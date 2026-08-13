@@ -13,12 +13,16 @@
  * renderings the code needs (TypeScript and SQL), so a claim's accept/refuse
  * verdict cannot differ between the layer that probes it and the layer that
  * writes it.
+ *
+ * The SQL rendering below compiles to a `SqlFragment` keyed on physical
+ * column NAMES rather than a Drizzle `Column` object, so a backend with no
+ * column objects at all can call this one owner instead of re-spelling the
+ * predicate.
  */
-import { type Column, type SQL, sql } from "drizzle-orm";
-
 import { subClassComponent } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
 import { ConfigurationError } from "../../errors";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStrings } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
@@ -280,27 +284,37 @@ export function claimOwnerKey(owner: ClaimOwner): string {
   return encodeTupleKey([owner.concreteKind, owner.nodeId]);
 }
 
-/** The owner columns of the uniques relation, as the SQL renderer needs them. */
-export type ClaimOwnerColumns = Readonly<{
-  nodeId: Column;
-  concreteKind: Column;
+/**
+ * The owner columns of the uniques relation, by PHYSICAL COLUMN NAME.
+ *
+ * Names, not column objects: every renderer only ever reads `column.name`
+ * (the batch builder's is already typed `(column: Readonly<{name: string}>)`),
+ * and taking the name is what lets a backend that has no column objects at all
+ * call the one owner of this predicate instead of re-spelling it.
+ */
+export type ClaimOwnerColumnNames = Readonly<{
+  nodeId: string;
+  concreteKind: string;
 }>;
 
 /**
- * THE SQL rendering of {@link isSameClaimOwner}, for the two upsert builders.
+ * THE SqlFragment rendering of {@link isSameClaimOwner}, for the three
+ * upsert builders.
  *
  * `existing` qualifies a column of the conflicting row the way the dialect
  * requires (PostgreSQL needs the table name, SQLite takes the bare quoted
  * column); `proposed` renders the value being claimed — a bound parameter for
- * the single-row builder, an `excluded.` reference for the batch one. Two
- * renderings, one definition: the arms both builders decide ownership with are
- * this fragment, so a builder cannot quietly compare fewer columns than the
- * TypeScript predicate does.
+ * the single-row builders, an `excluded.` reference for the batch one. Two
+ * renderings, one definition: the arms every builder decides ownership with
+ * are this fragment, so a builder cannot quietly compare fewer columns than
+ * the TypeScript predicate does. The dialect switch between the qualified and
+ * bare forms is the batch builder's own (its `existingColumnFragment`); this
+ * function only composes whatever renderer it is handed.
  */
 export function claimOwnerMatchesSql(
-  existing: (column: Column) => SQL,
-  proposed: (column: Column) => SQL,
-  columns: ClaimOwnerColumns,
-): SQL {
+  existing: (columnName: string) => SqlFragment,
+  proposed: (columnName: string) => SqlFragment,
+  columns: ClaimOwnerColumnNames,
+): SqlFragment {
   return sql`${existing(columns.nodeId)} = ${proposed(columns.nodeId)} AND ${existing(columns.concreteKind)} = ${proposed(columns.concreteKind)}`;
 }

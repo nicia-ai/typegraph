@@ -35,6 +35,14 @@ export default defineConfig({
     globals: false,
     include: [
       "tests/backends/sqlite/sqlite-backend.test.ts",
+      // The moved removal builders (`buildHardDeleteUniquesByConcreteKind`,
+      // `buildHardDeleteEdgeClaimsByEdgeKind`,
+      // `buildHardDeleteEdgeClaimsByNodeKind`) and `claimOwnerMatchesSql`'s
+      // conversion now live under `src/store/claims/**`, already inside
+      // `stryker.claims.config.json`'s mutate glob — without this file in
+      // the scoped run's `include`, that glob's mutants on them are never
+      // exercised, so they can never be killed.
+      "tests/claim-owner-sql-golden.test.ts",
       "tests/constraint-claim-inventory.test.ts",
       "tests/constraint-enforcement.test.ts",
       "tests/constraint-fence-capability.test.ts",

@@ -1,19 +1,19 @@
 /**
  * T2/T2b golden capture (F17) — the zero-behavior-change proof for §4.1's
- * planned severance of `claimOwnerMatchesSql` (currently
- * `src/store/claims/axis.ts`) and §4.1b's planned move of the three removal
- * builders. Captured HERE, in B1, before either edit exists, so the
- * snapshot's provenance predates every future edit mechanically rather than
- * by a claim in a commit message.
+ * severance of `claimOwnerMatchesSql` (originally `src/store/claims/axis.ts`,
+ * unchanged address) and §4.1b's move of the three removal builders (to
+ * `src/store/claims/removal-sql.ts`). Captured in B1, before either edit
+ * existed, so the snapshot's provenance predates every edit mechanically
+ * rather than by a claim in a commit message. Landed in B2: both families now
+ * reproduce these ten snapshots byte-for-byte with no edit to this file.
  *
- * Every builder is exercised at its CURRENT address, through the same
- * fixed fixture, and rendered two ways: the three `insertUnique` builders
- * compile a real Drizzle `SQL` (rendered with `SQLiteSyncDialect` /
- * `PgDialect`, the precedent `tests/search-candidates-planning.test.ts`
- * sets), and the three removal builders already return a `SqlFragment`
- * (rendered with `renderSqlite` / `renderPostgres`). A future batch that
- * moves either family to the new vocabulary must reproduce these ten
- * snapshots byte-for-byte with no source edit to this file.
+ * Every builder is exercised through its published re-export address (both
+ * families kept their old addresses), through the same fixed fixture, and
+ * rendered two ways: the three `insertUnique` builders compile a real
+ * Drizzle `SQL` (rendered with `SQLiteSyncDialect` / `PgDialect`, the
+ * precedent `tests/search-candidates-planning.test.ts` sets), and the three
+ * removal builders return a `SqlFragment` (rendered with `renderSqlite` /
+ * `renderPostgres`).
  */
 import { type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";

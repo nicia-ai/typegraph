@@ -10,11 +10,6 @@
  */
 import { type RawBackend } from "../backend/branded";
 import {
-  buildHardDeleteEdgeClaimsByEdgeKind,
-  buildHardDeleteEdgeClaimsByNodeKind,
-} from "../backend/drizzle/operations/edge-claims";
-import { buildHardDeleteUniquesByConcreteKind } from "../backend/drizzle/operations/uniques";
-import {
   type GraphBackend,
   type KindRemovalRow,
   type RecordKindRemovalParams,
@@ -37,6 +32,11 @@ import { nowIso } from "../utils/date";
 import { hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
+import {
+  buildHardDeleteEdgeClaimsByEdgeKind,
+  buildHardDeleteEdgeClaimsByNodeKind,
+  buildHardDeleteUniquesByConcreteKind,
+} from "./claims/removal-sql";
 import { ensureFocusedStatusTable } from "./materialize-shared";
 import { closeRecordedHardDeletedKind } from "./recorded-capture";
 

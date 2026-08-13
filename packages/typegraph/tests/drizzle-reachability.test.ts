@@ -73,51 +73,97 @@ const RECORDED_PORTABLE_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
 );
 
 /**
- * Recorded at `29d63ec` by `--grain=source` — every published entrypoint
- * reaches Drizzle today, at both walk modes, because no source file has been
- * severed yet.
+ * Recorded at HEAD by `--grain=source` (`20 / 36 dirty`) — an explicit,
+ * per-entrypoint table with a reason for each row, replacing B1's "every
+ * entrypoint is dirty" derivation now that this batch has severed R-axis
+ * (`src/store/claims/axis.ts`) and R-removals
+ * (`src/store/materialize-removals.ts`). Two portable entrypoints remain
+ * dirty — R-migrate's residue, B3's route — and every adapter entrypoint
+ * stays dirty by design (§3.1, §4.6).
  */
 const RECORDED_SOURCE_VERDICTS: Readonly<Record<string, ReachabilityVerdict>> =
-  Object.fromEntries(
-    RECORDED_ENTRYPOINTS.map((entrypoint) => [entrypoint, "dirty"]),
-  );
+  {
+    // R-migrate residue (`src/backend/migrate-recorded-time.ts` ->
+    // `src/backend/drizzle/ddl.ts`), B3's route — not severed by this batch.
+    ".": "dirty",
+    "./backend": "dirty",
+    // R-axis severed in this batch (`src/store/claims/axis.ts` no longer
+    // imports `drizzle-orm`).
+    "./core": "clean",
+    // R-removals severed in this batch (`src/store/materialize-removals.ts`
+    // no longer imports the adapter-owned builders).
+    "./interchange": "clean",
+    "./profiler": "clean",
+    "./schema": "clean",
+    "./indexes": "clean",
+    "./graph-extension": "clean",
+    "./graph-merge": "clean",
+    "./provenance": "clean",
+    // Adapter entrypoints: expected to reach Drizzle (ADAPTER_ENTRYPOINTS).
+    "./sqlite/local": "dirty",
+    "./postgres/pglite": "dirty",
+    "./adapters/drizzle/sqlite": "dirty",
+    "./adapters/drizzle/postgres": "dirty",
+    "./adapters/drizzle/postgres/pglite": "dirty",
+    "./adapters/drizzle/sqlite/local": "dirty",
+    "./adapters/drizzle/sqlite/libsql": "dirty",
+    "./adapters/drizzle/indexes": "dirty",
+  };
+
+/** The four non-adapter entrypoints still dirty at source grain (R-migrate's residue plus the two "batteries included" adapters). */
+const RECORDED_DIRTY_NON_ADAPTER_ENTRYPOINTS = [
+  ".",
+  "./backend",
+  "./sqlite/local",
+  "./postgres/pglite",
+].toSorted();
 
 /**
- * Recorded at `29d63ec` by `--grain=source --stage=<name>`, filtered to the
- * ten portable entrypoints at `load` mode — §3.1's three severance routes,
- * simulated one group at a time.
+ * Recorded at HEAD by `--grain=source --stage=<name>`, filtered to the ten
+ * portable entrypoints at `load` mode. R-axis and R-removals are now REALLY
+ * severed (not simulated), so simulating them again at `axis+migrate` /
+ * `axis+migrate+removals` is a no-op on top of the real severance — what
+ * those stages now additionally simulate is R-migrate
+ * (`migrate-recorded-time.ts` + `migrate-vectors.ts`), which is what drives
+ * both down to 0/10. `baseline` (no simulated severance at all) is where
+ * R-migrate's real, unsevered residue shows up.
  */
 const RECORDED_STAGE_DIRTY_COUNTS: Readonly<Record<string, number>> = {
-  baseline: 10,
-  "axis+migrate": 5,
+  baseline: 2,
+  "axis+migrate": 0,
   "axis+migrate+removals": 0,
 };
 
-/** The five portable entrypoints still dirty once R-axis and R-migrate are severed. */
-const RECORDED_AXIS_MIGRATE_DIRTY_ENTRYPOINTS = [
+/**
+ * The two portable entrypoints still dirty at stage `baseline` — R-migrate's
+ * residue, B3's route, not severed by this batch.
+ *
+ * This replaces B1's `RECORDED_AXIS_MIGRATE_DIRTY_ENTRYPOINTS`. That constant
+ * named the five entrypoints still dirty after SIMULATING R-axis and
+ * R-migrate's severance; now that R-axis is REALLY severed, its post-B2 value
+ * would be `[]`, and an empty-list assertion at a stage where every one of
+ * this batch's routes is already severed for real cannot fail for the right
+ * reason (mutating the scanner's severance logic for a stage that changes
+ * nothing observable does not move an empty array). The live residue this
+ * batch leaves behind is at stage `baseline`, not `axis+migrate` — so the
+ * check moves there.
+ */
+const RECORDED_BASELINE_DIRTY_PORTABLE_ENTRYPOINTS = [
   ".",
-  "./interchange",
-  "./profiler",
-  "./graph-merge",
-  "./provenance",
+  "./backend",
 ].toSorted();
 
-/** One witness chain per severance route, as `--grain=source --stage=<name>` prints it. */
+/**
+ * One witness chain per severance route still standing, as
+ * `--grain=source --stage=<name>` prints it. R-axis and R-removals are
+ * deleted from this table by this batch (§10 ruling (3)): both routes are
+ * really severed now, so no chain to witness exists any more — see
+ * {@link RECORDED_ABSENT_ROUTES} below, which replaces them with a
+ * route-absent assertion at the exact stage/entrypoint each used to be
+ * witnessed at. R-migrate is B3's route and is kept exactly as B1 recorded
+ * it, unsevered.
+ */
 const RECORDED_ROUTE_CHAINS = {
-  "R-axis": {
-    stage: "baseline",
-    entrypoint: "./core",
-    mode: "load",
-    chain: [
-      { from: "src/core/index.ts", to: "src/core/node.ts", kind: "static" },
-      {
-        from: "src/core/node.ts",
-        to: "src/store/claims/axis.ts",
-        kind: "static",
-      },
-      { from: "src/store/claims/axis.ts", to: "drizzle-orm", kind: "static" },
-    ],
-  },
   "R-migrate": {
     stage: "baseline",
     entrypoint: "./backend",
@@ -136,50 +182,45 @@ const RECORDED_ROUTE_CHAINS = {
       { from: "src/backend/drizzle/ddl.ts", to: "drizzle-orm", kind: "static" },
     ],
   },
-  "R-removals": {
-    stage: "axis+migrate",
-    entrypoint: ".",
-    mode: "load",
-    chain: [
-      { from: "src/index.ts", to: "src/store/index.ts", kind: "static" },
-      {
-        from: "src/store/index.ts",
-        to: "src/store/materialize-removals.ts",
-        kind: "static",
-      },
-      {
-        from: "src/store/materialize-removals.ts",
-        to: "src/backend/drizzle/operations/edge-claims.ts",
-        kind: "static",
-      },
-      {
-        from: "src/backend/drizzle/operations/edge-claims.ts",
-        to: "drizzle-orm",
-        kind: "static",
-      },
-    ],
-  },
 } as const;
 
 /**
- * Recorded at `29d63ec` by `pnpm build && --grain=dist`, `load` mode — 9 of
- * 12 non-adapter entrypoints resolve a Drizzle specifier at module load, in
- * both artifact formats (they agree entrywise today; no entrypoint defers
- * Drizzle behind a dynamic import yet).
+ * Where R-axis and R-removals used to be witnessed, before this batch severed
+ * them for real. `walk()` returns a CLEAN finding with neither `chain` nor
+ * `specifier` for a route that no longer exists (its clean-return branch), so
+ * asserting the absent chain — not just the "clean" verdict — is what proves
+ * the entrypoint is clean for the right reason at the exact spot each route
+ * used to be dirty, rather than merely "some entrypoint somewhere is clean."
+ */
+const RECORDED_ABSENT_ROUTES = {
+  "R-axis": { stage: "baseline", entrypoint: "./core" },
+  "R-removals": { stage: "axis+migrate", entrypoint: "." },
+} as const;
+
+/**
+ * Recorded at HEAD by `pnpm build && TYPEGRAPH_REQUIRE_DIST_GRAIN=1 pnpm
+ * vitest run tests/drizzle-reachability.test.ts` (a fresh build; the emitted
+ * numbers, not B1's prediction) — 4 of 12 non-adapter entrypoints resolve a
+ * Drizzle specifier at module load, in both artifact formats (they agree
+ * entrywise; no entrypoint defers Drizzle behind a dynamic import yet). Every
+ * predicted flip (`./core`, `./interchange`, `./schema`, `./graph-merge`,
+ * `./provenance`: dirty -> clean) landed exactly as predicted, joining the
+ * already-clean `./profiler`, `./indexes`, `./graph-extension`; `.`,
+ * `./backend` (R-migrate's residue) and every adapter entrypoint stay dirty.
  */
 const RECORDED_DIST_LOAD_VERDICTS: Readonly<
   Record<string, ReachabilityVerdict>
 > = {
   ".": "dirty",
   "./backend": "dirty",
-  "./core": "dirty",
-  "./interchange": "dirty",
+  "./core": "clean",
+  "./interchange": "clean",
   "./profiler": "clean",
-  "./schema": "dirty",
+  "./schema": "clean",
   "./indexes": "clean",
   "./graph-extension": "clean",
-  "./graph-merge": "dirty",
-  "./provenance": "dirty",
+  "./graph-merge": "clean",
+  "./provenance": "clean",
   "./sqlite/local": "dirty",
   "./postgres/pglite": "dirty",
   "./adapters/drizzle/sqlite": "dirty",
@@ -264,14 +305,25 @@ describe("drizzle reachability — source grain", () => {
     );
   });
 
-  it("records today's source verdicts for all 18 entrypoints (12 of 12 non-adapter dirty)", () => {
+  it("records today's source verdicts for all 18 entrypoints (4 of 12 non-adapter dirty: ., ./backend, ./sqlite/local, ./postgres/pglite)", () => {
     expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(6);
     expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(12);
-    expect(
-      RECORDED_NON_ADAPTER_ENTRYPOINTS.every(
-        (entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] === "dirty",
-      ),
-    ).toBe(true);
+
+    // Both-directions set equality, not a one-directional `.every`: a stray
+    // flip either into or out of the recorded dirty set must fail.
+    const dirtyNonAdapter = RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
+      (entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] === "dirty",
+    ).toSorted();
+    const cleanNonAdapter = RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
+      (entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] === "clean",
+    ).toSorted();
+    expect(dirtyNonAdapter).toEqual(RECORDED_DIRTY_NON_ADAPTER_ENTRYPOINTS);
+    expect(cleanNonAdapter).toEqual(
+      RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
+        (entrypoint) =>
+          !RECORDED_DIRTY_NON_ADAPTER_ENTRYPOINTS.includes(entrypoint),
+      ).toSorted(),
+    );
 
     const findings = scanSourceReachability();
     expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2);
@@ -313,7 +365,35 @@ describe("drizzle reachability — source grain", () => {
     },
   );
 
-  it("reproduces the staged-severance projection 10/10 -> 5/10 -> 0/10", () => {
+  it.each(Object.entries(RECORDED_ABSENT_ROUTES))(
+    "no chain exists for severed route %s",
+    (_route, witness) => {
+      const stage = resolveSeveranceStage(witness.stage);
+      const findings = scanSourceReachability({
+        severedModules: stage.severedModules,
+      });
+      for (const mode of ["load", "deferred"] as const) {
+        const finding = findings.find(
+          (candidate) =>
+            candidate.entrypoint === witness.entrypoint &&
+            candidate.mode === mode,
+        );
+        expect(finding?.verdict, `${witness.entrypoint} (${mode})`).toBe(
+          "clean",
+        );
+        expect(
+          finding?.chain,
+          `${witness.entrypoint} (${mode}) chain`,
+        ).toBeUndefined();
+        expect(
+          finding?.specifier,
+          `${witness.entrypoint} (${mode}) specifier`,
+        ).toBeUndefined();
+      }
+    },
+  );
+
+  it("reproduces the staged-severance projection 2/10 -> 0/10 -> 0/10", () => {
     expect(RECORDED_PORTABLE_ENTRYPOINTS.length).toBe(10);
 
     for (const stage of SIMULATED_SEVERANCE_STAGES) {
@@ -324,10 +404,10 @@ describe("drizzle reachability — source grain", () => {
     }
   });
 
-  it("names the five entrypoints still dirty at stage axis+migrate", () => {
-    const stage = resolveSeveranceStage("axis+migrate");
+  it("names the two portable entrypoints still dirty at stage baseline (R-migrate's residue)", () => {
+    const stage = resolveSeveranceStage("baseline");
     const dirty = dirtyPortableEntrypointsAtStage(stage).toSorted();
-    expect(dirty).toEqual(RECORDED_AXIS_MIGRATE_DIRTY_ENTRYPOINTS);
+    expect(dirty).toEqual(RECORDED_BASELINE_DIRTY_PORTABLE_ENTRYPOINTS);
   });
 
   it("throws naming the unknown stage and every valid stage name", () => {
@@ -392,8 +472,12 @@ describe("drizzle reachability — source grain", () => {
    *   tree-shaken remainder of the same module graph, so an entrypoint dirty
    *   at dist is always dirty at source too. Evaluating against source
    *   grain alone therefore covers the direction dist-only checking missed,
-   *   where an entrypoint (`./profiler`, `./indexes`, `./graph-extension`
-   *   today) is dirty at source but clean at dist.
+   *   where an entrypoint is dirty at source but clean at dist (before this
+   *   batch: `./profiler`, `./indexes`, `./graph-extension`; today, after
+   *   severing R-axis and R-removals, the source-dirty and dist-dirty
+   *   non-adapter sets happen to coincide exactly — see the containment
+   *   assertion below — but the property this guards is about every FUTURE
+   *   divergence, not today's particular numbers).
    * - **Mode.** Checked at `deferred` mode (every edge) rather than `load`
    *   mode (static edges only) for the identical reason one level down:
    *   `walk()` drops every dynamic edge in `load` mode
@@ -424,6 +508,29 @@ describe("drizzle reachability — source grain", () => {
         `exemption for ${exemption.entrypoint} names an entrypoint that is not dirty at source grain (either mode)`,
       ).toBe(true);
     }
+  });
+
+  /**
+   * I3's containment property, checked table against table rather than
+   * table against a fresh scan: `RECORDED_DIST_LOAD_VERDICTS` is hand-edited
+   * (recorded from a scan run separately, see its own doc comment) and
+   * `RECORDED_SOURCE_VERDICTS` is hand-edited too, so nothing structurally
+   * prevents the two from drifting apart independently. This is the guard
+   * that keeps them honest against each other: dist reachability walks the
+   * tree-shaken remainder of the SAME module graph source reachability
+   * walks, so an entrypoint dirty at dist can never be clean at source — the
+   * dist-dirty set is entrywise a subset of the source-dirty set.
+   */
+  it("the recorded dist-dirty set is entrywise a subset of the recorded source-dirty set", () => {
+    const dirtyAtDistributionButNotSource = Object.keys(RECORDED_DIST_LOAD_VERDICTS)
+      .filter(
+        (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "dirty",
+      )
+      .filter((entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] !== "dirty");
+    expect(
+      dirtyAtDistributionButNotSource,
+      "every entrypoint here is recorded dirty at dist but not at source",
+    ).toEqual([]);
   });
 });
 
@@ -507,24 +614,31 @@ describe("drizzle reachability — dist grain", () => {
       }
     });
 
-    it("records today's dist load verdicts in both formats (9 of 12 non-adapter dirty at load; clean: ./profiler, ./indexes, ./graph-extension)", () => {
+    it("records today's dist load verdicts in both formats (4 of 12 non-adapter dirty at load)", () => {
       const nonAdapterEntrypoints = Object.keys(
         RECORDED_DIST_LOAD_VERDICTS,
       ).filter((entrypoint) => !entrypoint.startsWith("./adapters/drizzle/"));
       expect(nonAdapterEntrypoints.length).toBe(12);
-      const dirtyNonAdapter = nonAdapterEntrypoints.filter(
-        (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "dirty",
-      );
-      expect(dirtyNonAdapter.length).toBe(9);
+      const dirtyNonAdapter = nonAdapterEntrypoints
+        .filter(
+          (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "dirty",
+        )
+        .toSorted();
+      expect(dirtyNonAdapter).toEqual(RECORDED_DIRTY_NON_ADAPTER_ENTRYPOINTS);
       const cleanNonAdapter = nonAdapterEntrypoints
         .filter(
           (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "clean",
         )
         .toSorted();
       expect(cleanNonAdapter).toEqual([
+        "./core",
         "./graph-extension",
+        "./graph-merge",
         "./indexes",
+        "./interchange",
         "./profiler",
+        "./provenance",
+        "./schema",
       ]);
 
       const findings = scanDistributionReachability().filter(

@@ -1,12 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  sql as fragmentSql,
-  type SqlFragment,
-} from "../../../query/sql-fragment";
-import {
   EDGE_CARDINALITY_SPECS,
-  edgeCardinalityAxesForKind,
   edgeCardinalityClaimTarget,
 } from "../../../store/claims/edge-claims";
 import type {
@@ -157,38 +152,10 @@ export function buildPurgeEdgeClaims(
   `;
 }
 
-/**
- * THE definition of "the cardinality claims an edge kind owns": every row at
- * one of the kind's declared-cardinality axes.
- *
- * Keyed on the axis rather than on the holder's id because a removed kind's
- * edges are deleted in the same pass, which would leave a claim naming a row
- * that no longer exists — takeable, but never reaped. Takes the relation NAME
- * rather than the Drizzle table so `materializeRemovals`, which knows only its
- * configured table names, compiles the same statement.
- */
-export function buildHardDeleteEdgeClaimsByEdgeKind(
-  edgeClaimsTableName: string,
-  params: Readonly<{ graphId: string; edgeKind: string }>,
-): SqlFragment {
-  const axes = edgeCardinalityAxesForKind(params.edgeKind).map(
-    (axis) => fragmentSql`${axis}`,
-  );
-  return fragmentSql`DELETE FROM ${fragmentSql.identifier(edgeClaimsTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND ${fragmentSql.identifier("axis")} IN (${fragmentSql.join(axes, fragmentSql`, `)})`;
-}
-
-/**
- * Housekeeping for node-kind removal: deletes every claim held by an edge whose
- * source or target has the removed kind.
- *
- * The holder ids are selected before those edges are deleted. Filtering claim
- * axes cannot express this ownership: an edge kind may connect several node
- * kinds, while its claim axis names only its cardinality and edge kind.
- */
-export function buildHardDeleteEdgeClaimsByNodeKind(
-  edgeClaimsTableName: string,
-  edgesTableName: string,
-  params: Readonly<{ graphId: string; nodeKind: string }>,
-): SqlFragment {
-  return fragmentSql`DELETE FROM ${fragmentSql.identifier(edgeClaimsTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND ${fragmentSql.identifier("edge_id")} IN (SELECT ${fragmentSql.identifier("id")} FROM ${fragmentSql.identifier(edgesTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND (${fragmentSql.identifier("from_kind")} = ${params.nodeKind} OR ${fragmentSql.identifier("to_kind")} = ${params.nodeKind}))`;
-}
+// Re-exported from their new owner. Resolved only by
+// `tests/claim-owner-sql-golden.test.ts` — that import is what keeps knip
+// from reporting these two re-exports as unused.
+export {
+  buildHardDeleteEdgeClaimsByEdgeKind,
+  buildHardDeleteEdgeClaimsByNodeKind,
+} from "../../../store/claims/removal-sql";
