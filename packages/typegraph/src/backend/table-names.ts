@@ -9,6 +9,14 @@ import {
 } from "../query/compiler/schema";
 import type { GraphBackend } from "./types";
 
+/**
+ * Physical name of the legacy single shared embeddings table, dropped in
+ * the cross-backend vector cutover (the clean cut of #157). Strategies now
+ * own per-`(nodeKind, fieldPath)` typed storage. Retained only so the
+ * one-time migration utility can address and drain the old table.
+ */
+export const LEGACY_EMBEDDINGS_TABLE_NAME = "typegraph_node_embeddings";
+
 function definedTableNameOverrides(
   override: Partial<SqlTableNames> | undefined,
 ): Partial<SqlTableNames> {

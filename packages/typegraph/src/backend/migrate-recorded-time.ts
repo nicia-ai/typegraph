@@ -9,7 +9,11 @@ import {
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../core/temporal";
-import { ConfigurationError, ValidationError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+  ValidationError,
+} from "../errors";
 import {
   createSqlSchema,
   type ResolvedSqlTableNames,
@@ -19,11 +23,13 @@ import { shortHash } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
-import { postgresContributions, sqliteContributions } from "./drizzle/ddl";
-import { createPostgresTables } from "./drizzle/schema/postgres";
-import { createSqliteTables } from "./drizzle/schema/sqlite";
 import { resolvedTableNames } from "./table-names";
-import { type GraphBackend, type TransactionBackend } from "./types";
+import {
+  type GraphBackend,
+  type RecordedRelationDdl,
+  type RecordedTableNames,
+  type TransactionBackend,
+} from "./types";
 
 const LEGACY_RECORDED_MAX = "9999-12-31T23:59:59.999Z";
 const MIGRATION_SUFFIX = "legacy_recorded_anchors";
@@ -337,74 +343,56 @@ async function writeMappingRows(
   }
 }
 
-function tableDdl(
-  dialect: GraphBackend["dialect"],
-  tables: ResolvedSqlTableNames,
-  temporary: Readonly<{
-    recordedClock: string;
-    recordedEdges: string;
-    recordedNodes: string;
-  }>,
-): Readonly<{
-  clock: readonly string[];
-  edges: readonly string[];
-  nodes: readonly string[];
-}> {
-  if (dialect === "sqlite") {
-    const temporaryTables = createSqliteTables(temporary);
-    const finalTables = createSqliteTables(tables);
-    const temporaryContributions = sqliteContributions(temporaryTables);
-    const finalContributions = sqliteContributions(finalTables);
-    return ddlForRecordedTables(temporaryContributions, finalContributions);
-  }
-  const temporaryTables = createPostgresTables(temporary);
-  const finalTables = createPostgresTables(tables);
-  return ddlForRecordedTables(
-    postgresContributions(temporaryTables),
-    postgresContributions(finalTables),
-  );
-}
+type RecordedDdlSet = Readonly<
+  Record<keyof RecordedTableNames, RecordedRelationDdl>
+>;
 
-function ddlForRecordedTables(
-  temporary: readonly Readonly<{
-    createDdl: readonly string[];
-    logicalName: string;
-  }>[],
-  final: readonly Readonly<{
-    createDdl: readonly string[];
-    logicalName: string;
-  }>[],
-): Readonly<{
-  clock: readonly string[];
-  edges: readonly string[];
-  nodes: readonly string[];
-}> {
-  function statements(
-    logicalName: "recordedClock" | "recordedEdges" | "recordedNodes",
-  ): readonly string[] {
-    const temporaryDdl = temporary.find(
-      (entry) => entry.logicalName === logicalName,
-    )?.createDdl;
-    const finalDdl = final.find(
-      (entry) => entry.logicalName === logicalName,
-    )?.createDdl;
-    if (temporaryDdl === undefined || finalDdl === undefined) {
-      throw new ConfigurationError(
-        `Could not generate migration DDL for ${logicalName}.`,
-      );
-    }
-    const createTable = temporaryDdl[0];
-    if (createTable === undefined) {
-      throw new ConfigurationError(
-        `Could not generate migration table DDL for ${logicalName}.`,
-      );
-    }
-    return [createTable, ...finalDdl.slice(1)];
+/**
+ * The two calls the offline migration makes to the port, plus their
+ * composition. `temporaryDdl`/`finalDdl` are the port's own, unmodified
+ * results for each name set — PK-constraint names included — kept around so
+ * {@link replaceLegacyTables} can read them without a third and fourth call.
+ */
+type RecordedMigrationDdl = Readonly<{
+  /**
+   * The temp-named `CREATE TABLE` (so the swap-in relation is empty and safe
+   * to populate) paired with the final-named `indexes` (so the swapped-in
+   * relation ends up carrying the SAME index/constraint statements the final
+   * table would get if provisioned fresh).
+   */
+  ddl: RecordedDdlSet;
+  temporaryDdl: RecordedDdlSet;
+  finalDdl: RecordedDdlSet;
+}>;
+
+/**
+ * The offline migration's own composition of the port's per-name-set DDL.
+ * `recordedTableDdl` is called exactly once per name set — mirroring the
+ * two-Drizzle-table-build shape this replaces — and both results are handed
+ * back alongside the composed DDL so no other call site needs to invoke the
+ * port again.
+ */
+function recordedMigrationDdl(
+  recordedTableDdl: NonNullable<GraphBackend["recordedTableDdl"]>,
+  finalNames: RecordedTableNames,
+  temporaryNames: RecordedTableNames,
+): RecordedMigrationDdl {
+  const temporaryDdl = recordedTableDdl(temporaryNames);
+  const finalDdl = recordedTableDdl(finalNames);
+  function composed(key: keyof RecordedTableNames): RecordedRelationDdl {
+    return {
+      createTable: temporaryDdl[key].createTable,
+      indexes: finalDdl[key].indexes,
+    };
   }
   return {
-    clock: statements("recordedClock"),
-    edges: statements("recordedEdges"),
-    nodes: statements("recordedNodes"),
+    ddl: {
+      recordedClock: composed("recordedClock"),
+      recordedEdges: composed("recordedEdges"),
+      recordedNodes: composed("recordedNodes"),
+    },
+    temporaryDdl,
+    finalDdl,
   };
 }
 
@@ -565,22 +553,32 @@ async function replaceLegacyTables(
   target: TransactionBackend,
   tables: ResolvedSqlTableNames,
   mappingTable: string,
+  recordedTableDdl: NonNullable<GraphBackend["recordedTableDdl"]>,
 ): Promise<void> {
-  const temporary = {
+  const temporary: RecordedTableNames = {
     recordedNodes: temporaryTableName(tables.recordedNodes, "rn"),
     recordedEdges: temporaryTableName(tables.recordedEdges, "re"),
     recordedClock: temporaryTableName(tables.recordedClock, "rc"),
   };
-  const ddl = tableDdl(target.dialect, tables, temporary);
+  const finalNames: RecordedTableNames = {
+    recordedNodes: tables.recordedNodes,
+    recordedEdges: tables.recordedEdges,
+    recordedClock: tables.recordedClock,
+  };
+  const { ddl, temporaryDdl, finalDdl } = recordedMigrationDdl(
+    recordedTableDdl,
+    finalNames,
+    temporary,
+  );
   for (const table of Object.values(temporary)) {
     await executeStatement(
       target,
       sql`DROP TABLE IF EXISTS ${sql.identifier(table)}`,
     );
   }
-  await executeDdl(target, requireCreateTable(ddl.nodes));
-  await executeDdl(target, requireCreateTable(ddl.edges));
-  await executeDdl(target, requireCreateTable(ddl.clock));
+  await executeDdl(target, ddl.recordedNodes.createTable);
+  await executeDdl(target, ddl.recordedEdges.createTable);
+  await executeDdl(target, ddl.recordedClock.createTable);
   await copyRecordedRelation(target, {
     columns: RECORDED_NODE_COLUMNS,
     legacyTable: tables.recordedNodes,
@@ -616,50 +614,60 @@ async function replaceLegacyTables(
   await renameTable(target, temporary.recordedClock, tables.recordedClock);
   await renamePrimaryKeyConstraint(
     target,
-    temporary.recordedNodes,
     tables.recordedNodes,
+    temporaryDdl.recordedNodes.primaryKeyConstraintName,
+    finalDdl.recordedNodes.primaryKeyConstraintName,
   );
   await renamePrimaryKeyConstraint(
     target,
-    temporary.recordedEdges,
     tables.recordedEdges,
+    temporaryDdl.recordedEdges.primaryKeyConstraintName,
+    finalDdl.recordedEdges.primaryKeyConstraintName,
   );
   await renamePrimaryKeyConstraint(
     target,
-    temporary.recordedClock,
     tables.recordedClock,
+    temporaryDdl.recordedClock.primaryKeyConstraintName,
+    finalDdl.recordedClock.primaryKeyConstraintName,
   );
   for (const statement of [
-    ...ddl.nodes.slice(1),
-    ...ddl.edges.slice(1),
-    ...ddl.clock.slice(1),
+    ...ddl.recordedNodes.indexes,
+    ...ddl.recordedEdges.indexes,
+    ...ddl.recordedClock.indexes,
   ]) {
     await executeDdl(target, statement);
   }
 }
 
+/**
+ * Renames the temporary table's PRIMARY KEY constraint to the final table's
+ * name, once the swap has renamed the table itself. Both names come from the
+ * authoring backend's `recordedTableDdl` (an ENGINE convention it alone
+ * knows — engines that do not name PK constraints separately, e.g. SQLite,
+ * return `undefined` for both, and this is a no-op). Identifier reduction on
+ * an over-long target stays this migration's own decision — `shortenedIdentifier`
+ * is applied to the target only, never the source (see {@link RecordedRelationDdl}).
+ */
 async function renamePrimaryKeyConstraint(
   target: TransactionBackend,
-  temporaryTable: string,
   finalTable: string,
+  temporaryConstraintName: string | undefined,
+  finalConstraintName: string | undefined,
 ): Promise<void> {
-  if (target.dialect !== "postgres") return;
+  if (
+    temporaryConstraintName === undefined ||
+    finalConstraintName === undefined
+  ) {
+    return;
+  }
   await executeStatement(
     target,
     sql`
       ALTER TABLE ${sql.identifier(finalTable)}
-      RENAME CONSTRAINT ${sql.identifier(`${temporaryTable}_pkey`)}
-      TO ${sql.identifier(shortenedIdentifier(`${finalTable}_pkey`))}
+      RENAME CONSTRAINT ${sql.identifier(temporaryConstraintName)}
+      TO ${sql.identifier(shortenedIdentifier(finalConstraintName))}
     `,
   );
-}
-
-function requireCreateTable(statements: readonly string[]): string {
-  const statement = statements[0];
-  if (statement === undefined) {
-    throw new ConfigurationError("Recorded migration table DDL was empty.");
-  }
-  return statement;
 }
 
 async function renameTable(
@@ -694,6 +702,7 @@ export async function migrateLegacyRecordedTime(
 ): Promise<MigrateLegacyRecordedTimeResult> {
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const mapTable = mappingTableName(tables, options.mappingTableName);
+  const recordedTableDdl = options.backend.recordedTableDdl;
   return options.backend.transaction(async (target) => {
     const clockColumns = await columnNames(target, tables.recordedClock);
     if (clockColumns.size === 0) {
@@ -741,10 +750,19 @@ export async function migrateLegacyRecordedTime(
       );
     }
 
+    if (recordedTableDdl === undefined) {
+      throw new UnsupportedBackendCapabilityError(
+        "migrateLegacyRecordedTime",
+        "recordedTableDdl",
+        { dialect: target.dialect, tables },
+        "Migrating the timestamp-only preview recorded schema needs the backend to author its own recorded-relation DDL. Only the bundled SQLite and PostgreSQL backends created that schema.",
+      );
+    }
+
     await executeDdl(target, migrationMapDdl(target.dialect, mapTable));
     const mapping = await readLegacyInstants(target, tables);
     await writeMappingRows(target, mapTable, mapping);
-    await replaceLegacyTables(target, tables, mapTable);
+    await replaceLegacyTables(target, tables, mapTable, recordedTableDdl);
     return {
       migrated: true,
       graphs: new Set(mapping.map((row) => row.graphId)).size,

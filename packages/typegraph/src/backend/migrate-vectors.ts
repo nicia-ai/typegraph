@@ -51,7 +51,7 @@ import { asCompiledRowsSql } from "../query/sql-intent";
 import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { isMissingTableError } from "../utils/sql-errors";
-import { LEGACY_EMBEDDINGS_TABLE_NAME } from "./drizzle/schema/sqlite";
+import { LEGACY_EMBEDDINGS_TABLE_NAME } from "./table-names";
 import { type GraphBackend } from "./types";
 
 /**

@@ -193,6 +193,8 @@ export type {
   RawStatementExecutionBackend,
   ReadConstraintFenceViolationsParams,
   RecordContributionMaterializationParams,
+  RecordedRelationDdl,
+  RecordedTableNames,
   RecordIndexMaterializationParams,
   RecordKindRemovalParams,
   ReleaseIndexMaterializationClaimParams,

@@ -112,6 +112,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "ensureFulltextTable",
   "ensureIdentityTables",
   "identityTableDdl",
+  "recordedTableDdl",
   "getReconciliationMarker",
   "setReconciliationMarker",
   "clearGraph",

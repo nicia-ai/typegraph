@@ -1,4 +1,6 @@
 /** End-to-end migration coverage for the timestamp-only preview schema. */
+import { drizzle as drizzlePostgres } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -11,7 +13,18 @@ import {
   migrateLegacyRecordedTime,
   migrateRecordedAnchor,
   recordedInstantRevision,
+  UnsupportedBackendCapabilityError,
 } from "../src";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
+import { type AnySqliteDatabase } from "../src/backend/drizzle/execution";
+import { createPostgresBackend } from "../src/backend/drizzle/postgres";
+import {
+  type AdapterBackend,
+  type RecordedTableNames,
+} from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import {
@@ -19,6 +32,7 @@ import {
   asCompiledStatementSql,
 } from "../src/query/sql-intent";
 import { assertCurrentRecordedSchema } from "../src/store/recorded-capture";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, recordedRevisionFromDriver } from "./test-utils";
 
 const FIRST = "2026-01-01T00:00:00.000Z";
@@ -54,6 +68,45 @@ async function captureConfigurationError(
     throw error;
   }
   throw new Error("Expected ConfigurationError");
+}
+
+async function captureUnsupportedCapabilityError(
+  promise: Promise<unknown>,
+): Promise<UnsupportedBackendCapabilityError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof UnsupportedBackendCapabilityError) return error;
+    throw error;
+  }
+  throw new Error("Expected UnsupportedBackendCapabilityError");
+}
+
+/**
+ * Wraps `base` with an `executeStatement`-counting `transaction` override,
+ * built entirely through the derivation seam (`deriveBackend`/
+ * `projectBackendWithout`) rather than by spreading a backend — the cap
+ * `tests/backend-derivation-population.test.ts` holds spread-derivations to.
+ */
+function withStatementCounter(
+  base: AdapterBackend<AnySqliteDatabase>,
+  count: { value: number },
+): AdapterBackend<AnySqliteDatabase> {
+  return deriveBackend(base, {
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              executeStatement: async (statement) => {
+                count.value += 1;
+                await requireDefined(target.executeStatement)(statement);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
 }
 
 type RevisionRow = Readonly<{
@@ -319,5 +372,112 @@ describe("migrateLegacyRecordedTime", () => {
         graphs: 0,
       },
     );
+  });
+
+  it("refuses on a legacy schema when the backend cannot author recorded DDL", async () => {
+    const base = createTestBackend();
+    await createLegacyRecordedSchema(base);
+    const memberless = projectBackendWithout(base, ["recordedTableDdl"]);
+    const count = { value: 0 };
+    const wrapped = withStatementCounter(memberless, count);
+
+    const error = await captureUnsupportedCapabilityError(
+      migrateLegacyRecordedTime({ backend: wrapped }),
+    );
+    expect(error.details["capability"]).toBe("recordedTableDdl");
+    expect(error.message).toContain("recordedTableDdl");
+    expect(count.value).toBe(0);
+
+    // Positive control: the SAME wrapper shape over the UNMODIFIED backend
+    // migrates and leaves count > 0 — what makes the 0 above load-bearing.
+    const controlBase = createTestBackend();
+    await createLegacyRecordedSchema(controlBase);
+    const controlCount = { value: 0 };
+    const controlWrapped = withStatementCounter(controlBase, controlCount);
+
+    await expect(
+      migrateLegacyRecordedTime({ backend: controlWrapped }),
+    ).resolves.toMatchObject({ migrated: true });
+    expect(controlCount.value).toBeGreaterThan(0);
+  });
+
+  it("still reports no migration for a non-legacy schema without the port", async () => {
+    const base = createTestBackend();
+    const memberless = projectBackendWithout(base, ["recordedTableDdl"]);
+
+    await expect(
+      migrateLegacyRecordedTime({ backend: memberless }),
+    ).resolves.toMatchObject({ migrated: false, anchors: 0, graphs: 0 });
+  });
+});
+
+describe("recordedTableDdl", () => {
+  it("returns keyed, role-split DDL for both bundled backends", async () => {
+    const LOGICAL_KEYS = [
+      "recordedClock",
+      "recordedEdges",
+      "recordedNodes",
+    ] as const;
+
+    const sqliteNames: RecordedTableNames = {
+      recordedNodes: "tg_rtd_recorded_nodes",
+      recordedEdges: "tg_rtd_recorded_edges",
+      recordedClock: "tg_rtd_recorded_clock",
+    };
+    const sqliteBackend = createTestBackend();
+    const sqliteDdl = requireDefined(sqliteBackend.recordedTableDdl)(
+      sqliteNames,
+    );
+    expect(Object.keys(sqliteDdl).toSorted()).toEqual(LOGICAL_KEYS.toSorted());
+    for (const key of LOGICAL_KEYS) {
+      expect(sqliteDdl[key].createTable).toMatch(/^CREATE TABLE /);
+      for (const statement of sqliteDdl[key].indexes) {
+        expect(statement).not.toContain("CREATE TABLE");
+      }
+      expect(sqliteDdl[key].primaryKeyConstraintName).toBeUndefined();
+    }
+
+    const pool = new Pool({
+      connectionString: "postgres://user@127.0.0.1:1/typegraph_recorded_ddl",
+    });
+    try {
+      const postgresBackend = createPostgresBackend(drizzlePostgres(pool), {
+        vector: false,
+      });
+      const postgresNamesA: RecordedTableNames = {
+        recordedNodes: "tg_rtd_a_recorded_nodes",
+        recordedEdges: "tg_rtd_a_recorded_edges",
+        recordedClock: "tg_rtd_a_recorded_clock",
+      };
+      const postgresDdlA = requireDefined(postgresBackend.recordedTableDdl)(
+        postgresNamesA,
+      );
+      expect(Object.keys(postgresDdlA).toSorted()).toEqual(
+        LOGICAL_KEYS.toSorted(),
+      );
+      for (const key of LOGICAL_KEYS) {
+        expect(postgresDdlA[key].createTable).toMatch(/^CREATE TABLE /);
+        for (const statement of postgresDdlA[key].indexes) {
+          expect(statement).not.toContain("CREATE TABLE");
+        }
+        expect(postgresDdlA[key].primaryKeyConstraintName).toBeDefined();
+      }
+
+      const postgresNamesB: RecordedTableNames = {
+        recordedNodes: "tg_rtd_b_recorded_nodes",
+        recordedEdges: "tg_rtd_b_recorded_edges",
+        recordedClock: "tg_rtd_b_recorded_clock",
+      };
+      const postgresDdlB = requireDefined(postgresBackend.recordedTableDdl)(
+        postgresNamesB,
+      );
+      for (const key of LOGICAL_KEYS) {
+        expect(postgresDdlB[key].primaryKeyConstraintName).not.toBe(
+          postgresDdlA[key].primaryKeyConstraintName,
+        );
+      }
+    } finally {
+      await pool.end();
+    }
   });
 });

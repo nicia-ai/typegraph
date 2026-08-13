@@ -141,6 +141,7 @@ type UnsafeHistoryStoreBackendMember =
   | "ensureIdentityTables"
   | "identityTableDdl"
   | "rebuildContribution"
+  | "recordedTableDdl"
   | "repairContributions"
   | "schemaWriteTransaction"
   | "transaction"

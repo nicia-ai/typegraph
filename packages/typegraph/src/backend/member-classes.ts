@@ -207,6 +207,7 @@ const PROVISIONING_MEMBERS = [
   "dropVectorIndex",
   "executeDdl",
   "identityTableDdl",
+  "recordedTableDdl",
   "assertRuntimeContributionsInitialized",
   "assertVectorSlotInitialized",
   "assertVectorSlotsInitialized",
