@@ -3034,8 +3034,9 @@ describe("store.algorithms temporal behavior", () => {
         { validFrom: recentValidFrom },
       );
 
-      // buildReachableCte: reachable/canReach/neighbors/shortestPath all share
-      // the same CTE — one assertion exercises the recursive path.
+      // resolveTemporalOptions: reachable routes through the iterative
+      // working-table path (iterative-graph-operation.ts), not a recursive
+      // CTE — this assertion exercises that path's temporal resolution.
       const reached = await freshStore.algorithms.reachable(alice.id, {
         edges: ["knows"],
         excludeSource: true,

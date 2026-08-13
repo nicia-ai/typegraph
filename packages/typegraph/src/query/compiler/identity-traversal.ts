@@ -7,7 +7,10 @@ import {
 import { type QueryAst } from "../ast";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { type TemporalFilterPass } from "./passes";
-import { type PredicateCompilerContext } from "./predicates";
+import {
+  type PredicateCompilerContext,
+  requireRecursiveTraversalVerdict,
+} from "./predicates";
 
 /**
  * Name of the query-level relation holding the identity classes a **historical**
@@ -91,11 +94,16 @@ export function compileIdentityClassCte(
   const coordinate = historicalCoordinate({ ast, temporalFilterPass });
   if (coordinate === undefined) return undefined;
 
+  const recursiveTraversal = requireRecursiveTraversalVerdict(
+    ctx,
+    "historical identity expansion",
+  );
   const peerClasses = historicalIdentityPeerClassQuery({
     schema: ctx.schema,
     graphId,
     coordinate,
     sameIdAcrossKinds: ctx.identitySameIdAcrossKinds ?? "fold",
+    recursiveTraversal,
   });
   // MATERIALIZED is load-bearing, not a hint. Left inlinable, SQLite pushes the
   // relation down to each reference site, and a per-step reference is then

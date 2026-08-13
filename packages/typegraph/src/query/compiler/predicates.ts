@@ -489,6 +489,30 @@ export type PredicateCompilerContext = Readonly<{
 }>;
 
 /**
+ * Returns the compiler context's {@link RecursiveTraversalVerdict}, or
+ * refuses because the plumbing was bypassed: every path that reaches this
+ * function threads the verdict through `CompileQueryOptions` /
+ * `propagateOptions`, so a missing verdict means a caller skipped that
+ * threading, which is a compiler invariant violation, not a capability
+ * refusal.
+ *
+ * @throws {CompilerInvariantError} when `ctx.recursiveTraversal` is undefined.
+ */
+export function requireRecursiveTraversalVerdict(
+  ctx: PredicateCompilerContext,
+  operation: string,
+): RecursiveTraversalVerdict {
+  const verdict = ctx.recursiveTraversal;
+  if (verdict === undefined) {
+    throw new CompilerInvariantError(
+      "recursive traversal verdict missing from compiler context",
+      { operation },
+    );
+  }
+  return verdict;
+}
+
+/**
  * Refuses a variable-length traversal when the compiler context carries no
  * {@link RecursiveTraversalVerdict}, or when the verdict says the backend
  * cannot recurse.
@@ -505,14 +529,10 @@ export function assertRecursiveTraversalSupported(
   ctx: PredicateCompilerContext,
   operation: string,
 ): void {
-  const verdict = ctx.recursiveTraversal;
-  if (verdict === undefined) {
-    throw new CompilerInvariantError(
-      "recursive traversal verdict missing from compiler context",
-      { operation },
-    );
-  }
-  assertRecursiveTraversal(verdict, operation);
+  assertRecursiveTraversal(
+    requireRecursiveTraversalVerdict(ctx, operation),
+    operation,
+  );
 }
 
 /**

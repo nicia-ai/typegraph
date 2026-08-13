@@ -1,3 +1,4 @@
+import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
 import { KindNotFoundError } from "../errors";
@@ -490,6 +491,7 @@ export async function loadHistoricalClasses(
     coordinate: sqlCoordinate,
     seedSource: sql`VALUES ${seeds}`,
     sameIdAcrossKinds,
+    recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
   });
   const rows = await target.execute<RawHistoricalClassMemberRow>(
     asCompiledRowsSql(sql`
