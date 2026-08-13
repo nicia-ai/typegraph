@@ -20,10 +20,16 @@ export function createFixtureBackend(capabilities: FixtureCapabilities): Fixture
 export type FixtureCapabilities = Readonly<{
     transactions: boolean;
     internal?: FixtureInternalOptions;
+    mandatory: FixtureMandatoryOptions;
 }>;
 
 // @public (undocumented)
 type FixtureInternalOptions = Readonly<{
+    retries: number;
+}>;
+
+// @public (undocumented)
+type FixtureMandatoryOptions = Readonly<{
     retries: number;
 }>;
 
@@ -37,17 +43,70 @@ export type FixtureResult = Readonly<{
 export function createFixtureStore(name: string, options: Readonly<{
     timeout: number;
 }>): FixtureResult;
+
+// @public
+export interface FixtureQueryBuilder {
+    from(kind: string, options: Readonly<{
+        timeout: number;
+    }>): FixtureQueryBuilder;
+}
 `;
 
 const HEAD_REQUIRED_MEMBER_ADDED = BASE_BODY.replace(
-  "    internal?: FixtureInternalOptions;\n}>;",
-  "    internal?: FixtureInternalOptions;\n    recursiveTraversal: boolean;\n}>;",
+  "    mandatory: FixtureMandatoryOptions;\n}>;",
+  "    mandatory: FixtureMandatoryOptions;\n    recursiveTraversal: boolean;\n}>;",
 );
 
 const HEAD_OPTIONAL_MEMBER_WITH_REQUIRED_CHILD = BASE_BODY.replace(
-  "    internal?: FixtureInternalOptions;\n}>;",
-  "    internal?: FixtureInternalOptions;\n    recursiveTraversal?: Readonly<{\n        mode: string;\n    }>;\n}>;",
+  "    mandatory: FixtureMandatoryOptions;\n}>;",
+  "    mandatory: FixtureMandatoryOptions;\n    recursiveTraversal?: Readonly<{\n        mode: string;\n    }>;\n}>;",
 );
+
+// The scenario the checker was actually shipped to close (§5.4): a brand-new
+// NAMED (not inline) type, reached only through an optional field on an
+// EXISTING contravariant declaration. Neither the field (`advanced`) nor the
+// referenced type (`FixtureAdvancedCapability`) exists at the base ref, and
+// `mode` is required on that new type — this must still pass, because no
+// existing external caller of `createFixtureBackend` is forced to supply
+// `advanced` at all.
+const HEAD_OPTIONAL_NAMED_TYPE_WITH_REQUIRED_CHILD = BASE_BODY.replace(
+  "    mandatory: FixtureMandatoryOptions;\n}>;",
+  "    mandatory: FixtureMandatoryOptions;\n    advanced?: FixtureAdvancedCapability;\n}>;",
+).replace(
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;",
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;\n\n// @public (undocumented)\ntype FixtureAdvancedCapability = Readonly<{\n    mode: string;\n}>;",
+);
+
+// The regression guard for the fix above: swapping an EXISTING mandatory
+// field's value type for a brand-new, differently-shaped type must still
+// fail — `mandatory` was already required on `FixtureCapabilities` at the
+// base ref, and `createFixtureBackend` (the function that makes
+// `FixtureCapabilities` contravariant at all) already existed there too, so
+// this is not the "nothing forces an existing caller" case above.
+const HEAD_MANDATORY_FIELD_RETYPED_TO_NEW_REQUIRED_SHAPE = BASE_BODY.replace(
+  "    mandatory: FixtureMandatoryOptions;\n}>;",
+  "    mandatory: FixtureMandatoryOptionsV2;\n}>;",
+).replace(
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;",
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;\n\n// @public (undocumented)\ntype FixtureMandatoryOptionsV2 = Readonly<{\n    retries: number;\n    forceSync: boolean;\n}>;",
+);
+
+// The other half of the base-ref scenario §5.4 was written for: a brand-new
+// exported FUNCTION whose mandatory parameter references a brand-new named
+// type. No existing caller invokes a function that did not exist at the
+// base ref, so this must pass too, even though the parameter itself is
+// required.
+const HEAD_NEW_FUNCTION_WITH_NEW_MANDATORY_PARAMETER_TYPE =
+  BASE_BODY +
+  `
+// @public
+export function assumeFixtureAdvancedSupported(verdict: FixtureAdvancedVerdict): void;
+
+// @public (undocumented)
+type FixtureAdvancedVerdict = Readonly<{
+    supported: boolean;
+}>;
+`;
 
 const HEAD_RETURN_ONLY_REQUIRED_MEMBER = BASE_BODY.replace(
   "    ok: boolean;\n    detail?: string;\n}>;",
@@ -59,9 +118,19 @@ const HEAD_INLINE_PARAMETER_REQUIRED_MEMBER = BASE_BODY.replace(
   "export function createFixtureStore(name: string, options: Readonly<{\n    timeout: number;\n    retryLimit: number;\n}>): FixtureResult;",
 );
 
+// Finding 1/2's gap: an inline parameter object literal on an INTERFACE
+// method, not a top-level function. Before the fix, nothing ever inventoried
+// `FixtureQueryBuilder.from`'s `options` parameter, so this passed vacuously
+// regardless of what changed inside it.
+const HEAD_INTERFACE_METHOD_INLINE_PARAMETER_REQUIRED_MEMBER =
+  BASE_BODY.replace(
+    "    from(kind: string, options: Readonly<{\n        timeout: number;\n    }>): FixtureQueryBuilder;",
+    "    from(kind: string, options: Readonly<{\n        timeout: number;\n        includeSubClasses: boolean;\n    }>): FixtureQueryBuilder;",
+  );
+
 const HEAD_UNEXPORTED_REQUIRED_MEMBER = BASE_BODY.replace(
-  "type FixtureInternalOptions = Readonly<{\n    retries: number;\n}>;",
-  "type FixtureInternalOptions = Readonly<{\n    retries: number;\n    forceSync: boolean;\n}>;",
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n}>;",
+  "type FixtureMandatoryOptions = Readonly<{\n    retries: number;\n    forceSync: boolean;\n}>;",
 );
 
 const HEAD_MEMBER_REMOVED = BASE_BODY.replace(
@@ -239,6 +308,50 @@ describe("api-surface-compat", () => {
     expect(result.stdout).not.toContain("gained REQUIRED");
   }, 30_000);
 
+  it("(b2) passes when a required child belongs to a brand-new, separately-declared type reached only through an optional field (not just an inline literal)", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(
+      fixtureDirectory,
+      HEAD_OPTIONAL_NAMED_TYPE_WITH_REQUIRED_CHILD,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("gained REQUIRED");
+    expect(result.stdout).toContain(
+      "FixtureAdvancedCapability gained REQUIRED member `mode` in a return-only position",
+    );
+  }, 30_000);
+
+  it("(b3) still fails when an EXISTING mandatory field's value type is swapped for a brand-new, differently-shaped type (regression guard for b2)", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(
+      fixtureDirectory,
+      HEAD_MANDATORY_FIELD_RETYPED_TO_NEW_REQUIRED_SHAPE,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "FixtureMandatoryOptionsV2 gained REQUIRED member `forceSync`",
+    );
+  }, 30_000);
+
+  it("(b4) passes when a brand-new function's mandatory parameter references a brand-new named type with a required member", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(
+      fixtureDirectory,
+      HEAD_NEW_FUNCTION_WITH_NEW_MANDATORY_PARAMETER_TYPE,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(0);
+    expect(result.stderr).not.toContain("gained REQUIRED");
+    expect(result.stdout).toContain(
+      "FixtureAdvancedVerdict gained REQUIRED member `supported` in a return-only position",
+    );
+  }, 30_000);
+
   it("(c) reports rather than fails a required member on a return-only type", () => {
     setupTaggedBaseFixture(fixtureDirectory);
     writeFixtureReport(fixtureDirectory, HEAD_RETURN_ONLY_REQUIRED_MEMBER);
@@ -258,13 +371,26 @@ describe("api-surface-compat", () => {
     expect(result.stderr).toContain("createFixtureStore(options)");
   }, 30_000);
 
-  it("(e) fails on a required member added to an unexported but rendered declaration", () => {
+  it("(d2) fails on a required member added inside an INTERFACE METHOD's inline parameter object literal (finding: methods were never inventoried)", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeFixtureReport(
+      fixtureDirectory,
+      HEAD_INTERFACE_METHOD_INLINE_PARAMETER_REQUIRED_MEMBER,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("FixtureQueryBuilder.from(options)");
+    expect(result.stderr).toContain("includeSubClasses");
+  }, 30_000);
+
+  it("(e) fails on a required member added to an unexported but rendered declaration reached through a mandatory field", () => {
     setupTaggedBaseFixture(fixtureDirectory);
     writeFixtureReport(fixtureDirectory, HEAD_UNEXPORTED_REQUIRED_MEMBER);
 
     const result = runChecker(fixturePackageDir);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("FixtureInternalOptions");
+    expect(result.stderr).toContain("FixtureMandatoryOptions");
   }, 30_000);
 
   it("(f) fails when a member is removed from a return-only type", () => {

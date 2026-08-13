@@ -54,6 +54,27 @@
  *   and unions are expanded structurally. A declaration whose entire body is
  *   such a reference can disappear from a snapshot without tripping the
  *   member-removed predicate, since it never had members to lose.
+ *
+ * ## Contravariant reachability is gated, not just polarity-tracked
+ *
+ * A declaration reached at contravariant (input) polarity only "hard"
+ * (fail-eligible) if the chain of members/parameters leading to it is itself
+ * mandatory: every field/parameter along the way is required (`Partial<>` /
+ * `Required<>` forced-optionality is honored the same way it is for member
+ * optionality), AND — for a chain rooted at a top-level function
+ * declaration — that function itself already existed at the base ref. A
+ * brand-new type reached only through an optional field (e.g.
+ * `capabilities.recursiveTraversal?: RecursiveTraversalCapability`) or only
+ * through a brand-new exported function's parameter (e.g. a new
+ * `assertFooSupported(verdict: FooVerdict)`) is therefore reported, not
+ * failed: no existing external caller is forced to construct it, because
+ * they can omit the optional field or simply never call the new function.
+ * A declaration reached through an *existing* (present-at-base) mandatory
+ * chain remains hard-contravariant even when its own referenced type is
+ * brand new — swapping an existing required field's value type for a new,
+ * differently-shaped type is exactly the kind of change this check exists
+ * to catch, and the new type's own member diff (relative to its absence at
+ * base) is how that surfaces.
  */
 
 import { execFileSync } from "node:child_process";
@@ -394,57 +415,80 @@ function flip(polarity: Polarity): Polarity {
  * declaration and for every top-level function declaration's own boundary;
  * function/method parameter positions flip polarity, return positions keep
  * it; a type reference's type arguments inherit the current polarity
- * (documented approximation, §module doc). A declaration is contravariant
- * iff reached at `-` by ANY path.
+ * (documented approximation, §module doc). A declaration is HARD
+ * contravariant — fail-eligible for `required-member-added` — iff reached at
+ * `-` by at least one MANDATORY path: every field/parameter on that path is
+ * required (honoring `Partial<>`/`Required<>` forced optionality the same
+ * way member-optionality resolution does), and, where the path is rooted at
+ * a top-level function declaration, that function itself is present in
+ * `existingFunctionNames` (omit the argument, e.g. when walking the base
+ * snapshot itself, to treat every top-level function as pre-existing — there
+ * is no "before" to gate against). A declaration reached only through an
+ * optional field or only through a brand-new function's parameter is walked
+ * (so it can still surface further nested contravariant reachability) but
+ * never added to the hard set, matching §module doc's gating note.
  */
 function computeContravariantNames(
   namedDeclarations: ReadonlyMap<string, NamedDeclarationEntry>,
   functionDeclarations: readonly ts.FunctionDeclaration[],
+  existingFunctionNames?: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const contravariant = new Set<string>();
   const visited = new Set<string>();
 
-  function markReachable(name: string, polarity: Polarity): void {
-    const visitKey = `${name} ${polarity}`;
+  function markReachable(
+    name: string,
+    polarity: Polarity,
+    mandatory: boolean,
+  ): void {
+    const visitKey = `${name}\0${polarity}\0${mandatory}`;
     if (visited.has(visitKey)) return;
     visited.add(visitKey);
-    if (polarity === -1) contravariant.add(name);
+    if (polarity === -1 && mandatory) contravariant.add(name);
     const entry = namedDeclarations.get(name);
     if (entry === undefined) return;
-    if (entry.kind === "type") walkTypeNode(entry.typeNode, polarity);
+    if (entry.kind === "type")
+      walkTypeNode(entry.typeNode, polarity, mandatory);
     else if (entry.kind === "interface")
-      walkTypeElements(entry.members, polarity);
-    else walkClassMembers(entry.members, polarity);
+      walkTypeElements(entry.members, polarity, mandatory, undefined);
+    else walkClassMembers(entry.members, polarity, mandatory);
   }
 
-  function walkTypeNode(typeNode: ts.TypeNode, polarity: Polarity): void {
-    const { node: peeled } = peelWrappers(typeNode, undefined);
+  function walkTypeNode(
+    typeNode: ts.TypeNode,
+    polarity: Polarity,
+    mandatory: boolean,
+  ): void {
+    const { node: peeled, forcedMode } = peelWrappers(typeNode, undefined);
     if (ts.isTypeReferenceNode(peeled) && ts.isIdentifier(peeled.typeName)) {
-      markReachable(peeled.typeName.text, polarity);
+      markReachable(peeled.typeName.text, polarity, mandatory);
       for (const typeArgument of peeled.typeArguments ?? []) {
-        walkTypeNode(typeArgument, polarity);
+        walkTypeNode(typeArgument, polarity, mandatory);
       }
       return;
     }
     if (ts.isTypeLiteralNode(peeled)) {
-      walkTypeElements(peeled.members, polarity);
+      walkTypeElements(peeled.members, polarity, mandatory, forcedMode);
       return;
     }
     if (ts.isFunctionTypeNode(peeled) || ts.isConstructorTypeNode(peeled)) {
       for (const parameter of peeled.parameters) {
-        if (parameter.type !== undefined)
-          walkTypeNode(parameter.type, flip(polarity));
+        if (parameter.type !== undefined) {
+          const parameterMandatory =
+            mandatory && parameter.questionToken === undefined;
+          walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
+        }
       }
-      walkTypeNode(peeled.type, polarity);
+      walkTypeNode(peeled.type, polarity, mandatory);
       return;
     }
     if (ts.isIntersectionTypeNode(peeled) || ts.isUnionTypeNode(peeled)) {
       for (const constituent of peeled.types)
-        walkTypeNode(constituent, polarity);
+        walkTypeNode(constituent, polarity, mandatory);
       return;
     }
     if (ts.isArrayTypeNode(peeled)) {
-      walkTypeNode(peeled.elementType, polarity);
+      walkTypeNode(peeled.elementType, polarity, mandatory);
       return;
     }
     if (ts.isTupleTypeNode(peeled)) {
@@ -452,34 +496,69 @@ function computeContravariantNames(
         walkTypeNode(
           ts.isNamedTupleMember(element) ? element.type : element,
           polarity,
+          mandatory,
         );
       }
       return;
     }
     if (ts.isMappedTypeNode(peeled) && peeled.type !== undefined) {
-      walkTypeNode(peeled.type, polarity);
+      walkTypeNode(peeled.type, polarity, mandatory);
     }
+  }
+
+  /**
+   * Resolves a member's own optionality, honoring an enclosing
+   * `Partial<>`/`Required<>` override, then folds it into the incoming
+   * mandatory chain (a member is only mandatory if it is itself required
+   * AND everything above it on the path was mandatory too).
+   */
+  function memberMandatory(
+    mandatory: boolean,
+    forcedMode: ForcedOptionalityMode | undefined,
+    questionToken: ts.QuestionToken | undefined,
+  ): boolean {
+    const optional =
+      forcedMode === "optional" ? true
+      : forcedMode === "required" ? false
+      : questionToken !== undefined;
+    return mandatory && !optional;
   }
 
   function walkTypeElements(
     elements: readonly ts.TypeElement[],
     polarity: Polarity,
+    mandatory: boolean,
+    forcedMode: ForcedOptionalityMode | undefined,
   ): void {
     for (const element of elements) {
       if (ts.isIndexSignatureDeclaration(element)) {
-        walkTypeNode(element.type, polarity);
+        walkTypeNode(element.type, polarity, mandatory);
         continue;
       }
       if (ts.isPropertySignature(element) && element.type !== undefined) {
-        walkTypeNode(element.type, polarity);
+        const childMandatory = memberMandatory(
+          mandatory,
+          forcedMode,
+          element.questionToken,
+        );
+        walkTypeNode(element.type, polarity, childMandatory);
         continue;
       }
       if (ts.isMethodSignature(element)) {
+        const childMandatory = memberMandatory(
+          mandatory,
+          forcedMode,
+          element.questionToken,
+        );
         for (const parameter of element.parameters) {
-          if (parameter.type !== undefined)
-            walkTypeNode(parameter.type, flip(polarity));
+          if (parameter.type !== undefined) {
+            const parameterMandatory =
+              childMandatory && parameter.questionToken === undefined;
+            walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
+          }
         }
-        if (element.type !== undefined) walkTypeNode(element.type, polarity);
+        if (element.type !== undefined)
+          walkTypeNode(element.type, polarity, childMandatory);
       }
     }
   }
@@ -487,6 +566,7 @@ function computeContravariantNames(
   function walkClassMembers(
     members: readonly ts.ClassElement[],
     polarity: Polarity,
+    mandatory: boolean,
   ): void {
     for (const member of members) {
       if (ts.isConstructorDeclaration(member)) continue;
@@ -499,26 +579,42 @@ function computeContravariantNames(
           ts.isSetAccessorDeclaration(member)) &&
         member.type !== undefined
       ) {
-        walkTypeNode(member.type, polarity);
+        const memberOptional =
+          ts.isPropertyDeclaration(member) &&
+          member.questionToken !== undefined;
+        walkTypeNode(member.type, polarity, mandatory && !memberOptional);
         continue;
       }
       if (ts.isMethodDeclaration(member)) {
+        const childMandatory = mandatory && member.questionToken === undefined;
         for (const parameter of member.parameters) {
-          if (parameter.type !== undefined)
-            walkTypeNode(parameter.type, flip(polarity));
+          if (parameter.type !== undefined) {
+            const parameterMandatory =
+              childMandatory && parameter.questionToken === undefined;
+            walkTypeNode(parameter.type, flip(polarity), parameterMandatory);
+          }
         }
-        if (member.type !== undefined) walkTypeNode(member.type, polarity);
+        if (member.type !== undefined)
+          walkTypeNode(member.type, polarity, childMandatory);
       }
     }
   }
 
-  for (const name of namedDeclarations.keys()) markReachable(name, 1);
+  for (const name of namedDeclarations.keys()) markReachable(name, 1, true);
   for (const functionDeclaration of functionDeclarations) {
+    const functionExisted =
+      existingFunctionNames === undefined ||
+      (functionDeclaration.name !== undefined &&
+        existingFunctionNames.has(functionDeclaration.name.text));
     for (const parameter of functionDeclaration.parameters) {
-      if (parameter.type !== undefined) walkTypeNode(parameter.type, -1);
+      if (parameter.type !== undefined) {
+        const parameterMandatory =
+          functionExisted && parameter.questionToken === undefined;
+        walkTypeNode(parameter.type, -1, parameterMandatory);
+      }
     }
     if (functionDeclaration.type !== undefined)
-      walkTypeNode(functionDeclaration.type, 1);
+      walkTypeNode(functionDeclaration.type, 1, true);
   }
 
   return contravariant;
@@ -532,18 +628,31 @@ function parameterKey(
 }
 
 /**
- * Inline object literals in function-parameter and return positions become
- * their own declaration entries, keyed `Name(paramName)` / `Name(=>)`.
- * Overloads sharing a name are aggregated into one entry per key
- * (order-independent), so api-extractor's per-overload rendering cannot
- * forge a spurious removal or duplicate-key collision.
+ * A callable signature shape common to top-level functions, interface method
+ * signatures, class methods, and constructors — the only three members this
+ * module needs from any of them.
  */
-function collectFunctionInlineLiteralEntries(
-  functionsByName: ReadonlyMap<string, readonly ts.FunctionDeclaration[]>,
+type CallableSignature = Readonly<{
+  parameters: ts.NodeArray<ts.ParameterDeclaration>;
+  returnType: ts.TypeNode | undefined;
+}>;
+
+/**
+ * Inline object literals in parameter and return positions become their own
+ * declaration entries, keyed `Name(paramName)` / `Name(=>)`. Overloads
+ * sharing a key are aggregated into one entry (order-independent), so
+ * api-extractor's per-overload rendering cannot forge a spurious removal or
+ * duplicate-key collision. `callableGroups` covers top-level functions
+ * (`funcName`), interface/class methods (`Owner.methodName`), and
+ * constructors (`Owner.constructor`) uniformly — a required member added to
+ * any of their inline parameter literals is inventoried the same way.
+ */
+function collectInlineLiteralEntries(
+  callableGroups: ReadonlyMap<string, readonly CallableSignature[]>,
 ): Map<string, DeclarationRecord> {
   const entries = new Map<string, DeclarationRecord>();
 
-  for (const [functionName, overloads] of functionsByName) {
+  for (const [callableName, overloads] of callableGroups) {
     const parameterMaps = new Map<string, ReadonlyMap<string, boolean>[]>();
     const returnMaps: ReadonlyMap<string, boolean>[] = [];
 
@@ -557,8 +666,8 @@ function collectFunctionInlineLiteralEntries(
         existing.push(localMembers);
         parameterMaps.set(key, existing);
       });
-      if (overload.type !== undefined) {
-        const localMembers = resolveLocalMembers(overload.type);
+      if (overload.returnType !== undefined) {
+        const localMembers = resolveLocalMembers(overload.returnType);
         if (localMembers.size > 0) returnMaps.push(localMembers);
       }
     }
@@ -566,7 +675,7 @@ function collectFunctionInlineLiteralEntries(
     for (const [parameterName, maps] of parameterMaps) {
       const merged = mergeOverloadAggregate(maps);
       if (merged.size === 0) continue;
-      const key = `${functionName}(${parameterName})`;
+      const key = `${callableName}(${parameterName})`;
       entries.set(key, {
         name: key,
         kind: "inline-literal",
@@ -577,7 +686,7 @@ function collectFunctionInlineLiteralEntries(
     if (returnMaps.length > 0) {
       const merged = mergeOverloadAggregate(returnMaps);
       if (merged.size > 0) {
-        const key = `${functionName}(=>)`;
+        const key = `${callableName}(=>)`;
         entries.set(key, {
           name: key,
           kind: "inline-literal",
@@ -591,17 +700,115 @@ function collectFunctionInlineLiteralEntries(
   return entries;
 }
 
+function pushCallableSignature(
+  groups: Map<string, CallableSignature[]>,
+  key: string,
+  signature: CallableSignature,
+): void {
+  const existing = groups.get(key) ?? [];
+  existing.push(signature);
+  groups.set(key, existing);
+}
+
+/**
+ * Groups every interface method signature by `${interfaceName}.${methodName}`
+ * so overloads aggregate the same way top-level function overloads do.
+ */
+function collectInterfaceMethodCallables(
+  namedDeclarations: ReadonlyMap<string, NamedDeclarationEntry>,
+): Map<string, CallableSignature[]> {
+  const groups = new Map<string, CallableSignature[]>();
+  for (const [declarationName, entry] of namedDeclarations) {
+    if (entry.kind !== "interface") continue;
+    for (const member of entry.members) {
+      if (!ts.isMethodSignature(member)) continue;
+      const methodName = getMemberName(member.name);
+      if (methodName === undefined) continue;
+      pushCallableSignature(groups, `${declarationName}.${methodName}`, {
+        parameters: member.parameters,
+        returnType: member.type,
+      });
+    }
+  }
+  return groups;
+}
+
+/**
+ * Groups every class method and constructor by `${className}.${methodName}`
+ * / `${className}.constructor`, excluding private members exactly as
+ * `collectClassMembers` does.
+ */
+function collectClassMethodCallables(
+  namedDeclarations: ReadonlyMap<string, NamedDeclarationEntry>,
+): Map<string, CallableSignature[]> {
+  const groups = new Map<string, CallableSignature[]>();
+  for (const [declarationName, entry] of namedDeclarations) {
+    if (entry.kind !== "class") continue;
+    for (const member of entry.members) {
+      if (member.name !== undefined && ts.isPrivateIdentifier(member.name))
+        continue;
+      if (hasPrivateModifier(member)) continue;
+      if (ts.isConstructorDeclaration(member)) {
+        pushCallableSignature(groups, `${declarationName}.constructor`, {
+          parameters: member.parameters,
+          returnType: undefined,
+        });
+        continue;
+      }
+      if (!ts.isMethodDeclaration(member)) continue;
+      const methodName = getMemberName(member.name);
+      if (methodName === undefined) continue;
+      pushCallableSignature(groups, `${declarationName}.${methodName}`, {
+        parameters: member.parameters,
+        returnType: member.type,
+      });
+    }
+  }
+  return groups;
+}
+
+/**
+ * Parses a report body far enough to list its top-level (non-method)
+ * `FunctionDeclaration` names. Used to resolve `existingFunctionNames`
+ * (the base snapshot's own function names) before building the head
+ * inventory, so a brand-new function's parameters never contribute HARD
+ * contravariant reachability (§module doc's gating note).
+ */
+export function collectTopLevelFunctionNames(
+  body: string,
+  entrypoint: string,
+): ReadonlySet<string> {
+  const sourceFile = ts.createSourceFile(
+    `${entrypoint}.ts`,
+    body,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const names = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (ts.isFunctionDeclaration(statement) && statement.name !== undefined) {
+      names.add(statement.name.text);
+    }
+  }
+  return names;
+}
+
 /**
  * Builds the canonical `(declaration → member path → optional?)` inventory
  * for one report body. Walks `TypeAliasDeclaration`, `InterfaceDeclaration`,
  * and `ClassDeclaration` statements — INCLUDING unexported ones, since
  * api-extractor renders forgotten exports without `export` when a published
  * type references them. Refuses if the body yields zero declarations, which
- * is the fence-format-change tripwire.
+ * is the fence-format-change tripwire. `existingFunctionNames`, when given,
+ * gates HARD contravariant reachability rooted at a top-level function to
+ * only those functions present in it (§module doc); omit it when there is no
+ * "before" to gate against (e.g. building the base snapshot's own inventory).
  */
 export function buildSurfaceInventory(
   body: string,
   entrypoint: string,
+  existingFunctionNames?: ReadonlySet<string>,
 ): SurfaceInventory {
   const sourceFile = ts.createSourceFile(
     `${entrypoint}.ts`,
@@ -613,7 +820,7 @@ export function buildSurfaceInventory(
 
   const namedDeclarations = new Map<string, NamedDeclarationEntry>();
   const functionDeclarations: ts.FunctionDeclaration[] = [];
-  const functionsByName = new Map<string, ts.FunctionDeclaration[]>();
+  const functionCallables = new Map<string, CallableSignature[]>();
 
   for (const statement of sourceFile.statements) {
     if (ts.isTypeAliasDeclaration(statement)) {
@@ -639,15 +846,17 @@ export function buildSurfaceInventory(
       statement.name !== undefined
     ) {
       functionDeclarations.push(statement);
-      const existing = functionsByName.get(statement.name.text) ?? [];
-      existing.push(statement);
-      functionsByName.set(statement.name.text, existing);
+      pushCallableSignature(functionCallables, statement.name.text, {
+        parameters: statement.parameters,
+        returnType: statement.type,
+      });
     }
   }
 
   const contravariantNames = computeContravariantNames(
     namedDeclarations,
     functionDeclarations,
+    existingFunctionNames,
   );
 
   const inventory = new Map<string, DeclarationRecord>();
@@ -665,9 +874,12 @@ export function buildSurfaceInventory(
     });
   }
 
-  for (const [key, record] of collectFunctionInlineLiteralEntries(
-    functionsByName,
-  )) {
+  const callableGroups = new Map<string, CallableSignature[]>([
+    ...functionCallables,
+    ...collectInterfaceMethodCallables(namedDeclarations),
+    ...collectClassMethodCallables(namedDeclarations),
+  ]);
+  for (const [key, record] of collectInlineLiteralEntries(callableGroups)) {
     inventory.set(key, record);
   }
 
@@ -957,7 +1169,7 @@ export function parseExceptionsLedger(
       );
     }
 
-    const tupleKey = `${entrypoint} ${declaration} ${member} ${kind}`;
+    const tupleKey = `${entrypoint}\0${declaration}\0${member}\0${kind}`;
     if (seenTuples.has(tupleKey)) {
       throw new ApiSurfaceLedgerError(
         `Ledger has a duplicate entry for (${entrypoint}, ${declaration}, ${member}, ${kind}).`,
@@ -1171,17 +1383,31 @@ export function runApiSurfaceCompat(
 
   for (const reportFile of headReportFiles) {
     const headSource = readFileSync(path.join(etcDir, reportFile), "utf8");
-    const headInventory = buildSurfaceInventory(
-      extractApiReportBody(headSource),
-      reportFile,
-    );
-    headInventories.set(reportFile, headInventory);
-
     const baseSource = readGitBlob(
       repoRoot,
       baseTag,
       `${relativeEtcDir}/${reportFile}`,
     );
+
+    // Resolve which top-level functions already existed at the base ref
+    // BEFORE building the head inventory, so a brand-new function's
+    // mandatory parameter never contributes HARD contravariant
+    // reachability (§module doc's gating note) — a new entrypoint has no
+    // base snapshot at all, so every head function is new by definition.
+    const existingFunctionNames =
+      baseSource === undefined ?
+        new Set<string>()
+      : collectTopLevelFunctionNames(
+          extractApiReportBody(baseSource),
+          reportFile,
+        );
+    const headInventory = buildSurfaceInventory(
+      extractApiReportBody(headSource),
+      reportFile,
+      existingFunctionNames,
+    );
+    headInventories.set(reportFile, headInventory);
+
     if (baseSource === undefined) {
       reportLines.push(
         `report: etc/${reportFile}: new entrypoint (no snapshot at ${baseTag}); surface not compared.`,
