@@ -69,6 +69,39 @@ function fixturesWithEngine(engine: PerfFixtureEngine): readonly PerfFixture[] {
   return PERF_FIXTURES.filter((fixture) => fixture.engines.includes(engine));
 }
 
+// `PGLITE_GLOBS` entries are either an exact file path, a filename wildcard
+// (`tests/backends/postgres/pglite-*.test.ts`), or a directory-recursive glob
+// (`tests/perf/explain/**/*.test.ts`, deliberately not a file-by-file ratchet
+// per that entry's own comment). A plain `toContain` check only recognizes
+// the first shape, so it would report every fixture under a directory-glob'd
+// subdirectory as unregistered even though the vitest project genuinely
+// covers it — one predicate covers all three shapes instead of two
+// independent, drift-prone checks.
+const DIRECTORY_GLOB_SUFFIX = "/**/*.test.ts";
+
+function globToRegExp(glob: string): RegExp {
+  const escaped = glob
+    .split("*")
+    .map((segment) =>
+      segment.replaceAll(/[.+?^${}()|[\]\\]/gu, String.raw`\$&`),
+    )
+    .join("[^/]*");
+  return new RegExp(`^${escaped}$`, "u");
+}
+
+function pgliteGlobsCover(globs: readonly string[], filePath: string): boolean {
+  return globs.some((glob) => {
+    if (glob.endsWith(DIRECTORY_GLOB_SUFFIX)) {
+      const directoryPrefix = glob.slice(0, -DIRECTORY_GLOB_SUFFIX.length);
+      return (
+        filePath.startsWith(`${directoryPrefix}/`) &&
+        filePath.endsWith(".test.ts")
+      );
+    }
+    return globToRegExp(glob).test(filePath);
+  });
+}
+
 describe("tests/perf inventory", () => {
   it("registers every file under tests/perf", () => {
     const registered = new Set(PERF_FIXTURES.map((fixture) => fixture.file));
@@ -137,7 +170,12 @@ describe("tests/perf inventory", () => {
     expect(pgliteFixtures.length).toBeGreaterThan(0);
 
     for (const fixture of pgliteFixtures) {
-      expect(PGLITE_GLOBS).toContain(`tests/perf/${fixture.file}`);
+      const relativePath = `tests/perf/${fixture.file}`;
+      if (!pgliteGlobsCover(PGLITE_GLOBS, relativePath)) {
+        throw new Error(
+          `${relativePath} is a pglite-engine fixture but no entry in PGLITE_GLOBS covers it`,
+        );
+      }
     }
   });
 });
