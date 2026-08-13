@@ -6,9 +6,11 @@
  * `design-ws8-port-isolation.md` §2.1. B3 severs R-migrate
  * (`src/backend/migrate-recorded-time.ts` / `migrate-vectors.ts`), which was
  * the last real route reaching Drizzle from `.` and `./backend` — both flip
- * clean at both grains and both formats in this batch. A later batch (B4)
- * flips the remaining two "batteries included" adapter entrypoints from
- * `dirty` to the `adapter-dynamic-only` classification.
+ * clean at both grains and both formats. This batch (B4) restructures the
+ * dist table into a per-mode verdict tuple and re-measures it against a
+ * fresh build (0 of 10 portable dirty at either mode, in both formats). A
+ * later batch (B4b) flips the remaining two "batteries included" adapter
+ * entrypoints from `dirty` to the `adapter-dynamic-only` classification.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -185,37 +187,61 @@ const RECORDED_ABSENT_ROUTES = {
 } as const;
 
 /**
- * Recorded at HEAD by `rm -rf dist && pnpm build && TYPEGRAPH_REQUIRE_DIST_GRAIN=1
- * pnpm vitest run tests/drizzle-reachability.test.ts` (a fresh build; the
- * emitted numbers, not a prediction) — 2 of 12 non-adapter entrypoints
- * resolve a Drizzle specifier at module load, in both artifact formats (they
- * agree entrywise; no entrypoint defers Drizzle behind a dynamic import
- * yet). `.` and `./backend` join the already-clean set now that R-migrate is
- * severed; only the two "batteries included" adapter entrypoints and every
- * `./adapters/drizzle/*` entrypoint stay dirty.
+ * Recorded at HEAD by `rm -rf dist && NODE_OPTIONS=--max-old-space-size=8192
+ * pnpm build`, then `node --import tsx scripts/drizzle-reachability-scan.ts
+ * --grain=dist` (a fresh build; the emitted `32 / 72 dirty`, not a
+ * prediction) — I3's per-mode verdict TUPLE, not a single `load` verdict:
+ * all ten portable entrypoints are clean at both `load` and `deferred`, in
+ * both artifact formats; all eight adapter entrypoints (the two "batteries
+ * included" entrypoints plus every `./adapters/drizzle/*` entrypoint) are
+ * dirty at both modes, in both formats — no entrypoint defers Drizzle behind
+ * a dynamic import yet (that is B4b's `adapter-dynamic-only`
+ * re-classification for the two batteries entrypoints), so `load` and
+ * `deferred` agree everywhere today.
  */
-const RECORDED_DIST_LOAD_VERDICTS: Readonly<
-  Record<string, ReachabilityVerdict>
+const RECORDED_DIST_VERDICTS: Readonly<
+  Record<
+    string,
+    Readonly<{ load: ReachabilityVerdict; deferred: ReachabilityVerdict }>
+  >
 > = {
-  ".": "clean",
-  "./backend": "clean",
-  "./core": "clean",
-  "./interchange": "clean",
-  "./profiler": "clean",
-  "./schema": "clean",
-  "./indexes": "clean",
-  "./graph-extension": "clean",
-  "./graph-merge": "clean",
-  "./provenance": "clean",
-  "./sqlite/local": "dirty",
-  "./postgres/pglite": "dirty",
-  "./adapters/drizzle/sqlite": "dirty",
-  "./adapters/drizzle/postgres": "dirty",
-  "./adapters/drizzle/postgres/pglite": "dirty",
-  "./adapters/drizzle/sqlite/local": "dirty",
-  "./adapters/drizzle/sqlite/libsql": "dirty",
-  "./adapters/drizzle/indexes": "dirty",
+  ".": { load: "clean", deferred: "clean" },
+  "./backend": { load: "clean", deferred: "clean" },
+  "./core": { load: "clean", deferred: "clean" },
+  "./interchange": { load: "clean", deferred: "clean" },
+  "./profiler": { load: "clean", deferred: "clean" },
+  "./schema": { load: "clean", deferred: "clean" },
+  "./indexes": { load: "clean", deferred: "clean" },
+  "./graph-extension": { load: "clean", deferred: "clean" },
+  "./graph-merge": { load: "clean", deferred: "clean" },
+  "./provenance": { load: "clean", deferred: "clean" },
+  "./sqlite/local": { load: "dirty", deferred: "dirty" },
+  "./postgres/pglite": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/sqlite": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/postgres": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/postgres/pglite": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/sqlite/local": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/sqlite/libsql": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/indexes": { load: "dirty", deferred: "dirty" },
 };
+
+/**
+ * `noUncheckedIndexedAccess` types `RECORDED_DIST_VERDICTS[entrypoint]` as
+ * possibly `undefined`, so a second index (`[mode]`/`.load`/`.deferred`) off
+ * that result does not typecheck. Every entrypoint IS recorded (asserted
+ * elsewhere), so this throws rather than silently narrowing with `!`.
+ */
+function distributionVerdictsFor(
+  entrypoint: string,
+): Readonly<{ load: ReachabilityVerdict; deferred: ReachabilityVerdict }> {
+  const verdicts = RECORDED_DIST_VERDICTS[entrypoint];
+  if (verdicts === undefined) {
+    throw new Error(
+      `RECORDED_DIST_VERDICTS has no entry for ${JSON.stringify(entrypoint)}.`,
+    );
+  }
+  return verdicts;
+}
 
 function dirtyPortableEntrypointsAtStage(
   stage: (typeof SIMULATED_SEVERANCE_STAGES)[number],
@@ -492,27 +518,32 @@ describe("drizzle reachability — source grain", () => {
 
   /**
    * I3's containment property, checked table against table rather than
-   * table against a fresh scan: `RECORDED_DIST_LOAD_VERDICTS` is hand-edited
+   * table against a fresh scan: `RECORDED_DIST_VERDICTS` is hand-edited
    * (recorded from a scan run separately, see its own doc comment) and
    * `RECORDED_SOURCE_VERDICTS` is hand-edited too, so nothing structurally
    * prevents the two from drifting apart independently. This is the guard
    * that keeps them honest against each other: dist reachability walks the
    * tree-shaken remainder of the SAME module graph source reachability
-   * walks, so an entrypoint dirty at dist can never be clean at source — the
-   * dist-dirty set is entrywise a subset of the source-dirty set.
+   * walks, so an entrypoint dirty at dist (at EITHER mode) can never be
+   * clean at source — the dist-dirty set is entrywise a subset of the
+   * source-dirty set, checked at both `load` and `deferred`.
    */
-  it("the recorded dist-dirty set is entrywise a subset of the recorded source-dirty set", () => {
-    const dirtyAtDistributionButNotSource = Object.keys(
-      RECORDED_DIST_LOAD_VERDICTS,
-    )
-      .filter(
-        (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "dirty",
+  it("the recorded dist-dirty set is entrywise a subset of the recorded source-dirty set, at both modes", () => {
+    for (const mode of ["load", "deferred"] as const) {
+      const dirtyAtDistributionButNotSource = Object.keys(
+        RECORDED_DIST_VERDICTS,
       )
-      .filter((entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] !== "dirty");
-    expect(
-      dirtyAtDistributionButNotSource,
-      "every entrypoint here is recorded dirty at dist but not at source",
-    ).toEqual([]);
+        .filter(
+          (entrypoint) => distributionVerdictsFor(entrypoint)[mode] === "dirty",
+        )
+        .filter(
+          (entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] !== "dirty",
+        );
+      expect(
+        dirtyAtDistributionButNotSource,
+        `every entrypoint here is recorded dirty at dist (${mode}) but not at source`,
+      ).toEqual([]);
+    }
   });
 });
 
@@ -596,50 +627,81 @@ describe("drizzle reachability — dist grain", () => {
       }
     });
 
-    it("records today's dist load verdicts in both formats (2 of 12 non-adapter dirty at load)", () => {
-      const nonAdapterEntrypoints = Object.keys(
-        RECORDED_DIST_LOAD_VERDICTS,
-      ).filter((entrypoint) => !entrypoint.startsWith("./adapters/drizzle/"));
-      expect(nonAdapterEntrypoints.length).toBe(12);
-      const dirtyNonAdapter = nonAdapterEntrypoints
-        .filter(
-          (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "dirty",
-        )
-        .toSorted();
-      expect(dirtyNonAdapter).toEqual(RECORDED_DIRTY_NON_ADAPTER_ENTRYPOINTS);
-      const cleanNonAdapter = nonAdapterEntrypoints
-        .filter(
-          (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "clean",
-        )
-        .toSorted();
-      expect(cleanNonAdapter).toEqual([
-        ".",
-        "./backend",
-        "./core",
-        "./graph-extension",
-        "./graph-merge",
-        "./indexes",
-        "./interchange",
-        "./profiler",
-        "./provenance",
-        "./schema",
-      ]);
-
-      const findings = scanDistributionReachability().filter(
-        (finding) => finding.mode === "load",
+    it("records the load and deferred dist verdicts for all 18 entrypoints in both formats (0 of 10 portable dirty at either mode)", () => {
+      expect(Object.keys(RECORDED_DIST_VERDICTS).length).toBe(
+        RECORDED_ENTRYPOINTS.length,
       );
-      for (const [entrypoint, verdict] of Object.entries(
-        RECORDED_DIST_LOAD_VERDICTS,
+
+      // Both directions on the ten truly portable entrypoints: none is
+      // recorded dirty at either mode.
+      const dirtyPortableAtEitherMode = RECORDED_PORTABLE_ENTRYPOINTS.filter(
+        (entrypoint) =>
+          distributionVerdictsFor(entrypoint).load === "dirty" ||
+          distributionVerdictsFor(entrypoint).deferred === "dirty",
+      );
+      expect(dirtyPortableAtEitherMode).toEqual([]);
+
+      // Every adapter entrypoint (the six true `./adapters/drizzle/*` plus
+      // the two "batteries included" entrypoints) is recorded dirty at BOTH
+      // modes — no entrypoint defers Drizzle behind a dynamic import yet.
+      const dirtyAdapterAtBothModes = [
+        ...RECORDED_TRUE_ADAPTER_ENTRYPOINTS,
+        "./sqlite/local",
+        "./postgres/pglite",
+      ]
+        .filter(
+          (entrypoint) =>
+            distributionVerdictsFor(entrypoint).load === "dirty" &&
+            distributionVerdictsFor(entrypoint).deferred === "dirty",
+        )
+        .toSorted();
+      expect(dirtyAdapterAtBothModes).toEqual(
+        [
+          ...RECORDED_TRUE_ADAPTER_ENTRYPOINTS,
+          "./sqlite/local",
+          "./postgres/pglite",
+        ].toSorted(),
+      );
+
+      const findings = scanDistributionReachability();
+      for (const [entrypoint, verdicts] of Object.entries(
+        RECORDED_DIST_VERDICTS,
       )) {
         for (const format of ["import", "require"] as const) {
-          const match = findings.find(
-            (finding) =>
-              finding.entrypoint === entrypoint && finding.format === format,
-          );
-          expect(match?.verdict, `${entrypoint} [${format}]`).toBe(verdict);
+          for (const mode of ["load", "deferred"] as const) {
+            const match = findings.find(
+              (finding) =>
+                finding.entrypoint === entrypoint &&
+                finding.format === format &&
+                finding.mode === mode,
+            );
+            expect(match?.verdict, `${entrypoint} [${format}] (${mode})`).toBe(
+              verdicts[mode],
+            );
+          }
         }
       }
     });
+  });
+
+  /**
+   * Mode containment on the DIST-grain table: `deferred` follows a strict
+   * superset of the edges `load` follows, so an artifact dirty at `load`
+   * must be recorded dirty at `deferred` too — the reverse (load-dirty,
+   * deferred-clean) can never happen by construction. This is the assertion
+   * that lets B4b's re-classification of the two "batteries included"
+   * entrypoints (`load` turns clean, `deferred` stays dirty — the ONLY
+   * direction this test permits) land as a reviewed diff in the recorded
+   * table rather than an unreviewed one.
+   */
+  it("no artifact is recorded dirty at load and clean at deferred", () => {
+    const loadDirtyDeferredClean = Object.entries(RECORDED_DIST_VERDICTS)
+      .filter(
+        ([, verdicts]) =>
+          verdicts.load === "dirty" && verdicts.deferred === "clean",
+      )
+      .map(([entrypoint]) => entrypoint);
+    expect(loadDirtyDeferredClean).toEqual([]);
   });
 
   it("refuses to skip the dist grain when TYPEGRAPH_REQUIRE_DIST_GRAIN=1", () => {

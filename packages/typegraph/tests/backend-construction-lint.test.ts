@@ -33,6 +33,8 @@ import {
   BACKEND_MUTATION_MESSAGE,
   BACKEND_SEAM_IMPORT_RESTRICTIONS,
   BACKEND_SEAM_MESSAGE,
+  DRIZZLE_ZONE,
+  DRIZZLE_ZONE_RESTRICTIONS,
   GLOBAL_SYMBOL_RESTRICTION,
   type RestrictedSyntaxEntry,
   RUNTIME_PORT_RESTRICTIONS,
@@ -150,6 +152,22 @@ function banColumns(modules: readonly string[]): readonly BanColumn[] {
         "src/backend/drizzle/postgres.ts",
         "src/backend/drizzle/sqlite.ts",
       ],
+    },
+    {
+      /**
+       * I1's zone ban (WS8's DRIZZLE_ZONE_RESTRICTIONS, not to be confused
+       * with I1/I2 above — the backend-derivation carry bans). The
+       * both-directions ratchet this column IS: a block that spreads
+       * SOURCE_WIDE_RESTRICTIONS but forgot DRIZZLE_ZONE_RESTRICTIONS shows
+       * up as an undeclared exempt file (`exempt` too large); a stale
+       * DRIZZLE_ZONE entry whose covering block still bans it shows up as a
+       * missing one (`exempt` too small) — proving the zone ban is
+       * installed WHOLE at every one of its 12 `SOURCE_WIDE_RESTRICTIONS`
+       * spread sites, never half.
+       */
+      name: "DRIZZLE_ZONE_RESTRICTIONS",
+      restrictions: DRIZZLE_ZONE_RESTRICTIONS,
+      exempt: DRIZZLE_ZONE.map((entry) => entry.file).toSorted(),
     },
   ];
 }

@@ -3,6 +3,7 @@
 import { createLibraryConfig } from "@typegraph/eslint-config/library";
 
 import {
+  profileCovers,
   WRITE_PIPELINE_EXEMPTIONS,
   writePipelineBlocks,
 } from "./eslint/write-pipeline-inventory.mjs";
@@ -273,6 +274,297 @@ const DIALECT_SEAM_RESTRICTIONS = [
 ];
 
 /**
+ * The single owner of "is this specifier a Drizzle package" TEXT, shared by
+ * substring between this file's L1 selectors and
+ * scripts/drizzle-reachability-scan.ts's `DRIZZLE_SPECIFIER_PATTERN` (L2). A
+ * plain ESM config file cannot cheaply import that TypeScript module, so the
+ * shared owner is the pattern's SOURCE TEXT rather than the compiled RegExp:
+ * `new RegExp(DRIZZLE_SPECIFIER_PATTERN_SOURCE).source` must equal
+ * `DRIZZLE_SPECIFIER_PATTERN.source` exactly, and every one of the five
+ * selectors below must contain this string — both asserted by
+ * tests/drizzle-zone-inventory.test.ts, so the two guardrails cannot drift
+ * apart silently.
+ */
+export const DRIZZLE_SPECIFIER_PATTERN_SOURCE =
+  "^(drizzle-orm|drizzle-kit|drizzle-|@drizzle-team\\/)";
+
+export const DRIZZLE_ZONE_MESSAGE =
+  "This module sits outside the sanctioned Drizzle-specifier zone " +
+  "(DRIZZLE_ZONE below: src/backend/drizzle/**, the three connection- " +
+  "constructing adapter entrypoints, and src/indexes/drizzle.ts). " +
+  "TypeGraph isolates Drizzle behind the GraphBackend port; importing, " +
+  "re-exporting, dynamically importing, or requiring a Drizzle specifier " +
+  "here defeats that isolation. This selector sees only the specifier " +
+  "text (L1) — a module that reaches Drizzle through a RELATIVE helper " +
+  "import is caught instead by scripts/drizzle-reachability-scan.ts's " +
+  "closure walk (L2). If this file genuinely belongs in the zone, add it " +
+  "to DRIZZLE_ZONE with its reason.";
+
+/**
+ * Builds the zone ban's five selectors from one pattern source: four
+ * conceptual forms, with the re-export form split into its two distinct AST
+ * node types (`export { x } from "…"` is an ExportNamedDeclaration;
+ * `export * from "…"` is an ExportAllDeclaration). `no-restricted-imports`
+ * cannot express the dynamic-import or `require` forms, so this stays
+ * `no-restricted-syntax` throughout, matching every other ratchet in this
+ * file. Exported so a downstream test can assert each selector still
+ * CONTAINS the one pattern source, rather than re-deriving the selector
+ * shape itself.
+ *
+ * @param {string} patternSource
+ * @returns {readonly import("./eslint.config.d.mts").RestrictedSyntaxEntry[]}
+ */
+export function drizzleZoneRestrictions(patternSource) {
+  return [
+    {
+      selector: `ImportDeclaration[source.value=/${patternSource}/]`,
+      message: DRIZZLE_ZONE_MESSAGE,
+    },
+    {
+      selector: `ExportNamedDeclaration[source.value=/${patternSource}/]`,
+      message: DRIZZLE_ZONE_MESSAGE,
+    },
+    {
+      selector: `ExportAllDeclaration[source.value=/${patternSource}/]`,
+      message: DRIZZLE_ZONE_MESSAGE,
+    },
+    {
+      selector: `ImportExpression > Literal[value=/${patternSource}/]`,
+      message: DRIZZLE_ZONE_MESSAGE,
+    },
+    {
+      selector: `CallExpression[callee.name="require"] > Literal[value=/${patternSource}/]`,
+      message: DRIZZLE_ZONE_MESSAGE,
+    },
+  ];
+}
+
+/**
+ * The I1 zone ban, exported so the exemption ratchet and the construction-
+ * lint ratchet both resolve THESE selectors out of the real config instead
+ * of re-spelling them.
+ */
+export const DRIZZLE_ZONE_RESTRICTIONS = drizzleZoneRestrictions(
+  DRIZZLE_SPECIFIER_PATTERN_SOURCE,
+);
+
+/** @typedef {Readonly<{ file: string, reason: string }>} DrizzleZoneEntry */
+
+/** Shared by the 26 files under src/backend/drizzle/** that are the adapter implementation itself. */
+const DRIZZLE_ADAPTER_IMPLEMENTATION_REASON =
+  "the Drizzle adapter implementation itself; L2's closure scan, not L1, " +
+  "is what keeps it unreachable from a portable entrypoint";
+
+/**
+ * The sanctioned Drizzle-specifier zone (I1): every `src` module that
+ * genuinely imports a Drizzle package, each with the reason it may.
+ * `tests/drizzle-zone-inventory.test.ts` asserts this list equals the set of
+ * real Drizzle importers, BOTH directions — a stale entry (a file that no
+ * longer imports Drizzle) fails as loudly as a new, unlisted importer. A
+ * blanket zone is unspellable by construction: every entry names one real
+ * file, never a glob.
+ *
+ * @type {readonly DrizzleZoneEntry[]}
+ */
+export const DRIZZLE_ZONE = [
+  {
+    file: "src/backend/drizzle/columns/fulltext.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/columns/vector.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/contribution-materializations.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/ddl.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/execution/postgres-execution.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/execution/sqlite-execution.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/execution/types.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/index-materializations.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/kind-removals.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operation-backend-core.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/clear.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/collections.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/constraint-fence-audit.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/edge-claims.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/edges.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/fulltext.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/hybrid.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/nodes.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/schema.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/shared.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/strategy.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/operations/uniques.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/postgres.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/schema/postgres.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/schema/sqlite.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/sqlite.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/postgres/pglite.ts",
+    reason:
+      "a published, pass-a-handle adapter entrypoint that constructs a PGlite connection directly",
+  },
+  {
+    file: "src/backend/sqlite/libsql.ts",
+    reason:
+      "a published, pass-a-handle adapter entrypoint that constructs a libSQL connection directly",
+  },
+  {
+    file: "src/backend/sqlite/local.ts",
+    reason:
+      "a published, pass-a-handle adapter entrypoint that constructs a better-sqlite3 connection directly",
+  },
+  {
+    file: "src/indexes/drizzle.ts",
+    reason:
+      "a Drizzle-typed module inside the otherwise-portable src/indexes/ " +
+      "tree; not a published entrypoint (./adapters/drizzle/indexes maps " +
+      "to src/backend/drizzle/indexes.ts) but named here so a future " +
+      "portable module importing it does not go unnoticed by L1 (I1/F15)",
+  },
+];
+
+/**
+ * Generates one exemption block per {@link DRIZZLE_ZONE} entry: the LAST
+ * block in `blocks` that sets `no-restricted-syntax` and covers `file`,
+ * minus the zone ban's own selectors. Never an `ignores` hole: a zone file
+ * keeps every OTHER guardrail its covering block installed, and loses only
+ * the zone ban itself.
+ *
+ * Reuses {@link profileCovers} (the write-pipeline generator's "is this file
+ * in that block?" predicate) so this generator and that one cannot disagree
+ * about the same kind of question.
+ *
+ * @param {readonly Readonly<{
+ *   name?: string,
+ *   files?: readonly string[],
+ *   ignores?: readonly string[],
+ *   rules?: Readonly<Record<string, unknown>>,
+ * }>[]} blocks
+ * @param {readonly DrizzleZoneEntry[]} zone
+ */
+export function drizzleZoneExemptionBlocks(blocks, zone) {
+  const zoneSelectors = new Set(
+    DRIZZLE_ZONE_RESTRICTIONS.map((restriction) => restriction.selector),
+  );
+
+  function isRestrictedSyntaxOption(option) {
+    return (
+      typeof option === "object" &&
+      option !== null &&
+      "selector" in option &&
+      typeof option.selector === "string"
+    );
+  }
+
+  return zone.map((entry) => {
+    const coveringBlocks = blocks.filter(
+      (block) =>
+        block.files !== undefined &&
+        Array.isArray(block.rules?.["no-restricted-syntax"]) &&
+        profileCovers(entry.file, {
+          files: block.files,
+          ignores: block.ignores,
+        }),
+    );
+    const coveringBlock = coveringBlocks.at(-1);
+    if (coveringBlock === undefined) {
+      throw new Error(
+        `drizzleZoneExemptionBlocks: no lint block sets no-restricted-syntax and covers ${entry.file}.`,
+      );
+    }
+
+    const inheritedOption = coveringBlock.rules?.["no-restricted-syntax"];
+    const inherited = (
+      Array.isArray(inheritedOption) ? inheritedOption : []).filter(
+      (option) =>
+        !isRestrictedSyntaxOption(option) ||
+        !zoneSelectors.has(option.selector),
+    );
+
+    return {
+      name: `typegraph/drizzle-zone/exempt/${entry.file}`,
+      files: [entry.file],
+      rules: {
+        "no-restricted-syntax": inherited,
+      },
+    };
+  });
+}
+
+/**
  * The audited overlay files: they legitimately drop the backend-overlay ban
  * (they ARE the audited decorators), so they are their own restriction profile
  * rather than an `ignores` hole in the store profile.
@@ -307,6 +599,7 @@ const WRITE_PIPELINE_PROFILES = [
     ignores: AUDITED_OVERLAY_FILES,
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
+      ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...BACKEND_DERIVATION_RESTRICTIONS,
     ],
@@ -322,6 +615,7 @@ const WRITE_PIPELINE_PROFILES = [
     ignores: ["src/identity/historical-sql.ts"],
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
+      ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...RUNTIME_PORT_RESTRICTIONS,
       ...BACKEND_DERIVATION_RESTRICTIONS,
@@ -332,6 +626,7 @@ const WRITE_PIPELINE_PROFILES = [
     files: AUDITED_OVERLAY_FILES,
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
+      ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...BACKEND_AUDIT_TRAIL_RESTRICTIONS,
     ],
@@ -341,6 +636,7 @@ const WRITE_PIPELINE_PROFILES = [
     files: ["src/identity/historical-sql.ts"],
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
+      ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...RUNTIME_PORT_RESTRICTIONS,
       ...BACKEND_DERIVATION_RESTRICTIONS,
@@ -349,7 +645,7 @@ const WRITE_PIPELINE_PROFILES = [
   },
 ];
 
-export default [
+const LINT_BLOCKS = [
   ...createLibraryConfig(import.meta.dirname, {
     ignores: [
       "test-d/**",
@@ -434,6 +730,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
@@ -453,6 +750,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
@@ -498,6 +796,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_DERIVATION_RESTRICTIONS,
@@ -514,6 +813,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
@@ -536,6 +836,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
@@ -554,6 +855,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
@@ -575,6 +877,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
@@ -588,6 +891,7 @@ export default [
       "no-restricted-syntax": [
         "error",
         ...SOURCE_WIDE_RESTRICTIONS,
+        ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
@@ -622,4 +926,34 @@ export default [
       "no-restricted-syntax": ["error", ...BACKEND_CONSTRUCTION_RESTRICTIONS],
     },
   },
+
+  // The reference-backend tree (B5's `tests/reference/**`, not yet created):
+  // the zone ban plus the construction ratchet. B5 EXTENDS this block's
+  // `no-restricted-syntax` list (I5's relative-`src` ban and bare-specifier
+  // allowlist) rather than adding a second `tests/reference/**` block — flat
+  // config entries REPLACE, so a second block would silently drop whichever
+  // ban it forgot to respell.
+  {
+    name: "typegraph/drizzle-zone/reference",
+    files: ["tests/reference/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        ...DRIZZLE_ZONE_RESTRICTIONS,
+        ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+      ],
+    },
+  },
+];
+
+// The zone ban applies to every `src`/`tests/reference` block above by
+// default (installed alongside SOURCE_WIDE_RESTRICTIONS at every one of
+// those spreads); these generated blocks are what EXEMPTS the 30 real
+// Drizzle importers, and only from the zone ban itself — every other
+// guardrail their covering block installed stays in force. Appended last so
+// flat config's "last block wins" makes them authoritative for exactly
+// their one file each.
+export default [
+  ...LINT_BLOCKS,
+  ...drizzleZoneExemptionBlocks(LINT_BLOCKS, DRIZZLE_ZONE),
 ];

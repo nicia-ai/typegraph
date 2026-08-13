@@ -1,14 +1,21 @@
 /**
- * I10 baseline ratchet — the entrypoint list has three hand-maintained
- * renderings (`package.json#exports`, `tsconfig.json#compilerOptions.paths`,
- * `vitest.config.ts#resolve.alias`) that already disagree. This records
- * today's measured gap as executable data rather than a hand count: 18 / 14
- * / 13 keys, with the four missing `tsconfig` entries and the five missing
- * `vitest` entries (the same four, plus `./provenance`) asserted both
- * directions against the derived gap, and every PRESENT rendering checked
- * against the source root {@link sourceRootForEntrypoint} derives, so a
- * silent divergence between "what tsconfig points at" and "what the tsup
- * entry map says" is caught here too.
+ * I10 ratchet — the entrypoint list has three hand-maintained renderings
+ * (`package.json#exports`, `tsconfig.json#compilerOptions.paths`,
+ * `vitest.config.ts#resolve.alias`) with one owner: `exports`. This batch
+ * (B4) closed the gap the two other renderings had accumulated (four missing
+ * `tsconfig` paths, five missing `vitest` aliases), so every rendering now
+ * names all 18 published entrypoints. Both directions stay asserted — a new
+ * `exports` key with no matching `tsconfig`/`vitest` entry, or a rendering
+ * entry naming a since-removed entrypoint, both fail — and every PRESENT
+ * rendering's target is checked against the source root
+ * {@link sourceRootForEntrypoint} derives, so a silent divergence between
+ * "what tsconfig points at" and "what the tsup entry map says" is caught
+ * here too. `loadVitestAlias` still assembles its import specifier at
+ * runtime rather than as a literal, and that is unrelated to any
+ * do-not-touch list: `vitest.config.ts` carries pre-existing, unrelated
+ * `noPropertyAccessFromIndexSignature` violations (bare `process.env.X`
+ * access) that this file must not pull into `tsc`'s program, so `tsc` must
+ * never statically resolve the import target.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -114,59 +121,47 @@ async function vitestAliasTarget(aliasKey: string): Promise<string> {
   return path.relative(PACKAGE_ROOT, target).split(path.sep).join("/");
 }
 
-/** Recorded at `29d63ec`: `package.json#exports` minus the tsconfig rendering. */
-const MISSING_TSCONFIG_PATHS = [
-  "./backend",
-  "./core",
-  "./graph-extension",
-  "./adapters/drizzle/indexes",
-].toSorted();
-
-/** Recorded at `29d63ec`: those four, plus `./provenance` — vitest is missing one more than tsconfig. */
-const MISSING_VITEST_ALIASES = [
-  ...MISSING_TSCONFIG_PATHS,
-  "./provenance",
-].toSorted();
-
 describe("entrypoint rendering parity", () => {
-  it("has the recorded key counts: 18 / 14 / 13", async () => {
-    expect(readPackageExportKeys().length).toBe(18);
-    expect(readTsconfigAliasKeys().length).toBe(14);
-    const vitestAliasKeys = await readVitestAliasKeys();
-    expect(vitestAliasKeys.length).toBe(13);
-  });
-
-  it("tsconfig's missing rows equal the recorded gap, both directions", () => {
+  it("tsconfig's paths name exactly the published entrypoints, both directions", () => {
     const exportKeys = new Set(readPackageExportKeys());
     const tsconfigExportKeys = new Set(
       readTsconfigAliasKeys().map((key) => toExportKey(key)),
     );
 
-    const missing = [...exportKeys]
-      .filter((key) => !tsconfigExportKeys.has(key))
-      .toSorted();
-    expect(missing).toEqual(MISSING_TSCONFIG_PATHS);
-
-    // Zero extra keys: every tsconfig rendering must name a real entrypoint.
-    for (const key of tsconfigExportKeys) {
-      expect({ [key]: exportKeys.has(key) }).toEqual({ [key]: true });
-    }
+    expect([...tsconfigExportKeys].toSorted()).toEqual(
+      [...exportKeys].toSorted(),
+    );
   });
 
-  it("vitest's missing rows equal the recorded gap (four, plus ./provenance), both directions", async () => {
+  it("vitest's aliases name exactly the published entrypoints, both directions", async () => {
     const exportKeys = new Set(readPackageExportKeys());
     const vitestAliasKeys = await readVitestAliasKeys();
     const vitestExportKeys = new Set(
       vitestAliasKeys.map((key) => toExportKey(key)),
     );
 
-    const missing = [...exportKeys]
-      .filter((key) => !vitestExportKeys.has(key))
-      .toSorted();
-    expect(missing).toEqual(MISSING_VITEST_ALIASES);
+    expect([...vitestExportKeys].toSorted()).toEqual(
+      [...exportKeys].toSorted(),
+    );
+  });
 
-    for (const key of vitestExportKeys) {
-      expect({ [key]: exportKeys.has(key) }).toEqual({ [key]: true });
+  it("orders the vitest aliases so no key shadows a longer key", async () => {
+    // @rollup/plugin-alias matches `importee === find || importee.startsWith(find
+    // + "/")` in INSERTION order, so a shorter key (a prefix of a longer one,
+    // notably the bare "@nicia-ai/typegraph") must be inserted AFTER every
+    // longer key it would otherwise shadow.
+    const alias = await loadVitestAlias();
+    const keys = Object.keys(alias);
+
+    for (const [longerIndex, longerKey] of keys.entries()) {
+      for (const [shorterIndex, shorterKey] of keys.entries()) {
+        if (longerKey === shorterKey) continue;
+        if (!longerKey.startsWith(`${shorterKey}/`)) continue;
+        expect(
+          longerIndex < shorterIndex,
+          `${JSON.stringify(longerKey)} (index ${longerIndex}) must be inserted before ${JSON.stringify(shorterKey)} (index ${shorterIndex})`,
+        ).toBe(true);
+      }
     }
   });
 
