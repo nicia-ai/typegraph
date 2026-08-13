@@ -1,0 +1,372 @@
+{
+  "commit": "b688c48cd5e2a40931dac1b67ff6b7363edfe7c4",
+  "command": "cd packages/typegraph; awk \"NR>=863{print} NR>=863 && /^}>;/{exit}\" etc/typegraph-backend.api.md > /tmp/gb.txt; grep -oE \"^    [A-Za-z_$][A-Za-z0-9_$]*\\?\" /tmp/gb.txt | tr -d \" ?\" | sort > /tmp/optional.txt; NAMES=$(paste -sd\"|\" /tmp/optional.txt); grep -rnE \".($NAMES)\\b\" src --include=*.ts | grep -vE \"^src/backend/drizzle/|^src/backend/types\\.ts|^src/backend/graph-backend-keys\\.ts|^src/backend/member-classes\\.ts|^src/store/history-store-backend\\.ts\" | grep -vE \"^[^:]+:[0-9]+: *(\\*|//|/\\*)\" | grep -E \"(backend|Backend|target|Target|tx|port|source)[A-Za-z0-9_]*\\??\\.($NAMES)\\b\" | grep -E \".(claimEdgeCardinality|claimEdgeCardinalityBatch|purgeEdgeClaims|hardDeleteUniquesByConcreteKind|insertUniqueBatch|checkUniqueBatch|hardDeleteUniquesByNodeIds|getNodes|getEdges|executeStatement|verifyContributions|repairContributions|rebuildContribution|probeContributions|ensureRevisionOriginsTable)\\b\" — the §Baselines pipeline, restricted to the 15 pilot members.",
+  "rows": [
+    {
+      "file": "backend/migrate-recorded-time.ts",
+      "line": 154,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "backend/migrate-recorded-time.ts",
+      "line": 161,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "backend/migrate-recorded-time.ts",
+      "line": 801,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "backend/repair-validity-windows.ts",
+      "line": 277,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "backend/repair-validity-windows.ts",
+      "line": 287,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "graph-merge/provenance-store.ts",
+      "line": 430,
+      "member": "executeStatement",
+      "class": "statically-required"
+    },
+    {
+      "file": "identity/sql-target.ts",
+      "line": 101,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "identity/sql-target.ts",
+      "line": 155,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "interchange/import.ts",
+      "line": 2311,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "interchange/import.ts",
+      "line": 2324,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "interchange/import.ts",
+      "line": 2350,
+      "member": "getEdges",
+      "class": "pilot"
+    },
+    {
+      "file": "interchange/import.ts",
+      "line": 2351,
+      "member": "getEdges",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/backing.ts",
+      "line": 140,
+      "member": "claimEdgeCardinality",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/backing.ts",
+      "line": 142,
+      "member": "claimEdgeCardinalityBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/backing.ts",
+      "line": 144,
+      "member": "purgeEdgeClaims",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/backing.ts",
+      "line": 146,
+      "member": "hardDeleteUniquesByConcreteKind",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/node-claims.ts",
+      "line": 511,
+      "member": "insertUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/node-claims.ts",
+      "line": 732,
+      "member": "hardDeleteUniquesByNodeIds",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/resolved-node-claims.ts",
+      "line": 211,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/resolved-node-claims.ts",
+      "line": 290,
+      "member": "hardDeleteUniquesByNodeIds",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/resolved-node-claims.ts",
+      "line": 292,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/claims/resolved-node-claims.ts",
+      "line": 293,
+      "member": "insertUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/collections/node-collection.ts",
+      "line": 756,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/collections/node-collection.ts",
+      "line": 764,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/edge-fetch.ts",
+      "line": 31,
+      "member": "getEdges",
+      "class": "pilot"
+    },
+    {
+      "file": "store/edge-fetch.ts",
+      "line": 33,
+      "member": "getEdges",
+      "class": "pilot"
+    },
+    {
+      "file": "store/materialize-removals.ts",
+      "line": 670,
+      "member": "executeStatement",
+      "class": "statically-required"
+    },
+    {
+      "file": "store/node-fetch.ts",
+      "line": 31,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/node-fetch.ts",
+      "line": 33,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/edge-operations.ts",
+      "line": 570,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/edge-operations.ts",
+      "line": 585,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1258,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1267,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1275,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1320,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1575,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1593,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1991,
+      "member": "hardDeleteUniquesByNodeIds",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1992,
+      "member": "insertUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-operations.ts",
+      "line": 1993,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-write-pipeline.ts",
+      "line": 633,
+      "member": "hardDeleteUniquesByNodeIds",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-write-pipeline.ts",
+      "line": 634,
+      "member": "insertUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/operations/node-write-pipeline.ts",
+      "line": 635,
+      "member": "checkUniqueBatch",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/clock.ts",
+      "line": 327,
+      "member": "ensureRevisionOriginsTable",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 62,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 64,
+      "member": "executeStatement",
+      "class": "not-an-access"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 79,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 219,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 251,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 299,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/recorded-capture/guards.ts",
+      "line": 319,
+      "member": "ensureRevisionOriginsTable",
+      "class": "pilot"
+    },
+    {
+      "file": "store/search.ts",
+      "line": 1254,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/search.ts",
+      "line": 1255,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 921,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 928,
+      "member": "executeStatement",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 3512,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 3516,
+      "member": "getNodes",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 4273,
+      "member": "verifyContributions",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 4350,
+      "member": "repairContributions",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 4406,
+      "member": "probeContributions",
+      "class": "pilot"
+    },
+    {
+      "file": "store/store.ts",
+      "line": 4515,
+      "member": "rebuildContribution",
+      "class": "pilot"
+    }
+  ]
+}

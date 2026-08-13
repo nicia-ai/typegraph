@@ -1,0 +1,70 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`PostgreSQL Adapter > Integration Test Suite > PostgreSQL Integration Tests > capability bundle construction never throws unexpectedly (T9b) > resolves all six bundles against the factory matrix 1`] = `
+[
+  {
+    "label": "postgres fulltext=default windowFunctions=true override=none",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=true override=fulltext",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=true override=vector",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=true override=contributions",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=false override=none",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=false override=fulltext",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=false override=vector",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=default windowFunctions=false override=contributions",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=true override=none",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=true override=fulltext",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=true override=vector",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=true override=contributions",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=false override=none",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=false override=fulltext",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=false override=vector",
+    "outcome": "no-throw",
+  },
+  {
+    "label": "postgres fulltext=explicit windowFunctions=false override=contributions",
+    "outcome": "no-throw",
+  },
+]
+`;

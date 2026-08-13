@@ -63,6 +63,26 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * spec-vs-measurement conflict in the batch's implementation notes rather
  * than silently exported around, since doing so would be exactly the
  * "export machinery invented to avoid it" this ledger's discipline forbids.
+ *
+ * Capability bundle pilot batch (WS5 B6): `./backend` moved again, +4
+ * (6 → 10). `src/backend/index.ts` re-exports the pilot registry, resolver
+ * and accessor barrel (`src/backend/capabilities/index.ts`). Three of the
+ * four are unexported HELPER type aliases in `capabilities/bind.ts`
+ * (`UniqueSidecarBatchExtraMember`, `BatchPointReadExtraMember`,
+ * `ContributionHealthExtraMember`) that name a graduated bundle's extra
+ * members for its bundle-wide accessor's parameter/return types
+ * (`uniqueSidecarBatchMembers`, `batchPointReadMembers`,
+ * `contributionHealthMembers`) — deliberately private, since exporting them
+ * would publish a per-bundle type with no cross-bundle meaning for a shape
+ * every consumer already reaches through `ExtraMember<typeof BUNDLE, …>`.
+ * The fourth, `CapabilityBundleCommon`, is `bundle-registry.ts`'s
+ * intersection member shared by `GatedBundleDefinition` and
+ * `GraduatedBundleDefinition` — named in the design's own sketch without an
+ * `export` keyword, so its debt is the design's intent, not an oversight.
+ * No other entrypoint moved: the barrel's other exports (`resolveBundle`,
+ * `bindCore`, `bindExtra`, the six registry constants, the six verdict/
+ * member accessors) are either concrete values or types every caller needs
+ * named directly, so API Extractor never needed to invent a name for them.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -94,8 +114,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "8925d7e9ea87e5b66ce0945340ee4cfb4b3063b9cf46940fbaae8c9cef1c0951",
   },
   "./backend": {
-    count: 6,
-    sha256: "0b71777c74cd023bfa1dd45db520e1fef142414de2099125a72f56f7515b491f",
+    count: 10,
+    sha256: "175a0a4287e06daf2d484c34917bbb09d9c0c8684bc140437e249e8686dfe45d",
   },
   "./core": {
     count: 72,

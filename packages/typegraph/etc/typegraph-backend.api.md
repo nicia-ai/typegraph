@@ -76,10 +76,737 @@ type BackendValidityEndMutation = Readonly<{
 export const BASE_CONTRIBUTION_OWNER = "base";
 
 // @public
+export const BATCH_POINT_READ: {
+    readonly id: "batchPointRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "getNodes";
+        readonly members: readonly ["getNodes"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+    }, {
+        readonly id: "getEdges";
+        readonly members: readonly ["getEdges"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "search hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/search.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import reference validation";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getNode in the routing loop";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import edge endpoint hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "edge batch endpoint priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip the priming pass; endpoint validation reads per-row";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/edge-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node create batch priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip priming; per-row probes";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node collection batch load";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/node-collection.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/node-fetch.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "edge batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "store/edge-fetch.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "identity member hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "getNodes";
+        }];
+    }];
+};
+
+// @public (undocumented)
+type BatchPointReadExtraMember = ExtraMember<typeof BATCH_POINT_READ, keyof ExtrasOf<typeof BATCH_POINT_READ>>;
+
+// @public (undocumented)
+export function batchPointReadMembers(port: Readonly<Partial<Pick<GraphBackend, BatchPointReadExtraMember>>>, verdict: BundleVerdictOf<typeof BATCH_POINT_READ>): PartialBundleBinding<BatchPointReadExtraMember>;
+
+// @public (undocumented)
+export function batchPointReadVerdict(backend: GraphBackend): BundleVerdictOf<typeof BATCH_POINT_READ>;
+
+// @public
+export function bindCore<const D extends GatedBundleDefinition<OptionalGraphBackendMember, string, OptionalGraphBackendMember>, M extends D["core"][number]>(port: Readonly<Partial<Pick<GraphBackend, M>>>, verdict: Extract<BundleVerdictOf<D>, {
+    supported: true;
+}>, definition: D): BundleBinding<M>;
+
+// @public
+export function bindExtra<const M extends OptionalGraphBackendMember>(port: Readonly<Partial<Pick<GraphBackend, M>>>, extraVerdict: Extract<ExtraVerdict<M>, {
+    present: true;
+}>, bundle: CapabilityBundleId): BundleBinding<M>;
+
+// @public
 export function buildFulltextCapabilities(strategy: FulltextStrategy): FulltextCapabilities;
 
 // @public
 export function buildVectorCapabilities(strategy: VectorStrategy): VectorCapabilities;
+
+// @public
+const BUNDLE_BINDING: unique symbol;
+
+// @public
+export type BundleBinding<M extends OptionalGraphBackendMember> = Required<Pick<GraphBackend, M>> & Readonly<{
+    [BUNDLE_BINDING]: true;
+}>;
+
+// @public
+export type BundleVerdictOf<D extends CapabilityBundleDefinition> = D extends ({
+    kind: "graduated";
+    extras: infer XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[];
+}) ? GraduatedBundleVerdict<SpecOf<XS>> : D extends ({
+    kind: "gated";
+    core: readonly (infer MCore extends OptionalGraphBackendMember)[];
+    extras?: infer XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[] | undefined;
+}) ? GatedBundleVerdict<MCore, SpecOf<XS extends (readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[]) ? XS : []>> : never;
+
+// @public
+export const CAPABILITY_BUNDLES: readonly [{
+    readonly id: "claims";
+    readonly kind: "gated";
+    readonly core: readonly ["claimEdgeCardinality", "claimEdgeCardinalityBatch", "purgeEdgeClaims", "hardDeleteUniquesByConcreteKind"];
+    readonly declaration: "constraintClaims";
+    readonly crossCheck: "bidirectional";
+    readonly portSurfaceCode: "CONSTRAINT_CLAIM_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "fallback";
+        readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+    };
+    readonly operations: readonly [{
+        readonly operation: "edge claim write";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinality";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinalityBatch";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "purgeEdgeClaims";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "hardDeleteUniquesByConcreteKind";
+        }];
+    }];
+}, {
+    readonly id: "uniqueSidecarBatch";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "insertUniqueBatch";
+        readonly members: readonly ["insertUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+    }, {
+        readonly id: "checkUniqueBatch";
+        readonly members: readonly ["checkUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+    }, {
+        readonly id: "hardDeleteUniquesByNodeIds";
+        readonly members: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "unique batch probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+        readonly requires: readonly ["checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1275, 1320];
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1575, 1593];
+        }];
+    }, {
+        readonly operation: "unique claim issue";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+        readonly requires: readonly ["insertUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }, {
+        readonly operation: "unique reap by node ids";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }];
+    }, {
+        readonly operation: "set-based node update";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "checkUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1993];
+        }];
+    }, {
+        readonly operation: "resolved node write";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [211];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [292];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }];
+}, {
+    readonly id: "batchPointRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "getNodes";
+        readonly members: readonly ["getNodes"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+    }, {
+        readonly id: "getEdges";
+        readonly members: readonly ["getEdges"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "search hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/search.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import reference validation";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getNode in the routing loop";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import edge endpoint hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "edge batch endpoint priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip the priming pass; endpoint validation reads per-row";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/edge-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node create batch priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip priming; per-row probes";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node collection batch load";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/node-collection.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/node-fetch.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "edge batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "store/edge-fetch.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "identity member hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "getNodes";
+        }];
+    }];
+}, {
+    readonly id: "statementExecution";
+    readonly kind: "gated";
+    readonly core: readonly ["executeStatement"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+    };
+    readonly operations: readonly [{
+        readonly operation: "identity statement execution";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "identity/sql-target.ts";
+            readonly member: "executeStatement";
+        }];
+    }, {
+        readonly operation: "recorded capture statement";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_CAPTURE_STATEMENT_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [62, 79];
+        }];
+    }, {
+        readonly operation: "history construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "HISTORY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [251];
+        }];
+    }, {
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [299];
+        }];
+    }, {
+        readonly operation: "history-unsafe raw write overlay";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "omit the overriding member; the port's own absence stands";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [219];
+        }];
+    }, {
+        readonly operation: "identity construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_ATOMIC_BACKEND";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [921];
+        }, {
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [928];
+        }];
+    }, {
+        readonly operation: "validity window repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "VALIDITY_WINDOW_REPAIR_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/repair-validity-windows.ts";
+            readonly member: "executeStatement";
+        }];
+    }, {
+        readonly operation: "recorded-time migration";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_TIME_MIGRATION_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/migrate-recorded-time.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [154, 161];
+        }];
+    }, {
+        readonly operation: "legacy anchor map delete";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "LEGACY_ANCHOR_MAP_DELETE_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/migrate-recorded-time.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [801];
+        }];
+    }];
+}, {
+    readonly id: "contributionHealth";
+    readonly kind: "graduated";
+    readonly declaration: "contributions";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "verifyContributions";
+        readonly members: readonly ["verifyContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "repairContributions";
+        readonly members: readonly ["repairContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "rebuildContribution";
+        readonly members: readonly ["rebuildContribution"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "probeContributions";
+        readonly members: readonly ["probeContributions"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "contribution verify";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+        readonly requires: readonly ["verifyContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "verifyContributions";
+        }];
+    }, {
+        readonly operation: "contribution repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+        readonly requires: readonly ["repairContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "repairContributions";
+        }];
+    }, {
+        readonly operation: "contribution rebuild";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+        readonly requires: readonly ["rebuildContribution"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "rebuildContribution";
+        }];
+    }, {
+        readonly operation: "contribution probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+        readonly requires: readonly ["probeContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "probeContributions";
+        }];
+        readonly declarationGate: true;
+    }];
+}, {
+    readonly id: "recordedRevisionOrigins";
+    readonly kind: "gated";
+    readonly core: readonly ["ensureRevisionOriginsTable"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+    };
+    readonly operations: readonly [{
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }, {
+        readonly operation: "revision origin bootstrap";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_ORIGIN_BOOTSTRAP_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/clock.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }];
+}];
+
+// @public (undocumented)
+type CapabilityBundleCommon = Readonly<{
+    id: string;
+    dialects?: readonly SqlDialect[];
+    declaration?: keyof BackendCapabilities;
+    crossCheck: CapabilityCrossCheck;
+    portSurfaceCode: string;
+    operations: readonly CapabilityBundleOperation[];
+}>;
+
+// @public (undocumented)
+export type CapabilityBundleDefinition = GatedBundleDefinition<OptionalGraphBackendMember, string, OptionalGraphBackendMember> | GraduatedBundleDefinition<string, OptionalGraphBackendMember>;
+
+// @public
+export type CapabilityBundleDisposition =
+/** Absence refuses, with ONE typed error per operation. */
+Readonly<{
+    kind: "refuse";
+    code: string;
+}>
+/** Absence degrades along a named, tested path. Never refuses. */
+| Readonly<{
+    kind: "fallback";
+    fallback: string;
+}>;
+
+// @public
+export type CapabilityBundleExtra<Id extends string, M extends OptionalGraphBackendMember> = Readonly<{
+    id: Id;
+    members: readonly M[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public (undocumented)
+export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
+
+// @public
+export type CapabilityBundleOperation = Readonly<{
+    operation: string;
+    disposition: CapabilityBundleDisposition;
+    requires?: readonly string[];
+    sites: readonly CapabilityBundleOperationSite[];
+    declarationGate?: true;
+}>;
+
+// @public
+export type CapabilityBundleOperationSite = Readonly<{
+    file: string;
+    member: OptionalGraphBackendMember;
+    lines?: readonly number[];
+}>;
+
+// @public (undocumented)
+export type CapabilityCrossCheck =
+/** Presence alone. The default, and 5 of the 6 pilot bundles. */
+"none"
+/**
+* Declared-but-missing refuses; implements-without-declaring resolves
+* supported. One-directional. No bundle uses this at 0.50 — it exists so a
+* future cross-check has a shape to grow into, one that must carry its own
+* justification row when adopted.
+*/
+| "declared-implies-members"
+/**
+* Disagreement in EITHER direction refuses. `claims` only — the existing
+* `CONSTRAINT_CLAIM_SURFACE_MISMATCH`, whose bidirectionality carries a
+* fence-specific justification ("a silent fallback would unfence exactly
+* the writes the capability exists to fence") that no other family has.
+*/
+| "bidirectional";
+
+// @public
+export type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMember>>;
 
 // @public
 export type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -125,6 +852,48 @@ export type ClaimIndexMaterializationParams = Readonly<{
     token: string;
     leaseMs: number;
 }>;
+
+// @public
+export const CLAIMS: {
+    readonly id: "claims";
+    readonly kind: "gated";
+    readonly core: readonly ["claimEdgeCardinality", "claimEdgeCardinalityBatch", "purgeEdgeClaims", "hardDeleteUniquesByConcreteKind"];
+    readonly declaration: "constraintClaims";
+    readonly crossCheck: "bidirectional";
+    readonly portSurfaceCode: "CONSTRAINT_CLAIM_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "fallback";
+        readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+    };
+    readonly operations: readonly [{
+        readonly operation: "edge claim write";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "unclaimed writes; the caller's own supported:false branch";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinality";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "claimEdgeCardinalityBatch";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "purgeEdgeClaims";
+        }, {
+            readonly file: "store/claims/backing.ts";
+            readonly member: "hardDeleteUniquesByConcreteKind";
+        }];
+    }];
+};
+
+// @public (undocumented)
+export function claimsMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof CLAIMS)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof CLAIMS>, {
+    supported: true;
+}>): BundleBinding<(typeof CLAIMS)["core"][number]>;
+
+// @public (undocumented)
+export function claimsVerdict(backend: GraphBackend): BundleVerdictOf<typeof CLAIMS>;
 
 // @public
 export type Collation = "binary" | "caseInsensitive";
@@ -203,6 +972,90 @@ export type ContendedUniqueRow = Readonly<{
 }>;
 
 // @public
+export const CONTRIBUTION_HEALTH: {
+    readonly id: "contributionHealth";
+    readonly kind: "graduated";
+    readonly declaration: "contributions";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "verifyContributions";
+        readonly members: readonly ["verifyContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "repairContributions";
+        readonly members: readonly ["repairContributions"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "rebuildContribution";
+        readonly members: readonly ["rebuildContribution"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+    }, {
+        readonly id: "probeContributions";
+        readonly members: readonly ["probeContributions"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "contribution verify";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_VERIFY_UNSUPPORTED";
+        };
+        readonly requires: readonly ["verifyContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "verifyContributions";
+        }];
+    }, {
+        readonly operation: "contribution repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REPAIR_UNSUPPORTED";
+        };
+        readonly requires: readonly ["repairContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "repairContributions";
+        }];
+    }, {
+        readonly operation: "contribution rebuild";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "CONTRIBUTION_REBUILD_UNSUPPORTED";
+        };
+        readonly requires: readonly ["rebuildContribution"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "rebuildContribution";
+        }];
+    }, {
+        readonly operation: "contribution probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "{entries: []}";
+        };
+        readonly requires: readonly ["probeContributions"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "probeContributions";
+        }];
+        readonly declarationGate: true;
+    }];
+};
+
+// @public
 export type ContributionCapabilities = Readonly<{
     supported: boolean;
     probe: boolean;
@@ -222,6 +1075,15 @@ export type ContributionDiagnostic = Readonly<{
 
 // @public
 export type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
+
+// @public (undocumented)
+type ContributionHealthExtraMember = ExtraMember<typeof CONTRIBUTION_HEALTH, keyof ExtrasOf<typeof CONTRIBUTION_HEALTH>>;
+
+// @public (undocumented)
+export function contributionHealthMembers(port: Readonly<Partial<Pick<GraphBackend, ContributionHealthExtraMember>>>, verdict: BundleVerdictOf<typeof CONTRIBUTION_HEALTH>): PartialBundleBinding<ContributionHealthExtraMember>;
+
+// @public (undocumented)
+export function contributionHealthVerdict(backend: GraphBackend): BundleVerdictOf<typeof CONTRIBUTION_HEALTH>;
 
 // @public (undocumented)
 export type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
@@ -357,6 +1219,14 @@ export const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
 
 // @public
 export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
+
+// @public
+export type DeferredUnbundledMember = Readonly<{
+    kind: "deferred";
+    workstream: "WS5b";
+    bundle: Ws5bBundleId;
+    ceiling: number;
+}>;
 
 // @public
 export type DeleteBehavior = "restrict" | "cascade" | "disconnect";
@@ -711,6 +1581,27 @@ export type ExtensionUniqueWhere = Readonly<{
     op: NullCheckOp;
 }>;
 
+// @public (undocumented)
+export type ExtraMember<D extends CapabilityBundleDefinition, X extends keyof ExtrasOf<D>> = Extract<ExtrasOf<D>[X], OptionalGraphBackendMember>;
+
+// @public (undocumented)
+export type ExtrasOf<D extends CapabilityBundleDefinition> = SpecOf<NonNullable<D["extras"]>>;
+
+// @public
+export type ExtraVerdict<M extends OptionalGraphBackendMember> = Readonly<{
+    present: true;
+    members: readonly M[];
+}> | Readonly<{
+    present: false;
+    missing: readonly M[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
+export type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
+    [K in keyof X]: ExtraVerdict<X[K]>;
+}>;
+
 // @public
 export type FilteredApproximateSearch = Readonly<{
     mode: FilteredApproximateSearchMode;
@@ -851,6 +1742,41 @@ export type FulltextStrategy = Readonly<{
     buildBatchUpsert: (this: void, tableName: string, params: UpsertFulltextBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, tableName: string, params: DeleteFulltextParams) => readonly SqlFragment[];
     buildBatchDelete: (this: void, tableName: string, params: DeleteFulltextBatchParams) => readonly SqlFragment[];
+}>;
+
+// @public
+export type GatedBundleDefinition<MCore extends OptionalGraphBackendMember, XId extends string = never, MExtra extends OptionalGraphBackendMember = never> = CapabilityBundleCommon & Readonly<{
+    kind: "gated";
+    core: readonly MCore[];
+    extras?: readonly CapabilityBundleExtra<XId, MExtra>[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public (undocumented)
+export type GatedBundleVerdict<MCore extends OptionalGraphBackendMember, X extends CapabilityExtraSpec> = Readonly<{
+    supported: true;
+    bundle: string;
+    members: readonly MCore[];
+    extras: ExtraVerdicts<X>;
+    missingExtras: readonly (keyof X)[];
+}> | Readonly<{
+    supported: false;
+    bundle: string;
+    missing: readonly MCore[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
+export type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
+    kind: "graduated";
+    extras: readonly CapabilityBundleExtra<XId, MExtra>[];
+}>;
+
+// @public
+export type GraduatedBundleVerdict<X extends CapabilityExtraSpec> = Readonly<{
+    bundle: string;
+    extras: ExtraVerdicts<X>;
+    missingExtras: readonly (keyof X)[];
 }>;
 
 // @public
@@ -1423,6 +2349,22 @@ export function normalizeGraphAnalyticsCapabilities(capabilities: BackendCapabil
 export type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
+export type OperationNames<D extends CapabilityBundleDefinition> = D["operations"][number]["operation"];
+
+// @public
+export type OptionalGraphBackendMember = OptionalKeys<GraphBackend>;
+
+// @public
+export type OptionalKeys<T> = {
+    [K in keyof T]-?: object extends Pick<T, K> ? K : never;
+}[keyof T];
+
+// @public
+export type PartialBundleBinding<M extends OptionalGraphBackendMember> = Readonly<Partial<Pick<GraphBackend, M>>> & Readonly<{
+    [BUNDLE_BINDING]: true;
+}>;
+
+// @public
 export class Placeholder {
     // (undocumented)
     readonly [SQL_PLACEHOLDER_BRAND]: true;
@@ -1469,6 +2411,13 @@ export type ReadConstraintFenceViolationsParams = Readonly<{
 }>;
 
 // @public
+export type ReasonedUnbundledMember = Readonly<{
+    kind: "reasoned";
+    reason: string;
+    accesses: number;
+}>;
+
+// @public
 export type RecordContributionMaterializationParams = Readonly<{
     graphId: string;
     logicalName: string;
@@ -1484,9 +2433,51 @@ export type RecordContributionMaterializationParams = Readonly<{
 const RECORDED_INSTANT_BRAND: unique symbol;
 
 // @public
+export const RECORDED_REVISION_ORIGINS: {
+    readonly id: "recordedRevisionOrigins";
+    readonly kind: "gated";
+    readonly core: readonly ["ensureRevisionOriginsTable"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+    };
+    readonly operations: readonly [{
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_REVISION_ORIGINS";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }, {
+        readonly operation: "revision origin bootstrap";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_ORIGIN_BOOTSTRAP_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/clock.ts";
+            readonly member: "ensureRevisionOriginsTable";
+        }];
+    }];
+};
+
+// @public
 export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
+
+// @public (undocumented)
+export function recordedRevisionOriginsMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof RECORDED_REVISION_ORIGINS)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>, {
+    supported: true;
+}>): BundleBinding<(typeof RECORDED_REVISION_ORIGINS)["core"][number]>;
+
+// @public (undocumented)
+export function recordedRevisionOriginsVerdict(backend: GraphBackend): BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>;
 
 // @public
 export type RecordedRelationDdl = Readonly<{
@@ -1608,6 +2599,25 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 
 // @public
 export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
+export type RequiredExtrasOf<D extends CapabilityBundleDefinition, Op extends OperationNames<D>> = Extract<D["operations"][number], {
+    operation: Op;
+}> extends ({
+    requires: infer R extends readonly string[];
+}) ? R[number] : never;
+
+// @public
+export function requireExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op): asserts verdict is BundleVerdictOf<D> & {
+    extras: {
+        [K in RequiredExtrasOf<D, Op> & keyof ExtrasOf<D>]: Extract<ExtraVerdict<ExtraMember<D, K>>, {
+            present: true;
+        }>;
+    };
+};
+
+// @public
+export function resolveBundle<const D extends CapabilityBundleDefinition>(backend: GraphBackend, definition: D): BundleVerdictOf<D>;
 
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
@@ -1774,6 +2784,11 @@ export type SetActiveVersionParams = Readonly<{
 export function shortHash(input: string): string;
 
 // @public
+export type SpecOf<XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[]> = {
+    [K in XS[number] as K["id"]]: K["members"][number];
+};
+
+// @public
 export const sql: SqlTag;
 
 // @public
@@ -1861,6 +2876,129 @@ export type SqlTextChunk = Readonly<{
 }>;
 
 // @public
+export const STATEMENT_EXECUTION: {
+    readonly id: "statementExecution";
+    readonly kind: "gated";
+    readonly core: readonly ["executeStatement"];
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly disposition: {
+        readonly kind: "refuse";
+        readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+    };
+    readonly operations: readonly [{
+        readonly operation: "identity statement execution";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "identity/sql-target.ts";
+            readonly member: "executeStatement";
+        }];
+    }, {
+        readonly operation: "recorded capture statement";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_CAPTURE_STATEMENT_UNSUPPORTED";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [62, 79];
+        }];
+    }, {
+        readonly operation: "history construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "HISTORY_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [251];
+        }];
+    }, {
+        readonly operation: "revision tracking construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "REVISION_TRACKING_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [299];
+        }];
+    }, {
+        readonly operation: "history-unsafe raw write overlay";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "omit the overriding member; the port's own absence stands";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/recorded-capture/guards.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [219];
+        }];
+    }, {
+        readonly operation: "identity construction gate";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "IDENTITY_REQUIRES_ATOMIC_BACKEND";
+        };
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [921];
+        }, {
+            readonly file: "store/store.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [928];
+        }];
+    }, {
+        readonly operation: "validity window repair";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "VALIDITY_WINDOW_REPAIR_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/repair-validity-windows.ts";
+            readonly member: "executeStatement";
+        }];
+    }, {
+        readonly operation: "recorded-time migration";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RECORDED_TIME_MIGRATION_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/migrate-recorded-time.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [154, 161];
+        }];
+    }, {
+        readonly operation: "legacy anchor map delete";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "LEGACY_ANCHOR_MAP_DELETE_REQUIRES_STATEMENT_EXECUTION";
+        };
+        readonly sites: readonly [{
+            readonly file: "backend/migrate-recorded-time.ts";
+            readonly member: "executeStatement";
+            readonly lines: readonly [801];
+        }];
+    }];
+};
+
+// @public (undocumented)
+export function statementExecutionMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof STATEMENT_EXECUTION)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof STATEMENT_EXECUTION>, {
+    supported: true;
+}>): BundleBinding<(typeof STATEMENT_EXECUTION)["core"][number]>;
+
+// @public (undocumented)
+export function statementExecutionVerdict(backend: GraphBackend): BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+
+// @public
 export type StrategyTableContribution = TableContribution;
 
 // @public (undocumented)
@@ -1932,6 +3070,508 @@ type TypeGraphErrorOptions = Readonly<{
     cause?: unknown;
 }>;
 
+// @public
+export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly bootstrapTables: {
+        readonly kind: "reasoned";
+        readonly reason: "One-shot provisioning hook consulted by createStore before any capability question exists; it has no operation that could refuse or degrade.";
+        readonly accesses: 3;
+    };
+    readonly tableNames: {
+        readonly kind: "reasoned";
+        readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
+        readonly accesses: 22;
+    };
+    readonly commitSchemaVersionIfKindsEmpty: {
+        readonly kind: "reasoned";
+        readonly reason: "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.";
+        readonly accesses: 1;
+    };
+    readonly commitSchemaVersionWithPreflight: {
+        readonly kind: "reasoned";
+        readonly reason: "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.";
+        readonly accesses: 2;
+    };
+    readonly lockSchemaVersionForWrite: {
+        readonly kind: "reasoned";
+        readonly reason: "Same family; also the one schema member on TransactionBackend, so bundling it would re-open the accessor's B-1 port-typing question for no pilot consumer.";
+        readonly accesses: 1;
+    };
+    readonly schemaWriteTransaction: {
+        readonly kind: "reasoned";
+        readonly reason: "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.";
+        readonly accesses: 4;
+    };
+    readonly ensureIdentityTables: {
+        readonly kind: "reasoned";
+        readonly reason: "Identity DDL, gated by the identity construction gate (store.ts:918-935), which is the write-fence design's decision and must stay one owner there.";
+        readonly accesses: 3;
+    };
+    readonly identityTableDdl: {
+        readonly kind: "reasoned";
+        readonly reason: "Same identity-DDL family as ensureIdentityTables.";
+        readonly accesses: 2;
+    };
+    readonly ensureKindRemovalsTable: {
+        readonly kind: "reasoned";
+        readonly reason: "Kind-removal provisioning; the removal path's own gate is a schema-lifecycle decision with a single consumer (materialize-removals.ts) and no second theory to consolidate.";
+        readonly accesses: 3;
+    };
+    readonly getAllKindRemovals: {
+        readonly kind: "reasoned";
+        readonly reason: "Same kind-removal family as ensureKindRemovalsTable.";
+        readonly accesses: 2;
+    };
+    readonly getPendingKindRemovals: {
+        readonly kind: "reasoned";
+        readonly reason: "Same kind-removal family as ensureKindRemovalsTable.";
+        readonly accesses: 4;
+    };
+    readonly recordKindRemoval: {
+        readonly kind: "reasoned";
+        readonly reason: "Same kind-removal family as ensureKindRemovalsTable.";
+        readonly accesses: 4;
+    };
+    readonly ensureReconciliationMarkersTable: {
+        readonly kind: "reasoned";
+        readonly reason: "Reconciliation-marker family; single consumer, single gate, same reasoning.";
+        readonly accesses: 2;
+    };
+    readonly getReconciliationMarker: {
+        readonly kind: "reasoned";
+        readonly reason: "Same reconciliation-marker family.";
+        readonly accesses: 2;
+    };
+    readonly setReconciliationMarker: {
+        readonly kind: "reasoned";
+        readonly reason: "Same reconciliation-marker family.";
+        readonly accesses: 2;
+    };
+    readonly readConstraintFenceViolations: {
+        readonly kind: "reasoned";
+        readonly reason: "Read-only fence audit with exactly one caller and a documented \"absent ⇒ the report is unavailable\" contract (history-store-backend.ts:105-108); no operation degrades or refuses on it.";
+        readonly accesses: 1;
+    };
+    readonly ensureContributionMaterializationsTable: {
+        readonly kind: "reasoned";
+        readonly reason: "Zero consumers in src/** outside the backend implementations — measured, not inferred. A member no code path consults has no measurable arity or disposition.";
+        readonly accesses: 0;
+    };
+    readonly getContributionMaterialization: {
+        readonly kind: "reasoned";
+        readonly reason: "Same zero-consumer family as ensureContributionMaterializationsTable.";
+        readonly accesses: 0;
+    };
+    readonly recordContributionMaterialization: {
+        readonly kind: "reasoned";
+        readonly reason: "Zero consumers outside the backend implementations; its only in-tree use is a backend implementation calling its own member (backend/drizzle/contribution-materializations.ts:1588), which the scanner excludes by scope.";
+        readonly accesses: 0;
+    };
+    readonly assertRuntimeContributionsInitialized: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "contributionProvisioning";
+        readonly ceiling: 1;
+    };
+    readonly assertVectorSlotInitialized: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 1;
+    };
+    readonly assertVectorSlotsInitialized: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 1;
+    };
+    readonly claimIndexMaterialization: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly compileSql: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "rawStatementReuse";
+        readonly ceiling: 9;
+    };
+    readonly createVectorIndex: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly deleteEdgesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 5;
+    };
+    readonly deleteEmbedding: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 8;
+    };
+    readonly deleteEmbeddingBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly deleteFulltext: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 11;
+    };
+    readonly deleteFulltextBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 6;
+    };
+    readonly deleteVectorSlotContribution: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 0;
+    };
+    readonly dropVectorIndex: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 0;
+    };
+    readonly ensureExtension: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "databaseExtensions";
+        readonly ceiling: 2;
+    };
+    readonly ensureFulltextTable: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextProvisioning";
+        readonly ceiling: 1;
+    };
+    readonly ensureIndexMaterializationsTable: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly ensureRuntimeContributions: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "contributionProvisioning";
+        readonly ceiling: 2;
+    };
+    readonly ensureTrigramExtension: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "databaseExtensions";
+        readonly ceiling: 2;
+    };
+    readonly ensureVectorSlotContribution: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 4;
+    };
+    readonly ensureVectorSlotContributions: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorSlotContributions";
+        readonly ceiling: 1;
+    };
+    readonly executeDdl: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "ddlExecution";
+        readonly ceiling: 13;
+    };
+    readonly executeRaw: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "rawStatementReuse";
+        readonly ceiling: 7;
+    };
+    readonly executeTemporaryStatement: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "temporaryStatements";
+        readonly ceiling: 3;
+    };
+    readonly findEdgesByEndpointSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "endpointSetRead";
+        readonly ceiling: 1;
+    };
+    readonly findEdgesByHeterogeneousEndpointSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "heterogeneousEndpointSetRead";
+        readonly ceiling: 1;
+    };
+    readonly fulltextSearch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 4;
+    };
+    readonly fulltextStrategy: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 2;
+    };
+    readonly getIndexMaterialization: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 3;
+    };
+    readonly getIndexMaterializations: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly hardDeleteEdgesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 5;
+    };
+    readonly hybridSearch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "hybridSearch";
+        readonly ceiling: 2;
+    };
+    readonly insertEdgeNoReturn: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertEdgesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertEdgesBatchReturning: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertNodeNoReturn: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertNodesBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly insertNodesBatchReturning: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 4;
+    };
+    readonly recordIndexMaterialization: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 6;
+    };
+    readonly releaseIndexMaterializationClaim: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "indexMaterialization";
+        readonly ceiling: 2;
+    };
+    readonly trustedImport: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "trustedImport";
+        readonly ceiling: 1;
+    };
+    readonly updateNodeSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 6;
+    };
+    readonly upsertEmbedding: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 10;
+    };
+    readonly upsertEmbeddingBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly upsertFulltext: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 9;
+    };
+    readonly upsertFulltextBatch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "fulltextOperations";
+        readonly ceiling: 6;
+    };
+    readonly vectorSearch: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 4;
+    };
+    readonly vectorStrategy: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "vectorOperations";
+        readonly ceiling: 9;
+    };
+};
+
+// @public (undocumented)
+export type UnbundledOptionalMember = ReasonedUnbundledMember | DeferredUnbundledMember;
+
+// @public
+export const UNIQUE_SIDECAR_BATCH: {
+    readonly id: "uniqueSidecarBatch";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "insertUniqueBatch";
+        readonly members: readonly ["insertUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+    }, {
+        readonly id: "checkUniqueBatch";
+        readonly members: readonly ["checkUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+    }, {
+        readonly id: "hardDeleteUniquesByNodeIds";
+        readonly members: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "unique batch probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+        readonly requires: readonly ["checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1275, 1320];
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1575, 1593];
+        }];
+    }, {
+        readonly operation: "unique claim issue";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+        readonly requires: readonly ["insertUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }, {
+        readonly operation: "unique reap by node ids";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }];
+    }, {
+        readonly operation: "set-based node update";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "checkUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1993];
+        }];
+    }, {
+        readonly operation: "resolved node write";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [211];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [292];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }];
+};
+
 // @public (undocumented)
 export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
@@ -1948,6 +3588,15 @@ export type UniqueRow = Readonly<{
     concrete_kind: string;
     deleted_at: string | undefined;
 }>;
+
+// @public (undocumented)
+type UniqueSidecarBatchExtraMember = ExtraMember<typeof UNIQUE_SIDECAR_BATCH, keyof ExtrasOf<typeof UNIQUE_SIDECAR_BATCH>>;
+
+// @public (undocumented)
+export function uniqueSidecarBatchMembers(port: Readonly<Partial<Pick<GraphBackend, UniqueSidecarBatchExtraMember>>>, verdict: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>): PartialBundleBinding<UniqueSidecarBatchExtraMember>;
+
+// @public (undocumented)
+export function uniqueSidecarBatchVerdict(backend: GraphBackend): BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
 
 // @public
 export type UpdateEdgeParams = Readonly<{
@@ -2167,6 +3816,28 @@ export type VectorStrategy = Readonly<{
     }>) => SqlFragment | undefined;
     buildDropIndex?: (this: void, slot: VectorSlot) => SqlFragment | undefined;
 }>;
+
+// @public
+export const WS5B_SEED_BUNDLES: {
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertEdgeNoReturn", "updateNodeSet"];
+    readonly endpointSetRead: readonly ["findEdgesByEndpointSet"];
+    readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
+    readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
+    readonly hybridSearch: readonly ["hybridSearch"];
+    readonly vectorSlotContributions: readonly ["assertVectorSlotsInitialized", "assertVectorSlotInitialized", "ensureVectorSlotContributions", "ensureVectorSlotContribution", "deleteVectorSlotContribution"];
+    readonly fulltextOperations: readonly ["upsertFulltext", "deleteFulltext", "upsertFulltextBatch", "deleteFulltextBatch", "fulltextSearch", "fulltextStrategy"];
+    readonly fulltextProvisioning: readonly ["ensureFulltextTable"];
+    readonly databaseExtensions: readonly ["ensureExtension", "ensureTrigramExtension"];
+    readonly contributionProvisioning: readonly ["ensureRuntimeContributions", "assertRuntimeContributionsInitialized"];
+    readonly indexMaterialization: readonly ["getIndexMaterialization", "recordIndexMaterialization", "getIndexMaterializations", "ensureIndexMaterializationsTable", "claimIndexMaterialization", "releaseIndexMaterializationClaim"];
+    readonly ddlExecution: readonly ["executeDdl"];
+    readonly temporaryStatements: readonly ["executeTemporaryStatement"];
+    readonly rawStatementReuse: readonly ["executeRaw", "compileSql"];
+    readonly trustedImport: readonly ["trustedImport"];
+};
+
+// @public
+export type Ws5bBundleId = "batchEntityWrite" | "endpointSetRead" | "heterogeneousEndpointSetRead" | "vectorOperations" | "hybridSearch" | "vectorSlotContributions" | "fulltextOperations" | "fulltextProvisioning" | "databaseExtensions" | "contributionProvisioning" | "indexMaterialization" | "ddlExecution" | "temporaryStatements" | "rawStatementReuse" | "trustedImport";
 
 // (No @packageDocumentation comment for this package)
 

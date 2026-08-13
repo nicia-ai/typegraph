@@ -36,6 +36,8 @@ import {
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
   registerBulkUpsertRepeatedIdIntegrationTests,
+  registerCapabilityBundleNoThrowIntegrationTests,
+  registerCapabilityMemberDropMatrixIntegrationTests,
   registerCapabilityRefusalIntegrationTests,
   registerClaimCompensationIntegrationTests,
   registerClaimLookupPreferenceIntegrationTests,
@@ -259,6 +261,8 @@ export function createIntegrationTestSuite<
     registerBulkFindEndpointIntegrationTests(context);
     registerBulkFindHeterogeneousIntegrationTests(context);
     registerBulkUpsertRepeatedIdIntegrationTests(context);
+    registerCapabilityBundleNoThrowIntegrationTests(context);
+    registerCapabilityMemberDropMatrixIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);

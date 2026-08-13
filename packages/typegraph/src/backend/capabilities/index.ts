@@ -1,0 +1,65 @@
+/**
+ * Barrel over the pilot capability-bundle model: the registry (data), the
+ * verdict resolver, and the member binder. Re-exported from
+ * `src/backend/index.ts` for external consumers; internal callers may still
+ * import the three modules directly.
+ */
+export {
+  batchPointReadMembers,
+  bindCore,
+  bindExtra,
+  type BundleBinding,
+  claimsMembers,
+  contributionHealthMembers,
+  type PartialBundleBinding,
+  recordedRevisionOriginsMembers,
+  statementExecutionMembers,
+  uniqueSidecarBatchMembers,
+} from "./bind";
+export {
+  BATCH_POINT_READ,
+  CAPABILITY_BUNDLES,
+  type CapabilityBundleDefinition,
+  type CapabilityBundleDisposition,
+  type CapabilityBundleExtra,
+  type CapabilityBundleId,
+  type CapabilityBundleOperation,
+  type CapabilityBundleOperationSite,
+  type CapabilityCrossCheck,
+  CLAIMS,
+  CONTRIBUTION_HEALTH,
+  type DeferredUnbundledMember,
+  type GatedBundleDefinition,
+  type GraduatedBundleDefinition,
+  type OptionalGraphBackendMember,
+  type OptionalKeys,
+  type ReasonedUnbundledMember,
+  RECORDED_REVISION_ORIGINS,
+  STATEMENT_EXECUTION,
+  UNBUNDLED_OPTIONAL_MEMBERS,
+  type UnbundledOptionalMember,
+  UNIQUE_SIDECAR_BATCH,
+  WS5B_SEED_BUNDLES,
+  type Ws5bBundleId,
+} from "./bundle-registry";
+export {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+  type CapabilityExtraSpec,
+  claimsVerdict,
+  contributionHealthVerdict,
+  type ExtraMember,
+  type ExtrasOf,
+  type ExtraVerdict,
+  type ExtraVerdicts,
+  type GatedBundleVerdict,
+  type GraduatedBundleVerdict,
+  type OperationNames,
+  recordedRevisionOriginsVerdict,
+  type RequiredExtrasOf,
+  requireExtras,
+  resolveBundle,
+  type SpecOf,
+  statementExecutionVerdict,
+  uniqueSidecarBatchVerdict,
+} from "./resolve";
