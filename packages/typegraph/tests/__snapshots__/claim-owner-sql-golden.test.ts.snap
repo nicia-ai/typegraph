@@ -1,0 +1,261 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`T2 — insertUnique builders (§4.1's zero-change proof) > batch, PostgreSQL > insertUnique batch postgres 1`] = `
+{
+  "params": [
+    "graph-1",
+    "Person",
+    "email_unique",
+    "alice@example.com",
+    "node-1",
+    "Employee",
+    "graph-1",
+    "Person",
+    "email_unique",
+    "bob@example.com",
+    "node-2",
+    "Contractor",
+  ],
+  "sql": "
+    INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at")
+    VALUES ($1, $2, $3, $4, $5, $6, NULL), ($7, $8, $9, $10, $11, $12, NULL)
+    ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key")
+    DO UPDATE SET
+      "node_id" = CASE
+        WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."node_id"
+        WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."node_id"
+        ELSE "typegraph_node_uniques"."node_id"
+      END,
+      "concrete_kind" = CASE
+        WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind"
+        WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN excluded."concrete_kind"
+        ELSE "typegraph_node_uniques"."concrete_kind"
+      END,
+      "deleted_at" = CASE
+        WHEN "typegraph_node_uniques"."node_id" = excluded."node_id" AND "typegraph_node_uniques"."concrete_kind" = excluded."concrete_kind" THEN NULL
+        WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL
+        ELSE "typegraph_node_uniques"."deleted_at"
+      END
+    RETURNING
+      "node_kind" as node_kind,
+      "constraint_name" as constraint_name,
+      "key" as key,
+      "node_id" as node_id,
+      "concrete_kind" as concrete_kind
+  ",
+}
+`;
+
+exports[`T2 — insertUnique builders (§4.1's zero-change proof) > batch, SQLite > insertUnique batch sqlite 1`] = `
+{
+  "params": [
+    "graph-1",
+    "Person",
+    "email_unique",
+    "alice@example.com",
+    "node-1",
+    "Employee",
+    "graph-1",
+    "Person",
+    "email_unique",
+    "bob@example.com",
+    "node-2",
+    "Contractor",
+  ],
+  "sql": "
+    INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at")
+    VALUES (?, ?, ?, ?, ?, ?, NULL), (?, ?, ?, ?, ?, ?, NULL)
+    ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key")
+    DO UPDATE SET
+      "node_id" = CASE
+        WHEN "node_id" = excluded."node_id" AND "concrete_kind" = excluded."concrete_kind" THEN excluded."node_id"
+        WHEN "deleted_at" IS NOT NULL THEN excluded."node_id"
+        ELSE "node_id"
+      END,
+      "concrete_kind" = CASE
+        WHEN "node_id" = excluded."node_id" AND "concrete_kind" = excluded."concrete_kind" THEN excluded."concrete_kind"
+        WHEN "deleted_at" IS NOT NULL THEN excluded."concrete_kind"
+        ELSE "concrete_kind"
+      END,
+      "deleted_at" = CASE
+        WHEN "node_id" = excluded."node_id" AND "concrete_kind" = excluded."concrete_kind" THEN NULL
+        WHEN "deleted_at" IS NOT NULL THEN NULL
+        ELSE "deleted_at"
+      END
+    RETURNING
+      "node_kind" as node_kind,
+      "constraint_name" as constraint_name,
+      "key" as key,
+      "node_id" as node_id,
+      "concrete_kind" as concrete_kind
+  ",
+}
+`;
+
+exports[`T2 — insertUnique builders (§4.1's zero-change proof) > single-row, PostgreSQL > insertUnique single-row postgres 1`] = `
+{
+  "params": [
+    "graph-1",
+    "Person",
+    "email_unique",
+    "alice@example.com",
+    "node-1",
+    "Employee",
+    "node-1",
+    "Employee",
+    "node-1",
+    "node-1",
+    "node-1",
+    "Employee",
+    "Employee",
+    "Employee",
+    "node-1",
+    "Employee",
+  ],
+  "sql": "
+    INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at")
+    VALUES (
+      $1, $2, $3,
+      $4, $5, $6, NULL
+    )
+    ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key")
+    DO UPDATE SET
+      "node_id" = CASE
+        WHEN "typegraph_node_uniques"."node_id" = $7 AND "typegraph_node_uniques"."concrete_kind" = $8 THEN $9
+        WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN $10
+        ELSE "typegraph_node_uniques"."node_id"
+      END,
+      "concrete_kind" = CASE
+        WHEN "typegraph_node_uniques"."node_id" = $11 AND "typegraph_node_uniques"."concrete_kind" = $12 THEN $13
+        WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN $14
+        ELSE "typegraph_node_uniques"."concrete_kind"
+      END,
+      "deleted_at" = CASE
+        WHEN "typegraph_node_uniques"."node_id" = $15 AND "typegraph_node_uniques"."concrete_kind" = $16 THEN NULL
+        WHEN "typegraph_node_uniques"."deleted_at" IS NOT NULL THEN NULL
+        ELSE "typegraph_node_uniques"."deleted_at"
+      END
+    RETURNING
+      "node_id" as node_id,
+      "concrete_kind" as concrete_kind
+  ",
+}
+`;
+
+exports[`T2 — insertUnique builders (§4.1's zero-change proof) > single-row, SQLite > insertUnique single-row sqlite 1`] = `
+{
+  "params": [
+    "graph-1",
+    "Person",
+    "email_unique",
+    "alice@example.com",
+    "node-1",
+    "Employee",
+    "node-1",
+    "Employee",
+    "node-1",
+    "node-1",
+    "node-1",
+    "Employee",
+    "Employee",
+    "Employee",
+    "node-1",
+    "Employee",
+  ],
+  "sql": "
+    INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at")
+    VALUES (
+      ?, ?, ?,
+      ?, ?, ?, NULL
+    )
+    ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key")
+    DO UPDATE SET
+      "node_id" = CASE
+        WHEN "node_id" = ? AND "concrete_kind" = ? THEN ?
+        WHEN "deleted_at" IS NOT NULL THEN ?
+        ELSE "node_id"
+      END,
+      "concrete_kind" = CASE
+        WHEN "node_id" = ? AND "concrete_kind" = ? THEN ?
+        WHEN "deleted_at" IS NOT NULL THEN ?
+        ELSE "concrete_kind"
+      END,
+      "deleted_at" = CASE
+        WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL
+        WHEN "deleted_at" IS NOT NULL THEN NULL
+        ELSE "deleted_at"
+      END
+    RETURNING
+      "node_id" as node_id,
+      "concrete_kind" as concrete_kind
+  ",
+}
+`;
+
+exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDeleteEdgeClaimsByEdgeKind, PostgreSQL > buildHardDeleteEdgeClaimsByEdgeKind postgres 1`] = `
+{
+  "params": [
+    "graph-1",
+    "one:knows",
+    "unique:knows",
+    "oneActive:knows",
+  ],
+  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = $1 AND "axis" IN ($2, $3, $4)",
+}
+`;
+
+exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDeleteEdgeClaimsByEdgeKind, SQLite > buildHardDeleteEdgeClaimsByEdgeKind sqlite 1`] = `
+{
+  "params": [
+    "graph-1",
+    "one:knows",
+    "unique:knows",
+    "oneActive:knows",
+  ],
+  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = ? AND "axis" IN (?, ?, ?)",
+}
+`;
+
+exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDeleteEdgeClaimsByNodeKind, PostgreSQL > buildHardDeleteEdgeClaimsByNodeKind postgres 1`] = `
+{
+  "params": [
+    "graph-1",
+    "graph-1",
+    "Person",
+    "Person",
+  ],
+  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = $1 AND "edge_id" IN (SELECT "id" FROM "typegraph_edges" WHERE "graph_id" = $2 AND ("from_kind" = $3 OR "to_kind" = $4))",
+}
+`;
+
+exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDeleteEdgeClaimsByNodeKind, SQLite > buildHardDeleteEdgeClaimsByNodeKind sqlite 1`] = `
+{
+  "params": [
+    "graph-1",
+    "graph-1",
+    "Person",
+    "Person",
+  ],
+  "sql": "DELETE FROM "typegraph_edge_claims" WHERE "graph_id" = ? AND "edge_id" IN (SELECT "id" FROM "typegraph_edges" WHERE "graph_id" = ? AND ("from_kind" = ? OR "to_kind" = ?))",
+}
+`;
+
+exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDeleteUniquesByConcreteKind, PostgreSQL > buildHardDeleteUniquesByConcreteKind postgres 1`] = `
+{
+  "params": [
+    "graph-1",
+    "Employee",
+  ],
+  "sql": "DELETE FROM "typegraph_node_uniques" WHERE "graph_id" = $1 AND "concrete_kind" = $2",
+}
+`;
+
+exports[`T2b — removal builders (§4.1b's zero-change proof) > buildHardDeleteUniquesByConcreteKind, SQLite > buildHardDeleteUniquesByConcreteKind sqlite 1`] = `
+{
+  "params": [
+    "graph-1",
+    "Employee",
+  ],
+  "sql": "DELETE FROM "typegraph_node_uniques" WHERE "graph_id" = ? AND "concrete_kind" = ?",
+}
+`;

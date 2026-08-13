@@ -1,0 +1,481 @@
+/**
+ * I2/I3 baseline ratchet — records today's measured Drizzle-reachability
+ * numbers (source grain and dist grain) as executable data. Nothing here is
+ * fixed yet: every `RECORDED_*` constant below is a fact about `29d63ec`,
+ * with the command that produced it named beside it, per
+ * `design-ws8-port-isolation.md` §2.1. A later batch (B4) flips the portable
+ * rows to clean at both grains and both formats; this batch only proves the
+ * scanner reproduces what is true today.
+ */
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import {
+  ADAPTER_ENTRYPOINTS,
+  classifyEntrypoints,
+  collectModuleEdges,
+  countComputedSpecifierSites,
+  distArtifactsPresent as distributionArtifactsPresent,
+  type EntrypointClassification,
+  PORTABILITY_EXEMPTIONS,
+  type ReachabilityVerdict,
+  scanDistReachability as scanDistributionReachability,
+  scanSourceReachability,
+  SIMULATED_SEVERANCE_STAGES,
+  sourceRootForEntrypoint,
+} from "../scripts/drizzle-reachability-scan";
+
+/**
+ * Recorded at `29d63ec` by `node --import tsx
+ * scripts/drizzle-reachability-scan.ts --grain=source` — every published
+ * entrypoint, classified. Ten portable, eight adapter (the six true
+ * `./adapters/drizzle/*` entrypoints plus the two "batteries included"
+ * entrypoints that still construct their connection eagerly today).
+ */
+const RECORDED_CLASSIFICATIONS: Readonly<
+  Record<string, EntrypointClassification>
+> = {
+  ".": "portable",
+  "./backend": "portable",
+  "./core": "portable",
+  "./interchange": "portable",
+  "./profiler": "portable",
+  "./schema": "portable",
+  "./indexes": "portable",
+  "./graph-extension": "portable",
+  "./graph-merge": "portable",
+  "./provenance": "portable",
+  "./sqlite/local": "adapter-static",
+  "./postgres/pglite": "adapter-static",
+  "./adapters/drizzle/sqlite": "adapter-static",
+  "./adapters/drizzle/postgres": "adapter-static",
+  "./adapters/drizzle/postgres/pglite": "adapter-static",
+  "./adapters/drizzle/sqlite/local": "adapter-static",
+  "./adapters/drizzle/sqlite/libsql": "adapter-static",
+  "./adapters/drizzle/indexes": "adapter-static",
+};
+
+const RECORDED_ENTRYPOINTS = Object.keys(RECORDED_CLASSIFICATIONS);
+const RECORDED_TRUE_ADAPTER_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
+  (entrypoint) => entrypoint.startsWith("./adapters/drizzle/"),
+);
+const RECORDED_NON_ADAPTER_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
+  (entrypoint) => !entrypoint.startsWith("./adapters/drizzle/"),
+);
+const RECORDED_PORTABLE_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
+  (entrypoint) => RECORDED_CLASSIFICATIONS[entrypoint] === "portable",
+);
+
+/**
+ * Recorded at `29d63ec` by `--grain=source` — every published entrypoint
+ * reaches Drizzle today, at both walk modes, because no source file has been
+ * severed yet.
+ */
+const RECORDED_SOURCE_VERDICTS: Readonly<Record<string, ReachabilityVerdict>> =
+  Object.fromEntries(
+    RECORDED_ENTRYPOINTS.map((entrypoint) => [entrypoint, "dirty"]),
+  );
+
+/**
+ * Recorded at `29d63ec` by `--grain=source --stage=<name>`, filtered to the
+ * ten portable entrypoints at `load` mode — §3.1's three severance routes,
+ * simulated one group at a time.
+ */
+const RECORDED_STAGE_DIRTY_COUNTS: Readonly<Record<string, number>> = {
+  baseline: 10,
+  "axis+migrate": 5,
+  "axis+migrate+removals": 0,
+};
+
+/** The five portable entrypoints still dirty once R-axis and R-migrate are severed. */
+const RECORDED_AXIS_MIGRATE_DIRTY_ENTRYPOINTS = [
+  ".",
+  "./interchange",
+  "./profiler",
+  "./graph-merge",
+  "./provenance",
+].toSorted();
+
+/** One witness chain per severance route, as `--grain=source --stage=<name>` prints it. */
+const RECORDED_ROUTE_CHAINS = {
+  "R-axis": {
+    stage: "baseline",
+    entrypoint: "./core",
+    mode: "load",
+    chain: [
+      { from: "src/core/index.ts", to: "src/core/node.ts", kind: "static" },
+      {
+        from: "src/core/node.ts",
+        to: "src/store/claims/axis.ts",
+        kind: "static",
+      },
+      { from: "src/store/claims/axis.ts", to: "drizzle-orm", kind: "static" },
+    ],
+  },
+  "R-migrate": {
+    stage: "baseline",
+    entrypoint: "./backend",
+    mode: "load",
+    chain: [
+      {
+        from: "src/backend/index.ts",
+        to: "src/backend/migrate-recorded-time.ts",
+        kind: "static",
+      },
+      {
+        from: "src/backend/migrate-recorded-time.ts",
+        to: "src/backend/drizzle/ddl.ts",
+        kind: "static",
+      },
+      { from: "src/backend/drizzle/ddl.ts", to: "drizzle-orm", kind: "static" },
+    ],
+  },
+  "R-removals": {
+    stage: "axis+migrate",
+    entrypoint: ".",
+    mode: "load",
+    chain: [
+      { from: "src/index.ts", to: "src/store/index.ts", kind: "static" },
+      {
+        from: "src/store/index.ts",
+        to: "src/store/materialize-removals.ts",
+        kind: "static",
+      },
+      {
+        from: "src/store/materialize-removals.ts",
+        to: "src/backend/drizzle/operations/edge-claims.ts",
+        kind: "static",
+      },
+      {
+        from: "src/backend/drizzle/operations/edge-claims.ts",
+        to: "drizzle-orm",
+        kind: "static",
+      },
+    ],
+  },
+} as const;
+
+/**
+ * Recorded at `29d63ec` by `pnpm build && --grain=dist`, `load` mode — 9 of
+ * 12 non-adapter entrypoints resolve a Drizzle specifier at module load, in
+ * both artifact formats (they agree entrywise today; no entrypoint defers
+ * Drizzle behind a dynamic import yet).
+ */
+const RECORDED_DIST_LOAD_VERDICTS: Readonly<
+  Record<string, ReachabilityVerdict>
+> = {
+  ".": "dirty",
+  "./backend": "dirty",
+  "./core": "dirty",
+  "./interchange": "dirty",
+  "./profiler": "clean",
+  "./schema": "dirty",
+  "./indexes": "clean",
+  "./graph-extension": "clean",
+  "./graph-merge": "dirty",
+  "./provenance": "dirty",
+  "./sqlite/local": "dirty",
+  "./postgres/pglite": "dirty",
+  "./adapters/drizzle/sqlite": "dirty",
+  "./adapters/drizzle/postgres": "dirty",
+  "./adapters/drizzle/postgres/pglite": "dirty",
+  "./adapters/drizzle/sqlite/local": "dirty",
+  "./adapters/drizzle/sqlite/libsql": "dirty",
+  "./adapters/drizzle/indexes": "dirty",
+};
+
+function stageNamed(name: string) {
+  const stage = SIMULATED_SEVERANCE_STAGES.find(
+    (candidate) => candidate.name === name,
+  );
+  if (stage === undefined) throw new Error(`No severance stage named ${name}`);
+  return stage;
+}
+
+function dirtyPortableEntrypointsAtStage(
+  stage: (typeof SIMULATED_SEVERANCE_STAGES)[number],
+): readonly string[] {
+  return scanSourceReachability({ severedModules: stage.severedModules })
+    .filter(
+      (finding) =>
+        finding.mode === "load" &&
+        RECORDED_PORTABLE_ENTRYPOINTS.includes(finding.entrypoint) &&
+        finding.verdict === "dirty",
+    )
+    .map((finding) => finding.entrypoint);
+}
+
+describe("drizzle reachability — source grain", () => {
+  it("classifies every published entrypoint and nothing else", () => {
+    const classification = classifyEntrypoints();
+    expect(classification).toEqual(RECORDED_CLASSIFICATIONS);
+
+    // Every key in ADAPTER_ENTRYPOINTS must itself be a published entrypoint;
+    // classifyEntrypoints() alone cannot catch a phantom key, since it only
+    // ever iterates the REAL export keys.
+    const publishedEntrypoints = new Set(Object.keys(classification));
+    for (const entrypoint of Object.keys(ADAPTER_ENTRYPOINTS)) {
+      expect(
+        publishedEntrypoints.has(entrypoint),
+        `ADAPTER_ENTRYPOINTS names ${entrypoint}, which is not a published entrypoint`,
+      ).toBe(true);
+    }
+  });
+
+  it("extracts all four static edge forms and the dynamic form", () => {
+    const temporaryDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "drizzle-reachability-fixture-"),
+    );
+    try {
+      const fixturePath = path.join(temporaryDirectory, "fixture.ts");
+      fs.writeFileSync(
+        fixturePath,
+        [
+          'import { a } from "./a";',
+          'export { b } from "./b";',
+          'export * from "./c";',
+          'const d = require("./d");',
+          'async function loadE() { return import("./e"); }',
+          "void d;",
+          "void loadE;",
+        ].join("\n"),
+      );
+
+      const edges = collectModuleEdges(fixturePath);
+      expect(edges).toEqual([
+        { specifier: "./a", kind: "static" },
+        { specifier: "./b", kind: "static" },
+        { specifier: "./c", kind: "static" },
+        { specifier: "./d", kind: "static" },
+        { specifier: "./e", kind: "dynamic" },
+      ]);
+      expect(countComputedSpecifierSites(fixturePath)).toBe(0);
+    } finally {
+      fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("derives source roots from the tsup entry map", () => {
+    expect(sourceRootForEntrypoint(".")).toBe("src/index.ts");
+    expect(sourceRootForEntrypoint("./core")).toBe("src/core/index.ts");
+    expect(sourceRootForEntrypoint("./sqlite/local")).toBe(
+      "src/backend/sqlite/local-store.ts",
+    );
+    expect(sourceRootForEntrypoint("./postgres/pglite")).toBe(
+      "src/backend/postgres/pglite-store.ts",
+    );
+  });
+
+  it("records today's source verdicts for all 18 entrypoints (12 of 12 non-adapter dirty)", () => {
+    expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(6);
+    expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(12);
+    expect(
+      RECORDED_NON_ADAPTER_ENTRYPOINTS.every(
+        (entrypoint) => RECORDED_SOURCE_VERDICTS[entrypoint] === "dirty",
+      ),
+    ).toBe(true);
+
+    const findings = scanSourceReachability();
+    expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2);
+
+    const recordedEntrypoints = new Set(RECORDED_ENTRYPOINTS);
+    for (const finding of findings) {
+      expect(
+        recordedEntrypoints.has(finding.entrypoint),
+        `scanner reported an unrecorded entrypoint: ${finding.entrypoint}`,
+      ).toBe(true);
+    }
+
+    for (const entrypoint of RECORDED_ENTRYPOINTS) {
+      for (const mode of ["load", "deferred"] as const) {
+        const finding = findings.find(
+          (candidate) =>
+            candidate.entrypoint === entrypoint && candidate.mode === mode,
+        );
+        expect(finding?.verdict, `${entrypoint} (${mode})`).toBe(
+          RECORDED_SOURCE_VERDICTS[entrypoint],
+        );
+      }
+    }
+  });
+
+  it.each(Object.entries(RECORDED_ROUTE_CHAINS))(
+    "names the shortest chain for severance route %s",
+    (_route, witness) => {
+      const stage = stageNamed(witness.stage);
+      const findings = scanSourceReachability({
+        severedModules: stage.severedModules,
+      });
+      const finding = findings.find(
+        (candidate) =>
+          candidate.entrypoint === witness.entrypoint &&
+          candidate.mode === witness.mode,
+      );
+      expect(finding?.chain).toEqual(witness.chain);
+    },
+  );
+
+  it("reproduces the staged-severance projection 10/10 -> 5/10 -> 0/10", () => {
+    expect(RECORDED_PORTABLE_ENTRYPOINTS.length).toBe(10);
+
+    for (const stage of SIMULATED_SEVERANCE_STAGES) {
+      const dirtyCount = dirtyPortableEntrypointsAtStage(stage).length;
+      expect({ [stage.name]: dirtyCount }).toEqual({
+        [stage.name]: RECORDED_STAGE_DIRTY_COUNTS[stage.name],
+      });
+    }
+  });
+
+  it("names the five entrypoints still dirty at stage axis+migrate", () => {
+    const stage = stageNamed("axis+migrate");
+    const dirty = dirtyPortableEntrypointsAtStage(stage).toSorted();
+    expect(dirty).toEqual(RECORDED_AXIS_MIGRATE_DIRTY_ENTRYPOINTS);
+  });
+});
+
+/**
+ * The decision the dist-grain `describe.skipIf` below is built from — named
+ * so it is testable directly, without depending on vitest's collection-time
+ * evaluation of `process.env` (a mutated env var inside an `it()` cannot
+ * retroactively un-skip a sibling `describe` block, since collection
+ * happens before any test body runs). `TYPEGRAPH_REQUIRE_DIST_GRAIN=1`
+ * refuses to skip even when the artifacts are absent, so a lane that forgot
+ * to `pnpm build` first fails loudly instead of silently reporting green.
+ */
+function shouldSkipDistributionGrain(
+  distributionPresent: boolean,
+  requireDistributionGrainEnv: string | undefined,
+): boolean {
+  return !distributionPresent && requireDistributionGrainEnv !== "1";
+}
+
+describe("drizzle reachability — dist grain", () => {
+  describe.skipIf(
+    shouldSkipDistributionGrain(
+      distributionArtifactsPresent(),
+      process.env["TYPEGRAPH_REQUIRE_DIST_GRAIN"],
+    ),
+  )("shipped artifacts", () => {
+    it("covers both artifact formats of all 18 entrypoints", () => {
+      const findings = scanDistributionReachability();
+      expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2 * 2);
+
+      for (const entrypoint of RECORDED_ENTRYPOINTS) {
+        for (const format of ["import", "require"] as const) {
+          for (const mode of ["load", "deferred"] as const) {
+            const match = findings.find(
+              (finding) =>
+                finding.entrypoint === entrypoint &&
+                finding.format === format &&
+                finding.mode === mode,
+            );
+            expect(match, `${entrypoint} [${format}] (${mode})`).toBeDefined();
+          }
+        }
+
+        // Each format resolves its OWN root — never both derived from
+        // `.import` (which would silently re-scan the ESM artifact under the
+        // "require" label instead of the real `.cjs`).
+        const importFinding = findings.find(
+          (finding) =>
+            finding.entrypoint === entrypoint &&
+            finding.format === "import" &&
+            finding.mode === "load",
+        );
+        const requireFinding = findings.find(
+          (finding) =>
+            finding.entrypoint === entrypoint &&
+            finding.format === "require" &&
+            finding.mode === "load",
+        );
+        expect(requireFinding?.root, `${entrypoint} require root`).not.toBe(
+          importFinding?.root,
+        );
+        expect(requireFinding?.root, `${entrypoint} require root`).toMatch(
+          /\.cjs$/,
+        );
+        expect(importFinding?.root, `${entrypoint} import root`).toMatch(
+          /\.js$/,
+        );
+      }
+
+      // The two entrypoints a `dist/**/index.js` glob would miss entirely
+      // (their artifact basenames are `local-store.*` / `pglite-store.*`,
+      // not `index.*`).
+      for (const entrypoint of ["./sqlite/local", "./postgres/pglite"]) {
+        for (const format of ["import", "require"] as const) {
+          const match = findings.find(
+            (finding) =>
+              finding.entrypoint === entrypoint && finding.format === format,
+          );
+          expect(match, `${entrypoint} [${format}]`).toBeDefined();
+        }
+      }
+    });
+
+    it("records today's dist load/deferred verdicts in both formats (9 of 12 non-adapter dirty at load; clean: ./profiler, ./indexes, ./graph-extension)", () => {
+      const nonAdapterEntrypoints = Object.keys(
+        RECORDED_DIST_LOAD_VERDICTS,
+      ).filter((entrypoint) => !entrypoint.startsWith("./adapters/drizzle/"));
+      expect(nonAdapterEntrypoints.length).toBe(12);
+      const dirtyNonAdapter = nonAdapterEntrypoints.filter(
+        (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "dirty",
+      );
+      expect(dirtyNonAdapter.length).toBe(9);
+      const cleanNonAdapter = nonAdapterEntrypoints
+        .filter(
+          (entrypoint) => RECORDED_DIST_LOAD_VERDICTS[entrypoint] === "clean",
+        )
+        .toSorted();
+      expect(cleanNonAdapter).toEqual([
+        "./graph-extension",
+        "./indexes",
+        "./profiler",
+      ]);
+
+      const findings = scanDistributionReachability().filter(
+        (finding) => finding.mode === "load",
+      );
+      for (const [entrypoint, verdict] of Object.entries(
+        RECORDED_DIST_LOAD_VERDICTS,
+      )) {
+        for (const format of ["import", "require"] as const) {
+          const match = findings.find(
+            (finding) =>
+              finding.entrypoint === entrypoint && finding.format === format,
+          );
+          expect(match?.verdict, `${entrypoint} [${format}]`).toBe(verdict);
+        }
+      }
+    });
+
+    it("an exemption names an entrypoint that is actually dirty", () => {
+      expect(PORTABILITY_EXEMPTIONS).toEqual([]);
+
+      const findings = scanDistributionReachability().filter(
+        (finding) => finding.mode === "load",
+      );
+      for (const exemption of PORTABILITY_EXEMPTIONS) {
+        const stillDirty = findings.some(
+          (finding) =>
+            finding.entrypoint === exemption.entrypoint &&
+            finding.verdict === "dirty",
+        );
+        expect(
+          stillDirty,
+          `exemption for ${exemption.entrypoint} names an entrypoint that is not dirty`,
+        ).toBe(true);
+      }
+    });
+  });
+
+  it("refuses to skip the dist grain when TYPEGRAPH_REQUIRE_DIST_GRAIN=1", () => {
+    expect(shouldSkipDistributionGrain(false, "1")).toBe(false);
+    expect(shouldSkipDistributionGrain(true, "1")).toBe(false);
+    expect(shouldSkipDistributionGrain(false, undefined)).toBe(true);
+    expect(shouldSkipDistributionGrain(true, undefined)).toBe(false);
+  });
+});
