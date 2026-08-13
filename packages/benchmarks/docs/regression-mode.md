@@ -152,3 +152,85 @@ regression."
 on a dedicated, ephemeral EC2 instance instead of locally — the runner behind
 the scheduled/on-demand `Perf Timing Lane` GitHub Actions workflow. See
 [`docs/ec2-regression-lane.md`](ec2-regression-lane.md).
+## Seeded-regression proof
+
+`pnpm bench:regression:proof -- --seed=<id>` (or `pnpm --filter
+@nicia-ai/typegraph-benchmarks bench:regression:proof -- --seed=<id>` / `tsx
+src/regression-proof.ts --seed=<id>` from this package) is this workstream's
+own load-bearing test: it seeds a known, already-fixed cost regression into a
+scratch worktree and asks whether the harness built above actually catches
+it, at the right severity, two independent ways.
+
+### The seed registry
+
+`src/regression/proof/seeds.ts` registers a `RegressionSeed` per known
+historical regression. A seed is a *reverse* patch — `git diff <fixed-sha>
+<fixed-sha>^` over exactly the files the fix touched — committed under
+`packages/benchmarks/etc/seeds/*.patch`. Applying it inside a scratch
+worktree un-fixes the regression without touching anything else, so the
+worktree's behavior on the seeded shape is a known answer, not a guess.
+
+The one registered seed today, `identity-frontier-396`, reverts `317f73d`
+("perf(query): bound current identity expansion by the frontier, not the
+closure"), restoring its parent `2562fe0`'s graph-wide `identity_peer_class`
+MATERIALIZED CTE at the current read coordinate — the #396/#432 shape (cost =
+sum of squares of every identity class in the graph). `allowedPathPrefixes`
+scopes it to `packages/typegraph/src/query/compiler/` only; a seed that
+touched its own guarding test would prove nothing.
+
+### The two halves and their judges
+
+`src/regression/proof/verdict.ts` is the testable core — every decision the
+proof makes lives here, none of it re-derived by the CLI or the driver:
+
+- **Timing half** (`judgeTimingProof`): reads the `bench:regression` report
+  the driver produced against the seeded worktree and asks whether the
+  `LaneComparison` for the seed's declared `(laneId, baseline)` classifies
+  the seed's declared `label` at exactly the seed's declared severity. It
+  never recomputes severity from thresholds — `classification` is owned by
+  `policy.classifyRatio`, consumed here, not re-derived — and it refuses a
+  report generated under a modified policy (a widened threshold or an
+  acceptance could make the seed "pass" without the fix having anything to
+  do with it).
+- **Explain half** (`judgeExplainProof`): reads a `vitest --reporter=json`
+  run of the seed's declared `tests/perf/explain/**` file and asks whether
+  every declared `mustFail` case failed, unambiguously, with a message
+  containing its own declared diagnostic substring, while every declared
+  `mustPass` case still passed. A red test proves nothing on its own — an
+  import error or a timeout is also red — the diagnostic substring is what
+  proves the test went red for the *declared* reason. A `mustFail` case that
+  passed is reported as "the seed passed undetected": the batch's own
+  STOP-and-escalate signal, never softened by loosening a ceiling or a term.
+
+`combineProofVerdict` is `proven` only when both halves ran and both proved;
+`--half=timing`/`--half=explain` runs one half for fast iteration during the
+loop protocol below, but `src/regression-proof.ts` refuses to write the
+curated report for a partial run (`PartialProofReportError`) — a report
+claiming "both halves proven" from a run that only checked one would be
+dishonest.
+
+### The `--tag=<base>` isolation rationale
+
+The driver invokes `bench:regression` with `--tag=<sha> --base=<sha>`, the
+SAME resolved sha, deliberately. The proof isolates exactly one variable —
+the seed patch — so both baseline points must be the unseeded tree. A real
+three-point run against a published tag would mix that release's own
+label/signature differences (`missing-baseline`, `incomparable`) into the
+result and prove nothing about the seed itself.
+
+### The exit-code-is-not-proof rule
+
+`judgeTimingProof` never looks at `reportExitCode` — an unrunnable lane, an
+incomparable signature, and a hard failure on the WRONG label all produce
+exit code `2`, but none of them is evidence that *this* seed was caught for
+*this* reason. Proof requires the exact matched `(lane, label, baseline,
+classification)` comparison the seed declares; an exit code is a summary,
+never a substitute.
+
+### Report
+
+Each proof run writes a curated report to `packages/benchmarks/reports/
+regression/proof-<seedId>-<date>/proof-report.md` (gitignored, like every
+other `reports/regression/` output). The load-bearing, committed proof for
+`identity-frontier-396` is at
+[`reports/regression-seeded-identity-frontier-396.md`](../reports/regression-seeded-identity-frontier-396.md).

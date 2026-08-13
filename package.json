@@ -26,6 +26,7 @@
     "bench:regression": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:regression",
     "bench:regression:ec2": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:regression:ec2",
     "bench:regression:ec2:collect": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:regression:ec2:collect",
+    "bench:regression:proof": "pnpm --filter @nicia-ai/typegraph-benchmarks bench:regression:proof",
     "fix": "run-s fix:*",
     "fix:prettier": "prettier --write .",
     "fix:lint": "turbo run lint -- --fix",

@@ -49,6 +49,10 @@
     "bench:identity": "tsx src/identity-bench.ts",
     "prebench:identity:postgres": "pnpm --filter @nicia-ai/typegraph build",
     "bench:identity:postgres": "tsx src/identity-bench.ts --backend=postgres",
+    "prebench:identity-frontier": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:identity-frontier": "tsx src/identity-frontier-bench.ts",
+    "prebench:identity-frontier:postgres": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:identity-frontier:postgres": "tsx src/identity-frontier-bench.ts --backend=postgres",
     "prebench:snb:doctor": "pnpm --filter @nicia-ai/typegraph build",
     "bench:snb:doctor": "tsx src/real/harness/doctor-cli.ts",
     "prebench:snb:smoke": "pnpm --filter @nicia-ai/typegraph build",
@@ -67,6 +71,7 @@
     "bench:regression": "tsx src/regression-bench.ts",
     "bench:regression:ec2": "tsx src/regression-ec2.ts launch",
     "bench:regression:ec2:collect": "tsx src/regression-ec2.ts collect",
+    "bench:regression:proof": "tsx src/regression-proof.ts",
     "typecheck": "tsc --noEmit --skipLibCheck",
     "test": "vitest run",
     "test:unit": "vitest run"

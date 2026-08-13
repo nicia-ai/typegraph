@@ -84,7 +84,7 @@ export const PERF_FIXTURES: readonly PerfFixture[] = [
     guards:
       "typegraph#396's quadratic identity-frontier expansion reintroduced as a correlated `identity_peer` scan that loses its `class_kind`/`class_id` join boundary — the #396 shape mechanized as a deterministic EXPLAIN plan-shape check instead of a timing threshold.",
     mutation:
-      "FRONTIER-PIN (dropping `class_kind`/`class_id` from the `identity_peer` join in `planCurrentIdentityFrontierExpansion`, `src/query/compiler/identity-traversal.ts`) measured 495 visited rows against the 100-row `FRONTIER_ROW_CEILING` (HEAD actual 18); FRONTIER-MATERIALIZE (forcing the historical branch unconditionally) is inconclusive at this coordinate, so FRONTIER-PIN is the load-bearing mutation. Both shown red-then-restored in the commit body.",
+      "FRONTIER-PIN (dropping `class_kind`/`class_id` from the `identity_peer` join in `planCurrentIdentityFrontierExpansion`, `src/query/compiler/identity-traversal.ts`) measured 495 visited rows against the 100-row `FRONTIER_ROW_CEILING` (HEAD actual 18); FRONTIER-MATERIALIZE (forcing the historical branch unconditionally) is inconclusive at this coordinate, so FRONTIER-PIN is the load-bearing mutation. Both shown red-then-restored in the commit body. The full-shape seed `packages/benchmarks/etc/seeds/identity-frontier-396.patch` (the reverse of 317f73d, restoring all three patched files rather than only the single join condition FRONTIER-PIN drops) reddens both cases too: SQLite's required-term check fails because the plan reverts to `MATERIALIZE identity_peer_class`, and PostgreSQL's `assertRowCeiling` measured 60,051 visited rows against the 100-row ceiling (600x over).",
   },
   {
     id: "variable-length-traversal",

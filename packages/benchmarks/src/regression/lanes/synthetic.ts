@@ -29,4 +29,13 @@ export const SYNTHETIC_LANES: readonly RegressionLane[] = [
     scripts: { sqlite: "bench:vector", postgres: "bench:vector:postgres" },
     requires: ["sqlite-vec"],
   },
+  {
+    id: "identity-frontier",
+    description:
+      "typegraph#396-shape current-coordinate identity-expanded hop, bounded fixture.",
+    scripts: {
+      sqlite: "bench:identity-frontier",
+      postgres: "bench:identity-frontier:postgres",
+    },
+  },
 ];
