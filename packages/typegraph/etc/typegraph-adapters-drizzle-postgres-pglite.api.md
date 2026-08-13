@@ -40,6 +40,7 @@ type BackendCapabilities = Readonly<{
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
+    recursiveTraversal?: RecursiveTraversalCapability | undefined;
 }>;
 
 // @public (undocumented)
@@ -4208,6 +4209,12 @@ type RecordKindRemovalParams = Readonly<{
     attemptedAt: string;
     removedAt: string | undefined;
     error: string | undefined;
+}>;
+
+// @public
+type RecursiveTraversalCapability = Readonly<{
+    supported: boolean;
+    reason?: string;
 }>;
 
 // @public

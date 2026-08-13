@@ -1786,3 +1786,31 @@ describe("query hook contract: each submitted statement is observable", () => {
     expect(errors[0]?.error).toBe(injectedFailure);
   });
 });
+
+describe("capability object immutability (I14)", () => {
+  // The freeze runs on the EXPOSED object — the one a factory hands back
+  // after spreading in `contributions` — not merely its top level. A
+  // top-level-only `Object.freeze` would leave every nested capability
+  // sub-object writable, including the one the factory derives last.
+  it("rejects mutating the last-derived contributions branch", () => {
+    const backend = createTestBackend();
+    const contributions = backend.capabilities.contributions as {
+      rebuild: boolean;
+    };
+
+    expect(() => {
+      contributions.rebuild = !contributions.rebuild;
+    }).toThrow(TypeError);
+  });
+
+  it("rejects mutating a nested, unconditionally-present sub-object", () => {
+    const backend = createTestBackend();
+    const graphAnalytics = backend.capabilities.graphAnalytics as {
+      supported: boolean;
+    };
+
+    expect(() => {
+      graphAnalytics.supported = false;
+    }).toThrow(TypeError);
+  });
+});
