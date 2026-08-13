@@ -639,16 +639,31 @@ export function nodeIdentityKey(node: PathNode): NodeIdentityKey {
 }
 
 /**
+ * Builds a node identity from a working-table row's nullable predecessor
+ * columns. Drivers deliver SQL NULL in varying shapes, so only a string
+ * pair counts as a real predecessor — the one owner of that predicate;
+ * {@link nodeIdentityKeyFromRow} delegates to it rather than re-spelling the
+ * same check.
+ */
+export function nodeIdentityFromRow(
+  id: unknown,
+  kind: unknown,
+): PathNode | undefined {
+  if (typeof id !== "string" || typeof kind !== "string") return undefined;
+  return { id, kind };
+}
+
+/**
  * Builds a node-identity key from a working-table row's nullable
- * predecessor columns. Drivers deliver SQL NULL in varying shapes, so only
- * a string pair counts as a real predecessor.
+ * predecessor columns. See {@link nodeIdentityFromRow} for the underlying
+ * string-pair predicate.
  */
 export function nodeIdentityKeyFromRow(
   id: unknown,
   kind: unknown,
 ): NodeIdentityKey | undefined {
-  if (typeof id !== "string" || typeof kind !== "string") return undefined;
-  return nodeIdentityKey({ id, kind });
+  const node = nodeIdentityFromRow(id, kind);
+  return node === undefined ? undefined : nodeIdentityKey(node);
 }
 
 export function compareNodeIdentity(left: PathNode, right: PathNode): number {

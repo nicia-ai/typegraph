@@ -83,6 +83,7 @@ import {
   registerTrustedImportIntegrationTests,
   registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
+  registerWeightedShortestPathExtractionIntegrationTests,
 } from "./integration";
 import type {
   InspectableHistoryStore,
@@ -295,6 +296,7 @@ export function createIntegrationTestSuite<
     registerSubgraphIntegrationTests(context);
     registerStoreViewIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
+    registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);

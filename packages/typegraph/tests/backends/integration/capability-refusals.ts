@@ -51,7 +51,7 @@ import { type IntegrationTestContext } from "./test-context";
  * inside `runInWriteTransaction`, so the window-ledger row (T1 row 4) would
  * silently exercise the base declaration without this wrapper.
  */
-function refuseRecursiveTraversal(
+export function refuseRecursiveTraversal(
   base: GraphBackend,
   reason: string,
 ): GraphBackend {
