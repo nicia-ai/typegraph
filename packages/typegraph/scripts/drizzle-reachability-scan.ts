@@ -102,14 +102,19 @@ export const DRIZZLE_SPECIFIER_PATTERN =
 /**
  * The published entrypoints that are EXPECTED to reach Drizzle, and how.
  *
- * At this batch, all eight are `adapter-static`: the six true
- * `./adapters/drizzle/*` entrypoints, plus the two "batteries included"
- * entrypoints (`./sqlite/local`, `./postgres/pglite`) that still construct
- * their connection with a static Drizzle import today. A later batch
- * (B4b) re-classifies the latter two to `adapter-dynamic-only` once their
- * connection construction moves behind a dynamic import — a reviewed diff
- * in this table, never a silent flip, because every other published
- * entrypoint not listed here is `portable` by default and must go clean.
+ * The six true `./adapters/drizzle/*` entrypoints are `adapter-static`: their
+ * factories are synchronous and take a caller-constructed Drizzle handle, so
+ * their connection construction reaches Drizzle eagerly, at both `load` and
+ * `deferred` mode. The two "batteries included" entrypoints (`./sqlite/local`,
+ * `./postgres/pglite`) are `adapter-dynamic-only` as of B4b: their factories
+ * moved their connection construction behind an `await import(...)` of a
+ * sibling `*-store-impl.ts` module (design §4.4b, I12), so Node's module
+ * loader never resolves `drizzle-orm` for them (`load` is clean) unless the
+ * factory actually runs (`deferred` is dirty) — which is also what makes the
+ * typed missing-peer refusal in `src/backend/missing-peer-ledger.ts`
+ * reachable in the first place. This is a reviewed diff in this table, never
+ * a silent flip: every other published entrypoint not listed here is
+ * `portable` by default and must go clean.
  */
 export const ADAPTER_ENTRYPOINTS: Readonly<
   Record<string, "adapter-static" | "adapter-dynamic-only">
@@ -120,8 +125,8 @@ export const ADAPTER_ENTRYPOINTS: Readonly<
   "./adapters/drizzle/sqlite/local": "adapter-static",
   "./adapters/drizzle/sqlite/libsql": "adapter-static",
   "./adapters/drizzle/indexes": "adapter-static",
-  "./sqlite/local": "adapter-static",
-  "./postgres/pglite": "adapter-static",
+  "./sqlite/local": "adapter-dynamic-only",
+  "./postgres/pglite": "adapter-dynamic-only",
 };
 
 /**

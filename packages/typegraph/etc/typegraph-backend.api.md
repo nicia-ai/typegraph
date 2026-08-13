@@ -1367,6 +1367,66 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
+export const MISSING_PEER_LEDGER: readonly [{
+    readonly entrypoint: "./sqlite/local";
+    readonly arm: "typed-refusal";
+    readonly formats: readonly ["import", "require"];
+}, {
+    readonly entrypoint: "./postgres/pglite";
+    readonly arm: "typed-refusal";
+    readonly formats: readonly ["import", "require"];
+}, {
+    readonly entrypoint: "./adapters/drizzle/sqlite";
+    readonly arm: "documented-resolution-error";
+    readonly formats: readonly ["import", "require"];
+    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly documentedIn: readonly string[];
+}, {
+    readonly entrypoint: "./adapters/drizzle/postgres";
+    readonly arm: "documented-resolution-error";
+    readonly formats: readonly ["import", "require"];
+    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly documentedIn: readonly string[];
+}, {
+    readonly entrypoint: "./adapters/drizzle/postgres/pglite";
+    readonly arm: "documented-resolution-error";
+    readonly formats: readonly ["import", "require"];
+    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly documentedIn: readonly string[];
+}, {
+    readonly entrypoint: "./adapters/drizzle/sqlite/local";
+    readonly arm: "documented-resolution-error";
+    readonly formats: readonly ["import", "require"];
+    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly documentedIn: readonly string[];
+}, {
+    readonly entrypoint: "./adapters/drizzle/sqlite/libsql";
+    readonly arm: "documented-resolution-error";
+    readonly formats: readonly ["import", "require"];
+    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly documentedIn: readonly string[];
+}, {
+    readonly entrypoint: "./adapters/drizzle/indexes";
+    readonly arm: "documented-resolution-error";
+    readonly formats: readonly ["import", "require"];
+    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly documentedIn: readonly string[];
+}];
+
+// @public
+export type MissingPeerLedgerEntry = Readonly<{
+    entrypoint: string;
+    arm: "typed-refusal";
+    formats: readonly ("import" | "require")[];
+}> | Readonly<{
+    entrypoint: string;
+    arm: "documented-resolution-error";
+    formats: readonly ("import" | "require")[];
+    reason: string;
+    documentedIn: readonly string[];
+}>;
+
+// @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
 // @public (undocumented)

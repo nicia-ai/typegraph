@@ -118,6 +118,15 @@ schema-derived types from `@nicia-ai/typegraph/core`. Custom backend and search
 strategy authors can use the complete Drizzle-free contract vocabulary from
 `@nicia-ai/typegraph/backend`.
 
+`drizzle-orm` is an optional peer dependency. `@nicia-ai/typegraph/sqlite/local`
+and `@nicia-ai/typegraph/postgres/pglite` install it on demand and refuse with a
+typed `ConfigurationError` (`MISSING_PEER_DEPENDENCY`) naming the package and the
+install command (`npm install drizzle-orm`) when it is absent. The six
+`/adapters/drizzle/...` entrypoints take a caller-constructed Drizzle handle, so a
+consumer who can call them has already imported `drizzle-orm` themselves — their
+own import fails first, surfacing the raw module-resolution error, which names the
+same package.
+
 ## Learn More
 
 - Docs: [typegraph.dev](https://typegraph.dev)

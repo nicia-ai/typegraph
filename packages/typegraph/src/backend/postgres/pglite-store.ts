@@ -7,7 +7,6 @@
 import { type GraphDef } from "../../core/define-graph";
 import { type SchemaManagerOptions } from "../../schema/manager";
 import {
-  createStoreWithSchema,
   type HistoryStore,
   type RecordedReadStore,
   type Store,
@@ -19,9 +18,7 @@ import {
   type StoreOptions,
   type UnboundLiveStoreOptions,
 } from "../../store/types";
-import { createPostgresTables } from "../drizzle/schema/postgres";
-import { closeAfterFailure } from "../types";
-import { createLocalPgliteBackend } from "./pglite";
+import { loadDrizzleBackedModule } from "../missing-peer-ledger";
 
 export type { GraphIdentityConfig } from "../../core/define-graph";
 export type {
@@ -61,21 +58,6 @@ export type LocalPgliteStoreOptions<
   schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;
 
-/**
- * Drops a smuggled `schema` from the nested schema-management options: the
- * effective `SqlSchema` has exactly one source (`store.schema`), which also
- * drives physical table provisioning in this constructor.
- */
-function withoutSchemaOverride(
-  schemaManagement: Omit<SchemaManagerOptions, "schema"> | undefined,
-): Omit<SchemaManagerOptions, "schema"> {
-  if (schemaManagement === undefined) return {};
-  const { schema: smuggled, ...rest } =
-    schemaManagement as SchemaManagerOptions;
-  void smuggled;
-  return rest;
-}
-
 /** Creates, provisions, and returns a full typed local PGlite Store. */
 export function createLocalPgliteStore<G extends GraphDef>(
   graph: G,
@@ -103,25 +85,9 @@ export async function createLocalPgliteStore<G extends GraphDef>(
   graph: G,
   options: LocalPgliteStoreOptions = {},
 ): Promise<Store<G> | HistoryStore<G> | RecordedReadStore<G>> {
-  const tables =
-    options.store?.schema === undefined ?
-      undefined
-    : createPostgresTables(options.store.schema.tables);
-  const { backend } = await createLocalPgliteBackend({
-    ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
-    ...(options.vector === false ? { vector: false as const } : {}),
-    ...(tables === undefined ? {} : { tables }),
-  });
-  try {
-    const [store] = await createStoreWithSchema(graph, backend, {
-      ...options.store,
-      // The type already excludes `schema` here; the runtime strip guards
-      // untyped callers, so the provisioned schema (or the default tables)
-      // can never diverge from the one the Store reads.
-      ...withoutSchemaOverride(options.schemaManagement),
-    });
-    return store;
-  } catch (error) {
-    return closeAfterFailure(backend, error);
-  }
+  const impl = await loadDrizzleBackedModule(
+    "./postgres/pglite",
+    () => import("./pglite-store-impl"),
+  );
+  return impl.createLocalPgliteStoreImpl(graph, options);
 }
