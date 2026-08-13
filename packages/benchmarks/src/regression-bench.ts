@@ -38,7 +38,10 @@ import {
   type BaselineId,
   DEFAULT_REGRESSION_POLICY,
 } from "./regression/policy";
-import { writeRegressionReport } from "./regression/report";
+import {
+  resolveBackendReportDir,
+  writeRegressionReport,
+} from "./regression/report";
 import { runLane, type LaneRunOutcome } from "./regression/run-lane";
 import {
   installWorktree,
@@ -246,10 +249,11 @@ async function main(argv: readonly string[]): Promise<void> {
     let worstExitCode: 0 | 1 | 2 = 0;
     for (const report of reports) {
       const [backend] = report.backends;
-      const perBackendDir =
-        reports.length > 1 ?
-          path.join(outputDir, backend ?? "unknown")
-        : outputDir;
+      const perBackendDir = resolveBackendReportDir(
+        outputDir,
+        reports.length,
+        backend,
+      );
       const written = await writeRegressionReport(perBackendDir, report);
       console.log(`\n=== ${report.backends.join(", ")} ===`);
       printLaneSummary(report);

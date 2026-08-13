@@ -145,3 +145,10 @@ severity as an unrunnable one: "no comparison happened" is the same
 untrustworthy state whether the run never happened, failed, or ran but
 can't be measured against its baseline — none of them may read as "no
 regression."
+
+## Running on EC2
+
+`bench:regression:ec2` / `bench:regression:ec2:collect` run this exact tool
+on a dedicated, ephemeral EC2 instance instead of locally — the runner behind
+the scheduled/on-demand `Perf Timing Lane` GitHub Actions workflow. See
+[`docs/ec2-regression-lane.md`](ec2-regression-lane.md).

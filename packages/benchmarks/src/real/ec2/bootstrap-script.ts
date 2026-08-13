@@ -18,6 +18,11 @@ import {
   SNB_DATASET_SPECS,
   snbDownloadUrl,
 } from "../dataset/resolve";
+import {
+  BOOTSTRAP_COMPLETE_SENTINEL,
+  renderBootstrapPrelude,
+  REPO_DIR,
+} from "./bootstrap-common";
 
 /**
  * This script runs as root on a remote Ubuntu box (bootstrap sets
@@ -53,11 +58,6 @@ export type BootstrapOptions = Readonly<{
   sshPublicKey: string | undefined;
 }>;
 
-export const BOOTSTRAP_LOG_PATH = "/var/log/typegraph-bootstrap.log";
-export const BOOTSTRAP_COMPLETE_SENTINEL = "/opt/typegraph-bootstrap-complete";
-export const BOOTSTRAP_FAILED_SENTINEL = "/opt/typegraph-bootstrap-failed";
-export const REPO_DIR = "/opt/typegraph";
-
 export function renderBootstrapScript(options: BootstrapOptions): string {
   const datasetStep =
     options.profile === "smoke" ?
@@ -75,70 +75,14 @@ cd "${REPO_DIR}"
 `.trim();
       })();
 
-  return `#!/bin/bash
-set -euxo pipefail
-exec > >(tee -a ${BOOTSTRAP_LOG_PATH}) 2>&1
-export HOME=/root
-export DEBIAN_FRONTEND=noninteractive
+  const prelude = renderBootstrapPrelude({
+    deadManSwitchMinutes: options.deadManSwitchMinutes,
+    sshPublicKey: options.sshPublicKey,
+    extraAptPackages: ["zstd"],
+    installDocker: true,
+  });
 
-trap 'echo "bootstrap failed at $(date -u --iso-8601=seconds)" > ${BOOTSTRAP_FAILED_SENTINEL}; tail -n 200 ${BOOTSTRAP_LOG_PATH} >> ${BOOTSTRAP_FAILED_SENTINEL} || true' ERR
-
-# Dead-man's switch: self-terminate if the benchmark is never collected.
-shutdown -h +${options.deadManSwitchMinutes} || true
-${
-  options.sshPublicKey === undefined ?
-    "# No SSH key supplied — SSM remains the only control channel."
-  : `# Diagnostic-only SSH fallback (opt-in, see BootstrapOptions.sshPublicKey).
-install -d -m 0700 -o ubuntu -g ubuntu /home/ubuntu/.ssh
-echo "${options.sshPublicKey}" >> /home/ubuntu/.ssh/authorized_keys
-chmod 0600 /home/ubuntu/.ssh/authorized_keys
-chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys`
-}
-
-# Fresh Ubuntu cloud images run apt-daily.timer / apt-daily-upgrade.timer /
-# unattended-upgrades.service within the first minute or two after boot,
-# which races this script for the dpkg lock and reliably fails an apt-get
-# call ("Could not get lock /var/lib/dpkg/lock-frontend") if it loses.
-# Disable the periodic offenders so nothing new grabs the lock, then wait
-# out whichever one might already be mid-run before touching apt ourselves.
-systemctl stop apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service 2>/dev/null || true
-systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
-flock -w 300 /var/lib/dpkg/lock-frontend true
-
-apt-get update -y
-apt-get install -y ca-certificates curl gnupg git zstd
-
-# A real SF10 run against instance i-021c312ac05b1720a (2026-07-09) went
-# network-unreachable ~3h in — AWS's own instance-reachability check and the
-# SSM agent both went dark while CPU utilization stayed rock steady, with no
-# kernel panic or OOM-kill in the console log — while Docker was running
-# heavy, high-churn connection traffic across 4 benchmarked engines at 10x
-# scale. That signature matches conntrack-table exhaustion degrading the
-# whole instance's networking, a well-documented failure mode for exactly
-# this kind of workload. Raise the ceiling before Docker's first iptables
-# NAT rule loads the module with the (much smaller) default hashsize.
-mkdir -p /etc/modprobe.d
-echo "options nf_conntrack hashsize=131072" > /etc/modprobe.d/nf_conntrack.conf
-modprobe nf_conntrack
-mkdir -p /etc/sysctl.d
-echo "net.netfilter.nf_conntrack_max = 1048576" > /etc/sysctl.d/99-typegraph-bench-conntrack.conf
-sysctl --system
-
-# Docker Engine (official apt repo).
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-echo \\
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \\
-  > /etc/apt/sources.list.d/docker.list
-apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-systemctl enable --now docker
-
-# Node 24 (matches this repo's CI and root package.json's pinned toolchain).
-curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-apt-get install -y nodejs
-corepack enable
+  return `${prelude}
 
 git clone --no-checkout "${options.repoUrl}" "${REPO_DIR}"
 cd "${REPO_DIR}"

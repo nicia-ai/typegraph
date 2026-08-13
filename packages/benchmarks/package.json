@@ -65,6 +65,8 @@
     "prebench:snb:verify-is2-tie-break": "pnpm --filter @nicia-ai/typegraph build",
     "bench:snb:verify-is2-tie-break": "tsx src/real/verify-is2-tie-break.ts",
     "bench:regression": "tsx src/regression-bench.ts",
+    "bench:regression:ec2": "tsx src/regression-ec2.ts launch",
+    "bench:regression:ec2:collect": "tsx src/regression-ec2.ts collect",
     "typecheck": "tsc --noEmit --skipLibCheck",
     "test": "vitest run",
     "test:unit": "vitest run"

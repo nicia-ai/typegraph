@@ -2,12 +2,33 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { writeJsonFile } from "../real/harness/process";
+import { type LaneBackend } from "./lanes";
 import { type BaselineId } from "./policy";
 import {
   type LaneComparison,
   type MeasurementComparison,
   type RegressionReport,
 } from "./compare";
+
+/**
+ * The single owner of the per-backend report layout decision: a
+ * multi-backend run (`backendCount > 1`) nests each backend's report under
+ * its own subdirectory named for the backend; a single-backend run writes
+ * directly to `outputDir`. Shared by the local writer
+ * (`regression-bench.ts`'s `main`) and the EC2 remote-artifact fetcher
+ * (`regression/ec2/remote-scripts.ts`'s `remoteReportPaths`) so neither can
+ * independently re-derive — and drift from — this layout.
+ */
+export function resolveBackendReportDir(
+  outputDir: string,
+  backendCount: number,
+  backend: LaneBackend | undefined,
+): string {
+  if (backendCount > 1) {
+    return path.join(outputDir, backend ?? "unknown");
+  }
+  return outputDir;
+}
 
 function formatOptionalMs(value: number | undefined): string {
   return value === undefined ? "—" : value.toFixed(3);
@@ -179,5 +200,29 @@ export async function writeRegressionReport(
   const jsonPath = path.join(outputDir, "report.json");
   await writeFile(markdownPath, renderMarkdownReport(report), "utf-8");
   await writeJsonFile(jsonPath, toJsonReport(report));
+  return { markdownPath, jsonPath };
+}
+
+/**
+ * Writes one backend's already-rendered report text (fetched verbatim from
+ * a remote run rather than assembled from a `RegressionReport`) to its
+ * resolved per-backend directory. Routes through `resolveBackendReportDir`
+ * so the EC2 collector's local write can never independently re-derive —
+ * and drift from — the same layout decision `writeRegressionReport` and
+ * `remoteReportPaths` use.
+ */
+export async function writeFetchedBackendReport(
+  outputDir: string,
+  backendCount: number,
+  backend: LaneBackend,
+  markdown: string,
+  json: string,
+): Promise<RegressionReportPaths> {
+  const backendDir = resolveBackendReportDir(outputDir, backendCount, backend);
+  await mkdir(backendDir, { recursive: true });
+  const markdownPath = path.join(backendDir, "report.md");
+  const jsonPath = path.join(backendDir, "report.json");
+  await writeFile(markdownPath, markdown, "utf-8");
+  await writeFile(jsonPath, json, "utf-8");
   return { markdownPath, jsonPath };
 }

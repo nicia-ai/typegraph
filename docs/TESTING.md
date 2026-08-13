@@ -514,6 +514,7 @@ only SQLite unit/property tests). The jobs are:
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
 | **Size budget** | `test:size` — per-entrypoint bundle budgets, single-symbol tree-shakeability probes, dist artifact totals |
+| **Perf lane advisory** *(advisory)* | Prints whether this PR's size or label makes the EC2 timing lane mandatory by policy — informational only, never a blocking gate |
 | **Build artifacts** | `turbo run build` in parallel with the test jobs |
 | **Build** | Final required gate that succeeds only after the build and every test job above pass |
 
@@ -525,6 +526,41 @@ To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
 typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
 change touching backend, store, or collection code. Coverage thresholds are
 enforced by `pnpm test:coverage`.
+
+### Performance timing lane (EC2)
+
+The deterministic checks that guard performance in every PR are the
+`EXPLAIN`-shape assertions (`packages/typegraph/tests/perf/explain/`) and the
+size budget above — both run in normal CI, on every PR, with no timing
+involved. Wall-clock timing measurement is a separate lane
+(`.github/workflows/perf-timing-lane.yml`) that never runs in the shared CI
+runners: it drives `bench:regression` on a dedicated, ephemeral EC2 instance
+over SSM (see
+[`packages/benchmarks/docs/ec2-regression-lane.md`](../packages/benchmarks/docs/ec2-regression-lane.md)),
+because a shared, contended CI runner cannot produce trustworthy timing
+numbers.
+
+The timing lane runs on the `perf-lane` PR label, on `workflow_dispatch`, and
+weekly on a schedule (Monday 07:17 UTC) — never as a required check on an
+ordinary PR. It is **mandatory by policy, not by gate**: a PR labeled
+`major-feature` or `refactor`, or one that changes more than 200 lines under
+`packages/typegraph/src/{query,store,backend}`, is expected to also carry the
+`perf-lane` label before merge, and the `Perf lane advisory` CI job
+(table above) states that verdict on every PR so a reviewer doesn't have to
+compute it by hand — but nothing in CI enforces the label; this phase, that
+enforcement is a review convention, not automation. A fork PR cannot trigger
+the timing lane via the label (it has no access to this repository's AWS
+OIDC role); use `workflow_dispatch` with an explicit `ref` instead.
+
+The 200-line threshold is a large-diff backstop (see
+`.github/scripts/perf-lane-advisory.sh`'s comment for the commit-history scan
+behind the number), not a claim that every smaller query/store/backend diff
+is risk-free — this repository's history has genuine capability additions
+under 200 lines (some under 100). Catching those depends on the author
+applying `major-feature`/`refactor`/`perf-lane` themselves; a reviewer who
+sees an unlabeled but behaviorally significant query/store/backend diff
+under the threshold should still ask for the label rather than trusting the
+line count alone.
 
 ### Size budget window
 

@@ -25,8 +25,15 @@ export class RegressionCliUsageError extends Error {
   }
 }
 
-/** Reads `--name=value` or `--name value` identically. */
-function readValue(argv: readonly string[], name: string): string | undefined {
+/**
+ * Reads `--name=value` or `--name value` identically. Exported so the EC2
+ * regression CLI (`regression/ec2/cli.ts`) reads its own argv through this
+ * same reader rather than a second, differently spelled copy.
+ */
+export function readValue(
+  argv: readonly string[],
+  name: string,
+): string | undefined {
   const inlinePrefix = `--${name}=`;
   const inlineIndex = argv.findIndex((argument) =>
     argument.startsWith(inlinePrefix),
@@ -42,11 +49,17 @@ function readValue(argv: readonly string[], name: string): string | undefined {
   return undefined;
 }
 
-function readFlag(argv: readonly string[], name: string): boolean {
+/** Reads a bare `--name` boolean flag. Exported for the same reason as `readValue`. */
+export function readFlag(argv: readonly string[], name: string): boolean {
   return argv.includes(`--${name}`);
 }
 
-function parseBackends(raw: string | undefined): readonly LaneBackend[] {
+/**
+ * Parses `--backend`'s value into the concrete `LaneBackend`s it selects.
+ * Exported so the EC2 regression CLI reuses this exact decision instead of
+ * re-deriving it.
+ */
+export function parseBackends(raw: string | undefined): readonly LaneBackend[] {
   if (raw === undefined) return ["sqlite"];
   if (raw === "both") return ["sqlite", "postgres"];
   if (raw === "sqlite" || raw === "postgres") return [raw];
