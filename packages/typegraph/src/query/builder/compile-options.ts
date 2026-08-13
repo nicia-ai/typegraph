@@ -3,10 +3,14 @@
  * aggregate query, and unionable query builders. Keeps one source of
  * truth for which config fields are propagated to the compiler.
  */
+import { resolveRecursiveTraversal } from "../../backend/capabilities/recursive-traversal";
 import { resolveEmbeddingFields } from "../../core/embedding";
 import { resolveDeclaredFulltextLanguage } from "../../core/searchable";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { type CompileQueryOptions } from "../compiler/index";
+import {
+  type CompileQueryOptions,
+  COMPILER_DEFAULT_RECURSIVE_TRAVERSAL,
+} from "../compiler/index";
 import {
   type VectorSlotDescriptor,
   vectorSlotKey,
@@ -25,6 +29,10 @@ export function buildCompileOptions(
     dialect: config.dialect ?? "sqlite",
     schema: config.schema,
     windowFunctions: config.backend?.capabilities.windowFunctions ?? true,
+    recursiveTraversal:
+      config.backend === undefined ?
+        COMPILER_DEFAULT_RECURSIVE_TRAVERSAL
+      : resolveRecursiveTraversal(config.backend.capabilities),
     identitySameIdAcrossKinds: config.identitySameIdAcrossKinds,
     ...(fulltextStrategy === undefined ?
       {}

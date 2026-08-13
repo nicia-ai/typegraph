@@ -79,6 +79,7 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
+import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -720,18 +721,20 @@ export function createPostgresBackend(
   // rebuild this backend cannot perform would be advertising a lie. The
   // HTTP-only drivers land on `rebuild: false` here because they cannot
   // hold a session across statements, so there is no fence to run under.
-  const capabilities: BackendCapabilities = {
-    ...declaredCapabilities,
-    contributions: {
-      supported: true,
-      probe: true,
-      rebuild: contributionRebuildSupported(
-        fulltextStrategy,
-        tables.fulltextTableName,
-        declaredCapabilities.transactions,
-      ),
+  const capabilities: BackendCapabilities = assertBundledCapabilityDeclarations(
+    {
+      ...declaredCapabilities,
+      contributions: {
+        supported: true,
+        probe: true,
+        rebuild: contributionRebuildSupported(
+          fulltextStrategy,
+          tables.fulltextTableName,
+          declaredCapabilities.transactions,
+        ),
+      },
     },
-  };
+  );
   const adapterOptions: PostgresExecutionAdapterOptions = {
     ...(options.prepareStatements === undefined ?
       {}

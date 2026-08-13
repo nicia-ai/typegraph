@@ -36,6 +36,7 @@ import {
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
   registerBulkUpsertRepeatedIdIntegrationTests,
+  registerCapabilityRefusalIntegrationTests,
   registerClaimCompensationIntegrationTests,
   registerClaimLookupPreferenceIntegrationTests,
   registerClaimOwnerIdentityIntegrationTests,
@@ -257,6 +258,7 @@ export function createIntegrationTestSuite<
     registerBulkFindEndpointIntegrationTests(context);
     registerBulkFindHeterogeneousIntegrationTests(context);
     registerBulkUpsertRepeatedIdIntegrationTests(context);
+    registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
     registerValidityEndClearingIntegrationTests(context);

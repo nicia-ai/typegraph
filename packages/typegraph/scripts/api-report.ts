@@ -41,6 +41,28 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * authoring entrypoint is intentionally absent: new entrypoints default to
  * zero debt. A changed symbol set fails verification even when its count is
  * unchanged, while API report diffs continue to show the declaration change.
+ *
+ * `recursiveTraversal` batch (WS5 B1): the six member-bearing entrypoints
+ * that never named `RecursiveTraversalVerdict` / `RecursiveTraversalCapability`
+ * directly (`./graph-merge`, `./interchange`, `./profiler`, `./provenance`,
+ * `./sqlite/local`, `./postgres/pglite`) each gained exactly those two as
+ * forgotten exports (+2 apiece) — the `RECURSIVE_TRAVERSAL_VERDICT` brand
+ * itself does NOT register as a forgotten export, matching the
+ * `RECORDED_INSTANT_BRAND` precedent in `etc/typegraph-backend.api.md`
+ * (present there, pre-existing, contributing zero debt): a `unique symbol`
+ * used only as a computed brand key never triggers API Extractor's
+ * ae-forgotten-export diagnostic. `.` gained nothing (both types are
+ * directly exported there). `./schema` and the five `./adapters/drizzle/*`
+ * entrypoints each gained exactly `RecursiveTraversalCapability` (+1 — they
+ * never see the verdict type). `./backend` is the one entry that moved for a
+ * DIFFERENT reason than the capability types: `recursiveTraversalUnsupportedError`
+ * declares `ConfigurationError` as its return type, which `./backend` does not
+ * otherwise export, so `ConfigurationError` and its own shape
+ * (`TypeGraphError`, `TypeGraphErrorOptions`, `ErrorCategory`) all became
+ * newly forgotten there (+4) — a real, unpredicted category, reported as a
+ * spec-vs-measurement conflict in the batch's implementation notes rather
+ * than silently exported around, since doing so would be exactly the
+ * "export machinery invented to avoid it" this ledger's discipline forbids.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -72,8 +94,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "8925d7e9ea87e5b66ce0945340ee4cfb4b3063b9cf46940fbaae8c9cef1c0951",
   },
   "./backend": {
-    count: 2,
-    sha256: "89302cd60cfda6fcf575acc1d1f273e3a9624d760dcc8afa1e763ff8bc9a3795",
+    count: 6,
+    sha256: "0b71777c74cd023bfa1dd45db520e1fef142414de2099125a72f56f7515b491f",
   },
   "./core": {
     count: 72,

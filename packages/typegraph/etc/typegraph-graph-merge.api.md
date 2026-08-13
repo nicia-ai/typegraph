@@ -116,6 +116,7 @@ type BackendCapabilities = Readonly<{
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
+    recursiveTraversal?: RecursiveTraversalCapability | undefined;
 }>;
 
 // @public (undocumented)
@@ -505,6 +506,7 @@ type CompileQueryOptions = Readonly<{
     recordedReadBinding?: RecordedReadBinding | undefined;
     readInstant?: ReadInstantMode | undefined;
     identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
+    recursiveTraversal?: RecursiveTraversalVerdict | undefined;
 }>;
 
 // @public
@@ -4218,6 +4220,9 @@ type RecordKindRemovalParams = Readonly<{
 }>;
 
 // @public
+const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;
+
+// @public
 type RecursiveAlias<T extends "depth" | "path"> = Readonly<{
     type: T;
 }>;
@@ -4232,6 +4237,12 @@ type RecursiveAliasValue<RA> = RA extends RecursiveAlias<"depth"> ? number : RA 
 type RecursiveCyclePolicy = "prevent" | "allow";
 
 // @public
+type RecursiveTraversalCapability = Readonly<{
+    supported: boolean;
+    reason?: string;
+}>;
+
+// @public
 type RecursiveTraversalOptions = Readonly<{
     minHops?: number;
     maxHops?: number;
@@ -4239,6 +4250,16 @@ type RecursiveTraversalOptions = Readonly<{
     path?: boolean | string;
     depth?: boolean | string;
 }>;
+
+// @public
+type RecursiveTraversalVerdict = Readonly<{
+    [RECURSIVE_TRAVERSAL_VERDICT]: true;
+} & ({
+    supported: true;
+} | {
+    supported: false;
+    reason: string;
+})>;
 
 // @public
 type ReembedFunction = (nodes: readonly Node[]) => Promise<ReadonlyMap<string, readonly number[]>> | ReadonlyMap<string, readonly number[]>;

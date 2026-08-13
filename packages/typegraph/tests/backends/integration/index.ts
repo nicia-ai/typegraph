@@ -5,6 +5,7 @@ export { registerBulkFindByIndexIntegrationTests } from "./bulk-find-by-index";
 export { registerBulkFindEndpointIntegrationTests } from "./bulk-find-endpoints";
 export { registerBulkFindHeterogeneousIntegrationTests } from "./bulk-find-heterogeneous";
 export { registerBulkUpsertRepeatedIdIntegrationTests } from "./bulk-upsert-repeated-ids";
+export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals";
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";

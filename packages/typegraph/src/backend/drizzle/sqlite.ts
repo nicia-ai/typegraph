@@ -57,6 +57,7 @@ import {
   isMissingTableError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
+import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
@@ -1329,18 +1330,20 @@ export function createSqliteBackend(
   // (durable markers, a catalog probe, a strategy that declares teardown
   // DDL, a transactional schema fence), and a caller who declared a
   // rebuild this backend cannot perform would be advertising a lie.
-  const capabilities: BackendCapabilities = {
-    ...declaredCapabilities,
-    contributions: {
-      supported: true,
-      probe: true,
-      rebuild: contributionRebuildSupported(
-        fulltextStrategy,
-        tables.fulltextTableName,
-        declaredCapabilities.transactions,
-      ),
+  const capabilities: BackendCapabilities = assertBundledCapabilityDeclarations(
+    {
+      ...declaredCapabilities,
+      contributions: {
+        supported: true,
+        probe: true,
+        rebuild: contributionRebuildSupported(
+          fulltextStrategy,
+          tables.fulltextTableName,
+          declaredCapabilities.transactions,
+        ),
+      },
     },
-  };
+  );
 
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),

@@ -23,10 +23,18 @@ export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower",
 export function assertFiniteEmbedding(embedding: readonly number[], name: string): void;
 
 // @public
+export function assertRecursiveTraversal(verdict: RecursiveTraversalVerdict, operation: string): asserts verdict is Extract<RecursiveTraversalVerdict, {
+    supported: true;
+}>;
+
+// @public
 export function assertVectorMinScore(minScore: number, metric: VectorMetric, label?: string): void;
 
 // @public
 export function assertVectorSearchLimit(limit: number): void;
+
+// @public
+export function assumeRecursiveTraversalSupported(reason: string): RecursiveTraversalVerdict;
 
 // @public
 export type BackendCapabilities = Readonly<{
@@ -40,6 +48,7 @@ export type BackendCapabilities = Readonly<{
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
+    recursiveTraversal?: RecursiveTraversalCapability | undefined;
 }>;
 
 // @public (undocumented)
@@ -157,6 +166,14 @@ export type CompiledStatementSql = IntentSql<"statement">;
 
 // @public (undocumented)
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
+
+// @public
+class ConfigurationError extends TypeGraphError {
+    constructor(message: string, details?: Record<string, unknown>, options?: {
+        cause?: unknown;
+        suggestion?: string;
+    });
+}
 
 // @public
 export type ConstraintFenceViolationRows = Readonly<{
@@ -550,6 +567,9 @@ export type EdgeRow = Readonly<{
 
 // @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
+
+// @public
+type ErrorCategory = "user" | "constraint" | "system";
 
 // @public
 export type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
@@ -1507,6 +1527,30 @@ export type RecordKindRemovalParams = Readonly<{
 }>;
 
 // @public
+const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;
+
+// @public
+export type RecursiveTraversalCapability = Readonly<{
+    supported: boolean;
+    reason?: string;
+}>;
+
+// @public
+export function recursiveTraversalUnsupportedError(verdict: Extract<RecursiveTraversalVerdict, {
+    supported: false;
+}>, operation: string): ConfigurationError;
+
+// @public
+export type RecursiveTraversalVerdict = Readonly<{
+    [RECURSIVE_TRAVERSAL_VERDICT]: true;
+} & ({
+    supported: true;
+} | {
+    supported: false;
+    reason: string;
+})>;
+
+// @public
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // @public
@@ -1581,6 +1625,9 @@ export type ResolvedSqlTableNames = Readonly<{
     uniques: string;
     edgeClaims: string;
 }>;
+
+// @public
+export function resolveRecursiveTraversal(capabilities: BackendCapabilities): RecursiveTraversalVerdict;
 
 // @public
 export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
@@ -1865,6 +1912,25 @@ export type TrustedImportSession = Readonly<{
 
 // @public (undocumented)
 export const tsvectorStrategy: FulltextStrategy;
+
+// @public
+class TypeGraphError extends Error {
+    constructor(message: string, code: string, options: TypeGraphErrorOptions);
+    readonly category: ErrorCategory;
+    readonly code: string;
+    readonly details: Readonly<Record<string, unknown>>;
+    readonly suggestion?: string;
+    toLogString(): string;
+    toUserMessage(): string;
+}
+
+// @public
+type TypeGraphErrorOptions = Readonly<{
+    details?: Record<string, unknown>;
+    category: ErrorCategory;
+    suggestion?: string;
+    cause?: unknown;
+}>;
 
 // @public (undocumented)
 export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;

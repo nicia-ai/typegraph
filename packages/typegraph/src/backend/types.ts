@@ -275,6 +275,10 @@ import { type SqlDialect } from "../query/dialect/types";
 
 export type { SqlDialect } from "../query/dialect/types";
 
+import { type RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
+
+export type { RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
+
 /**
  * Backend capabilities that vary by dialect.
  */
@@ -340,6 +344,18 @@ export type BackendCapabilities = Readonly<{
    * equivalent to every member `false`).
    */
   contributions?: ContributionCapabilities | undefined;
+  /**
+   * Whether this engine can compute a bounded transitive closure of a
+   * relation in one round trip (a recursive CTE, or a graph-native
+   * expansion operator).
+   *
+   * Absent means SUPPORTED. Every engine TypeGraph ships supports it, and
+   * every custom backend on this release already has every recursion site
+   * run against it unconditionally: making absence mean `false` would
+   * refuse traversals that work today. See
+   * {@link RecursiveTraversalCapability} for the full contract.
+   */
+  recursiveTraversal?: RecursiveTraversalCapability | undefined;
 }>;
 
 /** Keeps session-scoped analytics honest when a required SQL feature is absent. */
@@ -3840,6 +3856,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: false }),
+  recursiveTraversal: Object.freeze({ supported: true }),
 });
 
 /**
@@ -3855,4 +3872,5 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   constraintClaims: true,
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
+  recursiveTraversal: Object.freeze({ supported: true }),
 });

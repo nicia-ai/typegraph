@@ -71,6 +71,13 @@ export type {
   SqlIntent,
 } from "../query/sql-intent";
 export { resolveStampedValidityLowerBound } from "../utils/date";
+export type { RecursiveTraversalVerdict } from "./capabilities/recursive-traversal";
+export {
+  assertRecursiveTraversal,
+  assumeRecursiveTraversalSupported,
+  recursiveTraversalUnsupportedError,
+  resolveRecursiveTraversal,
+} from "./capabilities/recursive-traversal";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,
@@ -197,6 +204,7 @@ export type {
   RecordedTableNames,
   RecordIndexMaterializationParams,
   RecordKindRemovalParams,
+  RecursiveTraversalCapability,
   ReleaseIndexMaterializationClaimParams,
   RemovalMaterializationBackend,
   RowProps,
