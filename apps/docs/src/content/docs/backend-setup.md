@@ -920,6 +920,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
+| `recursiveTraversal?.{supported,reason}`                                   | Whether the engine can compute a bounded transitive closure of a relation in one round trip — a recursive CTE, or a graph-native expansion operator. **Absent means supported** |
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
@@ -939,6 +940,32 @@ a backend without that promise is refused with `ConfigurationError` code
 does not depend on whether the target row is already open. Omission still means
 preserve; custom backends that do not support clearing remain compatible with
 all writes that omit the option.
+
+### Recursive traversal capability
+
+Both bundled backends declare `capabilities.recursiveTraversal: { supported: true }`. **Absent
+means supported** — mirroring `returning`, not `constraintClaims`: every existing custom backend
+already runs the six recursive-CTE emission sites unconditionally, so absence meaning unsupported
+would refuse traversals that work today.
+
+```typescript
+const capabilities: BackendCapabilities = {
+  recursiveTraversal: { supported: false, reason: "engine has no WITH RECURSIVE / equivalent" },
+};
+```
+
+A backend that genuinely lacks the primitive declares `{ supported: false, reason }`. A factory
+refuses a contradictory declaration — `supported: false` with no `reason`, or `supported: true`
+with a dangling `reason` — with `ConfigurationError` details code `CAPABILITY_DECLARATION_CONTRADICTION`.
+
+Five operations refuse when unsupported: variable-length (`traverse`) queries, `store.subgraph()`,
+historical identity class reads, identity-expanded historical queries, and the identity
+window-ledger read — each throwing `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`
+with `details.operation` naming the site and `details.reason` echoing the declaration.
+
+`shortestPath` is the one exception: on a backend with temporary statements but no recursion, it
+**falls back** to a per-hop predecessor walk instead of refusing, issuing `pathLength + 1`
+extraction statements for the path a recursive CTE would have returned in one round trip.
 
 ### Declared constraints require `transactions`
 
@@ -1064,6 +1091,7 @@ TypeGraph choosing separate query semantics per backend:
 | Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
+| Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `shortestPath` degrades to a predecessor walk instead — see above |
 
 Identity support also has a **driver** dimension inside each dialect:
 
