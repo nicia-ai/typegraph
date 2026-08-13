@@ -152,6 +152,7 @@ regression."
 on a dedicated, ephemeral EC2 instance instead of locally — the runner behind
 the scheduled/on-demand `Perf Timing Lane` GitHub Actions workflow. See
 [`docs/ec2-regression-lane.md`](ec2-regression-lane.md).
+
 ## Seeded-regression proof
 
 `pnpm bench:regression:proof -- --seed=<id>` (or `pnpm --filter
