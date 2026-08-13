@@ -83,6 +83,13 @@ export type RunInstanceOptions = Readonly<{
    * default control channel and doesn't need this.
    */
   associatePublicIp: boolean;
+  /**
+   * The `Lane` tag value distinguishing which runner launched this instance
+   * (e.g. `"snb"`, `"regression"`). Every caller states its own lane
+   * explicitly rather than inheriting a hardcoded default, so a billing or
+   * inventory query can always attribute an instance to its runner.
+   */
+  lane: string;
 }>;
 
 /** Launches one instance and returns its id. Caller waits for `running` separately. */
@@ -97,7 +104,7 @@ export async function runInstance(
     `ResourceType=instance,Tags=[` +
       `{Key=Name,Value=${input.name}},` +
       `{Key=Project,Value=TypeGraphBenchmark},` +
-      `{Key=Lane,Value=snb},` +
+      `{Key=Lane,Value=${input.lane}},` +
       `{Key=RunId,Value=${input.runId}}` +
       `]`,
   ];
