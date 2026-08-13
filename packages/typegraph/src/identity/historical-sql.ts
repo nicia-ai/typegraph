@@ -1,4 +1,8 @@
 import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+} from "../backend/capabilities/recursive-traversal";
+import {
   optionalRecordedInstantParts,
   type ReadCoordinate,
   type RecordedInstantParts,
@@ -173,6 +177,11 @@ export function identityAssertionSnapshotSource(
 /**
  * Builds the shared recursive CTE body used to reconstruct an identity class.
  * `seedSource` must select `(seed_kind, seed_id)` columns.
+ *
+ * The assert below names this call site "historical identity class read"
+ * (site C). {@link historicalIdentityPeerClassQuery} (site D) asserts with its
+ * own label *before* calling this builder, so on the D path this assert is
+ * unreachable — the D-labeled refusal always fires first.
  */
 export function historicalIdentityReconstructionCtes(
   input: Readonly<{
@@ -181,8 +190,13 @@ export function historicalIdentityReconstructionCtes(
     coordinate: HistoricalIdentitySqlCoordinate;
     seedSource: SqlFragment;
     sameIdAcrossKinds: "fold" | "ignore";
+    recursiveTraversal: RecursiveTraversalVerdict;
   }>,
 ): SqlFragment {
+  assertRecursiveTraversal(
+    input.recursiveTraversal,
+    "historical identity class read",
+  );
   const nodes = identityNodeSnapshotSource(
     input.schema,
     input.graphId,
@@ -280,8 +294,13 @@ export function historicalIdentityPeerClassQuery(
     graphId: string;
     coordinate: HistoricalIdentitySqlCoordinate;
     sameIdAcrossKinds: "fold" | "ignore";
+    recursiveTraversal: RecursiveTraversalVerdict;
   }>,
 ): SqlFragment {
+  assertRecursiveTraversal(
+    input.recursiveTraversal,
+    "historical identity expansion",
+  );
   const reconstruction = historicalIdentityReconstructionCtes({
     ...input,
     seedSource: sql`SELECT DISTINCT a_kind, a_id FROM identity_edges`,

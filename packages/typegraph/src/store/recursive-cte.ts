@@ -1,3 +1,7 @@
+import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+} from "../backend/capabilities/recursive-traversal";
 import { type RecordedInstant } from "../core/temporal";
 import { type TemporalMode } from "../core/types";
 import { type RecursiveCyclePolicy } from "../query/ast";
@@ -41,11 +45,16 @@ type BuildReachableCteOptions = Readonly<{
    */
   schema: SqlSchema;
   recordedReadBinding?: RecordedReadBinding;
+  /** Resolved verdict for the engine this CTE will run on. */
+  recursiveTraversal: RecursiveTraversalVerdict;
+  /** Operation label echoed in the refusal's `details.operation`. */
+  operation: string;
 }>;
 
 export function buildReachableCte(
   options: BuildReachableCteOptions,
 ): SqlFragment {
+  assertRecursiveTraversal(options.recursiveTraversal, options.operation);
   const trackPath = options.cyclePolicy === "prevent" || options.includePath;
   const edgeKindFilter = compileKindFilter(
     sql.raw("e.kind"),

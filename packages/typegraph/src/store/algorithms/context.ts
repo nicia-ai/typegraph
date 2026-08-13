@@ -81,9 +81,12 @@ export function pickTemporalOptions(
 
 /**
  * Resolves per-call temporal overrides against the graph's default mode into
- * a plain `{ temporalMode, asOf? }` object. Shared by callers that forward
- * the pair to `buildReachableCte`. An `asOf` is rejected unless the mode is
- * `"asOf"` (via {@link resolveReadCoordinate}), matching every other read path.
+ * a plain `{ temporalMode, asOf? }` object. Consumed by the working-table
+ * iteration (`iterative-graph-operation.ts:848`), not `buildReachableCte` —
+ * `reachable`/`canReach`/`neighbors`/`shortestPath` route through the
+ * iterative working-table path and emit no recursive CTE. An `asOf` is
+ * rejected unless the mode is `"asOf"` (via {@link resolveReadCoordinate}),
+ * matching every other read path.
  */
 export function resolveTemporalOptions(
   ctx: AlgorithmContext,
