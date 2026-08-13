@@ -28,8 +28,11 @@
  *
  * - **It sees LITERALS.** `scanForRecursionEmissions` only finds the phrase
  *   inside a string or template-literal token. A phrase assembled by string
- *   concatenation (`"WITH " + "RECURSIVE"`) or produced by a helper function
- *   is invisible to it.
+ *   concatenation (`"WITH " + "RECURSIVE"`), produced by a helper function,
+ *   or split across a template-literal interpolation (`` sql`WITH ${x}
+ *   RECURSIVE` ``, where `WITH` and `RECURSIVE` land in separate
+ *   `TemplateHead`/`TemplateMiddle`/`TemplateTail` tokens that are each
+ *   scanned on their own) is invisible to it.
  * - **Two identical trimmed lines in one file share a key.** `(file, line)`
  *   is the key, so a file holding the exact same trimmed source line twice
  *   collapses both occurrences to one key. `diffAgainstInventory` compares
@@ -46,17 +49,26 @@
  *   calls the real function but is not a bare identifier named
  *   `assumeRecursiveTraversalSupported`, so `scanForAssumeCalls` does not see
  *   it. Renaming on import is the one bypass this scanner cannot close.
- * - **The phrase match normalizes whitespace and case, not spelling.**
- *   `RECURSION_PHRASE_PATTERN` matches `WITH`/`RECURSIVE` separated by any
- *   run of whitespace (a line break included) in any case, so a hand-written
- *   `"with\n  recursive"` inside a tagged template — the shape a line-broken
- *   multi-line SQL literal is most likely to take, since prettier does not
- *   reformat template contents — is found, not silently invisible in both
- *   the `undeclared` and `stale` directions the way a plain-text match would
- *   be. It still does not normalize the *key*: the matched site's `line` is
- *   the literal's own trimmed source text, case and spacing preserved, so a
- *   real site written as `with recursive` must be declared in
- *   `EMISSION_SITES` with that exact casing, not the canonical one.
+ * - **The phrase match normalizes whitespace, `\n`/`\r`/`\t` escapes, and
+ *   case — not arbitrary spelling.** `RECURSION_PHRASE_PATTERN` matches
+ *   `WITH`/`RECURSIVE` separated by any run of whitespace (an actual line
+ *   break included) OR a literal backslash-`n`/`r`/`t` escape sequence as it
+ *   appears in source text, in any case. So both a hand-written `with\n
+ *   recursive` containing a real line break, and the escape-sequence
+ *   spelling `` `WITH\n  RECURSIVE` `` (the two characters `\` and `n`,
+ *   typed literally, not a real newline — the shape a hand-rolled multi-line
+ *   SQL literal is just as likely to use, since prettier does not reformat
+ *   template contents and does not rewrite one spelling into the other) are
+ *   found, not silently invisible in both the `undeclared` and `stale`
+ *   directions the way a plain-text match would be. It still does not
+ *   normalize the *key*: the matched site's `line` is the literal's own
+ *   trimmed source text, case and spacing preserved, so a real site written
+ *   as `with recursive` must be declared in `EMISSION_SITES` with that exact
+ *   casing, not the canonical one. **Residual bypass:** an exotic escape
+ *   spelling the same control character differently (`\x0A`, `\u000A`,
+ *   `\u{a}`) is still invisible in both directions, because only `\n`,
+ *   `\r`, and `\t` are recognized — closing every escape spelling of every
+ *   whitespace character is a larger change than this ratchet's scope.
  * - **`scanForAssumeCalls` counts CALL expressions only.**
  *   `COMPILER_DEFAULT_RECURSIVE_TRAVERSAL` (`query/compiler/index.ts`) is a
  *   pre-built verdict constructed from the sole `assumeRecursiveTraversalSupported`
@@ -99,14 +111,20 @@ import { describe, expect, it } from "vitest";
 const RECURSION_PHRASE = "WITH RECURSIVE";
 /**
  * Matches `WITH` and `RECURSIVE` separated by any run of whitespace
- * (including a line break), in any case — a same-case single-space
- * `String.prototype.indexOf` would miss a hand-written
- * `"with\n  recursive"` inside a tagged template in BOTH ratchet
- * directions (no `undeclared` row because the phrase never matches, and no
- * `stale` row because the six declared sites are unaffected). See the
- * "Honest statement of its limits" bullet above.
+ * (an actual line break included) OR a literal `\n`/`\r`/`\t` escape
+ * sequence as it appears in source text (two characters — backslash then
+ * the letter — not the control character it would evaluate to), in any
+ * case. A same-case single-space `String.prototype.indexOf` would miss a
+ * hand-written `with\n  recursive` (an actual line break) inside a tagged
+ * template in BOTH ratchet directions (no `undeclared` row because the
+ * phrase never matches, and no `stale` row because the six declared sites
+ * are unaffected); the `\n`/`\r`/`\t` alternation closes the same gap for
+ * the escape-sequence spelling of the same shape (`` `WITH\n  RECURSIVE` ``
+ * written literally, not a real newline), which a whitespace-only pattern
+ * still misses because a backslash is not `\s`. See the "Honest statement
+ * of its limits" bullet above for what still bypasses this.
  */
-const RECURSION_PHRASE_PATTERN = /WITH\s+RECURSIVE/gi;
+const RECURSION_PHRASE_PATTERN = /WITH(?:\s|\\[nrt])+RECURSIVE/gi;
 const ASSUME_CONSTRUCTOR = "assumeRecursiveTraversalSupported";
 
 const SOURCE_ROOT = path.resolve(
@@ -517,13 +535,17 @@ describe("recursion inventory ratchet", () => {
     ).toEqual([]);
   });
 
-  it("finds a case- and whitespace-variant phrase a same-case single-space match would miss", () => {
+  it("finds a case-, whitespace-, and escape-sequence-variant phrase a same-case single-space match would miss", () => {
     // A same-case, exact-single-space `String.indexOf` (the defect this
-    // test guards against) matches none of these three lines, so a new
+    // test guards against) matches none of these four lines, so a new
     // seventh emission site written in any of these shapes would be
     // invisible in BOTH ratchet directions: no `undeclared` row (the
     // phrase never matches) and no `stale` row (the six declared sites are
-    // unaffected).
+    // unaffected). The fourth shape — `\n` typed literally as two source
+    // characters (backslash, then `n`), never a real line break — is the
+    // escape-sequence bypass the checkpoint measured as still invisible
+    // even after the whitespace/case widening; `RECURSION_PHRASE_PATTERN`'s
+    // `\\[nrt]` alternation is what catches it.
     const fixture = [
       "const lowercase = sql`with recursive scratch AS (SELECT 1)`;",
       "",
@@ -533,6 +555,8 @@ describe("recursion inventory ratchet", () => {
       "`;",
       "",
       "const mixedCaseExtraSpace = sql`With   Recursive scratch AS (SELECT 1)`;",
+      "",
+      "const escapedNewline = sql`WITH\\n  RECURSIVE scratch AS (SELECT 1)`;",
     ].join("\n");
 
     const found = scanForRecursionEmissions("fixture.ts", fixture);
@@ -543,6 +567,7 @@ describe("recursion inventory ratchet", () => {
       "1:const lowercase = sql`with recursive scratch AS (SELECT 1)`;",
       "4:WITH",
       "8:const mixedCaseExtraSpace = sql`With   Recursive scratch AS (SELECT 1)`;",
+      "10:const escapedNewline = sql`WITH\\n  RECURSIVE scratch AS (SELECT 1)`;",
     ]);
   });
 
