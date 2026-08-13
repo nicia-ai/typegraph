@@ -28,8 +28,17 @@ export type SkipAxisInventory = Readonly<{
   guards: readonly MemberGuard[];
   /** 1-indexed lines where the `skipRawQueries` identifier occurs. */
   optionAxisSites: readonly number[];
-  /** Occurrences of the literal substring `capabilities.` in the file. */
-  capabilityReadCount: number;
+  /**
+   * 1-indexed lines where a capability MEMBER is read off
+   * `backend.capabilities` — a further property/element access chained off
+   * it (`.returning`, `?.returning`, `["returning"]`), or a destructuring
+   * binding (`const { returning } = backend.capabilities;`). AST-scanned
+   * (property access off `backend.capabilities`), not a `capabilities.`
+   * substring match: `backend.capabilities?.returning` and
+   * `const { returning } = backend.capabilities;` both read a capability
+   * member without ever spelling the literal substring `capabilities.`.
+   */
+  capabilityReadLines: readonly number[];
   /** 1-indexed lines of every `backend.transaction(` call. */
   unguardedTransactionCallLines: readonly number[];
 }>;
@@ -145,6 +154,41 @@ function scanOptionAxisSites(sourceFile: ts.SourceFile): number[] {
   return lines;
 }
 
+/** Whether `expression` is exactly `backend.capabilities`, optional-chained or not. */
+function isCapabilitiesExpression(expression: ts.Expression): boolean {
+  return (
+    ts.isPropertyAccessExpression(expression) &&
+    ts.isIdentifier(expression.expression) &&
+    expression.expression.text === "backend" &&
+    expression.name.text === "capabilities"
+  );
+}
+
+function scanCapabilityReadLines(sourceFile: ts.SourceFile): number[] {
+  const lines: number[] = [];
+
+  function visit(node: ts.Node): void {
+    if (
+      (ts.isPropertyAccessExpression(node) ||
+        ts.isElementAccessExpression(node)) &&
+      isCapabilitiesExpression(node.expression)
+    ) {
+      lines.push(lineOf(sourceFile, node));
+    } else if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer !== undefined &&
+      ts.isObjectBindingPattern(node.name) &&
+      isCapabilitiesExpression(node.initializer)
+    ) {
+      lines.push(lineOf(sourceFile, node));
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+
+  return lines;
+}
+
 function scanTransactionCallLines(sourceFile: ts.SourceFile): number[] {
   const lines: number[] = [];
 
@@ -179,7 +223,7 @@ export function scanAdapterSuiteSkipAxes(): SkipAxisInventory {
   return {
     guards: scanMemberGuards(sourceFile),
     optionAxisSites: scanOptionAxisSites(sourceFile),
-    capabilityReadCount: (text.match(/capabilities\./g) ?? []).length,
+    capabilityReadLines: scanCapabilityReadLines(sourceFile),
     unguardedTransactionCallLines: scanTransactionCallLines(sourceFile),
   };
 }

@@ -164,6 +164,28 @@ const PACKAGE_ROOT = path.resolve(
   "..",
 );
 
+/**
+ * Resolves a {@link SIMULATED_SEVERANCE_STAGES} entry by name, throwing (and
+ * naming every valid stage) rather than degrading to baseline on an
+ * unrecognised name. Single owner for stage-name lookup: both the CLI's
+ * `--stage` flag and the test suite's stage lookups call this — an
+ * unrecognised name must fail loudly in both places, not just one.
+ */
+export function resolveSeveranceStage(name: string): SeveranceStage {
+  const stage = SIMULATED_SEVERANCE_STAGES.find(
+    (candidate) => candidate.name === name,
+  );
+  if (stage === undefined) {
+    const validNames = SIMULATED_SEVERANCE_STAGES.map(
+      (candidate) => candidate.name,
+    ).join(", ");
+    throw new Error(
+      `Unknown severance stage ${JSON.stringify(name)}. Valid stage names: ${validNames}.`,
+    );
+  }
+  return stage;
+}
+
 type ExportsEntry = Readonly<{
   types: string;
   import: string;
@@ -715,8 +737,9 @@ function runCli(): void {
   const severFlag = parseFlag(args, "sever");
   const severedModules =
     severFlag === undefined ?
-      (SIMULATED_SEVERANCE_STAGES.find((stage) => stage.name === stageName)
-        ?.severedModules ?? [])
+      stageName === undefined ?
+        []
+      : resolveSeveranceStage(stageName).severedModules
     : severFlag.split(",");
 
   const findings = scanSourceReachability({ severedModules });

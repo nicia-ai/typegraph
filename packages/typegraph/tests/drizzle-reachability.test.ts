@@ -22,6 +22,7 @@ import {
   type EntrypointClassification,
   PORTABILITY_EXEMPTIONS,
   type ReachabilityVerdict,
+  resolveSeveranceStage,
   scanDistReachability as scanDistributionReachability,
   scanSourceReachability,
   SIMULATED_SEVERANCE_STAGES,
@@ -187,14 +188,6 @@ const RECORDED_DIST_LOAD_VERDICTS: Readonly<
   "./adapters/drizzle/indexes": "dirty",
 };
 
-function stageNamed(name: string) {
-  const stage = SIMULATED_SEVERANCE_STAGES.find(
-    (candidate) => candidate.name === name,
-  );
-  if (stage === undefined) throw new Error(`No severance stage named ${name}`);
-  return stage;
-}
-
 function dirtyPortableEntrypointsAtStage(
   stage: (typeof SIMULATED_SEVERANCE_STAGES)[number],
 ): readonly string[] {
@@ -305,7 +298,7 @@ describe("drizzle reachability — source grain", () => {
   it.each(Object.entries(RECORDED_ROUTE_CHAINS))(
     "names the shortest chain for severance route %s",
     (_route, witness) => {
-      const stage = stageNamed(witness.stage);
+      const stage = resolveSeveranceStage(witness.stage);
       const findings = scanSourceReachability({
         severedModules: stage.severedModules,
       });
@@ -330,9 +323,55 @@ describe("drizzle reachability — source grain", () => {
   });
 
   it("names the five entrypoints still dirty at stage axis+migrate", () => {
-    const stage = stageNamed("axis+migrate");
+    const stage = resolveSeveranceStage("axis+migrate");
     const dirty = dirtyPortableEntrypointsAtStage(stage).toSorted();
     expect(dirty).toEqual(RECORDED_AXIS_MIGRATE_DIRTY_ENTRYPOINTS);
+  });
+
+  it("throws naming the unknown stage and every valid stage name", () => {
+    expect(() => resolveSeveranceStage("axis+migrat")).toThrow(
+      'Unknown severance stage "axis+migrat". Valid stage names: baseline, axis+migrate, axis+migrate+removals.',
+    );
+  });
+
+  /**
+   * I2's exemption ledger check (§ design's I2 row: "the list ships empty,
+   * and the both-directions assertion makes an empty list assertable rather
+   * than merely absent"). Lives here, in the UNGATED source-grain describe,
+   * not inside the dist-grain `describe.skipIf` below: it consults only
+   * {@link scanSourceReachability}, so it has no `pnpm build` dependency and
+   * must run in every `pnpm test` invocation and in CI's coverage shard
+   * (`.github/workflows/ci.yml`'s `test-coverage` job never runs `pnpm
+   * build`), not only when `dist/` happens to be present locally.
+   *
+   * Checked at source grain rather than dist grain because I3's containment
+   * property (`design-ws8-port-isolation.md` §I3: "the measured dist-dirty
+   * set is entrywise a subset of the source-dirty set") makes the two
+   * equivalent for this purpose: dist just walks the tree-shaken remainder
+   * of the same module graph, so an entrypoint dirty at dist is always dirty
+   * at source too, and evaluating against source grain alone therefore
+   * covers the union of both grains' dirty sets — including the direction
+   * dist-only checking missed, where an entrypoint (`./profiler`,
+   * `./indexes`, `./graph-extension` today) is dirty at source but clean at
+   * dist.
+   */
+  it("an exemption names an entrypoint that is actually dirty", () => {
+    expect(PORTABILITY_EXEMPTIONS).toEqual([]);
+
+    const sourceFindings = scanSourceReachability().filter(
+      (finding) => finding.mode === "load",
+    );
+    for (const exemption of PORTABILITY_EXEMPTIONS) {
+      const stillDirty = sourceFindings.some(
+        (finding) =>
+          finding.entrypoint === exemption.entrypoint &&
+          finding.verdict === "dirty",
+      );
+      expect(
+        stillDirty,
+        `exemption for ${exemption.entrypoint} names an entrypoint that is not dirty at source grain`,
+      ).toBe(true);
+    }
   });
 });
 
@@ -416,7 +455,7 @@ describe("drizzle reachability — dist grain", () => {
       }
     });
 
-    it("records today's dist load/deferred verdicts in both formats (9 of 12 non-adapter dirty at load; clean: ./profiler, ./indexes, ./graph-extension)", () => {
+    it("records today's dist load verdicts in both formats (9 of 12 non-adapter dirty at load; clean: ./profiler, ./indexes, ./graph-extension)", () => {
       const nonAdapterEntrypoints = Object.keys(
         RECORDED_DIST_LOAD_VERDICTS,
       ).filter((entrypoint) => !entrypoint.startsWith("./adapters/drizzle/"));
@@ -449,25 +488,6 @@ describe("drizzle reachability — dist grain", () => {
           );
           expect(match?.verdict, `${entrypoint} [${format}]`).toBe(verdict);
         }
-      }
-    });
-
-    it("an exemption names an entrypoint that is actually dirty", () => {
-      expect(PORTABILITY_EXEMPTIONS).toEqual([]);
-
-      const findings = scanDistributionReachability().filter(
-        (finding) => finding.mode === "load",
-      );
-      for (const exemption of PORTABILITY_EXEMPTIONS) {
-        const stillDirty = findings.some(
-          (finding) =>
-            finding.entrypoint === exemption.entrypoint &&
-            finding.verdict === "dirty",
-        );
-        expect(
-          stillDirty,
-          `exemption for ${exemption.entrypoint} names an entrypoint that is not dirty`,
-        ).toBe(true);
       }
     });
   });
