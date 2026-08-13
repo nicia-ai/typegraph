@@ -88,8 +88,10 @@ tool exists to catch.
 
 ## Accepting a known regression
 
-Add an entry to `DEFAULT_REGRESSION_POLICY.accepted` (or a
-policy variant threaded through the same shape):
+Add an entry to `DEFAULT_REGRESSION_POLICY.accepted` in
+`src/regression/policy.ts`. `main()` reads this constant directly; there is
+no `--policy`/`--accept` CLI flag or config-file override, so recording an
+accepted regression is a source change reviewed like any other:
 
 ```ts
 {
