@@ -314,6 +314,16 @@ jobs:
         if: matrix.typescript-version == '5.9.3'
         run: pnpm --filter @nicia-ai/typegraph test:api-report
 
+      - name: Fetch last published tag for API-surface comparison
+        if: matrix.typescript-version == '5.9.3'
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            "+refs/tags/@nicia-ai/typegraph@*:refs/tags/@nicia-ai/typegraph@*"
+
+      - name: Verify public API surface compatibility
+        if: matrix.typescript-version == '5.9.3'
+        run: pnpm --filter @nicia-ai/typegraph test:api-surface
+
   test-postgres:
     name: Test (PostgreSQL, shard ${{ matrix.shard }})
     runs-on: ubuntu-24.04
