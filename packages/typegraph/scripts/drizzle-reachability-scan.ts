@@ -435,7 +435,7 @@ function normalizeRelative(baseDir: string, specifier: string): string {
 }
 
 /**
- * Memoizes a resolver keyed on `${fromFile} ${specifier}`. The BFS below
+ * Memoizes a resolver keyed on `${fromFile}\0${specifier}`. The BFS below
  * revisits the same (file, specifier) pair across many entrypoints' walks —
  * every entrypoint whose closure passes through a shared module re-resolves
  * that module's edges — so caching here is what keeps the whole-tree scan
@@ -446,7 +446,7 @@ function memoizeRelativeResolver(
 ): (fromFile: string, specifier: string) => string | undefined {
   const cache = new Map<string, string | undefined>();
   return (fromFile, specifier) => {
-    const key = `${fromFile} ${specifier}`;
+    const key = `${fromFile}\0${specifier}`;
     if (cache.has(key)) return cache.get(key);
     const resolved = resolver(fromFile, specifier);
     cache.set(key, resolved);
@@ -720,9 +720,76 @@ function parseFlag(args: readonly string[], name: string): string | undefined {
   return found?.slice(prefix.length);
 }
 
+/** Whether `--<name>` appears among `args` with no `=<value>` — a valueless flag a shell user typed but the parser cannot honor. */
+function hasValuelessFlag(args: readonly string[], name: string): boolean {
+  return args.includes(`--${name}`);
+}
+
+/** The two grains {@link scanDistReachability}/{@link scanSourceReachability} support. */
+export type Grain = "source" | "dist";
+const VALID_GRAINS: readonly Grain[] = ["source", "dist"];
+
+/**
+ * Resolves the CLI's `--grain` flag, throwing (and naming every valid grain)
+ * rather than silently falling through to the source-grain scan on a typo
+ * (`--grain=dsit` previously printed the SOURCE grain's numbers with no
+ * diagnostic under a command line asking for `dist`) — the same
+ * throw-rather-than-degrade contract {@link resolveSeveranceStage} applies to
+ * `--stage`.
+ */
+export function resolveGrain(name: string): Grain {
+  if ((VALID_GRAINS as readonly string[]).includes(name)) {
+    return name as Grain;
+  }
+  throw new Error(
+    `Unknown grain ${JSON.stringify(name)}. Valid grains: ${VALID_GRAINS.join(", ")}.`,
+  );
+}
+
+/**
+ * Resolves `--stage`/`--sever` into the `severedModules` list `runCli` passes
+ * to {@link scanSourceReachability}. Single owner for the refuse-or-apply
+ * decision on both flags together, since there is exactly one
+ * `severedModules` list to build from them:
+ *
+ * - `--stage` and `--sever` cannot both be given — silently preferring one
+ *   over the other (as the previous implementation did, always picking
+ *   `--sever` when both were present) is an accepted option applied to the
+ *   wrong value, which is indistinguishable from ignoring the other one.
+ * - A valueless `--stage` (bare `--stage`, or the space-separated `--stage
+ *   axis+migrate` a shell user might reasonably type, which argv splits into
+ *   two separate elements neither of which matches the `--stage=` prefix)
+ *   throws naming the required `--stage=<name>` form, rather than silently
+ *   reporting the unsevered baseline.
+ */
+export function resolveSeveredModules(
+  args: readonly string[],
+): readonly string[] {
+  const stageName = parseFlag(args, "stage");
+  const severFlag = parseFlag(args, "sever");
+
+  if (stageName !== undefined && severFlag !== undefined) {
+    throw new Error(
+      "--stage and --sever cannot both be given; pass --stage=<name> to select a SIMULATED_SEVERANCE_STAGES entry, or --sever=<comma-separated modules> for an explicit list, but not both.",
+    );
+  }
+  if (hasValuelessFlag(args, "stage")) {
+    const validNames = SIMULATED_SEVERANCE_STAGES.map(
+      (stage) => stage.name,
+    ).join(", ");
+    throw new Error(
+      `--stage requires a value in the form --stage=<name>. Valid stage names: ${validNames}.`,
+    );
+  }
+  if (severFlag !== undefined) return severFlag.split(",");
+  if (stageName !== undefined)
+    return resolveSeveranceStage(stageName).severedModules;
+  return [];
+}
+
 function runCli(): void {
   const args = process.argv.slice(2);
-  const grain = parseFlag(args, "grain") ?? "source";
+  const grain = resolveGrain(parseFlag(args, "grain") ?? "source");
   const json = args.includes("--json");
 
   if (grain === "dist") {
@@ -733,14 +800,7 @@ function runCli(): void {
     return;
   }
 
-  const stageName = parseFlag(args, "stage");
-  const severFlag = parseFlag(args, "sever");
-  const severedModules =
-    severFlag === undefined ?
-      stageName === undefined ?
-        []
-      : resolveSeveranceStage(stageName).severedModules
-    : severFlag.split(",");
+  const severedModules = resolveSeveredModules(args);
 
   const findings = scanSourceReachability({ severedModules });
   console.log(

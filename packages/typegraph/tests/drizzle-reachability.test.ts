@@ -22,7 +22,9 @@ import {
   type EntrypointClassification,
   PORTABILITY_EXEMPTIONS,
   type ReachabilityVerdict,
+  resolveGrain,
   resolveSeveranceStage,
+  resolveSeveredModules,
   scanDistReachability as scanDistributionReachability,
   scanSourceReachability,
   SIMULATED_SEVERANCE_STAGES,
@@ -334,6 +336,42 @@ describe("drizzle reachability — source grain", () => {
     );
   });
 
+  it("throws naming the unknown grain and every valid grain, rather than silently scanning source", () => {
+    expect(() => resolveGrain("dsit")).toThrow(
+      'Unknown grain "dsit". Valid grains: source, dist.',
+    );
+    expect(resolveGrain("source")).toBe("source");
+    expect(resolveGrain("dist")).toBe("dist");
+  });
+
+  it("throws on a valueless --stage, whether bare or space-separated, rather than silently reporting the baseline", () => {
+    expect(() => resolveSeveredModules(["--stage"])).toThrow(
+      "--stage requires a value in the form --stage=<name>. Valid stage names: baseline, axis+migrate, axis+migrate+removals.",
+    );
+    expect(() => resolveSeveredModules(["--stage", "axis+migrate"])).toThrow(
+      "--stage requires a value in the form --stage=<name>. Valid stage names: baseline, axis+migrate, axis+migrate+removals.",
+    );
+  });
+
+  it("refuses --stage and --sever together instead of silently discarding one", () => {
+    expect(() =>
+      resolveSeveredModules(["--stage=axis+migrate", "--sever=src/foo.ts"]),
+    ).toThrow(
+      "--stage and --sever cannot both be given; pass --stage=<name> to select a SIMULATED_SEVERANCE_STAGES entry, or --sever=<comma-separated modules> for an explicit list, but not both.",
+    );
+  });
+
+  it("resolves --stage and --sever independently when given alone", () => {
+    expect(resolveSeveredModules([])).toEqual([]);
+    expect(resolveSeveredModules(["--stage=axis+migrate"])).toEqual(
+      resolveSeveranceStage("axis+migrate").severedModules,
+    );
+    expect(resolveSeveredModules(["--sever=src/a.ts,src/b.ts"])).toEqual([
+      "src/a.ts",
+      "src/b.ts",
+    ]);
+  });
+
   /**
    * I2's exemption ledger check (§ design's I2 row: "the list ships empty,
    * and the both-directions assertion makes an empty list assertable rather
@@ -344,22 +382,36 @@ describe("drizzle reachability — source grain", () => {
    * (`.github/workflows/ci.yml`'s `test-coverage` job never runs `pnpm
    * build`), not only when `dist/` happens to be present locally.
    *
-   * Checked at source grain rather than dist grain because I3's containment
-   * property (`design-ws8-port-isolation.md` §I3: "the measured dist-dirty
-   * set is entrywise a subset of the source-dirty set") makes the two
-   * equivalent for this purpose: dist just walks the tree-shaken remainder
-   * of the same module graph, so an entrypoint dirty at dist is always dirty
-   * at source too, and evaluating against source grain alone therefore
-   * covers the union of both grains' dirty sets — including the direction
-   * dist-only checking missed, where an entrypoint (`./profiler`,
-   * `./indexes`, `./graph-extension` today) is dirty at source but clean at
-   * dist.
+   * Two independent containments make evaluating one corner of the
+   * grain/mode square equivalent to checking the union of all four:
+   *
+   * - **Grain.** Checked at source grain rather than dist grain because I3's
+   *   containment property (`design-ws8-port-isolation.md` §I3: "the
+   *   measured dist-dirty set is entrywise a subset of the source-dirty
+   *   set") makes the two equivalent for this purpose: dist just walks the
+   *   tree-shaken remainder of the same module graph, so an entrypoint dirty
+   *   at dist is always dirty at source too. Evaluating against source
+   *   grain alone therefore covers the direction dist-only checking missed,
+   *   where an entrypoint (`./profiler`, `./indexes`, `./graph-extension`
+   *   today) is dirty at source but clean at dist.
+   * - **Mode.** Checked at `deferred` mode (every edge) rather than `load`
+   *   mode (static edges only) for the identical reason one level down:
+   *   `walk()` drops every dynamic edge in `load` mode
+   *   (`scripts/drizzle-reachability-scan.ts`'s `if (mode === "load" &&
+   *   edge.kind === "dynamic") continue;`), so an entrypoint dirty at `load`
+   *   is always dirty at `deferred` too — `deferred` is the union across
+   *   modes, not merely "the other mode". Filtering on `load` here would
+   *   reject an exemption for a portable entrypoint that reaches Drizzle
+   *   only through a relative `await import()` (the sanctioned in-tree
+   *   pattern after design §4.4b, and the evasion shape design I2/F-5.1
+   *   exists to catch) as "not dirty", even though it is dirty at
+   *   `deferred`.
    */
   it("an exemption names an entrypoint that is actually dirty", () => {
     expect(PORTABILITY_EXEMPTIONS).toEqual([]);
 
     const sourceFindings = scanSourceReachability().filter(
-      (finding) => finding.mode === "load",
+      (finding) => finding.mode === "deferred",
     );
     for (const exemption of PORTABILITY_EXEMPTIONS) {
       const stillDirty = sourceFindings.some(
@@ -369,7 +421,7 @@ describe("drizzle reachability — source grain", () => {
       );
       expect(
         stillDirty,
-        `exemption for ${exemption.entrypoint} names an entrypoint that is not dirty at source grain`,
+        `exemption for ${exemption.entrypoint} names an entrypoint that is not dirty at source grain (either mode)`,
       ).toBe(true);
     }
   });

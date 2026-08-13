@@ -2,7 +2,8 @@
  * I6 baseline ratchet — records `tests/backends/adapter-test-suite.ts`'s
  * three skip axes (member-presence guards, the `skipRawQueries` option, and
  * the unguarded transaction group) as measured today, both directions, so a
- * new guard, a split conjunction, a new `capabilities.` read, or a renamed
+ * new guard, a split conjunction, a new capability-member read (however its
+ * receiver is spelled — see `adapter-suite-skip-axis-scan.ts`), or a renamed
  * option all fail loudly instead of silently widening what the kit can skip
  * unnoticed.
  */
@@ -11,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import {
   type MemberGuard,
   scanAdapterSuiteSkipAxes,
+  scanCapabilityReadLinesFromSource,
 } from "./adapter-suite-skip-axis-scan";
 
 /**
@@ -103,5 +105,63 @@ describe("adapter suite skip axes", () => {
     expect(inventory.unguardedTransactionCallLines).toEqual(
       RECORDED_UNGUARDED_TRANSACTION_CALL_LINES,
     );
+  });
+});
+
+/**
+ * Fixture-based regression coverage for the capability-read axis's receiver
+ * resolution. `scanAdapterSuiteSkipAxes()` alone can only ever prove the
+ * REAL adapter suite reads no capability member today — it can never prove
+ * the scanner would catch one if it appeared, since the suite has none. Each
+ * of these forms was, at some point, an evasion: a direct
+ * `backend.capabilities` access is the baseline the other three must match.
+ */
+describe("capability read line detection (fixture)", () => {
+  it("catches a direct property access", () => {
+    const lines = scanCapabilityReadLinesFromSource(
+      "if (backend.capabilities.returning === false) return;",
+    );
+    expect(lines).toEqual([1]);
+  });
+
+  it("catches an optional-chained property access", () => {
+    const lines = scanCapabilityReadLinesFromSource(
+      "if (backend.capabilities?.returning === false) return;",
+    );
+    expect(lines).toEqual([1]);
+  });
+
+  it("catches a destructure directly off backend.capabilities", () => {
+    const lines = scanCapabilityReadLinesFromSource(
+      "const { returning } = backend.capabilities;",
+    );
+    expect(lines).toEqual([1]);
+  });
+
+  it("catches a property access through a local alias assigned from backend.capabilities", () => {
+    const lines = scanCapabilityReadLinesFromSource(
+      ["const caps = backend.capabilities;", "caps.returning;"].join("\n"),
+    );
+    expect(lines).toEqual([2]);
+  });
+
+  it("catches a property access through a receiver destructured off backend", () => {
+    const lines = scanCapabilityReadLinesFromSource(
+      [
+        "const { capabilities } = backend;",
+        "if (capabilities.returning === false) return;",
+      ].join("\n"),
+    );
+    expect(lines).toEqual([2]);
+  });
+
+  it("reports no false positive for an unrelated capabilities-named local", () => {
+    const lines = scanCapabilityReadLinesFromSource(
+      [
+        "const capabilities = { returning: true };",
+        "capabilities.returning;",
+      ].join("\n"),
+    );
+    expect(lines).toEqual([]);
   });
 });

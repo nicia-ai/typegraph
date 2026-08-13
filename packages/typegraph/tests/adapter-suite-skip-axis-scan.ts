@@ -9,6 +9,14 @@
  * ratchet; `tests/reference/member-inventory.test.ts` (B5) imports THIS
  * module rather than re-implementing the scan, so the guard population has
  * one owner across both consumers.
+ *
+ * The capability-read axis resolves receivers, not just one spelling of
+ * `backend.capabilities`: a local bound directly to `backend.capabilities`
+ * (`const caps = backend.capabilities;`) or destructured off `backend` under
+ * the name `capabilities` (`const { capabilities } = backend;`) is tracked as
+ * an alias, and a property/element access chained off that alias counts as a
+ * capability read too — otherwise the ratchet trades one evasion spelling for
+ * another instead of closing the axis.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -32,11 +40,17 @@ export type SkipAxisInventory = Readonly<{
    * 1-indexed lines where a capability MEMBER is read off
    * `backend.capabilities` — a further property/element access chained off
    * it (`.returning`, `?.returning`, `["returning"]`), or a destructuring
-   * binding (`const { returning } = backend.capabilities;`). AST-scanned
-   * (property access off `backend.capabilities`), not a `capabilities.`
-   * substring match: `backend.capabilities?.returning` and
-   * `const { returning } = backend.capabilities;` both read a capability
-   * member without ever spelling the literal substring `capabilities.`.
+   * binding (`const { returning } = backend.capabilities;`) — or off a LOCAL
+   * ALIAS of `backend.capabilities`, however that alias was bound: a direct
+   * assignment (`const caps = backend.capabilities;`) or a destructure of the
+   * `capabilities` property off `backend` (`const { capabilities } =
+   * backend;`). AST-scanned (property/element access resolved back to
+   * `backend.capabilities`, through at most one local alias), not a
+   * `capabilities.` substring match: `backend.capabilities?.returning`,
+   * `const { returning } = backend.capabilities;`, `const { capabilities } =
+   * backend; capabilities.returning`, and `const caps = backend.capabilities;
+   * caps.returning` all read a capability member, and none of them is caught
+   * by matching the literal substring `capabilities.` alone.
    */
   capabilityReadLines: readonly number[];
   /** 1-indexed lines of every `backend.transaction(` call. */
@@ -164,21 +178,100 @@ function isCapabilitiesExpression(expression: ts.Expression): boolean {
   );
 }
 
+/**
+ * Collects the names of local bindings that alias `backend.capabilities`,
+ * however they were bound: a direct assignment (`const caps =
+ * backend.capabilities;`) or a destructure of the `capabilities` property off
+ * `backend` (`const { capabilities } = backend;`, or renamed — `const {
+ * capabilities: caps } = backend;`). A property/element access chained off
+ * one of these names is a capability read exactly as if it were chained off
+ * `backend.capabilities` directly.
+ */
+function collectCapabilityAliases(sourceFile: ts.SourceFile): Set<string> {
+  const aliases = new Set<string>();
+
+  function visit(node: ts.Node): void {
+    if (ts.isVariableDeclaration(node) && node.initializer !== undefined) {
+      if (
+        ts.isIdentifier(node.name) &&
+        isCapabilitiesExpression(node.initializer)
+      ) {
+        aliases.add(node.name.text);
+      } else if (
+        ts.isObjectBindingPattern(node.name) &&
+        ts.isIdentifier(node.initializer) &&
+        node.initializer.text === "backend"
+      ) {
+        for (const element of node.name.elements) {
+          const sourcePropertyName =
+            (
+              element.propertyName !== undefined &&
+              ts.isIdentifier(element.propertyName)
+            ) ?
+              element.propertyName.text
+            : ts.isIdentifier(element.name) ? element.name.text
+            : undefined;
+          if (
+            sourcePropertyName === "capabilities" &&
+            ts.isIdentifier(element.name)
+          ) {
+            aliases.add(element.name.text);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+
+  return aliases;
+}
+
+/** Whether `expression` resolves to `backend.capabilities`, directly or through one local alias. */
+function isCapabilitiesReceiver(
+  expression: ts.Expression,
+  aliases: ReadonlySet<string>,
+): boolean {
+  if (isCapabilitiesExpression(expression)) return true;
+  return ts.isIdentifier(expression) && aliases.has(expression.text);
+}
+
+/**
+ * Scans arbitrary TypeScript source text for capability-member reads,
+ * exported so the receiver-resolution behavior (direct, optional-chained,
+ * destructured, or through a local alias) can be unit-tested against a
+ * fixture directly, independent of `tests/backends/adapter-test-suite.ts`'s
+ * real, line-pinned contents.
+ */
+export function scanCapabilityReadLinesFromSource(
+  text: string,
+): readonly number[] {
+  const sourceFile = ts.createSourceFile(
+    "fixture.ts",
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  return scanCapabilityReadLines(sourceFile);
+}
+
 function scanCapabilityReadLines(sourceFile: ts.SourceFile): number[] {
+  const aliases = collectCapabilityAliases(sourceFile);
   const lines: number[] = [];
 
   function visit(node: ts.Node): void {
     if (
       (ts.isPropertyAccessExpression(node) ||
         ts.isElementAccessExpression(node)) &&
-      isCapabilitiesExpression(node.expression)
+      isCapabilitiesReceiver(node.expression, aliases)
     ) {
       lines.push(lineOf(sourceFile, node));
     } else if (
       ts.isVariableDeclaration(node) &&
       node.initializer !== undefined &&
       ts.isObjectBindingPattern(node.name) &&
-      isCapabilitiesExpression(node.initializer)
+      isCapabilitiesReceiver(node.initializer, aliases)
     ) {
       lines.push(lineOf(sourceFile, node));
     }
