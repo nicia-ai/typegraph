@@ -46,6 +46,32 @@
  *   calls the real function but is not a bare identifier named
  *   `assumeRecursiveTraversalSupported`, so `scanForAssumeCalls` does not see
  *   it. Renaming on import is the one bypass this scanner cannot close.
+ * - **The phrase match normalizes whitespace and case, not spelling.**
+ *   `RECURSION_PHRASE_PATTERN` matches `WITH`/`RECURSIVE` separated by any
+ *   run of whitespace (a line break included) in any case, so a hand-written
+ *   `"with\n  recursive"` inside a tagged template — the shape a line-broken
+ *   multi-line SQL literal is most likely to take, since prettier does not
+ *   reformat template contents — is found, not silently invisible in both
+ *   the `undeclared` and `stale` directions the way a plain-text match would
+ *   be. It still does not normalize the *key*: the matched site's `line` is
+ *   the literal's own trimmed source text, case and spacing preserved, so a
+ *   real site written as `with recursive` must be declared in
+ *   `EMISSION_SITES` with that exact casing, not the canonical one.
+ * - **`scanForAssumeCalls` counts CALL expressions only.**
+ *   `COMPILER_DEFAULT_RECURSIVE_TRAVERSAL` (`query/compiler/index.ts`) is a
+ *   pre-built verdict constructed from the sole `assumeRecursiveTraversalSupported`
+ *   call this file inventories, then exported and consumed by identifier
+ *   reference at four sites. A future site could assume recursion support by
+ *   importing that constant instead of calling
+ *   `assumeRecursiveTraversalSupported` directly, which would not add a call
+ *   expression and so would not appear here. Today's four consumers are all
+ *   legitimate (each is genuinely backend-less) and the constant itself is
+ *   internal (absent from every `etc/*.api.md`), so this is a ceiling/visibility
+ *   gap rather than a live defect — recorded here rather than closed, because
+ *   closing it means choosing between counting identifier references to the
+ *   constant (which would require distinguishing a use from the declaration
+ *   and the one sanctioned re-export) and a design-level decision this file's
+ *   own scope does not own.
  *
  * Comment stripping is done by parsing with `ts.createSourceFile` and walking
  * the resulting AST (`ts.forEachChild`), not with a bare `ts.createScanner`
@@ -71,6 +97,16 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
 const RECURSION_PHRASE = "WITH RECURSIVE";
+/**
+ * Matches `WITH` and `RECURSIVE` separated by any run of whitespace
+ * (including a line break), in any case — a same-case single-space
+ * `String.prototype.indexOf` would miss a hand-written
+ * `"with\n  recursive"` inside a tagged template in BOTH ratchet
+ * directions (no `undeclared` row because the phrase never matches, and no
+ * `stale` row because the six declared sites are unaffected). See the
+ * "Honest statement of its limits" bullet above.
+ */
+const RECURSION_PHRASE_PATTERN = /WITH\s+RECURSIVE/gi;
 const ASSUME_CONSTRUCTOR = "assumeRecursiveTraversalSupported";
 
 const SOURCE_ROOT = path.resolve(
@@ -162,9 +198,9 @@ const ASSUME_CALL_SITES: readonly InventoryEntry[] = [
 
 /**
  * Every `WITH RECURSIVE` emission in `source`: every occurrence of
- * {@link RECURSION_PHRASE} inside a string- or template-literal token, with
- * comments and non-literal code excluded by construction because only those
- * token kinds are inspected.
+ * {@link RECURSION_PHRASE_PATTERN} (case- and whitespace-insensitive) inside
+ * a string- or template-literal token, with comments and non-literal code
+ * excluded by construction because only those token kinds are inspected.
  *
  * `node.getStart(parsed)` — never `node.pos` — is the slice's start, because
  * `pos` includes leading trivia and would fold a preceding comment's text
@@ -196,10 +232,8 @@ function scanForRecursionEmissions(
     if (LITERAL_KINDS.has(node.kind)) {
       const start = node.getStart(parsed);
       const text = source.slice(start, node.end);
-      let searchIndex = 0;
-      for (;;) {
-        const foundIndex = text.indexOf(RECURSION_PHRASE, searchIndex);
-        if (foundIndex === -1) break;
+      for (const match of text.matchAll(RECURSION_PHRASE_PATTERN)) {
+        const foundIndex = match.index;
         const { line } = parsed.getLineAndCharacterOfPosition(
           start + foundIndex,
         );
@@ -208,7 +242,6 @@ function scanForRecursionEmissions(
           lineNumber: line + 1,
           line: (lines[line] ?? "").trim(),
         });
-        searchIndex = foundIndex + RECURSION_PHRASE.length;
       }
     }
     ts.forEachChild(node, (child) => {
@@ -482,6 +515,35 @@ describe("recursion inventory ratchet", () => {
     expect(
       scanForRecursionEmissions("fixture.ts", COMMENT_ONLY_FIXTURE),
     ).toEqual([]);
+  });
+
+  it("finds a case- and whitespace-variant phrase a same-case single-space match would miss", () => {
+    // A same-case, exact-single-space `String.indexOf` (the defect this
+    // test guards against) matches none of these three lines, so a new
+    // seventh emission site written in any of these shapes would be
+    // invisible in BOTH ratchet directions: no `undeclared` row (the
+    // phrase never matches) and no `stale` row (the six declared sites are
+    // unaffected).
+    const fixture = [
+      "const lowercase = sql`with recursive scratch AS (SELECT 1)`;",
+      "",
+      "const lineBroken = sql`",
+      "  WITH",
+      "  RECURSIVE scratch AS (SELECT 1)",
+      "`;",
+      "",
+      "const mixedCaseExtraSpace = sql`With   Recursive scratch AS (SELECT 1)`;",
+    ].join("\n");
+
+    const found = scanForRecursionEmissions("fixture.ts", fixture);
+
+    expect(
+      found.map((site) => `${String(site.lineNumber)}:${site.line}`),
+    ).toEqual([
+      "1:const lowercase = sql`with recursive scratch AS (SELECT 1)`;",
+      "4:WITH",
+      "8:const mixedCaseExtraSpace = sql`With   Recursive scratch AS (SELECT 1)`;",
+    ]);
   });
 
   it("records the file-set formulation this replaces", () => {

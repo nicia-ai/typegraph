@@ -949,7 +949,7 @@ already runs the six recursive-CTE emission sites unconditionally, so absence me
 would refuse traversals that work today.
 
 ```typescript
-const capabilities: BackendCapabilities = {
+const capabilities: Partial<BackendCapabilities> = {
   recursiveTraversal: { supported: false, reason: "engine has no WITH RECURSIVE / equivalent" },
 };
 ```
@@ -963,9 +963,12 @@ historical identity class reads, identity-expanded historical queries, and the i
 window-ledger read — each throwing `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`
 with `details.operation` naming the site and `details.reason` echoing the declaration.
 
-`shortestPath` is the one exception: on a backend with temporary statements but no recursion, it
-**falls back** to a per-hop predecessor walk instead of refusing, issuing `pathLength + 1`
-extraction statements for the path a recursive CTE would have returned in one round trip.
+`weightedShortestPath` is the one exception: on a backend with temporary statements but no
+recursion, it **falls back** to a per-hop predecessor walk instead of refusing, issuing
+`pathLength + 1` extraction statements for the path a recursive CTE would have returned in one
+round trip. The unweighted `shortestPath` (along with `reachable`, `canReach`, and `neighbors`)
+emits no recursive CTE at all — it routes through the iterative working-table or inline path
+instead — so it neither refuses nor falls back regardless of this declaration.
 
 ### Declared constraints require `transactions`
 
@@ -1091,7 +1094,7 @@ TypeGraph choosing separate query semantics per backend:
 | Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
-| Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `shortestPath` degrades to a predecessor walk instead — see above |
+| Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
 
 Identity support also has a **driver** dimension inside each dialect:
 
