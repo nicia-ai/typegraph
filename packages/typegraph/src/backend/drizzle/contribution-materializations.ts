@@ -41,6 +41,11 @@ import {
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { errorChain, isMissingTableError } from "../../utils/sql-errors";
+import {
+  requireWriteFence,
+  resolveWriteFencePlan,
+  type WriteFenceTarget,
+} from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import type { StrategyTableContribution } from "../table-contribution";
@@ -561,6 +566,13 @@ export function gateFulltext(
  */
 export type ContributionMaterializerDeps = Readonly<{
   dialect: SqlDialect;
+  /**
+   * The write-fence target `lockContributionDdl` / `lockSharedFulltextTable`
+   * resolve a plan from — a small first-party-marked object rather than the
+   * whole backend, so this module needs no more of `GraphBackend` than the
+   * lock decision itself.
+   */
+  fenceTarget: WriteFenceTarget;
   fulltextStrategy: FulltextStrategy;
   fulltextTableName: string;
   /**
@@ -1452,12 +1464,26 @@ export function createContributionMaterializer(
   async function lockContributionDdl(
     tx: SchemaWriteTransactionBackend,
   ): Promise<void> {
-    if (dialect !== "postgres") return;
-    await tx.execute(
-      asCompiledRowsSql(
-        portableSql`SELECT pg_advisory_xact_lock(hashtext(${CONTRIBUTION_DDL_LOCK_KEY}), 0)`,
-      ),
-    );
+    const plan = resolveWriteFencePlan(deps.fenceTarget);
+    const fence = requireWriteFence(plan, "contribution DDL", "advisory-lock");
+    switch (fence.kind) {
+      case "lock": {
+        await tx.execute(
+          asCompiledRowsSql(
+            portableSql`SELECT pg_advisory_xact_lock(hashtext(${CONTRIBUTION_DDL_LOCK_KEY}), 0)`,
+          ),
+        );
+        return;
+      }
+      case "engine-serialized": {
+        // SQLite needs nothing: `BEGIN IMMEDIATE` already holds the
+        // database's single writer slot for the whole fence.
+        return;
+      }
+      default: {
+        fence satisfies never;
+      }
+    }
   }
 
   /**
@@ -1490,12 +1516,31 @@ export function createContributionMaterializer(
     tx: SchemaWriteTransactionBackend,
     tableName: string,
   ): Promise<void> {
-    if (dialect !== "postgres") return;
-    await tx.executeStatement(
-      asCompiledStatementSql(
-        portableSql`LOCK TABLE ${portableSql.identifier(tableName)} IN ACCESS EXCLUSIVE MODE`,
-      ),
+    const plan = resolveWriteFencePlan(deps.fenceTarget);
+    const fence = requireWriteFence(
+      plan,
+      "shared fulltext table lock",
+      "table-lock",
     );
+    switch (fence.kind) {
+      case "lock": {
+        await tx.executeStatement(
+          asCompiledStatementSql(
+            portableSql`LOCK TABLE ${portableSql.identifier(tableName)} IN ACCESS EXCLUSIVE MODE`,
+          ),
+        );
+        return;
+      }
+      case "engine-serialized": {
+        // SQLite has no relation lock and needs none: `BEGIN IMMEDIATE` took
+        // the database's single writer slot when the fence opened, so probe,
+        // drop and refill already run with every other writer excluded.
+        return;
+      }
+      default: {
+        fence satisfies never;
+      }
+    }
   }
 
   /**

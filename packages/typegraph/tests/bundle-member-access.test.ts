@@ -19,6 +19,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  EXCLUDED_ACCESS_SITES,
   NOT_AN_ACCESS_SITES,
   scanBundleMemberAccesses,
   STATICALLY_REQUIRED_SITES,
@@ -35,7 +36,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 const REASONED_FLOOR = 60;
 const DEFERRED_LIVE_TOTAL = 187;
 const DEFERRED_DECLARED_TOTAL = 190;
-const TOTAL_ROW_COUNT = 256;
+const EXCLUDED_COUNT = 4;
+const TOTAL_ROW_COUNT = 260;
 
 function rowKey(
   row: Readonly<{ file: string; line: number; member: string }>,
@@ -168,7 +170,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 256)", () => {
+  it("the class partition covers every scanned row (total 260)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.
@@ -191,7 +193,8 @@ describe("live bundle member access scan (I6, T21)", () => {
       scan.byClass["annotated-residue"] +
       scan.byClass["statically-required"] +
       scan.byClass.reasoned +
-      scan.byClass.deferred;
+      scan.byClass.deferred +
+      scan.byClass.excluded;
     expect(sum).toBe(scan.rows.length);
     expect(scan.rows.length).toBe(TOTAL_ROW_COUNT);
 
@@ -201,13 +204,61 @@ describe("live bundle member access scan (I6, T21)", () => {
       "statically-required",
       "reasoned",
       "deferred",
+      "excluded",
     ]);
     const unclassified = scan.rows.filter(
       (row) => !knownClasses.has(row.class),
     );
     expect(
       unclassified.map((row) => rowKey(row)),
-      "every scanned row must fall into exactly one of the five classes",
+      "every scanned row must fall into exactly one of the six classes",
     ).toEqual([]);
+  });
+
+  it("the trusted-import exclusion is exactly four sites, both directions", () => {
+    expect(EXCLUDED_ACCESS_SITES).toHaveLength(4);
+    expect(scan.byClass.excluded).toBe(EXCLUDED_COUNT);
+
+    const excludedRows = scan.rows.filter((row) => row.class === "excluded");
+    expect(excludedRows).toHaveLength(EXCLUDED_COUNT);
+
+    for (const site of EXCLUDED_ACCESS_SITES) {
+      // (i) every inventory row's snippet occurs verbatim in the file (a
+      // vacuity guard — the same one NOT_AN_ACCESS_SITES uses above).
+      const contents = readSourceFile(site.file);
+      expect(
+        contents.includes(site.snippet),
+        `expected to find the snippet ${JSON.stringify(site.snippet)} in src/${site.file}`,
+      ).toBe(true);
+    }
+
+    // (ii) per-(file, member) counts match: two rows each for executeRaw and
+    // executeStatement, both classified `excluded`.
+    for (const member of ["executeRaw", "executeStatement"] as const) {
+      const declaredCount = EXCLUDED_ACCESS_SITES.filter(
+        (site) => site.member === member,
+      ).length;
+      const liveCount = excludedRows.filter(
+        (row) => row.member === member,
+      ).length;
+      expect(liveCount).toBe(declaredCount);
+      expect(liveCount).toBe(2);
+    }
+
+    // (iii) every excluded row is in trusted-import.ts, and neither the
+    // reasoned floor nor the deferred ceiling absorbed these rows (the
+    // ruling's requirement that this be a SEVENTH bucket, not folded into
+    // an existing one): `perMember` — which the reasoned/deferred assertions
+    // above read — sums to the total row count MINUS the four excluded rows.
+    expect(
+      excludedRows.every(
+        (row) => row.file === "backend/drizzle/trusted-import.ts",
+      ),
+    ).toBe(true);
+    const perMemberTotal = Object.values(scan.perMember).reduce(
+      (sum, count) => sum + count,
+      0,
+    );
+    expect(perMemberTotal).toBe(TOTAL_ROW_COUNT - EXCLUDED_COUNT);
   });
 });

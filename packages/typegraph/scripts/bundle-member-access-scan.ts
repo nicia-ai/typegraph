@@ -7,9 +7,12 @@
  * checker, never hand-copied (see {@link deriveOptionalGraphBackendMembers})
  * — this walks `src/**` (minus the exclusions below) for every syntactic
  * shape that reads it off a receiver, classifies each live access, and
- * reports the six-bucket partition `tests/bundle-member-access.test.ts`
+ * reports the seven-bucket partition `tests/bundle-member-access.test.ts`
  * pins: `pilot`, `annotated-residue`, `statically-required`, `reasoned`,
- * `deferred`, and (implicitly, by omission) not-an-access.
+ * `deferred`, `excluded` ({@link EXCLUDED_ACCESS_SITES} — the WS1-era
+ * `backend/drizzle/trusted-import.ts` carve-out, made visible and exactly
+ * pinned rather than hidden behind a file-pattern exclusion), and
+ * (implicitly, by omission) not-an-access.
  *
  * ## The receiver test, in two arms
  *
@@ -107,7 +110,8 @@ export type BundleMemberAccessClass =
   | "annotated-residue"
   | "reasoned"
   | "deferred"
-  | "statically-required";
+  | "statically-required"
+  | "excluded";
 
 /** One member access node the scanner accepted (passed the receiver test, not brand-skipped). */
 export type BundleMemberAccessRow = Readonly<{
@@ -215,36 +219,85 @@ export const NOT_AN_ACCESS_SITES: readonly Readonly<{
  * materializations.ts:1494,1694` — `executeStatement` on the always-present
  * `SchemaWriteTransactionBackend`). Those three are named below, individually.
  *
- * `backend/drizzle/trusted-import.ts` is deliberately NOT in this list.
- * Verified by temporarily removing the old blanket glob and re-running the
- * scanner: `trusted-import.ts:52,58` (`requireStatementExecution`) are genuine
- * `executeStatement` presence checks on a bare `TransactionBackend` parameter —
- * the same shape as the tracked `identity/sql-target.ts` and `store/recorded-
- * capture/guards.ts` STATEMENT_EXECUTION sites, not a backend reading its own
- * guaranteed member — and `:40,46` (`requireRawExecution`) are the equivalent
- * check for `executeRaw`. Dispositioning them (rewire, or register as
- * annotated-residue) requires either new call-site threading through
- * `postgres.ts`'s/`sqlite.ts`'s own `trustedImport()` construction (out of a
- * ratchet-only batch's scope) or amending the T11b committed baseline fixture,
- * whose `commit`/`command` fields are pinned evidence for a specific historical
- * scan run that predates this file entering scope — neither of which a
- * findings-fix pass may do unilaterally. Left EXCLUDED, not because it is
- * self-reference (it is not), but because a correct disposition is a follow-up
- * decision; see impl-notes-capability-model.md's B9 entry for the open item.
- * Any OTHER file added under `backend/drizzle/**` is in-scope by default now —
- * only these four are named, so a new scattered check elsewhere in the
- * directory is still caught.
+ * `backend/drizzle/trusted-import.ts` is NOT excluded by file pattern (B10):
+ * its four accesses are classified `excluded` instead, via
+ * {@link EXCLUDED_ACCESS_SITES} — a pinned, exactly-four inventory rather than
+ * a glob hole, per the B9-checkpoint ruling ("Trusted-import gap: INVENTORIED
+ * EXCLUSION, ruled"). Any OTHER file added under `backend/drizzle/**` is
+ * in-scope by default — only these three are named here.
  */
 const EXCLUDED_FILE_PATTERNS: readonly RegExp[] = [
   /^backend\/drizzle\/postgres\.ts$/,
   /^backend\/drizzle\/sqlite\.ts$/,
   /^backend\/drizzle\/contribution-materializations\.ts$/,
-  /^backend\/drizzle\/trusted-import\.ts$/,
   /^backend\/types\.ts$/,
   /^backend\/graph-backend-keys\.ts$/,
   /^backend\/member-classes\.ts$/,
   /^store\/history-store-backend\.ts$/,
   /^backend\/capabilities\//,
+];
+
+/**
+ * The exactly-four `backend/drizzle/trusted-import.ts` accesses this batch
+ * (B10) makes VISIBLE rather than hiding them behind the old blanket file
+ * exclusion: `requireRawExecution`'s `executeRaw` presence-check-and-return
+ * (`:40`, `:46`) and `requireStatementExecution`'s equivalent for
+ * `executeStatement` (`:52`, `:58`). Both receivers are a bare
+ * `TransactionBackend` parameter — the same shape as the tracked
+ * `identity/sql-target.ts` / `store/recorded-capture/guards.ts`
+ * STATEMENT_EXECUTION sites, not a backend reading its own guaranteed member —
+ * so these are genuine accesses, not self-reference (Contract I2 does not
+ * apply). They are a permanent, WS1-era carve-out instead: `trusted-import.ts`
+ * is a second, backend-owned write path by design (a bulk, all-or-nothing
+ * ingestion session that takes the managed-write fence itself, per its own
+ * `WRITE_PIPELINE_EXEMPTIONS` entry in `eslint/write-pipeline-inventory.mjs`),
+ * never routed through the bundle model's verdict/binding split. Classified
+ * `excluded` FIRST, before statically-required/annotated-residue/pilot/
+ * reasoned/deferred, and never absorbed into the reasoned floor or the
+ * deferred ceiling — this is a SEVENTH bucket with its own exactly-four pin,
+ * asserted both directions by `tests/bundle-member-access.test.ts`: every
+ * `snippet` occurs verbatim in the file (a vacuity guard), and every one of
+ * these four appears in the scan with class `excluded`.
+ */
+export const EXCLUDED_ACCESS_SITES: readonly Readonly<{
+  file: string;
+  member: string;
+  count: number;
+  snippet: string;
+  reason: string;
+}>[] = [
+  {
+    file: "backend/drizzle/trusted-import.ts",
+    member: "executeRaw",
+    count: 1,
+    snippet: "if (backend.executeRaw === undefined) {",
+    reason:
+      "requireRawExecution's presence guard (:40) — a second, backend-owned write path by design, never routed through the bundle model.",
+  },
+  {
+    file: "backend/drizzle/trusted-import.ts",
+    member: "executeRaw",
+    count: 1,
+    snippet: "return backend.executeRaw;",
+    reason:
+      "requireRawExecution's return (:46) — a second, backend-owned write path by design, never routed through the bundle model.",
+  },
+  {
+    file: "backend/drizzle/trusted-import.ts",
+    member: "executeStatement",
+    count: 1,
+    snippet: "if (backend.executeStatement === undefined) {",
+    reason:
+      "requireStatementExecution's presence guard (:52) — a second, backend-owned write path by design, never routed through the bundle model.",
+  },
+  {
+    file: "backend/drizzle/trusted-import.ts",
+    member: "executeStatement",
+    count: 1,
+    snippet: "return backend.executeStatement;",
+    reason:
+      "requireStatementExecution's return (:58) — a second, backend-owned write path by design, never routed through the bundle model.",
+  },
 ];
 
 /** Textual reference the "derived" receiver-test arm accepts (§ receiver test). */
@@ -388,12 +441,30 @@ function collectRewiredMemberKeys(): ReadonlySet<string> {
   return keys;
 }
 
+function excludedAccessKey(file: string, member: string): string {
+  return `${file} ${member}`;
+}
+
+const EXCLUDED_ACCESS_KEYS: ReadonlySet<string> = new Set(
+  EXCLUDED_ACCESS_SITES.map((site) =>
+    excludedAccessKey(site.file, site.member),
+  ),
+);
+
 function classifyAccess(
   file: string,
   member: string,
   bundledMembers: ReadonlySet<string>,
   rewiredMemberKeys: ReadonlySet<string>,
 ): BundleMemberAccessClass {
+  // Classified FIRST, before the bundled/unbundled partition: the exclusion
+  // is about WHERE the access lives (a permanent, out-of-model write path),
+  // not about what kind of member it is, and it must never be absorbed into
+  // the reasoned floor or the deferred ceiling (both of which read `perMember`
+  // over non-excluded rows only — see `scanBundleMemberAccesses`).
+  if (EXCLUDED_ACCESS_KEYS.has(excludedAccessKey(file, member))) {
+    return "excluded";
+  }
   if (bundledMembers.has(member)) {
     if (
       STATICALLY_REQUIRED_SITES.some(
@@ -546,6 +617,7 @@ const EMPTY_BY_CLASS: Readonly<Record<BundleMemberAccessClass, number>> = {
   reasoned: 0,
   deferred: 0,
   "statically-required": 0,
+  excluded: 0,
 };
 
 let cachedScan: BundleMemberAccessScan | undefined;
@@ -626,6 +698,11 @@ export function scanBundleMemberAccesses(): BundleMemberAccessScan {
   );
   for (const row of rows) {
     byClass[row.class] += 1;
+    // The reasoned floor and the deferred ceiling both read `perMember`, and
+    // the ruling forbids those buckets absorbing the trusted-import
+    // carve-out: excluded rows are counted in `byClass` and `rows`, never in
+    // `perMember`.
+    if (row.class === "excluded") continue;
     perMember[row.member] = (perMember[row.member] ?? 0) + 1;
   }
 

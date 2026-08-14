@@ -4,19 +4,24 @@
  * Every backend the library builds FROM another backend — an overlay, an
  * allowlist projection, a narrowing-by-omission, a managed-close wrapper — is
  * built here, and every constructor in this module carries the source's
- * serialized-resource audit onto the object it returns. Raw `{ ...backend }`,
- * `Object.assign` and rest-omission construction build a NEW object the audit
- * does not follow, which is the defect this module exists to make unreachable:
- * a derived backend that lost its mark reads as unowned, and the import/clone
- * guards then let a read-and-write-through-one-connection stream proceed into a
- * deadlock.
+ * serialized-resource audit, and its first-party-factory write-fence mark,
+ * onto the object it returns. Raw `{ ...backend }`, `Object.assign` and
+ * rest-omission construction build a NEW object neither mark follows, which
+ * is the defect this module exists to make unreachable: a derived backend
+ * that lost its resource-audit mark reads as unowned, and the import/clone
+ * guards then let a read-and-write-through-one-connection stream proceed into
+ * a deadlock; one that lost its write-fence mark would resolve
+ * `resolveWriteFencePlan`'s dialect-derivation arm at one call site and
+ * `unfenced` at another for the same underlying backend.
  *
- * This is the only module that imports {@link carryBackendResourceAudit}.
+ * This is the only module that imports {@link carryBackendResourceAudit} and
+ * {@link carryFirstPartyFactoryMark}.
  *
  * Naming convention this module's ratchet depends on: an identifier ending in
  * `Backend` denotes a whole backend object; a members fragment is named
  * `*Members`.
  */
+import { carryFirstPartyFactoryMark } from "./capabilities/write-fence";
 import {
   GRAPH_BACKEND_PROJECTION_KEYS,
   type ProjectedGraphBackendKey,
@@ -117,6 +122,7 @@ export function deriveBackend<
     },
   });
   carryBackendResourceAudit(decoratedBackend, base);
+  carryFirstPartyFactoryMark(decoratedBackend, base);
   return decoratedBackend;
 }
 
@@ -150,6 +156,7 @@ export function projectBackend<
   // where an import guard would otherwise see an unaudited backend and let a
   // read-and-write-through-one-connection stream proceed into a deadlock.
   carryBackendResourceAudit(projection, base);
+  carryFirstPartyFactoryMark(projection, base);
   return projection;
 }
 

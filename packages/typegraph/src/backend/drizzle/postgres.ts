@@ -80,6 +80,7 @@ import {
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -1039,6 +1040,7 @@ export function createPostgresBackend(
 
   const contributionMaterializer = createContributionMaterializer({
     dialect: "postgres",
+    fenceTarget: markFirstPartyFactory({ dialect: "postgres", capabilities }),
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
     vectorStrategy,
@@ -1831,6 +1833,11 @@ export function createPostgresBackend(
   // "independent" is a verdict the guards can tell apart from a backend nobody
   // looked at.
   auditBackendResource(backend, resourceAudit);
+  // First-party mark: this factory declares `pessimisticLocks` unconditionally
+  // (POSTGRES_CAPABILITIES), so `resolveWriteFencePlan`'s dialect-derivation
+  // arm is reachable only from a test that builds a backend bypassing the
+  // declared capabilities while still carrying this mark.
+  markFirstPartyFactory(backend);
   return backend;
 }
 

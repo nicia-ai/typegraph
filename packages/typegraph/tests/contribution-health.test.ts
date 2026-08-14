@@ -116,6 +116,18 @@ function createRefusingMaterializer(
 
   const deps: ContributionMaterializerDeps = {
     dialect: "sqlite",
+    fenceTarget: {
+      dialect: "sqlite",
+      capabilities: {
+        transactions: true,
+        windowFunctions: true,
+        pessimisticLocks: {
+          advisoryLocks: false,
+          tableLocks: false,
+          serializedWriters: true,
+        },
+      },
+    },
     fulltextStrategy: options.fulltextStrategy ?? fts5Strategy,
     fulltextTableName: FULLTEXT_TABLE,
     vectorStrategy: undefined,

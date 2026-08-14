@@ -49,6 +49,8 @@ export type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public (undocumented)
@@ -2386,6 +2388,13 @@ export type PartialBundleBinding<M extends OptionalGraphBackendMember> = Readonl
 }>;
 
 // @public
+export type PessimisticLockCapabilities = Readonly<{
+    advisoryLocks: boolean;
+    tableLocks: boolean;
+    serializedWriters: boolean;
+}>;
+
+// @public
 export class Placeholder {
     // (undocumented)
     readonly [SQL_PLACEHOLDER_BRAND]: true;
@@ -2638,6 +2647,11 @@ export function requireExtras<const D extends CapabilityBundleDefinition, Op ext
 };
 
 // @public
+export function requireWriteFence(plan: WriteFencePlan, operation: string, requires: "advisory-lock" | "table-lock"): Extract<WriteFencePlan, {
+    kind: "lock" | "engine-serialized";
+}>;
+
+// @public
 export function resolveBundle<const D extends CapabilityBundleDefinition>(backend: GraphBackend, definition: D): BundleVerdictOf<D>;
 
 // @public (undocumented)
@@ -2662,6 +2676,9 @@ export function resolveRecursiveTraversal(capabilities: BackendCapabilities): Re
 
 // @public
 export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
+
+// @public
+export function resolveWriteFencePlan(target: WriteFenceTarget): WriteFencePlan;
 
 // @public
 export type RowProps = string | Readonly<Record<string, unknown>>;
@@ -3841,6 +3858,29 @@ export type VectorStrategy = Readonly<{
         concurrent?: boolean;
     }>) => SqlFragment | undefined;
     buildDropIndex?: (this: void, slot: VectorSlot) => SqlFragment | undefined;
+}>;
+
+// @public
+export type WriteFencePlan =
+/** Take the keyed/table lock. */
+Readonly<{
+    kind: "lock";
+    advisoryLocks: true;
+    tableLocks: boolean;
+}>
+/** No lock needed: the engine serializes writers. */
+| Readonly<{
+    kind: "engine-serialized";
+}>
+/** Neither. Every non-degradable fence refuses. */
+| Readonly<{
+    kind: "unfenced";
+}>;
+
+// @public
+type WriteFenceTarget = Readonly<{
+    dialect: SqlDialect;
+    capabilities: BackendCapabilities;
 }>;
 
 // @public

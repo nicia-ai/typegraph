@@ -26,6 +26,10 @@ import {
   CONTRIBUTION_HEALTH,
 } from "../backend/capabilities/bundle-registry";
 import {
+  refuseEngineNativeRecordedTimeNotYetImplemented,
+  resolveRecordedTimeOwnership,
+} from "../backend/capabilities/recorded-time-ownership";
+import {
   batchPointReadVerdict,
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -36,6 +40,11 @@ import {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
+import {
+  refuseUnfencedClockAllocation,
+  refuseUnfencedOperationalIdentity,
+  resolveWriteFencePlan,
+} from "../backend/capabilities/write-fence";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   createEdgeRowMapper,
@@ -981,12 +990,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
+    // A separate throw, not a widened condition on the gate above, so the
+    // message can be the migration guide (OQ-B) rather than a generic
+    // "atomic backend" refusal.
+    if (
+      graph.identity !== undefined &&
+      resolveWriteFencePlan(backend).kind === "unfenced"
+    ) {
+      refuseUnfencedOperationalIdentity(backend.dialect);
+    }
     this.#baseBackend = asRawBackend(backend);
     this.#adapterBackend = adapterBackend;
     this.#captureEnabled = options?.history === true;
     this.#revisionTrackingEnabled =
       this.#captureEnabled || options?.revisionTracking === true;
     if (this.#revisionTrackingEnabled) {
+      // Keyed on clock OWNERSHIP, not on the option name (ruling F3): the
+      // resource `lockRecordedClock` fences is the TypeGraph-owned clock row,
+      // which `history` and `revisionTracking` both reach.
+      const ownership = resolveRecordedTimeOwnership(backend.capabilities);
+      if (ownership === "engine-native") {
+        // NOT conditional on the fence plan: this refusal is about the
+        // missing engine-native read/write path (§5.3.1), not about locking —
+        // a separately-named gate below handles the fence (R-2).
+        refuseEngineNativeRecordedTimeNotYetImplemented();
+      }
+      if (resolveWriteFencePlan(backend).kind === "unfenced") {
+        refuseUnfencedClockAllocation(backend.dialect);
+      }
       assertRevisionTrackableBackend(backend);
     }
     // Resolve the schema before wrapping so recorded-time capture targets the

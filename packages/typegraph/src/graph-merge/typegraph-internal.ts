@@ -1,3 +1,7 @@
+export {
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../backend/capabilities/write-fence";
 export { snapshotExportContention } from "../backend/transaction-resource";
 export type {
   GraphBackend,

@@ -150,8 +150,24 @@ function createMockMaterializer(
     ),
   );
 
+  const dialect = vectorStrategy === undefined ? "sqlite" : "postgres";
   const deps = {
-    dialect: vectorStrategy === undefined ? "sqlite" : "postgres",
+    dialect,
+    fenceTarget: {
+      dialect,
+      capabilities: {
+        transactions: true,
+        windowFunctions: true,
+        pessimisticLocks:
+          dialect === "postgres" ?
+            { advisoryLocks: true, tableLocks: true, serializedWriters: false }
+          : {
+              advisoryLocks: false,
+              tableLocks: false,
+              serializedWriters: true,
+            },
+      },
+    },
     fulltextStrategy: fts5Strategy,
     fulltextTableName: FULLTEXT_TABLE,
     vectorStrategy,
@@ -378,6 +394,18 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     );
     const deps = {
       dialect: "sqlite",
+      fenceTarget: {
+        dialect: "sqlite",
+        capabilities: {
+          transactions: true,
+          windowFunctions: true,
+          pessimisticLocks: {
+            advisoryLocks: false,
+            tableLocks: false,
+            serializedWriters: true,
+          },
+        },
+      },
       fulltextStrategy: fts5Strategy,
       fulltextTableName: FULLTEXT_TABLE,
       vectorStrategy: undefined,
@@ -431,6 +459,18 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
     );
     const deps = {
       dialect: "postgres",
+      fenceTarget: {
+        dialect: "postgres",
+        capabilities: {
+          transactions: true,
+          windowFunctions: true,
+          pessimisticLocks: {
+            advisoryLocks: true,
+            tableLocks: true,
+            serializedWriters: false,
+          },
+        },
+      },
       fulltextStrategy: fts5Strategy,
       fulltextTableName: FULLTEXT_TABLE,
       vectorStrategy: undefined,

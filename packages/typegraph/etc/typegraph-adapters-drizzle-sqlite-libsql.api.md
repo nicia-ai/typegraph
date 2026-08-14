@@ -34,6 +34,8 @@ type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public (undocumented)
@@ -4197,6 +4199,13 @@ type NodeRow = Readonly<{
 
 // @public
 type NullCheckOp = "isNull" | "isNotNull";
+
+// @public
+type PessimisticLockCapabilities = Readonly<{
+    advisoryLocks: boolean;
+    tableLocks: boolean;
+    serializedWriters: boolean;
+}>;
 
 // @public
 class Placeholder {

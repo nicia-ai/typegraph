@@ -67,3 +67,9 @@ export {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "./resolve";
+export {
+  type PessimisticLockCapabilities,
+  requireWriteFence,
+  resolveWriteFencePlan,
+  type WriteFencePlan,
+} from "./write-fence";

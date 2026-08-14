@@ -207,6 +207,8 @@ export type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -4775,6 +4777,13 @@ export type PersonalizedPageRankSeed<G extends GraphDef> = Readonly<{
     id: string;
     kind: NodeKinds<G>;
     weight?: number;
+}>;
+
+// @public
+type PessimisticLockCapabilities = Readonly<{
+    advisoryLocks: boolean;
+    tableLocks: boolean;
+    serializedWriters: boolean;
 }>;
 
 // @public (undocumented)
