@@ -21,6 +21,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import { claimsVerdict } from "../src/backend/capabilities/resolve";
 import { projectGraphBackend } from "../src/backend/derive-backend";
 import { type GraphBackend } from "../src/backend/types";
 import {
@@ -357,13 +358,17 @@ describe("every projection of a claim-capable backend stays claim-capable", () =
   it("answers supported on the store projection and on the history projection", async () => {
     const { backend } = await createRecordedPostgresStore(inventoryGraph);
 
-    expect(claimSupport(projectGraphBackend(backend))).toMatchObject({
+    const storeProjection = projectGraphBackend(backend);
+    expect(
+      claimSupport(storeProjection, claimsVerdict(storeProjection)),
+    ).toMatchObject({
       supported: true,
     });
+    const historyProjection = createHistoryStoreBackendProjection(
+      backend,
+    ) as unknown as GraphBackend;
     expect(
-      claimSupport(
-        createHistoryStoreBackendProjection(backend) as unknown as GraphBackend,
-      ),
+      claimSupport(historyProjection, claimsVerdict(historyProjection)),
     ).toMatchObject({ supported: true });
   });
 });

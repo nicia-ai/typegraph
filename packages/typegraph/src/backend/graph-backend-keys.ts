@@ -1,3 +1,5 @@
+import { type Assert, type ContainsAll } from "../utils/type-assert";
+import type { CLAIMS } from "./capabilities/bundle-registry";
 import { type GraphBackend } from "./types";
 
 /**
@@ -139,3 +141,14 @@ const MISSING_GRAPH_BACKEND_PROJECTION_KEYS: Record<
   never
 > = {};
 void MISSING_GRAPH_BACKEND_PROJECTION_KEYS;
+
+// I13: the projection carries every `claims` core member, or a projected
+// backend could forward the declaration while silently dropping one of the
+// four members `claimSupport` binds.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _projectionContainsClaimsCore = Assert<
+  ContainsAll<
+    typeof GRAPH_BACKEND_PROJECTION_KEYS,
+    (typeof CLAIMS)["core"][number]
+  >
+>;

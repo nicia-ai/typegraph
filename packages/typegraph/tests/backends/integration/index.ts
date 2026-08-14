@@ -7,6 +7,7 @@ export { registerBulkFindHeterogeneousIntegrationTests } from "./bulk-find-heter
 export { registerBulkUpsertRepeatedIdIntegrationTests } from "./bulk-upsert-repeated-ids";
 export { registerCapabilityBundleNoThrowIntegrationTests } from "./capability-bundle-no-throw";
 export { registerCapabilityMemberDropMatrixIntegrationTests } from "./capability-member-drop-matrix";
+export { registerCapabilityPortBindingIntegrationTests } from "./capability-port-binding";
 export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals";
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";

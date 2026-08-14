@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
+import { createClaimsVerdictThunk } from "../src/backend/capabilities/resolve";
 import type { GraphBackend } from "../src/backend/types";
 import { checkWherePredicate, computeUniqueKey } from "../src/constraints";
 import { type UniqueConstraint } from "../src/core/types";
@@ -949,6 +950,7 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
         graphId: graph.id,
         registry: buildKindRegistry(graph),
         lock: uncapturedGraphWriteLock(),
+        claimsVerdict: createClaimsVerdictThunk(backend),
       },
       {
         kind: "Entry",

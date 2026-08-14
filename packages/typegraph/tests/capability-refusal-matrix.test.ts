@@ -8,10 +8,30 @@
  *
  * Behavioral rows (actually exercising the refusal against a backend) land
  * in B7/B8 — this file enumerates the registry's OWN data.
+ *
+ * The `describe("behavioral rows (B7)")` block below is B7's addition: each
+ * row asserts what the TREE actually throws (class, message, details) against
+ * a real backend, separately from the registry naming the row above — the
+ * registry's `code` is classification data, not a promise that this exact
+ * machine code is thrown (most rows here have none of their own).
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
+import {
+  createStore,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  repairInvertedValidityWindows,
+} from "../src";
 import { CAPABILITY_BUNDLES } from "../src/backend/capabilities/bundle-registry";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
+import { type GraphBackend } from "../src/backend/types";
+import { createTestBackend } from "./test-utils";
 
 type RefusalRow = Readonly<{
   bundle: string;
@@ -92,11 +112,6 @@ const PINNED_REFUSAL_TABLE: readonly (readonly [string, string, string])[] = [
     "RECORDED_TIME_MIGRATION_REQUIRES_STATEMENT_EXECUTION",
   ],
   [
-    "statementExecution",
-    "legacy anchor map delete",
-    "LEGACY_ANCHOR_MAP_DELETE_REQUIRES_STATEMENT_EXECUTION",
-  ],
-  [
     "contributionHealth",
     "contribution verify",
     "CONTRIBUTION_VERIFY_UNSUPPORTED",
@@ -166,5 +181,182 @@ describe("capability refusal matrix (T10, skeleton)", () => {
       missingFromEnumerated,
       "rows pinned but missing from the registry",
     ).toEqual([]);
+  });
+});
+
+function backendWithoutExecuteStatement(): GraphBackend {
+  const base = createTestBackend();
+  return projectBackendWithout(base, ["executeStatement"]);
+}
+
+const RefusalPerson = defineNode("RefusalPerson", {
+  schema: z.object({ name: z.string() }),
+});
+
+const refusalGraph = defineGraph({
+  id: "capability-refusal-matrix-behavioral",
+  nodes: { RefusalPerson: { type: RefusalPerson } },
+  edges: {},
+});
+
+const identityRefusalGraph = defineGraph({
+  id: "capability-refusal-matrix-identity",
+  nodes: { RefusalPerson: { type: RefusalPerson } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+const refusalHasPassport = defineEdge("refusalHasPassport", {
+  schema: z.object({}),
+});
+
+const constrainedRefusalGraph = defineGraph({
+  id: "capability-refusal-matrix-claims",
+  nodes: { RefusalPerson: { type: RefusalPerson } },
+  edges: {
+    refusalHasPassport: {
+      type: refusalHasPassport,
+      from: [RefusalPerson],
+      to: [RefusalPerson],
+      cardinality: "one",
+    },
+  },
+});
+
+describe("behavioral rows (B7)", () => {
+  it("statementExecution / history construction gate", () => {
+    // What the TREE actually throws: `history: true` also enables revision
+    // tracking (`this.#revisionTrackingEnabled = this.#captureEnabled || …`),
+    // whose OWN construction gate (`assertRevisionTrackableBackend`) runs
+    // BEFORE `createRecordedBackend`'s `assertCapturableBackend` and checks
+    // the SAME `executeStatement` member first — so a backend missing only
+    // `executeStatement` throws revisionTracking's message, never history's
+    // own (guards.ts:251's `HISTORY_REQUIRES_STATEMENT_EXECUTION` message is
+    // unreachable through THIS gap; see the batch report). The registry
+    // still separately names a "history construction gate" row.
+    expect(() =>
+      createStore(refusalGraph, backendWithoutExecuteStatement(), {
+        history: true,
+      }),
+    ).toThrow(
+      "revisionTracking: true requires a backend that supports executeStatement.",
+    );
+
+    const registryRow = CAPABILITY_BUNDLES.find(
+      (bundle) => bundle.id === "statementExecution",
+    )?.operations.find(
+      (operation) => operation.operation === "history construction gate",
+    );
+    expect(registryRow?.disposition.kind).toBe("refuse");
+  });
+
+  it("statementExecution / revision tracking construction gate", () => {
+    expect(() =>
+      createStore(refusalGraph, backendWithoutExecuteStatement(), {
+        revisionTracking: true,
+      }),
+    ).toThrow(
+      "revisionTracking: true requires a backend that supports executeStatement.",
+    );
+  });
+
+  it("statementExecution / identity construction gate", () => {
+    let caught: unknown;
+    try {
+      createStore(identityRefusalGraph, backendWithoutExecuteStatement());
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+    };
+    expect(error.details["code"]).toBe("IDENTITY_REQUIRES_ATOMIC_BACKEND");
+  });
+
+  it("statementExecution / validity window repair", async () => {
+    await expect(
+      repairInvertedValidityWindows({
+        backend: backendWithoutExecuteStatement(),
+        relations: "live",
+        mode: "apply",
+      }),
+    ).rejects.toThrow(
+      "Repairing inverted validity windows requires executeStatement support.",
+    );
+  });
+
+  it("claims / edge claim write (fallback): a backend with no claim members and no declaration writes a constrained edge with no claim and no throw", async () => {
+    const base = createTestBackend();
+    const { constraintClaims: _dropped, ...capabilities } = base.capabilities;
+    const backend = deriveBackend(
+      projectBackendWithout(base, [
+        "claimEdgeCardinality",
+        "claimEdgeCardinalityBatch",
+        "purgeEdgeClaims",
+        "hardDeleteUniquesByConcreteKind",
+      ]),
+      { capabilities },
+    );
+    const store = createStore(constrainedRefusalGraph, backend);
+    const alice = await store.nodes.RefusalPerson.create({ name: "Alice" });
+    const bob = await store.nodes.RefusalPerson.create({ name: "Bob" });
+
+    await expect(
+      store.edges.refusalHasPassport.create(alice, bob, {}),
+    ).resolves.toBeDefined();
+  });
+
+  it("claims mismatch, declared but missing a member: CONSTRAINT_CLAIM_SURFACE_MISMATCH, byte-identical to the registry's own message", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["claimEdgeCardinality"]);
+    // Node creation must still succeed: the verdict thunk resolves lazily, at
+    // the first CLAIMED write, never at store construction (T14).
+    const store = createStore(constrainedRefusalGraph, backend);
+    const alice = await store.nodes.RefusalPerson.create({ name: "Alice" });
+    const bob = await store.nodes.RefusalPerson.create({ name: "Bob" });
+
+    let caught: unknown;
+    try {
+      await store.edges.refusalHasPassport.create(alice, bob, {});
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+      message: string;
+    };
+    expect(error.details["code"]).toBe("CONSTRAINT_CLAIM_SURFACE_MISMATCH");
+    expect(error.message).toBe(
+      "This backend declares `constraintClaims: true` but does not implement claimEdgeCardinality. " +
+        "A declared constraint would then be written without the fence the declaration promises.",
+    );
+  });
+
+  it("claims mismatch, implemented but not declared: CONSTRAINT_CLAIM_SURFACE_MISMATCH, byte-identical to the registry's own message", async () => {
+    const base = createTestBackend();
+    const { constraintClaims: _dropped, ...capabilities } = base.capabilities;
+    const backend = deriveBackend(base, { capabilities });
+    const store = createStore(constrainedRefusalGraph, backend);
+    const alice = await store.nodes.RefusalPerson.create({ name: "Alice" });
+    const bob = await store.nodes.RefusalPerson.create({ name: "Bob" });
+
+    let caught: unknown;
+    try {
+      await store.edges.refusalHasPassport.create(alice, bob, {});
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+      message: string;
+    };
+    expect(error.details["code"]).toBe("CONSTRAINT_CLAIM_SURFACE_MISMATCH");
+    expect(error.message).toBe(
+      "This backend implements claimEdgeCardinality, claimEdgeCardinalityBatch, purgeEdgeClaims, hardDeleteUniquesByConcreteKind but does not declare `constraintClaims: true`. " +
+        "Claim support is read from the declaration, so these members would never be called.",
+    );
   });
 });

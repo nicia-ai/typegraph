@@ -106,6 +106,16 @@ export type CapabilityBundleOperationSite = Readonly<{
    * `migrate-recorded-time.ts#executeStatement`.
    */
   lines?: readonly number[];
+  /**
+   * Set when B7's rewiring pass reclassified this site AWAY from `pilot`
+   * instead of rewiring it — additive, optional, and read by nothing but the
+   * inventory/report tooling. `"deferred"` names a site whose receiver family
+   * needs plumbing this batch must not force (WS5b's input); `"reasoned"`
+   * names one this batch decided a verdict must never gate at all. The
+   * `code`/`disposition` above stay the classification data they always were;
+   * this is a SEPARATE fact about the site, not a replacement for either.
+   */
+  rewiring?: Readonly<{ class: "deferred" | "reasoned"; reason: string }>;
 }>;
 
 /** Every caller-visible operation that consumes a bundle. */
@@ -190,11 +200,11 @@ export type CapabilityBundleDefinition =
 // ---------------------------------------------------------------------------
 
 /**
- * `claimSupport` (`store/claims/backing.ts:129-169`) conjoins all four
- * members in one predicate today, and is the ONE bidirectional cross-check
- * in the tree. `resolve.ts`'s bidirectional branch reproduces its message
- * text byte-for-byte — a transitional duplicate `backing.ts` still owns
- * until B7 makes `claimSupport` delegate to `resolveBundle`.
+ * `claimSupport` (`store/claims/backing.ts`) is the ONE bidirectional
+ * cross-check consumer in the tree. Since B7 it delegates to
+ * `resolveBundle`, which runs `resolve.ts`'s `assertClaimsBidirectionalAgreement`
+ * — the check's only remaining owner; there is no second copy left in
+ * `backing.ts` to keep byte-for-byte in sync with.
  */
 export const CLAIMS = {
   id: "claims",
@@ -501,7 +511,17 @@ export const STATEMENT_EXECUTION = {
         kind: "refuse",
         code: "IDENTITY_REQUIRES_STATEMENT_EXECUTION",
       },
-      sites: [{ file: "identity/sql-target.ts", member: "executeStatement" }],
+      sites: [
+        {
+          file: "identity/sql-target.ts",
+          member: "executeStatement",
+          rewiring: {
+            class: "deferred",
+            reason:
+              "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures",
+          },
+        },
+      ],
     },
     {
       operation: "recorded capture statement",
@@ -514,6 +534,11 @@ export const STATEMENT_EXECUTION = {
           file: "store/recorded-capture/guards.ts",
           member: "executeStatement",
           lines: [62, 79],
+          rewiring: {
+            class: "deferred",
+            reason:
+              "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures",
+          },
         },
       ],
     },
@@ -556,6 +581,11 @@ export const STATEMENT_EXECUTION = {
           file: "store/recorded-capture/guards.ts",
           member: "executeStatement",
           lines: [219],
+          rewiring: {
+            class: "reasoned",
+            reason:
+              "genuinely a port-surface presence test; re-keying it on a verdict changes behavior in both directions (a phantom-rejecting stub one way, a raw-write escape on a history-enabled store the other — a safety regression), and adding a non-throwing gated accessor to the frozen binder surface for ONE site is the over-generalization anti-pattern",
+          },
         },
       ],
     },
@@ -594,20 +624,11 @@ export const STATEMENT_EXECUTION = {
           file: "backend/migrate-recorded-time.ts",
           member: "executeStatement",
           lines: [154, 161],
-        },
-      ],
-    },
-    {
-      operation: "legacy anchor map delete",
-      disposition: {
-        kind: "refuse",
-        code: "LEGACY_ANCHOR_MAP_DELETE_REQUIRES_STATEMENT_EXECUTION",
-      },
-      sites: [
-        {
-          file: "backend/migrate-recorded-time.ts",
-          member: "executeStatement",
-          lines: [801],
+          rewiring: {
+            class: "deferred",
+            reason:
+              "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners",
+          },
         },
       ],
     },

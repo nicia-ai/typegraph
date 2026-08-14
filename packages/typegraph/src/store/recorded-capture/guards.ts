@@ -1,3 +1,4 @@
+import { statementExecutionVerdict } from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type TransactionBackend,
@@ -248,7 +249,7 @@ export function assertCapturableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.executeStatement === undefined) {
+  if (!statementExecutionVerdict(backend).supported) {
     throw new ConfigurationError(
       "history: true requires a backend that supports executeStatement.",
       { dialect: backend.dialect },
@@ -296,7 +297,7 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.executeStatement === undefined) {
+  if (!statementExecutionVerdict(backend).supported) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend that supports executeStatement.",
       { dialect: backend.dialect },

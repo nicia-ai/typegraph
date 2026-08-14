@@ -22,6 +22,7 @@
  * {@link runInWriteTransaction}); they perform no transaction management of
  * their own.
  */
+import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
 import {
   type BackendValidityEndMutation,
   type ClaimEdgeCardinalityParams,
@@ -46,18 +47,24 @@ type Backend = GraphBackend | TransactionBackend;
  * at the call site instead of a lock-order inversion in review. There is no
  * registry, because an edge write resolves no schema and no constraints — the
  * caller validated the props before the transaction opened.
+ *
+ * `claimsVerdict` is the `claims` bundle's memoized, at-most-once verdict
+ * thunk (ruling B7 refinement 2), called at each site below that issues or
+ * releases an edge-cardinality claim.
  */
 export type EdgeWriteContext = Readonly<{
   graphId: string;
   lock: GraphWriteLock;
+  claimsVerdict: ClaimsVerdictThunk;
 }>;
 
 /** Builds an {@link EdgeWriteContext} — the one constructor every call site shares. */
 export function createEdgeWriteContext(
   graphId: string,
   lock: GraphWriteLock,
+  claimsVerdict: ClaimsVerdictThunk,
 ): EdgeWriteContext {
-  return { graphId, lock };
+  return { graphId, lock, claimsVerdict };
 }
 
 /**
@@ -115,7 +122,9 @@ export async function applyEdgeUpdate(
   backend: Backend,
 ): Promise<EdgeRow> {
   const { claim, ...rowWork } = args;
-  if (claim !== undefined) await claimEdgeCardinality(backend, claim);
+  if (claim !== undefined) {
+    await claimEdgeCardinality(backend, ctx.claimsVerdict(), claim);
+  }
   // Every key of the work record and of the fence draft is a field of
   // `UpdateEdgeParams`, and both are built with the same "present only when
   // stated" discipline the call site used to apply field by field, so the
@@ -181,6 +190,6 @@ export async function applyEdgeHardDelete(
     kind: work.kind,
   });
   if (work.holdsCardinalityClaim) {
-    await purgeEdgeClaims(backend, ctx.graphId, [work.id]);
+    await purgeEdgeClaims(backend, ctx.claimsVerdict(), ctx.graphId, [work.id]);
   }
 }

@@ -527,6 +527,10 @@ export const CAPABILITY_BUNDLES: readonly [{
         readonly sites: readonly [{
             readonly file: "identity/sql-target.ts";
             readonly member: "executeStatement";
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
         }];
     }, {
         readonly operation: "recorded capture statement";
@@ -538,6 +542,10 @@ export const CAPABILITY_BUNDLES: readonly [{
             readonly file: "store/recorded-capture/guards.ts";
             readonly member: "executeStatement";
             readonly lines: readonly [62, 79];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
         }];
     }, {
         readonly operation: "history construction gate";
@@ -571,6 +579,10 @@ export const CAPABILITY_BUNDLES: readonly [{
             readonly file: "store/recorded-capture/guards.ts";
             readonly member: "executeStatement";
             readonly lines: readonly [219];
+            readonly rewiring: {
+                readonly class: "reasoned";
+                readonly reason: "genuinely a port-surface presence test; re-keying it on a verdict changes behavior in both directions (a phantom-rejecting stub one way, a raw-write escape on a history-enabled store the other — a safety regression), and adding a non-throwing gated accessor to the frozen binder surface for ONE site is the over-generalization anti-pattern";
+            };
         }];
     }, {
         readonly operation: "identity construction gate";
@@ -607,17 +619,10 @@ export const CAPABILITY_BUNDLES: readonly [{
             readonly file: "backend/migrate-recorded-time.ts";
             readonly member: "executeStatement";
             readonly lines: readonly [154, 161];
-        }];
-    }, {
-        readonly operation: "legacy anchor map delete";
-        readonly disposition: {
-            readonly kind: "refuse";
-            readonly code: "LEGACY_ANCHOR_MAP_DELETE_REQUIRES_STATEMENT_EXECUTION";
-        };
-        readonly sites: readonly [{
-            readonly file: "backend/migrate-recorded-time.ts";
-            readonly member: "executeStatement";
-            readonly lines: readonly [801];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners";
+            };
         }];
     }];
 }, {
@@ -784,6 +789,10 @@ export type CapabilityBundleOperationSite = Readonly<{
     file: string;
     member: OptionalGraphBackendMember;
     lines?: readonly number[];
+    rewiring?: Readonly<{
+        class: "deferred" | "reasoned";
+        reason: string;
+    }>;
 }>;
 
 // @public (undocumented)
@@ -894,6 +903,9 @@ export function claimsMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof 
 
 // @public (undocumented)
 export function claimsVerdict(backend: GraphBackend): BundleVerdictOf<typeof CLAIMS>;
+
+// @public
+export type ClaimsVerdictThunk = () => BundleVerdictOf<typeof CLAIMS>;
 
 // @public
 export type Collation = "binary" | "caseInsensitive";
@@ -1196,6 +1208,9 @@ export type CountNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export function createClaimsVerdictThunk(backend: GraphBackend): ClaimsVerdictThunk;
+
+// @public
 export type CreateVectorIndexParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -1274,7 +1289,7 @@ export function deleteLegacyRecordedAnchorMap(options: DeleteLegacyRecordedAncho
 
 // @public (undocumented)
 export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
-    backend: Pick<GraphBackend, "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction">;
+    backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames" | "transaction"> & Required<Pick<GraphBackend, "executeStatement">>;
     graphId: string;
     tableNames?: Partial<SqlTableNames> | undefined;
     mappingTableName?: string | undefined;
@@ -2895,6 +2910,10 @@ export const STATEMENT_EXECUTION: {
         readonly sites: readonly [{
             readonly file: "identity/sql-target.ts";
             readonly member: "executeStatement";
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
         }];
     }, {
         readonly operation: "recorded capture statement";
@@ -2906,6 +2925,10 @@ export const STATEMENT_EXECUTION: {
             readonly file: "store/recorded-capture/guards.ts";
             readonly member: "executeStatement";
             readonly lines: readonly [62, 79];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "requires verdict threading through IdentityServiceContext / the capture session — WS5b input, measured at ~13 files/~35 signatures";
+            };
         }];
     }, {
         readonly operation: "history construction gate";
@@ -2939,6 +2962,10 @@ export const STATEMENT_EXECUTION: {
             readonly file: "store/recorded-capture/guards.ts";
             readonly member: "executeStatement";
             readonly lines: readonly [219];
+            readonly rewiring: {
+                readonly class: "reasoned";
+                readonly reason: "genuinely a port-surface presence test; re-keying it on a verdict changes behavior in both directions (a phantom-rejecting stub one way, a raw-write escape on a history-enabled store the other — a safety regression), and adding a non-throwing gated accessor to the frozen binder surface for ONE site is the over-generalization anti-pattern";
+            };
         }];
     }, {
         readonly operation: "identity construction gate";
@@ -2975,17 +3002,10 @@ export const STATEMENT_EXECUTION: {
             readonly file: "backend/migrate-recorded-time.ts";
             readonly member: "executeStatement";
             readonly lines: readonly [154, 161];
-        }];
-    }, {
-        readonly operation: "legacy anchor map delete";
-        readonly disposition: {
-            readonly kind: "refuse";
-            readonly code: "LEGACY_ANCHOR_MAP_DELETE_REQUIRES_STATEMENT_EXECUTION";
-        };
-        readonly sites: readonly [{
-            readonly file: "backend/migrate-recorded-time.ts";
-            readonly member: "executeStatement";
-            readonly lines: readonly [801];
+            readonly rewiring: {
+                readonly class: "deferred";
+                readonly reason: "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners";
+            };
         }];
     }];
 };

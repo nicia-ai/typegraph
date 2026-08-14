@@ -18,7 +18,8 @@
       "file": "backend/migrate-recorded-time.ts",
       "line": 801,
       "member": "executeStatement",
-      "class": "pilot"
+      "class": "statically-required",
+      "note": "C1(b): DeleteLegacyRecordedAnchorMapOptions[\"backend\"] now types executeStatement as Required<Pick<GraphBackend, \"executeStatement\">>, so this line's runtime guard is deleted and the access is a static requirement, not a runtime one."
     },
     {
       "file": "backend/repair-validity-windows.ts",

@@ -176,13 +176,14 @@ function resolveExtras<
 
 /**
  * The `claims` bidirectional cross-check (ruling F2), reproducing
- * `store/claims/backing.ts:129-169`'s message text, code and suggestion
- * BYTE-FOR-BYTE — a transitional duplicate `backing.ts` still owns until B7
- * makes `claimSupport` delegate to `resolveBundle`. `bidirectional` is
- * `claims`-only by design (§5.2.1): the two trailing sentences below name
- * "claim"/"fence" vocabulary that is specific to that one bundle, and a
- * future bundle raising `crossCheck` to `"bidirectional"` must carry its own
- * justification row and, with it, its own message pair here.
+ * `store/claims/backing.ts`'s pre-B7 message text, code and suggestion
+ * BYTE-FOR-BYTE. B7 made `claimSupport` (`backing.ts`) delegate to
+ * {@link resolveBundle}, so this is now the ONLY place the check runs — there
+ * is no second copy left to keep in sync. `bidirectional` is `claims`-only by
+ * design (§5.2.1): the two trailing sentences below name "claim"/"fence"
+ * vocabulary that is specific to that one bundle, and a future bundle raising
+ * `crossCheck` to `"bidirectional"` must carry its own justification row and,
+ * with it, its own message pair here.
  *
  * @throws {ConfigurationError} when the declaration and the member surface
  *   disagree in either direction.
@@ -412,4 +413,78 @@ export function recordedRevisionOriginsVerdict(
   backend: GraphBackend,
 ): BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS> {
   return resolveBundle(backend, RECORDED_REVISION_ORIGINS);
+}
+
+// ---------------------------------------------------------------------------
+// The claims verdict THUNK — the reference implementation of §5.2.3's INTENT
+// (one owner, at-most-once resolution, no re-derivation) moved to WHEN it
+// resolves rather than IF (ruling B7 refinement 2).
+// ---------------------------------------------------------------------------
+
+/**
+ * A memoized, at-most-once resolution of the `claims` bundle's verdict
+ * against ONE backend.
+ *
+ * Eager resolution at store construction is forbidden: T14's
+ * contradictory-declaration backends must still be able to construct a store
+ * and create nodes — only a constrained edge write may legally reach the
+ * bidirectional cross-check's throw, and it must do so lazily, at the first
+ * write that needs the verdict.
+ *
+ * A cached verdict cannot go stale because `GraphBackend` is deep-frozen (B1):
+ * nothing can flip `capabilities.constraintClaims` or add/remove a claim
+ * member on a backend object after this thunk has already resolved it, so
+ * "resolve once and reuse forever" is exactly as safe as "resolve every
+ * time" — for one backend object, they observe the same immutable answer.
+ */
+export type ClaimsVerdictThunk = () => BundleVerdictOf<typeof CLAIMS>;
+
+/**
+ * Interning: the same backend object always gets back the SAME thunk object.
+ * This is what makes "one shared thunk per backend" structural rather than a
+ * convention every population site has to honor — a second call to
+ * {@link createClaimsVerdictThunk} for a backend already minted cannot produce
+ * a second, independently-memoized verdict.
+ */
+const CLAIMS_VERDICT_THUNKS = new WeakMap<GraphBackend, ClaimsVerdictThunk>();
+
+/**
+ * Mints — or returns the already-minted — {@link ClaimsVerdictThunk} for
+ * `backend`.
+ *
+ * The thunk resolves {@link resolveBundle}`(backend, CLAIMS)` on its first
+ * call and caches the outcome, INCLUDING a thrown `ConfigurationError`: a
+ * refusal is cached and re-thrown on every subsequent call, never
+ * re-resolved. Both layers — interning here, memoization inside the thunk —
+ * are required: interning alone would still let two independently-memoized
+ * thunks exist for one backend if a caller ignored the shared one; memoizing
+ * alone would still let two different call sites mint two different thunks
+ * that could disagree about whether they had already resolved.
+ */
+export function createClaimsVerdictThunk(
+  backend: GraphBackend,
+): ClaimsVerdictThunk {
+  const existing = CLAIMS_VERDICT_THUNKS.get(backend);
+  if (existing !== undefined) return existing;
+
+  type Memo =
+    | Readonly<{ state: "resolved"; verdict: BundleVerdictOf<typeof CLAIMS> }>
+    | Readonly<{ state: "thrown"; error: unknown }>;
+  let memo: Memo | undefined;
+
+  const thunk: ClaimsVerdictThunk = () => {
+    if (memo === undefined) {
+      try {
+        memo = { state: "resolved", verdict: resolveBundle(backend, CLAIMS) };
+      } catch (error) {
+        memo = { state: "thrown", error };
+        throw error;
+      }
+    }
+    if (memo.state === "thrown") throw memo.error;
+    return memo.verdict;
+  };
+
+  CLAIMS_VERDICT_THUNKS.set(backend, thunk);
+  return thunk;
 }

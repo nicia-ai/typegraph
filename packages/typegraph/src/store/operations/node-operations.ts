@@ -44,6 +44,7 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
+import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
 import { deriveBackend } from "../../backend/derive-backend";
 import {
   type GraphBackend,
@@ -172,6 +173,13 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   coalesceUnchangedUpsertsEnabled: boolean;
   revisionSchema: SqlSchema;
   registry: KindRegistry;
+  /**
+   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
+   * refinement 2) — threaded through to `createNodeWriteContext` by
+   * `runWritePlan`'s session mint, and called at the write-session sites that
+   * issue or release a claim.
+   */
+  claimsVerdict: ClaimsVerdictThunk;
   createOperationContext: (
     operation: "create" | "update" | "delete",
     entity: KindEntity,

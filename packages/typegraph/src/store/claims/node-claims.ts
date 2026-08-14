@@ -13,6 +13,7 @@
  * maintains disjointness reservations too, by reading one list rather than by
  * being edited twice.
  */
+import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type InsertUniqueParams,
@@ -422,11 +423,20 @@ export async function checkUniquenessConstraints(
  * satisfied BEFORE any row work (see {@link GraphWriteLock}); the seam performs
  * no locking of its own, so requiring the token here makes "claim before lock"
  * a type error at the call site instead of a lock-order inversion in review.
+ *
+ * `claimsVerdict` is the `claims` bundle's memoized, at-most-once verdict
+ * thunk (ruling B7 refinement 2). This module's own uniqueness/disjointness
+ * claims never read it — they are a different fence family, backed by the
+ * `uniques` relation — but `node-write-pipeline.ts`'s hard-delete cascade
+ * shares this same context and calls `purgeEdgeClaims` (the `claims` bundle's
+ * edge-cardinality housekeeping) off it, so the field lives here rather than
+ * on a second, parallel context only that one caller would build.
  */
 export type NodeClaimContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
   lock: GraphWriteLock;
+  claimsVerdict: ClaimsVerdictThunk;
 }>;
 
 /** One row whose claims a create-shaped write is about to issue. */

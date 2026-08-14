@@ -10,8 +10,11 @@
  * (iii) Contract R2's audit, executed: `claimsVerdict`'s thrown error and
  *     `claimSupport`'s thrown error agree byte-for-byte on the
  *     `projectBackendWithout` fixtures `tests/recorded-capture-capability-
- *     gate.test.ts` already uses — this is the anti-drift seam for the
- *     transitional duplicate `resolve.ts` carries until B7.
+ *     gate.test.ts` already uses. Since B7, `claimSupport` takes an
+ *     already-resolved verdict rather than re-deriving one, so both sides of
+ *     this comparison resolve through the same `claimsVerdict` call — this
+ *     row now witnesses that `claimSupport` adds no second disagreement of
+ *     its own, rather than guarding two independent implementations.
  */
 import { describe, expect, it } from "vitest";
 
@@ -121,7 +124,7 @@ describe("capability bundle / declaration mismatch (T11)", () => {
       }
       let fromSupport: unknown;
       try {
-        claimSupport(missing);
+        claimSupport(missing, claimsVerdict(missing));
       } catch (error) {
         fromSupport = error;
       }
@@ -156,7 +159,7 @@ describe("capability bundle / declaration mismatch (T11)", () => {
       }
       let fromSupport: unknown;
       try {
-        claimSupport(undeclared);
+        claimSupport(undeclared, claimsVerdict(undeclared));
       } catch (error) {
         fromSupport = error;
       }

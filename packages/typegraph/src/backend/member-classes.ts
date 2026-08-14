@@ -30,7 +30,12 @@
  * capability PROJECTION, this is a PARTITION. Different jobs, different
  * module.
  */
-import { type Assert, type Equal } from "../utils/type-assert";
+import {
+  type Assert,
+  type ContainsAll,
+  type Equal,
+} from "../utils/type-assert";
+import type { CLAIMS } from "./capabilities/bundle-registry";
 import { type GraphBackend } from "./types";
 
 /** Static description of the backend, not an operation. */
@@ -375,4 +380,11 @@ type _d7 = Assert<
 >;
 type _d8 = Assert<Disjoint<ProvisioningMember, RawSqlMember | LifecycleMember>>;
 type _d9 = Assert<Disjoint<RawSqlMember, LifecycleMember>>;
+
+// I13: every `claims` core member is classified `sidecarWrite`, or a class
+// list that dropped one of the four would silently narrow the write pipeline's
+// own view of which members a claim write may call.
+type _sidecarWriteContainsClaimsCore = Assert<
+  ContainsAll<typeof SIDECAR_WRITE_MEMBERS, (typeof CLAIMS)["core"][number]>
+>;
 /* eslint-enable @typescript-eslint/no-unused-vars */

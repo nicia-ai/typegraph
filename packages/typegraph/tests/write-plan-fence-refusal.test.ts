@@ -24,6 +24,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import { createClaimsVerdictThunk } from "../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   type ExactBackendOverlay,
@@ -63,7 +64,7 @@ const graph = defineGraph({
 
 const registry = buildKindRegistry(graph);
 
-function writeContext(): WritePlanContext {
+function writeContext(backend: GraphBackend): WritePlanContext {
   return {
     graphId: GRAPH_ID,
     registry,
@@ -71,6 +72,7 @@ function writeContext(): WritePlanContext {
     historyEnabled: false,
     revisionTrackingEnabled: false,
     revisionSchema: createSqlSchema(),
+    claimsVerdict: createClaimsVerdictThunk(backend),
   };
 }
 
@@ -165,7 +167,7 @@ describe("a fence the row work's statement cannot carry", () => {
       const { backend, counts } = withSetUpdateCount(raw);
 
       const failure: unknown = await runWritePlan(
-        writeContext(),
+        writeContext(backend),
         nodeWritePlan(undefined, false),
         backend,
         (session) =>
@@ -195,7 +197,7 @@ describe("a fence the row work's statement cannot carry", () => {
       const { backend, counts } = withSetUpdateCount(raw);
 
       const result = await runWritePlan(
-        writeContext(),
+        writeContext(backend),
         nodeWritePlan(undefined, false),
         backend,
         (session) => session.reviseNodeSet(work, { validityLowerBound: {} }),

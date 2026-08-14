@@ -59,6 +59,7 @@ import {
   rebuildIdentityClosure,
   subClassOf,
 } from "../src";
+import { createClaimsVerdictThunk } from "../src/backend/capabilities/resolve";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { type GraphBackend } from "../src/backend/types";
@@ -624,6 +625,7 @@ describe("the executor's own frame keeps that order", () => {
         historyEnabled: false,
         revisionTrackingEnabled: false,
         revisionSchema: createSqlSchema(),
+        claimsVerdict: createClaimsVerdictThunk(backend),
         // The real acquirer the node/edge contexts hand the executor.
         identityLock: async (target) => {
           identityLocks.push(statements.length);

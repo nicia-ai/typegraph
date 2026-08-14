@@ -222,18 +222,6 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     ],
   },
   {
-    path: "src/store/claims/backing.ts",
-    reason:
-      "claimSupport reads the claim members to NARROW them for the sidecars above; it issues no write itself, and the syntactic rule cannot tell a requireDefined presence read from a call.",
-    permanent: true,
-    allowedMembers: [
-      "claimEdgeCardinality",
-      "claimEdgeCardinalityBatch",
-      "purgeEdgeClaims",
-      "hardDeleteUniquesByConcreteKind",
-    ],
-  },
-  {
     path: "src/store/embedding-sync.ts",
     reason: "The embedding sidecar, called only by the write steps.",
     permanent: true,

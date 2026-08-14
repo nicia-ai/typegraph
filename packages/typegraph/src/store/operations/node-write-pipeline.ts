@@ -17,6 +17,7 @@
  */
 import { type z } from "zod";
 
+import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type LiveNodeRow,
@@ -89,8 +90,9 @@ export function createNodeWriteContext(
   graphId: string,
   registry: KindRegistry,
   lock: GraphWriteLock,
+  claimsVerdict: ClaimsVerdictThunk,
 ): NodeWriteContext {
-  return { graphId, registry, lock };
+  return { graphId, registry, lock, claimsVerdict };
 }
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
@@ -195,7 +197,12 @@ async function enforceNodeDeleteBehavior(
       // Soft-deleted edges retain their rows for resurrection and are not
       // reaped here.
       if (args.mode === "hard") {
-        await purgeEdgeClaims(backend, ctx.graphId, connectedEdgeIds);
+        await purgeEdgeClaims(
+          backend,
+          ctx.claimsVerdict(),
+          ctx.graphId,
+          connectedEdgeIds,
+        );
       }
       break;
     }

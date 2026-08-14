@@ -14,17 +14,116 @@
  * `store.transaction()` — this test PINS the pattern; B7/B8 anchor it in
  * production code (`claimSupport`'s move onto the framework, and the
  * `uniqueSidecarBatch`/`batchPointRead` call sites).
+ *
+ * (c) B7's `ClaimsVerdictThunk`: interning (one thunk per backend object),
+ * memoization (at most one `resolveBundle` per thunk, ever — including across
+ * a simulated write loop), a production anchor through `store.transaction()`,
+ * and the one-owner ratchet — a source scan proving `claimsVerdict`/
+ * `resolveBundle` are never called, as bare identifiers, from `src/store/**`,
+ * `src/interchange/**` or `src/provenance/**`. The scan is AST-based
+ * (`ts.isIdentifier`, not a substring match) for the same reason
+ * `backend-derivation-inventory.test.ts` is: `ctx.claimsVerdict()` calls the
+ * THUNK field of that name and must not trip a scan meant to catch a bare
+ * `claimsVerdict(...)` call, which only a direct import of the raw accessor
+ * can spell.
  */
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { createStore, defineEdge, defineGraph, defineNode } from "../src";
 import { claimsMembers } from "../src/backend/capabilities/bind";
 import { CONTRIBUTION_HEALTH } from "../src/backend/capabilities/bundle-registry";
 import {
   claimsVerdict,
+  createClaimsVerdictThunk,
   resolveBundle,
 } from "../src/backend/capabilities/resolve";
-import { type TransactionBackend } from "../src/backend/types";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../src/backend/types";
+import { storeBackend } from "../src/store/runtime-port";
 import { createTestBackend } from "./test-utils";
+
+/** Every directory the one-owner ratchet (T13(c)) scans. */
+const ONE_OWNER_SCANNED_DIRECTORIES = [
+  "store",
+  "interchange",
+  "provenance",
+] as const;
+
+/** The bare identifiers the one-owner ratchet (T13(c)) bans. */
+const ONE_OWNER_BANNED_NAMES = new Set(["resolveBundle", "claimsVerdict"]);
+
+function collectTypeScriptFiles(directory: string): readonly string[] {
+  if (!fs.existsSync(directory)) return [];
+  const found: string[] = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...collectTypeScriptFiles(full));
+    } else if (entry.name.endsWith(".ts")) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+/**
+ * The called function's name, when the callee is a plain identifier —
+ * `claimsVerdict(backend)`. A property-access call (`ctx.claimsVerdict()`) is
+ * deliberately not this: it calls the THUNK field of that name, not the raw
+ * accessor import, and must not trip this ratchet.
+ */
+function bareCalleeName(call: ts.CallExpression): string | undefined {
+  return ts.isIdentifier(call.expression) ? call.expression.text : undefined;
+}
+
+function scanFileForBannedCalls(
+  relativeFile: string,
+  source: string,
+): readonly string[] {
+  const parsed = ts.createSourceFile(
+    relativeFile,
+    source,
+    ts.ScriptTarget.Latest,
+    /* setParentNodes */ false,
+    ts.ScriptKind.TS,
+  );
+  const found: string[] = [];
+  function visit(node: ts.Node): void {
+    if (ts.isCallExpression(node)) {
+      const name = bareCalleeName(node);
+      if (name !== undefined && ONE_OWNER_BANNED_NAMES.has(name)) {
+        const { line } = parsed.getLineAndCharacterOfPosition(
+          node.expression.getStart(parsed),
+        );
+        found.push(`${relativeFile}:${line + 1} — ${name}(...)`);
+      }
+    }
+    ts.forEachChild(node, (child) => {
+      visit(child);
+    });
+  }
+  visit(parsed);
+  return found;
+}
+
+/** The claim-member function every counted getter below resolves to. */
+function resolveClaimNoop(): Promise<undefined> {
+  return Promise.resolve(undefined);
+}
+
+/** A resolved member function that counts how many times it was minted. */
+function countedClaimMember(onCounted: () => void): () => Promise<undefined> {
+  onCounted();
+  return resolveClaimNoop;
+}
 
 describe("capability decision threading (T13)", () => {
   it("(a) resolveBundle refuses a TransactionBackend at the type level", () => {
@@ -74,5 +173,114 @@ describe("capability decision threading (T13)", () => {
       );
       return Promise.resolve();
     });
+  });
+});
+
+describe("the claims verdict thunk (T13(c), ruling B7 refinement 2)", () => {
+  it("interns: the same backend object always gets back the same thunk", () => {
+    const backend = createTestBackend();
+    expect(createClaimsVerdictThunk(backend)).toBe(
+      createClaimsVerdictThunk(backend),
+    );
+  });
+
+  it("memoizes: the thunk's own resolution is `toBe`-identical across calls", () => {
+    const backend = createTestBackend();
+    const thunk = createClaimsVerdictThunk(backend);
+    expect(thunk()).toBe(thunk());
+  });
+
+  it("resolves the bundle AT MOST ONCE, even across a simulated write loop", () => {
+    let reads = 0;
+    const onCounted = (): void => {
+      reads += 1;
+    };
+    const backend = {
+      capabilities: { constraintClaims: true },
+      get claimEdgeCardinality() {
+        return countedClaimMember(onCounted);
+      },
+      get claimEdgeCardinalityBatch() {
+        return countedClaimMember(onCounted);
+      },
+      get purgeEdgeClaims() {
+        return countedClaimMember(onCounted);
+      },
+      get hardDeleteUniquesByConcreteKind() {
+        return countedClaimMember(onCounted);
+      },
+    } as unknown as GraphBackend;
+
+    const thunk = createClaimsVerdictThunk(backend);
+    thunk();
+    const readsAfterFirstCall = reads;
+    expect(readsAfterFirstCall).toBeGreaterThan(0);
+
+    thunk();
+    // A simulated write loop: several more calls to the SAME thunk, exactly
+    // as `ctx.claimsVerdict()` is called once per write-session method.
+    for (let index = 0; index < 5; index += 1) thunk();
+
+    expect(reads).toBe(readsAfterFirstCall);
+  });
+
+  it("production anchor: the store's thunk is the same object before and inside a transaction performing two claimed edge writes", async () => {
+    const Person = defineNode("Person", {
+      schema: z.object({ name: z.string() }),
+    });
+    const hasPassport = defineEdge("anchor13cHasPassport", {
+      schema: z.object({}),
+    });
+    const graph = defineGraph({
+      id: "capability-decision-threading-t13c",
+      nodes: { Person: { type: Person } },
+      edges: {
+        hasPassport: {
+          type: hasPassport,
+          from: [Person],
+          to: [Person],
+          cardinality: "one",
+        },
+      },
+    });
+    const store = createStore(graph, createTestBackend());
+    const thunkBeforeTransaction = createClaimsVerdictThunk(
+      storeBackend(store),
+    );
+
+    await store.transaction(async (tx) => {
+      const thunkInsideTransaction = createClaimsVerdictThunk(
+        storeBackend(store),
+      );
+      expect(thunkInsideTransaction).toBe(thunkBeforeTransaction);
+
+      // Two claimed edge writes, on two different `from` nodes so neither
+      // claim contends with the other. Through `tx`, not `store`: a
+      // top-level store call from inside this callback would deadlock the
+      // single SQLite connection the transaction already holds.
+      const alice = await tx.nodes.Person.create({ name: "Alice" });
+      const bob = await tx.nodes.Person.create({ name: "Bob" });
+      const carol = await tx.nodes.Person.create({ name: "Carol" });
+      const dave = await tx.nodes.Person.create({ name: "Dave" });
+      await tx.edges.hasPassport.create(alice, bob, {});
+      await tx.edges.hasPassport.create(carol, dave, {});
+    });
+  });
+
+  it("one-owner ratchet: `resolveBundle`/`claimsVerdict` are never called, as bare identifiers, under src/store/**, src/interchange/** or src/provenance/**", () => {
+    const sourceRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../src",
+    );
+    const offenders = ONE_OWNER_SCANNED_DIRECTORIES.flatMap((directory) =>
+      collectTypeScriptFiles(path.join(sourceRoot, directory)).flatMap((file) =>
+        scanFileForBannedCalls(
+          path.relative(sourceRoot, file).replaceAll(path.sep, "/"),
+          fs.readFileSync(file, "utf8"),
+        ),
+      ),
+    );
+
+    expect(offenders).toEqual([]);
   });
 });

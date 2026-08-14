@@ -11,13 +11,22 @@
  * It also owns the runtime half of the same question — {@link claimSupport},
  * the one reader of "can THIS object hold a claim?" — so the declaration and
  * the surface are reconciled in one place rather than at each claim site.
+ * `claimSupport` is now a thin binder over the `claims` capability bundle
+ * (`backend/capabilities`): the bidirectional declaration/surface cross-check
+ * lives once in `resolve.ts`'s `assertClaimsBidirectionalAgreement`, reached
+ * through the verdict every caller threads in, and this module owns only the
+ * per-write port bind (`claimsMembers`) and this decision's shape.
  */
+import {
+  type BundleBinding,
+  claimsMembers,
+} from "../../backend/capabilities/bind";
+import type { CLAIMS } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
-import { requireDefined } from "../../utils/presence";
 
 /**
  * The runtime extent of the fence classes. {@link ConstraintFenceReason} is
@@ -76,97 +85,39 @@ export const CONSTRAINT_FENCE_BACKING = {
   nodeUniquenessScope: "uniques",
 } as const satisfies Record<ConstraintFenceReason, ConstraintFenceBacking>;
 
-/**
- * The claim members, narrowed to present. A caller holding this has been told
- * by ONE reader that this object both declares claim support and carries every
- * member that support consists of.
- */
-type RequiredClaimMembers = Readonly<{
-  claimEdgeCardinality: NonNullable<GraphBackend["claimEdgeCardinality"]>;
-  claimEdgeCardinalityBatch: NonNullable<
-    GraphBackend["claimEdgeCardinalityBatch"]
-  >;
-  purgeEdgeClaims: NonNullable<GraphBackend["purgeEdgeClaims"]>;
-  hardDeleteUniquesByConcreteKind: NonNullable<
-    GraphBackend["hardDeleteUniquesByConcreteKind"]
-  >;
-}>;
-
 /** The decision {@link claimSupport} returns — never a flag a caller re-derives. */
 export type ClaimSupport =
-  /** Capability declared AND every claim member present: the members, narrowed. */
-  | Readonly<{ supported: true; claims: RequiredClaimMembers }>
+  /** Capability declared AND every claim member present: the members, bound off the port. */
+  | Readonly<{
+      supported: true;
+      claims: BundleBinding<(typeof CLAIMS)["core"][number]>;
+    }>
   /** Capability absent or false AND no claim member present: the declared gap. */
   | Readonly<{ supported: false }>;
-
-/** The members `constraintClaims: true` promises, in one list. */
-const CLAIM_MEMBER_NAMES = [
-  "claimEdgeCardinality",
-  "claimEdgeCardinalityBatch",
-  "purgeEdgeClaims",
-  "hardDeleteUniquesByConcreteKind",
-] as const satisfies readonly (keyof RequiredClaimMembers)[];
 
 /**
  * THE one reader of "can this object hold a claim?", asked about the object the
  * claim is about to be written to.
  *
- * It reads BOTH the declaration and the surface, and returns the decision — the
- * narrowed members — rather than a boolean a caller then re-derives the members
- * from. Reading only `capabilities` would let a projection that forwards the
- * capability verbatim while dropping a method produce a verdict about a
- * different object than the write goes to; reading only member presence would
- * be the `undefined`-means-something inference the capability exists to
- * replace.
+ * Takes the bundle's VERDICT — resolved once, against `GraphBackend`, by the
+ * caller's `ClaimsVerdictThunk` (ruling B1/B7) — rather than resolving it
+ * itself: the declaration/surface cross-check
+ * (`resolve.ts`'s `assertClaimsBidirectionalAgreement`) runs exactly once,
+ * inside that resolution, and this function never re-derives it. What this
+ * function still owns is the PER-WRITE bind: `claimsMembers` (`bind.ts`) binds
+ * the verdict's named members off `target` — the object the write actually
+ * executes on, which may be a `TransactionBackend` the verdict was never
+ * resolved against — and throws the bundle's port-surface code
+ * (`CONSTRAINT_CLAIM_SURFACE_MISMATCH`) if `target` disagrees with what the
+ * verdict says is present.
  *
- * @throws ConfigurationError (`CONSTRAINT_CLAIM_SURFACE_MISMATCH`) when the two
- *   disagree in either direction — a backend or projection declaring
- *   `constraintClaims: true` while missing a member, or one shipping the
- *   members without declaring the capability. Both are defects in the object,
- *   and a silent fallback would unfence exactly the writes the capability
- *   exists to fence.
+ * @throws ConfigurationError (`CONSTRAINT_CLAIM_SURFACE_MISMATCH`) when
+ *   `target` is missing a member the verdict says is present.
  */
 export function claimSupport(
   target: GraphBackend | TransactionBackend,
+  verdict: BundleVerdictOf<typeof CLAIMS>,
 ): ClaimSupport {
-  const declared = target.capabilities.constraintClaims === true;
-  const present = CLAIM_MEMBER_NAMES.filter(
-    (name) => target[name] !== undefined,
-  );
-  if (declared && present.length === CLAIM_MEMBER_NAMES.length) {
-    return {
-      supported: true,
-      claims: {
-        claimEdgeCardinality: requireDefined(target.claimEdgeCardinality),
-        claimEdgeCardinalityBatch: requireDefined(
-          target.claimEdgeCardinalityBatch,
-        ),
-        purgeEdgeClaims: requireDefined(target.purgeEdgeClaims),
-        hardDeleteUniquesByConcreteKind: requireDefined(
-          target.hardDeleteUniquesByConcreteKind,
-        ),
-      },
-    };
-  }
-  if (!declared && present.length === 0) return { supported: false };
-
-  const missing = CLAIM_MEMBER_NAMES.filter(
-    (name) => target[name] === undefined,
-  );
-  throw new ConfigurationError(
-    declared ?
-      `This backend declares \`constraintClaims: true\` but does not implement ${missing.join(", ")}. ` +
-        "A declared constraint would then be written without the fence the " +
-        "declaration promises."
-    : `This backend implements ${present.join(", ")} but does not declare \`constraintClaims: true\`. ` +
-        "Claim support is read from the declaration, so these members would " +
-        "never be called.",
-    { code: "CONSTRAINT_CLAIM_SURFACE_MISMATCH", missing, present },
-    {
-      suggestion:
-        declared ?
-          "Implement the missing members, or drop `constraintClaims` from the backend's capabilities."
-        : "Declare `constraintClaims: true` in the backend's capabilities, or drop the claim members.",
-    },
-  );
+  if (!verdict.supported) return { supported: false };
+  return { supported: true, claims: claimsMembers(target, verdict) };
 }

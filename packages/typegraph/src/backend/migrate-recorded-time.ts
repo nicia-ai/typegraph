@@ -123,10 +123,19 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
+  /**
+   * `executeStatement` is STATICALLY required here (ruling C1(b)): a caller
+   * who cannot supply it now fails `pnpm typecheck` instead of reaching the
+   * runtime refusal this option used to carry. Converting a runtime refusal
+   * into a compile error is the honest-tightening class already shipped
+   * elsewhere in this migration; it breaks only callers who today get that
+   * refusal, never one passing a working minimal backend.
+   */
   backend: Pick<
     GraphBackend,
-    "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction"
-  >;
+    "dialect" | "execute" | "tableNames" | "transaction"
+  > &
+    Required<Pick<GraphBackend, "executeStatement">>;
   graphId: string;
   /** Patch selected backend table names; unstated names remain configured. */
   tableNames?: Partial<SqlTableNames> | undefined;
@@ -844,12 +853,6 @@ export async function migrateRecordedAnchor(
 export async function deleteLegacyRecordedAnchorMap(
   options: DeleteLegacyRecordedAnchorMapOptions,
 ): Promise<void> {
-  if (options.backend.executeStatement === undefined) {
-    throw new ConfigurationError(
-      "Deleting a recorded anchor migration map requires executeStatement support.",
-      { dialect: options.backend.dialect },
-    );
-  }
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const mapTable = mappingTableName(tables, options.mappingTableName);
   await options.backend.transaction(async (target) => {

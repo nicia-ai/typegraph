@@ -38,6 +38,7 @@ import {
   registerBulkUpsertRepeatedIdIntegrationTests,
   registerCapabilityBundleNoThrowIntegrationTests,
   registerCapabilityMemberDropMatrixIntegrationTests,
+  registerCapabilityPortBindingIntegrationTests,
   registerCapabilityRefusalIntegrationTests,
   registerClaimCompensationIntegrationTests,
   registerClaimLookupPreferenceIntegrationTests,
@@ -263,6 +264,7 @@ export function createIntegrationTestSuite<
     registerBulkUpsertRepeatedIdIntegrationTests(context);
     registerCapabilityBundleNoThrowIntegrationTests(context);
     registerCapabilityMemberDropMatrixIntegrationTests(context);
+    registerCapabilityPortBindingIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);

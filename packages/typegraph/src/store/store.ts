@@ -16,6 +16,11 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../backend/branded";
+import {
+  type ClaimsVerdictThunk,
+  createClaimsVerdictThunk,
+  statementExecutionVerdict,
+} from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   createEdgeRowMapper,
@@ -887,6 +892,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   readonly #baseBackend: RawBackend;
   readonly #backend: GraphWriteBackend;
+  /**
+   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
+   * refinement 2), minted from `#backend` — the same object every claimed
+   * write actually executes through — once, here, and threaded into every
+   * node/edge operation context this Store builds. Never resolved eagerly:
+   * only the thunk's own first call may reach the bidirectional cross-check's
+   * throw.
+   */
+  readonly #claimsVerdict: ClaimsVerdictThunk;
   readonly #adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
   readonly #captureEnabled: boolean;
   readonly #revisionTrackingEnabled: boolean;
@@ -915,17 +929,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     adapterBackend?: AdapterBackend<TNativeTransaction>,
   ) {
     this.#graph = graph;
+    const statementExecution = statementExecutionVerdict(backend);
     if (
       graph.identity !== undefined &&
-      (!backend.capabilities.transactions ||
-        backend.executeStatement === undefined)
+      (!backend.capabilities.transactions || !statementExecution.supported)
     ) {
       throw new ConfigurationError(
         "Operational Identity requires an atomic transactional backend with statement execution support.",
         {
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
           transactions: backend.capabilities.transactions,
-          statementExecution: backend.executeStatement !== undefined,
+          statementExecution: statementExecution.supported,
         },
         {
           suggestion:
@@ -973,6 +987,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#captureEnabled ?
         asGraphWriteBackend(createRecordedBackend(backend, resolvedSchema))
       : asGraphWriteBackend(backend);
+    this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
     this.#schema = resolvedSchema;
     const rowMapperConfig = rowMapperConfigFor(this.#backend);
     this.#recordedReads = createRecordedReadService({
@@ -1069,7 +1084,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         // transaction, so a merge that already took it pays no round trip.
         const lock = await lockRecordedGraphWrite(target, this.graphId);
         return applyResolvedNodeClaims(
-          { graphId: this.graphId, registry: this.#registry, lock },
+          {
+            graphId: this.graphId,
+            registry: this.#registry,
+            lock,
+            claimsVerdict: this.#claimsVerdict,
+          },
           target,
           upserts,
           releases,
@@ -4988,6 +5008,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
+      claimsVerdict: this.#claimsVerdict,
       ...(identityConfig === undefined ?
         {}
       : {
@@ -5064,6 +5085,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
+      claimsVerdict: this.#claimsVerdict,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,

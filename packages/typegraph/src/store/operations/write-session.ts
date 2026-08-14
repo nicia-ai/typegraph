@@ -38,6 +38,7 @@
  */
 import { type z } from "zod";
 
+import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
@@ -175,6 +176,13 @@ export function unfencedTarget(
 export type WriteSessionContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
+  /**
+   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
+   * refinement 2). Called at the site that needs it — never hoisted into
+   * store construction, which would resolve it eagerly and break a
+   * contradictory-declaration backend's ability to construct a store at all.
+   */
+  claimsVerdict: ClaimsVerdictThunk;
 }>;
 
 /** The derived data a node insert obliges, alongside the row itself. */
@@ -341,9 +349,18 @@ export function createWriteSession(
   target: GraphBackend | TransactionBackend,
   lock: GraphWriteLock,
 ): WriteSession {
-  const writeContext = createNodeWriteContext(ctx.graphId, ctx.registry, lock);
+  const writeContext = createNodeWriteContext(
+    ctx.graphId,
+    ctx.registry,
+    lock,
+    ctx.claimsVerdict,
+  );
   const dispatch = nodeInsertDispatch(target);
-  const edgeContext = createEdgeWriteContext(ctx.graphId, lock);
+  const edgeContext = createEdgeWriteContext(
+    ctx.graphId,
+    lock,
+    ctx.claimsVerdict,
+  );
   const edgeDispatch = edgeInsertDispatch(target);
 
   return {
@@ -442,20 +459,24 @@ export function createWriteSession(
     // in the same order.
     createEdge: async (work) => {
       if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, work.claim);
+        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
       }
       return edgeDispatch.one(work.params);
     },
 
     createEdgeNoReturn: async (work) => {
       if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, work.claim);
+        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
       }
       await runInsertNoReturn(edgeDispatch, work.params);
     },
 
     createEdges: async (work) => {
-      await claimEdgeCardinalityBatch(target, edgeBatchClaims(work));
+      await claimEdgeCardinalityBatch(
+        target,
+        ctx.claimsVerdict(),
+        edgeBatchClaims(work),
+      );
       return runInsertBatchReturning(
         edgeDispatch,
         work.map((item) => item.params),
@@ -463,7 +484,11 @@ export function createWriteSession(
     },
 
     createEdgesNoReturn: async (work) => {
-      await claimEdgeCardinalityBatch(target, edgeBatchClaims(work));
+      await claimEdgeCardinalityBatch(
+        target,
+        ctx.claimsVerdict(),
+        edgeBatchClaims(work),
+      );
       await runInsertBatch(
         edgeDispatch,
         work.map((item) => item.params),

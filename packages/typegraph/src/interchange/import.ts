@@ -46,6 +46,7 @@
  */
 import type { z } from "zod";
 
+import { createClaimsVerdictThunk } from "../backend/capabilities/resolve";
 import {
   acquireSerializedStreamLease,
   type SerializedStreamKind,
@@ -324,6 +325,11 @@ async function importGraphData<G extends GraphDef>(
     {
       graphId,
       registry,
+      // Interning (`createClaimsVerdictThunk`'s `WeakMap`) makes this the SAME
+      // thunk object the store's own operations use for this backend — a
+      // second, independent memoization for the same backend is exactly what
+      // interning exists to rule out.
+      claimsVerdict: createClaimsVerdictThunk(backend),
       schemaVersion: store.introspect().schemaVersion,
       historyEnabled: store.historyEnabled,
       revisionTrackingEnabled: store.revisionTrackingEnabled,

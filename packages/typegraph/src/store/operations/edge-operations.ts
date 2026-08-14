@@ -72,6 +72,7 @@
  *    `oneActive` population — asserted only for that decision; other
  *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
+import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
 import {
   type ClaimEdgeCardinalityParams,
   type EdgeRow as BackendEdgeRow,
@@ -177,6 +178,13 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   coalesceUnchangedUpsertsEnabled: boolean;
   revisionSchema: SqlSchema;
   registry: KindRegistry;
+  /**
+   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
+   * refinement 2) — threaded through to `createEdgeWriteContext` by
+   * `runWritePlan`'s session mint, and called at the write-session sites that
+   * issue or release an edge-cardinality claim.
+   */
+  claimsVerdict: ClaimsVerdictThunk;
   createOperationContext: (
     operation: "create" | "update" | "delete",
     entity: KindEntity,

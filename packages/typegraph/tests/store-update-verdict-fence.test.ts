@@ -37,6 +37,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { asNodeId, defineEdge, defineGraph, defineNode } from "../src";
+import { createClaimsVerdictThunk } from "../src/backend/capabilities/resolve";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
@@ -433,7 +434,12 @@ describe("store update verdict fence", () => {
 
     await expect(
       applyNodeResurrect(
-        createNodeWriteContext(graph.id, buildKindRegistry(graph), {} as never),
+        createNodeWriteContext(
+          graph.id,
+          buildKindRegistry(graph),
+          {} as never,
+          createClaimsVerdictThunk(backend),
+        ),
         {
           existing: tombstone as Parameters<
             typeof applyNodeResurrect
