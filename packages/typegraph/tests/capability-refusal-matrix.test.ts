@@ -25,12 +25,32 @@ import {
   defineNode,
   repairInvertedValidityWindows,
 } from "../src";
-import { CAPABILITY_BUNDLES } from "../src/backend/capabilities/bundle-registry";
+import {
+  CAPABILITY_BUNDLES,
+  RECORDED_REVISION_ORIGINS,
+} from "../src/backend/capabilities/bundle-registry";
+import {
+  createClaimsVerdictThunk,
+  recordedRevisionOriginsVerdict,
+  uniqueSidecarBatchVerdict,
+} from "../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   projectBackendWithout,
 } from "../src/backend/derive-backend";
 import { type GraphBackend } from "../src/backend/types";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { buildKindRegistry } from "../src/registry";
+import {
+  alreadyAppliedRowWrite,
+  createUniquenessContext,
+  hardDeleteClaimsByNodeIds,
+} from "../src/store/claims/node-claims";
+import { applyResolvedNodeClaims } from "../src/store/claims/resolved-node-claims";
+import {
+  ensureRevisionOrigin,
+  uncapturedGraphWriteLock,
+} from "../src/store/recorded-capture/clock";
 import { createTestBackend } from "./test-utils";
 
 type RefusalRow = Readonly<{
@@ -358,5 +378,245 @@ describe("behavioral rows (B7)", () => {
       "This backend implements claimEdgeCardinality, claimEdgeCardinalityBatch, purgeEdgeClaims, hardDeleteUniquesByConcreteKind but does not declare `constraintClaims: true`. " +
         "Claim support is read from the declaration, so these members would never be called.",
     );
+  });
+});
+
+const UniqueRefusalWidget = defineNode("UniqueRefusalWidget", {
+  schema: z.object({ code: z.string() }),
+});
+
+const uniqueRefusalGraph = defineGraph({
+  id: "capability-refusal-matrix-unique-sidecar",
+  nodes: {
+    UniqueRefusalWidget: {
+      type: UniqueRefusalWidget,
+      unique: [
+        {
+          name: "unique_code",
+          fields: ["code"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+/**
+ * B8's behavioral rows: the `uniqueSidecarBatch`, `contributionHealth` and
+ * `recordedRevisionOrigins` refusals, each exercising what the TREE actually
+ * throws against a real backend — the same discipline the B7 block above
+ * applies to `claims` and `statementExecution`.
+ */
+describe("behavioral rows (B8)", () => {
+  it("uniqueSidecarBatch / set-based node update", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["insertUniqueBatch"]);
+    const store = createStore(uniqueRefusalGraph, backend);
+    await store.nodes.UniqueRefusalWidget.create({ code: "widget-1" });
+
+    let caught: unknown;
+    try {
+      await store.nodes.UniqueRefusalWidget.updateWhere({
+        all: true,
+        patch: { code: "widget-2" },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+    };
+    expect(error.details["code"]).toBe("SET_UPDATE_UNIQUENESS_UNSUPPORTED");
+  });
+
+  it("uniqueSidecarBatch / resolved node write", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["insertUniqueBatch"]);
+    const registry = buildKindRegistry(uniqueRefusalGraph);
+
+    let caught: unknown;
+    try {
+      await applyResolvedNodeClaims(
+        {
+          graphId: uniqueRefusalGraph.id,
+          registry,
+          lock: uncapturedGraphWriteLock(),
+          claimsVerdict: createClaimsVerdictThunk(backend),
+          uniqueSidecarBatch: uniqueSidecarBatchVerdict(backend),
+        },
+        backend,
+        [],
+        [],
+        alreadyAppliedRowWrite,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+    };
+    expect(error.details["code"]).toBe("RESOLVED_NODE_UNIQUENESS_UNSUPPORTED");
+  });
+
+  it("uniqueSidecarBatch / unique reap by node ids: TypeError, matching the registry's `refuse`", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["hardDeleteUniquesByNodeIds"]);
+    const registry = buildKindRegistry(uniqueRefusalGraph);
+    const ctx = createUniquenessContext(
+      uniqueRefusalGraph.id,
+      registry,
+      backend,
+      uniqueSidecarBatchVerdict(backend),
+    );
+    await expect(
+      hardDeleteClaimsByNodeIds(ctx, "UniqueRefusalWidget", ["id-1"]),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("contributionHealth / contribution verify", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["verifyContributions"]);
+    const store = createStore(refusalGraph, backend);
+
+    let caught: unknown;
+    try {
+      await store.verifyContributions();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+      message: string;
+    };
+    expect(error.message).toBe(
+      "verifyContributions requires a backend that can probe its catalog " +
+        "for contribution tables.",
+    );
+    expect(error.details["capability"]).toBe("contributions");
+    expect(error.details["operation"]).toBe("verify");
+  });
+
+  it("contributionHealth / contribution repair", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["repairContributions"]);
+    const store = createStore(refusalGraph, backend);
+
+    let caught: unknown;
+    try {
+      await store.repairContributions();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+      message: string;
+    };
+    expect(error.message).toBe(
+      "repairContributions requires a backend that can probe and repair " +
+        "strategy-owned contribution tables.",
+    );
+    expect(error.details["capability"]).toBe("contributions");
+    expect(error.details["operation"]).toBe("repair");
+  });
+
+  it("contributionHealth / contribution rebuild", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["rebuildContribution"]);
+    const store = createStore(refusalGraph, backend);
+
+    let caught: unknown;
+    try {
+      await store.rebuildContribution("fulltext");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+      message: string;
+    };
+    expect(error.message).toBe(
+      "rebuildContribution requires a backend that can drop, recreate, " +
+        "and re-stamp strategy-owned contribution tables.",
+    );
+    expect(error.details["capability"]).toBe("contributions");
+    expect(error.details["operation"]).toBe("rebuild");
+  });
+
+  it("contributionHealth / contribution probe (declarationGate): undeclared + absent falls back to {entries: []}", async () => {
+    const base = createTestBackend();
+    const { contributions: _dropped, ...capabilities } = base.capabilities;
+    const backend = deriveBackend(
+      projectBackendWithout(base, ["probeContributions"]),
+      { capabilities },
+    );
+    const store = createStore(refusalGraph, backend);
+    await expect(store.probeContributions()).resolves.toEqual({
+      entries: [],
+    });
+  });
+
+  it("contributionHealth / contribution probe (declarationGate): declared + absent refuses", async () => {
+    const base = createTestBackend();
+    // The default SQLite test backend declares `contributions.supported: true`.
+    const backend = projectBackendWithout(base, ["probeContributions"]);
+    const store = createStore(refusalGraph, backend);
+
+    let caught: unknown;
+    try {
+      await store.probeContributions();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const error = caught as Error & {
+      details: Readonly<Record<string, unknown>>;
+      message: string;
+    };
+    expect(error.message).toBe(
+      "probeContributions requires a backend that can probe its catalog " +
+        "for contribution tables.",
+    );
+    expect(error.details["capability"]).toBe("contributions");
+    expect(error.details["operation"]).toBe("probe");
+  });
+
+  it("recordedRevisionOrigins / revision tracking construction gate", () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["ensureRevisionOriginsTable"]);
+
+    expect(() =>
+      createStore(refusalGraph, backend, { revisionTracking: true }),
+    ).toThrow(
+      "revisionTracking: true requires a backend that can bootstrap revision origins.",
+    );
+  });
+
+  it("recordedRevisionOrigins / revision origin bootstrap: direct call on an unsupported verdict, and the registry names the row", async () => {
+    const base = createTestBackend();
+    const backend = projectBackendWithout(base, ["ensureRevisionOriginsTable"]);
+    const verdict = recordedRevisionOriginsVerdict(backend);
+    expect(verdict.supported).toBe(false);
+
+    // Unreachable through the public API: `assertRevisionTrackableBackend`
+    // (the "revision tracking construction gate" row, above) refuses first,
+    // at store construction — the same gate-ordering fact B4's fixture (c)
+    // ruling records for a different pair of gates.
+    await expect(
+      ensureRevisionOrigin(backend, verdict, createSqlSchema(), "test-graph"),
+    ).rejects.toThrow(
+      "Revision tracking requires a backend that can bootstrap revision origins.",
+    );
+
+    const registryRow = RECORDED_REVISION_ORIGINS.operations.find(
+      (operation) => operation.operation === "revision origin bootstrap",
+    );
+    expect(registryRow?.disposition.kind).toBe("refuse");
   });
 });

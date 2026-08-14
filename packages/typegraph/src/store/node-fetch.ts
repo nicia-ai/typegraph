@@ -7,30 +7,40 @@
  * mechanics keeps the two paths from drifting; each caller layers its own
  * filtering (temporal mode vs. live-only) on top.
  */
+import { bindExtraIfReachable } from "../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type NodeRow as BackendNodeRow,
   type TransactionBackend,
 } from "../backend/types";
-import { requireDefined } from "../utils/presence";
 import { getRowsByIds } from "./row-fetch";
 
 /**
  * Fetches node rows by id into a Map keyed by id. Uses `backend.getNodes`
  * when available, otherwise issues parallel `getNode` calls for the distinct
- * ids. Missing ids are simply absent from the returned Map.
+ * ids. Missing ids are simply absent from the returned Map. `verdict` is the
+ * threaded `batchPointRead` verdict (`"node batch fetch"` operation) — bound
+ * off `backend`, the port the call executes on, never re-resolved here.
  */
 export async function getNodeRowsByIds(
   backend: GraphBackend | TransactionBackend,
+  verdict: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   kind: string,
   ids: readonly string[],
 ): Promise<Map<string, BackendNodeRow>> {
+  const bound = bindExtraIfReachable(
+    backend,
+    verdict.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
   return getRowsByIds(ids, {
     batch:
-      backend.getNodes === undefined ?
-        undefined
-      : (batchIds) => requireDefined(backend.getNodes)(graphId, kind, batchIds),
+      bound === undefined ? undefined : (
+        (batchIds) => bound.getNodes(graphId, kind, batchIds)
+      ),
     one: (id) => backend.getNode(graphId, kind, id),
   });
 }

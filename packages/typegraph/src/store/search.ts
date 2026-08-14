@@ -7,6 +7,9 @@
  * rank-based, so it papers over score-scale differences between
  * pgvector/sqlite-vec (distance-derived) and tsvector/FTS5 (BM25-style).
  */
+import { bindExtraIfReachable } from "../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type FulltextCapabilities,
   type FulltextQueryMode,
@@ -220,6 +223,17 @@ type StoreSearchContext = Readonly<{
    * `includeSubClasses` throw without it.
    */
   createQuery?: () => QueryBuilder<GraphDef>;
+  /**
+   * The threaded `batchPointRead` verdict — resolved once at `store.ts`,
+   * never re-resolved here. Optional at this boundary: `StoreSearchContext`
+   * is a contravariant (externally-authorable) position, so a new REQUIRED
+   * member here would be a breaking change (`scripts/api-surface-compat.ts`).
+   * Required after resolution instead, the same pattern
+   * `CompileQueryOptions.recursiveTraversal` uses — `store.ts`'s `search`
+   * getter always populates it, and every internal reader asserts it with
+   * `requireDefined`.
+   */
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ> | undefined;
 }>;
 
 /**
@@ -341,6 +355,7 @@ function scoreDescending(metric: VectorMetric): boolean {
  */
 async function fetchNodesForRows(
   backend: GraphBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   rows: readonly RankedSourceRow[],
 ): Promise<Map<string, Node>> {
@@ -353,7 +368,13 @@ async function fetchNodesForRows(
   const map = new Map<string, Node>();
   await Promise.all(
     [...idsByKind].map(async ([kind, ids]) => {
-      const kindMap = await fetchNodesByIds(backend, graphId, kind, [...ids]);
+      const kindMap = await fetchNodesByIds(
+        backend,
+        batchPointRead,
+        graphId,
+        kind,
+        [...ids],
+      );
       for (const [id, node] of kindMap) {
         map.set(searchNodeKey(kind, id), node);
       }
@@ -485,7 +506,12 @@ export async function executeFulltextSearch<N = Node>(
         .slice(offset, offset + options.limit);
   if (merged.length === 0) return [];
 
-  const nodeMap = await fetchNodesForRows(backend, graphId, merged);
+  const nodeMap = await fetchNodesForRows(
+    backend,
+    requireDefined(ctx.batchPointRead),
+    graphId,
+    merged,
+  );
 
   const hits: FulltextSearchHit<N>[] = [];
   let rank = 1;
@@ -593,7 +619,12 @@ export async function executeVectorSearch<N = Node>(
       );
   if (merged.length === 0) return [];
 
-  const nodeMap = await fetchNodesForRows(backend, graphId, merged);
+  const nodeMap = await fetchNodesForRows(
+    backend,
+    requireDefined(ctx.batchPointRead),
+    graphId,
+    merged,
+  );
 
   const hits: VectorSearchHit<N>[] = [];
   let rank = 1;
@@ -996,6 +1027,7 @@ export async function executeHybridSearch<N = Node>(
 
   const nodeMap = await fetchNodesForRows(
     backend,
+    requireDefined(ctx.batchPointRead),
     graphId,
     ranked.map((entry) => ({
       kind: entry.kind,
@@ -1245,14 +1277,20 @@ function warnIfLanguageNotAdvertised(
 
 async function fetchNodesByIds(
   backend: GraphBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   nodeKind: string,
   ids: readonly string[],
 ): Promise<Map<string, Node>> {
   if (ids.length === 0) return new Map();
   const map = new Map<string, Node>();
-  if (backend.getNodes) {
-    const rows = await backend.getNodes(graphId, nodeKind, ids);
+  const bound = bindExtraIfReachable(
+    backend,
+    batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  if (bound !== undefined) {
+    const rows = await bound.getNodes(graphId, nodeKind, ids);
     for (const row of rows) {
       // `getNodes` returns rows regardless of deleted_at. The search SQL
       // already constrains top-k to live nodes; this skip is

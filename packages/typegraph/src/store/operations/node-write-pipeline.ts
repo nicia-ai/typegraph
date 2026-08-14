@@ -17,7 +17,13 @@
  */
 import { type z } from "zod";
 
-import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+  missingRequiredExtras,
+} from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type LiveNodeRow,
@@ -91,8 +97,9 @@ export function createNodeWriteContext(
   registry: KindRegistry,
   lock: GraphWriteLock,
   claimsVerdict: ClaimsVerdictThunk,
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>,
 ): NodeWriteContext {
-  return { graphId, registry, lock, claimsVerdict };
+  return { graphId, registry, lock, claimsVerdict, uniqueSidecarBatch };
 }
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
@@ -113,7 +120,12 @@ export type NodeDeletePolicy = Readonly<{
 }>;
 
 function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
-  return createUniquenessContext(ctx.graphId, ctx.registry, backend);
+  return createUniquenessContext(
+    ctx.graphId,
+    ctx.registry,
+    backend,
+    ctx.uniqueSidecarBatch,
+  );
 }
 
 /**
@@ -637,9 +649,11 @@ export async function applyNodeSetUpdate(
   }
   if (
     uniqueConstraints.length > 0 &&
-    (backend.hardDeleteUniquesByNodeIds === undefined ||
-      backend.insertUniqueBatch === undefined ||
-      backend.checkUniqueBatch === undefined)
+    missingRequiredExtras(
+      UNIQUE_SIDECAR_BATCH,
+      ctx.uniqueSidecarBatch,
+      "set-based node update",
+    ).length > 0
   ) {
     throw new ConfigurationError(
       "The transaction backend lacks batched uniqueness operations",
@@ -720,12 +734,37 @@ export async function applyNodeSetUpdate(
     constraints: item.uniqueConstraints,
   }));
   if (uniqueConstraints.length > 0) {
+    // The re-claim below (`withNodeCreateClaimsBatch`) reaches `insertUniqueBatch`
+    // only through the shared, fallback-dispositioned `issueClaimsBatched`
+    // (`../claims/node-claims.ts`), which silently degrades to per-row inserts
+    // when the PORT lacks the member — the right answer for a plain create,
+    // but not for this REFUSE operation. Re-checking the port here, before the
+    // destructive hard-delete below, closes that gap: the later call binds off
+    // the same `backend`/verdict pair checked here, so its internal fallback
+    // branch can never fire for this call.
+    if (
+      bindExtraIfReachable(
+        backend,
+        ctx.uniqueSidecarBatch.extras.insertUniqueBatch,
+        UNIQUE_SIDECAR_BATCH.id,
+      ) === undefined
+    ) {
+      throw new ConfigurationError(
+        "The transaction backend lacks batched uniqueness operations",
+        { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+      );
+    }
     // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrote
     // every candidate at once, so a swap or a handoff of one key between two
     // rows it touched is legal in the final state and refused by every
     // intermediate one. One owner of that verdict, shared with the graph merge.
     await validateResolvedNodeClaims(
-      createUniquenessContext(ctx.graphId, ctx.registry, backend),
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
       claimItems,
       [],
     );

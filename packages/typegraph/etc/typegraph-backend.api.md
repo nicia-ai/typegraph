@@ -218,6 +218,9 @@ export function bindExtra<const M extends OptionalGraphBackendMember>(port: Read
 }>, bundle: CapabilityBundleId): BundleBinding<M>;
 
 // @public
+export function bindExtraIfReachable<const M extends OptionalGraphBackendMember>(port: Readonly<Partial<Pick<GraphBackend, M>>>, extraVerdict: ExtraVerdict<M>, bundle: CapabilityBundleId): BundleBinding<M> | undefined;
+
+// @public
 export function buildFulltextCapabilities(strategy: FulltextStrategy): FulltextCapabilities;
 
 // @public
@@ -2328,6 +2331,9 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
+export function missingRequiredExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op): readonly string[];
+
+// @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
 // @public (undocumented)
@@ -2623,7 +2629,7 @@ export type RequiredExtrasOf<D extends CapabilityBundleDefinition, Op extends Op
 }) ? R[number] : never;
 
 // @public
-export function requireExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op): asserts verdict is BundleVerdictOf<D> & {
+export function requireExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op, refuse?: (missing: readonly string[]) => never): asserts verdict is BundleVerdictOf<D> & {
     extras: {
         [K in RequiredExtrasOf<D, Op> & keyof ExtrasOf<D>]: Extract<ExtraVerdict<ExtraMember<D, K>>, {
             present: true;

@@ -48,7 +48,11 @@ import {
   UNBUNDLED_OPTIONAL_MEMBERS,
   UNIQUE_SIDECAR_BATCH,
 } from "../../../src/backend/capabilities/bundle-registry";
-import { resolveBundle } from "../../../src/backend/capabilities/resolve";
+import {
+  recordedRevisionOriginsVerdict,
+  resolveBundle,
+  uniqueSidecarBatchVerdict,
+} from "../../../src/backend/capabilities/resolve";
 import { projectBackendWithout } from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
@@ -243,6 +247,7 @@ export function registerCapabilityMemberDropMatrixIntegrationTests(
           defineGraph({ id: "test-graph", nodes: {}, edges: {} }),
         ),
         dropped,
+        uniqueSidecarBatchVerdict(dropped),
       );
       await expect(
         hardDeleteClaimsByNodeIds(ctx, "SomeKind", ["id-1"]),
@@ -260,7 +265,12 @@ export function registerCapabilityMemberDropMatrixIntegrationTests(
       expect(registryRow?.disposition.kind).toBe("refuse");
 
       await expect(
-        ensureRevisionOrigin(dropped, createSqlSchema(), "test-graph"),
+        ensureRevisionOrigin(
+          dropped,
+          recordedRevisionOriginsVerdict(dropped),
+          createSqlSchema(),
+          "test-graph",
+        ),
       ).rejects.toThrow(/revision origin/i);
     });
 

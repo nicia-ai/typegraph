@@ -26,6 +26,18 @@
  * THUNK field of that name and must not trip a scan meant to catch a bare
  * `claimsVerdict(...)` call, which only a direct import of the raw accessor
  * can spell.
+ *
+ * B8 extends the ratchet to all six named verdict accessors
+ * (`batchPointReadVerdict`, `uniqueSidecarBatchVerdict`,
+ * `statementExecutionVerdict`, `contributionHealthVerdict`,
+ * `recordedRevisionOriginsVerdict`, alongside `claimsVerdict`), each of which
+ * genuinely does resolve eagerly (no thunk — B8's rationale is that no pilot
+ * bundle below has a `crossCheck`), so a blanket zero-tolerance ban would be
+ * false: `store.ts`'s constructor, `guards.ts`'s construction gates,
+ * `recorded-capture.ts`'s overlay, and `import.ts`'s write-plan context are
+ * the named minting sites, each measured and pinned by `(file, name, count)`
+ * below. `resolveBundle` and `claimsVerdict` keep their EXISTING zero
+ * tolerance — the allowlist adds no entry for either.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -58,7 +70,37 @@ const ONE_OWNER_SCANNED_DIRECTORIES = [
 ] as const;
 
 /** The bare identifiers the one-owner ratchet (T13(c)) bans. */
-const ONE_OWNER_BANNED_NAMES = new Set(["resolveBundle", "claimsVerdict"]);
+const ONE_OWNER_BANNED_NAMES = new Set([
+  "resolveBundle",
+  "claimsVerdict",
+  "batchPointReadVerdict",
+  "uniqueSidecarBatchVerdict",
+  "statementExecutionVerdict",
+  "contributionHealthVerdict",
+  "recordedRevisionOriginsVerdict",
+]);
+
+/**
+ * The measured minting sites for the five EAGER accessors (ruling B8 spec
+ * item 2 — no pilot bundle below has a `crossCheck`, so eager resolution
+ * cannot throw, unlike `claims`'s thunk). Keyed on `${file}#${name}`; a name
+ * with no entry for a file keeps the pre-B8 zero-tolerance ban (`resolveBundle`
+ * and `claimsVerdict` have no entries at all — the allowlist adds none for
+ * either). Any call beyond the pinned count — a new site, or one more call at
+ * an already-listed site — is an offender, named by file and line.
+ */
+const ONE_OWNER_MINTING_ALLOWLIST = new Map<string, number>([
+  ["store/store.ts#batchPointReadVerdict", 1],
+  ["store/store.ts#uniqueSidecarBatchVerdict", 1],
+  ["store/store.ts#contributionHealthVerdict", 1],
+  ["store/store.ts#recordedRevisionOriginsVerdict", 1],
+  ["store/store.ts#statementExecutionVerdict", 1],
+  ["store/recorded-capture/guards.ts#statementExecutionVerdict", 2],
+  ["store/recorded-capture/guards.ts#recordedRevisionOriginsVerdict", 1],
+  ["store/recorded-capture.ts#batchPointReadVerdict", 1],
+  ["interchange/import.ts#batchPointReadVerdict", 1],
+  ["interchange/import.ts#uniqueSidecarBatchVerdict", 1],
+]);
 
 function collectTypeScriptFiles(directory: string): readonly string[] {
   if (!fs.existsSync(directory)) return [];
@@ -84,10 +126,13 @@ function bareCalleeName(call: ts.CallExpression): string | undefined {
   return ts.isIdentifier(call.expression) ? call.expression.text : undefined;
 }
 
+/** One bare banned-identifier call, located for the allowlist diff below. */
+type BannedCallSite = Readonly<{ file: string; name: string; line: number }>;
+
 function scanFileForBannedCalls(
   relativeFile: string,
   source: string,
-): readonly string[] {
+): readonly BannedCallSite[] {
   const parsed = ts.createSourceFile(
     relativeFile,
     source,
@@ -95,7 +140,7 @@ function scanFileForBannedCalls(
     /* setParentNodes */ false,
     ts.ScriptKind.TS,
   );
-  const found: string[] = [];
+  const found: BannedCallSite[] = [];
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {
       const name = bareCalleeName(node);
@@ -103,7 +148,7 @@ function scanFileForBannedCalls(
         const { line } = parsed.getLineAndCharacterOfPosition(
           node.expression.getStart(parsed),
         );
-        found.push(`${relativeFile}:${line + 1} — ${name}(...)`);
+        found.push({ file: relativeFile, name, line: line + 1 });
       }
     }
     ts.forEachChild(node, (child) => {
@@ -112,6 +157,33 @@ function scanFileForBannedCalls(
   }
   visit(parsed);
   return found;
+}
+
+/**
+ * The allowlist diff: groups every scanned call site by `${file}#${name}`,
+ * keeps only the calls beyond the pinned count for that pair (all of them,
+ * when the pair has no allowlist entry — the pre-B8 zero-tolerance ban), and
+ * names each offender by file and line.
+ */
+function offendersBeyondAllowlist(
+  callSites: readonly BannedCallSite[],
+): readonly string[] {
+  const byPair = new Map<string, BannedCallSite[]>();
+  for (const site of callSites) {
+    const key = `${site.file}#${site.name}`;
+    const group = byPair.get(key) ?? [];
+    group.push(site);
+    byPair.set(key, group);
+  }
+  const offenders: string[] = [];
+  for (const [key, sites] of byPair) {
+    const allowed = ONE_OWNER_MINTING_ALLOWLIST.get(key) ?? 0;
+    if (sites.length <= allowed) continue;
+    for (const site of sites.slice(allowed)) {
+      offenders.push(`${site.file}:${site.line} — ${site.name}(...)`);
+    }
+  }
+  return offenders;
 }
 
 /** The claim-member function every counted getter below resolves to. */
@@ -267,12 +339,12 @@ describe("the claims verdict thunk (T13(c), ruling B7 refinement 2)", () => {
     });
   });
 
-  it("one-owner ratchet: `resolveBundle`/`claimsVerdict` are never called, as bare identifiers, under src/store/**, src/interchange/** or src/provenance/**", () => {
+  it("one-owner ratchet: the six named verdict accessors are never called, as bare identifiers, beyond the pinned minting sites under src/store/**, src/interchange/** or src/provenance/**", () => {
     const sourceRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       "../src",
     );
-    const offenders = ONE_OWNER_SCANNED_DIRECTORIES.flatMap((directory) =>
+    const callSites = ONE_OWNER_SCANNED_DIRECTORIES.flatMap((directory) =>
       collectTypeScriptFiles(path.join(sourceRoot, directory)).flatMap((file) =>
         scanFileForBannedCalls(
           path.relative(sourceRoot, file).replaceAll(path.sep, "/"),
@@ -281,6 +353,6 @@ describe("the claims verdict thunk (T13(c), ruling B7 refinement 2)", () => {
       ),
     );
 
-    expect(offenders).toEqual([]);
+    expect(offendersBeyondAllowlist(callSites)).toEqual([]);
   });
 });

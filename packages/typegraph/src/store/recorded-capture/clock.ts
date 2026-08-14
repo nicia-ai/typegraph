@@ -1,3 +1,6 @@
+import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind";
+import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import { type GraphBackend } from "../../backend/types";
 import {
   createRecordedInstant,
@@ -321,11 +324,11 @@ export async function readRevisionOrigin(
  */
 export async function ensureRevisionOrigin(
   target: RevisionOriginBackend,
+  verdict: BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>,
   schema: SqlSchema,
   graphId: string,
 ): Promise<string> {
-  const ensureTable = target.ensureRevisionOriginsTable;
-  if (ensureTable === undefined) {
+  if (!verdict.supported) {
     throw new ConfigurationError(
       "Revision tracking requires a backend that can bootstrap revision origins.",
       { dialect: target.dialect },
@@ -335,6 +338,8 @@ export async function ensureRevisionOrigin(
       },
     );
   }
+  const { ensureRevisionOriginsTable: ensureTable } =
+    recordedRevisionOriginsMembers(target, verdict);
   await ensureTable();
   const existing = await readRevisionOrigin(target, schema, graphId);
   if (existing !== undefined) return existing;

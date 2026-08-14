@@ -37,7 +37,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { asNodeId, defineEdge, defineGraph, defineNode } from "../src";
-import { createClaimsVerdictThunk } from "../src/backend/capabilities/resolve";
+import {
+  createClaimsVerdictThunk,
+  uniqueSidecarBatchVerdict,
+} from "../src/backend/capabilities/resolve";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
@@ -439,6 +442,7 @@ describe("store update verdict fence", () => {
           buildKindRegistry(graph),
           {} as never,
           createClaimsVerdictThunk(backend),
+          uniqueSidecarBatchVerdict(backend),
         ),
         {
           existing: tombstone as Parameters<

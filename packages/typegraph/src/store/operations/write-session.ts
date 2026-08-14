@@ -38,7 +38,11 @@
  */
 import { type z } from "zod";
 
-import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
+import { type UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+} from "../../backend/capabilities/resolve";
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
@@ -183,6 +187,12 @@ export type WriteSessionContext = Readonly<{
    * contradictory-declaration backend's ability to construct a store at all.
    */
   claimsVerdict: ClaimsVerdictThunk;
+  /**
+   * The `uniqueSidecarBatch` bundle's verdict (ruling B8 spec item 2),
+   * resolved once at store construction (or once per import call) and
+   * threaded here for `createNodeWriteContext` — never re-resolved.
+   */
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
 }>;
 
 /** The derived data a node insert obliges, alongside the row itself. */
@@ -354,6 +364,7 @@ export function createWriteSession(
     ctx.registry,
     lock,
     ctx.claimsVerdict,
+    ctx.uniqueSidecarBatch,
   );
   const dispatch = nodeInsertDispatch(target);
   const edgeContext = createEdgeWriteContext(

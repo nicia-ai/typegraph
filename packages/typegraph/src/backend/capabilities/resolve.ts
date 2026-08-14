@@ -10,6 +10,7 @@
  */
 import { ConfigurationError } from "../../errors";
 import { createDataKeyedBag } from "../../utils/object";
+import { requireDefined } from "../../utils/presence";
 import { type BackendCapabilities, type GraphBackend } from "../types";
 import {
   BATCH_POINT_READ,
@@ -312,33 +313,26 @@ export type RequiredExtrasOf<
   : never;
 
 /**
- * The refusal for an operation whose `requires` extras are absent — how a
- * GRADUATED bundle refuses where the tree refuses today: the row names the
- * operation and the extras, this asserts they are present, and
- * {@link bindExtra} (`bind.ts`) binds them off the port.
+ * The registry's row lookup plus the presence fold, extracted verbatim from
+ * {@link requireExtras}'s body (ruling B8 spec item 3): the ONE owner of
+ * "what this operation requires" that both `requireExtras`'s default throw
+ * and a call site's own `refuse` callback consult.
  *
  * `operation` is the literal key of the bundle's `operations` tuple, so the
  * required extras are looked up TYPE-LEVEL from the registry — no second
  * spelling of `requires` at the call site.
  *
- * @throws {ConfigurationError} naming the row's own `code` when one or more
- *   required extras is absent from the verdict.
+ * @throws {ConfigurationError} naming the unknown operation when `operation`
+ *   is not a row of `definition.operations`.
  */
-export function requireExtras<
+export function missingRequiredExtras<
   const D extends CapabilityBundleDefinition,
   Op extends OperationNames<D>,
 >(
   definition: D,
   verdict: BundleVerdictOf<D>,
   operation: Op,
-): asserts verdict is BundleVerdictOf<D> & {
-  extras: {
-    [K in RequiredExtrasOf<D, Op> & keyof ExtrasOf<D>]: Extract<
-      ExtraVerdict<ExtraMember<D, K>>,
-      { present: true }
-    >;
-  };
-} {
+): readonly string[] {
   const row = definition.operations.find(
     (candidate) => candidate.operation === operation,
   );
@@ -352,12 +346,57 @@ export function requireExtras<
   const extras:
     | Readonly<Record<string, ExtraVerdict<OptionalGraphBackendMember>>>
     | undefined = "extras" in verdict ? verdict.extras : undefined;
-  const missing = required.filter(
+  return required.filter(
     (id) => extras === undefined || extras[id]?.present !== true,
   );
+}
+
+/**
+ * The refusal for an operation whose `requires` extras are absent — how a
+ * GRADUATED bundle refuses where the tree refuses today: the row names the
+ * operation and the extras, this asserts they are present, and
+ * {@link bindExtra} (`bind.ts`) binds them off the port.
+ *
+ * `refuse`, when supplied, is called instead of the registry-coded throw
+ * below — this is how a call site keeps its OWN existing error text (message,
+ * `details` shape, order relative to other refusals) while the registry
+ * stays the one owner of "what this operation requires" (ruling B8 spec item
+ * 3). Omitting it keeps the default behavior byte-identical to before this
+ * parameter existed.
+ *
+ * @throws {ConfigurationError} naming the row's own `code` when one or more
+ *   required extras is absent from the verdict and no `refuse` callback is
+ *   supplied; otherwise calls `refuse(missing)`, which never returns.
+ */
+export function requireExtras<
+  const D extends CapabilityBundleDefinition,
+  Op extends OperationNames<D>,
+>(
+  definition: D,
+  verdict: BundleVerdictOf<D>,
+  operation: Op,
+  refuse?: (missing: readonly string[]) => never,
+): asserts verdict is BundleVerdictOf<D> & {
+  extras: {
+    [K in RequiredExtrasOf<D, Op> & keyof ExtrasOf<D>]: Extract<
+      ExtraVerdict<ExtraMember<D, K>>,
+      { present: true }
+    >;
+  };
+} {
+  const missing = missingRequiredExtras(definition, verdict, operation);
   if (missing.length === 0) return;
 
-  const { disposition } = row;
+  if (refuse !== undefined) refuse(missing);
+
+  // `missingRequiredExtras` already threw the unknown-operation error above
+  // when the row would be undefined, so `requireDefined` here is a redundant
+  // (never-failing) narrowing, not a second lookup that could disagree.
+  const { disposition } = requireDefined(
+    definition.operations.find(
+      (candidate) => candidate.operation === operation,
+    ),
+  );
   if (disposition.kind === "refuse") {
     throw new ConfigurationError(
       `Operation "${operation}" on capability bundle "${definition.id}" requires ${missing.join(", ")}.`,

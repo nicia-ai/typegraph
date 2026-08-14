@@ -13,7 +13,12 @@
  * maintains disjointness reservations too, by reading one list rather than by
  * being edited twice.
  */
-import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+} from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type InsertUniqueParams,
@@ -53,6 +58,8 @@ export type UniquenessContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
   backend: GraphBackend | TransactionBackend;
+  /** The threaded `uniqueSidecarBatch` verdict — never re-resolved here. */
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
 }>;
 
 /**
@@ -83,8 +90,14 @@ export function createUniquenessContext<
   graphId: string,
   registry: KindRegistry,
   backend: T,
-): Readonly<{ graphId: string; registry: KindRegistry; backend: T }> {
-  return { graphId, registry, backend };
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>,
+): Readonly<{
+  graphId: string;
+  registry: KindRegistry;
+  backend: T;
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+}> {
+  return { graphId, registry, backend, uniqueSidecarBatch };
 }
 
 /** One claim a node row owes, decided but not written. */
@@ -437,6 +450,8 @@ export type NodeClaimContext = Readonly<{
   registry: KindRegistry;
   lock: GraphWriteLock;
   claimsVerdict: ClaimsVerdictThunk;
+  /** Threaded `uniqueSidecarBatch` verdict — never re-resolved here. */
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
 }>;
 
 /** One row whose claims a create-shaped write is about to issue. */
@@ -518,15 +533,21 @@ async function issueClaimsBatched(
   onIssued?: (issued: readonly PlacedClaim[]) => void,
 ): Promise<void> {
   if (claims.length === 0) return;
-  const batch = ctx.backend.insertUniqueBatch;
-  if (batch === undefined) {
+  const bound = bindExtraIfReachable(
+    ctx.backend,
+    ctx.uniqueSidecarBatch.extras.insertUniqueBatch,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  if (bound === undefined) {
     await issueClaimsIndividually(ctx, claims, onIssued);
     return;
   }
   await issuingClaims(
     claims.map((claim) => claim.entry),
     async () => {
-      await batch(claims.map((claim) => claimInsertParams(ctx.graphId, claim)));
+      await bound.insertUniqueBatch(
+        claims.map((claim) => claimInsertParams(ctx.graphId, claim)),
+      );
     },
   );
   onIssued?.(claims);
@@ -604,6 +625,7 @@ async function withNodeCreateClaimsIssuedBy<T>(
     ctx.graphId,
     ctx.registry,
     backend,
+    ctx.uniqueSidecarBatch,
   );
   const claims = items.flatMap((item) =>
     nodeClaimEntries(
@@ -739,7 +761,13 @@ export async function hardDeleteClaimsByNodeIds(
   concreteKind: string,
   nodeIds: readonly string[],
 ): Promise<void> {
-  await requireDefined(ctx.backend.hardDeleteUniquesByNodeIds)({
+  await requireDefined(
+    bindExtraIfReachable(
+      ctx.backend,
+      ctx.uniqueSidecarBatch.extras.hardDeleteUniquesByNodeIds,
+      UNIQUE_SIDECAR_BATCH.id,
+    )?.hardDeleteUniquesByNodeIds,
+  )({
     graphId: ctx.graphId,
     concreteKind,
     nodeIds,

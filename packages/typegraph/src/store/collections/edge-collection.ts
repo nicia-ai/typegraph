@@ -5,6 +5,8 @@
  */
 import { type z } from "zod";
 
+import { type BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeEndpointSide,
   type FindEdgesByKindParams,
@@ -87,6 +89,8 @@ export type EdgeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
   backend: GraphBackend | TransactionBackend;
+  /** Threaded `batchPointRead` verdict — never re-resolved here. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
   rowToEdge: (row: EdgeRow) => Edge;
   /** See EdgeOperations.maybeRefreshStatisticsAfterBulk. */
@@ -394,6 +398,7 @@ export function createEdgeCollection<
     graphId,
     kind,
     backend,
+    batchPointRead,
     defaultTemporalMode,
     rowToEdge,
     executeCreate: executeEdgeCreate,
@@ -603,7 +608,12 @@ export function createEdgeCollection<
     ): Promise<readonly (Edge<E> | undefined)[]> {
       if (ids.length === 0) return [];
 
-      const rowsById = await getEdgeRowsByIds(backend, graphId, ids);
+      const rowsById = await getEdgeRowsByIds(
+        backend,
+        batchPointRead,
+        graphId,
+        ids,
+      );
       // Resolve the coordinate once so the whole batch observes one instant.
       const matches = temporalRowMatcher(options);
       return ids.map((id) => {
@@ -812,7 +822,12 @@ export function createEdgeCollection<
         target: GraphBackend | TransactionBackend,
       ): Promise<{ results: Edge<E>[]; mutations: number }> => {
         const ids = items.map((item) => item.id);
-        const existingMap = await getEdgeRowsByIds(target, graphId, ids);
+        const existingMap = await getEdgeRowsByIds(
+          target,
+          batchPointRead,
+          graphId,
+          ids,
+        );
 
         // Coalesced items are written straight to results (the existing or
         // last-written edge) and skipped from the write batch; see the node

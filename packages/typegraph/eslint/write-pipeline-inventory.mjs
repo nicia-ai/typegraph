@@ -204,13 +204,6 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     ],
   },
   {
-    path: "src/store/claims/resolved-node-claims.ts",
-    reason:
-      "The resolved-write-set claim sidecar: the key-blind drop and rebuild a set update and a graph merge need, reached only from the step that owns their row write.",
-    permanent: true,
-    allowedMembers: ["hardDeleteUniquesByNodeIds"],
-  },
-  {
     path: "src/store/claims/edge-claims.ts",
     reason:
       "The edge cardinality claim sidecar (the edge_claims relation), called only by the session's edge create methods and the edge write steps.",

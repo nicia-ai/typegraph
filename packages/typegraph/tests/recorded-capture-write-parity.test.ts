@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { batchPointReadVerdict } from "../src/backend/capabilities/resolve";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   createRecordedBackend,
@@ -24,7 +25,11 @@ function buildWrappers(): {
   return {
     base,
     autocommit: createRecordedBackend(base, schema),
-    transactional: createRecordedTransactionScope(base, schema).backend,
+    transactional: createRecordedTransactionScope(
+      base,
+      batchPointReadVerdict(base),
+      schema,
+    ).backend,
   };
 }
 

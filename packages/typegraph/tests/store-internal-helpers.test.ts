@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { batchPointReadVerdict } from "../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   wrapWithManagedClose,
@@ -398,11 +399,18 @@ describe("insert dispatch", () => {
 describe("row fetch dispatch", () => {
   it("supports detached receiver-free batch readers", async () => {
     const backend = new ClosureReadBackend() as unknown as GraphBackend;
+    const batchPointRead = batchPointReadVerdict(backend);
 
-    const nodes = await getNodeRowsByIds(backend, "graph", "Person", [
-      "node-a",
+    const nodes = await getNodeRowsByIds(
+      backend,
+      batchPointRead,
+      "graph",
+      "Person",
+      ["node-a"],
+    );
+    const edges = await getEdgeRowsByIds(backend, batchPointRead, "graph", [
+      "edge-a",
     ]);
-    const edges = await getEdgeRowsByIds(backend, "graph", ["edge-a"]);
 
     expect(nodes.get("node-a")?.id).toBe("node-a");
     expect(edges.get("edge-a")?.id).toBe("edge-a");

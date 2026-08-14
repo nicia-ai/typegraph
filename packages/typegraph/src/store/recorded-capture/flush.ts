@@ -1,3 +1,5 @@
+import { type BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeRow,
   type HardDeleteNodeParams,
@@ -155,6 +157,7 @@ function recordedInsertsFor<
 
 export async function flushNodes(
   target: TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedNode[],
@@ -173,7 +176,7 @@ export async function flushNodes(
         kind,
       );
       const afterById = await resolveAfterImages(entityChunk, (missing) =>
-        getNodeRowsByIds(target, graphId, kind, missing),
+        getNodeRowsByIds(target, batchPointRead, graphId, kind, missing),
       );
       await insertRecordedNodeRows(
         target,
@@ -187,6 +190,7 @@ export async function flushNodes(
 
 export async function flushEdges(
   target: TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema: SqlSchema,
   graphId: string,
   entities: readonly TouchedEdge[],
@@ -203,7 +207,7 @@ export async function flushEdges(
       recordedRevision,
     );
     const afterById = await resolveAfterImages(entityChunk, (missing) =>
-      getEdgeRowsByIds(target, graphId, missing),
+      getEdgeRowsByIds(target, batchPointRead, graphId, missing),
     );
     await insertRecordedEdgeRows(
       target,

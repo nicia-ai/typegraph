@@ -72,7 +72,15 @@
  *    `oneActive` population — asserted only for that decision; other
  *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
-import { type ClaimsVerdictThunk } from "../../backend/capabilities/resolve";
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import {
+  BATCH_POINT_READ,
+  type UNIQUE_SIDECAR_BATCH,
+} from "../../backend/capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+} from "../../backend/capabilities/resolve";
 import {
   type ClaimEdgeCardinalityParams,
   type EdgeRow as BackendEdgeRow,
@@ -185,6 +193,16 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
    * issue or release an edge-cardinality claim.
    */
   claimsVerdict: ClaimsVerdictThunk;
+  /** Threaded from `store.ts`'s `#batchPointRead` — never re-resolved here. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /**
+   * Threaded from `store.ts`'s `#uniqueSidecarBatch` — the edge side never
+   * consults it (uniqueness sidecars are a node-only concern), but the field
+   * is structurally required: `runWritePlan` mints ONE shared write session
+   * from this context for both node and edge write contexts, and the
+   * session's `WriteSessionContext` parameter carries the field.
+   */
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   createOperationContext: (
     operation: "create" | "update" | "delete",
     entity: KindEntity,
@@ -575,7 +593,12 @@ async function primeEdgeBatchValidationCache<G extends GraphDef>(
     row: Awaited<ReturnType<GraphBackend["getNode"]>>,
   ) => void,
 ): Promise<void> {
-  if (backend.getNodes === undefined) return;
+  const bound = bindExtraIfReachable(
+    backend,
+    ctx.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  if (bound === undefined) return;
 
   const idsByKind = new Map<string, Set<string>>();
   const addEndpoint = (kind: string, id: string): void => {
@@ -590,7 +613,7 @@ async function primeEdgeBatchValidationCache<G extends GraphDef>(
 
   for (const [kind, ids] of idsByKind) {
     const orderedIds = [...ids];
-    const rows = await backend.getNodes(ctx.graphId, kind, orderedIds);
+    const rows = await bound.getNodes(ctx.graphId, kind, orderedIds);
     const rowsById = new Map(rows.map((row) => [row.id, row]));
     for (const id of orderedIds) {
       seedEndpointRow(ctx.graphId, kind, id, rowsById.get(id));

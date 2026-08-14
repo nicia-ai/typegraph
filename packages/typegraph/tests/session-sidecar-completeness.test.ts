@@ -51,7 +51,10 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
-import { createClaimsVerdictThunk } from "../src/backend/capabilities/resolve";
+import {
+  createClaimsVerdictThunk,
+  uniqueSidecarBatchVerdict,
+} from "../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   type ExactBackendOverlay,
@@ -232,6 +235,7 @@ function writeContext(backend: GraphBackend): WritePlanContext {
     revisionTrackingEnabled: false,
     revisionSchema: createSqlSchema(),
     claimsVerdict: createClaimsVerdictThunk(backend),
+    uniqueSidecarBatch: uniqueSidecarBatchVerdict(backend),
   };
 }
 

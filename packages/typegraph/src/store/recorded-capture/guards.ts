@@ -1,4 +1,7 @@
-import { statementExecutionVerdict } from "../../backend/capabilities/resolve";
+import {
+  recordedRevisionOriginsVerdict,
+  statementExecutionVerdict,
+} from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type TransactionBackend,
@@ -317,7 +320,7 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.ensureRevisionOriginsTable === undefined) {
+  if (!recordedRevisionOriginsVerdict(backend).supported) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend that can bootstrap revision origins.",
       { dialect: backend.dialect },

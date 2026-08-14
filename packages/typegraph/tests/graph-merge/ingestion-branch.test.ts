@@ -211,6 +211,41 @@ function withoutResolvedBatchTransaction(backend: GraphBackend): GraphBackend {
   });
 }
 
+/**
+ * B8 fixup: strips ONLY `insertUniqueBatch` from the transaction target,
+ * unlike {@link withoutResolvedBatchTransaction} above, which strips all
+ * three `uniqueSidecarBatch` extras together. `checkUniqueBatch` and
+ * `hardDeleteUniquesByNodeIds` staying reachable is the point — it lets a
+ * resolved write set's validation and claim hard-delete both succeed, so the
+ * merge reaches the FINAL re-claim, which is the only place `insertUniqueBatch`
+ * is consulted.
+ */
+function withoutInsertUniqueBatchTransaction(
+  backend: GraphBackend,
+): GraphBackend {
+  const transaction: GraphBackend["transaction"] = async (fn, options) =>
+    backend.transaction(
+      async (tx) =>
+        fn(
+          new Proxy(tx, {
+            get(target, property, receiver) {
+              return property === "insertUniqueBatch" ? undefined : (
+                  (Reflect.get(target, property, receiver) as unknown)
+                );
+            },
+          }),
+        ),
+      options,
+    );
+  return new Proxy(backend, {
+    get(target, property, receiver) {
+      return property === "transaction" ? transaction : (
+          (Reflect.get(target, property, receiver) as unknown)
+        );
+    },
+  });
+}
+
 function incrementalOptions() {
   return {
     resolve: {
@@ -1173,6 +1208,49 @@ describe.each(backendMatrix())(
 
       const result = await applyMergePlan(targetClone.store, plan);
 
+      expect(isErr(result)).toBe(true);
+      if (!isErr(result)) return;
+      expect(result.error.cause).toBeInstanceOf(ConfigurationError);
+      expect((result.error.cause as ConfigurationError).details).toMatchObject({
+        code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED",
+      });
+      expect(await targetClone.store.nodes.Patient.find()).toEqual([]);
+    });
+
+    it("refuses the final re-claim rather than silently falling back to per-row inserts when the target transaction lacks ONLY insertUniqueBatch (B8 fixup)", async () => {
+      cleanups = [];
+      const forkPoint = await makeStore();
+      const targetClone = unwrap(
+        await branch(
+          forkPoint,
+          async () => withoutInsertUniqueBatchTransaction(await makeBackend()),
+          { id: asBranchId("limited-target-insert-batch") },
+        ),
+      );
+      const incoming = await makeIngestion(forkPoint);
+      await incoming.nodes.Patient.create(
+        { name: "New patient", mrn: "MRN-NEW" },
+        { id: "patient-new" },
+      );
+      const plan = unwrap(
+        await planMergeIncremental({
+          forkPoint,
+          target: targetClone.store,
+          branches: [incoming],
+          options: { onBasePropertyConflict: "flag" },
+        }),
+      );
+
+      const result = await applyMergePlan(targetClone.store, plan);
+
+      // `checkUniqueBatch` and `hardDeleteUniquesByNodeIds` are both still on
+      // the port, so the resolved-set validation and the claim hard-delete
+      // both succeed — only the FINAL re-claim reaches `insertUniqueBatch`.
+      // Before the B8 port-check fix, that re-claim reached the member only
+      // through the shared, fallback-dispositioned `issueClaimsBatched`
+      // (`node-claims.ts`), which silently degraded to per-row `insertUnique`
+      // calls on a port mismatch instead of refusing — the merge would have
+      // SUCCEEDED here instead of refusing atomically.
       expect(isErr(result)).toBe(true);
       if (!isErr(result)) return;
       expect(result.error.cause).toBeInstanceOf(ConfigurationError);

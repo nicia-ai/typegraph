@@ -19,6 +19,9 @@
  * {@link isSameClaimOwner} / {@link claimOwnerKey}, and the rebuild from the
  * same claim writer every create-shaped write uses.
  */
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import { requireExtras } from "../../backend/capabilities/resolve";
 import { type UniqueConstraint } from "../../core/types";
 import { ConfigurationError, UniquenessError } from "../../errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
@@ -204,18 +207,45 @@ function groupClaimsForProbe(
   return [...groups.values()];
 }
 
-/** The batch probe this validation is defined in terms of, or a typed refusal. */
+/**
+ * The batch probe this validation is defined in terms of, or a typed refusal.
+ *
+ * Keyed on this ONE extra's own presence, not the operation's full 3-extra
+ * `requires` set: widening this to `missingRequiredExtras` would move
+ * {@link prepareResolvedNodeClaims}'s refusal earlier for
+ * `validateResolvedNodeClaims`'s direct caller
+ * ({@link file://../operations/node-write-pipeline.ts applyNodeSetUpdate}),
+ * which probes and refuses on the full set itself before reaching this call.
+ *
+ * Binds through {@link bindExtraIfReachable}, not {@link bindExtra}: this
+ * refusal is keyed on "is the probe reachable at all" — the verdict says
+ * present AND the port (`ctx.backend`, the transaction target the call
+ * actually executes on) can serve it — and either failure mode collapses
+ * into this SAME typed refusal, preserved byte-for-byte from before the
+ * capability model existed
+ * (`tests/graph-merge/ingestion-branch.test.ts`'s "refuses final validation
+ * when the target transaction lacks batch uniqueness operations" pins a
+ * transaction target narrower than the verdict it was resolved against, and
+ * still expects this exact code). `bindExtra`'s generic
+ * `BUNDLE_PORT_SURFACE_MISMATCH` would replace that pinned, operation-specific
+ * message with the bundle's own — an acceptable disposition for a call site
+ * with no existing refusal to preserve, but not for this one.
+ */
 function requireBatchProbe(
   ctx: UniquenessContext,
 ): NonNullable<UniquenessContext["backend"]["checkUniqueBatch"]> {
-  const checkUniqueBatch = ctx.backend.checkUniqueBatch;
-  if (checkUniqueBatch === undefined) {
+  const bound = bindExtraIfReachable(
+    ctx.backend,
+    ctx.uniqueSidecarBatch.extras.checkUniqueBatch,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  if (bound === undefined) {
     throw new ConfigurationError(
       "Resolved node writes require batched uniqueness probes",
       { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
     );
   }
-  return checkUniqueBatch;
+  return bound.checkUniqueBatch;
 }
 
 /**
@@ -282,21 +312,55 @@ export async function validateResolvedNodeClaims(
  * node's claims are batch-cleared so the later per-node upserts can take the
  * validated final keys in any order (including swaps and handoffs).
  */
+function resolvedNodeUniquenessOperationsRefusal(): ConfigurationError {
+  return new ConfigurationError(
+    "Resolved node writes require batched uniqueness operations",
+    { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
+  );
+}
+
 async function prepareResolvedNodeClaims(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUpsert[],
   releases: readonly ResolvedNodeRelease[],
 ): Promise<void> {
-  const hardDeleteUniquesByNodeIds = ctx.backend.hardDeleteUniquesByNodeIds;
+  requireExtras(
+    UNIQUE_SIDECAR_BATCH,
+    ctx.uniqueSidecarBatch,
+    "resolved node write",
+    () => {
+      throw resolvedNodeUniquenessOperationsRefusal();
+    },
+  );
+  // The verdict-level check above can pass while the PORT this call actually
+  // executes on (`ctx.backend`, a transaction target) still lacks the member —
+  // `bindExtraIfReachable` catches that case too, collapsing both into the
+  // same pinned refusal rather than the bundle's generic port-mismatch code
+  // (see `requireBatchProbe`'s note on the same tradeoff, below).
+  const boundHardDelete = bindExtraIfReachable(
+    ctx.backend,
+    ctx.uniqueSidecarBatch.extras.hardDeleteUniquesByNodeIds,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  if (boundHardDelete === undefined) {
+    throw resolvedNodeUniquenessOperationsRefusal();
+  }
+  const { hardDeleteUniquesByNodeIds } = boundHardDelete;
+  // Same port re-check for `insertUniqueBatch`, done here rather than left to
+  // `applyResolvedNodeClaims`'s later `withNodeCreateClaimsBatch` rebuild: that
+  // call reaches the member only through the shared, fallback-dispositioned
+  // `issueClaimsBatched` (`node-claims.ts`), which silently degrades to
+  // per-row inserts on a port mismatch instead of refusing — the right answer
+  // for a plain create, but not for this REFUSE operation. Checked before the
+  // hard-delete below runs, so a refusal here still leaves no claim dropped.
   if (
-    ctx.backend.checkUniqueBatch === undefined ||
-    ctx.backend.insertUniqueBatch === undefined ||
-    hardDeleteUniquesByNodeIds === undefined
+    bindExtraIfReachable(
+      ctx.backend,
+      ctx.uniqueSidecarBatch.extras.insertUniqueBatch,
+      UNIQUE_SIDECAR_BATCH.id,
+    ) === undefined
   ) {
-    throw new ConfigurationError(
-      "Resolved node writes require batched uniqueness operations",
-      { code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED" },
-    );
+    throw resolvedNodeUniquenessOperationsRefusal();
   }
   await validateResolvedNodeClaims(ctx, upserts, releases);
 
@@ -349,6 +413,7 @@ export async function applyResolvedNodeClaims<Output>(
     graphId: ctx.graphId,
     registry: ctx.registry,
     backend,
+    uniqueSidecarBatch: ctx.uniqueSidecarBatch,
   };
   await prepareResolvedNodeClaims(claimContext, upserts, releases);
   const result = await apply();

@@ -83,11 +83,30 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * `bindCore`, `bindExtra`, the six registry constants, the six verdict/
  * member accessors) are either concrete values or types every caller needs
  * named directly, so API Extractor never needed to invent a name for them.
+ *
+ * Pilot rewiring batch (WS5 B8): seven entrypoints moved, +20 apiece
+ * (`.`, `./interchange`, `./profiler`, `./graph-merge`, `./provenance`,
+ * `./sqlite/local`, `./postgres/pglite`) — every entrypoint whose public type
+ * graph reaches `Store`/`HistoryStore`'s `[STORE_RUNTIME]` property. B8 adds
+ * `StoreRuntime.uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>`
+ * (`store/runtime-port.ts`) so `provenance/index.ts`'s fact close/reopen path
+ * can build a `NodeClaimContext` from the store's already-resolved verdict
+ * instead of re-minting one — the same reason `StoreRuntime.backend` is
+ * exposed there rather than reconstructed, and the T13(c) one-owner ratchet's
+ * reason `provenance/index.ts` has no `uniqueSidecarBatchVerdict` minting
+ * site of its own. The one new field's full type graph (`GraduatedBundleVerdict`,
+ * `ExtraVerdicts`, `ExtraVerdict`, `SpecOf`, `CapabilityExtraSpec`, and the
+ * `uniqueSidecarBatch` extra-member type helpers) becomes newly reachable —
+ * and, being reachable through an `@internal`, non-enumerable symbol property
+ * that was already present before B8 (`StoreRuntime.backend` etc.), this is
+ * the established cost of that existing pattern, not a new one. `./backend`
+ * is unaffected: `bindExtraIfReachable` and `missingRequiredExtras` are named
+ * exports every caller reaches directly, so neither needed a forgotten name.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 334,
-    sha256: "a2a10b07fc244c72fc48f27a3f9fac2715462951e1397e56192dbbd356af8ae3",
+    count: 352,
+    sha256: "a610b66bc7f324f0e03dac8cd259debc38818b29bce80186f1567c9ce87afcfe",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -126,36 +145,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 598,
-    sha256: "68e7f894eabfb3db31405da68311bc73ede8430f02231b561646b24a7d66e772",
+    count: 618,
+    sha256: "d8ab78e72bdd81f814343f5089a5721f2ca1226fa16650851ca9ab73824adf1d",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 584,
-    sha256: "c0c642fe5e33096dc885d44101efa9e6bd0bd8250f0a2909a91223b984323359",
+    count: 604,
+    sha256: "ca91504d2b2de3fd93a0276751104608e16d898ab042b3c7872594676e81973f",
   },
   "./postgres/pglite": {
-    count: 588,
-    sha256: "975d5ba55864708733bb9735cb3fffeca54e452338d37493d805deaf43115b58",
+    count: 608,
+    sha256: "3cabec91556ea56004cd3c18b24f43d016932e3d8b72468dd2a711ee6620128c",
   },
   "./profiler": {
-    count: 586,
-    sha256: "28ae505f778fb529649d3cade702064fa823ecd16abf366bec90c3d6f02472fc",
+    count: 606,
+    sha256: "d309b02f63b6371d7b149a344c5ea522c9b9031ecba95752ba514850eca646a8",
   },
   "./provenance": {
-    count: 592,
-    sha256: "4d5dff574b9d7915547d0e4ff534d0e1465bb8b6cf31938d5be88103c5d086c8",
+    count: 612,
+    sha256: "f94226600c5c8a0509b843360f5f446123157db2808d4cc8d972dd0444c2ae42",
   },
   "./schema": {
     count: 224,
     sha256: "a1de7419e9b7cba15f310444ed2addc60d5aa17ce81ca35b15bdce8cbddcd870",
   },
   "./sqlite/local": {
-    count: 588,
-    sha256: "975d5ba55864708733bb9735cb3fffeca54e452338d37493d805deaf43115b58",
+    count: 608,
+    sha256: "3cabec91556ea56004cd3c18b24f43d016932e3d8b72468dd2a711ee6620128c",
   },
 };
 

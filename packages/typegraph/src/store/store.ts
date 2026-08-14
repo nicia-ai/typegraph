@@ -16,10 +16,25 @@ import {
   type GraphWriteBackend,
   type RawBackend,
 } from "../backend/branded";
+import { bindExtra, bindExtraIfReachable } from "../backend/capabilities/bind";
+import type {
+  RECORDED_REVISION_ORIGINS,
+  UNIQUE_SIDECAR_BATCH,
+} from "../backend/capabilities/bundle-registry";
 import {
+  BATCH_POINT_READ,
+  CONTRIBUTION_HEALTH,
+} from "../backend/capabilities/bundle-registry";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
   type ClaimsVerdictThunk,
+  contributionHealthVerdict,
   createClaimsVerdictThunk,
+  recordedRevisionOriginsVerdict,
+  requireExtras,
   statementExecutionVerdict,
+  uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
@@ -901,6 +916,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * throw.
    */
   readonly #claimsVerdict: ClaimsVerdictThunk;
+  /**
+   * Resolved EAGERLY, once, immediately after `#claimsVerdict` — unlike
+   * `claims`, no pilot bundle below has a `crossCheck`, so `resolveBundle`
+   * cannot throw on construction and the thunk's lazy-resolution rationale
+   * does not apply (ruling B8 spec item 2). `batchPointRead` and
+   * `uniqueSidecarBatch` resolve against `#backend`, the object every graph
+   * write and read actually executes through.
+   */
+  readonly #batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  readonly #uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /**
+   * The contribution-health methods and `ensureRevisionOrigin` read
+   * `#baseBackend`, not `#backend` (recorded capture never wraps them), so
+   * their verdicts are resolved against `#baseBackend` too.
+   */
+  readonly #contributionHealth: BundleVerdictOf<typeof CONTRIBUTION_HEALTH>;
+  readonly #recordedRevisionOrigins: BundleVerdictOf<
+    typeof RECORDED_REVISION_ORIGINS
+  >;
   readonly #adapterBackend: AdapterBackend<TNativeTransaction> | undefined;
   readonly #captureEnabled: boolean;
   readonly #revisionTrackingEnabled: boolean;
@@ -988,6 +1022,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         asGraphWriteBackend(createRecordedBackend(backend, resolvedSchema))
       : asGraphWriteBackend(backend);
     this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
+    this.#batchPointRead = batchPointReadVerdict(this.#backend);
+    this.#uniqueSidecarBatch = uniqueSidecarBatchVerdict(this.#backend);
+    this.#contributionHealth = contributionHealthVerdict(this.#baseBackend);
+    this.#recordedRevisionOrigins = recordedRevisionOriginsVerdict(
+      this.#baseBackend,
+    );
     this.#schema = resolvedSchema;
     const rowMapperConfig = rowMapperConfigFor(this.#backend);
     this.#recordedReads = createRecordedReadService({
@@ -1005,6 +1045,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
     this[STORE_RUNTIME] = {
       backend: this.#backend,
+      uniqueSidecarBatch: this.#uniqueSidecarBatch,
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
@@ -1089,6 +1130,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             registry: this.#registry,
             lock,
             claimsVerdict: this.#claimsVerdict,
+            uniqueSidecarBatch: this.#uniqueSidecarBatch,
           },
           target,
           upserts,
@@ -1305,6 +1347,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     const scope = createRecordedTransactionScope(
       target,
+      this.#batchPointRead,
       this.#sqlSchema(),
       target.dialect === "sqlite",
     );
@@ -1562,6 +1605,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
         this.#registry,
         this.#backend,
+        this.#batchPointRead,
         this.#nodeOperations,
       );
     }
@@ -1592,6 +1636,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
         this.#registry,
         this.#backend,
+        this.#batchPointRead,
         this.#edgeOperations,
       );
     }
@@ -2281,7 +2326,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     const pendingOrigin =
       this.#revisionOrigin ??
-      ensureRevisionOrigin(this.#baseBackend, this.#sqlSchema(), this.graphId);
+      ensureRevisionOrigin(
+        this.#baseBackend,
+        this.#recordedRevisionOrigins,
+        this.#sqlSchema(),
+        this.graphId,
+      );
     this.#revisionOrigin = pendingOrigin;
     try {
       return await pendingOrigin;
@@ -2371,6 +2421,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: this.#backend,
         registry: this.#registry,
         createQuery: () => this.query(),
+        batchPointRead: this.#batchPointRead,
       });
     }
     return this.#search;
@@ -3256,7 +3307,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // rows to close, so it flushes to an empty instant map.
     const scope =
       this.#captureEnabled ?
-        createRecordedTransactionScope(txBackend, this.#sqlSchema())
+        createRecordedTransactionScope(
+          txBackend,
+          this.#batchPointRead,
+          this.#sqlSchema(),
+        )
       : {
           backend: txBackend,
           flush: (): Promise<RecordedFlushInstants> =>
@@ -3393,6 +3448,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.graphId,
       this.#registry,
       txBackend,
+      this.#batchPointRead,
       txNodeOperations,
     );
 
@@ -3401,6 +3457,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.graphId,
       this.#registry,
       txBackend,
+      this.#batchPointRead,
       txEdgeOperations,
     );
 
@@ -3528,12 +3585,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               }
               return;
             }
+            const boundGetNodes = bindExtraIfReachable(
+              backend,
+              this.#batchPointRead.extras.getNodes,
+              BATCH_POINT_READ.id,
+            );
             const rows =
-              backend.getNodes === undefined ?
+              boundGetNodes === undefined ?
                 await Promise.all(
                   ids.map((id) => backend.getNode(this.graphId, kind, id)),
                 )
-              : await backend.getNodes(this.graphId, kind, ids);
+              : await boundGetNodes.getNodes(this.graphId, kind, ids);
             // Identity visibility treats every row as visible under
             // includeTombstones, so a soft-deleted member the coordinate
             // surfaced must hydrate rather than silently vanish between
@@ -4290,18 +4352,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async verifyContributions(): Promise<readonly ContributionDiagnostic[]> {
     const backend = this.#baseBackend;
-    const verify = backend.verifyContributions;
-    if (verify === undefined) {
-      throw new ConfigurationError(
-        "verifyContributions requires a backend that can probe its catalog " +
-          "for contribution tables.",
-        {
-          backend: backend.dialect,
-          capability: "contributions",
-          operation: "verify",
-        },
-      );
-    }
+    requireExtras(
+      CONTRIBUTION_HEALTH,
+      this.#contributionHealth,
+      "contribution verify",
+      () => {
+        throw new ConfigurationError(
+          "verifyContributions requires a backend that can probe its catalog " +
+            "for contribution tables.",
+          {
+            backend: backend.dialect,
+            capability: "contributions",
+            operation: "verify",
+          },
+        );
+      },
+    );
+    const { verifyContributions: verify } = bindExtra(
+      backend,
+      this.#contributionHealth.extras.verifyContributions,
+      CONTRIBUTION_HEALTH.id,
+    );
     const vectorSlots =
       backend.capabilities.vector?.supported === true ?
         resolveGraphVectorSlots(this.#graph)
@@ -4367,18 +4438,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async repairContributions(): Promise<ContributionRepairResult> {
     const backend = this.#baseBackend;
-    const repair = backend.repairContributions;
-    if (repair === undefined) {
-      throw new ConfigurationError(
-        "repairContributions requires a backend that can probe and repair " +
-          "strategy-owned contribution tables.",
-        {
-          backend: backend.dialect,
-          capability: "contributions",
-          operation: "repair",
-        },
-      );
-    }
+    requireExtras(
+      CONTRIBUTION_HEALTH,
+      this.#contributionHealth,
+      "contribution repair",
+      () => {
+        throw new ConfigurationError(
+          "repairContributions requires a backend that can probe and repair " +
+            "strategy-owned contribution tables.",
+          {
+            backend: backend.dialect,
+            capability: "contributions",
+            operation: "repair",
+          },
+        );
+      },
+    );
+    const { repairContributions: repair } = bindExtra(
+      backend,
+      this.#contributionHealth.extras.repairContributions,
+      CONTRIBUTION_HEALTH.id,
+    );
 
     const { baseline } = await this.#loadCaughtUp("repair");
     const vectorSlots =
@@ -4423,8 +4503,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async probeContributions(): Promise<ContributionProbeResult> {
     const backend = this.#baseBackend;
-    const probe = backend.probeContributions;
-    if (probe === undefined) {
+    const probeVerdict = this.#contributionHealth.extras.probeContributions;
+    if (!probeVerdict.present) {
       if (backend.capabilities.contributions?.supported !== true) {
         return { entries: [] };
       }
@@ -4438,6 +4518,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         },
       );
     }
+    const { probeContributions: probe } = bindExtra(
+      backend,
+      probeVerdict,
+      CONTRIBUTION_HEALTH.id,
+    );
 
     // The graph snapshot this Store holds, deliberately not a catch-up
     // read: the probe must stay read-only, and `#loadCaughtUp` commits
@@ -4532,18 +4617,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     options?: RebuildContributionOptions,
   ): Promise<ContributionRebuildResult> {
     const backend = this.#baseBackend;
-    const rebuild = backend.rebuildContribution;
-    if (rebuild === undefined) {
-      throw new ConfigurationError(
-        "rebuildContribution requires a backend that can drop, recreate, " +
-          "and re-stamp strategy-owned contribution tables.",
-        {
-          backend: backend.dialect,
-          capability: "contributions",
-          operation: "rebuild",
-        },
-      );
-    }
+    requireExtras(
+      CONTRIBUTION_HEALTH,
+      this.#contributionHealth,
+      "contribution rebuild",
+      () => {
+        throw new ConfigurationError(
+          "rebuildContribution requires a backend that can drop, recreate, " +
+            "and re-stamp strategy-owned contribution tables.",
+          {
+            backend: backend.dialect,
+            capability: "contributions",
+            operation: "rebuild",
+          },
+        );
+      },
+    );
+    const { rebuildContribution: rebuild } = bindExtra(
+      backend,
+      this.#contributionHealth.extras.rebuildContribution,
+      CONTRIBUTION_HEALTH.id,
+    );
 
     // Catch up first: a rebuild recreates storage from the CURRENT
     // declarations, so running it against a stale in-memory graph would
@@ -5009,6 +5103,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       claimsVerdict: this.#claimsVerdict,
+      batchPointRead: this.#batchPointRead,
+      uniqueSidecarBatch: this.#uniqueSidecarBatch,
       ...(identityConfig === undefined ?
         {}
       : {
@@ -5086,6 +5182,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       revisionSchema: this.#sqlSchema(),
       registry: this.#registry,
       claimsVerdict: this.#claimsVerdict,
+      batchPointRead: this.#batchPointRead,
+      uniqueSidecarBatch: this.#uniqueSidecarBatch,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,

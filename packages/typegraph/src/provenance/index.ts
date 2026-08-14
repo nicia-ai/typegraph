@@ -22,6 +22,7 @@ import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import {
   storeBackend,
+  storeRuntime,
   transactionBackend,
   transactionNodeOperationHookRunner,
 } from "../store/runtime-port";
@@ -33,6 +34,7 @@ import {
 import { compareStrings } from "../utils/compare";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { isPlainObject } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 
 export type {
   ContributionDiagnostic,
@@ -872,6 +874,7 @@ async function closeFactCurrency<G extends GraphDef>(
         store.registry,
         lock,
         createClaimsVerdictThunk(storeBackend(store)),
+        requireDefined(storeRuntime(store).uniqueSidecarBatch),
       ),
       {
         existing: row,
@@ -903,6 +906,7 @@ async function reopenFactCurrency<G extends GraphDef>(
         store.registry,
         lock,
         createClaimsVerdictThunk(storeBackend(store)),
+        requireDefined(storeRuntime(store).uniqueSidecarBatch),
       ),
       {
         existing: row,

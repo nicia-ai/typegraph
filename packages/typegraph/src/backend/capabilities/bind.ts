@@ -63,26 +63,41 @@ function portSurfaceCodeFor(bundle: CapabilityBundleId): string {
   return definition?.portSurfaceCode ?? "BUNDLE_PORT_SURFACE_MISMATCH";
 }
 
+/**
+ * The one owner of "does this port have every one of these names" — used both
+ * by {@link bindNames}'s REFUSE arm (`bindCore`/`bindExtra`, which keep the
+ * throw) and by {@link bindExtraIfReachable}'s FALLBACK arm (which turns the
+ * same answer into `undefined`). Returns the first missing name, or
+ * `undefined` when the port has them all.
+ */
+function findMissingPortMember<M extends OptionalGraphBackendMember>(
+  port: Readonly<Partial<Pick<GraphBackend, M>>>,
+  names: readonly M[],
+): M | undefined {
+  const portRecord = port as Readonly<Record<string, unknown>>;
+  return names.find((name) => portRecord[name] === undefined);
+}
+
 function bindNames<const M extends OptionalGraphBackendMember>(
   port: Readonly<Partial<Pick<GraphBackend, M>>>,
   names: readonly M[],
   bundle: CapabilityBundleId,
 ): Record<string, unknown> {
+  const missing = findMissingPortMember(port, names);
+  if (missing !== undefined) {
+    throw new ConfigurationError(
+      `The port passed to capability bundle "${bundle}" is missing "${missing}", which the resolved verdict says is present.`,
+      {
+        code: portSurfaceCodeFor(bundle),
+        bundle,
+        member: missing,
+      },
+    );
+  }
   const bound = createDataKeyedBag<unknown>();
   const portRecord = port as Readonly<Record<string, unknown>>;
   for (const name of names) {
-    const value = portRecord[name];
-    if (value === undefined) {
-      throw new ConfigurationError(
-        `The port passed to capability bundle "${bundle}" is missing "${name}", which the resolved verdict says is present.`,
-        {
-          code: portSurfaceCodeFor(bundle),
-          bundle,
-          member: name,
-        },
-      );
-    }
-    bound[name] = value;
+    bound[name] = portRecord[name];
   }
   return bound;
 }
@@ -136,6 +151,36 @@ export function bindExtra<const M extends OptionalGraphBackendMember>(
 ): BundleBinding<M> {
   const bound = bindNames(port, extraVerdict.members, bundle);
   return bound as BundleBinding<M>;
+}
+
+/**
+ * The FALLBACK arm of I20's disposition-keyed port-mismatch split (ruling,
+ * B8 blocker): binds an extra when the verdict says it is present AND the
+ * port can reach it, otherwise returns `undefined` — collapsing "the verdict
+ * says absent" and "the port cannot reach it" into the site's single declared
+ * fallback, which is exactly the shape a `fallback`-dispositioned row already
+ * has. Used ONLY at call sites whose registry operation row disposes
+ * `fallback`; a `refuse` row keeps calling {@link bindExtra} (or
+ * {@link bindCore}) so its port mismatch still throws (I20's REFUSE arm).
+ *
+ * Deliberately does NOT consult the row's disposition itself: an extra's own
+ * disposition and its operation row's disposition can differ (`
+ * checkUniqueBatch` is a `fallback` extra owned by both a `fallback` row and
+ * two `refuse` rows), so only the call site — which knows which row it is —
+ * can choose the arm.
+ */
+export function bindExtraIfReachable<
+  const M extends OptionalGraphBackendMember,
+>(
+  port: Readonly<Partial<Pick<GraphBackend, M>>>,
+  extraVerdict: ExtraVerdict<M>,
+  bundle: CapabilityBundleId,
+): BundleBinding<M> | undefined {
+  if (!extraVerdict.present) return undefined;
+  if (findMissingPortMember(port, extraVerdict.members) !== undefined) {
+    return undefined;
+  }
+  return bindExtra(port, extraVerdict, bundle);
 }
 
 /**
