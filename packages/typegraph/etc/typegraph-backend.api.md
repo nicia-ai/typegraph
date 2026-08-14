@@ -3106,7 +3106,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly tableNames: {
         readonly kind: "reasoned";
         readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
-        readonly accesses: 22;
+        readonly accesses: 23;
     };
     readonly commitSchemaVersionIfKindsEmpty: {
         readonly kind: "reasoned";
@@ -3131,7 +3131,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly ensureIdentityTables: {
         readonly kind: "reasoned";
         readonly reason: "Identity DDL, gated by the identity construction gate (store.ts:918-935), which is the write-fence design's decision and must stay one owner there.";
-        readonly accesses: 3;
+        readonly accesses: 4;
     };
     readonly identityTableDdl: {
         readonly kind: "reasoned";

@@ -534,6 +534,13 @@ export const STATEMENT_EXECUTION = {
           file: "store/recorded-capture/guards.ts",
           member: "executeStatement",
           lines: [62, 79],
+          // DUAL-CLASS (file, member) pair: this same "guards.ts#executeStatement"
+          // key also carries the "reasoned" rewiring below (the port-surface
+          // fallback site). The live scanner (scripts/bundle-member-access-scan.ts)
+          // matches rewiring annotations on (file, member) only — it cannot read
+          // `lines` to split the pair — so every live executeStatement access in
+          // this file classifies as `annotated-residue` once either sibling
+          // annotation exists.
           rewiring: {
             class: "deferred",
             reason:
@@ -581,6 +588,13 @@ export const STATEMENT_EXECUTION = {
           file: "store/recorded-capture/guards.ts",
           member: "executeStatement",
           lines: [219],
+          // DUAL-CLASS (file, member) pair: this same "guards.ts#executeStatement"
+          // key also carries the "deferred" rewiring above (the recorded-capture
+          // statement site). The live scanner (scripts/bundle-member-access-scan.ts)
+          // matches rewiring annotations on (file, member) only — it cannot read
+          // `lines` to split the pair — so every live executeStatement access in
+          // this file classifies as `annotated-residue` once either sibling
+          // annotation exists.
           rewiring: {
             class: "reasoned",
             reason:
@@ -804,8 +818,9 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 19 `reasoned` + 47 `deferred` members — 58 + 190 = 248 accesses,
- * 15 + 66 = 81 members total with the pilot's 15.
+ * The 19 `reasoned` + 47 `deferred` members — 60 + 190 = 250 accesses
+ * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
+ * `ensureIdentityTables` 3→4), 15 + 66 = 81 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   bootstrapTables: {
@@ -818,7 +833,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.",
-    accesses: 22,
+    // 23, not the grep tier's 22: store/store.ts holds two `backend.tableNames`
+    // accesses on one physical line, which a line-keyed grep counts once but
+    // the type-aware scanner counts as two access nodes (§Baselines).
+    accesses: 23,
   },
   commitSchemaVersionIfKindsEmpty: {
     kind: "reasoned",
@@ -848,7 +866,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Identity DDL, gated by the identity construction gate (store.ts:918-935), which is the write-fence design's decision and must stay one owner there.",
-    accesses: 3,
+    // 4, not the grep tier's 3: identity/schema-transition.ts:228 accesses
+    // `input.ensureIdentityTables` through a derived (arm-b) receiver whose
+    // property name never matches the grep receiver-name filter
+    // (backend|Backend|target|Target|tx|port|source). The type-aware scanner
+    // resolves it via the receiver's declared type node, which textually
+    // references `GraphBackend["ensureIdentityTables"]` (§Baselines).
+    accesses: 4,
   },
   identityTableDdl: {
     kind: "reasoned",

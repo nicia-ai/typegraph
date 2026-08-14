@@ -788,8 +788,9 @@ const LINT_BLOCKS = [
   //
   // `src/identity/historical-sql.ts` is query-compiler SQL construction that
   // lives outside src/query, so it is in scope. The rest of src/identity is
-  // not: `service.ts` legitimately branches on dialect to gate PostgreSQL
-  // advisory locks, which is backend provisioning, not query compilation.
+  // not: the dialect branching lives in `service-read.ts` (`lockIdentityGraph`
+  // / `lockIdentityEnablementNodes`, gating PostgreSQL advisory + table
+  // locks), which is backend provisioning, not query compilation.
   {
     files: ["src/query/**/*.ts", "src/identity/historical-sql.ts"],
     rules: {

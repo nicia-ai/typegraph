@@ -108,13 +108,18 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("19 reasoned entries sum to 58 accesses; 47 deferred entries sum to 190", () => {
+  it("19 reasoned entries sum to 60 accesses; 47 deferred entries sum to 190", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
     expect(reasoned.length).toBe(19);
     expect(deferred.length).toBe(47);
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(58);
+    // B9's scanner corrected two grep-tier undercounts with type-aware
+    // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
+    // on one physical line) and `ensureIdentityTables` 3->4
+    // (identity/schema-transition.ts:228 is a real access the grep
+    // receiver-name filter never matched). 58 -> 60.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(60);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(190);
   });
 });
