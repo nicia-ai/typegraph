@@ -23,7 +23,7 @@ export function resolveRecordedTimeOwnership(
  * "engine-native"` while constructing a store that allocates the
  * TypeGraph-owned recorded clock (`history` / `revisionTracking`).
  *
- * AT 0.50 THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
+ * TODAY THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
  * F8, owned by WS9). The capture path allocates the TypeGraph clock
  * unconditionally, so this configuration is refused at construction by its
  * own typed error naming the interim state — never admitted and left to
@@ -37,10 +37,10 @@ export function resolveRecordedTimeOwnership(
 export function refuseEngineNativeRecordedTimeNotYetImplemented(): never {
   throw new ConfigurationError(
     'This backend declares `recordedTimeOwnership: "engine-native"`, but ' +
-      "TypeGraph 0.50 still allocates its own recorded clock for `history` / " +
-      "`revisionTracking`; the engine-native recorded-time path lands with " +
-      "WS9. Construct the store without `history` / `revisionTracking`, or " +
-      'declare `recordedTimeOwnership: "typegraph-relations"` and let ' +
+      "TypeGraph still allocates its own recorded clock for `history` / " +
+      "`revisionTracking`; the engine-native path lands with a later " +
+      "release. Construct the store without `history` / `revisionTracking`, " +
+      'or declare `recordedTimeOwnership: "typegraph-relations"` and let ' +
       "TypeGraph own the clock.",
     { code: "ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED" },
     {

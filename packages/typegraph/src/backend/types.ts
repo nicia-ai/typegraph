@@ -383,7 +383,7 @@ export type BackendCapabilities = Readonly<{
    * construction. `"engine-native"` means the engine supplies the recorded
    * axis itself (WS9's ruled BraidDB posture: pinned-handle `AS OF`).
    *
-   * AT 0.50 THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
+   * TODAY THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
    * F8, owned by WS9). The capture path allocates the TypeGraph clock
    * unconditionally, so declaring `"engine-native"` and enabling
    * clock-allocating history/revision tracking is refused at construction by

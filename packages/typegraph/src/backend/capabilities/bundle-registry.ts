@@ -82,7 +82,7 @@ export type CapabilityCrossCheck =
   | "none"
   /**
    * Declared-but-missing refuses; implements-without-declaring resolves
-   * supported. One-directional. No bundle uses this at 0.50 — it exists so a
+   * supported. One-directional. No bundle uses this today — it exists so a
    * future cross-check has a shape to grow into, one that must carry its own
    * justification row when adopted.
    */

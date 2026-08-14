@@ -55,6 +55,27 @@
  *   such a reference can disappear from a snapshot without tripping the
  *   member-removed predicate, since it never had members to lose.
  *
+ *   This has a named consequence class beyond the disappearing-declaration
+ *   case above: a required-ification that happens **inside a member's value
+ *   type** — not at the member's own optionality — produces zero findings
+ *   from either predicate. `DeleteLegacyRecordedAnchorMapOptions.backend`
+ *   (`packages/typegraph/src/backend/migrate-recorded-time.ts`) is the
+ *   worked example: its value type went from
+ *   `Pick<GraphBackend, "dialect" | "execute" | "executeStatement" | …>` to
+ *   `Pick<GraphBackend, "dialect" | "execute" | …> & Required<Pick<GraphBackend,
+ *   "executeStatement">>`. The `backend` member itself is required in both
+ *   snapshots — predicate 3 (optionality-tightened) sees no change there —
+ *   and the `Pick<>` / `Required<Pick<>>` bodies on either side of the
+ *   intersection are exactly the reference bodies this bullet says are not
+ *   walked, so predicate 1 (required-member-added) never descends into them
+ *   either. The change is a real honest-tightening/breaking change (a caller
+ *   passing a `backend` object that lacks `executeStatement` compiled before
+ *   and does not compile now) that this checker cannot see by construction.
+ *   Extending the inventory into value-type bodies is a deliberate open
+ *   decision, left to whichever workstream next needs it (see the
+ *   conformance-kit obligations in `src/backend/capabilities/index.ts`'s
+ *   module doc) — not attempted here.
+ *
  * ## Contravariant reachability is gated, not just polarity-tracked
  *
  * A declaration reached at contravariant (input) polarity only "hard"

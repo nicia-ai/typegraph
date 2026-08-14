@@ -168,4 +168,38 @@ describe("api-surface-exceptions-ledger", () => {
       parseExceptionsLedger(JSON.stringify([duplicateEntry, duplicateEntry])),
     ).toThrow(ApiSurfaceLedgerError);
   }, 30_000);
+
+  it("the shipped exceptions ledger is empty at the pilot freeze", () => {
+    const ledgerSource = readFileSync(
+      path.join(PACKAGE_ROOT, EXCEPTIONS_LEDGER_RELATIVE_PATH),
+      "utf8",
+    );
+    expect(parseExceptionsLedger(ledgerSource)).toEqual([]);
+  });
+
+  it("a value-type-body tightening is not expressible as a ledger entry", () => {
+    const inventories = buildAllInventories();
+    const issues = validateExceptionsLedger(
+      [
+        {
+          entrypoint: BACKEND_ENTRYPOINT,
+          declaration: "DeleteLegacyRecordedAnchorMapOptions",
+          member: "executeStatement",
+          kind: "optionality-tightened",
+          reason:
+            "value-type-body tightening: DeleteLegacyRecordedAnchorMapOptions.backend gained Required<Pick<GraphBackend, 'executeStatement'>> inside its value type, which the checker does not walk",
+          issue: "#1",
+        },
+      ],
+      inventories,
+    );
+
+    // Exactly one issue: the member does not exist in the inventory at all,
+    // because `backend`'s value type is a Pick/Required-intersection body
+    // this checker never expands, so `executeStatement` never became a
+    // tracked member of `DeleteLegacyRecordedAnchorMapOptions` in the first
+    // place. A fabricated ledger entry for this shape exempts nothing.
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.entry.member).toBe("executeStatement");
+  }, 30_000);
 });

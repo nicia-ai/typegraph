@@ -8,12 +8,13 @@
  *      zero statements.
  *  (b) an identity graph on an `unfenced` backend refuses, zero statements.
  *  (c) `history: true` on a backend declaring `recordedTimeOwnership:
- *      "engine-native"` refuses with the INTERIM error (names WS9 and the
- *      missing engine-native path), on both an unfenced AND a fenced
- *      engine-native backend (the interim gate is not the fence gate wearing
- *      a different hat) — plus an R-2 exemption sub-row: an unfenced
- *      engine-native backend constructed WITHOUT `history`/`revisionTracking`
- *      succeeds.
+ *      "engine-native"` refuses with the INTERIM error (a version-free
+ *      message naming the missing engine-native path), on both an unfenced
+ *      AND a fenced engine-native backend (the interim gate is not the fence
+ *      gate wearing a different hat) — plus an R-2 exemption sub-row: an
+ *      unfenced engine-native backend constructed WITHOUT
+ *      `history`/`revisionTracking` succeeds. A pilot-freeze row (§B11)
+ *      additionally asserts the message names no release version.
  *  (d) an undeclared non-factory backend refuses (a) and (b) via M-5's
  *      `unfenced` default.
  *  (e) the refusal message contains the LITERAL declaration line for the
@@ -29,6 +30,7 @@ import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../src";
 import { pessimisticLockDeclarationLine } from "../src/backend/capabilities/write-fence";
+import { TypeGraphError } from "../src/errors";
 import { cloneWorkingCopyStrategy } from "../src/graph-merge";
 import {
   createLoggedPostgresBackend,
@@ -120,6 +122,27 @@ describe("T16 — (c) engine-native interim refusal", () => {
       recordedTimeOwnership: "engine-native",
     });
     expect(() => createStore(plainGraph, logged.backend)).not.toThrow();
+  });
+
+  it("the engine-native interim refusal names no release version", () => {
+    const logged = createLoggedSqliteBackend({
+      pessimisticLocks: UNFENCED_CAPABILITIES,
+      recordedTimeOwnership: "engine-native",
+    });
+    let caught: unknown;
+    try {
+      createStore(plainGraph, logged.backend, { history: true });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TypeGraphError);
+    const error = caught as TypeGraphError;
+    expect(error.details["code"]).toBe(
+      "ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED",
+    );
+    expect(error.message).toContain("without `history`");
+    expect(error.message).toContain('"typegraph-relations"');
+    expect(error.message).not.toMatch(/\b0\.\d+(\.\d+)?\b/);
   });
 });
 
