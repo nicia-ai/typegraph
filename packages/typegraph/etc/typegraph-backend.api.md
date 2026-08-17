@@ -1379,37 +1379,37 @@ export const MISSING_PEER_LEDGER: readonly [{
     readonly entrypoint: "./adapters/drizzle/sqlite";
     readonly arm: "documented-resolution-error";
     readonly formats: readonly ["import", "require"];
-    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly reason: "synchronous pass-a-Drizzle-handle factory: deferring the adapter implementation to translate its module-resolution failure would require an async signature change";
     readonly documentedIn: readonly string[];
 }, {
     readonly entrypoint: "./adapters/drizzle/postgres";
     readonly arm: "documented-resolution-error";
     readonly formats: readonly ["import", "require"];
-    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly reason: "synchronous pass-a-Drizzle-handle factory: deferring the adapter implementation to translate its module-resolution failure would require an async signature change";
     readonly documentedIn: readonly string[];
 }, {
     readonly entrypoint: "./adapters/drizzle/postgres/pglite";
     readonly arm: "documented-resolution-error";
     readonly formats: readonly ["import", "require"];
-    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly reason: "explicit Drizzle-native adapter entrypoint: it eagerly exposes a Drizzle database alongside the GraphBackend, so a missing drizzle-orm fails at module evaluation with the raw resolution error";
     readonly documentedIn: readonly string[];
 }, {
     readonly entrypoint: "./adapters/drizzle/sqlite/local";
     readonly arm: "documented-resolution-error";
     readonly formats: readonly ["import", "require"];
-    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly reason: "synchronous connection-owning adapter factory: deferring its Drizzle-backed implementation to translate the module-resolution failure would require an async signature change";
     readonly documentedIn: readonly string[];
 }, {
     readonly entrypoint: "./adapters/drizzle/sqlite/libsql";
     readonly arm: "documented-resolution-error";
     readonly formats: readonly ["import", "require"];
-    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly reason: "explicit Drizzle-native adapter entrypoint: it eagerly exposes a Drizzle database alongside the GraphBackend, so a missing drizzle-orm fails at module evaluation with the raw resolution error";
     readonly documentedIn: readonly string[];
 }, {
     readonly entrypoint: "./adapters/drizzle/indexes";
     readonly arm: "documented-resolution-error";
     readonly formats: readonly ["import", "require"];
-    readonly reason: "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+    readonly reason: "Drizzle-native schema-builder entrypoint with no factory boundary at which to translate a missing drizzle-orm import";
     readonly documentedIn: readonly string[];
 }];
 

@@ -1,6 +1,6 @@
 /**
- * I9 baseline ratchet — records today's "no Drizzle here" claim sites (13
- * occurrences across 11 files, repo-root-rooted) as a both-directions
+ * I9 baseline ratchet — records today's "no Drizzle here" claim sites (14
+ * occurrences across 12 files, repo-root-rooted) as a both-directions
  * inventory. A new unqualified claim and a stale recorded row are both
  * defects: the former lets an unaudited claim of Drizzle absence ship, the
  * latter lets the two most consumer-visible ones (the shipped README, the
@@ -19,12 +19,20 @@ import { scanClaimSites } from "../scripts/drizzle-claim-inventory";
 
 const CLAIM_WORD = "Drizzle";
 
-/** Recorded at `29d63ec` by `node --import tsx scripts/drizzle-claim-inventory.ts`. */
+/** Derived by `node --import tsx scripts/drizzle-claim-inventory.ts`. */
 const RECORDED_CLAIM_SITES: readonly Readonly<{
   file: string;
   line: number;
   text: string;
 }>[] = [
+  {
+    file: ".changeset/port-isolation-severance.md",
+    line: 5,
+    text:
+      "Sever the last three Drizzle routes from the portable entrypoints. `GraphBackend` gains an optional `recordedTableDdl` member (with `RecordedTableNames` and `RecordedRelationDdl` types) so the recorded-time migration obtains its DDL from the backend rather than from Drizzle schema objects — it is called twice per migration, once per name set, and a backend without it gets a typed refusal on the migration branch rather than a crash. The claim-owner SQL comparison and the three removal builders move to portable owners with golden `{sql, params}` tests pinning byte-identical output on both dialects. A reachability scanner plus ratchet tests now assert all ten portable entrypoints are " +
+      CLAIM_WORD +
+      "-free at both the source and dist grain, in both module formats, so a future import cannot silently re-couple them.",
+  },
   {
     file: "README.md",
     line: 118,
@@ -121,18 +129,18 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
 ];
 
 describe("drizzle claim-site inventory", () => {
-  it("has the recorded shape: 13 occurrences across 11 files", () => {
-    expect(RECORDED_CLAIM_SITES.length).toBe(13);
+  it("has the recorded shape: 14 occurrences across 12 files", () => {
+    expect(RECORDED_CLAIM_SITES.length).toBe(14);
     expect(new Set(RECORDED_CLAIM_SITES.map((site) => site.file)).size).toBe(
-      11,
+      12,
     );
   });
 
   it("matches scanClaimSites() both directions", () => {
     const scanned = scanClaimSites();
 
-    expect(scanned.length).toBe(13);
-    expect(new Set(scanned.map((site) => site.file)).size).toBe(11);
+    expect(scanned.length).toBe(14);
+    expect(new Set(scanned.map((site) => site.file)).size).toBe(12);
 
     const recordedKeys = new Set(
       RECORDED_CLAIM_SITES.map((site) => `${site.file}:${site.line}`),
