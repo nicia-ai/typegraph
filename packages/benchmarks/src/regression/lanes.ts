@@ -1,5 +1,6 @@
 import { REAL_WORKLOAD_LANES } from "./lanes/real-workload";
 import { SYNTHETIC_LANES } from "./lanes/synthetic";
+import { type MeasurementSemantics } from "./policy";
 
 export type LaneBackend = "sqlite" | "postgres";
 
@@ -11,6 +12,8 @@ export type RegressionLane = Readonly<{
   /** pnpm script name in packages/benchmarks per backend; undefined = lane has no leg there. */
   scripts: Readonly<Record<LaneBackend, string | undefined>>;
   requires?: readonly LaneRequirement[];
+  /** Exact-label overrides for metrics whose unit or polarity is not latency. */
+  measurementSemantics?: Readonly<Record<string, MeasurementSemantics>>;
 }>;
 
 /**

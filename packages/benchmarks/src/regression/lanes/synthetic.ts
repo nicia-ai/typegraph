@@ -1,5 +1,11 @@
 import { type RegressionLane } from "../lanes";
 
+const RECALL_SEMANTICS = {
+  direction: "higher-is-better",
+  minAbsoluteDelta: 0.01,
+  unit: "recall",
+} as const;
+
 /**
  * Regression lanes backed by the existing synthetic social-graph benchmark
  * suites (`src/main.ts`, `src/write-bench.ts`, `src/identity-bench.ts`,
@@ -28,6 +34,12 @@ export const SYNTHETIC_LANES: readonly RegressionLane[] = [
     description: "Vector/ANN search latency and recall.",
     scripts: { sqlite: "bench:vector", postgres: "bench:vector:postgres" },
     requires: ["sqlite-vec"],
+    measurementSemantics: {
+      "vector:ann-recall": RECALL_SEMANTICS,
+      "vector:ann-filtered-recall": RECALL_SEMANTICS,
+      "vector:exact-postindex-recall": RECALL_SEMANTICS,
+      "vector:exact-filtered-postindex-recall": RECALL_SEMANTICS,
+    },
   },
   {
     id: "identity-frontier",

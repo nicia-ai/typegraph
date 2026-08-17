@@ -17,6 +17,8 @@ type LaneHistoryEntry = Readonly<{
   engine: string;
   profile: string;
   requestsPerQuery: number;
+  warmupIterations: number;
+  sampleIterations: number;
   loadMs: number;
   queries: Readonly<
     Record<
@@ -38,6 +40,8 @@ export type WriteLaneHistoryInput = Readonly<{
   engine: string;
   profile: string;
   requestsPerQuery: number;
+  warmupIterations: number;
+  sampleIterations: number;
   loadMs: number;
   queries: ReadonlyMap<
     string,
@@ -66,6 +70,8 @@ export function writeLaneHistoryEntry(input: WriteLaneHistoryInput): string {
     engine: input.engine,
     profile: input.profile,
     requestsPerQuery: input.requestsPerQuery,
+    warmupIterations: input.warmupIterations,
+    sampleIterations: input.sampleIterations,
     loadMs: Number(input.loadMs.toFixed(1)),
     queries,
   };

@@ -33,6 +33,7 @@ import {
   type LaneComparison,
   type RegressionReport,
 } from "./regression/compare";
+import { type LaneBackend } from "./regression/lanes";
 import { type BaselineId } from "./regression/policy";
 import {
   findUncommittedProofPaths,
@@ -45,7 +46,9 @@ import {
   assertSeedPatchScope,
 } from "./regression/proof/patch";
 import { resolveSeed, type RegressionSeed } from "./regression/proof/seeds";
+import { timingReportPaths } from "./regression/proof/timing-reports";
 import {
+  combineBackendTimingVerdicts,
   combineProofVerdict,
   judgeExplainProof,
   judgeTimingProof,
@@ -150,9 +153,45 @@ function defaultProofOutputDir(repoRoot: string, seedId: string): string {
 
 type TimingRunResult = Readonly<{
   verdict: ProofHalfVerdict;
-  reportPath: string;
+  reportPaths: readonly string[];
   benchRegressionExitCode: number | null;
 }>;
+
+async function judgeBackendTimingReports(
+  input: Readonly<{
+    outputDir: string;
+    backends: readonly LaneBackend[];
+    seed: RegressionSeed;
+  }>,
+): Promise<
+  Readonly<{
+    verdict: ProofHalfVerdict;
+    reportPaths: readonly string[];
+  }>
+> {
+  const verdicts: Array<{
+    backend: LaneBackend;
+    verdict: ProofHalfVerdict;
+  }> = [];
+  const reportPaths: string[] = [];
+  for (const { backend, reportPath } of timingReportPaths(
+    input.outputDir,
+    input.backends,
+  )) {
+    const report = reconstructRegressionReport(
+      await readFile(reportPath, "utf-8"),
+    );
+    verdicts.push({
+      backend,
+      verdict: judgeTimingProof({ report, expectation: input.seed.timing }),
+    });
+    reportPaths.push(reportPath);
+  }
+  return {
+    verdict: combineBackendTimingVerdicts(verdicts),
+    reportPaths,
+  };
+}
 
 async function runTimingHalf(
   input: Readonly<{
@@ -193,12 +232,12 @@ async function runTimingHalf(
     { cwd: benchmarksDir, onOutput: logChunk },
   );
 
-  const reportPath = path.join(outputDir, "report.json");
-  const report = reconstructRegressionReport(
-    await readFile(reportPath, "utf-8"),
-  );
-  const verdict = judgeTimingProof({ report, expectation: seed.timing });
-  return { verdict, reportPath, benchRegressionExitCode: result.code };
+  const judged = await judgeBackendTimingReports({
+    outputDir,
+    backends: options.backends,
+    seed,
+  });
+  return { ...judged, benchRegressionExitCode: result.code };
 }
 
 async function runExplainHalf(
@@ -300,7 +339,7 @@ function renderProofReport(
     lines.push(
       `\`bench:regression\` exit code: ${timing.benchRegressionExitCode ?? "—"}`,
       "",
-      `Report: \`${timing.reportPath}\``,
+      `Reports: ${timing.reportPaths.map((reportPath) => `\`${reportPath}\``).join(", ")}`,
       "",
     );
   }

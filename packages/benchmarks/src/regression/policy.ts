@@ -26,6 +26,15 @@ export type RegressionPolicy = Readonly<{
   accepted: readonly AcceptedRegression[];
 }>;
 
+export type MeasurementDirection = "lower-is-better" | "higher-is-better";
+
+export type MeasurementSemantics = Readonly<{
+  direction: MeasurementDirection;
+  /** Smallest absolute change worth classifying, in the measurement's own unit. */
+  minAbsoluteDelta: number;
+  unit: "ms" | "recall";
+}>;
+
 export const DEFAULT_REGRESSION_POLICY: RegressionPolicy = {
   flagRatio: 1.2,
   failRatio: 2.0,
@@ -49,6 +58,7 @@ export type ClassifyRatioInput = Readonly<{
   baseline: BaselineId;
   baselineMs: number;
   candidateMs: number;
+  semantics?: MeasurementSemantics;
 }>;
 
 export type ClassifyRatioResult = Readonly<{
@@ -58,11 +68,11 @@ export type ClassifyRatioResult = Readonly<{
   note?: string;
 }>;
 
-function computeRatio(baselineMs: number, candidateMs: number): number {
-  if (baselineMs === 0) {
-    return candidateMs === 0 ? 1 : Number.POSITIVE_INFINITY;
+function computeRatio(baselineValue: number, candidateValue: number): number {
+  if (baselineValue === 0) {
+    return candidateValue === 0 ? 1 : Number.POSITIVE_INFINITY;
   }
-  return candidateMs / baselineMs;
+  return candidateValue / baselineValue;
 }
 
 function findApplicableAcceptance(
@@ -99,12 +109,20 @@ export function classifyRatio(
 ): ClassifyRatioResult {
   const { laneId, label, baseline, baselineMs, candidateMs } = input;
   const deltaMs = candidateMs - baselineMs;
-  const ratio = computeRatio(baselineMs, candidateMs);
+  const semantics = input.semantics ?? {
+    direction: "lower-is-better",
+    minAbsoluteDelta: policy.minAbsoluteDeltaMs,
+    unit: "ms",
+  };
+  const ratio =
+    semantics.direction === "lower-is-better" ?
+      computeRatio(baselineMs, candidateMs)
+    : computeRatio(candidateMs, baselineMs);
 
   // I2: the noise floor gates on the absolute delta, never on the baseline
   // magnitude. The #396 regression was 0.0082ms -> 564ms: a tiny baseline
   // must never suppress a real regression.
-  if (Math.abs(deltaMs) < policy.minAbsoluteDeltaMs) {
+  if (Math.abs(deltaMs) < semantics.minAbsoluteDelta) {
     return { classification: "below-noise-floor", ratio, deltaMs };
   }
 

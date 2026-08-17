@@ -21,6 +21,9 @@ const PERF_TIMING_LANE_WORKFLOW_PATH = fileURLToPath(
 const ADVISORY_SCRIPT_PATH = fileURLToPath(
   new URL("../../../.github/scripts/perf-lane-advisory.sh", import.meta.url),
 );
+const REGRESSION_EC2_PATH = fileURLToPath(
+  new URL("../../benchmarks/src/regression-ec2.ts", import.meta.url),
+);
 
 function runGit(fixtureDirectory: string, args: readonly string[]): string {
   return execFileSync("git", args, {
@@ -137,11 +140,44 @@ describe("Perf timing lane workflow contract", () => {
     expect(workflow).toContain("cancel-in-progress: false");
   });
 
-  it("always terminates its instance", () => {
+  it("terminates by default without overriding an explicit keep request", () => {
     const workflow = readFileSync(PERF_TIMING_LANE_WORKFLOW_PATH, "utf8");
     expect(workflow).toMatch(
-      /Terminate the EC2 instance[\s\S]*?if: always\(\)[\s\S]*?terminate-instances/,
+      /Terminate the EC2 instance[\s\S]*?if: always\(\) && github\.event\.inputs\.keep != 'true'[\s\S]*?terminate-instances/,
     );
+  });
+
+  it("records the instance before launch can fail and uses that record in the backstop", () => {
+    const workflow = readFileSync(PERF_TIMING_LANE_WORKFLOW_PATH, "utf8");
+    const source = readFileSync(REGRESSION_EC2_PATH, "utf8");
+    const runInstanceIndex = source.indexOf("await runInstance");
+    const instanceRecordIndex = source.indexOf('"instance.json"');
+    const firstWaitIndex = source.indexOf('waitUntil("instance running"');
+
+    expect(runInstanceIndex).toBeGreaterThan(-1);
+    expect(instanceRecordIndex).toBeGreaterThan(runInstanceIndex);
+    expect(instanceRecordIndex).toBeLessThan(firstWaitIndex);
+    expect(workflow).toContain('instance_json="$OUTPUT_DIR/instance.json"');
+  });
+
+  it("places initial collect polling inside the termination finally", () => {
+    const source = readFileSync(REGRESSION_EC2_PATH, "utf8");
+    const collectIndex = source.indexOf("async function collect");
+    const pollingIndex = source.indexOf(
+      "await getCommandInvocation",
+      collectIndex,
+    );
+    const tryIndex = source.lastIndexOf("try {", pollingIndex);
+    const finallyIndex = source.indexOf("} finally {", pollingIndex);
+    const terminateIndex = source.indexOf(
+      "await terminateInstance",
+      finallyIndex,
+    );
+
+    expect(tryIndex).toBeGreaterThan(collectIndex);
+    expect(tryIndex).toBeLessThan(pollingIndex);
+    expect(finallyIndex).toBeGreaterThan(pollingIndex);
+    expect(terminateIndex).toBeGreaterThan(finallyIndex);
   });
 
   it("refuses a perf-lane label from a fork PR", () => {

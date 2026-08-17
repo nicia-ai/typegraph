@@ -21,6 +21,50 @@ export type ProofHalfVerdict =
   | Readonly<{ kind: "inconclusive"; reason: string }>
   | Readonly<{ kind: "invalid-seed"; reason: string }>;
 
+/** Every requested backend must prove the seed; one weak leg weakens the half. */
+export function combineBackendTimingVerdicts(
+  verdicts: readonly Readonly<{
+    backend: string;
+    verdict: ProofHalfVerdict;
+  }>[],
+): ProofHalfVerdict {
+  const invalid = verdicts.find(
+    (entry) => entry.verdict.kind === "invalid-seed",
+  );
+  if (invalid !== undefined && invalid.verdict.kind === "invalid-seed") {
+    return {
+      kind: "invalid-seed",
+      reason: `${invalid.backend}: ${invalid.verdict.reason}`,
+    };
+  }
+  const inconclusive = verdicts.find(
+    (entry) => entry.verdict.kind === "inconclusive",
+  );
+  if (
+    inconclusive !== undefined &&
+    inconclusive.verdict.kind === "inconclusive"
+  ) {
+    return {
+      kind: "inconclusive",
+      reason: `${inconclusive.backend}: ${inconclusive.verdict.reason}`,
+    };
+  }
+  if (verdicts.length === 0) {
+    return { kind: "inconclusive", reason: "no backend reports were judged" };
+  }
+  return {
+    kind: "proven",
+    evidence: verdicts
+      .map((entry) => {
+        if (entry.verdict.kind !== "proven") {
+          throw new Error("Unexpected non-proven backend timing verdict.");
+        }
+        return `${entry.backend}: ${entry.verdict.evidence}`;
+      })
+      .join("; "),
+  };
+}
+
 function isDefaultPolicy(policy: RegressionPolicy): boolean {
   return (
     policy.flagRatio === DEFAULT_REGRESSION_POLICY.flagRatio &&

@@ -18,6 +18,7 @@ export type LaneRunOutcome =
       refId: string;
       sha: string;
       run: ExtractedRun;
+      measurementSemantics?: RegressionLane["measurementSemantics"];
       durationMs: number;
     }>
   | Readonly<{
@@ -131,13 +132,31 @@ export async function runLane(input: RunLaneInput): Promise<LaneRunOutcome> {
   }
 
   const appendedLines = readHistoryTail(historyPath, byteOffsetBefore);
-  const run = extractLaneMeasurements(appendedLines);
+  let run: ExtractedRun;
+  try {
+    run = extractLaneMeasurements(appendedLines);
+  } catch (error) {
+    return {
+      kind: "failed",
+      laneId: lane.id,
+      refId: worktree.id,
+      sha: worktree.sha,
+      reason:
+        `Lane "${lane.id}" (${worktree.id}) exited successfully but did not ` +
+        `produce usable benchmark measurements: ${error instanceof Error ? error.message : String(error)}`,
+      exitCode: result.code,
+      timedOut: false,
+    };
+  }
   return {
     kind: "measured",
     laneId: lane.id,
     refId: worktree.id,
     sha: worktree.sha,
     run,
+    ...(lane.measurementSemantics === undefined ?
+      {}
+    : { measurementSemantics: lane.measurementSemantics }),
     durationMs,
   };
 }

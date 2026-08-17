@@ -15,7 +15,8 @@ remote run script, and the artifact/verdict decisions
 ```bash
 # Provisions the instance, confirms bootstrap, starts bench:regression in
 # the background, and prints a launch.json path plus the exact collect
-# invocation:
+# invocation. It writes instance.json immediately after allocation so a
+# later bootstrap/SSM failure still leaves the workflow a termination handle:
 pnpm --filter @nicia-ai/typegraph-benchmarks bench:regression:ec2 -- \
   --region=us-west-2 \
   --subnet-id=<your-subnet-id> \
@@ -128,8 +129,10 @@ Same dead-man's-switch mechanism as the SNB runner
 (`docs/ec2-benchmark-runner.md`'s "Cost safety net"): the bootstrap schedules
 a `shutdown` timed to comfortably outlive both the bootstrap and run
 timeouts. `collect`'s `finally` always terminates the instance (unless
-`--keep`); the GitHub Actions workflow adds a best-effort `always()`
-terminate step covering a launch that failed before `collect` ever ran.
+`--keep`), including failures during the first SSM poll. The GitHub Actions
+workflow adds a best-effort backstop that reads the early `instance.json`
+record when launch failed before `launch.json` or `collect`; it is skipped for
+an explicit `keep=true` dispatch.
 
 ## Verifying the pipeline cheaply
 

@@ -118,8 +118,8 @@ Each run writes `report.md` and `report.json` to
 by default (`--output=<dir>` to override; this directory is gitignored —
 curated proof reports are committed separately at
 `packages/benchmarks/reports/regression-*.md`). The markdown includes a
-per-lane table (`Lane | Measurement | Baseline | baseline ms | candidate
-ms | ratio | classification`), the resolved SHA of every worktree, the
+per-lane table (`Lane | Measurement | Baseline | Unit | baseline | candidate |
+ratio | classification`), the resolved SHA of every worktree, the
 policy in force, and every applied acceptance with its reason. The JSON
 report nests measurements by lane id, then baseline — never a flattened
 `"lane:baseline"` string key.
@@ -145,6 +145,20 @@ severity as an unrunnable one: "no comparison happened" is the same
 untrustworthy state whether the run never happened, failed, or ran but
 can't be measured against its baseline — none of them may read as "no
 regression."
+
+A lane that exits successfully but appends no measurement is also unrunnable.
+This covers optional engines and capabilities that can legitimately skip their
+work: a zero-row result is not evidence of unchanged performance. Signatures
+must have identical key sets and values. The synthetic and SNB writers include
+warmup/sample counts, and multi-engine SNB runs include the sorted engine set;
+a missing parameter is a mismatch rather than a wildcard.
+
+Most measurements are latency, where lower is better and the default absolute
+noise floor is `0.5ms`. Vector `*-recall` measurements are declared as
+higher-is-better recall values with a `0.01` noise floor. The classifier turns
+their ratio into degradation polarity before applying the same flag/fail
+thresholds, so increased recall is an improvement and decreased recall is a
+regression.
 
 ## Running on EC2
 
@@ -209,6 +223,10 @@ loop protocol below, but `src/regression-proof.ts` refuses to write the
 curated report for a partial run (`PartialProofReportError`) — a report
 claiming "both halves proven" from a run that only checked one would be
 dishonest.
+
+When `--backend=both` is requested, the timing half reads the separate
+`sqlite/report.json` and `postgres/report.json` files and requires both backend
+verdicts to prove. One inconclusive backend makes the timing half inconclusive.
 
 ### The `--tag=<base>` isolation rationale
 

@@ -1,17 +1,17 @@
+import {
+  parseBackends,
+  readFlag,
+  readValue,
+  RegressionCliUsageError,
+} from "../cli";
 import { type LaneBackend } from "../lanes";
 
 /**
  * CLI parsing for the seeded-regression proof driver
  * (`src/regression-proof.ts`). Pure: no filesystem or process spawning.
  *
- * `../cli.ts` (`regression/cli.ts`) declares its own `readValue`/`readFlag`
- * with the exact semantics this module needs, but neither is exported —
- * this batch's own DO-NOT-TOUCH list restricts every edit anywhere in
- * `src/regression/` outside `proof/` to the one permitted `synthetic.ts`
- * lane entry, so adding an `export` there is out of scope here. The two
- * helpers below are therefore a deliberate, minimal, byte-for-byte-equivalent
- * local copy, not a re-derived decision — flagging for a future batch to
- * hoist both into a shared module once `regression/cli.ts` is back in scope.
+ * The shared regression CLI owns generic argv and backend parsing. This
+ * module only translates its usage error into the proof CLI's boundary type.
  */
 
 type ProofHalf = "both" | "timing" | "explain";
@@ -45,34 +45,15 @@ export class ProofCliUsageError extends Error {
   }
 }
 
-/** Reads `--name=value` or `--name value` identically. */
-function readValue(argv: readonly string[], name: string): string | undefined {
-  const inlinePrefix = `--${name}=`;
-  const inlineIndex = argv.findIndex((argument) =>
-    argument.startsWith(inlinePrefix),
-  );
-  if (inlineIndex !== -1) {
-    return argv[inlineIndex]!.slice(inlinePrefix.length);
+function parseProofBackends(raw: string | undefined): readonly LaneBackend[] {
+  try {
+    return parseBackends(raw);
+  } catch (error) {
+    if (error instanceof RegressionCliUsageError) {
+      throw new ProofCliUsageError(error.message);
+    }
+    throw error;
   }
-  const flag = `--${name}`;
-  const flagIndex = argv.indexOf(flag);
-  if (flagIndex !== -1 && flagIndex + 1 < argv.length) {
-    return argv[flagIndex + 1];
-  }
-  return undefined;
-}
-
-function readFlag(argv: readonly string[], name: string): boolean {
-  return argv.includes(`--${name}`);
-}
-
-function parseBackends(raw: string | undefined): readonly LaneBackend[] {
-  if (raw === undefined) return ["sqlite"];
-  if (raw === "both") return ["sqlite", "postgres"];
-  if (raw === "sqlite" || raw === "postgres") return [raw];
-  throw new ProofCliUsageError(
-    `Unsupported --backend value: "${raw}". Expected "sqlite", "postgres", or "both".`,
-  );
 }
 
 function parseHalf(raw: string | undefined): ProofHalf {
@@ -123,7 +104,7 @@ export function parseProofCliOptions(argv: readonly string[]): ProofCliOptions {
     seedId,
     baseRef: readValue(argv, "base"),
     laneIds: parseLaneIds(readValue(argv, "lanes")),
-    backends: parseBackends(readValue(argv, "backend")),
+    backends: parseProofBackends(readValue(argv, "backend")),
     half: parseHalf(readValue(argv, "half")),
     laneTimeoutMs: parseTimeoutMs(
       readValue(argv, "lane-timeout-ms"),

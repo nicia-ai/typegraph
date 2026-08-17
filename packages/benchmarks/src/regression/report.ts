@@ -30,7 +30,7 @@ export function resolveBackendReportDir(
   return outputDir;
 }
 
-function formatOptionalMs(value: number | undefined): string {
+function formatOptionalMeasurement(value: number | undefined): string {
   return value === undefined ? "—" : value.toFixed(3);
 }
 
@@ -51,13 +51,13 @@ function renderLaneSection(lane: LaneComparison): readonly string[] {
   }
 
   lines.push(
-    "| Lane | Measurement | Baseline | baseline ms | candidate ms | ratio | classification |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| Lane | Measurement | Baseline | Unit | baseline | candidate | ratio | classification |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
   );
   for (const comparison of lane.comparisons) {
     lines.push(
-      `| ${comparison.laneId} | ${comparison.label} | ${comparison.baseline} | ` +
-        `${formatOptionalMs(comparison.baselineMs)} | ${formatOptionalMs(comparison.candidateMs)} | ` +
+      `| ${comparison.laneId} | ${comparison.label} | ${comparison.baseline} | ${comparison.unit ?? "ms"} | ` +
+        `${formatOptionalMeasurement(comparison.baselineMs)} | ${formatOptionalMeasurement(comparison.candidateMs)} | ` +
         `${formatOptionalRatio(comparison.ratio)} | ${comparison.classification} |`,
     );
   }

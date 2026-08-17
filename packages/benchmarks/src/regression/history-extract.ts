@@ -57,6 +57,29 @@ export class UnrecognizedHistoryRowError extends Error {
   }
 }
 
+export class EmptyLaneMeasurementsError extends Error {
+  constructor() {
+    super("The lane appended no benchmark measurements to history.jsonl.");
+    this.name = "EmptyLaneMeasurementsError";
+  }
+}
+
+export class InconsistentHistorySignatureError extends Error {
+  constructor(key: string, previous: string | number, next: string | number) {
+    super(
+      `History rows disagree on signature key "${key}": ${String(previous)} vs ${String(next)}.`,
+    );
+    this.name = "InconsistentHistorySignatureError";
+  }
+}
+
+export class DuplicateHistoryMeasurementError extends Error {
+  constructor(label: string) {
+    super(`History rows contain duplicate measurement label "${label}".`);
+    this.name = "DuplicateHistoryMeasurementError";
+  }
+}
+
 const SIGNATURE_KEYS = [
   "backend",
   "scale",
@@ -81,6 +104,10 @@ function collectSignature(
   for (const key of SIGNATURE_KEYS) {
     const value = row[key];
     if (typeof value === "string" || typeof value === "number") {
+      const previous = signature[key];
+      if (previous !== undefined && previous !== value) {
+        throw new InconsistentHistorySignatureError(key, previous, value);
+      }
       signature[key] = value;
     }
   }
@@ -102,10 +129,20 @@ function collectMeasurements(
   bucket: Record<string, unknown>,
   medianKey: "median" | "medianMs",
   measurements: Map<string, number>,
+  labelPrefix = "",
 ): void {
   for (const [label, sample] of Object.entries(bucket)) {
-    // Labels are free-form human strings (I6) — never split or reshape them.
-    measurements.set(label, extractSampleMedian(rawLine, sample, medianKey));
+    // Labels are free-form human strings (I6) — never split them. The SNB
+    // row's engine is a separate identity dimension, so prefix it rather
+    // than allowing one engine's identically named query to overwrite another.
+    const qualifiedLabel = `${labelPrefix}${label}`;
+    if (measurements.has(qualifiedLabel)) {
+      throw new DuplicateHistoryMeasurementError(qualifiedLabel);
+    }
+    measurements.set(
+      qualifiedLabel,
+      extractSampleMedian(rawLine, sample, medianKey),
+    );
   }
 }
 
@@ -120,6 +157,7 @@ export function extractLaneMeasurements(
 ): ExtractedRun {
   const measurements = new Map<string, number>();
   const signature: Record<string, string | number> = {};
+  const engines = new Set<string>();
 
   for (const rawLine of appendedLines) {
     const row = JSON.parse(rawLine) as Record<string, unknown>;
@@ -134,10 +172,28 @@ export function extractLaneMeasurements(
       continue;
     }
     if (isRecord(row["queries"])) {
-      collectMeasurements(rawLine, row["queries"], "medianMs", measurements);
+      const engine = row["engine"];
+      if (typeof engine !== "string") {
+        throw new UnrecognizedHistoryRowError(rawLine);
+      }
+      engines.add(engine);
+      collectMeasurements(
+        rawLine,
+        row["queries"],
+        "medianMs",
+        measurements,
+        `${engine}:`,
+      );
       continue;
     }
     throw new UnrecognizedHistoryRowError(rawLine);
+  }
+
+  if (measurements.size === 0) {
+    throw new EmptyLaneMeasurementsError();
+  }
+  if (engines.size > 0) {
+    signature["engines"] = [...engines].sort().join(",");
   }
 
   return { measurements, signature };

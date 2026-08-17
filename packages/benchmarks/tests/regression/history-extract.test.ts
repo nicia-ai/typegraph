@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   extractLaneMeasurements,
+  EmptyLaneMeasurementsError,
   historyFileSize,
   readHistoryTail,
   UnrecognizedHistoryRowError,
@@ -73,7 +74,7 @@ const SECOND_ENGINE_QUERIES_LINE = JSON.stringify({
   requestsPerQuery: 15,
   loadMs: 20.2,
   queries: {
-    "snb:IS2": {
+    "snb:IS1": {
       medianMs: 30.1,
       p95Ms: 33,
       p99Ms: 35,
@@ -97,7 +98,7 @@ describe("extractLaneMeasurements", () => {
 
   it("normalizes the queries shape", () => {
     const run = extractLaneMeasurements([QUERIES_LINE]);
-    expect(run.measurements.get("snb:IS1")).toBe(12.3);
+    expect(run.measurements.get("typegraph-sqlite:snb:IS1")).toBe(12.3);
   });
 
   it("throws on an unrecognized history row", () => {
@@ -112,8 +113,11 @@ describe("extractLaneMeasurements", () => {
       QUERIES_LINE,
       SECOND_ENGINE_QUERIES_LINE,
     ]);
-    expect(run.measurements.get("snb:IS1")).toBe(12.3);
-    expect(run.measurements.get("snb:IS2")).toBe(30.1);
+    expect(run.measurements.get("typegraph-sqlite:snb:IS1")).toBe(12.3);
+    expect(run.measurements.get("typegraph-postgres:snb:IS1")).toBe(30.1);
+    expect(run.signature["engines"]).toBe(
+      "typegraph-postgres,typegraph-sqlite",
+    );
   });
 
   it("preserves labels containing colons and spaces verbatim", () => {
@@ -132,6 +136,12 @@ describe("extractLaneMeasurements", () => {
     const run = extractLaneMeasurements([QUERIES_LINE]);
     expect(run.signature["profile"]).toBe("smoke");
     expect(run.signature["requestsPerQuery"]).toBe(15);
+  });
+
+  it("refuses an empty successful lane result", () => {
+    expect(() => extractLaneMeasurements([])).toThrowError(
+      EmptyLaneMeasurementsError,
+    );
   });
 });
 

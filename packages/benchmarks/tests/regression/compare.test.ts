@@ -6,7 +6,10 @@ import {
   type LaneComparison,
 } from "../../src/regression/compare";
 import { type ExtractedRun } from "../../src/regression/history-extract";
-import { DEFAULT_REGRESSION_POLICY } from "../../src/regression/policy";
+import {
+  DEFAULT_REGRESSION_POLICY,
+  type MeasurementSemantics,
+} from "../../src/regression/policy";
 import { type LaneRunOutcome } from "../../src/regression/run-lane";
 
 const CANDIDATE_REF = { ref: "HEAD", sha: "cand123", path: "/tmp/candidate" };
@@ -20,6 +23,7 @@ function measuredOutcome(
     backend: "sqlite",
     sampleIterations: 15,
   },
+  measurementSemantics?: Readonly<Record<string, MeasurementSemantics>>,
 ): LaneRunOutcome {
   const run: ExtractedRun = {
     measurements: new Map(Object.entries(measurements)),
@@ -31,6 +35,7 @@ function measuredOutcome(
     refId,
     sha: `${refId}-sha`,
     run,
+    ...(measurementSemantics === undefined ? {} : { measurementSemantics }),
     durationMs: 1000,
   };
 }
@@ -89,6 +94,85 @@ describe("compareRun", () => {
     // change to SAMPLE_ITERATIONS) silently reports "no regression" for
     // every lane it touches.
     expect(reportExitCode(report)).toBe(2);
+  });
+
+  it("marks a lane incomparable when either signature is missing a key", () => {
+    const report = compareRun({
+      candidate: [
+        measuredOutcome("candidate", { label: 10 }, { backend: "sqlite" }),
+      ],
+      baselines: [
+        measuredOutcome(
+          "base",
+          { label: 10 },
+          {
+            backend: "sqlite",
+            sampleIterations: 15,
+          },
+        ),
+      ],
+      policy: DEFAULT_REGRESSION_POLICY,
+      candidateRef: CANDIDATE_REF,
+      baselineRefs: BASELINE_REFS,
+      backends: BACKENDS,
+    });
+
+    const lane = findLane(report.lanes, "base");
+    expect(lane.kind).toBe("incomparable");
+    if (lane.kind === "incomparable") {
+      expect(lane.reason).toContain("missing from the candidate");
+    }
+  });
+
+  it("treats higher recall as an improvement and lower recall as a regression", () => {
+    const recallSemantics = {
+      "vector:ann-recall": {
+        direction: "higher-is-better" as const,
+        minAbsoluteDelta: 0.01,
+        unit: "recall" as const,
+      },
+    };
+    const improved = compareRun({
+      candidate: [
+        measuredOutcome(
+          "candidate",
+          { "vector:ann-recall": 0.9 },
+          undefined,
+          recallSemantics,
+        ),
+      ],
+      baselines: [measuredOutcome("base", { "vector:ann-recall": 0.7 })],
+      policy: DEFAULT_REGRESSION_POLICY,
+      candidateRef: CANDIDATE_REF,
+      baselineRefs: BASELINE_REFS,
+      backends: BACKENDS,
+    });
+    const regressed = compareRun({
+      candidate: [
+        measuredOutcome(
+          "candidate",
+          { "vector:ann-recall": 0.4 },
+          undefined,
+          recallSemantics,
+        ),
+      ],
+      baselines: [measuredOutcome("base", { "vector:ann-recall": 0.8 })],
+      policy: DEFAULT_REGRESSION_POLICY,
+      candidateRef: CANDIDATE_REF,
+      baselineRefs: BASELINE_REFS,
+      backends: BACKENDS,
+    });
+
+    const improvedLane = findLane(improved.lanes, "base");
+    const regressedLane = findLane(regressed.lanes, "base");
+    expect(improvedLane.kind).toBe("compared");
+    expect(regressedLane.kind).toBe("compared");
+    if (improvedLane.kind === "compared") {
+      expect(improvedLane.comparisons[0]?.classification).toBe("improved");
+    }
+    if (regressedLane.kind === "compared") {
+      expect(regressedLane.comparisons[0]?.classification).toBe("failed");
+    }
   });
 
   it("reports a baseline-only label as missing-candidate", () => {

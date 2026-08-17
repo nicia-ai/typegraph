@@ -8,6 +8,7 @@ import {
 } from "../../src/regression/compare";
 import { DEFAULT_REGRESSION_POLICY } from "../../src/regression/policy";
 import {
+  combineBackendTimingVerdicts,
   combineProofVerdict,
   judgeExplainProof,
   judgeTimingProof,
@@ -178,6 +179,43 @@ describe("judgeTimingProof", () => {
       expectation: TIMING_EXPECTATION,
     });
     expect(withAcceptance.kind).toBe("inconclusive");
+  });
+});
+
+describe("combineBackendTimingVerdicts", () => {
+  it("requires every requested backend to prove the timing seed", () => {
+    const verdict = combineBackendTimingVerdicts([
+      {
+        backend: "sqlite",
+        verdict: { kind: "proven", evidence: "failed at 2.1x" },
+      },
+      {
+        backend: "postgres",
+        verdict: { kind: "inconclusive", reason: "no matching comparison" },
+      },
+    ]);
+    expect(verdict).toEqual({
+      kind: "inconclusive",
+      reason: "postgres: no matching comparison",
+    });
+  });
+
+  it("combines evidence when every requested backend proves the seed", () => {
+    const verdict = combineBackendTimingVerdicts([
+      {
+        backend: "sqlite",
+        verdict: { kind: "proven", evidence: "failed at 2.1x" },
+      },
+      {
+        backend: "postgres",
+        verdict: { kind: "proven", evidence: "failed at 2.4x" },
+      },
+    ]);
+    expect(verdict.kind).toBe("proven");
+    if (verdict.kind === "proven") {
+      expect(verdict.evidence).toContain("sqlite");
+      expect(verdict.evidence).toContain("postgres");
+    }
   });
 });
 

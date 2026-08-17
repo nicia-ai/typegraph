@@ -133,6 +133,7 @@ async function launch(argv: readonly string[]): Promise<void> {
   const repoRoot = resolveRepoRoot();
   const runId = newRunId();
   const name = `typegraph-regression-${runId}`;
+  const outputDir = options.outputDir ?? defaultOutputDir(repoRoot, runId);
 
   console.log(`Resolving current Ubuntu 24.04 AMI in ${options.aws.region}...`);
   const amiId = await resolveUbuntu2404Ami(options.aws);
@@ -173,6 +174,23 @@ async function launch(argv: readonly string[]): Promise<void> {
     lane: "regression",
   });
   console.log(`Instance: ${instanceId}`);
+
+  // Persist the billable resource identity before any wait/bootstrap/SSM
+  // operation can fail. The workflow backstop reads this smaller record even
+  // when launch.json was never reached.
+  const instanceJsonPath = path.join(outputDir, "instance.json");
+  try {
+    await writeJsonFile(instanceJsonPath, {
+      instanceId,
+      runId,
+      region: options.aws.region,
+      awsProfile: options.aws.profile,
+      launchedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    await terminateInstance(options.aws, instanceId);
+    throw error;
+  }
 
   console.log("Waiting for instance to reach 'running'...");
   await waitUntil("instance running", 5_000, 5 * 60_000, async () => {
@@ -225,7 +243,6 @@ async function launch(argv: readonly string[]): Promise<void> {
     timeoutSeconds: options.runTimeoutSeconds,
   });
 
-  const outputDir = options.outputDir ?? defaultOutputDir(repoRoot, runId);
   const launchRecord: LaunchRecord = {
     instanceId,
     commandId,
@@ -254,35 +271,36 @@ async function collect(argv: readonly string[]): Promise<void> {
   const { aws } = options;
   const target: CollectTarget = options.target;
 
-  console.log(
-    `Polling SSM command ${target.commandId} on ${target.instanceId} every ${options.pollIntervalSeconds}s...`,
-  );
-  let pollCount = 0;
-  let invocation = await getCommandInvocation(
-    aws,
-    target.instanceId,
-    target.commandId,
-  );
-  while (!TERMINAL_COMMAND_STATUSES.includes(invocation.status)) {
-    pollCount += 1;
-    console.log(`  [${new Date().toISOString()}] status=${invocation.status}`);
-    if (pollCount % HEARTBEAT_EVERY_N_POLLS === 0) {
-      await heartbeatTail(aws, target.instanceId);
-    }
-    await sleep(options.pollIntervalSeconds * 1000);
-    invocation = await getCommandInvocation(
+  try {
+    console.log(
+      `Polling SSM command ${target.commandId} on ${target.instanceId} every ${options.pollIntervalSeconds}s...`,
+    );
+    let pollCount = 0;
+    let invocation = await getCommandInvocation(
       aws,
       target.instanceId,
       target.commandId,
     );
-  }
-  console.log(`Command finished with status: ${invocation.status}`);
+    while (!TERMINAL_COMMAND_STATUSES.includes(invocation.status)) {
+      pollCount += 1;
+      console.log(
+        `  [${new Date().toISOString()}] status=${invocation.status}`,
+      );
+      if (pollCount % HEARTBEAT_EVERY_N_POLLS === 0) {
+        await heartbeatTail(aws, target.instanceId);
+      }
+      await sleep(options.pollIntervalSeconds * 1000);
+      invocation = await getCommandInvocation(
+        aws,
+        target.instanceId,
+        target.commandId,
+      );
+    }
+    console.log(`Command finished with status: ${invocation.status}`);
 
-  const repoRoot = resolveRepoRoot();
-  const outputDir =
-    options.outputDir ?? defaultOutputDir(repoRoot, target.runId);
-
-  try {
+    const repoRoot = resolveRepoRoot();
+    const outputDir =
+      options.outputDir ?? defaultOutputDir(repoRoot, target.runId);
     const remoteExitCode = extractExitCode(invocation.stdout);
 
     const fetchedBackends: LaneBackend[] = [];

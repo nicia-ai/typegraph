@@ -342,6 +342,8 @@ async function main(argv: readonly string[]): Promise<void> {
       engine: run.name,
       profile: options.profile,
       requestsPerQuery: options.requestsPerQuery,
+      warmupIterations: options.warmupRequests,
+      sampleIterations: options.requestsPerQuery,
       loadMs: run.loadMs,
       queries: historyQueriesByEngine.get(run.name)!,
     });

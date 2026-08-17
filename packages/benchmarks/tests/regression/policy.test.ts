@@ -55,6 +55,34 @@ describe("classifyRatio", () => {
     expect(result.classification).toBe("improved");
   });
 
+  it("inverts ratio polarity for higher-is-better measurements", () => {
+    const semantics = {
+      direction: "higher-is-better" as const,
+      minAbsoluteDelta: 0.01,
+      unit: "recall" as const,
+    };
+    const improved = classifyRatio(
+      {
+        ...BASE_INPUT,
+        baselineMs: 0.5,
+        candidateMs: 0.8,
+        semantics,
+      },
+      DEFAULT_REGRESSION_POLICY,
+    );
+    const regressed = classifyRatio(
+      {
+        ...BASE_INPUT,
+        baselineMs: 0.8,
+        candidateMs: 0.4,
+        semantics,
+      },
+      DEFAULT_REGRESSION_POLICY,
+    );
+    expect(improved.classification).toBe("improved");
+    expect(regressed.classification).toBe("failed");
+  });
+
   it("refuses an acceptance whose observed ratio exceeds maxRatio", () => {
     const acceptance: AcceptedRegression = {
       laneId: BASE_INPUT.laneId,

@@ -1,4 +1,4 @@
-import { type LaneBackend } from "./lanes";
+import { type LaneBackend, type RegressionLane } from "./lanes";
 import {
   classifyRatio,
   findStaleAcceptances,
@@ -8,6 +8,7 @@ import {
   type RegressionPolicy,
 } from "./policy";
 import { type LaneMeasurements } from "./history-extract";
+import { type MeasurementSemantics } from "./policy";
 import { type LaneRunOutcome } from "./run-lane";
 
 export type MeasurementComparison = Readonly<{
@@ -20,6 +21,8 @@ export type MeasurementComparison = Readonly<{
   deltaMs: number | undefined;
   classification: Classification;
   note?: string;
+  unit?: MeasurementSemantics["unit"];
+  direction?: MeasurementSemantics["direction"];
 }>;
 
 export type LaneComparison =
@@ -87,10 +90,19 @@ function findSignatureDifference(
   baselineSignature: Readonly<Record<string, string | number>>,
   candidateSignature: Readonly<Record<string, string | number>>,
 ): string | undefined {
-  const commonKeys = Object.keys(baselineSignature).filter(
-    (key) => key in candidateSignature,
-  );
-  for (const key of commonKeys) {
+  const allKeys = [
+    ...new Set([
+      ...Object.keys(baselineSignature),
+      ...Object.keys(candidateSignature),
+    ]),
+  ].sort();
+  for (const key of allKeys) {
+    if (!(key in baselineSignature)) {
+      return `Signature key "${key}" is missing from the baseline.`;
+    }
+    if (!(key in candidateSignature)) {
+      return `Signature key "${key}" is missing from the candidate.`;
+    }
     if (baselineSignature[key] !== candidateSignature[key]) {
       return (
         `Signature key "${key}" differs between baseline ` +
@@ -107,6 +119,7 @@ function compareLabels(
   baselineMeasurements: LaneMeasurements,
   candidateMeasurements: LaneMeasurements,
   policy: RegressionPolicy,
+  measurementSemantics: RegressionLane["measurementSemantics"],
 ): readonly MeasurementComparison[] {
   const labels = new Set([
     ...baselineMeasurements.keys(),
@@ -146,8 +159,16 @@ function compareLabels(
       continue;
     }
 
+    const semantics = measurementSemantics?.[label];
     const { classification, ratio, deltaMs, note } = classifyRatio(
-      { laneId, label, baseline, baselineMs, candidateMs },
+      {
+        laneId,
+        label,
+        baseline,
+        baselineMs,
+        candidateMs,
+        ...(semantics === undefined ? {} : { semantics }),
+      },
       policy,
     );
     comparisons.push({
@@ -159,6 +180,9 @@ function compareLabels(
       ratio,
       deltaMs,
       classification,
+      ...(semantics === undefined ?
+        {}
+      : { unit: semantics.unit, direction: semantics.direction }),
       ...(note === undefined ? {} : { note }),
     });
   }
@@ -228,6 +252,7 @@ function buildLaneComparison(
       baselineOutcome.run.measurements,
       candidateOutcome.run.measurements,
       policy,
+      candidateOutcome.measurementSemantics,
     ),
   };
 }
