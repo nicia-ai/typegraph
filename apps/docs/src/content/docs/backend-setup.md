@@ -759,13 +759,14 @@ When a custom SQL schema is supplied, the managed factory provisions those
 same physical table names; no separate Drizzle table configuration is needed.
 
 `drizzle-orm` is an optional peer dependency for these two managed
-entrypoints: they install it on demand and, when it is absent, reject with a
-typed `ConfigurationError` (`MISSING_PEER_DEPENDENCY`) naming the package and
-the install command (`npm install drizzle-orm`) rather than a bare
-module-resolution stack. The `/adapters/drizzle/...` entrypoints below take a
-caller-constructed Drizzle handle, so a consumer who can call them has
-already imported `drizzle-orm` themselves; their own import fails first and
-surfaces the raw module-resolution error, which names the same package.
+entrypoints: they load it only when their factory is called and, when it is
+absent, reject with a typed `ConfigurationError` (`MISSING_PEER_DEPENDENCY`)
+naming the package and the install command (`npm install drizzle-orm`) rather
+than a bare module-resolution stack. The explicit `/adapters/drizzle/...`
+entrypoints below expose Drizzle-native backends, connections, or schema
+builders and load `drizzle-orm` when the module is evaluated. Importing one
+without the peer installed therefore surfaces the raw module-resolution
+error, which names the same package.
 
 ## Drizzle Adapter Entrypoints
 

@@ -1689,6 +1689,11 @@ export type RecordedRelationDdl = Readonly<{
    * truncation semantics: `shortenedIdentifier` is the identity on the
    * source for every reachable input, and its effect is observable only on
    * the target.
+   *
+   * A backend must apply this option consistently across name sets: return a
+   * name for both the temporary and final relation, or `undefined` for both.
+   * The migration refuses a mixed pair because silently dropping either name
+   * would leave the swapped relation with a backend-inconsistent constraint.
    */
   primaryKeyConstraintName?: string | undefined;
 }>;

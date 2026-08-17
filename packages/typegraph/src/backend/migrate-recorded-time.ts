@@ -347,11 +347,15 @@ type RecordedDdlSet = Readonly<
   Record<keyof RecordedTableNames, RecordedRelationDdl>
 >;
 
+type PrimaryKeyConstraintRename =
+  | Readonly<{ status: "none" }>
+  | Readonly<{ status: "rename"; from: string; to: string }>;
+
 /**
  * The two calls the offline migration makes to the port, plus their
- * composition. `temporaryDdl`/`finalDdl` are the port's own, unmodified
- * results for each name set — PK-constraint names included — kept around so
- * {@link replaceLegacyTables} can read them without a third and fourth call.
+ * composition. `primaryKeyConstraintRenames` carries the backend-authored
+ * decision itself, so the swap cannot re-derive it or silently ignore one
+ * supplied name.
  */
 type RecordedMigrationDdl = Readonly<{
   /**
@@ -361,16 +365,16 @@ type RecordedMigrationDdl = Readonly<{
    * table would get if provisioned fresh).
    */
   ddl: RecordedDdlSet;
-  temporaryDdl: RecordedDdlSet;
-  finalDdl: RecordedDdlSet;
+  primaryKeyConstraintRenames: Readonly<
+    Record<keyof RecordedTableNames, PrimaryKeyConstraintRename>
+  >;
 }>;
 
 /**
  * The offline migration's own composition of the port's per-name-set DDL.
  * `recordedTableDdl` is called exactly once per name set — mirroring the
- * two-Drizzle-table-build shape this replaces — and both results are handed
- * back alongside the composed DDL so no other call site needs to invoke the
- * port again.
+ * two-Drizzle-table-build shape this replaces — and the backend-authored
+ * constraint-name pair is resolved here before any migration SQL executes.
  */
 function recordedMigrationDdl(
   recordedTableDdl: NonNullable<GraphBackend["recordedTableDdl"]>,
@@ -385,14 +389,47 @@ function recordedMigrationDdl(
       indexes: finalDdl[key].indexes,
     };
   }
+  function primaryKeyConstraintRename(
+    key: keyof RecordedTableNames,
+  ): PrimaryKeyConstraintRename {
+    const temporaryConstraintName = temporaryDdl[key].primaryKeyConstraintName;
+    const finalConstraintName = finalDdl[key].primaryKeyConstraintName;
+    if (
+      temporaryConstraintName === undefined &&
+      finalConstraintName === undefined
+    )
+      return { status: "none" };
+    if (
+      temporaryConstraintName === undefined ||
+      finalConstraintName === undefined
+    )
+      throw new ConfigurationError(
+        "Recorded relation DDL must name both primary-key constraints or neither.",
+        {
+          code: "RECORDED_DDL_CONSTRAINT_NAME_MISMATCH",
+          relation: key,
+          finalTable: finalNames[key],
+          temporaryConstraintName,
+          finalConstraintName,
+        },
+      );
+    return {
+      status: "rename",
+      from: temporaryConstraintName,
+      to: finalConstraintName,
+    };
+  }
   return {
     ddl: {
       recordedClock: composed("recordedClock"),
       recordedEdges: composed("recordedEdges"),
       recordedNodes: composed("recordedNodes"),
     },
-    temporaryDdl,
-    finalDdl,
+    primaryKeyConstraintRenames: {
+      recordedClock: primaryKeyConstraintRename("recordedClock"),
+      recordedEdges: primaryKeyConstraintRename("recordedEdges"),
+      recordedNodes: primaryKeyConstraintRename("recordedNodes"),
+    },
   };
 }
 
@@ -565,7 +602,7 @@ async function replaceLegacyTables(
     recordedEdges: tables.recordedEdges,
     recordedClock: tables.recordedClock,
   };
-  const { ddl, temporaryDdl, finalDdl } = recordedMigrationDdl(
+  const { ddl, primaryKeyConstraintRenames } = recordedMigrationDdl(
     recordedTableDdl,
     finalNames,
     temporary,
@@ -615,20 +652,17 @@ async function replaceLegacyTables(
   await renamePrimaryKeyConstraint(
     target,
     tables.recordedNodes,
-    temporaryDdl.recordedNodes.primaryKeyConstraintName,
-    finalDdl.recordedNodes.primaryKeyConstraintName,
+    primaryKeyConstraintRenames.recordedNodes,
   );
   await renamePrimaryKeyConstraint(
     target,
     tables.recordedEdges,
-    temporaryDdl.recordedEdges.primaryKeyConstraintName,
-    finalDdl.recordedEdges.primaryKeyConstraintName,
+    primaryKeyConstraintRenames.recordedEdges,
   );
   await renamePrimaryKeyConstraint(
     target,
     tables.recordedClock,
-    temporaryDdl.recordedClock.primaryKeyConstraintName,
-    finalDdl.recordedClock.primaryKeyConstraintName,
+    primaryKeyConstraintRenames.recordedClock,
   );
   for (const statement of [
     ...ddl.recordedNodes.indexes,
@@ -651,21 +685,15 @@ async function replaceLegacyTables(
 async function renamePrimaryKeyConstraint(
   target: TransactionBackend,
   finalTable: string,
-  temporaryConstraintName: string | undefined,
-  finalConstraintName: string | undefined,
+  rename: PrimaryKeyConstraintRename,
 ): Promise<void> {
-  if (
-    temporaryConstraintName === undefined ||
-    finalConstraintName === undefined
-  ) {
-    return;
-  }
+  if (rename.status === "none") return;
   await executeStatement(
     target,
     sql`
       ALTER TABLE ${sql.identifier(finalTable)}
-      RENAME CONSTRAINT ${sql.identifier(temporaryConstraintName)}
-      TO ${sql.identifier(shortenedIdentifier(finalConstraintName))}
+      RENAME CONSTRAINT ${sql.identifier(rename.from)}
+      TO ${sql.identifier(shortenedIdentifier(rename.to))}
     `,
   );
 }

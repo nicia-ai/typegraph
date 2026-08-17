@@ -45,6 +45,18 @@ function moduleError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
+function documentedResolutionReason(entrypoint: string): string {
+  const row = MISSING_PEER_LEDGER.find(
+    (candidate) => candidate.entrypoint === entrypoint,
+  );
+  if (row?.arm !== "documented-resolution-error") {
+    throw new Error(
+      `${entrypoint} is not a documented-resolution-error ledger row.`,
+    );
+  }
+  return row.reason;
+}
+
 /**
  * The structural substitute for the wiring tests below (see module doc):
  * `vi.doMock` cannot make the dynamic import inside `createLocalSqliteStore`
@@ -276,6 +288,27 @@ describe("missing-peer-ledger", () => {
           ).toBe(true);
         }
       }
+    });
+
+    it("records each adapter entrypoint's actual eager-load boundary", () => {
+      expect(documentedResolutionReason("./adapters/drizzle/sqlite")).toContain(
+        "pass-a-Drizzle-handle",
+      );
+      expect(
+        documentedResolutionReason("./adapters/drizzle/postgres"),
+      ).toContain("pass-a-Drizzle-handle");
+      expect(
+        documentedResolutionReason("./adapters/drizzle/sqlite/local"),
+      ).toContain("connection-owning");
+      expect(
+        documentedResolutionReason("./adapters/drizzle/postgres/pglite"),
+      ).toContain("Drizzle-native adapter entrypoint");
+      expect(
+        documentedResolutionReason("./adapters/drizzle/sqlite/libsql"),
+      ).toContain("Drizzle-native adapter entrypoint");
+      expect(
+        documentedResolutionReason("./adapters/drizzle/indexes"),
+      ).toContain("no factory boundary");
     });
   });
 

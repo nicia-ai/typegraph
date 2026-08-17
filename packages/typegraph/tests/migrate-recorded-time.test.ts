@@ -401,6 +401,53 @@ describe("migrateLegacyRecordedTime", () => {
     expect(controlCount.value).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["temporary name only", true, false],
+    ["final name only", false, true],
+  ] as const)(
+    "refuses mismatched primary-key metadata when the port returns the %s",
+    async (_caseName, nameTemporaryConstraint, nameFinalConstraint) => {
+      const base = createTestBackend();
+      await createLegacyRecordedSchema(base);
+      const backend = deriveBackend(base, {
+        recordedTableDdl: (tableNames) => {
+          const ddl = requireDefined(base.recordedTableDdl)(tableNames);
+          const isTemporary = tableNames.recordedNodes.startsWith("__tg_");
+          const shouldNameConstraint =
+            isTemporary ? nameTemporaryConstraint : nameFinalConstraint;
+          return {
+            ...ddl,
+            recordedNodes: {
+              ...ddl.recordedNodes,
+              primaryKeyConstraintName:
+                shouldNameConstraint ?
+                  `${tableNames.recordedNodes}_pkey`
+                : undefined,
+            },
+          };
+        },
+      });
+
+      const error = await captureConfigurationError(
+        migrateLegacyRecordedTime({ backend }),
+      );
+      expect(error.details["code"]).toBe(
+        "RECORDED_DDL_CONSTRAINT_NAME_MISMATCH",
+      );
+      expect(error.details["finalTable"]).toBe(
+        createSqlSchema(base.tableNames).tables.recordedNodes,
+      );
+
+      const schema = createSqlSchema(base.tableNames);
+      const nodeColumns = await base.execute<ColumnTypeRow>(
+        asCompiledRowsSql(sql`PRAGMA table_info(${schema.recordedNodesTable})`),
+      );
+      expect(
+        nodeColumns.find((column) => column.name === "recorded_from")?.type,
+      ).toBe("TEXT");
+    },
+  );
+
   it("still reports no migration for a non-legacy schema without the port", async () => {
     const base = createTestBackend();
     const memberless = projectBackendWithout(base, ["recordedTableDdl"]);

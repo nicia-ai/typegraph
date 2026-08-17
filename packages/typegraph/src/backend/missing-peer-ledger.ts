@@ -7,11 +7,11 @@
  * they are the only entrypoints a consumer can reach WITHOUT themselves
  * importing `drizzle-orm` first, and therefore the only ones that can turn
  * "drizzle-orm is not installed" into a typed, actionable error instead of a
- * bare module-resolution stack. The six `./adapters/drizzle/*` entrypoints
- * take a caller-constructed Drizzle handle, so a consumer who can call them
- * has already imported `drizzle-orm` themselves and their own import fails
- * first, naming the same package (ruling r3-OQ2) — that arm is an accepted,
- * documented exemption, not a mechanism this module builds.
+ * bare module-resolution stack. The six explicit `./adapters/drizzle/*`
+ * entrypoints expose Drizzle-native backends, connections, or schema builders
+ * and load `drizzle-orm` when their module is evaluated. Their raw resolution
+ * failure is an accepted, documented exemption (ruling r3-OQ2), not a
+ * mechanism this module builds.
  *
  * {@link isMissingDrizzlePeerError} is the single narrow both factories call
  * (through {@link loadDrizzleBackedModule}), so the decision is spelled
@@ -51,17 +51,17 @@ export type MissingPeerLedgerEntry =
       documentedIn: readonly string[];
     }>;
 
-/**
- * The reason the six synchronous adapter entrypoints are an accepted
- * exemption rather than a typed refusal (ruling r3-OQ2): their factories
- * take a caller-constructed Drizzle handle, so the caller's own
- * `drizzle-orm` import fails first and names the same package; converting
- * a missing *static* dependency into a typed error would require making all
- * six factories `async`, a breaking signature change to a published
- * factory.
- */
-const SYNCHRONOUS_ADAPTER_REASON =
-  "synchronous pass-a-handle factory: the caller's own drizzle-orm import fails first and names the same package; a typed refusal would require an async signature change to a published factory";
+const SYNCHRONOUS_HANDLE_ADAPTER_REASON =
+  "synchronous pass-a-Drizzle-handle factory: deferring the adapter implementation to translate its module-resolution failure would require an async signature change";
+
+const SYNCHRONOUS_CONNECTION_ADAPTER_REASON =
+  "synchronous connection-owning adapter factory: deferring its Drizzle-backed implementation to translate the module-resolution failure would require an async signature change";
+
+const ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON =
+  "explicit Drizzle-native adapter entrypoint: it eagerly exposes a Drizzle database alongside the GraphBackend, so a missing drizzle-orm fails at module evaluation with the raw resolution error";
+
+const DRIZZLE_INDEX_BUILDERS_REASON =
+  "Drizzle-native schema-builder entrypoint with no factory boundary at which to translate a missing drizzle-orm import";
 
 /**
  * Repo-root-relative, POSIX paths (matching `scripts/drizzle-claim-inventory.ts`'s
@@ -98,42 +98,42 @@ export const MISSING_PEER_LEDGER = [
     entrypoint: "./adapters/drizzle/sqlite",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
-    reason: SYNCHRONOUS_ADAPTER_REASON,
+    reason: SYNCHRONOUS_HANDLE_ADAPTER_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
   {
     entrypoint: "./adapters/drizzle/postgres",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
-    reason: SYNCHRONOUS_ADAPTER_REASON,
+    reason: SYNCHRONOUS_HANDLE_ADAPTER_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
   {
     entrypoint: "./adapters/drizzle/postgres/pglite",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
-    reason: SYNCHRONOUS_ADAPTER_REASON,
+    reason: ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
   {
     entrypoint: "./adapters/drizzle/sqlite/local",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
-    reason: SYNCHRONOUS_ADAPTER_REASON,
+    reason: SYNCHRONOUS_CONNECTION_ADAPTER_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
   {
     entrypoint: "./adapters/drizzle/sqlite/libsql",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
-    reason: SYNCHRONOUS_ADAPTER_REASON,
+    reason: ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
   {
     entrypoint: "./adapters/drizzle/indexes",
     arm: "documented-resolution-error",
     formats: ["import", "require"],
-    reason: SYNCHRONOUS_ADAPTER_REASON,
+    reason: DRIZZLE_INDEX_BUILDERS_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
 ] as const satisfies readonly MissingPeerLedgerEntry[];
