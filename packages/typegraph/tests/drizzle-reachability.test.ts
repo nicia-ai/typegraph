@@ -44,6 +44,9 @@ import {
   sourceRootForEntrypoint,
 } from "../scripts/drizzle-reachability-scan";
 
+/** Headroom for the cold repository scan when V8 coverage instruments it. */
+const REPOSITORY_SCAN_TIMEOUT_MS = 30_000;
+
 /**
  * Recorded at `29d63ec` by `node --import tsx
  * scripts/drizzle-reachability-scan.ts --grain=source` — every published
@@ -405,53 +408,58 @@ describe("drizzle reachability — source grain", () => {
     );
   });
 
-  it("records today's source verdicts for all 18 entrypoints in both modes (2 of 12 non-adapter adapter-dynamic-only: ./sqlite/local, ./postgres/pglite)", () => {
-    expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(6);
-    expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(12);
+  it(
+    "records today's source verdicts for all 18 entrypoints in both modes (2 of 12 non-adapter adapter-dynamic-only: ./sqlite/local, ./postgres/pglite)",
+    { timeout: REPOSITORY_SCAN_TIMEOUT_MS },
+    () => {
+      expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(6);
+      expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(12);
 
-    // Both-directions set equality against the CLASSIFICATION table, not a
-    // one-directional `.every`: a stray flip either into or out of the
-    // recorded `adapter-dynamic-only` set must fail. (Pre-B4b this compared
-    // against a single collapsed verdict; the two batteries entrypoints no
-    // longer agree across modes, so "dirty" is no longer a well-defined
-    // question without naming a mode.)
-    const dynamicOnlyNonAdapter = RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
-      (entrypoint) =>
-        RECORDED_CLASSIFICATIONS[entrypoint] === "adapter-dynamic-only",
-    ).toSorted();
-    const portableNonAdapter = RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
-      (entrypoint) => RECORDED_CLASSIFICATIONS[entrypoint] === "portable",
-    ).toSorted();
-    expect(dynamicOnlyNonAdapter).toEqual(RECORDED_DYNAMIC_ONLY_ENTRYPOINTS);
-    expect(portableNonAdapter).toEqual(
-      RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
-        (entrypoint) => !RECORDED_DYNAMIC_ONLY_ENTRYPOINTS.includes(entrypoint),
-      ).toSorted(),
-    );
+      // Both-directions set equality against the CLASSIFICATION table, not a
+      // one-directional `.every`: a stray flip either into or out of the
+      // recorded `adapter-dynamic-only` set must fail. (Pre-B4b this compared
+      // against a single collapsed verdict; the two batteries entrypoints no
+      // longer agree across modes, so "dirty" is no longer a well-defined
+      // question without naming a mode.)
+      const dynamicOnlyNonAdapter = RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
+        (entrypoint) =>
+          RECORDED_CLASSIFICATIONS[entrypoint] === "adapter-dynamic-only",
+      ).toSorted();
+      const portableNonAdapter = RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
+        (entrypoint) => RECORDED_CLASSIFICATIONS[entrypoint] === "portable",
+      ).toSorted();
+      expect(dynamicOnlyNonAdapter).toEqual(RECORDED_DYNAMIC_ONLY_ENTRYPOINTS);
+      expect(portableNonAdapter).toEqual(
+        RECORDED_NON_ADAPTER_ENTRYPOINTS.filter(
+          (entrypoint) =>
+            !RECORDED_DYNAMIC_ONLY_ENTRYPOINTS.includes(entrypoint),
+        ).toSorted(),
+      );
 
-    const findings = scanSourceReachability();
-    expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2);
+      const findings = scanSourceReachability();
+      expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2);
 
-    const recordedEntrypoints = new Set(RECORDED_ENTRYPOINTS);
-    for (const finding of findings) {
-      expect(
-        recordedEntrypoints.has(finding.entrypoint),
-        `scanner reported an unrecorded entrypoint: ${finding.entrypoint}`,
-      ).toBe(true);
-    }
-
-    for (const entrypoint of RECORDED_ENTRYPOINTS) {
-      for (const mode of ["load", "deferred"] as const) {
-        const finding = findings.find(
-          (candidate) =>
-            candidate.entrypoint === entrypoint && candidate.mode === mode,
-        );
-        expect(finding?.verdict, `${entrypoint} (${mode})`).toBe(
-          sourceVerdictsFor(entrypoint)[mode],
-        );
+      const recordedEntrypoints = new Set(RECORDED_ENTRYPOINTS);
+      for (const finding of findings) {
+        expect(
+          recordedEntrypoints.has(finding.entrypoint),
+          `scanner reported an unrecorded entrypoint: ${finding.entrypoint}`,
+        ).toBe(true);
       }
-    }
-  });
+
+      for (const entrypoint of RECORDED_ENTRYPOINTS) {
+        for (const mode of ["load", "deferred"] as const) {
+          const finding = findings.find(
+            (candidate) =>
+              candidate.entrypoint === entrypoint && candidate.mode === mode,
+          );
+          expect(finding?.verdict, `${entrypoint} (${mode})`).toBe(
+            sourceVerdictsFor(entrypoint)[mode],
+          );
+        }
+      }
+    },
+  );
 
   /**
    * I2/I3's derived binding, at SOURCE grain: `classifyEntrypoints()`'s real

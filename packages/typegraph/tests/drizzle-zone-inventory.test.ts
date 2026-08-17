@@ -37,6 +37,9 @@ import {
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, "..", "..");
 
+/** Headroom for the cold repository scan when V8 coverage instruments it. */
+const REPOSITORY_SCAN_TIMEOUT_MS = 30_000;
+
 /** Every `src` module, as a package-relative POSIX path. */
 function allSourceModules(): readonly string[] {
   return fs
@@ -138,11 +141,15 @@ async function zoneMessages(
 }
 
 describe("drizzle zone inventory (I1)", () => {
-  it("the zone list equals the set of src modules importing a Drizzle specifier, both directions", () => {
-    const scanned = realDrizzleImporters();
-    const zoneFiles = DRIZZLE_ZONE.map((entry) => entry.file);
-    expect(scanned.toSorted()).toEqual(zoneFiles.toSorted());
-  });
+  it(
+    "the zone list equals the set of src modules importing a Drizzle specifier, both directions",
+    { timeout: REPOSITORY_SCAN_TIMEOUT_MS },
+    () => {
+      const scanned = realDrizzleImporters();
+      const zoneFiles = DRIZZLE_ZONE.map((entry) => entry.file);
+      expect(scanned.toSorted()).toEqual(zoneFiles.toSorted());
+    },
+  );
 
   it("every zone entry names an existing file and carries a non-empty reason", () => {
     expect(DRIZZLE_ZONE.length).toBe(30);
