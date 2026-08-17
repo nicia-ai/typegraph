@@ -110,7 +110,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1337,53 +1337,33 @@ export function parseExceptionsLedger(
 }
 
 /**
- * Checks the ledger BOTH directions against the current head snapshots: a
- * `required-member-added` / `optionality-tightened` entry must name a
- * member that exists in head and is required there; a `member-removed`
- * entry must name a member absent from head; an unknown entrypoint or
- * declaration is itself an issue. A stale entry is a refusal, not a
- * silently-ignored no-op.
+ * Checks the ledger BOTH directions against the current comparison. Every
+ * entry must match an actual fail-severity base-to-head finding. A stale entry
+ * is a refusal, even when its named head member still has the shape that once
+ * made the exception valid.
  */
 export function validateExceptionsLedger(
   entries: readonly ExceptionEntry[],
-  inventories: ReadonlyMap<string, SurfaceInventory>,
+  findings: readonly SurfaceFinding[],
 ): readonly LedgerIssue[] {
-  const issues: LedgerIssue[] = [];
-  for (const entry of entries) {
-    const inventory = inventories.get(entry.entrypoint);
-    if (inventory === undefined) {
-      issues.push({
+  return entries.flatMap((entry) => {
+    const matchesBreakingFinding = findings.some(
+      (finding) =>
+        finding.severity === "fail" &&
+        finding.entrypoint === entry.entrypoint &&
+        finding.declaration === entry.declaration &&
+        finding.member === entry.member &&
+        finding.kind === entry.kind,
+    );
+    if (matchesBreakingFinding) return [];
+    return [
+      {
         entry,
-        problem: `Unknown entrypoint "${entry.entrypoint}".`,
-      });
-      continue;
-    }
-    const declaration = inventory.get(entry.declaration);
-    if (declaration === undefined) {
-      issues.push({
-        entry,
-        problem: `Unknown declaration "${entry.declaration}" in ${entry.entrypoint}.`,
-      });
-      continue;
-    }
-    if (entry.kind === "member-removed") {
-      if (declaration.members.has(entry.member)) {
-        issues.push({
-          entry,
-          problem: `Member \`${entry.member}\` is still present on ${entry.declaration}; it was not removed.`,
-        });
-      }
-      continue;
-    }
-    const optionality = declaration.members.get(entry.member);
-    if (optionality !== "required") {
-      issues.push({
-        entry,
-        problem: `Member \`${entry.member}\` on ${entry.declaration} is not required in the current head snapshot.`,
-      });
-    }
-  }
-  return issues;
+        problem:
+          "No matching breaking base-to-head API-surface finding exists.",
+      },
+    ];
+  });
 }
 
 /**
@@ -1425,6 +1405,27 @@ function readGitBlob(
   } catch {
     return undefined;
   }
+}
+
+function listGitApiReportFiles(
+  repoRoot: string,
+  ref: string,
+  relativeEtcDir: string,
+): readonly string[] {
+  const output = execFileSync(
+    "git",
+    ["-C", repoRoot, "ls-tree", "-r", "--name-only", ref, "--", relativeEtcDir],
+    { encoding: "utf8" },
+  );
+  const prefix = `${relativeEtcDir}/`;
+  return output
+    .split("\n")
+    .filter(
+      (relativePath) =>
+        relativePath.startsWith(prefix) && relativePath.endsWith(".api.md"),
+    )
+    .map((relativePath) => relativePath.slice(prefix.length))
+    .toSorted();
 }
 
 function toPosixRelativePath(from: string, to: string): string {
@@ -1498,7 +1499,7 @@ function appendMergeBaseReport(
 export function runApiSurfaceCompat(
   options: Readonly<{ packageDir: string; env?: NodeJS.ProcessEnv }>,
 ): CompatRunResult {
-  const packageDir = path.resolve(options.packageDir);
+  const packageDir = realpathSync(path.resolve(options.packageDir));
   const env = options.env ?? process.env;
   const repoRoot = execFileSync(
     "git",
@@ -1513,13 +1514,26 @@ export function runApiSurfaceCompat(
   const headReportFiles = readdirSync(etcDir)
     .filter((file) => file.endsWith(".api.md"))
     .toSorted();
-  if (headReportFiles.length === 0) {
+  const baseTag = resolveBaseTag(repoRoot, BASE_TAG_PATTERN);
+  const baseReportFiles = listGitApiReportFiles(
+    repoRoot,
+    baseTag,
+    relativeEtcDir,
+  );
+  if (baseReportFiles.length === 0) {
     throw new ApiSurfaceParseError(
-      `No API report snapshots found in ${etcDir}. Run pnpm test:api-report first.`,
+      `Base ref ${baseTag} has no API report snapshots at ${baseTag}:${relativeEtcDir}.`,
     );
   }
-
-  const baseTag = resolveBaseTag(repoRoot, BASE_TAG_PATTERN);
+  const headReportFileSet = new Set(headReportFiles);
+  const removedReportFiles = baseReportFiles.filter(
+    (reportFile) => !headReportFileSet.has(reportFile),
+  );
+  if (removedReportFiles.length > 0) {
+    throw new ApiSurfaceParseError(
+      `Head is missing API report snapshot(s) present at ${baseTag}: ${removedReportFiles.join(", ")}. Restore the removed public entrypoint and its API report.`,
+    );
+  }
 
   const headInventories = new Map<string, SurfaceInventory>();
   const allFindings: SurfaceFinding[] = [];
@@ -1581,7 +1595,7 @@ export function runApiSurfaceCompat(
 
   const ledgerPath = path.join(packageDir, EXCEPTIONS_LEDGER_RELATIVE_PATH);
   const ledgerEntries = parseExceptionsLedger(readFileSync(ledgerPath, "utf8"));
-  const ledgerIssues = validateExceptionsLedger(ledgerEntries, headInventories);
+  const ledgerIssues = validateExceptionsLedger(ledgerEntries, allFindings);
   if (ledgerIssues.length > 0) {
     const details = ledgerIssues
       .map(

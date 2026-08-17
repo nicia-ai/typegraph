@@ -32,9 +32,11 @@ import {
   searchable,
 } from "../src/core/searchable";
 import { createSchemaIntrospector } from "../src/query/schema-introspector";
+import { buildKindRegistry } from "../src/registry";
 import type { Store } from "../src/store";
 import { getSearchableFields } from "../src/store/fulltext-sync";
 import { type FulltextSearchHit } from "../src/store/search";
+import { StoreSearch } from "../src/store/search-facade";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
@@ -282,6 +284,28 @@ describe("end-to-end fulltext search (SQLite FTS5)", () => {
     );
     expect(results[0]?.score).toBeGreaterThan(0);
     expect(results[0]?.rank).toBe(1);
+  });
+
+  it("hydrates non-empty results when constructed with the legacy public context shape", async () => {
+    await store.nodes.Document.create({
+      title: "Public constructor compatibility",
+      body: "Standalone StoreSearch resolves its point-read verdict",
+    });
+    const standaloneSearch = new StoreSearch<typeof SearchableGraph>({
+      graphId: SearchableGraph.id,
+      backend,
+      registry: buildKindRegistry(SearchableGraph),
+    });
+
+    const results = await standaloneSearch.fulltext("Document", {
+      query: "standalone",
+      limit: 10,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(documentProps(requireDefined(results[0])).title).toBe(
+      "Public constructor compatibility",
+    );
   });
 
   it("supports phrase queries", async () => {

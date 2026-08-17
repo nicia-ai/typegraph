@@ -763,6 +763,39 @@ describe("api-surface-compat", () => {
     expect(result.stdout).toContain("exempted:");
   }, 30_000);
 
+  it("(i2) refuses a stale ledger entry after the base catches up", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    writeLedger(
+      fixtureDirectory,
+      `${JSON.stringify([
+        {
+          entrypoint: REPORT_FILE_NAME,
+          declaration: "FixtureCapabilities",
+          member: "transactions",
+          kind: "required-member-added",
+          reason: "historical rollout exception",
+          issue: "#1234",
+        },
+      ])}\n`,
+    );
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "No matching breaking base-to-head API-surface finding exists",
+    );
+  }, 30_000);
+
+  it("(i3) refuses removal of a published entrypoint report", () => {
+    setupTaggedBaseFixture(fixtureDirectory);
+    rmSync(path.join(fixturePackageDir, "etc", REPORT_FILE_NAME));
+
+    const result = runChecker(fixturePackageDir);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Head is missing API report snapshot");
+    expect(result.stderr).toContain(REPORT_FILE_NAME);
+  }, 30_000);
+
   it("(j) reports the merge-base diff on the pull-request leg without failing", () => {
     initGitRepo(fixtureDirectory);
     writeFixtureReport(fixtureDirectory, BASE_BODY);

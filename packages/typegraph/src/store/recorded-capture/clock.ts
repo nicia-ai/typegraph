@@ -172,15 +172,13 @@ export async function lockRecordedGraphWrite(
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  const plan = resolveWriteFencePlan(target);
+  const plan = requireWriteFence(
+    resolveWriteFencePlan(target),
+    "recorded graph write",
+    "advisory-lock",
+  );
   switch (plan.kind) {
-    case "engine-serialized":
-    case "unfenced": {
-      // `unfenced` is unreachable through a store construction path — the
-      // recorded-clock refusal (J9a) has already stopped a caller that would
-      // reach here — but this fence degrades rather than throws defensively,
-      // matching `engine-serialized`: losing it degrades to whatever
-      // serialization the engine already provides.
+    case "engine-serialized": {
       return graphWriteLockEvidence();
     }
     case "lock": {

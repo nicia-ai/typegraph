@@ -14,7 +14,7 @@
  *  3. declared-unfenced — a PostgreSQL factory backend whose `capabilities`
  *     OVERRIDE (a real factory option, so it flows into every closure the
  *     factory builds at construction) declares `pessimisticLocks` all-false.
- *     Every site resolves `unfenced` and refuses (except J1, which degrades).
+ *     Every site resolves `unfenced` and refuses.
  *  4. declared-advisory-only — `{advisoryLocks:true, tableLocks:false,
  *     serializedWriters:false}`. Advisory-lock sites (J1, J2, J3, J5, J7)
  *     succeed exactly as posture 2; table-lock sites (J4, J6, J8) refuse.
@@ -54,6 +54,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   createStoreWithSchema,
   defineGraph,
   defineNode,
@@ -81,6 +82,7 @@ import {
   allocateRecordedCommit,
   lockRecordedGraphWrite,
 } from "../src/store/recorded-capture/clock";
+import { STORE_RUNTIME } from "../src/store/runtime-port";
 import {
   ADVISORY_ONLY_CAPABILITIES,
   createLoggedPostgresBackend,
@@ -95,6 +97,27 @@ const IDENTITY_DDL_ADVISORY_LOCK = "typegraph:identity-ddl";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK = "typegraph:recorded-graph-write";
 const RECORDED_CLOCK_ADVISORY_LOCK = "typegraph:recorded-clock";
 const CONTRIBUTION_DDL_ADVISORY_LOCK = "typegraph:contribution-ddl";
+
+const UniquelyNamedNode = defineNode("UniquelyNamedNode", {
+  schema: z.object({ name: z.string() }),
+});
+const uniquenessGraph = defineGraph({
+  id: "lock-fence-plan-uniqueness",
+  nodes: {
+    UniquelyNamedNode: {
+      type: UniquelyNamedNode,
+      unique: [
+        {
+          name: "unique_name",
+          fields: ["name"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
 
 /**
  * Some advisory-lock call sites interpolate the namespace key as a bound
@@ -182,7 +205,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     }
   });
 
-  it("declared-unfenced: degrades — no advisory lock, no throw", async () => {
+  it("declared-unfenced: refuses before any graph-write statement", async () => {
     const logged = await createLoggedPostgresBackend({
       pessimisticLocks: UNFENCED_CAPABILITIES,
     });
@@ -190,7 +213,13 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
       logged.reset();
       await expect(
         lockRecordedGraphWrite(logged.backend, "graph-a"),
-      ).resolves.toBeDefined();
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            code: "WRITE_FENCE_UNAVAILABLE",
+          }) as unknown,
+        }),
+      );
       expect(
         advisoryLockIndices(
           logged.statements,
@@ -222,22 +251,61 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     }
   });
 
-  it("undeclared non-factory (postgres): degrades — no advisory lock, no throw", async () => {
+  it("undeclared non-factory (postgres): refuses", async () => {
     const logged = await createLoggedPostgresBackend();
     try {
       const { pessimisticLocks: _pessimisticLocks, ...undeclared } =
         logged.backend.capabilities;
       const target = overlayCapabilities(logged.backend, undeclared);
       logged.reset();
-      await expect(
-        lockRecordedGraphWrite(target, "graph-a"),
-      ).resolves.toBeDefined();
+      await expect(lockRecordedGraphWrite(target, "graph-a")).rejects.toThrow(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            code: "WRITE_FENCE_UNAVAILABLE",
+          }) as unknown,
+        }),
+      );
       expect(
         advisoryLockIndices(
           logged.statements,
           RECORDED_GRAPH_WRITE_ADVISORY_LOCK,
         ),
       ).toHaveLength(0);
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("ordinary graph-merge uniqueness refuses an unfenced store backend", async () => {
+    const logged = await createLoggedPostgresBackend({
+      pessimisticLocks: UNFENCED_CAPABILITIES,
+    });
+    try {
+      const store = createStore(uniquenessGraph, logged.backend);
+      logged.reset();
+      await expect(
+        store[STORE_RUNTIME].applyResolvedNodeUniqueness(
+          logged.backend,
+          {
+            upserts: [
+              {
+                kind: "UniquelyNamedNode",
+                id: "node-a",
+                props: { name: "Alice" },
+              },
+            ],
+            releases: [],
+          },
+          () => Promise.resolve(undefined),
+        ),
+      ).rejects.toThrow(
+        expect.objectContaining({
+          details: expect.objectContaining({
+            code: "WRITE_FENCE_UNAVAILABLE",
+          }) as unknown,
+        }),
+      );
+      expect(logged.statements).toHaveLength(0);
     } finally {
       await logged.close();
     }
