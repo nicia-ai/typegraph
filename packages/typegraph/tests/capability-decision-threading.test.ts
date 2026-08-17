@@ -91,6 +91,11 @@ const ONE_OWNER_BANNED_NAMES = new Set([
  */
 const ONE_OWNER_MINTING_ALLOWLIST = new Map<string, number>([
   ["store/store.ts#batchPointReadVerdict", 1],
+  // The public facade constructor is also a minting boundary for legacy
+  // callers that cannot supply the newly threaded optional verdict. Store
+  // callers pass the verdict minted above, so each facade still resolves it
+  // exactly once.
+  ["store/search-facade.ts#batchPointReadVerdict", 1],
   ["store/store.ts#uniqueSidecarBatchVerdict", 1],
   ["store/store.ts#contributionHealthVerdict", 1],
   ["store/store.ts#recordedRevisionOriginsVerdict", 1],

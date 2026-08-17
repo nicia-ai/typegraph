@@ -172,12 +172,13 @@ export async function lockRecordedGraphWrite(
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  const plan = requireWriteFence(
-    resolveWriteFencePlan(target),
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(
+    plan,
     "recorded graph write",
     "advisory-lock",
   );
-  switch (plan.kind) {
+  switch (fence.kind) {
     case "engine-serialized": {
       return graphWriteLockEvidence();
     }
@@ -185,7 +186,7 @@ export async function lockRecordedGraphWrite(
       break;
     }
     default: {
-      plan satisfies never;
+      fence satisfies never;
     }
   }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
