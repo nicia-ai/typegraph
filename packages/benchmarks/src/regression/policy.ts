@@ -26,7 +26,7 @@ export type RegressionPolicy = Readonly<{
   accepted: readonly AcceptedRegression[];
 }>;
 
-export type MeasurementDirection = "lower-is-better" | "higher-is-better";
+type MeasurementDirection = "lower-is-better" | "higher-is-better";
 
 export type MeasurementSemantics = Readonly<{
   direction: MeasurementDirection;

@@ -64,7 +64,7 @@ export class EmptyLaneMeasurementsError extends Error {
   }
 }
 
-export class InconsistentHistorySignatureError extends Error {
+class InconsistentHistorySignatureError extends Error {
   constructor(key: string, previous: string | number, next: string | number) {
     super(
       `History rows disagree on signature key "${key}": ${String(previous)} vs ${String(next)}.`,
@@ -73,7 +73,7 @@ export class InconsistentHistorySignatureError extends Error {
   }
 }
 
-export class DuplicateHistoryMeasurementError extends Error {
+class DuplicateHistoryMeasurementError extends Error {
   constructor(label: string) {
     super(`History rows contain duplicate measurement label "${label}".`);
     this.name = "DuplicateHistoryMeasurementError";
