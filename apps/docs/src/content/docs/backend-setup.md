@@ -758,6 +758,16 @@ const store = await createLocalSqliteStore(graph, {
 When a custom SQL schema is supplied, the managed factory provisions those
 same physical table names; no separate Drizzle table configuration is needed.
 
+`drizzle-orm` is an optional peer dependency for these two managed
+entrypoints: they load it only when their factory is called and, when it is
+absent, reject with a typed `ConfigurationError` (`MISSING_PEER_DEPENDENCY`)
+naming the package and the install command (`npm install drizzle-orm`) rather
+than a bare module-resolution stack. The explicit `/adapters/drizzle/...`
+entrypoints below expose Drizzle-native backends, connections, or schema
+builders and load `drizzle-orm` when the module is evaluated. Importing one
+without the peer installed therefore surfaces the raw module-resolution
+error, which names the same package.
+
 ## Drizzle Adapter Entrypoints
 
 TypeGraph exposes Drizzle adapters through public entrypoints:

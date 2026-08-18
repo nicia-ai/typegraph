@@ -24,6 +24,9 @@ const METADATA_PREDICATE_PATH = fileURLToPath(
     import.meta.url,
   ),
 );
+const TSUP_CONFIG_PATH = fileURLToPath(
+  new URL("../tsup.config.ts", import.meta.url),
+);
 
 function runGit(fixtureDirectory: string, args: readonly string[]): string {
   return execFileSync("git", args, {
@@ -254,5 +257,47 @@ describe("CI workflow contract", () => {
     }
     expect(workflow).toContain('.value.result != "success"');
     expect(workflow).toContain("!cancelled()");
+  });
+
+  it("pins tsup splitting:true, which the missing-peer refusal depends on in both formats", () => {
+    // `./sqlite/local` and `./postgres/pglite` defer their `drizzle-orm`
+    // resolution behind `await import("./*-store-impl")` so a missing peer
+    // surfaces as a typed refusal instead of a bare module-resolution stack
+    // (design §4.4b). That mechanism depends on `splitting: true`: measured
+    // against `tsup@8.5.1`, `splitting: false` hoists the impl module's
+    // `drizzle-orm` import to the ENTRY's top level in both the ESM and CJS
+    // artifacts, so `require(entryPath)`/`import(entryPath)` fails
+    // synchronously before the factory function is ever called — the
+    // factory's own `catch` (inside `loadDrizzleBackedModule`) never runs,
+    // in either format. `tests/drizzle-reachability.test.ts`'s dist-grain
+    // suite measures the same dependency directly (T17/M10).
+    const tsupConfig = readFileSync(TSUP_CONFIG_PATH, "utf8");
+    expect(tsupConfig).toContain("splitting: true");
+  });
+
+  it("pins the dist-grain reachability scan after the artifact build", () => {
+    // The dist-grain reachability suite (`tests/drizzle-reachability.test.ts`)
+    // only measures the shipped artifacts under `dist/`, which the "Build"
+    // step (`pnpm turbo run build`) produces. Running the scan before that
+    // step would measure a stale or absent `dist/`, and
+    // `TYPEGRAPH_REQUIRE_DIST_GRAIN: "1"` is what turns "the dist grain was
+    // skipped" from a silent pass into a hard failure (design §4.4, I3).
+    const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+    expect(workflow).toMatch(
+      /build-artifacts:[\s\S]*?pnpm turbo run build[\s\S]*?tests\/drizzle-reachability\.test\.ts[\s\S]*?TYPEGRAPH_REQUIRE_DIST_GRAIN: "1"/,
+    );
+  });
+
+  it("pins the strict packed-consumer step that runs both install-grain fixtures", () => {
+    // `pnpm test:strict-local-consumers` (`scripts/test-strict-local-consumers.ts`)
+    // runs BOTH fixtures — the packed-Drizzle fixture and the portable,
+    // drizzle-orm-absent fixture — under one script invocation (design
+    // §4.4c, B7a). `tests/strict-consumer-fixture-contract.test.ts`'s
+    // `FIXTURE_PLAN` test is what pins "both fixtures run"; this test only
+    // pins that the step itself is not lost from CI.
+    const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+    expect(workflow).toMatch(
+      /test-strict-local-consumers:[\s\S]*?run: pnpm test:strict-local-consumers/,
+    );
   });
 });

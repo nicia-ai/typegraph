@@ -61,13 +61,12 @@ export type SqliteTableNames = Readonly<{
   reconciliationMarkers: string;
 }>;
 
-/**
- * Physical name of the legacy single shared embeddings table, dropped in
- * the cross-backend vector cutover (the clean cut of #157). Strategies now
- * own per-`(nodeKind, fieldPath)` typed storage. Retained only so the
- * one-time migration utility can address and drain the old table.
- */
-export const LEGACY_EMBEDDINGS_TABLE_NAME = "typegraph_node_embeddings";
+// Moved to `../../table-names` (the module that owns physical table-name
+// resolution for the backend layer). Re-exported here so this module's own
+// callers and any external importer of `./adapters/drizzle/sqlite` see no
+// change. Resolved only by `tests/migrate-vectors.test.ts` — that import is
+// what keeps knip from reporting this re-export as unused.
+export { LEGACY_EMBEDDINGS_TABLE_NAME } from "../../table-names";
 
 export type CreateSqliteTablesOptions = Readonly<{
   /**

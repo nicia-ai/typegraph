@@ -1582,6 +1582,7 @@ type GraphBackend = Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
     identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
+    recordedTableDdl?: (this: void, tableNames: RecordedTableNames) => Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>>;
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -3222,6 +3223,13 @@ type RecordedReadBinding = RecordedReadSource;
 type RecordedReadSource = ExternalRecordedReadSource | TypeGraphRecordedReadSource;
 
 // @public
+type RecordedRelationDdl = Readonly<{
+    createTable: string;
+    indexes: readonly string[];
+    primaryKeyConstraintName?: string | undefined;
+}>;
+
+// @public
 type RecordedScanOptions = Readonly<{
     limit?: number;
     after?: string;
@@ -3267,6 +3275,13 @@ type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<StoreViewNodeCol
 type RecordedStoreViewNodeCollections<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]-?: RecordedStoreViewNodeCollection<G["nodes"][K]["type"]>;
 };
+
+// @public
+type RecordedTableNames = Readonly<{
+    recordedClock: string;
+    recordedEdges: string;
+    recordedNodes: string;
+}>;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{

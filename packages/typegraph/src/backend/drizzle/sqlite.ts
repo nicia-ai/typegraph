@@ -91,6 +91,8 @@ import {
   type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
   type RecordContributionMaterializationParams,
+  type RecordedRelationDdl,
+  type RecordedTableNames,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type SchemaKindEmptinessProbe,
@@ -290,6 +292,17 @@ const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
   "recordedIdentityAssertions",
   "identityClosure",
   "identitySeparation",
+]);
+
+/**
+ * Barrel keys (contribution logical names) of the three relations that hold
+ * timestamp-only recorded-time state. `recordedTableDdl()` scopes its
+ * projected DDL to exactly these.
+ */
+const RECORDED_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
+  "recordedNodes",
+  "recordedEdges",
+  "recordedClock",
 ]);
 
 /**
@@ -1509,6 +1522,27 @@ export function createSqliteBackend(
     );
   }
 
+  /**
+   * The contribution descriptors for exactly the three recorded relations,
+   * under caller-supplied physical names. Pure — nothing is executed here —
+   * and the single owner of "which DDL belongs to the recorded relations",
+   * handed to `recordedTableDdl`'s caller (the offline legacy-schema
+   * migration) rather than executed directly.
+   */
+  function recordedContributionsFor(
+    recordedTableNames: RecordedTableNames,
+  ): ReturnType<typeof sqliteContributions> {
+    const recordedTables = buildSqliteTables({
+      recordedNodes: recordedTableNames.recordedNodes,
+      recordedEdges: recordedTableNames.recordedEdges,
+      recordedClock: recordedTableNames.recordedClock,
+    });
+    return sqliteContributions(recordedTables, fulltextStrategy).filter(
+      (contribution) =>
+        RECORDED_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
+    );
+  }
+
   const contributionMaterializer = createContributionMaterializer({
     dialect: "sqlite",
     fulltextStrategy,
@@ -1837,6 +1871,30 @@ export function createSqliteBackend(
       return identityContributionsFor(identityTableNames).flatMap(
         (contribution) => [...contribution.createDdl],
       );
+    },
+
+    recordedTableDdl(
+      recordedTableNames,
+    ): Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>> {
+      const contributions = recordedContributionsFor(recordedTableNames);
+      function ddlFor(logicalName: keyof RecordedTableNames): RecordedRelationDdl {
+        const contribution = requireDefined(
+          contributions.find((entry) => entry.logicalName === logicalName),
+          `recordedTableDdl: no contribution for ${logicalName}.`,
+        );
+        return {
+          createTable: requireDefined(
+            contribution.createDdl[0],
+            `recordedTableDdl: empty DDL for ${logicalName}.`,
+          ),
+          indexes: contribution.createDdl.slice(1),
+        };
+      }
+      return {
+        recordedClock: ddlFor("recordedClock"),
+        recordedEdges: ddlFor("recordedEdges"),
+        recordedNodes: ddlFor("recordedNodes"),
+      };
     },
 
     // Every fulltext-touching method asserts the durable marker instead

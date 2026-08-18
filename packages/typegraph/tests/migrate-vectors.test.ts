@@ -16,8 +16,10 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../src/backend/derive-backend";
+import { LEGACY_EMBEDDINGS_TABLE_NAME as LEGACY_EMBEDDINGS_TABLE_NAME_FROM_SCHEMA } from "../src/backend/drizzle/schema/sqlite";
 import { migrateLegacyEmbeddings } from "../src/backend/migrate-vectors";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { LEGACY_EMBEDDINGS_TABLE_NAME as LEGACY_EMBEDDINGS_TABLE_NAME_FROM_TABLE_NAMES } from "../src/backend/table-names";
 import { type GraphBackend } from "../src/backend/types";
 import {
   renderSqlInline,
@@ -386,5 +388,14 @@ describe("migrateLegacyEmbeddings (sqlite-vec, end-to-end)", () => {
     expect(result.migrated).toBe(1);
     expect(result.perField).toEqual({ "Document.embedding": 1 });
     expect(result.skippedDecodeError).toEqual({ "Document.embedding": 1 });
+  });
+});
+
+describe("LEGACY_EMBEDDINGS_TABLE_NAME", () => {
+  it("resolves to one value at both addresses", () => {
+    expect(LEGACY_EMBEDDINGS_TABLE_NAME_FROM_SCHEMA).toBe(
+      LEGACY_EMBEDDINGS_TABLE_NAME_FROM_TABLE_NAMES,
+    );
+    expect(LEGACY_EMBEDDINGS_TABLE_NAME_FROM_SCHEMA).toBe(LEGACY_TABLE);
   });
 });

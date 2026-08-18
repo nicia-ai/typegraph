@@ -1647,6 +1647,58 @@ export type IdentityTableNames = Readonly<{
 }>;
 
 /**
+ * The physical names of the three recorded relations. Named once so the
+ * ports that speak about them cannot drift apart — the {@link IdentityTableNames}
+ * precedent.
+ */
+export type RecordedTableNames = Readonly<{
+  recordedClock: string;
+  recordedEdges: string;
+  recordedNodes: string;
+}>;
+
+/**
+ * One recorded relation's provisioning DDL, with the roles the caller needs
+ * SEPARATED rather than positional.
+ */
+export type RecordedRelationDdl = Readonly<{
+  /** The single `CREATE TABLE` statement. */
+  createTable: string;
+  /** Its index/constraint statements, in application order. */
+  indexes: readonly string[];
+  /**
+   * The name the ENGINE will have given this relation's PRIMARY KEY constraint
+   * once `createTable` has executed, or `undefined` on an engine that does not
+   * name PK constraints separately (SQLite).
+   *
+   * NOT "the name the DDL text declares": both bundled emitters push an unnamed
+   * inline `PRIMARY KEY (…)` (`ddl.ts:114-118`, `:441-445`), so on PostgreSQL the
+   * server derives `<table>_pkey`. The point of the field is that the derivation
+   * is an ENGINE convention, and the only honest source of it is whoever authored
+   * the DDL for that engine — a migration that reconstructs it bakes one adapter's
+   * convention in.
+   *
+   * The name is returned UNREDUCED. Reducing an over-long identifier is a
+   * separate decision with a separate owner (`shortenedIdentifier`), and it
+   * applies only to the RENAME's target. The source name is the *temporary*
+   * table's PK name, and temp table names are hash-derived and short BY
+   * CONSTRUCTION (`` `__tg_${role}_${shortHash(tableName)}` ``, an 8-char
+   * hash, so `<temp>_pkey` is at most ~21 bytes for any configured table
+   * name) — nowhere near the 63-byte ceiling. So the split is a structural
+   * fact about the temp-name shape, not a claim about PostgreSQL's
+   * truncation semantics: `shortenedIdentifier` is the identity on the
+   * source for every reachable input, and its effect is observable only on
+   * the target.
+   *
+   * A backend must apply this option consistently across name sets: return a
+   * name for both the temporary and final relation, or `undefined` for both.
+   * The migration refuses a mixed pair because silently dropping either name
+   * would leave the swapped relation with a backend-inconsistent constraint.
+   */
+  primaryKeyConstraintName?: string | undefined;
+}>;
+
+/**
  * The database-global extensions TypeGraph installs on a caller's behalf.
  *
  * The extent is closed on purpose: {@link GraphBackend.ensureExtension}
@@ -2265,6 +2317,25 @@ export type GraphBackend = Readonly<{
     this: void,
     tableNames: IdentityTableNames,
   ) => readonly string[];
+
+  /**
+   * The provisioning DDL for the three recorded relations under the given
+   * physical names, keyed by logical relation. Used only by the offline legacy
+   * preview-schema migration, which builds temp tables, copies, and swaps —
+   * so it is called TWICE per migration, once per name set, and the migration
+   * (not the backend) composes the temp `createTable` with the final `indexes`.
+   *
+   * A backend that omits this cannot be migrated FROM the timestamp-only
+   * preview schema — a schema only the bundled Drizzle backends ever created.
+   * `migrateLegacyRecordedTime` REFUSES with `UnsupportedBackendCapabilityError`
+   * naming this port rather than emitting DDL it cannot author.
+   *
+   * @internal
+   */
+  recordedTableDdl?: (
+    this: void,
+    tableNames: RecordedTableNames,
+  ) => Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>>;
 
   /**
    * Look up a recorded materialization for a declared index by its

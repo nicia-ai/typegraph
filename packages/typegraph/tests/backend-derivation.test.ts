@@ -112,6 +112,18 @@ describe("seam constructors carry the base's resource audit", () => {
   });
 });
 
+describe("recordedTableDdl", () => {
+  it("carries recordedTableDdl through a derivation and a GraphBackend projection", () => {
+    const backend = createTestBackend();
+
+    const derived = deriveBackend(backend, {});
+    const projected = projectGraphBackend(backend);
+
+    expect(derived.recordedTableDdl).toBeInstanceOf(Function);
+    expect(projected.recordedTableDdl).toBeInstanceOf(Function);
+  });
+});
+
 describe("a backend's resource verdict is written once", () => {
   it("keeps a derived backend unaudited when its base is audited afterwards", () => {
     // The lease reads this value and closes over the resource it claimed. A

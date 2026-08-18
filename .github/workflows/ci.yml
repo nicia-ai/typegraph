@@ -448,6 +448,11 @@ jobs:
           NICIA_EMAIL_LIST_API_URL: ${{ secrets.NICIA_EMAIL_LIST_API_URL }}
           NICIA_EMAIL_LIST_API_KEY: ${{ secrets.NICIA_EMAIL_LIST_API_KEY }}
 
+      - name: Verify the shipped artifacts do not reach drizzle-orm
+        run: pnpm --filter @nicia-ai/typegraph exec vitest run tests/drizzle-reachability.test.ts
+        env:
+          TYPEGRAPH_REQUIRE_DIST_GRAIN: "1"
+
   build:
     name: Build
     runs-on: ubuntu-24.04

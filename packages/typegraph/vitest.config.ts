@@ -89,6 +89,20 @@ export default defineConfig({
         __dirname,
         "src/backend/sqlite/index.ts",
       ),
+      "@nicia-ai/typegraph/backend": resolve(__dirname, "src/backend/index.ts"),
+      "@nicia-ai/typegraph/core": resolve(__dirname, "src/core/index.ts"),
+      "@nicia-ai/typegraph/graph-extension": resolve(
+        __dirname,
+        "src/graph-extension/index.ts",
+      ),
+      "@nicia-ai/typegraph/provenance": resolve(
+        __dirname,
+        "src/provenance/index.ts",
+      ),
+      "@nicia-ai/typegraph/adapters/drizzle/indexes": resolve(
+        __dirname,
+        "src/backend/drizzle/indexes.ts",
+      ),
       "@nicia-ai/typegraph": resolve(__dirname, "src/index.ts"),
     },
   },

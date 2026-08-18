@@ -1,25 +1,43 @@
-import { type Column, getTableName, type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  sql as fragmentSql,
-  type SqlFragment,
-} from "../../../query/sql-fragment";
-import { claimOwnerMatchesSql } from "../../../store/claims/axis";
+  type ClaimOwnerColumnNames,
+  claimOwnerMatchesSql,
+} from "../../../store/claims/axis";
 import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
   DeleteUniqueParams,
-  HardDeleteUniquesByConcreteKindParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
   SqlDialect,
 } from "../../types";
-import { quotedColumn, type Tables } from "./shared";
+import { quotedColumn, quotedTableName, type Tables } from "./shared";
 
 type InsertUniqueDialectBuilder = (
   tables: Tables,
   params: InsertUniqueParams,
 ) => SQL;
+
+/** Adapts Drizzle's generic SQL tag to the representation-neutral claim owner. */
+function drizzleSqlTag(
+  strings: TemplateStringsArray,
+  ...expressions: readonly SQL[]
+): SQL {
+  return sql(strings, ...expressions);
+}
+
+/**
+ * The owner columns of the uniques relation, by physical column name — the
+ * one owner {@link claimOwnerMatchesSql} is handed instead of a re-spelled
+ * qualification decision.
+ */
+function ownerColumnNames(uniques: Tables["uniques"]): ClaimOwnerColumnNames {
+  return {
+    nodeId: uniques.nodeId.name,
+    concreteKind: uniques.concreteKind.name,
+  };
+}
 
 /**
  * The proposed row's owner columns, as bound values — the single-row builders'
@@ -28,11 +46,24 @@ type InsertUniqueDialectBuilder = (
 function boundOwnerColumn(
   uniques: Tables["uniques"],
   params: InsertUniqueParams,
-): (column: Column) => SQL {
-  return (column) =>
-    column.name === uniques.nodeId.name ?
+): (columnName: string) => SQL {
+  return (columnName) =>
+    columnName === uniques.nodeId.name ?
       sql`${params.nodeId}`
     : sql`${params.concreteKind}`;
+}
+
+/**
+ * The batch builder's rendering of the `proposed` side of
+ * {@link claimOwnerMatchesSql}: the row `ON CONFLICT DO UPDATE` is about to
+ * write, read back off `excluded`.
+ */
+function excludedColumnByName(columnName: string): SQL {
+  return sql`excluded.${quotedColumn({ name: columnName })}`;
+}
+
+function excludedColumn(column: Readonly<{ name: string }>): SQL {
+  return excludedColumnByName(column.name);
 }
 
 /**
@@ -60,9 +91,10 @@ function buildInsertUniqueSqlite(
   );
 
   const ownerMatches = claimOwnerMatchesSql(
-    (column) => quotedColumn(column),
+    drizzleSqlTag,
+    (columnName) => quotedColumn({ name: columnName }),
     boundOwnerColumn(uniques, params),
-    uniques,
+    ownerColumnNames(uniques),
   );
 
   return sql`
@@ -119,13 +151,16 @@ function buildInsertUniquePostgres(
   );
 
   const tableName = getTableName(uniques);
+  const existingColumnByName = (columnName: string): SQL =>
+    sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
   const existingColumn = (column: Readonly<{ name: string }>) =>
-    sql.raw(`"${tableName}"."${column.name}"`);
+    existingColumnByName(column.name);
 
   const ownerMatches = claimOwnerMatchesSql(
-    (column) => existingColumn(column),
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
     boundOwnerColumn(uniques, params),
-    uniques,
+    ownerColumnNames(uniques),
   );
 
   return sql`
@@ -206,28 +241,32 @@ export function buildInsertUniqueBatch(
 
   // Mirror the single-row builders' dialect split for references to the
   // EXISTING row inside DO UPDATE: Postgres qualifies with the table name,
-  // SQLite uses the bare quoted column.
+  // SQLite uses the bare quoted column. This is the batch builder's own
+  // switch — claimOwnerMatchesSql only composes whatever renderer it is
+  // handed.
   const tableName = getTableName(uniques);
-  const existingColumn = (column: Readonly<{ name: string }>) => {
+  const existingColumnByName = (columnName: string): SQL => {
     switch (dialect) {
       case "postgres": {
-        return sql.raw(`"${tableName}"."${column.name}"`);
+        return sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
       }
       case "sqlite": {
-        return sql.raw(`"${column.name}"`);
+        return quotedColumn({ name: columnName });
       }
       default: {
         return dialect satisfies never;
       }
     }
   };
-  const excludedColumn = (column: Readonly<{ name: string }>) =>
-    sql.raw(`excluded."${column.name}"`);
+
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    existingColumnByName(column.name);
 
   const ownerMatches = claimOwnerMatchesSql(
-    (column) => existingColumn(column),
-    (column) => excludedColumn(column),
-    uniques,
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    excludedColumnByName,
+    ownerColumnNames(uniques),
   );
 
   const valueRows = sql.join(
@@ -337,30 +376,9 @@ export function buildHardDeleteUniquesByNodeIds(
   `;
 }
 
-/**
- * THE definition of "the uniqueness claims nodes of this kind own": every row
- * whose `concrete_kind` is the kind, at whatever axis the row sits on.
- *
- * Kind reaping is a different predicate from a lifecycle release — "every claim
- * this kind's nodes own" rather than "this node's claim for one constraint and
- * key" — and it is a hard delete rather than a tombstone, so it is its own
- * builder. It is nonetheless the ONLY spelling of that predicate: both the
- * `hardDeleteUniquesByConcreteKind` backend member and `materializeRemovals`'
- * removed-kind cleanup compile this fragment. Keying on `node_kind` instead
- * would leak a claim whose axis is a sibling kind, delete a surviving sibling's
- * claim when the removed kind IS the axis, and never match a claim whose axis
- * is not a kind at all.
- *
- * Takes the relation NAME rather than the Drizzle table so the store-side
- * caller, which knows only its configured table names, can build the same
- * statement; the fragment renders on either dialect.
- */
-export function buildHardDeleteUniquesByConcreteKind(
-  uniquesTableName: string,
-  params: HardDeleteUniquesByConcreteKindParams,
-): SqlFragment {
-  return fragmentSql`DELETE FROM ${fragmentSql.identifier(uniquesTableName)} WHERE ${fragmentSql.identifier("graph_id")} = ${params.graphId} AND ${fragmentSql.identifier("concrete_kind")} = ${params.concreteKind}`;
-}
+// Re-exported from its new owner so `operations/strategy.ts:117,256,597-600`
+// sees no change.
+export { buildHardDeleteUniquesByConcreteKind } from "../../../store/claims/removal-sql";
 
 /**
  * Builds a SELECT query to check for uniqueness violations.

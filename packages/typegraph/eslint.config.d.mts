@@ -31,3 +31,18 @@ export declare const BACKEND_SEAM_IMPORT_RESTRICTIONS: readonly RestrictedSyntax
 export declare const BACKEND_CONSTRUCTION_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
 export declare const BACKEND_CARRY_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
 export declare const BACKEND_AUDIT_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
+
+/**
+ * The I1 zone ban's shared pieces: the one pattern-source string L1's
+ * selectors and scripts/drizzle-reachability-scan.ts's
+ * `DRIZZLE_SPECIFIER_PATTERN` both derive from, the resulting five
+ * selectors, and the zone list itself.
+ */
+export declare const DRIZZLE_SPECIFIER_PATTERN_SOURCE: string;
+export declare const DRIZZLE_ZONE_MESSAGE: string;
+export declare const DRIZZLE_ZONE_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
+
+/** One `DRIZZLE_ZONE` entry: a real file that genuinely imports Drizzle, and why it may. */
+export type DrizzleZoneEntry = Readonly<{ file: string; reason: string }>;
+
+export declare const DRIZZLE_ZONE: readonly DrizzleZoneEntry[];

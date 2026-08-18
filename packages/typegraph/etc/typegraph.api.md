@@ -2534,6 +2534,7 @@ export type GraphBackend = Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
     identityTableDdl?: (this: void, tableNames: IdentityTableNames) => readonly string[];
+    recordedTableDdl?: (this: void, tableNames: RecordedTableNames) => Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>>;
     getIndexMaterialization?: (this: void, indexName: string) => Promise<IndexMaterializationRow | undefined>;
     getIndexMaterializations?: (this: void, statusKeys: readonly string[]) => Promise<readonly IndexMaterializationRow[]>;
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
@@ -4908,6 +4909,13 @@ export type RecordedReadStoreOptions = LiveStoreOptions & Readonly<{
 // @public (undocumented)
 export function recordedRelation(options: RecordedRelationOptions): ExternalRecordedReadSource;
 
+// @public
+type RecordedRelationDdl = Readonly<{
+    createTable: string;
+    indexes: readonly string[];
+    primaryKeyConstraintName?: string | undefined;
+}>;
+
 // @public (undocumented)
 export type RecordedRelationOptions = Readonly<{
     schema: SqlSchema;
@@ -4959,6 +4967,13 @@ export type RecordedStoreViewNodeCollection<N extends NodeType> = Pick<StoreView
 export type RecordedStoreViewNodeCollections<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]-?: RecordedStoreViewNodeCollection<G["nodes"][K]["type"]>;
 };
+
+// @public
+type RecordedTableNames = Readonly<{
+    recordedClock: string;
+    recordedEdges: string;
+    recordedNodes: string;
+}>;
 
 // @public
 type RecordIndexMaterializationParams = Readonly<{
@@ -6628,7 +6643,7 @@ type UniqueRow = Readonly<{
 }>;
 
 // @public (undocumented)
-type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
+type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPreflight" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "recordedTableDdl" | "repairContributions" | "schemaWriteTransaction" | "transaction" | "trustedImport";
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {

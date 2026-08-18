@@ -7,10 +7,13 @@
     "paths": {
       "@/*": ["./src/*"],
       "@nicia-ai/typegraph": ["./src/index.ts"],
+      "@nicia-ai/typegraph/backend": ["./src/backend/index.ts"],
+      "@nicia-ai/typegraph/core": ["./src/core/index.ts"],
       "@nicia-ai/typegraph/interchange": ["./src/interchange/index.ts"],
       "@nicia-ai/typegraph/profiler": ["./src/profiler/index.ts"],
       "@nicia-ai/typegraph/schema": ["./src/schema/index.ts"],
       "@nicia-ai/typegraph/indexes": ["./src/indexes/index.ts"],
+      "@nicia-ai/typegraph/graph-extension": ["./src/graph-extension/index.ts"],
       "@nicia-ai/typegraph/graph-merge": ["./src/graph-merge/index.ts"],
       "@nicia-ai/typegraph/provenance": ["./src/provenance/index.ts"],
       "@nicia-ai/typegraph/sqlite/local": [
@@ -33,6 +36,9 @@
       ],
       "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite": [
         "./src/backend/postgres/pglite.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/indexes": [
+        "./src/backend/drizzle/indexes.ts"
       ]
     }
   },

@@ -191,6 +191,9 @@
     "better-sqlite3": {
       "optional": true
     },
+    "drizzle-orm": {
+      "optional": true
+    },
     "pg": {
       "optional": true
     },

@@ -7,7 +7,6 @@
 import { type GraphDef } from "../../core/define-graph";
 import { type SchemaManagerOptions } from "../../schema/manager";
 import {
-  createStoreWithSchema,
   type HistoryStore,
   type RecordedReadStore,
   type Store,
@@ -19,9 +18,8 @@ import {
   type StoreOptions,
   type UnboundLiveStoreOptions,
 } from "../../store/types";
-import { createSqliteTables } from "../drizzle/schema/sqlite";
-import { type BackendCapabilities, closeAfterFailure } from "../types";
-import { createLocalSqliteBackend } from "./local";
+import { loadDrizzleBackedModule } from "../missing-peer-ledger";
+import { type BackendCapabilities } from "../types";
 import { type LocalSqlitePragmaOptions } from "./local-options";
 
 export type { GraphIdentityConfig } from "../../core/define-graph";
@@ -70,21 +68,6 @@ export type LocalSqliteStoreOptions<
   schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;
 
-/**
- * Drops a smuggled `schema` from the nested schema-management options: the
- * effective `SqlSchema` has exactly one source (`store.schema`), which also
- * drives physical table provisioning in this constructor.
- */
-function withoutSchemaOverride(
-  schemaManagement: Omit<SchemaManagerOptions, "schema"> | undefined,
-): Omit<SchemaManagerOptions, "schema"> {
-  if (schemaManagement === undefined) return {};
-  const { schema: smuggled, ...rest } =
-    schemaManagement as SchemaManagerOptions;
-  void smuggled;
-  return rest;
-}
-
 /** Creates, provisions, and returns a full typed local SQLite Store. */
 export function createLocalSqliteStore<G extends GraphDef>(
   graph: G,
@@ -112,28 +95,9 @@ export async function createLocalSqliteStore<G extends GraphDef>(
   graph: G,
   options: LocalSqliteStoreOptions = {},
 ): Promise<Store<G> | HistoryStore<G> | RecordedReadStore<G>> {
-  const tables =
-    options.store?.schema === undefined ?
-      undefined
-    : createSqliteTables(options.store.schema.tables);
-  const { backend } = createLocalSqliteBackend({
-    ...(options.path === undefined ? {} : { path: options.path }),
-    ...(options.pragmas === undefined ? {} : { pragmas: options.pragmas }),
-    ...(options.capabilities === undefined ?
-      {}
-    : { capabilities: options.capabilities }),
-    ...(tables === undefined ? {} : { tables }),
-  });
-  try {
-    const [store] = await createStoreWithSchema(graph, backend, {
-      ...options.store,
-      // The type already excludes `schema` here; the runtime strip guards
-      // untyped callers, so the provisioned schema (or the default tables)
-      // can never diverge from the one the Store reads.
-      ...withoutSchemaOverride(options.schemaManagement),
-    });
-    return store;
-  } catch (error) {
-    return closeAfterFailure(backend, error);
-  }
+  const impl = await loadDrizzleBackedModule(
+    "./sqlite/local",
+    () => import("./local-store-impl"),
+  );
+  return impl.createLocalSqliteStoreImpl(graph, options);
 }
