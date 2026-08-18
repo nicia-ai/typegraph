@@ -80,8 +80,6 @@ export {
   migrateRecordedAnchor,
   type MigrateRecordedAnchorOptions,
 } from "./migrate-recorded-time";
-export type { MissingPeerLedgerEntry } from "./missing-peer-ledger";
-export { MISSING_PEER_LEDGER } from "./missing-peer-ledger";
 export {
   repairInvertedValidityWindows,
   type RepairInvertedWindowsOptions,

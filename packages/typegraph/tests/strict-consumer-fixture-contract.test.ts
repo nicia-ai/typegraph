@@ -132,6 +132,10 @@ describe("strict consumer fixture contract", () => {
     const cjsRunner = renderPortableCjsRunner();
     const walkModule = renderLedgerWalkModule();
 
+    expect(esmRunner).not.toContain("MISSING_PEER_LEDGER");
+    expect(cjsRunner).not.toContain("MISSING_PEER_LEDGER");
+    expect(esmRunner).not.toContain("@nicia-ai/typegraph/backend");
+    expect(cjsRunner).not.toContain("@nicia-ai/typegraph/backend");
     expect(esmRunner).not.toContain("MISSING_PEER_DEPENDENCY");
     expect(cjsRunner).not.toContain("MISSING_PEER_DEPENDENCY");
     expect(esmRunner).not.toContain("refusalDetailsCode");

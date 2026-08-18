@@ -14,15 +14,14 @@
  * verdict cannot differ between the layer that probes it and the layer that
  * writes it.
  *
- * The SQL rendering below compiles to a `SqlFragment` keyed on physical
- * column NAMES rather than a Drizzle `Column` object, so a backend with no
- * column objects at all can call this one owner instead of re-spelling the
- * predicate.
+ * The SQL rendering below is generic over the caller's SQL representation and
+ * keyed on physical column NAMES rather than a Drizzle `Column` object, so a
+ * backend with no column objects at all can call this one owner without an
+ * adapter-specific intermediate representation or a re-spelled predicate.
  */
 import { subClassComponent } from "../../constraints";
 import { type UniquenessScope } from "../../core/types";
 import { ConfigurationError } from "../../errors";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareStrings } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
@@ -298,8 +297,7 @@ export type ClaimOwnerColumnNames = Readonly<{
 }>;
 
 /**
- * THE SqlFragment rendering of {@link isSameClaimOwner}, for the three
- * upsert builders.
+ * THE SQL rendering of {@link isSameClaimOwner}, for the three upsert builders.
  *
  * `existing` qualifies a column of the conflicting row the way the dialect
  * requires (PostgreSQL needs the table name, SQLite takes the bare quoted
@@ -308,13 +306,18 @@ export type ClaimOwnerColumnNames = Readonly<{
  * renderings, one definition: the arms every builder decides ownership with
  * are this fragment, so a builder cannot quietly compare fewer columns than
  * the TypeScript predicate does. The dialect switch between the qualified and
- * bare forms is the batch builder's own (its `existingColumnFragment`); this
- * function only composes whatever renderer it is handed.
+ * bare forms is the batch builder's own; this function only composes whatever
+ * renderer it is handed. The generic tag keeps that composition portable while
+ * allowing an adapter to build its native SQL value directly.
  */
-export function claimOwnerMatchesSql(
-  existing: (columnName: string) => SqlFragment,
-  proposed: (columnName: string) => SqlFragment,
+export function claimOwnerMatchesSql<TExpression>(
+  tag: (
+    strings: TemplateStringsArray,
+    ...expressions: readonly TExpression[]
+  ) => TExpression,
+  existing: (columnName: string) => TExpression,
+  proposed: (columnName: string) => TExpression,
   columns: ClaimOwnerColumnNames,
-): SqlFragment {
-  return sql`${existing(columns.nodeId)} = ${proposed(columns.nodeId)} AND ${existing(columns.concreteKind)} = ${proposed(columns.concreteKind)}`;
+): TExpression {
+  return tag`${existing(columns.nodeId)} = ${proposed(columns.nodeId)} AND ${existing(columns.concreteKind)} = ${proposed(columns.concreteKind)}`;
 }

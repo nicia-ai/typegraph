@@ -1,10 +1,6 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  sql as fragmentSql,
-  type SqlFragment,
-} from "../../../query/sql-fragment";
-import {
   type ClaimOwnerColumnNames,
   claimOwnerMatchesSql,
 } from "../../../store/claims/axis";
@@ -16,13 +12,20 @@ import type {
   InsertUniqueParams,
   SqlDialect,
 } from "../../types";
-import { toDrizzleSql } from "../execution/types";
-import { quotedColumn, type Tables } from "./shared";
+import { quotedColumn, quotedTableName, type Tables } from "./shared";
 
 type InsertUniqueDialectBuilder = (
   tables: Tables,
   params: InsertUniqueParams,
 ) => SQL;
+
+/** Adapts Drizzle's generic SQL tag to the representation-neutral claim owner. */
+function drizzleSqlTag(
+  strings: TemplateStringsArray,
+  ...expressions: readonly SQL[]
+): SQL {
+  return sql(strings, ...expressions);
+}
 
 /**
  * The owner columns of the uniques relation, by physical column name — the
@@ -43,11 +46,11 @@ function ownerColumnNames(uniques: Tables["uniques"]): ClaimOwnerColumnNames {
 function boundOwnerColumn(
   uniques: Tables["uniques"],
   params: InsertUniqueParams,
-): (columnName: string) => SqlFragment {
+): (columnName: string) => SQL {
   return (columnName) =>
     columnName === uniques.nodeId.name ?
-      fragmentSql`${params.nodeId}`
-    : fragmentSql`${params.concreteKind}`;
+      sql`${params.nodeId}`
+    : sql`${params.concreteKind}`;
 }
 
 /**
@@ -55,8 +58,12 @@ function boundOwnerColumn(
  * {@link claimOwnerMatchesSql}: the row `ON CONFLICT DO UPDATE` is about to
  * write, read back off `excluded`.
  */
-function excludedColumnFragment(columnName: string): SqlFragment {
-  return fragmentSql`excluded.${fragmentSql.identifier(columnName)}`;
+function excludedColumnByName(columnName: string): SQL {
+  return sql`excluded.${quotedColumn({ name: columnName })}`;
+}
+
+function excludedColumn(column: Readonly<{ name: string }>): SQL {
+  return excludedColumnByName(column.name);
 }
 
 /**
@@ -83,13 +90,11 @@ function buildInsertUniqueSqlite(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
 
-  const ownerMatches = toDrizzleSql(
-    claimOwnerMatchesSql(
-      (columnName) => fragmentSql.identifier(columnName),
-      boundOwnerColumn(uniques, params),
-      ownerColumnNames(uniques),
-    ),
-    "sqlite",
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => quotedColumn({ name: columnName }),
+    boundOwnerColumn(uniques, params),
+    ownerColumnNames(uniques),
   );
 
   return sql`
@@ -146,18 +151,16 @@ function buildInsertUniquePostgres(
   );
 
   const tableName = getTableName(uniques);
-  const existingColumnFragment = (columnName: string): SqlFragment =>
-    fragmentSql`${fragmentSql.identifier(tableName)}.${fragmentSql.identifier(columnName)}`;
+  const existingColumnByName = (columnName: string): SQL =>
+    sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
   const existingColumn = (column: Readonly<{ name: string }>) =>
-    toDrizzleSql(existingColumnFragment(column.name), "postgres");
+    existingColumnByName(column.name);
 
-  const ownerMatches = toDrizzleSql(
-    claimOwnerMatchesSql(
-      (columnName) => existingColumnFragment(columnName),
-      boundOwnerColumn(uniques, params),
-      ownerColumnNames(uniques),
-    ),
-    "postgres",
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    boundOwnerColumn(uniques, params),
+    ownerColumnNames(uniques),
   );
 
   return sql`
@@ -242,13 +245,13 @@ export function buildInsertUniqueBatch(
   // switch — claimOwnerMatchesSql only composes whatever renderer it is
   // handed.
   const tableName = getTableName(uniques);
-  const existingColumnFragment = (columnName: string): SqlFragment => {
+  const existingColumnByName = (columnName: string): SQL => {
     switch (dialect) {
       case "postgres": {
-        return fragmentSql`${fragmentSql.identifier(tableName)}.${fragmentSql.identifier(columnName)}`;
+        return sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
       }
       case "sqlite": {
-        return fragmentSql.identifier(columnName);
+        return quotedColumn({ name: columnName });
       }
       default: {
         return dialect satisfies never;
@@ -257,17 +260,13 @@ export function buildInsertUniqueBatch(
   };
 
   const existingColumn = (column: Readonly<{ name: string }>) =>
-    toDrizzleSql(existingColumnFragment(column.name), dialect);
-  const excludedColumn = (column: Readonly<{ name: string }>) =>
-    toDrizzleSql(excludedColumnFragment(column.name), dialect);
+    existingColumnByName(column.name);
 
-  const ownerMatches = toDrizzleSql(
-    claimOwnerMatchesSql(
-      (columnName) => existingColumnFragment(columnName),
-      (columnName) => excludedColumnFragment(columnName),
-      ownerColumnNames(uniques),
-    ),
-    dialect,
+  const ownerMatches = claimOwnerMatchesSql(
+    drizzleSqlTag,
+    (columnName) => existingColumnByName(columnName),
+    excludedColumnByName,
+    ownerColumnNames(uniques),
   );
 
   const valueRows = sql.join(
