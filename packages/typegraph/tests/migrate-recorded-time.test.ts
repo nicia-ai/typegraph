@@ -35,20 +35,6 @@ import { assertCurrentRecordedSchema } from "../src/store/recorded-capture";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, recordedRevisionFromDriver } from "./test-utils";
 
-/**
- * Narrows a test backend's `executeStatement` to non-optional, matching what
- * `DeleteLegacyRecordedAnchorMapOptions["backend"]` now requires statically
- * (ruling C1(b)). The SQLite test backend always has it; this is a type-level
- * assertion, not a behavior change.
- */
-function assertExecutesStatements<T extends { executeStatement?: unknown }>(
-  backend: T,
-): asserts backend is T & Required<Pick<T, "executeStatement">> {
-  if (backend.executeStatement === undefined) {
-    throw new Error("SQLite test backend must execute statements");
-  }
-}
-
 const FIRST = "2026-01-01T00:00:00.000Z";
 const SECOND = "2026-01-01T00:00:00.001Z";
 const THIRD = "2026-01-01T00:00:00.002Z";
@@ -230,10 +216,6 @@ async function createLegacyRecordedSchema(
 describe("migrateLegacyRecordedTime", () => {
   it("dense-ranks legacy boundaries and durably remaps external anchors", async () => {
     const backend = createTestBackend();
-    // `deleteLegacyRecordedAnchorMap` now requires `executeStatement`
-    // statically (ruling C1(b)); the SQLite test backend always has it, but
-    // the assertion narrows the type this test's own calls need.
-    assertExecutesStatements(backend);
     await createLegacyRecordedSchema(backend);
 
     const result = await migrateLegacyRecordedTime({ backend });

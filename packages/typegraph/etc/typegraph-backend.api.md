@@ -623,7 +623,7 @@ export const CAPABILITY_BUNDLES: readonly [{
         readonly sites: readonly [{
             readonly file: "backend/migrate-recorded-time.ts";
             readonly member: "executeStatement";
-            readonly lines: readonly [154, 161];
+            readonly lines: readonly [154, 161, 801];
             readonly rewiring: {
                 readonly class: "deferred";
                 readonly reason: "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners";
@@ -1294,7 +1294,7 @@ export function deleteLegacyRecordedAnchorMap(options: DeleteLegacyRecordedAncho
 
 // @public (undocumented)
 export type DeleteLegacyRecordedAnchorMapOptions = Readonly<{
-    backend: Pick<GraphBackend, "dialect" | "execute" | "tableNames" | "transaction"> & Required<Pick<GraphBackend, "executeStatement">>;
+    backend: Pick<GraphBackend, "dialect" | "execute" | "executeStatement" | "tableNames" | "transaction">;
     graphId: string;
     tableNames?: Partial<SqlTableNames> | undefined;
     mappingTableName?: string | undefined;
@@ -3024,7 +3024,7 @@ export const STATEMENT_EXECUTION: {
         readonly sites: readonly [{
             readonly file: "backend/migrate-recorded-time.ts";
             readonly member: "executeStatement";
-            readonly lines: readonly [154, 161];
+            readonly lines: readonly [154, 161, 801];
             readonly rewiring: {
                 readonly class: "deferred";
                 readonly reason: "the delete path's public Pick-typed backend cannot reach resolveBundle, and the shared module-private helpers make a single-path rewire two owners";

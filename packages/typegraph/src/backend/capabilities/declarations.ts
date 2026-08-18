@@ -1,7 +1,8 @@
 /**
  * Validates the bundled capability declarations a factory assembles before
- * exposing them, then deep-freezes the object so nothing downstream can
- * mutate a capability sub-object after the fact (I14).
+ * exposing them, then clones and deep-freezes the object so nothing
+ * downstream can mutate a capability sub-object after the fact (I14) without
+ * freezing objects owned by the caller.
  */
 import { ConfigurationError } from "../../errors";
 import { type BackendCapabilities } from "../types";
@@ -19,7 +20,7 @@ function deepFreeze<T>(value: T): T {
 
 /**
  * Refuses a bundled capability declaration that contradicts its own shape,
- * then deep-freezes and returns the same object.
+ * then returns a deep-frozen, backend-owned clone.
  *
  * Two contradictions are refused:
  *
@@ -74,5 +75,5 @@ export function assertBundledCapabilityDeclarations(
       },
     );
   }
-  return deepFreeze(capabilities);
+  return deepFreeze(structuredClone(capabilities));
 }

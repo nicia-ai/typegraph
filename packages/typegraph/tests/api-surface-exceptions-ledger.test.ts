@@ -157,16 +157,16 @@ describe("api-surface-exceptions-ledger", () => {
     expect(parseExceptionsLedger(ledgerSource)).toEqual([]);
   });
 
-  it("a value-type-body tightening is not expressible as a ledger entry", () => {
+  it("a nested value-type member is not expressible as a ledger entry", () => {
     const issues = validateExceptionsLedger(
       [
         {
           entrypoint: BACKEND_ENTRYPOINT,
-          declaration: "DeleteLegacyRecordedAnchorMapOptions",
+          declaration: "SyntheticOptions",
           member: "executeStatement",
           kind: "optionality-tightened",
           reason:
-            "value-type-body tightening: DeleteLegacyRecordedAnchorMapOptions.backend gained Required<Pick<GraphBackend, 'executeStatement'>> inside its value type, which the checker does not walk",
+            "synthetic value-type-body tightening inside a Pick/Required intersection, which the checker does not walk",
           issue: "#1",
         },
       ],
@@ -176,8 +176,8 @@ describe("api-surface-exceptions-ledger", () => {
     // Exactly one issue: the member does not exist in the inventory at all,
     // because `backend`'s value type is a Pick/Required-intersection body
     // this checker never expands, so `executeStatement` never became a
-    // tracked member of `DeleteLegacyRecordedAnchorMapOptions` in the first
-    // place. A fabricated ledger entry for this shape exempts nothing.
+    // tracked member of `SyntheticOptions` in the first place. A fabricated
+    // ledger entry for this shape exempts nothing.
     expect(issues).toHaveLength(1);
     expect(issues[0]?.entry.member).toBe("executeStatement");
   }, 30_000);

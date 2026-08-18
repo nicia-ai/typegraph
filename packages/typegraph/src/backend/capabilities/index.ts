@@ -30,10 +30,9 @@
  *    `CAPABILITY_BUNDLES` grows the kit's coverage with zero kit changes —
  *    the same one-owner property the registry already gives the runtime.
  * 3. The value-type-body blind spot the api-surface checker's module doc
- *    now names (a required-ification inside a member's value type, e.g.
- *    `DeleteLegacyRecordedAnchorMapOptions.backend`, produces zero
- *    checker findings) needs a WS6-time decision: close it in the kit's own
- *    certification checks, or extend the checker's inventory into
+ *    now names (a required-ification inside a member's value type produces
+ *    zero checker findings) needs a WS6-time decision: close it in the kit's
+ *    own certification checks, or extend the checker's inventory into
  *    value-type bodies.
  *
  * **WS7 (engine profiles + pushdown).** `recursiveTraversal` is a *backend*

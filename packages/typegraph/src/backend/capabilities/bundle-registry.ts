@@ -637,7 +637,7 @@ export const STATEMENT_EXECUTION = {
         {
           file: "backend/migrate-recorded-time.ts",
           member: "executeStatement",
-          lines: [154, 161],
+          lines: [154, 161, 801],
           rewiring: {
             class: "deferred",
             reason:

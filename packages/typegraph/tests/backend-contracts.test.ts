@@ -1813,4 +1813,34 @@ describe("capability object immutability (I14)", () => {
       graphAnalytics.supported = false;
     }).toThrow(TypeError);
   });
+
+  it("does not freeze or retain caller-owned capability overrides", () => {
+    const database = new Database(":memory:");
+    const recursiveTraversal = {
+      supported: false,
+      reason: "the test engine cannot recurse",
+    };
+
+    try {
+      const backend = createSqliteBackend(drizzle(database), {
+        capabilities: { recursiveTraversal },
+      });
+
+      expect(backend.capabilities.recursiveTraversal).not.toBe(
+        recursiveTraversal,
+      );
+      expect(Object.isFrozen(backend.capabilities.recursiveTraversal)).toBe(
+        true,
+      );
+      expect(Object.isFrozen(recursiveTraversal)).toBe(false);
+
+      recursiveTraversal.reason = "the caller changed its own declaration";
+
+      expect(backend.capabilities.recursiveTraversal?.reason).toBe(
+        "the test engine cannot recurse",
+      );
+    } finally {
+      database.close();
+    }
+  });
 });

@@ -1,13 +1,10 @@
 /**
  * T11b — expands every operation row's `sites` against the COMMITTED
  * baseline fixture (never the live scan — that is B9's), and checks the
- * cover of the fixture's 57 `pilot` keys: each covered exactly once, no
- * stale `(file, member)` attribution, and the 3 `statically-required` keys
+ * cover of the fixture's 58 `pilot` keys: each covered exactly once, no
+ * stale `(file, member)` attribution, and the 2 `statically-required` keys
  * plus the 1 `not-an-access` key excluded BY NAME rather than by falling
- * out of the count. The count moved 58/2 -> 57/3 in B7 (ruling C1(b)):
- * `backend/migrate-recorded-time.ts:801`'s runtime guard is deleted and its
- * `executeStatement` option becomes statically required, so the site is no
- * longer a runtime access at all.
+ * out of the count.
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -45,10 +42,6 @@ const EXCLUDED_BY_NAME: readonly Readonly<{
   { file: "store/materialize-removals.ts", line: 670 },
   { file: "graph-merge/provenance-store.ts", line: 430 },
   { file: "store/recorded-capture/guards.ts", line: 64 },
-  // C1(b): the runtime guard at this line is deleted, and the fixture's row
-  // reclassifies pilot -> statically-required (the option's `executeStatement`
-  // is now compile-time required).
-  { file: "backend/migrate-recorded-time.ts", line: 801 },
 ];
 
 function rowKey(row: Pick<BaselineRow, "file" | "line" | "member">): string {
@@ -133,7 +126,7 @@ describe("capability operation cover against the committed baseline (T11b)", () 
     expect(staleAttributions).toEqual([]);
   });
 
-  it("excludes the 3 statically-required and 1 not-an-access keys BY NAME", () => {
+  it("excludes the 2 statically-required and 1 not-an-access keys BY NAME", () => {
     const baseline = loadBaseline();
     for (const excluded of EXCLUDED_BY_NAME) {
       const row = baseline.rows.find(
@@ -146,10 +139,10 @@ describe("capability operation cover against the committed baseline (T11b)", () 
     const nonPilotCount = baseline.rows.filter(
       (row) => row.class !== "pilot",
     ).length;
-    expect(nonPilotCount).toBe(4);
+    expect(nonPilotCount).toBe(3);
   });
 
-  it("57 + 3 + 1 = 61", () => {
+  it("58 + 2 + 1 = 61", () => {
     const baseline = loadBaseline();
     expect(baseline.rows).toHaveLength(61);
   });

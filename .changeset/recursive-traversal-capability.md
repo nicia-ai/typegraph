@@ -12,6 +12,6 @@ All six `WITH RECURSIVE` emission sites now consult the resolved verdict — fou
 
 The two bundled factories now refuse a contradictory capability declaration at construction — `supported: false` with no `reason`, or `supported: true` with a dangling `reason` — with `ConfigurationError` code `CAPABILITY_DECLARATION_CONTRADICTION`. This also applies to a caller-supplied `capabilities` override on either factory.
 
-One behavior note for custom backends: the factory-assembled `capabilities` object is now deep-frozen, so code that mutated `backend.capabilities` (or a nested field such as `backend.capabilities.vector`) after construction now throws instead of silently succeeding.
+One behavior note for custom backends: a backend-owned clone of the factory-assembled `capabilities` object is now deep-frozen, so code that mutated `backend.capabilities` (or a nested field such as `backend.capabilities.vector`) after construction now throws instead of silently succeeding. Objects supplied through the factory options remain caller-owned and mutable.
 
 The bundled SQLite and PostgreSQL backends both declare `{ supported: true }`, so no shipped configuration changes behavior — this release only adds the capability, the refusal, and the fallback for backends that opt into declaring recursion absent.
