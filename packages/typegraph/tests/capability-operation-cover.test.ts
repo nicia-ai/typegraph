@@ -95,10 +95,10 @@ function expandCover(baseline: BaselineFixture): Readonly<{
 }
 
 describe("capability operation cover against the committed baseline (T11b)", () => {
-  it("covers every one of the 57 `pilot` keys exactly once", () => {
+  it("covers every one of the 58 `pilot` keys exactly once", () => {
     const baseline = loadBaseline();
     const pilotRows = baseline.rows.filter((row) => row.class === "pilot");
-    expect(pilotRows).toHaveLength(57);
+    expect(pilotRows).toHaveLength(58);
 
     const { coveredKeys, staleAttributions } = expandCover(baseline);
     expect(staleAttributions, "stale attributions").toEqual([]);

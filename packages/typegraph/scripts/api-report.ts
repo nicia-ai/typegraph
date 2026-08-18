@@ -144,35 +144,40 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * every entrypoint is `PessimisticLockCapabilities` OR (at `./backend` only)
  * `WriteFenceTarget`, nothing else, no entrypoint's debt DECREASED, and no
  * 15th entrypoint moved.
+ *
+ * Recorded-time DDL batch (#520): the 13 entrypoints that render
+ * `GraphBackend` without directly exporting its newly referenced public types
+ * each gain `RecordedRelationDdl` and `RecordedTableNames` (+2). `./backend`
+ * exports both names directly, so its forgotten-export debt is unchanged.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 353,
-    sha256: "e884bafcaffbbf29bf670852cc84f1ae017e9bcd0843b5098479ac9829283760",
+    count: 355,
+    sha256: "d77f4c9db93968d554a9910a2092c526565a4ce5fcc679522c56211c18e3ee86",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 203,
-    sha256: "5d99b168f566db0ca2dc6ac41a1f026cf84c836fff02c8696bdeb648e2a42231",
+    count: 205,
+    sha256: "ccc4471d48cbb1dbcac6106da70aa329549d49b8e966d4de986c3e7c064bf842",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 207,
-    sha256: "f67ab7ebd788dbbc1e48cdc2e0d1fabf12184334b3f6f7ab629dea697abac7a6",
+    count: 209,
+    sha256: "7eb5c4c7984810cf195b59371408a71f08fd90fd71cbef8de8cedaae52b062f1",
   },
   "./adapters/drizzle/sqlite": {
-    count: 204,
-    sha256: "0ace99ace2ba251115c36273a32a0b6df32cc530b49870a82ea4f33f4b0dc1da",
+    count: 206,
+    sha256: "603f36c7ad60cd0a7c9f81e2f6f8a93eb9a9252bc50932ea71a945594a701ccf",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 207,
-    sha256: "75b3ab93627cad6ed57cf8efac63fa8ec41d8234604cdf35cc5ab2fcc6c97d52",
+    count: 209,
+    sha256: "b64c8e28c80741e7bf39ad8d91165d23e110faf5cab3bcfaef0dcbd4b437559f",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 207,
-    sha256: "75b3ab93627cad6ed57cf8efac63fa8ec41d8234604cdf35cc5ab2fcc6c97d52",
+    count: 209,
+    sha256: "b64c8e28c80741e7bf39ad8d91165d23e110faf5cab3bcfaef0dcbd4b437559f",
   },
   "./backend": {
     count: 11,
@@ -187,36 +192,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 619,
-    sha256: "587c3add30ee1cb26d4d280077a2952070dac97c1cbfbc3933acd5f9b57aee28",
+    count: 621,
+    sha256: "4957126747e9698a1381331c48d6f44156facbc536530feb293d1bb10f328729",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 605,
-    sha256: "ea5def0206e01310d74976aa4d75f7287d72c4b15306bf65848d804111b5d163",
+    count: 607,
+    sha256: "3565beb1f6b01e8ba8a1583c64664f0fbca33add4b9aa2971bc39d83d346700c",
   },
   "./postgres/pglite": {
-    count: 609,
-    sha256: "691471033a8ac6eb9fbae55be3a047dd3c8c1afe9668ab5c9dc3701230c68fb0",
+    count: 611,
+    sha256: "756194bfc79c07eb44292fa5065c2cfc5922ae2fa3397f7173316fcd78c4e4e9",
   },
   "./profiler": {
-    count: 607,
-    sha256: "6f3fd51bfad0f9569bd1ae5d6ef524d076aaaaef5081d95c0367ecbabe1014ee",
+    count: 609,
+    sha256: "a1ab2f4b928af5eb4cadea39bf19ba230ab0ab1a336b220ba42ccb14663dc71d",
   },
   "./provenance": {
-    count: 613,
-    sha256: "0093efd5d0fabd585188863060ea903066ec7c83579a93c101ce6aa9fe066618",
+    count: 615,
+    sha256: "071193c7d98ad4ab23af6d3083637da74138e5543384871d8aaa60ce9eedfd66",
   },
   "./schema": {
-    count: 224,
-    sha256: "3a09c76383210297e3ee7630673e6cf972e3de169db8ffe7ace3e35bd6de9375",
+    count: 226,
+    sha256: "f4e7678c52f7dec45abe4fa7ce07878d3b54816a5cc7e887d389e0cc005645cd",
   },
   "./sqlite/local": {
-    count: 609,
-    sha256: "691471033a8ac6eb9fbae55be3a047dd3c8c1afe9668ab5c9dc3701230c68fb0",
+    count: 611,
+    sha256: "756194bfc79c07eb44292fa5065c2cfc5922ae2fa3397f7173316fcd78c4e4e9",
   },
 };
 

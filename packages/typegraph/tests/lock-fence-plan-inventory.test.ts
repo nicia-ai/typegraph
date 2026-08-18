@@ -138,13 +138,10 @@ const LOCK_SITE_FILES: readonly string[] = [
 /**
  * The dialect-literal rows the `(!==|===)` grep shape returns OUTSIDE the
  * lock sites — named so an exemption is a decision, not a silent survivor
- * (M-7, M-8). Re-measured directly against this tree rather than trusting
- * the batch spec's own re-measurement: the spec's digest names 6 rows here
- * (J10, J11, J12 x3, J13), but a fresh scan of `migrate-recorded-time.ts`
- * finds TWO more `dialect === "sqlite"` rows the digest did not list
- * (`:222`, `:362` — both DDL/introspection-strategy selection, the same
- * class as J12's named rows). The tree wins over the digest's count; both
- * are recorded here rather than silently dropped or silently added.
+ * (M-7, M-8). Re-measured directly against the combined tree: #520 moved
+ * temporary-table construction and primary-key constraint naming behind the
+ * backend-owned `recordedTableDdl` port, removing the two corresponding
+ * dialect comparisons from `migrate-recorded-time.ts`.
  */
 const NON_LOCK_EXEMPTIONS: readonly InventoryEntry[] = [
   {
@@ -168,23 +165,9 @@ const NON_LOCK_EXEMPTIONS: readonly InventoryEntry[] = [
   },
   {
     file: "backend/migrate-recorded-time.ts",
-    line: 'if (dialect === "sqlite") {',
-    site: "J12-b",
-    reason:
-      "Selects which table-creation helper builds the temporary migration tables — not a lock.",
-  },
-  {
-    file: "backend/migrate-recorded-time.ts",
     line: 'return dialect === "postgres" ?',
     site: "J12",
     reason: "Column-type selection in a migration — not a lock.",
-  },
-  {
-    file: "backend/migrate-recorded-time.ts",
-    line: 'if (target.dialect !== "postgres") return;',
-    site: "J10",
-    reason:
-      "renamePrimaryKeyConstraint is PostgreSQL-only DDL syntax — not a lock.",
   },
   {
     file: "store/algorithms/iterative-graph-operation.ts",

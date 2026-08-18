@@ -2501,6 +2501,13 @@ export type RecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RecordedInstant";
 };
 
+// @public
+export type RecordedRelationDdl = Readonly<{
+    createTable: string;
+    indexes: readonly string[];
+    primaryKeyConstraintName?: string | undefined;
+}>;
+
 // @public (undocumented)
 export function recordedRevisionOriginsMembers(port: Readonly<Partial<Pick<GraphBackend, (typeof RECORDED_REVISION_ORIGINS)["core"][number]>>>, verdict: Extract<BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>, {
     supported: true;
@@ -2508,13 +2515,6 @@ export function recordedRevisionOriginsMembers(port: Readonly<Partial<Pick<Graph
 
 // @public (undocumented)
 export function recordedRevisionOriginsVerdict(backend: GraphBackend): BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>;
-
-// @public
-export type RecordedRelationDdl = Readonly<{
-    createTable: string;
-    indexes: readonly string[];
-    primaryKeyConstraintName?: string | undefined;
-}>;
 
 // @public
 export type RecordedTableNames = Readonly<{
@@ -3154,6 +3154,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "reasoned";
         readonly reason: "Same identity-DDL family as ensureIdentityTables.";
         readonly accesses: 2;
+    };
+    readonly recordedTableDdl: {
+        readonly kind: "reasoned";
+        readonly reason: "Recorded-time migration DDL factory; its only consumer has its own typed capability refusal, so it is a provisioning port rather than a feature-family operation.";
+        readonly accesses: 1;
     };
     readonly ensureKindRemovalsTable: {
         readonly kind: "reasoned";
