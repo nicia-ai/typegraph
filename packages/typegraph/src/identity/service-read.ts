@@ -1,3 +1,8 @@
+import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
+import {
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../backend/capabilities/write-fence";
 import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
 import { KindNotFoundError } from "../errors";
@@ -210,7 +215,7 @@ export function publicNodeRef<G extends GraphDef>(
 }
 
 /**
- * Serializes identity-affecting writers on one graph (Postgres only).
+ * Serializes identity-affecting writers on one graph.
  *
  * The lock is deliberately whole-graph rather than scoped to the kinds a write
  * touches. Identity closures are transitive: an assertion between two kinds
@@ -233,32 +238,75 @@ export function publicNodeRef<G extends GraphDef>(
  * observable) nor retryable in place (SQLite requires a rollback), so it is
  * refused with a typed error naming the cause and the remedy — see
  * `executeIdentityStatement` (#447).
+ *
+ * The dialect check above is now the `resolveWriteFencePlan`/
+ * `requireWriteFence` pair (§5.3): the `lock` arm takes the advisory lock,
+ * and the `engine-serialized` arm is the SQLite writer-slot case this doc
+ * already describes.
  */
 export async function lockIdentityGraph(
   target: Backend,
   graphId: string,
 ): Promise<void> {
-  if (target.dialect !== "postgres") return;
-  await target.execute(
-    asCompiledRowsSql(sql`
-      SELECT pg_advisory_xact_lock(
-        hashtext('typegraph:identity'),
-        hashtext(${graphId})
-      )
-    `),
-  );
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(plan, "identity graph lock", "advisory-lock");
+  switch (fence.kind) {
+    case "lock": {
+      await target.execute(
+        asCompiledRowsSql(sql`
+          SELECT pg_advisory_xact_lock(
+            hashtext('typegraph:identity'),
+            hashtext(${graphId})
+          )
+        `),
+      );
+      return;
+    }
+    case "engine-serialized": {
+      // No lock is taken because the engine's single writer slot already
+      // serializes writers — see the DEFERRED-frame caveat above, which
+      // `executeIdentityStatement` turns into a typed refusal (#447).
+      return;
+    }
+    default: {
+      fence satisfies never;
+    }
+  }
 }
 
-/** Drains in-flight legacy node writes before the first identity snapshot. */
+/**
+ * Drains in-flight legacy node writes before the first identity snapshot.
+ * Resolves a {@link resolveWriteFencePlan}; the `lock` arm takes the relation
+ * lock (needs `tableLocks`), and the `engine-serialized` arm is the SQLite
+ * writer-slot case, which has already drained every writer.
+ */
 export async function lockIdentityEnablementNodes(
   target: Backend,
   schema: SqlSchema,
 ): Promise<void> {
-  if (target.dialect !== "postgres") return;
-  await executeIdentityStatement(
-    target,
-    sql`LOCK TABLE ${schema.nodesTable} IN SHARE MODE`,
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(
+    plan,
+    "identity enablement drain",
+    "table-lock",
   );
+  switch (fence.kind) {
+    case "lock": {
+      await executeIdentityStatement(
+        target,
+        sql`LOCK TABLE ${schema.nodesTable} IN SHARE MODE`,
+      );
+      return;
+    }
+    case "engine-serialized": {
+      // No lock is taken because the engine's single writer slot already
+      // drained every writer before the fence opened.
+      return;
+    }
+    default: {
+      fence satisfies never;
+    }
+  }
 }
 
 export async function loadNodeSnapshot(
@@ -490,6 +538,7 @@ export async function loadHistoricalClasses(
     coordinate: sqlCoordinate,
     seedSource: sql`VALUES ${seeds}`,
     sameIdAcrossKinds,
+    recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
   });
   const rows = await target.execute<RawHistoricalClassMemberRow>(
     asCompiledRowsSql(sql`

@@ -592,11 +592,27 @@ const AUDITED_OVERLAY_FILES = [
  * selectors, the exempt half is the identical list without them, which is the
  * only difference an exemption is allowed to make.
  */
+const RECORDED_CAPTURE_DIALECT_SEAM_FILES = [
+  "src/store/recorded-capture/clock.ts",
+];
+
+/**
+ * The three `subsystems`-profile files whose dialect branching is now the
+ * pessimistic-lock decision (`resolveWriteFencePlan`, §5.3) rather than
+ * backend provisioning — moved to the `dialect-seam` profile below so the
+ * ban applies to them too.
+ */
+const DIALECT_SEAM_LOCK_FILES = [
+  "src/identity/service-read.ts",
+  "src/identity/schema-transition.ts",
+  "src/graph-merge/provenance-store.ts",
+];
+
 const WRITE_PIPELINE_PROFILES = [
   {
     name: "store",
     files: ["src/store/**/*.ts"],
-    ignores: AUDITED_OVERLAY_FILES,
+    ignores: [...AUDITED_OVERLAY_FILES, ...RECORDED_CAPTURE_DIALECT_SEAM_FILES],
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
       ...DRIZZLE_ZONE_RESTRICTIONS,
@@ -612,7 +628,7 @@ const WRITE_PIPELINE_PROFILES = [
       "src/graph-merge/**/*.ts",
       "src/provenance/**/*.ts",
     ],
-    ignores: ["src/identity/historical-sql.ts"],
+    ignores: ["src/identity/historical-sql.ts", ...DIALECT_SEAM_LOCK_FILES],
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
       ...DRIZZLE_ZONE_RESTRICTIONS,
@@ -632,13 +648,32 @@ const WRITE_PIPELINE_PROFILES = [
     ],
   },
   {
+    // The pessimistic-lock decision's one owner is `resolveWriteFencePlan`
+    // (src/backend/capabilities/write-fence.ts); every site that used to
+    // spell `dialect === "postgres"` to make that decision now resolves a
+    // plan instead, and this profile is what keeps the spelling from
+    // reappearing at any of them.
     name: "dialect-seam",
-    files: ["src/identity/historical-sql.ts"],
+    files: ["src/identity/historical-sql.ts", ...DIALECT_SEAM_LOCK_FILES],
     restrictions: [
       ...SOURCE_WIDE_RESTRICTIONS,
       ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...RUNTIME_PORT_RESTRICTIONS,
+      ...BACKEND_DERIVATION_RESTRICTIONS,
+      ...DIALECT_SEAM_RESTRICTIONS,
+    ],
+  },
+  {
+    // clock.ts is a `store/**` file, so it re-spreads the `store` profile's
+    // own restriction list (not `subsystems`') alongside the dialect-literal
+    // ban — the same one-owner rationale as the `dialect-seam` profile above.
+    name: "recorded-capture-dialect-seam",
+    files: RECORDED_CAPTURE_DIALECT_SEAM_FILES,
+    restrictions: [
+      ...SOURCE_WIDE_RESTRICTIONS,
+      ...DRIZZLE_ZONE_RESTRICTIONS,
+      GLOBAL_SYMBOL_RESTRICTION,
       ...BACKEND_DERIVATION_RESTRICTIONS,
       ...DIALECT_SEAM_RESTRICTIONS,
     ],
@@ -787,9 +822,18 @@ const LINT_BLOCKS = [
   // no-restricted-syntax entry for query-compiler files.)
   //
   // `src/identity/historical-sql.ts` is query-compiler SQL construction that
-  // lives outside src/query, so it is in scope. The rest of src/identity is
-  // not: `service.ts` legitimately branches on dialect to gate PostgreSQL
-  // advisory locks, which is backend provisioning, not query compilation.
+  // lives outside src/query, so it is in scope here too. `service-read.ts`
+  // (`lockIdentityGraph` / `lockIdentityEnablementNodes`),
+  // `schema-transition.ts` (`lockIdentityDdl`) and
+  // `graph-merge/provenance-store.ts` (`drainUnfencedRowWriters`) ALSO ban
+  // the dialect literal, but through the `dialect-seam` `WRITE_PIPELINE_PROFILES`
+  // entry below (`DIALECT_SEAM_LOCK_FILES`), not this block: the
+  // pessimistic-lock decision those three files used to spell inline now has
+  // exactly one owner, `resolveWriteFencePlan`
+  // (`src/backend/capabilities/write-fence.ts`, §5.3), so they are in scope
+  // for the same reason this block is — a second inline spelling of a
+  // decision that already has an owner is the defect this ban exists to
+  // catch, not a backend-provisioning exemption from it.
   {
     files: ["src/query/**/*.ts", "src/identity/historical-sql.ts"],
     rules: {

@@ -1,3 +1,5 @@
+import { type UNIQUE_SIDECAR_BATCH } from "../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type BackendIdentity,
   type GraphBackend,
@@ -49,6 +51,23 @@ export const STORE_RUNTIME: unique symbol =
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
+  /**
+   * @internal The `uniqueSidecarBatch` bundle's verdict, resolved once at
+   * store construction against `backend` (ruling B8 spec item 2) and exposed
+   * here so a Store-owned view (provenance's fact close/reopen) can build a
+   * {@link file://./claims/node-claims.ts NodeClaimContext} without re-minting
+   * a second verdict for the same backend — the same reason `backend` itself
+   * is exposed here rather than reconstructed.
+   *
+   * Optional at this boundary — a `StoreRuntime`-shaped value is a
+   * contravariant (externally-authorable) position, so a new REQUIRED member
+   * here would be a breaking change (`scripts/api-surface-compat.ts`).
+   * Required after resolution instead, the same pattern
+   * `CompileQueryOptions.recursiveTraversal` uses: the one real producer
+   * (`store.ts`'s constructor) always populates it, and the one real
+   * consumer (`provenance/index.ts`) asserts it with `requireDefined`.
+   */
+  uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
   /**
    * @internal The backend this Store's queries actually execute through for
    * `target` — the Store's own backend when `target` is omitted.

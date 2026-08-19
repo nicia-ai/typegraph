@@ -5,6 +5,7 @@
  * Uses a recursive CTE for BFS traversal with cycle detection, then hydrates
  * the reachable nodes and connecting edges in two parallel queries.
  */
+import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import type { GraphBackend } from "../backend/types";
 import { MAX_PG_IDENTIFIER_LENGTH } from "../constants";
 import type {
@@ -545,6 +546,8 @@ export async function executeSubgraph<
     ...(ctx.recordedReadBinding === undefined ?
       {}
     : { recordedReadBinding: ctx.recordedReadBinding }),
+    recursiveTraversal: resolveRecursiveTraversal(params.backend.capabilities),
+    operation: "subgraph",
   });
   const includedIdsCte = buildIncludedIdsCte(ctx);
 

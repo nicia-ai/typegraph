@@ -14,6 +14,7 @@ import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
+import { resolveWriteFencePlan } from "../src/backend/capabilities/write-fence";
 import {
   deriveBackend,
   projectBackend,
@@ -278,6 +279,52 @@ describe("factories audit unconditionally", () => {
     } finally {
       await pool.end();
     }
+  });
+});
+
+describe("the seam carries the first-party write-fence mark (§5.3)", () => {
+  // `pessimisticLocks: undefined` forces the "absent" arm of
+  // `resolveWriteFencePlan` on an otherwise-real factory backend — after
+  // A1/A2, no first-party factory ever omits the declaration, so this is the
+  // only way to exercise the dialect-derivation fallback the mark gates. If
+  // `deriveBackend`/`projectGraphBackend` lost the mark (the #435 defect
+  // class applied to write-fence.ts instead of transaction-resource.ts), the
+  // derived/projected backend would resolve `unfenced` here while the source
+  // still resolves `engine-serialized` — two answers to one question.
+  it("a deriveBackend-decorated first-party backend resolves the same plan as its source", () => {
+    const db: AnySqliteDatabase = drizzleSqliteProxy(() =>
+      Promise.resolve({ rows: [] }),
+    );
+    const backend = createSqliteBackend(db, {
+      capabilities: { pessimisticLocks: undefined },
+    });
+
+    const decorated = deriveBackend(backend, {});
+
+    expect(resolveWriteFencePlan(backend)).toEqual({
+      kind: "engine-serialized",
+    });
+    expect(resolveWriteFencePlan(decorated)).toEqual(
+      resolveWriteFencePlan(backend),
+    );
+  });
+
+  it("a projectGraphBackend-projected first-party backend resolves the same plan as its source", () => {
+    const db: AnySqliteDatabase = drizzleSqliteProxy(() =>
+      Promise.resolve({ rows: [] }),
+    );
+    const backend = createSqliteBackend(db, {
+      capabilities: { pessimisticLocks: undefined },
+    });
+
+    const projected = projectGraphBackend(backend);
+
+    expect(resolveWriteFencePlan(backend)).toEqual({
+      kind: "engine-serialized",
+    });
+    expect(resolveWriteFencePlan(projected)).toEqual(
+      resolveWriteFencePlan(backend),
+    );
   });
 });
 

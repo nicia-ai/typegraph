@@ -688,6 +688,31 @@ untouched — see
 [Declared constraints require `transactions`](/backend-setup#declared-constraints-require-transactions)
 for what still works there.
 
+#### Write-fence declaration codes
+
+`capabilities.pessimisticLocks` resolves one of three write-fence plans a
+lock site consumes — see
+[Write fence declaration](/backend-setup#write-fence-declaration-pessimisticlocks).
+Three `ConfigurationError` codes name the ways a backend's fence turns out
+not to cover what a write needs:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `RECORDED_CLOCK_REQUIRES_WRITE_FENCE` | The store is constructed with `history: true` or `revisionTracking: true` — TypeGraph-owned recorded-clock allocation — against a backend whose write-fence plan resolves `unfenced`. |
+| `WRITE_FENCE_UNAVAILABLE` | A resolved plan cannot satisfy what a specific operation needs: either the plan is `unfenced` outright, or it is a declared-advisory-only `lock` plan (`tableLocks: false`) meeting an operation whose `requires` is `"table-lock"`. `details.operation` names the operation and `details.requires` names which lock kind (`"advisory-lock"` or `"table-lock"`) it needed. |
+| `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` | The backend declares `recordedTimeOwnership: "engine-native"` and the store is constructed with `history: true` or `revisionTracking: true` — TypeGraph still allocates its own recorded clock for those options, so the engine-native path is refused as an interim measure, independently of the write-fence plan. See [Recorded-time ownership](/backend-setup#recorded-time-ownership-recordedtimeownership). |
+
+All three refuse at `createStore`, never mid-flush, and the message names the
+exact declaration line to add. `IDENTITY_REQUIRES_WRITE_FENCE` is the fourth
+write-fence-related code — see the Operational Identity guard codes table
+above — but is not in this table because it guards identity construction, not
+recorded-clock allocation.
+
+These codes are not part of `RECORDED_CAPTURE_GUARD_CODES` — that set is
+closed to the three codes documented under
+[Recorded-capture guard codes](#recorded-capture-guard-codes) below, and
+`isRecordedCaptureGuardError` does not recognize any write-fence code.
+
 #### Approximate retrieval with a mismatched metric
 
 `.similarTo(vector, k, { approximate: true, metric })` is refused with a
@@ -719,6 +744,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | --- | --- |
 | `IDENTITY_REQUIRES_ATOMIC_BACKEND` | The selected adapter cannot provide the interactive transaction required by identity writes. |
 | `IDENTITY_REQUIRES_STATEMENT_EXECUTION` | The backend cannot execute the raw statements Operational Identity issues internally. |
+| `IDENTITY_REQUIRES_WRITE_FENCE` | Operational Identity was constructed against a backend whose `capabilities.pessimisticLocks` resolves `unfenced` — declare the capability, matching the engine's real locking support. See [Write-fence declaration codes](#write-fence-declaration-codes). |
 | `IDENTITY_NOT_ENABLED` | `store.identity`, `tx.identity`, `StoreView.identity`, or an identity-expanded query option was reached on a graph without `identity: { ... }` — normally caught at compile time; this is the runtime guard for a widened or `any`-typed handle. |
 | `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement, or exists without this graph's fill. Restore ledgers, or recreate and rebuild the derived closure, before serving traffic. `details.reason: "unfilled"` marks the second case: the separation relation is present but holds no row for this graph while the ledger holds a live `different` assertion across two distinct identity classes — reopen the Store (the open runs the fill) or run `rebuildIdentityClosure(store)`. A Store handle opened while the relation did not exist keeps failing until it is reopened, which is deliberate: the alternative is a confident "not separated" the moment another graph's upgrade creates the shared relation. |
 | `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` | The backend cannot publish the derived separation relation's upgrade — the `CREATE` and the fill — as one commit, on a graph that owes rows. `details.missingPorts` names what is absent: `schemaWriteTransaction` / `identityTableDdl` on the fenced path, or `executeSchemaDdl` on the schema-commit path. Refused rather than degraded, because a relation created empty and filled afterwards reads as "nothing is separated" in between. Both bundled Drizzle backends implement all three when transactions are enabled, so this is a custom-backend path. |

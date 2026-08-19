@@ -1,3 +1,4 @@
+import { createClaimsVerdictThunk } from "../backend/capabilities/resolve";
 import {
   type EdgeRow,
   type GraphReadBackend,
@@ -20,6 +21,8 @@ import {
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
 import {
+  storeBackend,
+  storeRuntime,
   transactionBackend,
   transactionNodeOperationHookRunner,
 } from "../store/runtime-port";
@@ -31,6 +34,7 @@ import {
 import { compareStrings } from "../utils/compare";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { isPlainObject } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 
 export type {
   ContributionDiagnostic,
@@ -865,7 +869,13 @@ async function closeFactCurrency<G extends GraphDef>(
     // removed (`cascade` / `disconnect`). Every edge survives untouched,
     // making a later reopen an exact inverse of this close.
     await applyNodeSoftDelete(
-      createNodeWriteContext(store.graphId, store.registry, lock),
+      createNodeWriteContext(
+        store.graphId,
+        store.registry,
+        lock,
+        createClaimsVerdictThunk(storeBackend(store)),
+        requireDefined(storeRuntime(store).uniqueSidecarBatch),
+      ),
       {
         existing: row,
         schema: registration.type.schema,
@@ -891,7 +901,13 @@ async function reopenFactCurrency<G extends GraphDef>(
     // re-inserts them (rather than the diff-based update path) before clearing
     // the tombstone and re-syncing embeddings/fulltext.
     await applyNodeResurrect(
-      createNodeWriteContext(store.graphId, store.registry, lock),
+      createNodeWriteContext(
+        store.graphId,
+        store.registry,
+        lock,
+        createClaimsVerdictThunk(storeBackend(store)),
+        requireDefined(storeRuntime(store).uniqueSidecarBatch),
+      ),
       {
         existing: row,
         schema: registration.type.schema,

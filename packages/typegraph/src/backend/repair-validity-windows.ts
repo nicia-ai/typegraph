@@ -43,6 +43,12 @@ import type {
 } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { statementExecutionMembers } from "./capabilities/bind";
+import type { STATEMENT_EXECUTION } from "./capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  statementExecutionVerdict,
+} from "./capabilities/resolve";
 import { resolvedTableNames } from "./table-names";
 import {
   type GraphBackend,
@@ -270,21 +276,25 @@ async function countMatching(
  * `"apply"` writes, so it needs the optional non-row-returning statement path.
  * `"report"` deliberately does not: `execute` is a required member, so
  * detection stays available on every backend even where repair is not.
+ *
+ * Shared by both throw sites below: the public entry refuses BEFORE opening a
+ * transaction (so an unsupported backend never pays for one), and
+ * {@link repairRelation}'s own guard exists ONLY because a nested closure
+ * cannot inherit the entry's narrowing of `verdict` to `{ supported: true }` —
+ * it can never fire at runtime, since the entry already refused. One message,
+ * two structurally-required call sites.
  */
-function requireStatements(
-  target: Pick<RepairTarget, "dialect" | "executeStatement">,
-): NonNullable<RepairTarget["executeStatement"]> {
-  if (target.executeStatement === undefined) {
-    throw new ConfigurationError(
-      "Repairing inverted validity windows requires executeStatement support.",
-      { dialect: target.dialect, mode: "apply" },
-      {
-        suggestion:
-          'Use a built-in SQLite or PostgreSQL backend to apply the repair. Detection needs no such support: call this with mode: "report" to count the affected rows on any backend.',
-      },
-    );
-  }
-  return target.executeStatement;
+function statementExecutionRequiredError(
+  dialect: GraphBackend["dialect"],
+): ConfigurationError {
+  return new ConfigurationError(
+    "Repairing inverted validity windows requires executeStatement support.",
+    { dialect, mode: "apply" },
+    {
+      suggestion:
+        'Use a built-in SQLite or PostgreSQL backend to apply the repair. Detection needs no such support: call this with mode: "report" to count the affected rows on any backend.',
+    },
+  );
 }
 
 /**
@@ -317,11 +327,19 @@ function translatedCaptureRefusal(error: unknown): unknown {
 
 async function repairRelation(
   target: RepairTarget,
+  verdict: BundleVerdictOf<typeof STATEMENT_EXECUTION>,
   table: string,
   predicate: SqlFragment,
 ): Promise<void> {
+  // Unreachable at runtime: `repairInvertedValidityWindows` already refused an
+  // unsupported backend before opening the transaction this runs inside. The
+  // check exists only so `verdict` narrows for `statementExecutionMembers` —
+  // TypeScript does not carry the entry's narrowing into this closure.
+  if (!verdict.supported) {
+    throw statementExecutionRequiredError(target.dialect);
+  }
   try {
-    await requireStatements(target)(
+    await statementExecutionMembers(target, verdict).executeStatement(
       asCompiledStatementSql(sql`
         UPDATE ${sql.identifier(table)}
         SET valid_from = NULL
@@ -413,16 +431,23 @@ function relationRecord(
  *
  * @throws ConfigurationError in `"apply"` mode when the backend cannot execute
  *   statements, when the backend is a recorded-capture wrapper, or when any
- *   scanned relation stores non-canonical bounds.
+ *   scanned relation stores non-canonical bounds. A transaction TARGET that
+ *   disagrees with the top-level verdict (missing `executeStatement` the
+ *   top-level backend has) refuses separately, with I20's
+ *   `BUNDLE_PORT_SURFACE_MISMATCH` — the per-bundle port check
+ *   `statementExecutionMembers` performs, not a second spelling of this one.
  */
 export async function repairInvertedValidityWindows(
   options: RepairInvertedWindowsOptions,
 ): Promise<RepairInvertedWindowsReport> {
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const relations = scopedRelations(options.relations);
+  const verdict = statementExecutionVerdict(options.backend);
   // Refuse before opening a transaction: a backend with no statement path can
   // never apply, whatever the scan finds.
-  if (options.mode === "apply") requireStatements(options.backend);
+  if (options.mode === "apply" && !verdict.supported) {
+    throw statementExecutionRequiredError(options.backend.dialect);
+  }
 
   return runOptionallyInTransaction(
     options.backend,
@@ -453,6 +478,7 @@ export async function repairInvertedValidityWindows(
         for (const relation of relations) {
           await repairRelation(
             target,
+            verdict,
             relationTable(tables, relation),
             predicate,
           );

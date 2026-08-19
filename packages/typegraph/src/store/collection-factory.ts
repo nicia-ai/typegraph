@@ -4,6 +4,8 @@
  * Creates typed node and edge collection proxies for both
  * Store and TransactionContext to reduce code duplication.
  */
+import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import { type GraphBackend, type TransactionBackend } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { type TemporalMode } from "../core/types";
@@ -259,6 +261,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   graphId: string,
   registry: KindRegistry,
   backend: GraphBackend | TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   operations: NodeOperations,
 ): GraphNodeCollections<G> {
   const collectionCache = new Map<string, unknown>();
@@ -281,6 +284,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
         graphId,
         kind,
         backend,
+        batchPointRead,
         ...operations,
       });
       collectionCache.set(kind, collection);
@@ -300,6 +304,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   graphId: string,
   registry: KindRegistry,
   backend: GraphBackend | TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   operations: EdgeOperations,
 ): GraphEdgeCollections<G> {
   const collectionCache = new Map<string, unknown>();
@@ -322,6 +327,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         graphId,
         kind,
         backend,
+        batchPointRead,
         ...operations,
       });
       collectionCache.set(kind, collection);

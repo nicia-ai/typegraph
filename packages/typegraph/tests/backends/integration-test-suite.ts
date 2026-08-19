@@ -36,6 +36,10 @@ import {
   registerBulkFindEndpointIntegrationTests,
   registerBulkFindHeterogeneousIntegrationTests,
   registerBulkUpsertRepeatedIdIntegrationTests,
+  registerCapabilityBundleNoThrowIntegrationTests,
+  registerCapabilityMemberDropMatrixIntegrationTests,
+  registerCapabilityPortBindingIntegrationTests,
+  registerCapabilityRefusalIntegrationTests,
   registerClaimCompensationIntegrationTests,
   registerClaimLookupPreferenceIntegrationTests,
   registerClaimOwnerIdentityIntegrationTests,
@@ -82,6 +86,7 @@ import {
   registerTrustedImportIntegrationTests,
   registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
+  registerWeightedShortestPathExtractionIntegrationTests,
 } from "./integration";
 import type {
   InspectableHistoryStore,
@@ -257,6 +262,10 @@ export function createIntegrationTestSuite<
     registerBulkFindEndpointIntegrationTests(context);
     registerBulkFindHeterogeneousIntegrationTests(context);
     registerBulkUpsertRepeatedIdIntegrationTests(context);
+    registerCapabilityBundleNoThrowIntegrationTests(context);
+    registerCapabilityMemberDropMatrixIntegrationTests(context);
+    registerCapabilityPortBindingIntegrationTests(context);
+    registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
     registerValidityEndClearingIntegrationTests(context);
@@ -293,6 +302,7 @@ export function createIntegrationTestSuite<
     registerSubgraphIntegrationTests(context);
     registerStoreViewIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
+    registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);

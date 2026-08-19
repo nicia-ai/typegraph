@@ -1,5 +1,7 @@
+import type { CLAIMS } from "../backend/capabilities/bundle-registry";
 import { projectBackend } from "../backend/derive-backend";
 import { type GraphBackend } from "../backend/types";
+import { type Assert, type ContainsAll } from "../utils/type-assert";
 
 /**
  * Members that are safe to expose through a history-enabled adapter Store.
@@ -131,6 +133,18 @@ const HISTORY_STORE_BACKEND_KEYS = [
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 type HistoryStoreBackendMember = (typeof HISTORY_STORE_BACKEND_KEYS)[number];
+
+// I13: every `claims` core member is exposed through the history-store
+// projection, or a history-enabled Store could silently lose access to a
+// member `claimSupport` binds — unfencing exactly the constrained edge
+// writes the claim relation exists to fence.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- compile-time assertion
+type _historyStoreContainsClaimsCore = Assert<
+  ContainsAll<
+    typeof HISTORY_STORE_BACKEND_KEYS,
+    (typeof CLAIMS)["core"][number]
+  >
+>;
 
 type UnsafeHistoryStoreBackendMember =
   | "clearGraph"

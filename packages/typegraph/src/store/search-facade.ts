@@ -10,6 +10,11 @@
  * type cast, with a runtime guard rejecting misspellings at the call
  * site.
  */
+import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+} from "../backend/capabilities/resolve";
 import { type GraphBackend } from "../backend/types";
 import { type GraphDef, type NodeKinds } from "../core/define-graph";
 import { type NodeRegistration, type NodeType } from "../core/types";
@@ -68,6 +73,15 @@ type StoreSearchContext = Readonly<{
   backend: GraphBackend;
   registry: KindRegistry;
   createQuery?: () => QueryBuilder<GraphDef>;
+  /**
+   * The threaded `batchPointRead` verdict, resolved once per facade. Optional
+   * at this boundary for the same reason `search.ts`'s own
+   * `StoreSearchContext` is: a contravariant position, so a new required
+   * member would be a breaking change. The constructor resolves it when
+   * legacy callers omit it; `store.ts`'s `search` getter threads its
+   * already-resolved verdict through.
+   */
+  batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ> | undefined;
 }>;
 
 /**
@@ -109,7 +123,11 @@ export class StoreSearch<G extends GraphDef> {
   readonly #context: StoreSearchContext;
 
   constructor(context: StoreSearchContext) {
-    this.#context = context;
+    this.#context = {
+      ...context,
+      batchPointRead:
+        context.batchPointRead ?? batchPointReadVerdict(context.backend),
+    };
   }
 
   /**

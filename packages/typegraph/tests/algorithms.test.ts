@@ -29,6 +29,7 @@ import type {
 } from "../src/query/sql-intent";
 import { createStore, type Store } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
+import { createStatementCountingBackend } from "./statement-counting-backend";
 import {
   collectAllEdges,
   createTestBackend,
@@ -167,41 +168,6 @@ async function seed(store: Store<TestGraph>): Promise<Fixture> {
     t3: t3.id,
     t4: t4.id,
   };
-}
-
-/**
- * Counts every statement (row-returning and temporary) issued inside a
- * traversal's transaction, so a reintroduced per-round COUNT or meeting
- * probe fails the round-trip budget tests instead of silently doubling
- * round-trips.
- */
-function createCountingBackend(
-  backend: GraphBackend,
-  collected: string[],
-): GraphBackend {
-  return deriveBackend(backend, {
-    transaction<T>(
-      fn: (tx: TransactionBackend) => Promise<T>,
-      options?: TransactionOptions,
-    ): Promise<T> {
-      return backend.transaction(async (tx) => {
-        const observedTransaction: TransactionBackend = {
-          ...tx,
-          execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
-            collected.push(requireDefined(backend.compileSql)(query).sql);
-            return tx.execute<Result>(query);
-          },
-          async executeTemporaryStatement(
-            query: CompiledTemporaryStatementSql,
-          ): Promise<void> {
-            collected.push(requireDefined(backend.compileSql)(query).sql);
-            await requireDefined(tx.executeTemporaryStatement)(query);
-          },
-        };
-        return fn(observedTransaction);
-      }, options);
-    },
-  });
 }
 
 function createPostgresTemporaryStatementFailureBackend(
@@ -1226,7 +1192,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       const reached = await observedStore.algorithms.reachable(ids.alice, {
@@ -1252,7 +1218,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       const path = await observedStore.algorithms.shortestPath(
@@ -1287,7 +1253,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       const reached = await observedStore.algorithms.reachable(ids.alice, {
@@ -1535,7 +1501,10 @@ describe("store.algorithms", () => {
 
     it("uses indexed delta frontiers without reset or redundant joins", async () => {
       const statements: string[] = [];
-      const observedBackend = createCountingBackend(backend, statements);
+      const observedBackend = createStatementCountingBackend(
+        backend,
+        statements,
+      );
       const observedStore = createStore(testGraph, observedBackend);
 
       await observedStore.algorithms.weaklyConnectedComponents({
@@ -1680,7 +1649,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const labelStore = createStore(
         testGraph,
-        createCountingBackend(createTestBackend(), statements),
+        createStatementCountingBackend(createTestBackend(), statements),
       );
       const [alpha, beta, gamma] = await Promise.all([
         labelStore.nodes.Person.create({ name: "Alpha" }, { id: "label-a" }),
@@ -1723,7 +1692,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const labelStore = createStore(
         testGraph,
-        createCountingBackend(createTestBackend(), statements),
+        createStatementCountingBackend(createTestBackend(), statements),
       );
       const [left, right] = await Promise.all([
         labelStore.nodes.Person.create({ name: "Left" }, { id: "left" }),
@@ -1756,7 +1725,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const labelStore = createStore(
         testGraph,
-        createCountingBackend(createTestBackend(), statements),
+        createStatementCountingBackend(createTestBackend(), statements),
       );
       const [left, right] = await Promise.all([
         labelStore.nodes.Person.create({ name: "Left" }, { id: "osc-a" }),
@@ -2077,7 +2046,7 @@ describe("store.algorithms", () => {
       const statements: string[] = [];
       const observedStore = createStore(
         testGraph,
-        createCountingBackend(backend, statements),
+        createStatementCountingBackend(backend, statements),
       );
 
       await observedStore.algorithms.pageRank({ edges: ["knows"] });
@@ -3034,8 +3003,9 @@ describe("store.algorithms temporal behavior", () => {
         { validFrom: recentValidFrom },
       );
 
-      // buildReachableCte: reachable/canReach/neighbors/shortestPath all share
-      // the same CTE — one assertion exercises the recursive path.
+      // resolveTemporalOptions: reachable routes through the iterative
+      // working-table path (iterative-graph-operation.ts), not a recursive
+      // CTE — this assertion exercises that path's temporal resolution.
       const reached = await freshStore.algorithms.reachable(alice.id, {
         edges: ["knows"],
         excludeSource: true,

@@ -52,6 +52,10 @@ import {
   defineNode,
 } from "../src";
 import {
+  createClaimsVerdictThunk,
+  uniqueSidecarBatchVerdict,
+} from "../src/backend/capabilities/resolve";
+import {
   deriveBackend,
   type ExactBackendOverlay,
 } from "../src/backend/derive-backend";
@@ -222,7 +226,7 @@ function withCallCounts(backend: GraphBackend): Readonly<{
   };
 }
 
-function writeContext(): WritePlanContext {
+function writeContext(backend: GraphBackend): WritePlanContext {
   return {
     graphId: GRAPH_ID,
     registry,
@@ -230,6 +234,8 @@ function writeContext(): WritePlanContext {
     historyEnabled: false,
     revisionTrackingEnabled: false,
     revisionSchema: createSqlSchema(),
+    claimsVerdict: createClaimsVerdictThunk(backend),
+    uniqueSidecarBatch: uniqueSidecarBatchVerdict(backend),
   };
 }
 
@@ -671,11 +677,15 @@ describe("write session sidecar completeness", () => {
         const rowWork = await testCase.run(raw);
         const { backend, counts, sequence } = withCallCounts(raw);
 
-        await runWritePlan(writeContext(), testCase.plan, backend, (session) =>
-          // `CASES` is heterogeneous by plan family. `Object.entries` erases
-          // the correlation between each plan and its row-work session, while
-          // the exhaustive table above establishes that correlation per entry.
-          rowWork(session as WriteSession),
+        await runWritePlan(
+          writeContext(backend),
+          testCase.plan,
+          backend,
+          (session) =>
+            // `CASES` is heterogeneous by plan family. `Object.entries` erases
+            // the correlation between each plan and its row-work session, while
+            // the exhaustive table above establishes that correlation per entry.
+            rowWork(session as WriteSession),
         );
 
         const missing = [testCase.row, ...testCase.sidecars].filter(

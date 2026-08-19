@@ -1786,3 +1786,61 @@ describe("query hook contract: each submitted statement is observable", () => {
     expect(errors[0]?.error).toBe(injectedFailure);
   });
 });
+
+describe("capability object immutability (I14)", () => {
+  // The freeze runs on the EXPOSED object — the one a factory hands back
+  // after spreading in `contributions` — not merely its top level. A
+  // top-level-only `Object.freeze` would leave every nested capability
+  // sub-object writable, including the one the factory derives last.
+  it("rejects mutating the last-derived contributions branch", () => {
+    const backend = createTestBackend();
+    const contributions = backend.capabilities.contributions as {
+      rebuild: boolean;
+    };
+
+    expect(() => {
+      contributions.rebuild = !contributions.rebuild;
+    }).toThrow(TypeError);
+  });
+
+  it("rejects mutating a nested, unconditionally-present sub-object", () => {
+    const backend = createTestBackend();
+    const graphAnalytics = backend.capabilities.graphAnalytics as {
+      supported: boolean;
+    };
+
+    expect(() => {
+      graphAnalytics.supported = false;
+    }).toThrow(TypeError);
+  });
+
+  it("does not freeze or retain caller-owned capability overrides", () => {
+    const database = new Database(":memory:");
+    const recursiveTraversal = {
+      supported: false,
+      reason: "the test engine cannot recurse",
+    };
+
+    try {
+      const backend = createSqliteBackend(drizzle(database), {
+        capabilities: { recursiveTraversal },
+      });
+
+      expect(backend.capabilities.recursiveTraversal).not.toBe(
+        recursiveTraversal,
+      );
+      expect(Object.isFrozen(backend.capabilities.recursiveTraversal)).toBe(
+        true,
+      );
+      expect(Object.isFrozen(recursiveTraversal)).toBe(false);
+
+      recursiveTraversal.reason = "the caller changed its own declaration";
+
+      expect(backend.capabilities.recursiveTraversal?.reason).toBe(
+        "the test engine cannot recurse",
+      );
+    } finally {
+      database.close();
+    }
+  });
+});

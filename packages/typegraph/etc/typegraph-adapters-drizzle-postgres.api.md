@@ -37,6 +37,9 @@ type BackendCapabilities = Readonly<{
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
+    recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public (undocumented)
@@ -4730,6 +4733,13 @@ export const nodes: drizzle_orm_pg_core.PgTableWithColumns<{
 type NullCheckOp = "isNull" | "isNotNull";
 
 // @public
+type PessimisticLockCapabilities = Readonly<{
+    advisoryLocks: boolean;
+    tableLocks: boolean;
+    serializedWriters: boolean;
+}>;
+
+// @public
 class Placeholder {
     // (undocumented)
     readonly [SQL_PLACEHOLDER_BRAND]: true;
@@ -5552,6 +5562,12 @@ type RecordKindRemovalParams = Readonly<{
     attemptedAt: string;
     removedAt: string | undefined;
     error: string | undefined;
+}>;
+
+// @public
+type RecursiveTraversalCapability = Readonly<{
+    supported: boolean;
+    reason?: string;
 }>;
 
 // @public

@@ -920,6 +920,9 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
+| `recursiveTraversal?.{supported,reason}`                                   | Whether the engine can compute a bounded transitive closure of a relation in one round trip — a recursive CTE, or a graph-native expansion operator. **Absent means supported** |
+| `pessimisticLocks?.{advisoryLocks,tableLocks,serializedWriters}`           | How this engine serializes concurrent writers, if at all — see [Write fence declaration](#write-fence-declaration-pessimisticlocks) |
+| `recordedTimeOwnership?`                                                  | Who allocates recorded-time revisions — see [Recorded-time ownership](#recorded-time-ownership-recordedtimeownership) |
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
@@ -939,6 +942,130 @@ a backend without that promise is refused with `ConfigurationError` code
 does not depend on whether the target row is already open. Omission still means
 preserve; custom backends that do not support clearing remain compatible with
 all writes that omit the option.
+
+### Recursive traversal capability
+
+Both bundled backends declare `capabilities.recursiveTraversal: { supported: true }`. **Absent
+means supported** — mirroring `returning`, not `constraintClaims`: every existing custom backend
+already runs the six recursive-CTE emission sites unconditionally, so absence meaning unsupported
+would refuse traversals that work today.
+
+```typescript
+const capabilities: Partial<BackendCapabilities> = {
+  recursiveTraversal: { supported: false, reason: "engine has no WITH RECURSIVE / equivalent" },
+};
+```
+
+A backend that genuinely lacks the primitive declares `{ supported: false, reason }`. A factory
+refuses a contradictory declaration — `supported: false` with no `reason`, or `supported: true`
+with a dangling `reason` — with `ConfigurationError` details code `CAPABILITY_DECLARATION_CONTRADICTION`.
+
+Five operations refuse when unsupported: variable-length (`traverse`) queries, `store.subgraph()`,
+historical identity class reads, identity-expanded historical queries, and the identity
+window-ledger read — each throwing `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`
+with `details.operation` naming the site and `details.reason` echoing the declaration.
+
+`weightedShortestPath` is the one exception: on a backend with temporary statements but no
+recursion, it **falls back** to a per-hop predecessor walk instead of refusing, issuing
+`pathLength + 1` extraction statements for the path a recursive CTE would have returned in one
+round trip. The unweighted `shortestPath` (along with `reachable`, `canReach`, and `neighbors`)
+emits no recursive CTE at all — it routes through the iterative working-table or inline path
+instead — so it neither refuses nor falls back regardless of this declaration.
+
+### Write fence declaration (pessimisticLocks)
+
+TypeGraph serializes a family of writes — Operational Identity's mutations, and the
+TypeGraph-owned recorded-clock allocation behind `history` / `revisionTracking` — behind a
+per-graph fence rather than trusting the engine's default isolation. `capabilities.pessimisticLocks`
+declares what this backend can provide, and `resolveWriteFencePlan` is the one place that
+declaration turns into a plan every lock site consumes instead of re-deriving:
+
+- `{ kind: "lock", advisoryLocks: true, tableLocks: boolean }` — take the declared keyed
+  (and, where needed, table) lock.
+- `{ kind: "engine-serialized" }` — no lock needed; the engine serializes writers by
+  construction (SQLite's single writer slot).
+- `{ kind: "unfenced" }` — neither. Every non-degradable fence refuses rather than running
+  unfenced.
+
+Resolution order: (1) the declared `pessimisticLocks` value, if present; (2) absent AND the
+backend was built by `createSqliteBackend` / `createPostgresBackend` — derived from `dialect`,
+which is exactly what every lock site used to compute inline; (3) absent on anything else —
+`unfenced`, because an undeclared custom backend is by definition uncertified and inferring
+lock support from `dialect` alone is the unsound inference this capability replaces.
+
+```typescript
+const capabilities: Partial<BackendCapabilities> = {
+  pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false },
+};
+```
+
+The two bundled backends declare exactly these lines — copy the one matching your engine:
+
+- PostgreSQL: `pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false }`
+- SQLite: `pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: true }`
+
+Constructing Operational Identity, or `history: true` / `revisionTracking: true`, against an
+`unfenced` backend is refused immediately at `createStore` — never mid-flush — with
+`ConfigurationError` details code `IDENTITY_REQUIRES_WRITE_FENCE` (identity) or
+`RECORDED_CLOCK_REQUIRES_WRITE_FENCE` (recorded-clock allocation), and the refusal message names
+the exact declaration line to add.
+
+A declared-advisory-only backend (`tableLocks: false`) that reaches a site whose operation
+`requires: "table-lock"` is refused with details code `WRITE_FENCE_UNAVAILABLE`, naming
+`details.operation` and `details.requires` — the lock plan resolved, but it cannot satisfy what
+this specific operation needs.
+
+### Recorded-time ownership (recordedTimeOwnership)
+
+`capabilities.recordedTimeOwnership` names who allocates recorded-time revisions. Absent means
+`"typegraph-relations"` — today's behavior for every existing backend: TypeGraph owns a clock
+row and performs the read/advance/write that the write fence serializes.
+
+Declaring `"engine-native"` together with `history: true` or `revisionTracking: true` is refused
+at construction with `ConfigurationError` details code
+`ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` — the engine-native read/write path does not exist
+yet, so admitting the declaration would move the refusal from construction to mid-flush instead.
+This refusal is independent of the write-fence plan above: it fires whether the same backend is
+fenced or unfenced, because it is about the missing read/write path, not about locking. Declaring
+`"engine-native"` **without** `history` / `revisionTracking` constructs without incident — the
+declaration has no consumer to refuse until one exists.
+
+### Capability bundles
+
+A **capability bundle** groups a set of `GraphBackend` members that one operation family needs
+together, with one verdict resolver and one member accessor, so a caller never re-derives "does
+this backend support X" from a scattered `undefined` check. Six pilot bundles ship in this
+release:
+
+| Bundle                    | Kind       | Disposition                                                                                                                                                                 |
+| ------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claims`                  | gated      | Bidirectional cross-check between the `constraintClaims` declaration and the core members; disagreement in either direction refuses with `CONSTRAINT_CLAIM_SURFACE_MISMATCH` |
+| `statementExecution`      | gated      | Core `executeStatement` absent refuses with `IDENTITY_REQUIRES_STATEMENT_EXECUTION`                                                                                          |
+| `recordedRevisionOrigins` | gated      | Core `ensureRevisionOriginsTable` absent refuses with the operation's own typed error                                                                                        |
+| `batchPointRead`          | graduated  | `getNodes` absent falls back to per-id `getNode`; `getEdges` absent falls back to per-id `getEdge`                                                                           |
+| `uniqueSidecarBatch`      | graduated  | `insertUniqueBatch` absent falls back to `issueClaimsIndividually`; `checkUniqueBatch` absent falls back to a per-key loop; `hardDeleteUniquesByNodeIds` absent refuses with the operation's own typed error |
+| `contributionHealth`      | graduated  | `verifyContributions` / `repairContributions` / `rebuildContribution` absent each refuse with the operation's own typed error; `probeContributions` absent falls back to `{ entries: [] }` |
+
+The port-mismatch rule that governs every bundle's member accessor is keyed to the disposition,
+not blanket: a `refuse`-disposition row whose backend object cannot actually reach the member
+throws that bundle's own `portSurfaceCode` (`CONSTRAINT_CLAIM_SURFACE_MISMATCH` for `claims`,
+`BUNDLE_PORT_SURFACE_MISMATCH` for the other five); a `fallback`-disposition row whose port cannot
+reach the member takes its declared fallback instead of throwing — the verdict said the member
+was there, the object it binds against says otherwise, and a fallback row is defined to degrade
+rather than assert.
+
+This bundle model ships for **six of the twenty-one** member-bearing operation families measured
+in this workstream; the remaining fifteen are a named follow-up workstream, not a silent gap —
+their members keep working exactly as before, unbundled, with an access-count ceiling that
+prevents new scattered checks from accumulating ahead of that follow-up.
+
+A backend author does not need to do anything for these six bundles today: both bundled backends
+already carry every core member each bundle's `dialects` scope requires. A future conformance kit
+will certify a **third-party** backend by resolving every bundle's verdict against the declared
+capabilities and the object the calls actually execute on, and asserting the disposition-keyed
+port-mismatch rule above holds — a backend author preparing for that kit should make sure a
+declared capability (`constraintClaims`, `contributions`, …) is truthful about which members the
+backend object actually implements, not just which capability fields it sets.
 
 ### Declared constraints require `transactions`
 
@@ -1064,6 +1191,10 @@ TypeGraph choosing separate query semantics per backend:
 | Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
+| Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
+| Write fence (`capabilities.pessimisticLocks`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares neither resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
+| Recorded-time ownership (`capabilities.recordedTimeOwnership`) | `"typegraph-relations"` (default)          | `"typegraph-relations"` (default)          | Both bundled backends own the clock today. `"engine-native"` is refused at construction as an interim measure whenever it is combined with `history`/`revisionTracking`, on either dialect |
+| Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 
 Identity support also has a **driver** dimension inside each dialect:
 

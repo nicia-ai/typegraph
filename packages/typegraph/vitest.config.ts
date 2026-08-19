@@ -30,6 +30,12 @@ const PGLITE_GLOBS = [
   "tests/constraint-write-fence.test.ts",
   "tests/contribution-rebuild-lock.test.ts",
   "tests/materialize-trigram-extension.test.ts",
+  // T15/T16 (B10): each posture in `tests/lock-fence-test-utils.ts`'s
+  // `createLoggedPostgresBackend` boots its own in-process PGlite instance —
+  // several per file — so these belong here for the same reason the
+  // recorder suites do, not on the default five-second budget.
+  "tests/lock-fence-plan.test.ts",
+  "tests/lock-fence-refusal.test.ts",
 ];
 
 const SHARED_EXCLUDE = [

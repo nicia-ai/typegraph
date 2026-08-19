@@ -300,4 +300,42 @@ describe("CI workflow contract", () => {
       /test-strict-local-consumers:[\s\S]*?run: pnpm test:strict-local-consumers/,
     );
   });
+
+  it("fetches the published tag the API-surface check compares against", () => {
+    const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+
+    expect(workflow).toContain("git fetch --no-tags --depth=1 origin");
+    expect(workflow).toContain(
+      "+refs/tags/@nicia-ai/typegraph@*:refs/tags/@nicia-ai/typegraph@*",
+    );
+  });
+
+  it("runs the API-surface check after the API report in the compat job", () => {
+    const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+
+    expect(workflow).toMatch(
+      /test-typescript-compat:[\s\S]*?Verify public API report[\s\S]*?if: matrix\.typescript-version == '5\.9\.3'[\s\S]*?Fetch last published tag for API-surface comparison[\s\S]*?if: matrix\.typescript-version == '5\.9\.3'[\s\S]*?Verify public API surface compatibility[\s\S]*?\n {2}test-postgres:/,
+    );
+  });
+
+  it("keeps the compat job checkout shallow and its script name real", () => {
+    const workflow = readFileSync(WORKFLOW_PATH, "utf8");
+    const packageManifest = JSON.parse(
+      readFileSync(
+        fileURLToPath(new URL("../package.json", import.meta.url)),
+        "utf8",
+      ),
+    ) as Readonly<{ scripts: Readonly<Record<string, string>> }>;
+
+    // Bound the match to the compat job's own block (up to the next
+    // top-level `  job-name:` key) so a later job's bare checkout can't
+    // stand in for this one.
+    const jobBlockMatch =
+      /\n {2}test-typescript-compat:\n[\s\S]*?(?=\n {2}\S)/.exec(workflow);
+    expect(jobBlockMatch).not.toBeNull();
+    expect(jobBlockMatch?.[0]).toMatch(/- uses: actions\/checkout@v6\n\n/);
+    expect(packageManifest.scripts["test:api-surface"]).toBe(
+      "node --import tsx scripts/api-surface-compat.ts",
+    );
+  });
 });

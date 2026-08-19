@@ -155,6 +155,8 @@ import {
   createStoreWithSchema,
   defineInternalGraph,
   defineNode,
+  requireWriteFence,
+  resolveWriteFencePlan,
   serializeSchema,
   sha256Hex,
   sql,
@@ -356,6 +358,7 @@ async function claimSidecarOwnership(
  */
 type SidecarClaimPort = SidecarInspectionPort &
   Readonly<{
+    capabilities: GraphBackend["capabilities"];
     dialect: GraphBackend["dialect"];
     executeStatement: NonNullable<GraphBackend["executeStatement"]>;
   }>;
@@ -423,15 +426,35 @@ type SidecarClaimPort = SidecarInspectionPort &
  * complete before the callback runs. Unlike the identity path, this fence is
  * always one TypeGraph opened itself, never one adopted from a caller's
  * `DEFERRED` transaction, so that premise holds unconditionally.
+ *
+ * Resolves a {@link resolveWriteFencePlan}: the `lock` arm takes the relation
+ * lock below (needs `tableLocks`), and the `engine-serialized` arm is the
+ * SQLite writer-slot case this doc already describes.
  */
 async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
-  if (tx.dialect !== "postgres") return;
-  const schema = createSqlSchema(tx.tableNames);
-  await tx.executeStatement(
-    asCompiledStatementSql(
-      sql`LOCK TABLE ${schema.nodesTable}, ${schema.edgesTable} IN SHARE ROW EXCLUSIVE MODE`,
-    ),
+  const plan = resolveWriteFencePlan(tx);
+  const fence = requireWriteFence(
+    plan,
+    "graph-merge provenance fence",
+    "table-lock",
   );
+  switch (fence.kind) {
+    case "lock": {
+      const schema = createSqlSchema(tx.tableNames);
+      await tx.executeStatement(
+        asCompiledStatementSql(
+          sql`LOCK TABLE ${schema.nodesTable}, ${schema.edgesTable} IN SHARE ROW EXCLUSIVE MODE`,
+        ),
+      );
+      return;
+    }
+    case "engine-serialized": {
+      return;
+    }
+    default: {
+      fence satisfies never;
+    }
+  }
 }
 
 /**

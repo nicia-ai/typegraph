@@ -206,6 +206,9 @@ export type BackendCapabilities = Readonly<{
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
+    recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -267,6 +270,129 @@ export type BaseTraversalOptions<G extends GraphDef> = TemporalAlgorithmOptions 
 }>;
 
 // @public
+const BATCH_POINT_READ: {
+    readonly id: "batchPointRead";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "getNodes";
+        readonly members: readonly ["getNodes"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+    }, {
+        readonly id: "getEdges";
+        readonly members: readonly ["getEdges"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "search hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/search.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import reference validation";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getNode in the routing loop";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "import edge endpoint hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-row getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "interchange/import.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "edge batch endpoint priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip the priming pass; endpoint validation reads per-row";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/edge-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node create batch priming";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "skip priming; per-row probes";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node collection batch load";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/collections/node-collection.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "node batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/node-fetch.ts";
+            readonly member: "getNodes";
+        }];
+    }, {
+        readonly operation: "edge batch fetch";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getEdge";
+        };
+        readonly requires: readonly ["getEdges"];
+        readonly sites: readonly [{
+            readonly file: "store/edge-fetch.ts";
+            readonly member: "getEdges";
+        }];
+    }, {
+        readonly operation: "identity member hydration";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-id getNode";
+        };
+        readonly requires: readonly ["getNodes"];
+        readonly sites: readonly [{
+            readonly file: "store/store.ts";
+            readonly member: "getNodes";
+        }];
+    }];
+};
+
+// @public
 export type BatchableQuery<R = unknown> = Readonly<{
     executeOn: (backend: GraphBackend | TransactionBackend) => Promise<readonly R[]>;
 }>;
@@ -324,6 +450,91 @@ export type BulkOperationHookContext = HookContext & Readonly<{
     entity: "node";
     kind: string;
 }>;
+
+// @public
+type BundleVerdictOf<D extends CapabilityBundleDefinition> = D extends ({
+    kind: "graduated";
+    extras: infer XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[];
+}) ? GraduatedBundleVerdict<SpecOf<XS>> : D extends ({
+    kind: "gated";
+    core: readonly (infer MCore extends OptionalGraphBackendMember)[];
+    extras?: infer XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[] | undefined;
+}) ? GatedBundleVerdict<MCore, SpecOf<XS extends (readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[]) ? XS : []>> : never;
+
+// @public (undocumented)
+type CapabilityBundleCommon = Readonly<{
+    id: string;
+    dialects?: readonly SqlDialect[];
+    declaration?: keyof BackendCapabilities;
+    crossCheck: CapabilityCrossCheck;
+    portSurfaceCode: string;
+    operations: readonly CapabilityBundleOperation[];
+}>;
+
+// @public (undocumented)
+type CapabilityBundleDefinition = GatedBundleDefinition<OptionalGraphBackendMember, string, OptionalGraphBackendMember> | GraduatedBundleDefinition<string, OptionalGraphBackendMember>;
+
+// @public
+type CapabilityBundleDisposition =
+/** Absence refuses, with ONE typed error per operation. */
+Readonly<{
+    kind: "refuse";
+    code: string;
+}>
+/** Absence degrades along a named, tested path. Never refuses. */
+| Readonly<{
+    kind: "fallback";
+    fallback: string;
+}>;
+
+// @public
+type CapabilityBundleExtra<Id extends string, M extends OptionalGraphBackendMember> = Readonly<{
+    id: Id;
+    members: readonly M[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
+type CapabilityBundleOperation = Readonly<{
+    operation: string;
+    disposition: CapabilityBundleDisposition;
+    requires?: readonly string[];
+    sites: readonly CapabilityBundleOperationSite[];
+    declarationGate?: true;
+}>;
+
+// @public
+type CapabilityBundleOperationSite = Readonly<{
+    file: string;
+    member: OptionalGraphBackendMember;
+    lines?: readonly number[];
+    rewiring?: Readonly<{
+        class: "deferred" | "reasoned";
+        reason: string;
+    }>;
+}>;
+
+// @public (undocumented)
+type CapabilityCrossCheck =
+/** Presence alone. The default, and 5 of the 6 pilot bundles. */
+"none"
+/**
+* Declared-but-missing refuses; implements-without-declaring resolves
+* supported. One-directional. No bundle uses this today — it exists so a
+* future cross-check has a shape to grow into, one that must carry its own
+* justification row when adopted.
+*/
+| "declared-implies-members"
+/**
+* Disagreement in EITHER direction refuses. `claims` only — the existing
+* `CONSTRAINT_CLAIM_SURFACE_MISMATCH`, whose bidirectionality carries a
+* fence-specific justification ("a silent fallback would unfence exactly
+* the writes the capability exists to fence") that no other family has.
+*/
+| "bidirectional";
+
+// @public
+type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMember>>;
 
 // @public
 export type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -479,6 +690,7 @@ type CompileQueryOptions = Readonly<{
     recordedReadBinding?: RecordedReadBinding | undefined;
     readInstant?: ReadInstantMode | undefined;
     identitySameIdAcrossKinds?: "fold" | "ignore" | undefined;
+    recursiveTraversal?: RecursiveTraversalVerdict | undefined;
 }>;
 
 // @public
@@ -2149,6 +2361,21 @@ export type ExternalRefValue<T extends string = string> = Readonly<{
 }>;
 
 // @public
+type ExtraVerdict<M extends OptionalGraphBackendMember> = Readonly<{
+    present: true;
+    members: readonly M[];
+}> | Readonly<{
+    present: false;
+    missing: readonly M[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
+type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
+    [K in keyof X]: ExtraVerdict<X[K]>;
+}>;
+
+// @public
 export function field(alias: string, ...path: string[]): FieldRef;
 
 // @public
@@ -2367,6 +2594,28 @@ export type FulltextStrategy = Readonly<{
 }>;
 
 // @public
+type GatedBundleDefinition<MCore extends OptionalGraphBackendMember, XId extends string = never, MExtra extends OptionalGraphBackendMember = never> = CapabilityBundleCommon & Readonly<{
+    kind: "gated";
+    core: readonly MCore[];
+    extras?: readonly CapabilityBundleExtra<XId, MExtra>[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public (undocumented)
+type GatedBundleVerdict<MCore extends OptionalGraphBackendMember, X extends CapabilityExtraSpec> = Readonly<{
+    supported: true;
+    bundle: string;
+    members: readonly MCore[];
+    extras: ExtraVerdicts<X>;
+    missingExtras: readonly (keyof X)[];
+}> | Readonly<{
+    supported: false;
+    bundle: string;
+    missing: readonly MCore[];
+    disposition: CapabilityBundleDisposition;
+}>;
+
+// @public
 export function generateId(): string;
 
 // @public
@@ -2401,6 +2650,19 @@ export type GetOrCreateAction = "created" | "found" | "updated" | "resurrected";
 
 // @public (undocumented)
 export function getSearchableMetadata(schema: z.ZodType): SearchableMetadata | undefined;
+
+// @public
+type GraduatedBundleDefinition<XId extends string, MExtra extends OptionalGraphBackendMember> = CapabilityBundleCommon & Readonly<{
+    kind: "graduated";
+    extras: readonly CapabilityBundleExtra<XId, MExtra>[];
+}>;
+
+// @public
+type GraduatedBundleVerdict<X extends CapabilityExtraSpec> = Readonly<{
+    bundle: string;
+    extras: ExtraVerdicts<X>;
+    missingExtras: readonly (keyof X)[];
+}>;
 
 // @public
 const GRAPH_DEF_BRAND: "__graphDef";
@@ -4422,6 +4684,14 @@ export type OperationHookContext = HookContext & Readonly<{
 }>;
 
 // @public
+type OptionalGraphBackendMember = OptionalKeys<GraphBackend>;
+
+// @public
+type OptionalKeys<T> = {
+    [K in keyof T]-?: object extends Pick<T, K> ? K : never;
+}[keyof T];
+
+// @public
 export function orderByFragment<G extends GraphDef, A extends string>(alias: A, field: string, direction?: "asc" | "desc"): FlexibleQueryFragment<G>;
 
 // @public
@@ -4507,6 +4777,13 @@ export type PersonalizedPageRankSeed<G extends GraphDef> = Readonly<{
     id: string;
     kind: NodeKinds<G>;
     weight?: number;
+}>;
+
+// @public
+type PessimisticLockCapabilities = Readonly<{
+    advisoryLocks: boolean;
+    tableLocks: boolean;
+    serializedWriters: boolean;
 }>;
 
 // @public (undocumented)
@@ -5000,6 +5277,9 @@ type RecordKindRemovalParams = Readonly<{
 }>;
 
 // @public
+const RECURSIVE_TRAVERSAL_VERDICT: unique symbol;
+
+// @public
 type RecursiveAlias<T extends "depth" | "path"> = Readonly<{
     type: T;
 }>;
@@ -5014,6 +5294,12 @@ type RecursiveAliasValue<RA> = RA extends RecursiveAlias<"depth"> ? number : RA 
 type RecursiveCyclePolicy = "prevent" | "allow";
 
 // @public
+export type RecursiveTraversalCapability = Readonly<{
+    supported: boolean;
+    reason?: string;
+}>;
+
+// @public
 export type RecursiveTraversalOptions = Readonly<{
     minHops?: number;
     maxHops?: number;
@@ -5021,6 +5307,16 @@ export type RecursiveTraversalOptions = Readonly<{
     path?: boolean | string;
     depth?: boolean | string;
 }>;
+
+// @public
+export type RecursiveTraversalVerdict = Readonly<{
+    [RECURSIVE_TRAVERSAL_VERDICT]: true;
+} & ({
+    supported: true;
+} | {
+    supported: false;
+    reason: string;
+})>;
 
 // @public
 export type ReembedFunction = (nodes: readonly Node[]) => Promise<ReadonlyMap<string, readonly number[]>> | ReadonlyMap<string, readonly number[]>;
@@ -5559,6 +5855,11 @@ type SimilarToOptions = Readonly<{
 export type SortDirection = "asc" | "desc";
 
 // @public
+type SpecOf<XS extends readonly CapabilityBundleExtra<string, OptionalGraphBackendMember>[]> = {
+    [K in XS[number] as K["id"]]: K["members"][number];
+};
+
+// @public
 export const sql: SqlTag;
 
 // @public
@@ -5854,6 +6155,7 @@ export interface StoreRef<in out T> {
 // @internal
 type StoreRuntime<G extends GraphDef> = Readonly<{
     backend: GraphBackend;
+    uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
@@ -6058,6 +6360,7 @@ type StoreSearchContext = Readonly<{
     backend: GraphBackend;
     registry: KindRegistry;
     createQuery?: () => QueryBuilder<GraphDef>;
+    batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ> | undefined;
 }>;
 
 // @public (undocumented)
@@ -6567,6 +6870,124 @@ type UnionableQueryState = Readonly<{
     traversals?: readonly Traversal[];
     selectFn?: (context: SelectContext<AliasMap, EdgeAliasMap>) => unknown;
 }>;
+
+// @public
+const UNIQUE_SIDECAR_BATCH: {
+    readonly id: "uniqueSidecarBatch";
+    readonly kind: "graduated";
+    readonly crossCheck: "none";
+    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
+    readonly extras: readonly [{
+        readonly id: "insertUniqueBatch";
+        readonly members: readonly ["insertUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+    }, {
+        readonly id: "checkUniqueBatch";
+        readonly members: readonly ["checkUniqueBatch"];
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+    }, {
+        readonly id: "hardDeleteUniquesByNodeIds";
+        readonly members: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+    }];
+    readonly operations: readonly [{
+        readonly operation: "unique batch probe";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "per-key checkUnique loop";
+        };
+        readonly requires: readonly ["checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1275, 1320];
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1575, 1593];
+        }];
+    }, {
+        readonly operation: "unique claim issue";
+        readonly disposition: {
+            readonly kind: "fallback";
+            readonly fallback: "issueClaimsIndividually";
+        };
+        readonly requires: readonly ["insertUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }, {
+        readonly operation: "unique reap by node ids";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "UNIQUE_REAP_BY_NODE_IDS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }];
+    }, {
+        readonly operation: "set-based node update";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-write-pipeline.ts";
+            readonly member: "checkUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "insertUniqueBatch";
+        }, {
+            readonly file: "store/operations/node-operations.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [1993];
+        }];
+    }, {
+        readonly operation: "resolved node write";
+        readonly disposition: {
+            readonly kind: "refuse";
+            readonly code: "RESOLVED_NODE_UNIQUENESS_UNSUPPORTED";
+        };
+        readonly requires: readonly ["hardDeleteUniquesByNodeIds", "insertUniqueBatch", "checkUniqueBatch"];
+        readonly sites: readonly [{
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [211];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "checkUniqueBatch";
+            readonly lines: readonly [292];
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "hardDeleteUniquesByNodeIds";
+        }, {
+            readonly file: "store/claims/resolved-node-claims.ts";
+            readonly member: "insertUniqueBatch";
+        }];
+    }];
+};
 
 // @public
 type UniqueAlias<A extends string, Aliases extends AliasMap> = A extends keyof Aliases ? `Error: Alias '${A}' is already in use` : A;

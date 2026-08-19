@@ -275,6 +275,14 @@ import { type SqlDialect } from "../query/dialect/types";
 
 export type { SqlDialect } from "../query/dialect/types";
 
+import { type RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
+
+export type { RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
+
+import { type PessimisticLockCapabilities } from "./capabilities/write-fence";
+
+export type { PessimisticLockCapabilities } from "./capabilities/write-fence";
+
 /**
  * Backend capabilities that vary by dialect.
  */
@@ -340,6 +348,50 @@ export type BackendCapabilities = Readonly<{
    * equivalent to every member `false`).
    */
   contributions?: ContributionCapabilities | undefined;
+  /**
+   * Whether this engine can compute a bounded transitive closure of a
+   * relation in one round trip (a recursive CTE, or a graph-native
+   * expansion operator).
+   *
+   * Absent means SUPPORTED. Every engine TypeGraph ships supports it, and
+   * every custom backend on this release already has every recursion site
+   * run against it unconditionally: making absence mean `false` would
+   * refuse traversals that work today. See
+   * {@link RecursiveTraversalCapability} for the full contract.
+   */
+  recursiveTraversal?: RecursiveTraversalCapability | undefined;
+  /**
+   * Whether this engine can serialize concurrent writers, and how: keyed
+   * advisory locks, relation-level table locks, or a single writer slot that
+   * serializes by construction.
+   *
+   * Absent means `unfenced` for any backend the first-party factories did
+   * not build (`resolveWriteFencePlan`, `src/backend/capabilities/write-fence.ts`):
+   * an undeclared custom backend is refused at construction for Operational
+   * Identity and for TypeGraph-owned recorded-clock allocation
+   * (`history` / `revisionTracking`) rather than silently emitting locks the
+   * engine may not honor. Every first-party backend declares this member
+   * (`SQLITE_CAPABILITIES`, `POSTGRES_CAPABILITIES`), so the refusal is
+   * reachable only by a backend this library did not build.
+   */
+  pessimisticLocks?: PessimisticLockCapabilities | undefined;
+  /**
+   * Who allocates recorded-time revisions. `"typegraph-relations"` (the
+   * default, and every first-party backend) means TypeGraph owns a clock row
+   * and performs the read/advance/write that `lockRecordedClock` fences —
+   * which is undegradable, so an `unfenced` engine is refused at
+   * construction. `"engine-native"` means the engine supplies the recorded
+   * axis itself (WS9's ruled BraidDB posture: pinned-handle `AS OF`).
+   *
+   * TODAY THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
+   * F8, owned by WS9). The capture path allocates the TypeGraph clock
+   * unconditionally, so declaring `"engine-native"` and enabling
+   * clock-allocating history/revision tracking is refused at construction by
+   * its own typed error naming the interim state
+   * (`refuseEngineNativeRecordedTimeNotYetImplemented`,
+   * `src/backend/capabilities/recorded-time-ownership.ts`).
+   */
+  recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 /** Keeps session-scoped analytics honest when a required SQL feature is absent. */
@@ -3840,6 +3892,12 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: false }),
+  recursiveTraversal: Object.freeze({ supported: true }),
+  pessimisticLocks: Object.freeze({
+    advisoryLocks: false,
+    tableLocks: false,
+    serializedWriters: true,
+  }),
 });
 
 /**
@@ -3855,4 +3913,10 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   constraintClaims: true,
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
+  recursiveTraversal: Object.freeze({ supported: true }),
+  pessimisticLocks: Object.freeze({
+    advisoryLocks: true,
+    tableLocks: true,
+    serializedWriters: false,
+  }),
 });

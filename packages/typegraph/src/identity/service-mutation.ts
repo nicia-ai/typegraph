@@ -1,3 +1,8 @@
+import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+  resolveRecursiveTraversal,
+} from "../backend/capabilities/recursive-traversal";
 import { type GraphDef } from "../core/define-graph";
 import {
   IdentityContradictionError,
@@ -356,19 +361,44 @@ function windowOverlapSql(
   `;
 }
 
+/**
+ * @internal Exported only so the T3 type test can witness that the branded
+ * verdict is REQUIRED here. Not re-exported from any entrypoint.
+ */
+export type IdentityWindowLedgerInput = Readonly<{
+  target: Backend;
+  schema: SqlSchema;
+  graphId: string;
+  requests: readonly IdentityWindowValidationRequest[];
+  operationInstant: string;
+  sameIdAcrossKinds: "fold" | "ignore";
+  recursiveTraversal: RecursiveTraversalVerdict;
+}>;
+
 async function loadIdentityWindowLedger(
-  target: Backend,
-  schema: SqlSchema,
-  graphId: string,
-  requests: readonly IdentityWindowValidationRequest[],
-  operationInstant: string,
-  sameIdAcrossKinds: "fold" | "ignore",
+  input: IdentityWindowLedgerInput,
 ): Promise<
   Readonly<{
     nodes: readonly IdentityWindowNode[];
     assertions: IdentityAssertionStorageRow[];
   }>
 > {
+  // The verdict is applied or refused, never skipped — including on the path
+  // below that ends up needing no rows. Asserting before the early return
+  // keeps a stated capability from being silently ignored just because this
+  // particular call happens to have nothing active to validate.
+  assertRecursiveTraversal(
+    input.recursiveTraversal,
+    "identity window ledger read",
+  );
+  const {
+    target,
+    schema,
+    graphId,
+    requests,
+    operationInstant,
+    sameIdAcrossKinds,
+  } = input;
   const activeRequests = requests.filter(
     (request) => request.window.effective !== "empty",
   );
@@ -653,14 +683,15 @@ export async function createIdentityWindowValidator(
   operationInstant: string,
   ignoredAssertionIds: ReadonlySet<string> = new Set(),
 ): Promise<IdentityWindowValidator> {
-  const ledger = await loadIdentityWindowLedger(
+  const ledger = await loadIdentityWindowLedger({
     target,
-    ctx.schema,
-    ctx.graphId,
+    schema: ctx.schema,
+    graphId: ctx.graphId,
     requests,
     operationInstant,
-    ctx.sameIdAcrossKinds,
-  );
+    sameIdAcrossKinds: ctx.sameIdAcrossKinds,
+    recursiveTraversal: resolveRecursiveTraversal(target.capabilities),
+  });
   if (ignoredAssertionIds.size > 0) {
     const retained = ledger.assertions.filter(
       (assertion) => !ignoredAssertionIds.has(assertion.id),

@@ -844,12 +844,7 @@ export async function migrateRecordedAnchor(
 export async function deleteLegacyRecordedAnchorMap(
   options: DeleteLegacyRecordedAnchorMapOptions,
 ): Promise<void> {
-  if (options.backend.executeStatement === undefined) {
-    throw new ConfigurationError(
-      "Deleting a recorded anchor migration map requires executeStatement support.",
-      { dialect: options.backend.dialect },
-    );
-  }
+  requireStatements(options.backend);
   const tables = resolvedTableNames(options.backend, options.tableNames);
   const mapTable = mappingTableName(tables, options.mappingTableName);
   await options.backend.transaction(async (target) => {

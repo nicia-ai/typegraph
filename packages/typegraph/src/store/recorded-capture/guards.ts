@@ -1,4 +1,8 @@
 import {
+  recordedRevisionOriginsVerdict,
+  statementExecutionVerdict,
+} from "../../backend/capabilities/resolve";
+import {
   type GraphBackend,
   type TransactionBackend,
   type TransactionOptions,
@@ -248,7 +252,7 @@ export function assertCapturableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.executeStatement === undefined) {
+  if (!statementExecutionVerdict(backend).supported) {
     throw new ConfigurationError(
       "history: true requires a backend that supports executeStatement.",
       { dialect: backend.dialect },
@@ -296,7 +300,7 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.executeStatement === undefined) {
+  if (!statementExecutionVerdict(backend).supported) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend that supports executeStatement.",
       { dialect: backend.dialect },
@@ -316,7 +320,7 @@ export function assertRevisionTrackableBackend(backend: GraphBackend): void {
       },
     );
   }
-  if (backend.ensureRevisionOriginsTable === undefined) {
+  if (!recordedRevisionOriginsVerdict(backend).supported) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend that can bootstrap revision origins.",
       { dialect: backend.dialect },

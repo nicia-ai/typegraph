@@ -1,3 +1,10 @@
+import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind";
+import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
+import {
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../../backend/capabilities/write-fence";
 import { type GraphBackend } from "../../backend/types";
 import {
   createRecordedInstant,
@@ -7,7 +14,6 @@ import {
 } from "../../core/temporal";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
-import type { SqlDialect } from "../../query/dialect/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { canonicalizeDatabaseTimestamp, nowIso } from "../../utils/date";
@@ -22,7 +28,7 @@ type RevisionOriginRow = Readonly<{ origin: unknown }>;
 
 type RecordedClockBackend = Pick<
   GraphBackend,
-  "dialect" | "execute" | "executeStatement"
+  "capabilities" | "dialect" | "execute" | "executeStatement"
 >;
 
 type RevisionOriginBackend = Pick<
@@ -41,11 +47,6 @@ const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
   "typegraph:recorded-graph-write";
-
-const USES_RECORDED_GRAPH_ADVISORY_LOCK = {
-  postgres: true,
-  sqlite: false,
-} as const satisfies Record<SqlDialect, boolean>;
 
 /**
  * Builds a `pg_advisory_xact_lock` call scoped to a `(namespace, graphId)` pair.
@@ -167,12 +168,26 @@ async function acquireRecordedGraphWriteLock(
 }
 
 export async function lockRecordedGraphWrite(
-  target: Pick<GraphBackend, "dialect" | "execute">,
+  target: Pick<GraphBackend, "capabilities" | "dialect" | "execute">,
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  if (!USES_RECORDED_GRAPH_ADVISORY_LOCK[target.dialect]) {
-    return graphWriteLockEvidence();
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(
+    plan,
+    "recorded graph write",
+    "advisory-lock",
+  );
+  switch (fence.kind) {
+    case "engine-serialized": {
+      return graphWriteLockEvidence();
+    }
+    case "lock": {
+      break;
+    }
+    default: {
+      fence satisfies never;
+    }
   }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
@@ -321,11 +336,11 @@ export async function readRevisionOrigin(
  */
 export async function ensureRevisionOrigin(
   target: RevisionOriginBackend,
+  verdict: BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>,
   schema: SqlSchema,
   graphId: string,
 ): Promise<string> {
-  const ensureTable = target.ensureRevisionOriginsTable;
-  if (ensureTable === undefined) {
+  if (!verdict.supported) {
     throw new ConfigurationError(
       "Revision tracking requires a backend that can bootstrap revision origins.",
       { dialect: target.dialect },
@@ -335,6 +350,8 @@ export async function ensureRevisionOrigin(
       },
     );
   }
+  const { ensureRevisionOriginsTable: ensureTable } =
+    recordedRevisionOriginsMembers(target, verdict);
   await ensureTable();
   const existing = await readRevisionOrigin(target, schema, graphId);
   if (existing !== undefined) return existing;
@@ -439,14 +456,20 @@ async function lockRecordedClock(
   // Serialize the read/advance/write sequence per graph. Without this,
   // concurrent transactions can read the same previous clock value and
   // allocate the same recorded instant.
-  switch (target.dialect) {
-    case "postgres": {
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(
+    plan,
+    "recorded clock allocation",
+    "advisory-lock",
+  );
+  switch (fence.kind) {
+    case "lock": {
       await target.execute(
         asCompiledRowsSql(recordedClockAdvisoryLockSql(graphId)),
       );
       return;
     }
-    case "sqlite": {
+    case "engine-serialized": {
       // SQLite: the seed-UPSERT exists only to take the clock row's write lock
       // before reading when the enclosing transaction did NOT already hold one.
       // Bundled transactions open BEGIN IMMEDIATE, so the lock is already held.
@@ -462,7 +485,7 @@ async function lockRecordedClock(
       return;
     }
     default: {
-      target.dialect satisfies never;
+      fence satisfies never;
     }
   }
 }

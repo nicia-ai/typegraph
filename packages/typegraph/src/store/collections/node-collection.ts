@@ -5,6 +5,9 @@
  */
 import { type z } from "zod";
 
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
   rowPropsToObject,
@@ -169,6 +172,8 @@ export type NodeCollectionConfig = Readonly<{
   graphId: string;
   kind: string;
   backend: GraphBackend | TransactionBackend;
+  /** Threaded `batchPointRead` verdict — never re-resolved here. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
   rowToNode: (row: NodeRow) => Node;
   /** See NodeOperations.maybeRefreshStatisticsAfterBulk. */
@@ -348,6 +353,7 @@ export function createNodeCollection<
     graphId,
     kind,
     backend,
+    batchPointRead,
     defaultTemporalMode,
     rowToNode,
     executeCreate: executeNodeCreate,
@@ -403,7 +409,13 @@ export function createNodeCollection<
     ): Promise<readonly (Node<N> | undefined)[]> {
       if (ids.length === 0) return [];
 
-      const rowsById = await getNodeRowsByIds(backend, graphId, kind, ids);
+      const rowsById = await getNodeRowsByIds(
+        backend,
+        batchPointRead,
+        graphId,
+        kind,
+        ids,
+      );
       // Resolve the coordinate once so the whole batch observes one instant.
       const matches = temporalRowMatcher(options);
       return ids.map((id) => {
@@ -753,7 +765,12 @@ export function createNodeCollection<
         // props, not just deleted_at.
         const existingMap = new Map<string, NodeRow>();
 
-        if (target.getNodes === undefined) {
+        const boundGetNodes = bindExtraIfReachable(
+          target,
+          batchPointRead.extras.getNodes,
+          BATCH_POINT_READ.id,
+        );
+        if (boundGetNodes === undefined) {
           const rows = await Promise.all(
             ids.map((id) => target.getNode(graphId, kind, id)),
           );
@@ -761,7 +778,7 @@ export function createNodeCollection<
             if (row !== undefined) existingMap.set(row.id, row);
           }
         } else {
-          const rows = await target.getNodes(graphId, kind, ids);
+          const rows = await boundGetNodes.getNodes(graphId, kind, ids);
           for (const row of rows) {
             existingMap.set(row.id, row);
           }

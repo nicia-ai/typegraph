@@ -14,6 +14,8 @@
  * any delete path having run. `purgeEdgeClaims` exists to bound table growth,
  * not to make the fence correct.
  */
+import type { CLAIMS } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type ClaimEdgeCardinalityParams,
   type GraphBackend,
@@ -248,9 +250,10 @@ type ClaimTargetBackend = GraphBackend | TransactionBackend;
  */
 export async function claimEdgeCardinality(
   backend: ClaimTargetBackend,
+  verdict: BundleVerdictOf<typeof CLAIMS>,
   claim: ClaimEdgeCardinalityParams,
 ): Promise<void> {
-  const support = claimSupport(backend);
+  const support = claimSupport(backend, verdict);
   if (!support.supported) return;
   const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
     support.claims.claimEdgeCardinality(claim),
@@ -270,10 +273,11 @@ export async function claimEdgeCardinality(
  */
 export async function claimEdgeCardinalityBatch(
   backend: ClaimTargetBackend,
+  verdict: BundleVerdictOf<typeof CLAIMS>,
   claims: readonly ClaimEdgeCardinalityParams[],
 ): Promise<void> {
   if (claims.length === 0) return;
-  const support = claimSupport(backend);
+  const support = claimSupport(backend, verdict);
   if (!support.supported) return;
   const ordered = claims
     .map((claim) => ({ claim, target: edgeCardinalityClaimTarget(claim) }))
@@ -302,11 +306,12 @@ export async function claimEdgeCardinalityBatch(
  */
 export async function purgeEdgeClaims(
   backend: ClaimTargetBackend,
+  verdict: BundleVerdictOf<typeof CLAIMS>,
   graphId: string,
   edgeIds: readonly string[],
 ): Promise<void> {
   if (edgeIds.length === 0) return;
-  const support = claimSupport(backend);
+  const support = claimSupport(backend, verdict);
   if (!support.supported) return;
   await withEdgeClaimRelationPrecondition(graphId, () =>
     support.claims.purgeEdgeClaims({ graphId, edgeIds }),

@@ -1,4 +1,8 @@
 import {
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../backend/capabilities/write-fence";
+import {
   type GraphBackend,
   type IdentityTableNames,
   type SchemaCommitPreflightBackend,
@@ -413,14 +417,30 @@ export async function withIdentityDdlRaceRetry<T>(
  * `executeIdentityStatement` turns into a typed refusal (#447). Schema
  * transitions run inside the backend's own schema-write transaction, so this
  * path is not reachable from an adopted frame today.
+ *
+ * Resolves a {@link resolveWriteFencePlan}: the `lock` arm takes the advisory
+ * lock below, and the `engine-serialized` arm is the SQLite writer-slot case
+ * this doc already describes.
  */
 async function lockIdentityDdl(target: IdentityTarget): Promise<void> {
-  if (target.dialect !== "postgres") return;
-  await target.execute(
-    asCompiledRowsSql(sql`
-      SELECT pg_advisory_xact_lock(hashtext(${IDENTITY_DDL_LOCK_KEY}), 0)
-    `),
-  );
+  const plan = resolveWriteFencePlan(target);
+  const fence = requireWriteFence(plan, "identity DDL", "advisory-lock");
+  switch (fence.kind) {
+    case "lock": {
+      await target.execute(
+        asCompiledRowsSql(sql`
+          SELECT pg_advisory_xact_lock(hashtext(${IDENTITY_DDL_LOCK_KEY}), 0)
+        `),
+      );
+      return;
+    }
+    case "engine-serialized": {
+      return;
+    }
+    default: {
+      fence satisfies never;
+    }
+  }
 }
 
 const IDENTITY_DDL_LOCK_KEY = "typegraph:identity-ddl";

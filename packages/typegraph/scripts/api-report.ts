@@ -41,39 +41,147 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * authoring entrypoint is intentionally absent: new entrypoints default to
  * zero debt. A changed symbol set fails verification even when its count is
  * unchanged, while API report diffs continue to show the declaration change.
+ *
+ * `recursiveTraversal` batch (WS5 B1): the six member-bearing entrypoints
+ * that never named `RecursiveTraversalVerdict` / `RecursiveTraversalCapability`
+ * directly (`./graph-merge`, `./interchange`, `./profiler`, `./provenance`,
+ * `./sqlite/local`, `./postgres/pglite`) each gained exactly those two as
+ * forgotten exports (+2 apiece) — the `RECURSIVE_TRAVERSAL_VERDICT` brand
+ * itself does NOT register as a forgotten export, matching the
+ * `RECORDED_INSTANT_BRAND` precedent in `etc/typegraph-backend.api.md`
+ * (present there, pre-existing, contributing zero debt): a `unique symbol`
+ * used only as a computed brand key never triggers API Extractor's
+ * ae-forgotten-export diagnostic. `.` gained nothing (both types are
+ * directly exported there). `./schema` and the five `./adapters/drizzle/*`
+ * entrypoints each gained exactly `RecursiveTraversalCapability` (+1 — they
+ * never see the verdict type). `./backend` is the one entry that moved for a
+ * DIFFERENT reason than the capability types: `recursiveTraversalUnsupportedError`
+ * declares `ConfigurationError` as its return type, which `./backend` does not
+ * otherwise export, so `ConfigurationError` and its own shape
+ * (`TypeGraphError`, `TypeGraphErrorOptions`, `ErrorCategory`) all became
+ * newly forgotten there (+4) — a real, unpredicted category, reported as a
+ * spec-vs-measurement conflict in the batch's implementation notes rather
+ * than silently exported around, since doing so would be exactly the
+ * "export machinery invented to avoid it" this ledger's discipline forbids.
+ *
+ * Capability bundle pilot batch (WS5 B6): `./backend` moved again, +4
+ * (6 → 10). `src/backend/index.ts` re-exports the pilot registry, resolver
+ * and accessor barrel (`src/backend/capabilities/index.ts`). Three of the
+ * four are unexported HELPER type aliases in `capabilities/bind.ts`
+ * (`UniqueSidecarBatchExtraMember`, `BatchPointReadExtraMember`,
+ * `ContributionHealthExtraMember`) that name a graduated bundle's extra
+ * members for its bundle-wide accessor's parameter/return types
+ * (`uniqueSidecarBatchMembers`, `batchPointReadMembers`,
+ * `contributionHealthMembers`) — deliberately private, since exporting them
+ * would publish a per-bundle type with no cross-bundle meaning for a shape
+ * every consumer already reaches through `ExtraMember<typeof BUNDLE, …>`.
+ * The fourth, `CapabilityBundleCommon`, is `bundle-registry.ts`'s
+ * intersection member shared by `GatedBundleDefinition` and
+ * `GraduatedBundleDefinition` — named in the design's own sketch without an
+ * `export` keyword, so its debt is the design's intent, not an oversight.
+ * No other entrypoint moved: the barrel's other exports (`resolveBundle`,
+ * `bindCore`, `bindExtra`, the six registry constants, the six verdict/
+ * member accessors) are either concrete values or types every caller needs
+ * named directly, so API Extractor never needed to invent a name for them.
+ *
+ * Pilot rewiring batch (WS5 B8): seven entrypoints moved, +20 apiece
+ * (`.`, `./interchange`, `./profiler`, `./graph-merge`, `./provenance`,
+ * `./sqlite/local`, `./postgres/pglite`) — every entrypoint whose public type
+ * graph reaches `Store`/`HistoryStore`'s `[STORE_RUNTIME]` property. B8 adds
+ * `StoreRuntime.uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>`
+ * (`store/runtime-port.ts`) so `provenance/index.ts`'s fact close/reopen path
+ * can build a `NodeClaimContext` from the store's already-resolved verdict
+ * instead of re-minting one — the same reason `StoreRuntime.backend` is
+ * exposed there rather than reconstructed, and the T13(c) one-owner ratchet's
+ * reason `provenance/index.ts` has no `uniqueSidecarBatchVerdict` minting
+ * site of its own. The one new field's full type graph (`GraduatedBundleVerdict`,
+ * `ExtraVerdicts`, `ExtraVerdict`, `SpecOf`, `CapabilityExtraSpec`, and the
+ * `uniqueSidecarBatch` extra-member type helpers) becomes newly reachable —
+ * and, being reachable through an `@internal`, non-enumerable symbol property
+ * that was already present before B8 (`StoreRuntime.backend` etc.), this is
+ * the established cost of that existing pattern, not a new one. `./backend`
+ * is unaffected: `bindExtraIfReachable` and `missingRequiredExtras` are named
+ * exports every caller reaches directly, so neither needed a forgotten name.
+ *
+ * Write-fence batch (WS5 B10): the same 14 entrypoints B1's
+ * `recursiveTraversal` batch moved (every entrypoint rendering
+ * `BackendCapabilities` unexported, plus `.` and `./backend`, which export it
+ * directly) each move by exactly +1, but the ADDED SYMBOL is not the same
+ * name everywhere — measured, not assumed:
+ *
+ * - 13 of the 14 (`.`, `./interchange`, `./profiler`, `./schema`,
+ *   `./graph-merge`, `./provenance`, `./sqlite/local`, `./postgres/pglite`,
+ *   and the five `./adapters/drizzle/*` entrypoints) gain
+ *   `PessimisticLockCapabilities` (`src/backend/capabilities/write-fence.ts`)
+ *   — the same shape `RecursiveTraversalCapability` took in B1, since
+ *   `BackendCapabilities` is rendered unexported at all of them and none
+ *   re-exports the write-fence functions that would make `WriteFenceTarget`
+ *   reachable there too.
+ * - `./backend` gains `WriteFenceTarget` instead, NOT
+ *   `PessimisticLockCapabilities`: that type IS directly exported at
+ *   `./backend` (this batch's barrel work), so it never needs a forgotten
+ *   name there, but `resolveWriteFencePlan`'s parameter type
+ *   (`WriteFenceTarget`, deliberately unexported per §6 of the batch spec —
+ *   `resolveWriteFencePlan`'s own parameter type losing the design's
+ *   `unique symbol` member is what keeps it structural) has no other name to
+ *   go by.
+ *
+ * `WriteFencePlan` itself does NOT add to the debt anywhere: every one of its
+ * 10 `resolveWriteFencePlan`/`requireWriteFence` call sites either reaches
+ * `src/backend/index.ts`'s own barrel, which names the type directly
+ * (mirroring `RecursiveTraversalVerdict`'s treatment at that same barrel), or
+ * does not reach a rendered public signature at all. The first-party mark
+ * (`markFirstPartyFactory`/`carryFirstPartyFactoryMark`), the two refusal
+ * constructors, and `pessimisticLockDeclarationLine` are deliberately not
+ * exported anywhere, so none of them can register as a forgotten export
+ * either. Delta table (old → new, all +1): `.` 352→353, `./backend` 10→11,
+ * `./interchange` 604→605, `./profiler` 606→607, `./schema` 223→224,
+ * `./graph-merge` 618→619, `./provenance` 612→613, `./sqlite/local` 608→609,
+ * `./postgres/pglite` 608→609, `./adapters/drizzle/sqlite` 203→204,
+ * `./adapters/drizzle/postgres` 202→203, `./adapters/drizzle/postgres/pglite`
+ * 206→207, `./adapters/drizzle/sqlite/local` 206→207,
+ * `./adapters/drizzle/sqlite/libsql` 206→207. Gate: every added symbol at
+ * every entrypoint is `PessimisticLockCapabilities` OR (at `./backend` only)
+ * `WriteFenceTarget`, nothing else, no entrypoint's debt DECREASED, and no
+ * 15th entrypoint moved.
+ *
+ * Recorded-time DDL batch (#520): the 13 entrypoints that render
+ * `GraphBackend` without directly exporting its newly referenced public types
+ * each gain `RecordedRelationDdl` and `RecordedTableNames` (+2). `./backend`
+ * exports both names directly, so its forgotten-export debt is unchanged.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 334,
-    sha256: "a2a10b07fc244c72fc48f27a3f9fac2715462951e1397e56192dbbd356af8ae3",
+    count: 355,
+    sha256: "d77f4c9db93968d554a9910a2092c526565a4ce5fcc679522c56211c18e3ee86",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 203,
-    sha256: "880ac0f92bbe7da36926c9fe5f4a2b7147345cd22ac7474f3f0bf756d52fc4f1",
+    count: 205,
+    sha256: "ccc4471d48cbb1dbcac6106da70aa329549d49b8e966d4de986c3e7c064bf842",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 207,
-    sha256: "451d634a38e0391544956ae696dd409a996fa478761dc941ae2528936933bb95",
+    count: 209,
+    sha256: "7eb5c4c7984810cf195b59371408a71f08fd90fd71cbef8de8cedaae52b062f1",
   },
   "./adapters/drizzle/sqlite": {
-    count: 204,
-    sha256: "fa02a545f9bcdd4aa7d955a281e543d0fae6cc5ad038ffe42d1536d7e8095d7f",
+    count: 206,
+    sha256: "603f36c7ad60cd0a7c9f81e2f6f8a93eb9a9252bc50932ea71a945594a701ccf",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 207,
-    sha256: "8925d7e9ea87e5b66ce0945340ee4cfb4b3063b9cf46940fbaae8c9cef1c0951",
+    count: 209,
+    sha256: "b64c8e28c80741e7bf39ad8d91165d23e110faf5cab3bcfaef0dcbd4b437559f",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 207,
-    sha256: "8925d7e9ea87e5b66ce0945340ee4cfb4b3063b9cf46940fbaae8c9cef1c0951",
+    count: 209,
+    sha256: "b64c8e28c80741e7bf39ad8d91165d23e110faf5cab3bcfaef0dcbd4b437559f",
   },
   "./backend": {
-    count: 2,
-    sha256: "89302cd60cfda6fcf575acc1d1f273e3a9624d760dcc8afa1e763ff8bc9a3795",
+    count: 11,
+    sha256: "5f07ba614699eaeec44c0ed78582d9c3a350f8454d9320b660d8089a9b20a1cb",
   },
   "./core": {
     count: 72,
@@ -84,36 +192,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 598,
-    sha256: "68e7f894eabfb3db31405da68311bc73ede8430f02231b561646b24a7d66e772",
+    count: 621,
+    sha256: "4957126747e9698a1381331c48d6f44156facbc536530feb293d1bb10f328729",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 584,
-    sha256: "c0c642fe5e33096dc885d44101efa9e6bd0bd8250f0a2909a91223b984323359",
+    count: 607,
+    sha256: "3565beb1f6b01e8ba8a1583c64664f0fbca33add4b9aa2971bc39d83d346700c",
   },
   "./postgres/pglite": {
-    count: 588,
-    sha256: "975d5ba55864708733bb9735cb3fffeca54e452338d37493d805deaf43115b58",
+    count: 611,
+    sha256: "756194bfc79c07eb44292fa5065c2cfc5922ae2fa3397f7173316fcd78c4e4e9",
   },
   "./profiler": {
-    count: 586,
-    sha256: "28ae505f778fb529649d3cade702064fa823ecd16abf366bec90c3d6f02472fc",
+    count: 609,
+    sha256: "a1ab2f4b928af5eb4cadea39bf19ba230ab0ab1a336b220ba42ccb14663dc71d",
   },
   "./provenance": {
-    count: 592,
-    sha256: "4d5dff574b9d7915547d0e4ff534d0e1465bb8b6cf31938d5be88103c5d086c8",
+    count: 615,
+    sha256: "071193c7d98ad4ab23af6d3083637da74138e5543384871d8aaa60ce9eedfd66",
   },
   "./schema": {
-    count: 224,
-    sha256: "a1de7419e9b7cba15f310444ed2addc60d5aa17ce81ca35b15bdce8cbddcd870",
+    count: 226,
+    sha256: "f4e7678c52f7dec45abe4fa7ce07878d3b54816a5cc7e887d389e0cc005645cd",
   },
   "./sqlite/local": {
-    count: 588,
-    sha256: "975d5ba55864708733bb9735cb3fffeca54e452338d37493d805deaf43115b58",
+    count: 611,
+    sha256: "756194bfc79c07eb44292fa5065c2cfc5922ae2fa3397f7173316fcd78c4e4e9",
   },
 };
 

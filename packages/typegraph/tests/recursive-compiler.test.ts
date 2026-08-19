@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { assumeRecursiveTraversalSupported } from "../src/backend/capabilities/recursive-traversal";
 import { UnsupportedPredicateError } from "../src/errors";
 import {
   type FieldRef,
@@ -93,6 +94,9 @@ function createContext(
     schema: DEFAULT_SQL_SCHEMA,
     compileQuery: () => sql`SELECT 1`,
     windowFunctions: true,
+    recursiveTraversal: assumeRecursiveTraversalSupported(
+      "recursive compiler unit test",
+    ),
   };
 }
 

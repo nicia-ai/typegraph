@@ -1,3 +1,8 @@
+import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+} from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   type DeleteEdgesBatchParams,
@@ -101,6 +106,7 @@ type RecordedCaptureSession = Readonly<{
   forceGraphRevision: (graphId: string) => void;
   flush: (
     target: TransactionBackend,
+    batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
     schema: SqlSchema,
     ownsWriteLock: boolean,
   ) => Promise<RecordedFlushInstants>;
@@ -259,6 +265,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
 
     async flush(
       target: TransactionBackend,
+      batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
       schema: SqlSchema,
       ownsWriteLock: boolean,
     ): Promise<RecordedFlushInstants> {
@@ -304,6 +311,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         );
         await flushNodes(
           target,
+          batchPointRead,
           schema,
           graphId,
           nodes,
@@ -311,6 +319,7 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
         );
         await flushEdges(
           target,
+          batchPointRead,
           schema,
           graphId,
           edges,
@@ -643,6 +652,7 @@ function createRecordedTransactionBackend(
 
 export function createRecordedTransactionScope(
   target: TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema?: SqlSchema,
   // True only when the enclosing transaction already holds a SQLite write lock
   // (the bundled BEGIN IMMEDIATE paths), letting clock allocation skip the
@@ -667,7 +677,7 @@ export function createRecordedTransactionScope(
       // missing-table error can only be a recorded relation — surface it as the
       // typed precondition the constructor gate could not check.
       return withRecordedRelationsPrecondition(
-        session.flush(target, resolvedSchema, ownsWriteLock),
+        session.flush(target, batchPointRead, resolvedSchema, ownsWriteLock),
         { dialect: target.dialect, surface: "capture-flush" },
       );
     },
@@ -677,6 +687,7 @@ export function createRecordedTransactionScope(
 async function runCapturedAutocommit<T>(
   backend: GraphBackend,
   schema: SqlSchema | undefined,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   fn: (target: TransactionBackend) => Promise<T>,
   options?: InternalTransactionOptions,
 ): Promise<T> {
@@ -684,7 +695,12 @@ async function runCapturedAutocommit<T>(
   return backend.transaction(async (target) => {
     await assertRecordedCaptureTransactionIsolation(target);
     // The bundled transaction opened BEGIN IMMEDIATE, so the write lock is held.
-    const scope = createRecordedTransactionScope(target, schema, true);
+    const scope = createRecordedTransactionScope(
+      target,
+      batchPointRead,
+      schema,
+      true,
+    );
     const result = await fn(scope.backend);
     await scope.flush();
     return result;
@@ -696,9 +712,13 @@ export function createRecordedBackend(
   schema?: SqlSchema,
 ): GraphBackend {
   assertCapturableBackend(backend);
+  // Resolved ONCE, here, into a closure local threaded to every capture path
+  // this overlay opens (ruling B8 spec item 2): the autocommit-wrapped single
+  // write below and the multi-statement `transaction` override further down.
+  const batchPointRead = batchPointReadVerdict(backend);
   const capture = <T>(
     fn: (target: TransactionBackend) => Promise<T>,
-  ): Promise<T> => runCapturedAutocommit(backend, schema, fn);
+  ): Promise<T> => runCapturedAutocommit(backend, schema, batchPointRead, fn);
 
   const projectedBackend = projectGraphBackend(backend);
   return deriveBackend(projectedBackend, {
@@ -850,7 +870,12 @@ export function createRecordedBackend(
       return backend.transaction(async (target) => {
         await assertRecordedCaptureTransactionIsolation(target, backendOptions);
         const readOnly = backendOptions?.accessMode === "read_only";
-        const scope = createRecordedTransactionScope(target, schema, !readOnly);
+        const scope = createRecordedTransactionScope(
+          target,
+          batchPointRead,
+          schema,
+          !readOnly,
+        );
         const result = await fn(scope.backend);
         const instants = await scope.flush();
         observer?.(instants);

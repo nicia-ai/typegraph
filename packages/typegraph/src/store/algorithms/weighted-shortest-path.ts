@@ -1,3 +1,4 @@
+import { resolveRecursiveTraversal } from "../../backend/capabilities/recursive-traversal";
 import type { GraphDef } from "../../core/define-graph";
 import {
   ConfigurationError,
@@ -19,6 +20,7 @@ import {
   type IterativeGraphOperation,
   type IterativeGraphRunContext,
   type NodeExpansion,
+  nodeIdentityFromRow,
   type NodeIdentityKey,
   nodeIdentityKey,
   reduceExpandedWorkingSet,
@@ -393,7 +395,17 @@ async function findWeightedShortestPathInWorkingTable(
       return state.frontierCount === 0;
     },
     async extractResult(context) {
-      return extractPathFromWorkingTable(context, targetId, maxIterations);
+      // Selects rather than refuses (§5.1.3 of the design): the working-table
+      // path is gated on temp tables/RETURNING, not recursive traversal, so
+      // an engine that can run every relaxation round but lacks the
+      // recursive CTE still gets a working extraction instead of a refusal
+      // that would take away an algorithm it can otherwise run in full.
+      const recursiveTraversal = resolveRecursiveTraversal(
+        ctx.backend.capabilities,
+      );
+      return recursiveTraversal.supported ?
+          extractPathFromWorkingTable(context, targetId, maxIterations)
+        : extractPathByPredecessorWalk(context, targetId, maxIterations);
     },
   });
 }
@@ -570,23 +582,13 @@ async function extractPathFromWorkingTable(
   targetId: string,
   maxIterations: number,
 ): Promise<WeightedShortestPathResult | undefined> {
-  const { operation, workingTable, graphId, runId } = context;
-  const { dialect } = operation.ctx;
+  const { workingTable, graphId, runId } = context;
   const rows = await context.backend.execute<ChainRow>(
     asCompiledRowsSql(sql`
       WITH RECURSIVE chain AS (
         SELECT best.node_id, best.node_kind, best.distance, best.hops,
           best.predecessor_id, best.predecessor_kind, 0 AS position
-        FROM (
-          SELECT node_id, node_kind, distance, hops,
-            predecessor_id, predecessor_kind
-          FROM ${workingTable}
-          WHERE graph_id = ${graphId}
-            AND run_id = ${runId}
-            AND node_id = ${targetId}
-          ORDER BY distance ASC, ${dialect.binaryText(sql`node_kind`)}
-          LIMIT 1
-        ) best
+        FROM (${selectCheapestTargetRowSql(context, targetId)}) best
         UNION ALL
         SELECT w.node_id, w.node_kind, w.distance, w.hops,
           w.predecessor_id, w.predecessor_kind, c.position + 1
@@ -610,6 +612,134 @@ async function extractPathFromWorkingTable(
     nodes: rows.map((row) => ({ id: row.node_id, kind: row.node_kind })),
     depth: Number(target.hops),
     totalWeight: Number(target.distance),
+  };
+}
+
+/**
+ * The one owner of the "cheapest row carrying the target id" decision (ties
+ * broken by kind in binary collation, matching the id's fixed value): the
+ * recursive extractor above and the predecessor-walk fallback below both
+ * anchor on this fragment, so their tie-break cannot drift apart the way a
+ * second inline copy of this `ORDER BY` would let it.
+ */
+function selectCheapestTargetRowSql(
+  context: IterativeGraphRunContext,
+  targetId: string,
+): SqlFragment {
+  const { operation, workingTable, graphId, runId } = context;
+  const { dialect } = operation.ctx;
+  return sql`
+    SELECT node_id, node_kind, distance, hops,
+      predecessor_id, predecessor_kind
+    FROM ${workingTable}
+    WHERE graph_id = ${graphId}
+      AND run_id = ${runId}
+      AND node_id = ${targetId}
+    ORDER BY distance ASC, ${dialect.binaryText(sql`node_kind`)}
+    LIMIT 1
+  `;
+}
+
+/** @internal — the working-table row a predecessor walk reads. */
+export type PredecessorChainRow = ChainRow &
+  Readonly<{ predecessor_id: unknown; predecessor_kind: unknown }>;
+
+/**
+ * @internal — exported so the bound/termination axes are unit-testable
+ * (precedent: `shouldRefreshWorkingTableStatistics`).
+ *
+ * Walks predecessor pointers target-first, starting at `first`, reproducing
+ * the recursive CTE's own bound and termination exactly (ruling M-13,
+ * behavior preservation):
+ *
+ * - **Termination**: a row's predecessor columns normalize to `undefined`
+ *   through {@link nodeIdentityFromRow} exactly when the CTE's join on
+ *   `predecessor_id`/`predecessor_kind` would fail on SQL NULL — the seeded
+ *   source row ends the chain this way. The same predicate also ends the
+ *   chain when a read returns no row, mirroring a join that yields nothing.
+ * - **Bound**: the loop runs `position` from `0` through `maxIterations`
+ *   inclusive — the same range as the CTE's recursive arm, gated on
+ *   `position <= maxIterations` — and stops silently, without throwing, past
+ *   it. The chain can therefore hold at most `maxIterations + 2` rows: `first`
+ *   plus one row per loop iteration. The truncation this produces on an
+ *   over-length chain is pre-existing contract, reproduced deliberately, not
+ *   a new defect: it is unreachable through the public API, because
+ *   `runWorkingTableRounds` (`iterative-graph-operation.ts:471-493`) raises
+ *   `GraphAlgorithmConvergenceError` before extraction runs at all unless the
+ *   plan converged, and a converged plan has at most `maxIterations - 1`
+ *   hops (a node improved in round *i* has hops at most *i*, and convergence
+ *   needs one round with an empty frontier). Follow-up **F11** asks whether
+ *   either implementation should truncate at all — this function does not
+ *   answer that question, only reproduces the existing one.
+ */
+export async function collectPredecessorChain(
+  first: PredecessorChainRow,
+  readPredecessor: (
+    predecessor: PathNode,
+  ) => Promise<PredecessorChainRow | undefined>,
+  maxIterations: number,
+): Promise<readonly PredecessorChainRow[]> {
+  const chain: PredecessorChainRow[] = [first];
+  let current = first;
+  for (let position = 0; position <= maxIterations; position++) {
+    const predecessor = nodeIdentityFromRow(
+      current.predecessor_id,
+      current.predecessor_kind,
+    );
+    if (predecessor === undefined) break;
+    const predecessorRow = await readPredecessor(predecessor);
+    if (predecessorRow === undefined) break;
+    chain.push(predecessorRow);
+    current = predecessorRow;
+  }
+  return chain;
+}
+
+/**
+ * The predecessor-walk fallback for engines with temporary tables and
+ * `RETURNING` but no recursive traversal (the recursive CTE `chain` above):
+ * issues the shared selection once, then walks predecessor pointers with one
+ * primary-key point read per hop instead of one recursive statement. Costs
+ * `path length + 1` statements rather than 1, which is the applied-not-
+ * refused answer for an engine that can run every relaxation round but
+ * cannot run the final recursive read (§5.1.3 of the design).
+ */
+async function extractPathByPredecessorWalk(
+  context: IterativeGraphRunContext,
+  targetId: string,
+  maxIterations: number,
+): Promise<WeightedShortestPathResult | undefined> {
+  const rows = await context.backend.execute<PredecessorChainRow>(
+    asCompiledRowsSql(selectCheapestTargetRowSql(context, targetId)),
+  );
+  const first = rows[0];
+  if (first === undefined) return undefined;
+
+  const { workingTable, graphId, runId } = context;
+  const chain = await collectPredecessorChain(
+    first,
+    async (predecessor) => {
+      const predecessorRows =
+        await context.backend.execute<PredecessorChainRow>(
+          asCompiledRowsSql(sql`
+            SELECT node_id, node_kind, distance, hops,
+              predecessor_id, predecessor_kind
+            FROM ${workingTable}
+            WHERE graph_id = ${graphId} AND run_id = ${runId}
+              AND node_kind = ${predecessor.kind} AND node_id = ${predecessor.id}
+          `),
+        );
+      return predecessorRows[0];
+    },
+    maxIterations,
+  );
+
+  return {
+    nodes: chain
+      .map((row) => ({ id: row.node_id, kind: row.node_kind }))
+      .toReversed(),
+    depth: Number(first.hops),
+    totalWeight: Number(first.distance),
   };
 }
 

@@ -8,29 +8,39 @@
  * keeps the copies from drifting; each caller layers its own filtering
  * (temporal mode, kind narrowing) on top.
  */
+import { bindExtraIfReachable } from "../backend/capabilities/bind";
+import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type EdgeRow,
   type GraphBackend,
   type TransactionBackend,
 } from "../backend/types";
-import { requireDefined } from "../utils/presence";
 import { getRowsByIds } from "./row-fetch";
 
 /**
  * Fetches edge rows by id into a Map keyed by id. Uses `backend.getEdges`
  * when available, otherwise issues parallel `getEdge` calls for the distinct
- * ids. Missing ids are simply absent from the returned Map.
+ * ids. Missing ids are simply absent from the returned Map. `verdict` is the
+ * threaded `batchPointRead` verdict (`"edge batch fetch"` operation) — bound
+ * off `backend`, the port the call executes on, never re-resolved here.
  */
 export async function getEdgeRowsByIds(
   backend: GraphBackend | TransactionBackend,
+  verdict: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   ids: readonly string[],
 ): Promise<Map<string, EdgeRow>> {
+  const bound = bindExtraIfReachable(
+    backend,
+    verdict.extras.getEdges,
+    BATCH_POINT_READ.id,
+  );
   return getRowsByIds(ids, {
     batch:
-      backend.getEdges === undefined ?
-        undefined
-      : (batchIds) => requireDefined(backend.getEdges)(graphId, batchIds),
+      bound === undefined ? undefined : (
+        (batchIds) => bound.getEdges(graphId, batchIds)
+      ),
     one: (id) => backend.getEdge(graphId, id),
   });
 }

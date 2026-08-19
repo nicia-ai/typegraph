@@ -5,7 +5,14 @@
  * Handles comparisons, string operations, null checks, array/object predicates,
  * and subqueries.
  */
-import { UnsupportedPredicateError } from "../../errors";
+import {
+  assertRecursiveTraversal,
+  type RecursiveTraversalVerdict,
+} from "../../backend/capabilities/recursive-traversal";
+import {
+  CompilerInvariantError,
+  UnsupportedPredicateError,
+} from "../../errors";
 import { requireDefined } from "../../utils/presence";
 import {
   type ArrayPredicate,
@@ -471,7 +478,62 @@ export type PredicateCompilerContext = Readonly<{
   readInstant?: ReadInstantMode;
   /** Equal-id behavior for historical identity traversal reconstruction. */
   identitySameIdAcrossKinds?: "fold" | "ignore";
+  /**
+   * Whether the active backend can compute a bounded transitive closure in
+   * one round trip. Optional per Contract E: a required member here would
+   * churn every predicate-context literal across the compiler's tests for
+   * no added protection, since the only site that reads it today
+   * (`compileVariableLengthQuery`) already asserts its presence.
+   */
+  recursiveTraversal?: RecursiveTraversalVerdict;
 }>;
+
+/**
+ * Returns the compiler context's {@link RecursiveTraversalVerdict}, or
+ * refuses because the plumbing was bypassed: every path that reaches this
+ * function threads the verdict through `CompileQueryOptions` /
+ * `propagateOptions`, so a missing verdict means a caller skipped that
+ * threading, which is a compiler invariant violation, not a capability
+ * refusal.
+ *
+ * @throws {CompilerInvariantError} when `ctx.recursiveTraversal` is undefined.
+ */
+export function requireRecursiveTraversalVerdict(
+  ctx: PredicateCompilerContext,
+  operation: string,
+): RecursiveTraversalVerdict {
+  const verdict = ctx.recursiveTraversal;
+  if (verdict === undefined) {
+    throw new CompilerInvariantError(
+      "recursive traversal verdict missing from compiler context",
+      { operation },
+    );
+  }
+  return verdict;
+}
+
+/**
+ * Refuses a variable-length traversal when the compiler context carries no
+ * {@link RecursiveTraversalVerdict}, or when the verdict says the backend
+ * cannot recurse.
+ *
+ * A missing verdict is never silently treated as supported: every path that
+ * reaches this function threads the verdict through `CompileQueryOptions` /
+ * `propagateOptions`, so its absence means a caller bypassed that plumbing,
+ * which is a compiler invariant violation, not a capability refusal.
+ *
+ * @throws {CompilerInvariantError} when `ctx.recursiveTraversal` is undefined.
+ * @throws {ConfigurationError} when the verdict declares no support.
+ */
+export function assertRecursiveTraversalSupported(
+  ctx: PredicateCompilerContext,
+  operation: string,
+): void {
+  assertRecursiveTraversal(
+    requireRecursiveTraversalVerdict(ctx, operation),
+    operation,
+  );
+}
 
 /**
  * Compiles a predicate expression to SQL.

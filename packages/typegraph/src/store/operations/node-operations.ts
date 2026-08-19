@@ -44,6 +44,16 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
+import { bindExtraIfReachable } from "../../backend/capabilities/bind";
+import {
+  BATCH_POINT_READ,
+  UNIQUE_SIDECAR_BATCH,
+} from "../../backend/capabilities/bundle-registry";
+import {
+  type BundleVerdictOf,
+  type ClaimsVerdictThunk,
+  missingRequiredExtras,
+} from "../../backend/capabilities/resolve";
 import { deriveBackend } from "../../backend/derive-backend";
 import {
   type GraphBackend,
@@ -172,6 +182,17 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   coalesceUnchangedUpsertsEnabled: boolean;
   revisionSchema: SqlSchema;
   registry: KindRegistry;
+  /**
+   * The `claims` bundle's memoized, at-most-once verdict thunk (ruling B7
+   * refinement 2) — threaded through to `createNodeWriteContext` by
+   * `runWritePlan`'s session mint, and called at the write-session sites that
+   * issue or release a claim.
+   */
+  claimsVerdict: ClaimsVerdictThunk;
+  /** Threaded from `store.ts`'s `#batchPointRead` — never re-resolved here. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /** Threaded from `store.ts`'s `#uniqueSidecarBatch` — never re-resolved here. */
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   createOperationContext: (
     operation: "create" | "update" | "delete",
     entity: KindEntity,
@@ -799,7 +820,12 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   await checkDisjointnessConstraint(constraintContext, kind, id);
 
   await checkUniquenessConstraints(
-    createUniquenessContext(ctx.graphId, ctx.registry, backend),
+    createUniquenessContext(
+      ctx.graphId,
+      ctx.registry,
+      backend,
+      ctx.uniqueSidecarBatch,
+    ),
     kind,
     id,
     validatedProps,
@@ -1242,7 +1268,12 @@ function nodeUpdateRaceError(
  * and keep the per-row fallback.
  */
 export async function primeBatchValidationCaches(
-  ctx: Readonly<{ graphId: string; registry: KindRegistry }>,
+  ctx: Readonly<{
+    graphId: string;
+    registry: KindRegistry;
+    batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+    uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  }>,
   drafts: readonly NodeCreateDraft[],
   backend: WriteTarget,
   seams: Readonly<{
@@ -1255,7 +1286,12 @@ export async function primeBatchValidationCaches(
     ) => void;
   }>,
 ): Promise<void> {
-  if (backend.getNodes !== undefined) {
+  const boundGetNodes = bindExtraIfReachable(
+    backend,
+    ctx.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  if (boundGetNodes !== undefined) {
     const idsByKind = new Map<string, Set<string>>();
     for (const draft of drafts) {
       const ids = idsByKind.get(draft.kind) ?? new Set<string>();
@@ -1264,7 +1300,7 @@ export async function primeBatchValidationCaches(
     }
     for (const [kind, ids] of idsByKind) {
       const orderedIds = [...ids];
-      const rows = await backend.getNodes(ctx.graphId, kind, orderedIds);
+      const rows = await boundGetNodes.getNodes(ctx.graphId, kind, orderedIds);
       const rowsById = new Map(rows.map((row) => [row.id, row]));
       for (const id of orderedIds) {
         seams.seedNodeRow(kind, id, rowsById.get(id));
@@ -1272,7 +1308,12 @@ export async function primeBatchValidationCaches(
     }
   }
 
-  if (backend.checkUniqueBatch !== undefined) {
+  const boundCheckUniqueBatch = bindExtraIfReachable(
+    backend,
+    ctx.uniqueSidecarBatch.extras.checkUniqueBatch,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  if (boundCheckUniqueBatch !== undefined) {
     interface ProbeGroup {
       nodeKind: string;
       constraintName: string;
@@ -1317,7 +1358,7 @@ export async function primeBatchValidationCaches(
     }
     for (const group of groups.values()) {
       const orderedKeys = [...group.keys];
-      const rows = await backend.checkUniqueBatch({
+      const rows = await boundCheckUniqueBatch.checkUniqueBatch({
         graphId: ctx.graphId,
         nodeKind: group.nodeKind,
         constraintName: group.constraintName,
@@ -1563,6 +1604,7 @@ interface UniqueMatchRow {
 
 async function batchCheckUniqueAcrossKinds(
   backend: WriteTarget,
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>,
   graphId: string,
   constraintName: string,
   uniqueKeys: readonly string[],
@@ -1570,9 +1612,14 @@ async function batchCheckUniqueAcrossKinds(
   includeDeleted: boolean,
 ): Promise<Map<string, UniqueMatchRow>> {
   const existingByKey = new Map<string, UniqueMatchRow>();
+  const boundCheckUniqueBatch = bindExtraIfReachable(
+    backend,
+    uniqueSidecarBatch.extras.checkUniqueBatch,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
 
   for (const kindToCheck of kindsToCheck) {
-    if (backend.checkUniqueBatch === undefined) {
+    if (boundCheckUniqueBatch === undefined) {
       for (const key of uniqueKeys) {
         const incumbent = existingByKey.get(key);
         if (incumbent !== undefined && incumbent.deleted_at === undefined) {
@@ -1590,7 +1637,7 @@ async function batchCheckUniqueAcrossKinds(
         }
       }
     } else {
-      const rows = await backend.checkUniqueBatch({
+      const rows = await boundCheckUniqueBatch.checkUniqueBatch({
         graphId,
         nodeKind: kindToCheck,
         constraintName,
@@ -1988,9 +2035,11 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
 
   if (
     uniqueConstraints.length > 0 &&
-    (backend.hardDeleteUniquesByNodeIds === undefined ||
-      backend.insertUniqueBatch === undefined ||
-      backend.checkUniqueBatch === undefined)
+    missingRequiredExtras(
+      UNIQUE_SIDECAR_BATCH,
+      ctx.uniqueSidecarBatch,
+      "set-based node update",
+    ).length > 0
   ) {
     throw new ConfigurationError(
       "updateWhere() requires batched uniqueness sidecar operations for constrained nodes",
@@ -2513,6 +2562,7 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
     uniqueKeys.length > 0 ?
       await batchCheckUniqueAcrossKinds(
         backend,
+        ctx.uniqueSidecarBatch,
         ctx.graphId,
         constraint.name,
         uniqueKeys,
@@ -2890,6 +2940,7 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
 
   const nodesById = await hydrateNodesById(
     backend,
+    ctx.batchPointRead,
     ctx.graphId,
     kind,
     matches.map((match) => match.id),
@@ -2934,11 +2985,18 @@ function capMatchesPerGroup(
 /** Hydrates live nodes by id via the backend's normalized node reads. */
 async function hydrateNodesById(
   backend: GraphBackend | TransactionBackend,
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   kind: string,
   ids: readonly string[],
 ): Promise<Map<string, Node>> {
-  const rowsById = await getNodeRowsByIds(backend, graphId, kind, ids);
+  const rowsById = await getNodeRowsByIds(
+    backend,
+    batchPointRead,
+    graphId,
+    kind,
+    ids,
+  );
   const nodesById = new Map<string, Node>();
   for (const [id, row] of rowsById) {
     if (row.deleted_at !== undefined) continue;
@@ -2992,6 +3050,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       uniqueKeys.length > 0 ?
         await batchCheckUniqueAcrossKinds(
           backend,
+          ctx.uniqueSidecarBatch,
           ctx.graphId,
           constraint.name,
           uniqueKeys,

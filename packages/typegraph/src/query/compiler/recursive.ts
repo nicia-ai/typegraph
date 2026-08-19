@@ -31,6 +31,7 @@ import {
 import { type LogicalPlan, lowerRecursiveQueryToLogicalPlan } from "./plan";
 import { compileKindFilter as sharedCompileKindFilter } from "./predicate-utils";
 import {
+  assertRecursiveTraversalSupported,
   compileFieldValue,
   compilePredicateExpression,
   type PredicateCompilerContext,
@@ -215,6 +216,7 @@ export function compileVariableLengthQuery(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): SqlFragment {
+  assertRecursiveTraversalSupported(ctx, "variable-length traversal");
   const strategy = ctx.dialect.capabilities.recursiveQueryStrategy;
   const handler = RECURSIVE_QUERY_STRATEGY_HANDLERS[strategy];
   return handler(ast, graphId, ctx);

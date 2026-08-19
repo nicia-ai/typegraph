@@ -46,6 +46,15 @@
  */
 import type { z } from "zod";
 
+import { bindExtraIfReachable } from "../backend/capabilities/bind";
+import type { UNIQUE_SIDECAR_BATCH } from "../backend/capabilities/bundle-registry";
+import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import {
+  batchPointReadVerdict,
+  type BundleVerdictOf,
+  createClaimsVerdictThunk,
+  uniqueSidecarBatchVerdict,
+} from "../backend/capabilities/resolve";
 import {
   acquireSerializedStreamLease,
   type SerializedStreamKind,
@@ -271,6 +280,10 @@ type ImportWriteFrame = Readonly<{
   session: WriteSession;
   target: WriteTarget;
   overlaidSession: OverlaidSessionMint<"mixed">;
+  /** Threaded `batchPointRead` verdict — resolved once, from `backend`. */
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  /** Threaded `uniqueSidecarBatch` verdict — resolved once, from `backend`. */
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
 }>;
 
 async function importGraphData<G extends GraphDef>(
@@ -292,6 +305,11 @@ async function importGraphData<G extends GraphDef>(
   const backend = storeBackend(store);
   const runtime = storeRuntime(store);
   const registry = store.registry;
+  // Resolved ONCE, here, and threaded into the write-plan context and the
+  // frame every leg reads (ruling B8 spec item 2): no pilot bundle below has
+  // a `crossCheck`, so eager resolution cannot throw.
+  const batchPointRead = batchPointReadVerdict(backend);
+  const uniqueSidecarBatch = uniqueSidecarBatchVerdict(backend);
 
   // Fenced or refused, before any write. An import writes claim rows like every
   // other writer, but it takes no per-graph lock and it is not covered by
@@ -324,6 +342,12 @@ async function importGraphData<G extends GraphDef>(
     {
       graphId,
       registry,
+      // Interning (`createClaimsVerdictThunk`'s `WeakMap`) makes this the SAME
+      // thunk object the store's own operations use for this backend — a
+      // second, independent memoization for the same backend is exactly what
+      // interning exists to rule out.
+      claimsVerdict: createClaimsVerdictThunk(backend),
+      uniqueSidecarBatch,
       schemaVersion: store.introspect().schemaVersion,
       historyEnabled: store.historyEnabled,
       revisionTrackingEnabled: store.revisionTrackingEnabled,
@@ -339,7 +363,13 @@ async function importGraphData<G extends GraphDef>(
     mixedWritePlan(undefined, true),
     backend,
     async (session, target, overlaidSession) => {
-      const frame: ImportWriteFrame = { session, target, overlaidSession };
+      const frame: ImportWriteFrame = {
+        session,
+        target,
+        overlaidSession,
+        batchPointRead,
+        uniqueSidecarBatch,
+      };
       await processNodes(
         frame,
         graphId,
@@ -1322,7 +1352,12 @@ async function processNodeSlice(
     seedUniqueRow,
   } = createNodeBatchValidationSeams(graphId, registry, frame.target);
   await primeBatchValidationCaches(
-    { graphId, registry },
+    {
+      graphId,
+      registry,
+      batchPointRead: frame.batchPointRead,
+      uniqueSidecarBatch: frame.uniqueSidecarBatch,
+    },
     candidates.map((candidate) => candidate.draft),
     frame.target,
     { seedNodeRow, seedUniqueRow },
@@ -2308,7 +2343,12 @@ async function processEdgeSlice(
   // getNode inside the routing loop when the backend lacks getNodes.
   const liveEndpointKeys = new Set<string>();
   const checkedEndpointKeys = new Set<string>();
-  if (options.validateReferences && frame.target.getNodes !== undefined) {
+  const boundGetNodesForEndpoints = bindExtraIfReachable(
+    frame.target,
+    frame.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  if (options.validateReferences && boundGetNodesForEndpoints !== undefined) {
     const idsByKind = new Map<string, Set<string>>();
     for (const { edge } of candidates) {
       for (const endpoint of [edge.from, edge.to]) {
@@ -2321,7 +2361,9 @@ async function processEdgeSlice(
       }
     }
     for (const [kind, ids] of idsByKind) {
-      const rows = await frame.target.getNodes(graphId, kind, [...ids]);
+      const rows = await boundGetNodesForEndpoints.getNodes(graphId, kind, [
+        ...ids,
+      ]);
       for (const row of rows) {
         if (isLiveNodeRow(row)) {
           liveEndpointKeys.add(makeNodeKey(kind, row.id));
@@ -2347,8 +2389,13 @@ async function processEdgeSlice(
     string,
     Awaited<ReturnType<GraphBackend["getEdge"]>>
   >();
-  if (candidates.length > 0 && frame.target.getEdges !== undefined) {
-    const rows = await frame.target.getEdges(
+  const boundGetEdges = bindExtraIfReachable(
+    frame.target,
+    frame.batchPointRead.extras.getEdges,
+    BATCH_POINT_READ.id,
+  );
+  if (candidates.length > 0 && boundGetEdges !== undefined) {
+    const rows = await boundGetEdges.getEdges(
       graphId,
       candidates.map((candidate) => candidate.edge.id),
     );
