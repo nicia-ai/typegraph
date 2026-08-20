@@ -1,8 +1,8 @@
 {
   "entrypoints": {
     ".": {
-      "minified": 738904,
-      "gzip": 200239,
+      "minified": 732249,
+      "gzip": 200719,
       "excludedDomains": [
         "graph-merge",
         "interchange",
@@ -30,8 +30,8 @@
       ]
     },
     "./adapters/drizzle/postgres": {
-      "minified": 164084,
-      "gzip": 43876,
+      "minified": 167923,
+      "gzip": 44952,
       "excludedDomains": [
         "core",
         "graph-extension",
@@ -45,8 +45,8 @@
       ]
     },
     "./adapters/drizzle/postgres/pglite": {
-      "minified": 165178,
-      "gzip": 44445,
+      "minified": 169017,
+      "gzip": 45622,
       "excludedDomains": [
         "core",
         "graph-extension",
@@ -60,8 +60,8 @@
       ]
     },
     "./adapters/drizzle/sqlite": {
-      "minified": 149867,
-      "gzip": 39789,
+      "minified": 153650,
+      "gzip": 40865,
       "excludedDomains": [
         "core",
         "graph-extension",
@@ -75,8 +75,8 @@
       ]
     },
     "./adapters/drizzle/sqlite/libsql": {
-      "minified": 155510,
-      "gzip": 41320,
+      "minified": 159287,
+      "gzip": 42384,
       "excludedDomains": [
         "core",
         "graph-extension",
@@ -90,8 +90,8 @@
       ]
     },
     "./adapters/drizzle/sqlite/local": {
-      "minified": 159227,
-      "gzip": 42620,
+      "minified": 163004,
+      "gzip": 43759,
       "excludedDomains": [
         "core",
         "graph-extension",
@@ -105,13 +105,14 @@
       ]
     },
     "./backend": {
-      "minified": 79245,
-      "gzip": 19623,
+      "minified": 65214,
+      "gzip": 18154,
       "excludedDomains": [
         "constraints",
         "graph-extension",
         "graph-merge",
         "identity",
+        "indexes",
         "interchange",
         "profiler",
         "provenance",
@@ -121,8 +122,8 @@
       ]
     },
     "./core": {
-      "minified": 18223,
-      "gzip": 6578,
+      "minified": 18188,
+      "gzip": 6555,
       "excludedDomains": [
         "(root)",
         "backend",
@@ -154,8 +155,8 @@
       ]
     },
     "./graph-merge": {
-      "minified": 827660,
-      "gzip": 232039,
+      "minified": 849426,
+      "gzip": 237642,
       "excludedDomains": ["profiler", "provenance"]
     },
     "./indexes": {
@@ -176,8 +177,8 @@
       ]
     },
     "./interchange": {
-      "minified": 93561,
-      "gzip": 27985,
+      "minified": 108193,
+      "gzip": 31341,
       "excludedDomains": [
         "graph-extension",
         "graph-merge",
@@ -188,8 +189,8 @@
       ]
     },
     "./postgres/pglite": {
-      "minified": 784134,
-      "gzip": 213886,
+      "minified": 822234,
+      "gzip": 225259,
       "excludedDomains": [
         "graph-merge",
         "interchange",
@@ -218,8 +219,8 @@
       ]
     },
     "./provenance": {
-      "minified": 30299,
-      "gzip": 10181,
+      "minified": 43813,
+      "gzip": 13178,
       "excludedDomains": [
         "graph-extension",
         "graph-merge",
@@ -231,8 +232,8 @@
       ]
     },
     "./schema": {
-      "minified": 144479,
-      "gzip": 41946,
+      "minified": 146554,
+      "gzip": 42424,
       "excludedDomains": [
         "graph-merge",
         "interchange",
@@ -241,8 +242,8 @@
       ]
     },
     "./sqlite/local": {
-      "minified": 778779,
-      "gzip": 212310,
+      "minified": 816778,
+      "gzip": 223858,
       "excludedDomains": [
         "graph-merge",
         "interchange",
@@ -253,12 +254,12 @@
   },
   "probes": {
     ".#defineNode": {
-      "minified": 5550,
-      "gzip": 2372
+      "minified": 5516,
+      "gzip": 2351
     },
     "./core#defineNode": {
-      "minified": 5550,
-      "gzip": 2373
+      "minified": 5516,
+      "gzip": 2352
     },
     "./schema#computeSchemaHash": {
       "minified": 833,
@@ -273,17 +274,17 @@
       "gzip": 4327
     },
     "./graph-merge#planMerge": {
-      "minified": 108140,
-      "gzip": 33614
+      "minified": 108105,
+      "gzip": 33592
     },
     "./adapters/drizzle/sqlite#createSqliteBackend": {
-      "minified": 149593,
-      "gzip": 39701
+      "minified": 153370,
+      "gzip": 40763
     }
   },
   "artifacts": {
-    "esmBytes": 2416763,
-    "cjsBytes": 2570339,
-    "declarationBytes": 2879805
+    "esmBytes": 2487820,
+    "cjsBytes": 2647038,
+    "declarationBytes": 3078147
   }
 }

@@ -1,5 +1,5 @@
 diff --git a/packages/typegraph/src/query/compiler/emitter/standard-builders.ts b/packages/typegraph/src/query/compiler/emitter/standard-builders.ts
-index 8afca62..607ef8e 100644
+index 8afca62b..607ef8e4 100644
 --- a/packages/typegraph/src/query/compiler/emitter/standard-builders.ts
 +++ b/packages/typegraph/src/query/compiler/emitter/standard-builders.ts
 @@ -389,12 +389,8 @@ export function buildStandardTraversalCte(
@@ -27,11 +27,11 @@ index 8afca62..607ef8e 100644
        compileKindFilter(sql.raw(`e.${branch.targetKindField}`), nodeKinds),
      ];
 diff --git a/packages/typegraph/src/query/compiler/identity-traversal.ts b/packages/typegraph/src/query/compiler/identity-traversal.ts
-index a83ccab..3f133d4 100644
+index eaf39c61..67e4b96b 100644
 --- a/packages/typegraph/src/query/compiler/identity-traversal.ts
 +++ b/packages/typegraph/src/query/compiler/identity-traversal.ts
-@@ -10,31 +10,23 @@ import { type TemporalFilterPass } from "./passes";
- import { type PredicateCompilerContext } from "./predicates";
+@@ -13,31 +13,23 @@ import {
+ } from "./predicates";
  
  /**
 - * Name of the query-level relation holding the identity classes a **historical**
@@ -70,7 +70,7 @@ index a83ccab..3f133d4 100644
   */
  function historicalCoordinate(
    input: Readonly<{
-@@ -59,17 +51,63 @@ function historicalCoordinate(
+@@ -62,17 +54,63 @@ function historicalCoordinate(
  }
  
  /**
@@ -144,17 +144,22 @@ index a83ccab..3f133d4 100644
   *
   * Callers must place the definition ahead of the traversal relations that read
   * it. It depends on no other CTE, so the head of the `WITH` list is always
-@@ -89,19 +127,21 @@ export function compileIdentityClassCte(
+@@ -92,24 +130,25 @@ export function compileIdentityClassCte(
    );
    if (!expandsIdentity) return undefined;
    const coordinate = historicalCoordinate({ ast, temporalFilterPass });
 -  if (coordinate === undefined) return undefined;
  
+-  const recursiveTraversal = requireRecursiveTraversalVerdict(
+-    ctx,
+-    "historical identity expansion",
+-  );
 -  const peerClasses = historicalIdentityPeerClassQuery({
 -    schema: ctx.schema,
 -    graphId,
 -    coordinate,
 -    sameIdAcrossKinds: ctx.identitySameIdAcrossKinds ?? "fold",
+-    recursiveTraversal,
 -  });
 +  const peerClasses =
 +    coordinate === undefined ?
@@ -164,6 +169,10 @@ index a83ccab..3f133d4 100644
 +        graphId,
 +        coordinate,
 +        sameIdAcrossKinds: ctx.identitySameIdAcrossKinds ?? "fold",
++        recursiveTraversal: requireRecursiveTraversalVerdict(
++          ctx,
++          "historical identity expansion",
++        ),
 +      });
    // MATERIALIZED is load-bearing, not a hint. Left inlinable, SQLite pushes the
    // relation down to each reference site, and a per-step reference is then
@@ -175,7 +184,7 @@ index a83ccab..3f133d4 100644
    return sql`
      ${sql.identifier(IDENTITY_CLASS_CTE_ALIAS)}(${IDENTITY_PEER_CLASS_COLUMNS}) AS MATERIALIZED (
        ${peerClasses}
-@@ -115,103 +155,27 @@ export function compileIdentityClassCte(
+@@ -123,103 +162,27 @@ export function compileIdentityClassCte(
   * `frontierJoin` widens the step's FROM list from "the frontier" to "the
   * frontier's class members"; `memberKind`/`memberId` then name the member a
   * candidate edge must attach to, so the edge join is an ordinary equality — the
@@ -290,7 +299,7 @@ index a83ccab..3f133d4 100644
    input: Readonly<{
      previousId: SqlFragment;
      previousKind: SqlFragment;
-@@ -227,50 +191,5 @@ function planHistoricalIdentityFrontierExpansion(
+@@ -235,50 +198,5 @@ function planHistoricalIdentityFrontierExpansion(
      `,
      memberId: sql`COALESCE(${peer}.id, ${previousId})`,
      memberKind: sql`COALESCE(${peer}.kind, ${previousKind})`,
@@ -342,10 +351,10 @@ index a83ccab..3f133d4 100644
 -  });
 -}
 diff --git a/packages/typegraph/src/query/compiler/recursive.ts b/packages/typegraph/src/query/compiler/recursive.ts
-index d25fdf0..ae6d886 100644
+index 0b3766e2..11b3b507 100644
 --- a/packages/typegraph/src/query/compiler/recursive.ts
 +++ b/packages/typegraph/src/query/compiler/recursive.ts
-@@ -274,10 +274,9 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
+@@ -276,10 +276,9 @@ function compileVariableLengthQueryWithRecursiveCteStrategy(
      temporalFilterPass,
    );
  
@@ -359,7 +368,7 @@ index d25fdf0..ae6d886 100644
    const identityClassCte = compileIdentityClassCte({
      ast,
      ctx,
-@@ -465,12 +464,8 @@ function compileRecursiveCte(
+@@ -467,12 +466,8 @@ function compileRecursiveCte(
    const identityFrontierExpansion =
      traversal.includeIdentityMembers === true ?
        planIdentityFrontierExpansion({
@@ -372,7 +381,7 @@ index d25fdf0..ae6d886 100644
        })
      : undefined;
  
-@@ -480,10 +475,6 @@ function compileRecursiveCte(
+@@ -482,10 +477,6 @@ function compileRecursiveCte(
      edgeTemporalFilter,
      nodeTemporalFilter,
      maxDepthCondition,

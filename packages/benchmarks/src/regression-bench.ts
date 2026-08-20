@@ -198,9 +198,9 @@ async function main(argv: readonly string[]): Promise<void> {
         repoRoot,
         worktreeRoot,
       });
+      cleanupTargets.push(worktree);
       await installWorktree(worktree, options.skipInstall);
       baselineWorktrees.set(plan.id, worktree);
-      cleanupTargets.push(worktree);
     }
 
     const candidateWorktree = await resolveCandidateWorktree(
