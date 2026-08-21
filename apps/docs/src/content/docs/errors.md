@@ -713,6 +713,26 @@ closed to the three codes documented under
 [Recorded-capture guard codes](#recorded-capture-guard-codes) below, and
 `isRecordedCaptureGuardError` does not recognize any write-fence code.
 
+#### Backend capability declaration codes
+
+Custom backend declarations and capability bundles use stable `details.code` values when the
+declared surface disagrees with what TypeGraph can safely execute:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `CAPABILITY_DECLARATION_CONTRADICTION` | `recursiveTraversal.supported` and its `reason` contradict each other: unsupported without a reason, or supported with a dangling reason. |
+| `RECURSIVE_TRAVERSAL_UNSUPPORTED` | A backend declares recursive traversal unsupported and a recursive query, subgraph read, or historical identity operation needs it. `details.operation` names the refusing path and `details.reason` echoes the backend declaration. |
+| `CONSTRAINT_CLAIM_SURFACE_MISMATCH` | The `constraintClaims` declaration and the claim members implemented by the backend disagree in either direction. |
+| `BUNDLE_PORT_SURFACE_MISMATCH` | A non-claim capability bundle resolves a required member as present, but the backend port used by the operation cannot reach it. Fallback-disposition members degrade through their documented fallback instead of throwing this code. |
+| `RECORDED_DDL_CONSTRAINT_NAME_MISMATCH` | `recordedTableDdl` names a primary-key constraint for only one of the temporary or final recorded-table name sets. |
+
+The recorded-time preview migration also throws `UnsupportedBackendCapabilityError` with
+`details.capability: "recordedTableDdl"` when a legacy schema needs rewriting and the custom
+backend does not provide its DDL callback. See
+[Migrating Preview Recorded Time](/schema-management#migrating-preview-recorded-time) and
+[Capability bundles](/backend-setup#capability-bundles) for the corresponding migration and
+backend-author guidance.
+
 #### Approximate retrieval with a mismatched metric
 
 `.similarTo(vector, k, { approximate: true, metric })` is refused with a

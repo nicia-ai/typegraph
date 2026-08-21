@@ -943,6 +943,26 @@ does not depend on whether the target row is already open. Omission still means
 preserve; custom backends that do not support clearing remain compatible with
 all writes that omit the option.
 
+### Recorded-table migration DDL (`recordedTableDdl`)
+
+`GraphBackend.recordedTableDdl` is an optional, synchronous callback used only by the offline
+timestamp-only recorded-time preview migration. The migration calls it twice, once with temporary
+table names and once with the final names, and expects DDL for `recordedClock`, `recordedNodes`, and
+`recordedEdges`. The backend owns this callback because table creation, indexes, and named
+constraints are dialect-specific and must not pull Drizzle into portable entrypoints.
+
+A custom backend can omit the callback unless it created data in the old preview schema. If
+`migrateLegacyRecordedTime` discovers that schema and the callback is absent, it throws
+`UnsupportedBackendCapabilityError` with `details.capability: "recordedTableDdl"`. When the engine
+names primary-key constraints, the temporary and final callback results must either both name the
+constraint or both omit it; a one-sided result throws `ConfigurationError` code
+`RECORDED_DDL_CONSTRAINT_NAME_MISMATCH`.
+
+The callback only describes DDL. It must not execute statements or inspect the catalog, because the
+migration invokes it inside its transaction. See
+[Migrating Preview Recorded Time](/schema-management#migrating-preview-recorded-time) for the
+operator workflow.
+
 ### Recursive traversal capability
 
 Both bundled backends declare `capabilities.recursiveTraversal: { supported: true }`. **Absent
