@@ -196,6 +196,15 @@ and — unless a single call's `edges` list exceeds the backend's
 bind-parameter budget (hundreds of kinds, where equal-weight predecessor
 ties can resolve differently) — so is the returned node sequence.
 
+Path extraction honors the backend's
+[`recursiveTraversal`](/backend-setup#recursive-traversal-capability) declaration. A supported
+backend reconstructs the result with one recursive statement. A backend declaring
+`{ supported: false, reason }` still runs the full weighted search when it supports the temporary
+working-table operations the algorithm requires; TypeGraph reconstructs the same result by walking
+predecessors instead, using `path.depth + 1` extraction statements. This affects round trips, not
+the selected path or its weight. The unweighted traversal algorithms do not emit a recursive CTE
+and are unaffected by this capability.
+
 ## reachable
 
 Returns every node reachable from `from` within `maxHops`, annotated with

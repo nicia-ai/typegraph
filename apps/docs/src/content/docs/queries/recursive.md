@@ -8,8 +8,33 @@ transitive dependencies of a package, or everyone reachable within six degrees o
 relational database, each depth level requires another self-join — and you have to know the depth
 ahead of time. Recursive traversals solve this by walking edges until a stopping condition is met.
 
-TypeGraph compiles `.recursive()` into a SQL `WITH RECURSIVE` CTE. The database engine handles the
-iteration, so you get the full performance of native recursive SQL without writing it by hand.
+When the backend advertises recursive traversal support, TypeGraph compiles `.recursive()` into a
+SQL `WITH RECURSIVE` CTE. The database engine handles the iteration, so you get the full
+performance of native recursive SQL without writing it by hand.
+
+## Backend Support
+
+The bundled SQLite and PostgreSQL backends support recursive traversal. A custom backend that
+cannot compute a bounded transitive closure in one round trip must declare:
+
+```typescript
+const capabilities = {
+  recursiveTraversal: {
+    supported: false,
+    reason: "engine has no WITH RECURSIVE or graph-native equivalent",
+  },
+} satisfies Partial<BackendCapabilities>;
+```
+
+Calling `.recursive()` through that backend throws `ConfigurationError` with
+`details.code: "RECURSIVE_TRAVERSAL_UNSUPPORTED"`. `details.operation` identifies the refusing
+query path and `details.reason` contains the backend's declaration. This refusal also applies when
+the recursive query is nested inside `union()`, `intersect()`, or `except()`.
+
+An absent `recursiveTraversal` declaration means supported for backward compatibility with custom
+backends that already execute recursive SQL. See
+[Recursive traversal capability](/backend-setup#recursive-traversal-capability) for the complete
+backend-author contract and the other operations governed by this capability.
 
 ## How It Works
 

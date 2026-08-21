@@ -43,11 +43,32 @@ npm install --global windows-build-tools
 
 **Alternative:** Use `sql.js` for pure JavaScript SQLite (no compilation needed).
 
+### Missing optional `drizzle-orm` peer
+
+**Cause:** The managed SQLite or PGlite Store entrypoint was called without the optional
+`drizzle-orm` peer installed.
+
+**Solution:** Install the peer in the application that uses the managed entrypoint:
+
+```bash
+npm install drizzle-orm
+```
+
+The root package and other portable entrypoints do not require Drizzle. Explicit
+`@nicia-ai/typegraph/adapters/drizzle/...` entrypoints load Drizzle when the module is evaluated,
+so a missing peer there appears as the runtime's raw module-resolution error instead of
+`MISSING_PEER_DEPENDENCY`. See [Managed Store Entrypoints](/backend-setup#managed-store-entrypoints).
+
 ### "Module not found: drizzle-orm/better-sqlite3"
 
-**Cause:** Drizzle ORM subpath exports require specific import syntax.
+**Cause:** An explicit Drizzle adapter import is missing `drizzle-orm`, or the application imported
+the wrong Drizzle subpath.
 
-**Solution:** Ensure correct imports:
+**Solution:** First install `drizzle-orm`, then ensure the import matches the driver:
+
+```bash
+npm install drizzle-orm
+```
 
 ```typescript
 // Correct

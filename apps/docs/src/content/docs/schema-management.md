@@ -481,6 +481,21 @@ await deleteLegacyRecordedAnchorMap({
 });
 ```
 
+The bundled SQLite and PostgreSQL backends provide the recorded-relation DDL needed by this
+rewrite. A custom backend that created the preview schema must implement
+`backend.recordedTableDdl(tableNames)` before running `migrateLegacyRecordedTime`; otherwise the
+migration throws `UnsupportedBackendCapabilityError` with
+`details.capability: "recordedTableDdl"`. The callback is invoked for the temporary and final name
+sets so the backend, rather than TypeGraph's portable entrypoint, remains the owner of
+dialect-specific table and index DDL.
+
+When the engine names primary-key constraints, each callback result must name the constraint for
+both name sets or for neither. A one-sided declaration throws `ConfigurationError` with
+`details.code: "RECORDED_DDL_CONSTRAINT_NAME_MISMATCH"` before the replacement tables are
+published. See
+[`recordedTableDdl` in the backend contract](/backend-setup#recorded-table-migration-ddl-recordedtableddl)
+when adapting this migration to a custom backend.
+
 The migration dense-ranks distinct legacy commit timestamps independently per
 graph, preserving their exact total order. It rewrites the recorded relations
 and clock atomically and retains a durable old-anchor mapping so downstream

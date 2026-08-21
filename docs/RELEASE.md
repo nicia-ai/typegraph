@@ -13,8 +13,9 @@ changelog generation, npm publishing, and GitHub Releases.
 
 2. Choose bump level:
    `patch`: bug fixes, non-breaking internal improvements.
-   `minor`: new backward-compatible features.
-   `major`: breaking API/behavior changes.
+   `minor`: new features and, while the package remains pre-1.0, intentional
+   breaking API or behavior changes with explicit migration notes.
+   `major`: the 1.0 stability commitment and later breaking releases.
 3. Commit the generated `.changeset/*.md` file in the same PR.
 4. Do not edit package versions manually.
 
@@ -37,7 +38,8 @@ changesets reach `main`:
 - every numbered SQLite and PostgreSQL example;
 - the documentation build, rendered internal links and anchors, and TypeGraph
   imports extracted from current documentation code blocks;
-- strict packed-consumer tests and API-report checks.
+- strict packed-consumer tests, API-report checks, and the API-surface
+  compatibility check against the last published tag.
 
 The generated Version Packages PR only changes release metadata, so CI skips
 those heavy jobs after verifying that its changes are limited to changesets,
@@ -53,6 +55,7 @@ pnpm fix && pnpm typecheck && pnpm test
 pnpm test:postgres
 pnpm test:examples
 pnpm test:docs:release
+pnpm --filter @nicia-ai/typegraph test:api-surface
 ```
 
 Run `pnpm test:examples:postgres` with `POSTGRES_URL` set when validating the
