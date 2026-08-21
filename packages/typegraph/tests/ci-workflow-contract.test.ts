@@ -114,6 +114,22 @@ describe("CI workflow contract", () => {
     }
   });
 
+  it("installs every optional peer required by the release export smoke test", () => {
+    const workflow = readFileSync(RELEASE_WORKFLOW_PATH, "utf8");
+    const optionalPeerNamesMatch = /const names = (\[[^;]+\]);/.exec(workflow);
+
+    expect(optionalPeerNamesMatch).not.toBeNull();
+    expect(JSON.parse(optionalPeerNamesMatch?.[1] ?? "[]")).toEqual([
+      "drizzle-orm",
+      "better-sqlite3",
+      "@libsql/client",
+      "@electric-sql/pglite",
+    ]);
+    expect(workflow).toContain(
+      'npm install "$TARBALL_PATH" $OPTIONAL_PEER_SPECS >/dev/null',
+    );
+  });
+
   it("detects metadata-only changes on pushes and pull requests", () => {
     const workflow = readFileSync(WORKFLOW_PATH, "utf8");
     const baseSha = runGit(fixtureDirectory, ["rev-parse", "HEAD"]);
