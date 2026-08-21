@@ -31,8 +31,7 @@
 /* Blog cover art (starlight-blog's Cover component, used on both the post
    list and individual posts) — round the corners to match the rest of the
    site's rounded-lg convention (see the landing page's buttons/cards). */
-.preview figure img,
-.sl-markdown-content > figure:first-child img {
+.sl-blog-cover-image {
   border-radius: 0.5rem;
 }
 
