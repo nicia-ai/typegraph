@@ -1,5 +1,49 @@
 # @nicia-ai/typegraph
 
+## 0.51.0
+
+### Minor Changes
+
+- [#521](https://github.com/nicia-ai/typegraph/pull/521) [`da251ef`](https://github.com/nicia-ai/typegraph/commit/da251ef021c8b2b61717f0c8fa7c07535a28599a) Thanks [@pdlug](https://github.com/pdlug)! - Custom backend capabilities now resolve through six shared bundles instead of scattered `undefined` checks. This makes each operation family consistently choose one of three outcomes: use the declared member, take its documented fallback, or refuse with a typed error.
+
+  The pilot covers `claims`, `statementExecution`, `recordedRevisionOrigins`, `batchPointRead`, `uniqueSidecarBatch`, and `contributionHealth`. Batch point reads and supported sidecar operations degrade to their existing per-item implementations when the batch member is absent. Operations without a safe fallback keep their existing typed refusal. A backend whose capability declaration disagrees with the members reachable on its execution port now refuses with `CONSTRAINT_CLAIM_SURFACE_MISMATCH` for claims or `BUNDLE_PORT_SURFACE_MISMATCH` for the other bundles.
+
+  `CAPABILITY_BUNDLES`, the six named definitions, their verdict and binding types, and the `resolveBundle`, `bindCore`, `bindExtra`, and `bindExtraIfReachable` helpers are public for backend conformance tooling. Both bundled backends already implement every required member, so their behavior is unchanged.
+
+  This pilot covers six of twenty-one member-bearing operation families; the other fifteen continue to work through their existing paths. See [Capability bundles](https://typegraph.dev/backend-setup#capability-bundles) for the complete member and fallback matrix.
+
+- [#520](https://github.com/nicia-ai/typegraph/pull/520) [`b6478f6`](https://github.com/nicia-ai/typegraph/commit/b6478f6e67d57767784c59691268049ce8585f75) Thanks [@pdlug](https://github.com/pdlug)! - `drizzle-orm` is now optional when using TypeGraph's portable entrypoints. Applications that import only the root, backend, core, schema, indexes, graph-extension, interchange, profiler, graph-merge, or provenance entrypoints no longer need Drizzle installed.
+
+  Applications using a managed SQLite or PGlite Store, or an explicit `/adapters/drizzle/...` entrypoint, must still install it with `npm install drizzle-orm` when their package manager does not install optional peers automatically. Managed Store factories report a typed `MISSING_PEER_DEPENDENCY` error with that command; explicit Drizzle adapters retain the runtime's raw module-resolution error. See [Managed Store Entrypoints](https://typegraph.dev/backend-setup#managed-store-entrypoints) and [installation troubleshooting](https://typegraph.dev/troubleshooting#missing-optional-drizzle-orm-peer).
+
+- [#520](https://github.com/nicia-ai/typegraph/pull/520) [`b6478f6`](https://github.com/nicia-ai/typegraph/commit/b6478f6e67d57767784c59691268049ce8585f75) Thanks [@pdlug](https://github.com/pdlug)! - Portable entrypoints no longer reach Drizzle through recorded-time migration, claim comparison, or removal-statement builders. This completes the separation that lets consumers use the ten portable entrypoints without installing `drizzle-orm`; source and packaged-output checks now prevent those imports from returning.
+
+  Custom backends that need to migrate the timestamp-only recorded-time preview schema must implement the new optional `GraphBackend.recordedTableDdl(tableNames)` member. It returns backend-owned table and index DDL for the temporary and final recorded-relation names. A migration that reaches the legacy rewrite without this member throws `UnsupportedBackendCapabilityError` with `details.capability: "recordedTableDdl"` instead of importing Drizzle or crashing. See [Migrating Preview Recorded Time](https://typegraph.dev/schema-management#migrating-preview-recorded-time).
+
+- [#521](https://github.com/nicia-ai/typegraph/pull/521) [`da251ef`](https://github.com/nicia-ai/typegraph/commit/da251ef021c8b2b61717f0c8fa7c07535a28599a) Thanks [@pdlug](https://github.com/pdlug)! - Custom backends can now declare whether they support recursive traversal with `capabilities.recursiveTraversal`. Absence means supported for backward compatibility; an engine without recursive SQL or a graph-native equivalent declares `{ supported: false, reason }`.
+
+  The decision is resolved through a branded `RecursiveTraversalVerdict` that only `resolveRecursiveTraversal` can construct, so a caller cannot forge one by writing `{ supported: true }` inline. Also exported: `assumeRecursiveTraversalSupported` (the one sanctioned way to obtain a verdict without a backend, used by the query compiler's no-backend entry point), `assertRecursiveTraversal`, `recursiveTraversalUnsupportedError`, and the `RecursiveTraversalCapability` type itself.
+
+  Variable-length queries, `store.subgraph()`, and the three recursion-dependent historical identity reads now refuse an unsupported declaration with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `details.operation` and `details.reason` identify the affected path and engine limitation. `weightedShortestPath` keeps working when temporary statements are available, reconstructing the same path through `pathLength + 1` predecessor reads instead of one recursive extraction statement.
+
+  `CompileQueryOptions` gains an optional `recursiveTraversal`, threaded by `propagateOptions` into every set-operation sub-compile so a `union()`/`intersect()`/`except()` operand carries the same verdict as its parent query.
+
+  Bundled factories refuse contradictory declarations — unsupported without a reason or supported with a dangling reason — using `CAPABILITY_DECLARATION_CONTRADICTION`. The bundled SQLite and PostgreSQL backends declare support, so their query behavior is unchanged.
+
+  Custom backend note: the factory-owned clone of `backend.capabilities` is now deep-frozen, so mutating it after construction throws. Objects supplied through factory options remain caller-owned and mutable. See [Recursive traversal capability](https://typegraph.dev/backend-setup#recursive-traversal-capability) and the [recursive query guide](https://typegraph.dev/queries/recursive#backend-support).
+
+- [#521](https://github.com/nicia-ai/typegraph/pull/521) [`da251ef`](https://github.com/nicia-ai/typegraph/commit/da251ef021c8b2b61717f0c8fa7c07535a28599a) Thanks [@pdlug](https://github.com/pdlug)! - **Custom backend migration:** a backend not built by `createSqliteBackend` or `createPostgresBackend` must now declare `capabilities.pessimisticLocks` before hosting Operational Identity, `history: true`, or `revisionTracking: true`. Store construction refuses an undeclared backend immediately instead of risking an unfenced concurrent write. PostgreSQL backends normally declare `pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false }`; SQLite backends normally declare `pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: true }`. Verify those values against the engine's actual guarantees rather than copying them for a different topology.
+
+  `BackendCapabilities` gains an optional `pessimisticLocks` field (`{ advisoryLocks, tableLocks, serializedWriters }`) declaring how an engine serializes concurrent writers, if at all. `resolveWriteFencePlan` is the one place that declaration turns into a `WriteFencePlan` (`lock` / `engine-serialized` / `unfenced`) every lock site now consumes instead of re-deriving from `dialect` inline, and `requireWriteFence` is the one place an operation's specific lock requirement (`"advisory-lock"` / `"table-lock"`) is checked against the resolved plan, refusing with `WRITE_FENCE_UNAVAILABLE` when it cannot be met. This consolidates eight call sites that used to spell the same dialect-keyed decision independently.
+
+  `BackendCapabilities` also gains an optional `recordedTimeOwnership` field (`"typegraph-relations"` | `"engine-native"`) naming who allocates recorded-time revisions. Absent means `"typegraph-relations"` — today's behavior for every existing backend. Declaring `"engine-native"` together with `history`/`revisionTracking` is refused at construction with `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` as an interim measure, independently of the write-fence plan, because the engine-native read/write path does not exist yet; a later release lifts this refusal with that path.
+
+  Both bundled backends already declare their write-fence support, so shipped configurations keep their existing behavior. See [Write fence declaration](https://typegraph.dev/backend-setup#write-fence-declaration-pessimisticlocks), [recorded-time ownership](https://typegraph.dev/backend-setup#recorded-time-ownership-recordedtimeownership), and the [stable error codes](https://typegraph.dev/errors#write-fence-declaration-codes).
+
+### Patch Changes
+
+- [#521](https://github.com/nicia-ai/typegraph/pull/521) [`da251ef`](https://github.com/nicia-ai/typegraph/commit/da251ef021c8b2b61717f0c8fa7c07535a28599a) Thanks [@pdlug](https://github.com/pdlug)! - **For contributors:** CI now compares the public `etc/*.api.md` snapshots with the last published tag through `test:api-surface`. The check fails when an external consumer would lose a member, see an optional member become required, or need to supply a newly required member through a contravariant API position. This adds no runtime or published API; it makes breaking surface changes visible before release. See the [release verification commands](https://github.com/nicia-ai/typegraph/blob/main/docs/RELEASE.md#pre-release-verification).
+
 ## 0.50.0
 
 ### Minor Changes
