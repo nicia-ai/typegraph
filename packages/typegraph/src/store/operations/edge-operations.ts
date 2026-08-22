@@ -88,8 +88,8 @@ import {
   type GraphReadBackend,
   type InsertEdgeParams,
   rowPropsToObject,
-  type TransactionBackend,
   runOptionallyInTransaction,
+  type TransactionBackend,
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
@@ -1735,16 +1735,18 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     );
   }
 
+  // The return-mode probe is also the dispatcher read for a create. Keep a
+  // negative result so a no-match call does not pay for the same root lookup
+  // twice before the create transaction performs its authoritative check.
+  let initialNegativeRootCandidates: readonly BackendEdgeRow[] | undefined;
+
   // Keep the cheap root probe for the common found path, but never return its
   // row directly. A positive root result is only a hint; the transaction read
   // below owns the match decision and can reject a stale cache entry.
   if (ifExists === "return") {
     const probeRows = await findCandidates(backend);
-    const { liveRow: probedLiveRow } = findMatchingEdge(
-      probeRows,
-      matchOn,
-      validatedProps,
-    );
+    const { liveRow: probedLiveRow, deletedRow: probedDeletedRow } =
+      findMatchingEdge(probeRows, matchOn, validatedProps);
     if (probedLiveRow !== undefined) {
       const currentRows = await findCandidatesInTransaction();
       const { liveRow: currentLiveRow } = findMatchingEdge(
@@ -1756,6 +1758,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
         return { edge: rowToEdge(currentLiveRow), action: "found" };
       }
+    } else if (probedDeletedRow === undefined) {
+      initialNegativeRootCandidates = probeRows;
     }
   }
 
@@ -1859,7 +1863,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     const candidateRows =
       forceTransactionRead ?
         await findCandidatesInTransaction()
-      : await findCandidates(backend);
+      : (initialNegativeRootCandidates ?? (await findCandidates(backend)));
+    initialNegativeRootCandidates = undefined;
 
     let { liveRow, deletedRow } = findMatchingEdge(
       candidateRows,
