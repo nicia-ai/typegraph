@@ -185,6 +185,7 @@ const WATCHED_MEMBERS = [
   "insertEdge",
   "insertEdgeIfEndpointsLive",
   "insertEdgeIfEndpointsLiveWithSchemaFence",
+  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",

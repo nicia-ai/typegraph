@@ -1,6 +1,7 @@
 import { is, type SQL, sql as drizzleSql } from "drizzle-orm";
 
 import {
+  CompilerInvariantError,
   ConfigurationError,
   DatabaseOperationError,
   MigrationError,
@@ -85,6 +86,45 @@ import {
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
 
+function assertMatchingFusedEdgeClaim(
+  params: InsertEdgeParams,
+  claim: ClaimEdgeCardinalityParams,
+): void {
+  const matchesEdge =
+    claim.graphId === params.graphId &&
+    claim.edgeId === params.id &&
+    claim.edgeKind === params.kind &&
+    claim.fromKind === params.fromKind &&
+    claim.fromId === params.fromId &&
+    claim.toKind === params.toKind &&
+    claim.toId === params.toId;
+  if (matchesEdge) return;
+
+  throw new CompilerInvariantError(
+    "A fused edge cardinality claim must describe the edge being inserted.",
+    {
+      edge: {
+        graphId: params.graphId,
+        id: params.id,
+        kind: params.kind,
+        fromKind: params.fromKind,
+        fromId: params.fromId,
+        toKind: params.toKind,
+        toId: params.toId,
+      },
+      claim: {
+        graphId: claim.graphId,
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+        fromKind: claim.fromKind,
+        fromId: claim.fromId,
+        toKind: claim.toKind,
+        toId: claim.toId,
+      },
+    },
+  );
+}
+
 /**
  * The owner a claim write proposes. Reading it off the params in one place is
  * what keeps the accept/refuse test comparing the same pair the SQL arms do.
@@ -137,6 +177,7 @@ export type CommonOperationBackend = Pick<
   | "insertEdge"
   | "insertEdgeIfEndpointsLive"
   | "insertEdgeIfEndpointsLiveWithSchemaFence"
+  | "insertEdgeIfEndpointsLiveWithCardinalityClaim"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
@@ -249,6 +290,8 @@ type CreateCommonOperationBackendOptions = Readonly<{
   schemaFenceLockClause?: SQL | undefined;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   schemaGraphWriteLockNamespace?: string | undefined;
+  /** Present only for a bundled PostgreSQL transaction-scoped backend. */
+  edgeCardinalityInsertFusion?: boolean | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -659,11 +702,45 @@ export function createCommonOperationBackend(
         },
       };
 
+  const edgeCardinalityInsertFusionMembers = (() => {
+    const buildInsertEdgeIfEndpointsLiveWithCardinalityClaim =
+      operationStrategy.buildInsertEdgeIfEndpointsLiveWithCardinalityClaim;
+    if (
+      options.edgeCardinalityInsertFusion !== true ||
+      buildInsertEdgeIfEndpointsLiveWithCardinalityClaim === undefined
+    ) {
+      return {};
+    }
+    return {
+      async insertEdgeIfEndpointsLiveWithCardinalityClaim(
+        params: InsertEdgeParams,
+        claim: ClaimEdgeCardinalityParams,
+      ): Promise<EdgeRow | undefined> {
+        assertMatchingFusedEdgeClaim(params, claim);
+        const query = buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
+          params,
+          claim,
+          nowIso(),
+        );
+        const row = await withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+          },
+        );
+        return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+      },
+    };
+  })();
+
   return {
     tableExists,
 
     ...schemaFenceMembers,
     ...schemaGraphWriteFenceMembers,
+    ...edgeCardinalityInsertFusionMembers,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

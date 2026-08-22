@@ -260,8 +260,11 @@ function indexOfSchemaFence(): number {
  * protect. Lock statements are `SELECT`s, so they cannot be mistaken for one.
  */
 function indexOfFirstRowStatement(): number {
-  return statements.findIndex((statement) =>
-    /^\s*(insert|update|delete)/i.test(statement.query),
+  return statements.findIndex(
+    (statement) =>
+      /^\s*(insert|update|delete)\b/iu.test(statement.query) ||
+      (/^\s*with\b/iu.test(statement.query) &&
+        /\b(?:insert\s+into|update|delete\s+from)\b/iu.test(statement.query)),
   );
 }
 

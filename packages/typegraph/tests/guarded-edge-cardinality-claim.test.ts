@@ -11,7 +11,10 @@ import {
   type GraphBackend,
   type TransactionBackend,
 } from "../src/backend/types";
-import { createStore } from "../src/store";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import { sql } from "../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { createStore, createStoreWithSchema } from "../src/store";
 import { createRecordedPostgresStore } from "./statement-recorder";
 import { createInitializedStore } from "./test-utils";
 
@@ -48,24 +51,66 @@ function edgeEntityStatements(queries: readonly string[]): readonly string[] {
   );
 }
 
+async function readClaimRows(
+  backend: GraphBackend,
+): Promise<readonly { axis: string; key: string; edge_id: string }[]> {
+  const schema = createSqlSchema(backend.tableNames);
+  return backend.execute<{ axis: string; key: string; edge_id: string }>(
+    asCompiledRowsSql(sql`
+      SELECT axis, key, edge_id
+      FROM ${sql.identifier(schema.tables.edgeClaims)}
+      WHERE graph_id = ${graph.id}
+      ORDER BY axis, key
+    `),
+  );
+}
+
 describe("guarded edge cardinality claim", () => {
-  it("folds the cardinality and endpoint probes into two successful-path statements", async () => {
+  it.each(["one", "unique", "oneActive"] as const)(
+    "folds the %s cardinality claim and endpoint insert into one statement",
+    async (kind) => {
+      const fixture = await createRecordedPostgresStore(graph);
+      const from = await fixture.store.nodes.Person.create({ name: "from" });
+      const to = await fixture.store.nodes.Person.create({ name: "to" });
+
+      fixture.reset();
+      await fixture.store.edges[kind].create(from, to, {});
+
+      const statements = edgeEntityStatements(
+        fixture.statements.map((statement) => statement.query),
+      );
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toMatch(/insert into "typegraph_edge_claims"/iu);
+      expect(statements[0]).toMatch(/exists[\s\S]*from "typegraph_edges"/iu);
+      expect(statements[0]).toMatch(
+        /insert into "typegraph_edges"[\s\S]*select/iu,
+      );
+      expect(statements[0]).toMatch(/typegraph_nodes/iu);
+    },
+  );
+
+  it("runs the combined schema/graph fence before the fused edge write", async () => {
     const fixture = await createRecordedPostgresStore(graph);
-    const from = await fixture.store.nodes.Person.create({ name: "from" });
-    const to = await fixture.store.nodes.Person.create({ name: "to" });
+    const [store] = await createStoreWithSchema(graph, fixture.backend);
+    const from = await store.nodes.Person.create({ name: "from" });
+    const to = await store.nodes.Person.create({ name: "to" });
 
     fixture.reset();
-    await fixture.store.edges.one.create(from, to, {});
+    await store.edges.one.create(from, to, {});
 
-    const statements = edgeEntityStatements(
-      fixture.statements.map((statement) => statement.query),
+    const statements = fixture.statements.map((statement) => statement.query);
+    const fenceIndex = statements.findIndex(
+      (statement) =>
+        /for share/iu.test(statement) &&
+        /pg_advisory_xact_lock/iu.test(statement),
     );
-    expect(statements).toHaveLength(2);
-    expect(statements[0]).toMatch(/insert into "typegraph_edge_claims"/iu);
-    expect(statements[0]).toMatch(/exists[\s\S]*from "typegraph_edges"/iu);
-    expect(statements[1]).toMatch(
-      /insert into "typegraph_edges"[\s\S]*select/iu,
+    const fusedIndex = statements.findIndex(
+      (statement) =>
+        /insert into "typegraph_edge_claims"/iu.test(statement) &&
+        /insert into "typegraph_edges"/iu.test(statement),
     );
+    expect(fenceIndex).toBeGreaterThanOrEqual(0);
+    expect(fusedIndex).toBe(fenceIndex + 1);
   });
 
   it("retains the separate probe when the exact target lacks the strong member", async () => {
@@ -77,7 +122,11 @@ describe("guarded edge cardinality claim", () => {
       ): Promise<T> {
         return fixture.backend.transaction(
           (tx) =>
-            fn(projectBackendWithout(tx, ["claimEdgeCardinalityGuarded"])),
+            fn(
+              projectBackendWithout(tx, [
+                "insertEdgeIfEndpointsLiveWithCardinalityClaim",
+              ]),
+            ),
           options,
         );
       },
@@ -89,13 +138,241 @@ describe("guarded edge cardinality claim", () => {
     fixture.reset();
     await store.edges.one.create(from, to, {});
 
+    const statements = edgeEntityStatements(
+      fixture.statements.map((statement) => statement.query),
+    );
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toMatch(/insert into "typegraph_edge_claims"/iu);
+    expect(statements[1]).toMatch(/insert into "typegraph_edges"/iu);
+  });
+
+  it("does not leave a claim when a fused endpoint check returns no row", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const to = await fixture.store.nodes.Person.create({ name: "to" });
+
+    await fixture.store.transaction(async (transaction) => {
+      await expect(
+        transaction.edges.one.create(
+          { kind: "Person", id: "missing-from" },
+          to,
+          {},
+        ),
+      ).rejects.toMatchObject({ details: { endpoint: "from" } });
+      // Catching the refusal lets this caller-owned transaction commit. The
+      // endpoint CTE must therefore prevent the claim write itself; relying on
+      // an operation-owned rollback would not protect this path.
+    });
+    expect(await readClaimRows(fixture.backend)).toEqual([]);
+
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    await fixture.store.nodes.Person.delete(to.id);
+    await fixture.store.transaction(async (transaction) => {
+      await expect(
+        transaction.edges.one.create(from, to, {}),
+      ).rejects.toMatchObject({ details: { endpoint: "to" } });
+    });
+    expect(await readClaimRows(fixture.backend)).toEqual([]);
+  });
+
+  it("refuses a cardinality conflict without inserting the losing edge", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    const firstTo = await fixture.store.nodes.Person.create({ name: "first" });
+    const secondTo = await fixture.store.nodes.Person.create({
+      name: "second",
+    });
+
+    const incumbent = await fixture.store.edges.one.create(from, firstTo, {});
+    await expect(
+      fixture.store.edges.one.create(from, secondTo, {}),
+    ).rejects.toMatchObject({ details: { cardinality: "one" } });
+
+    expect(await fixture.store.edges.one.findFrom(from)).toHaveLength(1);
+    expect(await readClaimRows(fixture.backend)).toEqual([
+      expect.objectContaining({ edge_id: incumbent.id }),
+    ]);
+  });
+
+  it("does not claim a claimless incumbent's axis when the caller commits", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    const firstTo = await fixture.store.nodes.Person.create({ name: "first" });
+    const secondTo = await fixture.store.nodes.Person.create({
+      name: "second",
+    });
+    await fixture.backend.insertEdge({
+      graphId: graph.id,
+      id: "claimless-incumbent",
+      kind: "one",
+      fromKind: "Person",
+      fromId: from.id,
+      toKind: "Person",
+      toId: firstTo.id,
+      props: {},
+    });
+
+    await fixture.store.transaction(async (transaction) => {
+      await expect(
+        transaction.edges.one.create(from, secondTo, {}),
+      ).rejects.toMatchObject({ details: { cardinality: "one" } });
+    });
+
+    expect(await readClaimRows(fixture.backend)).toEqual([]);
+    expect(await fixture.store.edges.one.findFrom(from)).toHaveLength(1);
+  });
+
+  it("takes over a stale foreign claim through the fresh fallback", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    const to = await fixture.store.nodes.Person.create({ name: "to" });
+    const claim = fixture.backend.claimEdgeCardinality;
+    if (claim === undefined) throw new Error("expected edge claim support");
+
+    await claim({
+      graphId: graph.id,
+      cardinality: "one",
+      edgeKind: "one",
+      edgeId: "stale-holder",
+      fromKind: "Person",
+      fromId: from.id,
+      toKind: "Person",
+      toId: to.id,
+    });
+
+    fixture.reset();
+    const created = await fixture.store.edges.one.create(from, to, {});
+    expect(created.id).not.toBe("stale-holder");
+    expect(await readClaimRows(fixture.backend)).toEqual([
+      expect.objectContaining({ edge_id: created.id }),
+    ]);
     expect(
-      fixture.statements.some(
-        (statement) =>
-          /select count/iu.test(statement.query) &&
-          /from "typegraph_edges"/iu.test(statement.query),
+      fixture.statements.some((statement) =>
+        /update "typegraph_edge_claims"/iu.test(statement.query),
       ),
     ).toBe(true);
+  });
+
+  it("rolls back the fused claim statement when its edge id is duplicate", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const firstFrom = await fixture.store.nodes.Person.create({
+      name: "from-1",
+    });
+    const secondFrom = await fixture.store.nodes.Person.create({
+      name: "from-2",
+    });
+    const to = await fixture.store.nodes.Person.create({ name: "to" });
+
+    const incumbent = await fixture.store.edges.one.create(
+      firstFrom,
+      to,
+      {},
+      {
+        id: "duplicate-edge-id",
+      },
+    );
+    await fixture.backend.transaction(async (transaction) => {
+      const fused = transaction.insertEdgeIfEndpointsLiveWithCardinalityClaim;
+      if (fused === undefined) throw new Error("expected fused edge support");
+      await expect(
+        fused(
+          {
+            graphId: graph.id,
+            id: "duplicate-edge-id",
+            kind: "one",
+            fromKind: "Person",
+            fromId: secondFrom.id,
+            toKind: "Person",
+            toId: to.id,
+            props: {},
+          },
+          {
+            graphId: graph.id,
+            cardinality: "one",
+            edgeKind: "one",
+            edgeId: "duplicate-edge-id",
+            fromKind: "Person",
+            fromId: secondFrom.id,
+            toKind: "Person",
+            toId: to.id,
+          },
+        ),
+      ).rejects.toBeDefined();
+      // The duplicate is caught inside the caller's transaction, which then
+      // commits. SQL statement atomicity must still roll back its new claim.
+    });
+
+    expect(await fixture.store.edges.one.find()).toHaveLength(1);
+    expect(await readClaimRows(fixture.backend)).toEqual([
+      expect.objectContaining({ edge_id: incumbent.id }),
+    ]);
+  });
+
+  it("refuses a fused claim that does not describe the inserted edge", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    const to = await fixture.store.nodes.Person.create({ name: "to" });
+
+    await fixture.backend.transaction(async (transaction) => {
+      const fused = transaction.insertEdgeIfEndpointsLiveWithCardinalityClaim;
+      if (fused === undefined) throw new Error("expected fused edge support");
+      await expect(
+        fused(
+          {
+            graphId: graph.id,
+            id: "edge-id",
+            kind: "one",
+            fromKind: "Person",
+            fromId: from.id,
+            toKind: "Person",
+            toId: to.id,
+            props: {},
+          },
+          {
+            graphId: graph.id,
+            cardinality: "one",
+            edgeKind: "one",
+            edgeId: "different-edge-id",
+            fromKind: "Person",
+            fromId: from.id,
+            toKind: "Person",
+            toId: to.id,
+          },
+        ),
+      ).rejects.toMatchObject({ code: "COMPILER_INVARIANT_ERROR" });
+    });
+
+    expect(await fixture.store.edges.one.find()).toEqual([]);
+    expect(await readClaimRows(fixture.backend)).toEqual([]);
+  });
+
+  it("captures a fused edge row and its claim atomically under history", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const historyStore = createStore(graph, fixture.backend, { history: true });
+    const from = await historyStore.nodes.Person.create({ name: "from" });
+    const to = await historyStore.nodes.Person.create({ name: "to" });
+
+    fixture.reset();
+    const created = await historyStore.edges.one.create(from, to, {});
+    const schema = createSqlSchema(fixture.backend.tableNames);
+    const recordedRows = await fixture.backend.execute<{ total: number }>(
+      asCompiledRowsSql(sql`
+        SELECT COUNT(*) AS total
+        FROM ${schema.recordedEdgesTable}
+        WHERE graph_id = ${graph.id} AND id = ${created.id}
+      `),
+    );
+    expect(recordedRows[0]?.total).toBe(1);
+    expect(
+      fixture.statements.some((statement) =>
+        /insert into "typegraph_recorded_edges"/iu.test(statement.query),
+      ),
+    ).toBe(true);
+    const fused = fixture.statements.filter(
+      (statement) =>
+        /insert into "typegraph_edge_claims"/iu.test(statement.query) &&
+        /insert into "typegraph_edges"/iu.test(statement.query),
+    );
+    expect(fused).toHaveLength(1);
   });
 
   it("refuses claimless live incumbents for one, unique, and oneActive", async () => {

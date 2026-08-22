@@ -35,6 +35,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "getNodes",
   "insertEdge",
   "insertEdgeIfEndpointsLive",
+  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",

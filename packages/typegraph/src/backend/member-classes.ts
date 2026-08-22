@@ -109,6 +109,7 @@ export const ENTITY_WRITE_MEMBERS = [
   "hardDeleteNode",
   "insertEdge",
   "insertEdgeIfEndpointsLive",
+  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
   "insertEdgeIfEndpointsLiveWithSchemaFence",
   "insertEdgeNoReturn",
   "insertEdgesBatch",

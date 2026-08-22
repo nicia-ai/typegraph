@@ -2,7 +2,7 @@
  * The stamping-site inventory, ratcheted over source text (invariant I5).
  *
  * "No write path stamps a validity bound it did not judge" is a claim about a
- * SET of call sites, and no behavioral test can state it: a fourteenth site
+ * SET of call sites, and no behavioral test can state it: an additional site
  * added tomorrow with its own `?? timestamp` would leave every existing test
  * green while re-opening issue #407 on whatever path it serves. The claim is
  * structural, so the guard is too.
@@ -19,8 +19,8 @@
  *      WITHOUT calling an owner, which is precisely how the duplicate resolver
  *      in `trusted-import.ts` survived the last two rounds of review.
  *  (c) FILE SET — the set of files under `src/backend/**` that name the column at
- *      all equals the thirteen declared here, each with the role that earns it. (a)
- *      and (b) only see three files; a NEW file that binds `valid_from` would be
+ *      all equals the fourteen declared here, each with the role that earns it. (a)
+ *      and (b) only see four files; a NEW file that binds `valid_from` would be
  *      invisible to them, and I5 is quantified over the whole directory.
  *
  * The rule this defends is A2': a write that stamps a lower bound its caller did
@@ -62,6 +62,7 @@ const COLUMN_MENTION = /validFrom|valid_from/;
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 8, stated: 0 },
   "drizzle/operations/edges.ts": { stamping: 6, stated: 1 },
+  "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
 } as const satisfies Readonly<
   Record<string, Readonly<{ stamping: number; stated: number }>>
@@ -82,6 +83,7 @@ const WRITER_INVENTORY = {
  * line alone either.
  */
 const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
+  "drizzle/operations/edge-claims.ts": [],
   "drizzle/operations/nodes.ts": [
     // The compare-and-set fence's column argument — a READ of the bound the
     // caller asserted, never a choice about what to store.
@@ -112,6 +114,8 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
  * Equality: a new one fails this test whether or not it writes anything.
  */
 const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
+  "drizzle/operations/edge-claims.ts":
+    "writer — fused cardinality claim and edge insert",
   "drizzle/operations/nodes.ts": "writer — five stamping sites",
   "drizzle/operations/edges.ts":
     "writer — four stamping sites, one pass-through",
@@ -126,7 +130,7 @@ const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/schema/sqlite.ts": "column declaration",
   "drizzle/schema/postgres.ts": "column declaration",
   "migrate-recorded-time.ts": "copy list naming the column",
-  // Not a stamping site and never a fourteenth: the repair only CLEARS a bound
+  // Not a stamping site: the repair only CLEARS a bound
   // that was already stored inverted (`SET valid_from = NULL`), so it chooses
   // no instant and has nothing to route through an owner.
   "repair-validity-windows.ts":
@@ -219,6 +223,6 @@ describe("the stamping-site inventory (I5)", () => {
     for (const role of Object.values(BACKEND_COLUMN_FILES)) {
       expect(role.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(13);
+    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(14);
   });
 });

@@ -64,6 +64,7 @@ import {
   buildDisjointOverlapAudit,
 } from "./constraint-fence-audit";
 import {
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
   buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
   buildPurgeEdgeClaims,
@@ -225,6 +226,12 @@ export type CommonOperationStrategy = Readonly<{
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
+  ) => SQL;
+  /** PostgreSQL transaction-only claim + endpoint + edge write. */
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (
+    params: InsertEdgeParams,
+    claim: ClaimEdgeCardinalityParams,
+    timestamp: string,
   ) => SQL;
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
@@ -819,6 +826,17 @@ export function createPostgresOperationStrategy(
 ): PostgresOperationStrategy {
   return {
     ...createCommonOperationStrategy(tables, "postgres", fulltextStrategy),
+    buildInsertEdgeIfEndpointsLiveWithCardinalityClaim: (
+      params,
+      claim,
+      timestamp,
+    ) =>
+      buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
+        tables,
+        params,
+        claim,
+        timestamp,
+      ),
     buildLockSchemaVersionAndGraphWrite: (params, advisoryLockNamespace) =>
       buildLockSchemaVersionAndGraphWrite(
         tables,
