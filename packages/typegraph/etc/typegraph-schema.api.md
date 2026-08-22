@@ -910,6 +910,22 @@ type GraphBackend = Readonly<{
     }>) => Promise<void>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
+    registerGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        schemaHash: string;
+        schemaDoc: SerializedSchema;
+    }>) => Promise<GraphTemplateRow>;
+    instantiateGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        templateSchemaHash: string;
+        graphId: string;
+        schemaHash: string;
+    }>) => Promise<Readonly<{
+        status: "ready";
+        row: SchemaVersionRow;
+    }> | Readonly<{
+        status: "refused";
+    }>>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
         tableExists: (this: void, tableName: string) => Promise<boolean>;
@@ -1037,6 +1053,21 @@ export type GraphIdentityConfig = Readonly<{
 
 // @public (undocumented)
 type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+
+// @public
+export type GraphTemplate<G extends GraphDef> = Readonly<{
+    id: string;
+    reconciled: ReconciledSchema<G>;
+    schemaHash: string;
+}>;
+
+// @public
+type GraphTemplateRow = Readonly<{
+    template_id: string;
+    schema_hash: string;
+    schema_doc: string;
+    created_at: string;
+}>;
 
 // @public
 type HardDeleteEdgeParams = Readonly<{
@@ -1273,6 +1304,25 @@ type InsertUniqueParams = Readonly<{
     key: string;
     nodeId: string;
     concreteKind: string;
+}>;
+
+// @public
+export function instantiateGraph<G extends GraphDef>(backend: GraphBackend, params: Readonly<{
+    template: GraphTemplate<G>;
+    graphId: string;
+}>): Promise<InstantiateGraphTemplateResult<G>>;
+
+// @public
+export function instantiateGraphTemplate<G extends GraphDef>(backend: GraphBackend, params: Readonly<{
+    template: GraphTemplate<G>;
+    graphId: string;
+}>): Promise<InstantiateGraphTemplateResult<G>>;
+
+// @public (undocumented)
+export type InstantiateGraphTemplateResult<G extends GraphDef> = Readonly<{
+    status: "ready";
+    reconciled: ReconciledSchema<G>;
+    schema: SchemaVersionRow;
 }>;
 
 // @public (undocumented)
@@ -1589,6 +1639,13 @@ type ReadConstraintFenceViolationsParams = Readonly<{
 }>;
 
 // @public
+type ReconciledSchema<G extends GraphDef> = Readonly<{
+    graph: G;
+    version: number | undefined;
+    hash: string | undefined;
+}>;
+
+// @public
 type RecordContributionMaterializationParams = Readonly<{
     graphId: string;
     logicalName: string;
@@ -1643,6 +1700,12 @@ type RecursiveTraversalCapability = Readonly<{
     supported: boolean;
     reason?: string;
 }>;
+
+// @public
+export function registerGraphTemplate<G extends GraphDef>(backend: GraphBackend, params: Readonly<{
+    templateId: string;
+    reconciled: ReconciledSchema<G>;
+}>): Promise<GraphTemplate<G>>;
 
 // @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
