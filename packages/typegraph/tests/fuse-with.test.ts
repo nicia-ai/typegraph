@@ -82,18 +82,30 @@ function makeBuilder(): ReturnType<
 }
 
 describe(".fuseWith()", () => {
+  it("forces floating-point arithmetic for the SQL-layer RRF score", () => {
+    const compiled = buildHybridQuery();
+    const sqlText = toSqlString(compiled);
+
+    // PostgreSQL performs integer division when both the configured weight
+    // and the rank denominator are integers. The default RRF contribution
+    // would therefore be zero for every row unless the emitter promotes the
+    // numerator to a floating-point value.
+    expect(sqlText).toMatch(/\(1 \* 1\.0\) \/ \(60 \+ cte_embeddings\.ord\)/);
+    expect(sqlText).toMatch(/\(1 \* 1\.0\) \/ \(60 \+ cte_fulltext\.ord\)/);
+  });
+
   it("threads a custom k into the compiled RRF ORDER BY", () => {
     const compiled = buildHybridQuery({ k: 30 });
     const sqlText = toSqlString(compiled);
-    expect(sqlText).toMatch(/1 \/ \(30 \+ cte_embeddings\.ord\)/);
-    expect(sqlText).toMatch(/1 \/ \(30 \+ cte_fulltext\.ord\)/);
+    expect(sqlText).toMatch(/\(1 \* 1\.0\) \/ \(30 \+ cte_embeddings\.ord\)/);
+    expect(sqlText).toMatch(/\(1 \* 1\.0\) \/ \(30 \+ cte_fulltext\.ord\)/);
   });
 
   it("threads fulltext weight into the compiled RRF ORDER BY", () => {
     const compiled = buildHybridQuery({ weights: { fulltext: 2 } });
     const sqlText = toSqlString(compiled);
-    expect(sqlText).toMatch(/2 \/ \(60 \+ cte_fulltext\.ord\)/);
-    expect(sqlText).toMatch(/1 \/ \(60 \+ cte_embeddings\.ord\)/);
+    expect(sqlText).toMatch(/\(2 \* 1\.0\) \/ \(60 \+ cte_fulltext\.ord\)/);
+    expect(sqlText).toMatch(/\(1 \* 1\.0\) \/ \(60 \+ cte_embeddings\.ord\)/);
   });
 
   it("threads vector weight and k together", () => {
@@ -102,8 +114,10 @@ describe(".fuseWith()", () => {
       weights: { vector: 1.3, fulltext: 0.7 },
     });
     const sqlText = toSqlString(compiled);
-    expect(sqlText).toMatch(/1\.3 \/ \(42 \+ cte_embeddings\.ord\)/);
-    expect(sqlText).toMatch(/0\.7 \/ \(42 \+ cte_fulltext\.ord\)/);
+    expect(sqlText).toMatch(
+      /\(1\.3 \* 1\.0\) \/ \(42 \+ cte_embeddings\.ord\)/,
+    );
+    expect(sqlText).toMatch(/\(0\.7 \* 1\.0\) \/ \(42 \+ cte_fulltext\.ord\)/);
   });
 
   it("rejects hybrid relevance ranking when window functions are unavailable", () => {
