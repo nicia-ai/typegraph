@@ -183,6 +183,7 @@ export type {
   LockSchemaVersionForWriteParams,
   NodeEntityReadBackend,
   NodeEntityWriteBackend,
+  NodeFulltextSync,
   PopulatedSchemaKind,
   QueryExecutionBackend,
   RawQueryExecutionBackend,

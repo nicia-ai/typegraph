@@ -395,6 +395,8 @@ export type GatableFulltextBackend = Pick<
   | "deleteFulltextBatch"
   | "fulltextSearch"
   | "hardDeleteNode"
+  | "insertNodeWithFulltext"
+  | "insertNodeWithSchemaFenceAndFulltext"
 >;
 
 type RefuseUnavailableFulltext = (
@@ -432,7 +434,9 @@ function errorMessage(error: unknown): string | undefined {
   return typeof error.message === "string" ? error.message : undefined;
 }
 
-function unquoteSqliteIdentifier(identifier: string | undefined): string | undefined {
+function unquoteSqliteIdentifier(
+  identifier: string | undefined,
+): string | undefined {
   if (identifier === undefined) return undefined;
   const first = identifier.at(0);
   const last = identifier.at(-1);
@@ -481,16 +485,22 @@ export function gateFulltextMethods(
   if (source.upsertFulltext) {
     const raw = source.upsertFulltext;
     gated.upsertFulltext = async (params) => {
-      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params),
+      await executeGatedFulltext(
+        params.graphId,
+        assert,
+        refuseUnavailable,
+        () => raw(params),
       );
     };
   }
   if (source.deleteFulltext) {
     const raw = source.deleteFulltext;
     gated.deleteFulltext = async (params) => {
-      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params),
+      await executeGatedFulltext(
+        params.graphId,
+        assert,
+        refuseUnavailable,
+        () => raw(params),
       );
     };
   }
@@ -500,8 +510,11 @@ export function gateFulltextMethods(
       // A genuine no-op call asserts nothing — the "empty input is
       // harmless" contract.
       if (params.rows.length === 0) return;
-      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params),
+      await executeGatedFulltext(
+        params.graphId,
+        assert,
+        refuseUnavailable,
+        () => raw(params),
       );
     };
   }
@@ -509,10 +522,31 @@ export function gateFulltextMethods(
     const raw = source.deleteFulltextBatch;
     gated.deleteFulltextBatch = async (params) => {
       if (params.nodeIds.length === 0) return;
-      await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params),
+      await executeGatedFulltext(
+        params.graphId,
+        assert,
+        refuseUnavailable,
+        () => raw(params),
       );
     };
+  }
+  if (source.insertNodeWithFulltext) {
+    const raw = source.insertNodeWithFulltext;
+    gated.insertNodeWithFulltext = async (params, fulltext) =>
+      executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params, fulltext),
+      );
+  }
+  if (source.insertNodeWithSchemaFenceAndFulltext) {
+    const raw = source.insertNodeWithSchemaFenceAndFulltext;
+    gated.insertNodeWithSchemaFenceAndFulltext = async (
+      params,
+      fulltext,
+      schemaFence,
+    ) =>
+      executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
+        raw(params, fulltext, schemaFence),
+      );
   }
   if (source.fulltextSearch) {
     const raw = source.fulltextSearch;

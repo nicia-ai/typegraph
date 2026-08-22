@@ -11,7 +11,11 @@
  */
 import { type z } from "zod";
 
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  type NodeFulltextSync,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   DEFAULT_SEARCHABLE_LANGUAGE,
   getSearchableFields,
@@ -71,6 +75,27 @@ export function computeFulltextContent(
 }
 
 /**
+ * Resolves the complete fulltext side effect for one node row.
+ * `undefined` means the schema has no searchable fields; an explicit delete
+ * keeps an all-empty searchable row from being mistaken for no projection.
+ */
+export function resolveNodeFulltextSync(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+  identity: Readonly<{
+    graphId: string;
+    nodeKind: string;
+    nodeId: string;
+  }>,
+): NodeFulltextSync | undefined {
+  if (getSearchableFields(schema).length === 0) return undefined;
+  const computed = computeFulltextContent(schema, props);
+  return computed === undefined ?
+      { ...identity, action: "delete" }
+    : { ...identity, action: "upsert", ...computed };
+}
+
+/**
  * Syncs the fulltext index row after a node create or update.
  *
  * Concatenates the values of all searchable fields into a single content
@@ -88,22 +113,18 @@ export async function syncFulltext(
     return;
   }
 
-  // `computeFulltextContent` returns `undefined` both when the schema has
-  // no `searchable()` fields and when every value is empty — either case
-  // means the row should not exist. Delete any stale row only when the
-  // schema declares searchable fields (nothing to clean up otherwise).
-  const computed = computeFulltextContent(schema, props);
-  if (computed !== undefined) {
+  const sync = resolveNodeFulltextSync(schema, props, ctx);
+  if (sync?.action === "upsert") {
     await backend.upsertFulltext({
       graphId: ctx.graphId,
       nodeKind: ctx.nodeKind,
       nodeId: ctx.nodeId,
-      content: computed.content,
-      language: computed.language,
+      content: sync.content,
+      language: sync.language,
     });
     return;
   }
-  if (getSearchableFields(schema).length === 0) return;
+  if (sync === undefined) return;
   await backend.deleteFulltext({
     graphId: ctx.graphId,
     nodeKind: ctx.nodeKind,

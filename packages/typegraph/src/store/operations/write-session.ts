@@ -53,6 +53,7 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
+  type NodeFulltextSync,
   type NodeRow,
   type QueryExecutionBackend,
   type RawQueryExecutionBackend,
@@ -66,6 +67,7 @@ import {
   type VectorOperationBackend,
 } from "../../backend/types";
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
+import { CompilerInvariantError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
@@ -151,6 +153,8 @@ export type WriteTarget = Readonly<
       | "insertNodeIfAbsent"
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
+      | "insertNodeWithFulltext"
+      | "insertNodeWithSchemaFenceAndFulltext"
     > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
@@ -238,6 +242,7 @@ export type NodeInsertWork = Readonly<{
   params: InsertNodeParams;
   claim: NodeClaimItem;
   sideEffects: NodeInsertSideEffects;
+  fulltext?: NodeFulltextSync;
 }>;
 
 /**
@@ -421,9 +426,27 @@ export function createWriteSession(
         writeContext,
         work.claim,
         target,
-        () => dispatch.one(work.params),
+        () => {
+          const fulltext = work.fulltext;
+          if (fulltext === undefined) return dispatch.one(work.params);
+          const insert = target.insertNodeWithFulltext;
+          if (insert === undefined) return dispatch.one(work.params);
+          return insert(work.params, fulltext);
+        },
       );
-      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      await applyNodeInsertSyncFans(
+        writeContext,
+        {
+          ...work.sideEffects,
+          ...((
+            work.fulltext !== undefined &&
+            target.insertNodeWithFulltext !== undefined
+          ) ?
+            { fulltextFused: true }
+          : {}),
+        },
+        target,
+      );
       return row;
     },
 
@@ -444,11 +467,44 @@ export function createWriteSession(
     },
 
     createNodeWithSchemaFence: async (work, schemaFence) => {
-      const insert = target.insertNodeWithSchemaFence;
-      if (insert === undefined) return;
-      const row = await insert(work.params, schemaFence);
+      const result = await (async () => {
+        const fulltext = work.fulltext;
+        if (fulltext === undefined) {
+          const insert = target.insertNodeWithSchemaFence;
+          if (insert === undefined) return { row: undefined, fused: false };
+          return { row: await insert(work.params, schemaFence), fused: false };
+        }
+        const fusedInsert = target.insertNodeWithSchemaFenceAndFulltext;
+        if (fusedInsert === undefined) {
+          throw new CompilerInvariantError(
+            "Schema-fenced node work carrying a fulltext action requires the fused backend member.",
+            {
+              graphId: work.params.graphId,
+              kind: work.params.kind,
+              id: work.params.id,
+            },
+          );
+        }
+        return {
+          row: await withNodeCreateClaims(
+            writeContext,
+            work.claim,
+            target,
+            () => fusedInsert(work.params, fulltext, schemaFence),
+          ),
+          fused: true,
+        };
+      })();
+      const row = result.row;
       if (row === undefined) return;
-      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      await applyNodeInsertSyncFans(
+        writeContext,
+        {
+          ...work.sideEffects,
+          ...(result.fused ? { fulltextFused: true } : {}),
+        },
+        target,
+      );
       return row;
     },
 

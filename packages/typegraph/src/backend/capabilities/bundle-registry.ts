@@ -26,7 +26,7 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 90 optional
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 92 optional
  * `GraphBackend` members are bundled here; the other 74 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
@@ -821,7 +821,7 @@ export type UnbundledOptionalMember =
  * The 27 `reasoned` + 48 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 75 = 90 members total with the pilot's 15.
+ * access), 15 + 77 = 92 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   claimEdgeCardinalityGuarded: {
@@ -840,6 +840,18 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
+    accesses: 7,
+  },
+  insertNodeWithFulltext: {
+    kind: "reasoned",
+    reason:
+      "A bundled PostgreSQL/PGlite node-plus-fulltext statement selected only when the active strategy proves one-statement sync; other backends retain the ordinary node then sidecar path.",
+    accesses: 7,
+  },
+  insertNodeWithSchemaFenceAndFulltext: {
+    kind: "reasoned",
+    reason:
+      "The schema-fenced counterpart of the bundled PostgreSQL/PGlite node-plus-fulltext statement; absence retains the existing schema-fenced node write and sidecar path.",
     accesses: 7,
   },
   insertEdgeIfEndpointsLiveWithSchemaFence: {
@@ -1405,7 +1417,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 90 optional members.
+// (i) Totality: the three-way partition covers exactly the 92 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

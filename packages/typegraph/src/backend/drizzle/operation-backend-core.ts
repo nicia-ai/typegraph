@@ -64,6 +64,7 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
+  NodeFulltextSync,
   NodeRow,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
@@ -123,6 +124,29 @@ function assertMatchingFusedEdgeClaim(
       },
     },
   );
+}
+
+function assertMatchingNodeFulltextSync(
+  params: InsertNodeParams,
+  fulltext: NodeFulltextSync,
+): void {
+  if (
+    fulltext.graphId !== params.graphId ||
+    fulltext.nodeKind !== params.kind ||
+    fulltext.nodeId !== params.id
+  ) {
+    throw new CompilerInvariantError(
+      "A fused node fulltext sync must describe the node being inserted.",
+      {
+        node: {
+          graphId: params.graphId,
+          kind: params.kind,
+          id: params.id,
+        },
+        fulltext,
+      },
+    );
+  }
 }
 
 /**
@@ -185,6 +209,8 @@ export type CommonOperationBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
+  | "insertNodeWithFulltext"
+  | "insertNodeWithSchemaFenceAndFulltext"
   | "lockSchemaVersionAndGraphWrite"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
@@ -292,6 +318,8 @@ type CreateCommonOperationBackendOptions = Readonly<{
   schemaGraphWriteLockNamespace?: string | undefined;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   edgeCardinalityInsertFusion?: boolean | undefined;
+  /** Present only for bundled PostgreSQL/PGlite operation backends. */
+  nodeFulltextInsertFusion?: boolean | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -735,12 +763,82 @@ export function createCommonOperationBackend(
     };
   })();
 
+  const nodeFulltextInsertFusionMembers = (() => {
+    const buildInsertNodeWithFulltext =
+      operationStrategy.buildInsertNodeWithFulltext;
+    const buildInsertNodeWithSchemaFenceAndFulltext =
+      operationStrategy.buildInsertNodeWithSchemaFenceAndFulltext;
+    if (
+      options.nodeFulltextInsertFusion !== true ||
+      buildInsertNodeWithFulltext === undefined
+    ) {
+      return {};
+    }
+    return {
+      async insertNodeWithFulltext(
+        params: InsertNodeParams,
+        fulltext: NodeFulltextSync,
+      ): Promise<NodeRow> {
+        assertMatchingNodeFulltextSync(params, fulltext);
+        const query = buildInsertNodeWithFulltext(
+          params,
+          fulltext,
+          nowIso(),
+        );
+        const row = await withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "node",
+            relation: operationStrategy.primaryKeyConstraints.nodes,
+            attempted: attemptedInserts([params]),
+          },
+        );
+        if (row === undefined) {
+          throw new DatabaseOperationError(
+            "Fused node/fulltext insert failed: no row returned",
+            { operation: "insert", entity: "node", reason: "no_row_returned" },
+          );
+        }
+        return rowMappers.toNodeRow(row);
+      },
+      ...(buildInsertNodeWithSchemaFenceAndFulltext === undefined ||
+      options.schemaFenceLockClause === undefined ?
+        {}
+      : {
+          async insertNodeWithSchemaFenceAndFulltext(
+            params: InsertNodeParams,
+            fulltext: NodeFulltextSync,
+            schemaFence: SchemaWriteFenceParams,
+          ): Promise<NodeRow | undefined> {
+            assertMatchingNodeFulltextSync(params, fulltext);
+            const query = buildInsertNodeWithSchemaFenceAndFulltext(
+              params,
+              fulltext,
+              nowIso(),
+              schemaFence,
+              options.schemaFenceLockClause ?? drizzleSql.raw(""),
+            );
+            const row = await withDuplicateKeyClassification(
+              () => execution.execGet<Record<string, unknown>>(query),
+              {
+                entity: "node",
+                relation: operationStrategy.primaryKeyConstraints.nodes,
+                attempted: attemptedInserts([params]),
+              },
+            );
+            return row === undefined ? undefined : rowMappers.toNodeRow(row);
+          },
+        }),
+    };
+  })();
+
   return {
     tableExists,
 
     ...schemaFenceMembers,
     ...schemaGraphWriteFenceMembers,
     ...edgeCardinalityInsertFusionMembers,
+    ...nodeFulltextInsertFusionMembers,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

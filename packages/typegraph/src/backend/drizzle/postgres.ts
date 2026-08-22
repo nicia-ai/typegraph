@@ -2369,6 +2369,7 @@ function createPostgresOperationBackend(
       toUniqueRow,
     },
     schemaFenceLockClause: sql.raw("FOR SHARE"),
+    nodeFulltextInsertFusion: true,
     ...(transactionScoped ?
       {
         schemaGraphWriteLockNamespace:
