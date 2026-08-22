@@ -587,6 +587,31 @@ describe("generated node ids avoid identity lock round trips", () => {
   });
 });
 
+describe("unconstrained edge endpoint fusion", () => {
+  it("uses one edge INSERT and no endpoint probes for a generated-id create", async () => {
+    await store.edges.knows.create(
+      { kind: "Plain", id: SEEDED.plainA },
+      { kind: "Plain", id: SEEDED.plainB },
+      { note: "fused-endpoints" },
+    );
+
+    const endpointProbes = statements.filter(
+      (statement) =>
+        /^\s*select/i.test(statement.query) &&
+        statement.query.includes("typegraph_nodes"),
+    );
+    const edgeInserts = statements.filter(
+      (statement) =>
+        /^\s*insert/i.test(statement.query) &&
+        statement.query.includes("typegraph_edges"),
+    );
+
+    expect(endpointProbes).toEqual([]);
+    expect(edgeInserts).toHaveLength(1);
+    expect(edgeInserts[0]?.query).toContain('CROSS JOIN "typegraph_nodes"');
+  });
+});
+
 /**
  * The first statement that writes the CLAIM relation a node's declared
  * constraints reserve in. Both claim families live in `uniques`, so one matcher

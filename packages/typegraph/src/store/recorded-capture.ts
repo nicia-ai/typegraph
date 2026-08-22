@@ -555,6 +555,24 @@ function createRecordedTransactionBackend(
       return row;
     },
 
+    ...(target.insertEdgeIfEndpointsLive === undefined ?
+      {}
+    : {
+        async insertEdgeIfEndpointsLive(
+          params: InsertEdgeParams,
+        ): Promise<EdgeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(target.insertEdgeIfEndpointsLive)(
+            params,
+          );
+          if (row !== undefined) {
+            session.touchEdge(params.graphId, params.id, row);
+          }
+          return row;
+        },
+      }),
+
     ...(target.insertEdgeNoReturn === undefined ?
       {}
     : {
@@ -822,6 +840,18 @@ export function createRecordedBackend(
     async insertEdge(params) {
       return capture((target) => target.insertEdge(params));
     },
+
+    ...(backend.insertEdgeIfEndpointsLive === undefined ?
+      {}
+    : {
+        async insertEdgeIfEndpointsLive(
+          params: InsertEdgeParams,
+        ): Promise<EdgeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertEdgeIfEndpointsLive)(params),
+          );
+        },
+      }),
 
     ...(backend.insertEdgeNoReturn === undefined ?
       {}

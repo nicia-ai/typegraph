@@ -92,6 +92,21 @@ import { requireDefined } from "../src/utils/presence";
 
 const GRAPH_ID = "session_sidecar_completeness";
 
+function createEdgeWithFusedEndpointCheck(
+  session: WriteSession,
+): Promise<unknown> {
+  return session.createEdgeIfEndpointsLive({
+    graphId: GRAPH_ID,
+    kind: "links",
+    id: "edge-fast-fused",
+    fromKind: "Doc",
+    fromId: "fused",
+    toKind: "Doc",
+    toId: "fused-b",
+    props: {},
+  });
+}
+
 const Document = defineNode("Doc", {
   schema: z.object({
     title: searchable(),
@@ -155,6 +170,7 @@ const WATCHED_MEMBERS = [
   "upsertEmbeddingBatch",
   "deleteEmbedding",
   "insertEdge",
+  "insertEdgeIfEndpointsLive",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -576,6 +592,15 @@ const CASES: Record<keyof WriteSession, Case> = {
     sidecars: ["claimEdgeCardinality"],
     row: "insertEdge",
     preRow: ["claimEdgeCardinality"],
+    plan: EDGE_PLAN,
+  },
+  createEdgeIfEndpointsLive: {
+    run: async (raw) => {
+      await seed(raw, "fused");
+      return createEdgeWithFusedEndpointCheck;
+    },
+    sidecars: [],
+    row: "insertEdgeIfEndpointsLive",
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {

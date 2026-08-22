@@ -106,6 +106,7 @@ export const ENTITY_WRITE_MEMBERS = [
   "deleteNode",
   "hardDeleteNode",
   "insertEdge",
+  "insertEdgeIfEndpointsLive",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",

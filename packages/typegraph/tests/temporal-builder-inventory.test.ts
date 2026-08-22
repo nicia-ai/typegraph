@@ -53,13 +53,13 @@ const COLUMN_MENTION = /validFrom|valid_from/;
  * whose id names an existing tombstone. The insert-if-absent fast path is a
  * separate INSERT builder and therefore owns its stamped lower bound too.
  *
- * `operations/edges.ts` has four and ONE pass-through: an edge resurrection that
+ * `operations/edges.ts` has five and ONE pass-through: an edge resurrection that
  * names no `validFrom` retains the stored window instead of stamping, so its
  * window-writing leg only runs when the caller stated a bound.
  */
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 6, stated: 0 },
-  "drizzle/operations/edges.ts": { stamping: 4, stated: 1 },
+  "drizzle/operations/edges.ts": { stamping: 5, stated: 1 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
 } as const satisfies Readonly<
   Record<string, Readonly<{ stamping: number; stated: number }>>

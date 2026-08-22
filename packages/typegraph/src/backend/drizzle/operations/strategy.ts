@@ -79,6 +79,7 @@ import {
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
   buildInsertEdge,
+  buildInsertEdgeIfEndpointsLive,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
@@ -196,6 +197,10 @@ export type CommonOperationStrategy = Readonly<{
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
+  buildInsertEdgeIfEndpointsLive: (
+    params: InsertEdgeParams,
+    timestamp: string,
+  ) => SQL;
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
     params: readonly InsertEdgeParams[],
@@ -371,6 +376,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildDeleteNode,
   buildHardDeleteNode,
   buildInsertEdge,
+  buildInsertEdgeIfEndpointsLive,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
