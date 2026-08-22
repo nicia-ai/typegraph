@@ -2,8 +2,9 @@
  * Backend-interaction contracts, asserted by tracing WHERE work happens
  * rather than only what state results:
  *
- * - Read-path contract: the found path of every getOrCreate never opens a
- *   write transaction and never calls a write method.
+ * - Read-path contract: the found path of every getOrCreate never calls a
+ *   write method. Endpoint getOrCreate also confirms its match in a read-only
+ *   transaction so a cached positive cannot become a stale write decision.
  * - Atomicity contract: every mutation's row and sidecar writes (uniques,
  *   fulltext) happen inside a transaction, never on the root connection.
  * - Hook contract: an operation whose transaction fails at COMMIT reports
@@ -1232,7 +1233,7 @@ describe("read-path contract: found paths perform no write work", () => {
     expect(writeCalls(trace.calls)).toEqual([]);
   });
 
-  it("edge getOrCreateByEndpoints found path opens no transaction", async () => {
+  it("edge getOrCreateByEndpoints found path confirms its match in a read transaction", async () => {
     const trace = createTracingBackend(createTestBackend());
     const [store] = await createStoreWithSchema(graph, trace.backend);
     await seedPair(store);
@@ -1249,9 +1250,9 @@ describe("read-path contract: found paths perform no write work", () => {
       { weight: 1 },
     );
     expect(found.action).toBe("found");
-    expect(trace.calls.filter((call) => call.includes("transaction"))).toEqual(
-      [],
-    );
+    expect(
+      trace.calls.filter((call) => call.includes("transaction")),
+    ).not.toEqual([]);
     expect(writeCalls(trace.calls)).toEqual([]);
   });
 });

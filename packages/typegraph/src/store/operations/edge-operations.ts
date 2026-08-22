@@ -88,6 +88,7 @@ import {
   type GraphReadBackend,
   type InsertEdgeParams,
   rowPropsToObject,
+  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
@@ -452,12 +453,31 @@ type EdgeConvergenceGuard = Readonly<{
  * this.
  */
 class EdgeConvergenceRaced extends Error {
-  constructor(kind: string) {
+  readonly row: BackendEdgeRow;
+
+  constructor(kind: string, row: BackendEdgeRow) {
     super(
       `A competing writer claimed the ${kind} match key; re-resolving it. ` +
         `This is internal to getOrCreateByEndpoints and is never returned to a caller.`,
     );
     this.name = "EdgeConvergenceRaced";
+    this.row = row;
+  }
+}
+
+/**
+ * The dispatcher selected an edge by a match key that no longer describes the
+ * row when the update transaction re-read it. The caller must re-dispatch from
+ * a transaction-owned match-key read rather than applying the update to the
+ * stale id.
+ */
+class EdgeMatchKeyMoved extends Error {
+  constructor(kind: string, id: string) {
+    super(
+      `The ${kind} edge "${id}" no longer has the requested match key; ` +
+        "re-resolving it. This is internal and is never returned to a caller.",
+    );
+    this.name = "EdgeMatchKeyMoved";
   }
 }
 
@@ -508,8 +528,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           convergeOn.matchOn,
           convergeOn.props,
         );
-        if (liveRow !== undefined || deletedRow !== undefined) {
-          throw new EdgeConvergenceRaced(kind);
+        const matchedRow = liveRow ?? deletedRow;
+        if (matchedRow !== undefined) {
+          throw new EdgeConvergenceRaced(kind, matchedRow);
         }
       }
 
@@ -841,7 +862,11 @@ async function performEdgeUpdate<G extends GraphDef>(
   input: UpsertUpdateEdgeInput,
   session: EdgeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
+  }>,
 ): Promise<Edge> {
   const id = input.id;
 
@@ -861,6 +886,9 @@ async function performEdgeUpdate<G extends GraphDef>(
     edgeIdentityFromRow(existing),
     "update",
   );
+  if (options?.matchOn !== undefined && options.matchProps !== undefined) {
+    assertEdgeMatchKey(existing, options.matchOn, options.matchProps);
+  }
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
@@ -1050,7 +1078,11 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
   input: UpsertUpdateEdgeInput,
   session: EdgeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
+  }>,
 ): Promise<Edge> {
   for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
     try {
@@ -1151,6 +1183,8 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     clearDeleted?: boolean;
     coalesceUnchanged?: boolean;
     coalesceCandidate?: BackendEdgeRow;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
   }>,
 ): Promise<EdgeUpsertUpdateOutcome> {
   if (input.clearValidTo === true) {
@@ -1173,8 +1207,10 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     async (session, target) => {
       if (options?.coalesceUnchanged === true && !options.clearDeleted) {
         const existing =
-          options.coalesceCandidate ??
-          (await target.getEdge(ctx.graphId, input.id));
+          options.matchOn !== undefined && options.matchProps !== undefined ?
+            await target.getEdge(ctx.graphId, input.id)
+          : (options.coalesceCandidate ??
+            (await target.getEdge(ctx.graphId, input.id)));
         if (existing !== undefined && existing.deleted_at === undefined) {
           assertEdgeIdentityMatches(
             input.id,
@@ -1182,6 +1218,12 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
             edgeIdentityFromRow(existing),
             "update",
           );
+          if (
+            options.matchOn !== undefined &&
+            options.matchProps !== undefined
+          ) {
+            assertEdgeMatchKey(existing, options.matchOn, options.matchProps);
+          }
           const runDirtyCheck = () =>
             edgeUpsertDirtyCheck(
               ctx,
@@ -1219,7 +1261,11 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
   backend: GraphBackend | TransactionBackend,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
+  }>,
 ): Promise<Edge> {
   const outcome = await executeEdgeUpsertUpdateWithOutcome(
     ctx,
@@ -1508,6 +1554,22 @@ function findMatchingEdge(
 }
 
 /**
+ * Rechecks the match key against a row selected for an endpoint upsert.
+ * Returning a stale coalesced candidate would otherwise bypass the normal
+ * update-body validation entirely.
+ */
+function assertEdgeMatchKey(
+  row: BackendEdgeRow,
+  matchOn: readonly string[],
+  matchProps: Record<string, unknown>,
+): void {
+  const match = findMatchingEdge([row], matchOn, matchProps);
+  if (match.liveRow === undefined && match.deletedRow === undefined) {
+    throw new EdgeMatchKeyMoved(row.kind, row.id);
+  }
+}
+
+/**
  * Executes a single findByEndpoints operation.
  *
  * Looks up an edge by endpoints and optional matchOn fields, honoring the
@@ -1649,13 +1711,10 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     );
   }
 
-  // Probe outside the transaction: with ifExists "return", the common found
-  // path performs no write, so it must not pay for a write transaction
-  // (BEGIN IMMEDIATE on SQLite, the per-graph advisory lock under history).
-  // The transactional body re-queries, so a concurrent create between this
-  // probe and the write lock is still handled correctly.
-  if (ifExists === "return") {
-    const probeRows = await backend.findEdgesByKind({
+  const findCandidates = async (
+    target: GraphBackend | TransactionBackend,
+  ): Promise<readonly BackendEdgeRow[]> =>
+    target.findEdgesByKind({
       graphId: ctx.graphId,
       kind,
       fromKind,
@@ -1665,14 +1724,38 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       excludeDeleted: false,
       temporalMode: "includeTombstones",
     });
+
+  async function findCandidatesInTransaction(): Promise<
+    readonly BackendEdgeRow[]
+  > {
+    return runOptionallyInTransaction(
+      backend,
+      (target) => findCandidates(target),
+      { transaction: { accessMode: "read_only" } },
+    );
+  }
+
+  // Keep the cheap root probe for the common found path, but never return its
+  // row directly. A positive root result is only a hint; the transaction read
+  // below owns the match decision and can reject a stale cache entry.
+  if (ifExists === "return") {
+    const probeRows = await findCandidates(backend);
     const { liveRow: probedLiveRow } = findMatchingEdge(
       probeRows,
       matchOn,
       validatedProps,
     );
     if (probedLiveRow !== undefined) {
-      assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
-      return { edge: rowToEdge(probedLiveRow), action: "found" };
+      const currentRows = await findCandidatesInTransaction();
+      const { liveRow: currentLiveRow } = findMatchingEdge(
+        currentRows,
+        matchOn,
+        validatedProps,
+      );
+      if (currentLiveRow !== undefined) {
+        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
+        return { edge: rowToEdge(currentLiveRow), action: "found" };
+      }
     }
   }
 
@@ -1691,26 +1774,114 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // in-transaction re-read and its endpoint-predicated UPDATE are what make
   // that write land on the row this lookup meant, not a re-derivation of the
   // dispatcher's choice.
-  async function attempt(): Promise<
-    Readonly<{ edge: Edge; action: GetOrCreateAction }>
-  > {
-    // Query all edges of this kind between (from, to) including tombstones
-    const candidateRows = await backend.findEdgesByKind({
-      graphId: ctx.graphId,
-      kind,
-      fromKind,
-      fromId,
-      toKind,
-      toId,
-      excludeDeleted: false,
-      temporalMode: "includeTombstones",
-    });
+  async function resolveMatchedRow(
+    matchedRow: BackendEdgeRow,
+    isDeleted: boolean,
+  ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
+    if (!isDeleted) {
+      if (ifExists === "return") {
+        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
+        return { edge: rowToEdge(matchedRow), action: "found" };
+      }
+      // ifExists === "update". `validFrom` is forwarded even though an
+      // in-place update stores no lower bound: the shared write guard judges
+      // it and refuses a different bound instead of silently dropping it.
+      const outcome = await executeEdgeUpsertUpdateWithOutcome(
+        ctx,
+        {
+          id: matchedRow.id,
+          identity: { kind, fromKind, fromId, toKind, toId },
+          props: validatedProps,
+          ...(validFrom !== undefined && { validFrom }),
+          ...(validTo !== undefined && { validTo }),
+          ...(options?.clearValidTo === true && {
+            clearValidTo: true as const,
+          }),
+          ...(options?.onImmutableLowerBound !== undefined && {
+            onImmutableLowerBound: options.onImmutableLowerBound,
+          }),
+        },
+        backend,
+        {
+          coalesceUnchanged:
+            ctx.coalesceUnchangedUpsertsEnabled &&
+            shouldCoalesceUpsert(matchedRow, options, () =>
+              edgeUpsertDirtyCheck(
+                ctx,
+                matchedRow.kind,
+                matchedRow.id,
+                rowPropsToObject(matchedRow.props),
+                validatedProps,
+              ),
+            ),
+          matchOn,
+          matchProps: validatedProps,
+        },
+      );
+      return {
+        edge: outcome.edge,
+        action: outcome.wrote ? "updated" : "found",
+      };
+    }
 
-    const { liveRow, deletedRow } = findMatchingEdge(
+    // A resurrection forwards `validFrom` as the create leg does: naming it
+    // restates the revived row's WHOLE window. The shared update path derives
+    // the resulting live state and re-checks cardinality in its transaction.
+    const edge = await executeEdgeUpsertUpdate(
+      ctx,
+      {
+        id: matchedRow.id,
+        identity: { kind, fromKind, fromId, toKind, toId },
+        props: validatedProps,
+        ...(validFrom !== undefined && { validFrom }),
+        ...(validTo !== undefined && { validTo }),
+        ...(options?.clearValidTo === true && {
+          clearValidTo: true as const,
+        }),
+        ...(options?.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: options.onImmutableLowerBound,
+        }),
+      },
+      backend,
+      {
+        clearDeleted: true,
+        matchOn,
+        matchProps: validatedProps,
+      },
+    );
+    return { edge, action: "resurrected" };
+  }
+
+  async function attempt(
+    forceTransactionRead: boolean,
+  ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
+    // Query all edges of this kind between (from, to) including tombstones
+    const candidateRows =
+      forceTransactionRead ?
+        await findCandidatesInTransaction()
+      : await findCandidates(backend);
+
+    let { liveRow, deletedRow } = findMatchingEdge(
       candidateRows,
       matchOn,
       validatedProps,
     );
+
+    // A root read is only a dispatcher hint. Once it reports a match, confirm
+    // that match through the transaction target before returning it or using
+    // its id for an update/resurrection. Caching transports can replay a stale
+    // positive just as they can replay a stale empty result.
+    if (
+      !forceTransactionRead &&
+      (liveRow !== undefined || deletedRow !== undefined)
+    ) {
+      const currentRows = await findCandidatesInTransaction();
+      ({ liveRow, deletedRow } = findMatchingEdge(
+        currentRows,
+        matchOn,
+        validatedProps,
+      ));
+    }
 
     // No match → create new edge
     if (liveRow === undefined && deletedRow === undefined) {
@@ -1737,121 +1908,54 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       return { edge: created, action: "created" };
     }
 
-    // Live match found
-    if (liveRow !== undefined) {
-      if (ifExists === "return") {
-        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
-        return { edge: rowToEdge(liveRow), action: "found" };
-      }
-      // ifExists === "update". `validFrom` is forwarded even though an in-place
-      // update stores no lower bound: the shared write guard is what judges it,
-      // refusing a bound that differs from the one the live row holds instead of
-      // dropping it here where the caller would never hear about it.
-      const outcome = await executeEdgeUpsertUpdateWithOutcome(
-        ctx,
-        {
-          id: liveRow.id,
-          identity: { kind, fromKind, fromId, toKind, toId },
-          props: validatedProps,
-          ...(validFrom !== undefined && { validFrom }),
-          ...(validTo !== undefined && { validTo }),
-          ...(options?.clearValidTo === true && {
-            clearValidTo: true as const,
-          }),
-          ...(options?.onImmutableLowerBound !== undefined && {
-            onImmutableLowerBound: options.onImmutableLowerBound,
-          }),
-        },
-        backend,
-        {
-          coalesceUnchanged:
-            ctx.coalesceUnchangedUpsertsEnabled &&
-            shouldCoalesceUpsert(liveRow, options, () =>
-              edgeUpsertDirtyCheck(
-                ctx,
-                liveRow.kind,
-                liveRow.id,
-                rowPropsToObject(liveRow.props),
-                validatedProps,
-              ),
-            ),
-        },
-      );
-      return {
-        edge: outcome.edge,
-        action: outcome.wrote ? "updated" : "found",
-      };
-    }
-
-    // Deleted match only → resurrect. The shared update path derives the
-    // resulting live/active state and re-checks cardinality under the same
-    // transaction fence as the revival it authorizes.
-    if (deletedRow === undefined) {
-      throw new Error("Expected deletedRow to be defined");
-    }
-    const matchedDeletedRow = deletedRow;
-
-    // A resurrection forwards `validFrom` as the create leg does: naming it
-    // restates the revived row's WHOLE window (the backend rewrites both
-    // endpoints together), which is the only way to revive a row into a window
-    // that closed before the row originally began. Dropping it here silently
-    // ignored a stated lower bound and left the caller no way to satisfy the
-    // window-ordering guard.
-    const edge = await executeEdgeUpsertUpdate(
-      ctx,
-      {
-        id: matchedDeletedRow.id,
-        identity: { kind, fromKind, fromId, toKind, toId },
-        props: validatedProps,
-        ...(validFrom !== undefined && { validFrom }),
-        ...(validTo !== undefined && { validTo }),
-        ...(options?.clearValidTo === true && {
-          clearValidTo: true as const,
-        }),
-        ...(options?.onImmutableLowerBound !== undefined && {
-          onImmutableLowerBound: options.onImmutableLowerBound,
-        }),
-      },
-      backend,
-      { clearDeleted: true },
-    );
-    return { edge, action: "resurrected" };
+    if (liveRow !== undefined) return resolveMatchedRow(liveRow, false);
+    return resolveMatchedRow(requireDefined(deletedRow), true);
   }
 
   // Convergence loop. Under the fence a losing writer learns about the winner
   // from its own in-transaction lookup ({@link EdgeConvergenceRaced}) rather
-  // than from a constraint violation, so the ordinary path is one re-dispatch
-  // that finds the winner's edge. The `CardinalityError` arm remains the
-  // backstop for the paths the fence cannot cover — a competitor whose write is
-  // not a `getOrCreateByEndpoints` at all.
+  // than from a constraint violation. That signal carries the authoritative
+  // row so the caller converges without re-dispatching through a possibly stale
+  // root read. The `CardinalityError` arm remains the backstop for the paths the
+  // fence cannot cover — a competitor whose write is not a
+  // `getOrCreateByEndpoints` at all.
   //
-  // ATTEMPT_LIMIT bounds a pathological ping-pong (a competitor that creates
-  // and hard-deletes the same match key repeatedly) rather than spinning; the
-  // last attempt would otherwise be indistinguishable from a livelock. On the
-  // FINAL attempt a retryable signal is no longer retryable, so it is reported:
-  // a `CardinalityError` as itself (the caller's own constraint is what failed),
-  // and an exhausted convergence race as the terminal error below, which names
-  // the interference rather than leaking an internal signal.
+  // ATTEMPT_LIMIT bounds repeated cardinality conflicts rather than spinning.
+  // On the final attempt the caller's own constraint error is reported as
+  // itself; the internal convergence signal never escapes this function.
   const ATTEMPT_LIMIT = 3;
+  let forceTransactionRead = false;
   for (let remaining = ATTEMPT_LIMIT; remaining > 0; remaining -= 1) {
     try {
-      return await attempt();
+      return await attempt(forceTransactionRead);
     } catch (error) {
-      const retryable =
-        error instanceof CardinalityError ||
-        error instanceof EdgeConvergenceRaced;
-      if (!retryable || remaining === 1) {
-        if (!(error instanceof EdgeConvergenceRaced)) throw error;
-        throw new DatabaseOperationError(
-          `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
-            `and ${toKind} "${toId}" lost its match key to a competing writer ` +
-            `${String(ATTEMPT_LIMIT)} times without converging. A concurrent ` +
-            `writer is repeatedly creating and removing this edge; serialize ` +
-            `those callers or retry the operation.`,
-          { operation: "insert", entity: "edge" },
-          { cause: error },
-        );
+      if (error instanceof EdgeConvergenceRaced) {
+        // The create guard found this row through the transaction target. That
+        // is the authoritative read-own-writes observation. Re-dispatching via
+        // the root backend can replay a caching transport's stale empty probe,
+        // so converge directly from the row the fenced lookup just proved.
+        return resolveMatchedRow(error.row, error.row.deleted_at !== undefined);
       }
+      if (error instanceof EdgeMatchKeyMoved) {
+        if (remaining === 1) {
+          throw new DatabaseOperationError(
+            `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
+              `and ${toKind} "${toId}" could not resolve a stable match key ` +
+              `after ${ATTEMPT_LIMIT} attempts. Either a concurrent writer is ` +
+              "changing the matching properties, or the transaction transport " +
+              "is returning stale rows. Serialize competing writers, use a " +
+              "transaction-affine non-caching connection, or retry.",
+            { operation: "insert", entity: "edge" },
+            { cause: error },
+          );
+        }
+        // The previous update was selected from a row whose match key changed
+        // before its write. The next dispatch must not consult the root cache
+        // again, or it could select that same stale id indefinitely.
+        forceTransactionRead = true;
+        continue;
+      }
+      if (!(error instanceof CardinalityError) || remaining === 1) throw error;
     }
   }
   // Unreachable: the loop either returns or throws on its final iteration.
@@ -2005,6 +2109,16 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     return rowsByEndpoint;
   }
 
+  async function fetchRowsByEndpointInTransaction(): Promise<
+    ReadonlyMap<string, readonly BackendEdgeRow[]>
+  > {
+    return runOptionallyInTransaction(
+      backend,
+      (target) => fetchRowsByEndpoint(target),
+      { transaction: { accessMode: "read_only" } },
+    );
+  }
+
   interface CreateEntry {
     index: number;
     input: CreateEdgeInput;
@@ -2124,30 +2238,42 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     return { toCreate, toFetch, duplicateOf };
   }
 
-  // Probe outside the transaction: with ifExists "return" and every entry
-  // matching a live edge, the whole call performs no write, so it must not
-  // pay for a write transaction (BEGIN IMMEDIATE on SQLite, the per-graph
-  // advisory lock under history). The transactional body re-queries, so a
-  // concurrent write between this probe and the write lock is still handled
-  // correctly.
+  // Probe outside the write transaction: with ifExists "return" and every
+  // entry matching a live edge, the whole call performs no write. A matching
+  // probe is nevertheless confirmed through a read-only transaction before
+  // returning, so a cached positive cannot become a stale result.
   if (ifExists === "return") {
     const probe = partitionEntries(await fetchRowsByEndpoint(backend));
     const allFoundLive =
       probe.toCreate.length === 0 &&
       probe.toFetch.every((entry) => !entry.isDeleted);
     if (allFoundLive) {
-      const found: Result[] = Array.from({ length: items.length });
-      for (const entry of probe.toFetch) {
-        assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
-        found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
+      // The root partition is only a fast-path hint. Re-partition through the
+      // transaction target before returning rows, because a caching transport
+      // can replay a stale positive match just as it can replay an empty one.
+      const confirmed = partitionEntries(
+        await fetchRowsByEndpointInTransaction(),
+      );
+      const confirmedAllFoundLive =
+        confirmed.toCreate.length === 0 &&
+        confirmed.toFetch.every((entry) => !entry.isDeleted);
+      if (confirmedAllFoundLive) {
+        const found: Result[] = Array.from({ length: items.length });
+        for (const entry of confirmed.toFetch) {
+          assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
+          found[entry.index] = {
+            edge: rowToEdge(entry.row),
+            action: "found",
+          };
+        }
+        for (const { index, sourceIndex } of confirmed.duplicateOf) {
+          found[index] = {
+            edge: requireDefined(found[sourceIndex]).edge,
+            action: "found",
+          };
+        }
+        return found;
       }
-      for (const { index, sourceIndex } of probe.duplicateOf) {
-        found[index] = {
-          edge: requireDefined(found[sourceIndex]).edge,
-          action: "found",
-        };
-      }
-      return found;
     }
   }
 
@@ -2232,7 +2358,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                 }),
               },
               rawTarget,
-              { clearDeleted: true },
+              {
+                clearDeleted: true,
+                matchOn,
+                matchProps: entry.validatedProps,
+              },
             );
             results[entry.index] = { edge, action: "resurrected" };
             writes += 1;
@@ -2267,6 +2397,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
               {
                 coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled,
                 coalesceCandidate: entry.row,
+                matchOn,
+                matchProps: entry.validatedProps,
               },
             );
             results[entry.index] = {
@@ -2299,7 +2431,16 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         return { results, writes };
       },
       { didWrite: (outcome) => outcome.writes > 0 },
-    );
+    ).catch((error: unknown) => {
+      if (!(error instanceof EdgeMatchKeyMoved)) throw error;
+      throw new DatabaseOperationError(
+        `bulk getOrCreateByEndpoints for ${kind} could not resolve a stable ` +
+          "match key because a concurrent writer changed it during the batch; " +
+          "retry the operation.",
+        { operation: "update", entity: "edge" },
+        { cause: error },
+      );
+    });
   }
 
   async function runBatchResults(): Promise<Result[]> {

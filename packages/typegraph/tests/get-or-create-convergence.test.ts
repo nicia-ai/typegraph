@@ -36,7 +36,10 @@ const Person = defineNode("Person", {
 });
 
 const knows = defineEdge("knows", {
-  schema: z.object({ since: z.string().default("2024") }),
+  schema: z.object({
+    since: z.string().default("2024"),
+    note: z.string().optional(),
+  }),
 });
 
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
@@ -358,12 +361,12 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(await setup.revisionNow()).toBe(afterCompetitor);
   });
 
-  it("reports a terminal error when the match key never settles", async () => {
-    // The convergence loop is bounded: a competitor that keeps claiming and
-    // releasing the same match key would otherwise spin forever. Injected here
-    // by making the create leg's in-transaction guard ALWAYS see a competitor
-    // while the dispatcher's own lookup sees none — a permanent version of the
-    // real interleaving.
+  it("converges from the transaction read when root reads stay stale", async () => {
+    // Caching transports may replay the root probe's empty result while
+    // bypassing their cache inside an explicit transaction. The guarded create
+    // therefore sees the committed row even though every root lookup still
+    // reports nothing. The transaction's row is authoritative: throwing it
+    // away and retrying the root lookup used to fail after three phantom races.
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
     const bob = await setup.nodes.Person.create({ name: "Bob" });
@@ -392,11 +395,11 @@ describe("getOrCreateByEndpoints convergence", () => {
             (target) =>
               fn({
                 ...target,
-                // The guard reads through the transaction and always sees a
-                // competitor, so every attempt aborts.
-                findEdgesByKind: () => {
+                // Transaction reads bypass the simulated root cache and see
+                // the row's current live/tombstoned state.
+                findEdgesByKind: (params) => {
                   attempts += 1;
-                  return Promise.resolve([phantom]);
+                  return target.findEdgesByKind(params);
                 },
               }),
             options,
@@ -404,11 +407,200 @@ describe("getOrCreateByEndpoints convergence", () => {
       }),
     );
 
-    await expect(
-      store.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "x" }),
-    ).rejects.toThrow(/lost its match key/u);
-    // Bounded, and it really did use every attempt before giving up.
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "x",
+    });
+
+    expect(result.action).toBe("found");
+    expect(result.edge.id).toBe(phantom.id);
+    // No retry through the stale root read: one in-transaction observation is
+    // enough to converge on the database's actual row.
+    expect(attempts).toBe(1);
+
+    const updated = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "updated" },
+      { ifExists: "update" },
+    );
+    expect(updated.action).toBe("updated");
+    expect(updated.edge.since).toBe("updated");
+
+    await setup.edges.knows.delete(updated.edge.id);
+    const resurrected = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "revived" },
+      { ifExists: "update" },
+    );
+    expect(resurrected.action).toBe("resurrected");
+    expect(resurrected.edge.id).toBe(phantom.id);
+    expect(resurrected.edge.since).toBe("revived");
     expect(attempts).toBe(3);
+  });
+
+  it("does not return a stale positive match from the root read", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const stale = await setup.edges.knows.create(alice, bob, {
+      since: "stale",
+    });
+    const staleRow = requireDefined(await raw.getEdge(graph.id, stale.id));
+    await setup.edges.knows.hardDelete(stale.id);
+    await setup.edges.knows.create(alice, bob, { since: "current" });
+
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        // The root transport replays the old live row, while the transaction
+        // target sees the committed replacement.
+        findEdgesByKind: () => Promise.resolve([staleRow]),
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "stale" },
+      { matchOn: ["since"] },
+    );
+
+    expect(result.action).toBe("created");
+    expect(result.edge.since).toBe("stale");
+    expect(await setup.edges.knows.findFrom(alice)).toHaveLength(2);
+  });
+
+  it("does not update an id after its match key changed", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const original = await setup.edges.knows.create(alice, bob, {
+      since: "original",
+    });
+    const originalRow = requireDefined(
+      await raw.getEdge(graph.id, original.id),
+    );
+    await setup.edges.knows.update(original.id, { since: "changed" });
+
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        // The dispatcher sees the row before its match key changed. The
+        // transaction-owned read must refuse to apply the update by id.
+        findEdgesByKind: () => Promise.resolve([originalRow]),
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "original" },
+      { matchOn: ["since"], ifExists: "update" },
+    );
+
+    expect(result.action).toBe("created");
+    expect(result.edge.since).toBe("original");
+    const storedEdges = await setup.edges.knows.findFrom(alice);
+    expect(storedEdges).toHaveLength(2);
+    expect(storedEdges.find((edge) => edge.id === original.id)?.since).toBe(
+      "changed",
+    );
+  });
+
+  it("reports stale transaction reads honestly when convergence cannot stabilize", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const original = await setup.edges.knows.create(alice, bob, {
+      since: "original",
+    });
+    const staleRow = requireDefined(await raw.getEdge(graph.id, original.id));
+    await setup.edges.knows.update(original.id, { since: "changed" });
+
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        findEdgesByKind: () => Promise.resolve([staleRow]),
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  findEdgesByKind: () => Promise.resolve([staleRow]),
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    await expect(
+      store.edges.knows.getOrCreateByEndpoints(
+        alice,
+        bob,
+        { since: "original" },
+        { matchOn: ["since"], ifExists: "update" },
+      ),
+    ).rejects.toThrow(/transaction transport is returning stale rows/u);
+  });
+
+  it("re-reads instead of coalescing a stale bulk candidate", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const original = await setup.edges.knows.create(alice, bob, {
+      since: "same-key",
+      note: "old",
+    });
+    let interposed = false;
+    const backend = deriveBackend(raw, {
+      transaction: (fn, options) =>
+        raw.transaction(
+          (target) =>
+            fn(
+              deriveBackend(target, {
+                findEdgesByKind: async (params) => {
+                  const rows = await target.findEdgesByKind(params);
+                  if (!interposed) {
+                    interposed = true;
+                    await target.updateEdge({
+                      graphId: graph.id,
+                      id: original.id,
+                      kind: "knows",
+                      fromKind: "Person",
+                      fromId: alice.id,
+                      toKind: "Person",
+                      toId: bob.id,
+                      props: { since: "same-key", note: "new" },
+                    });
+                  }
+                  return rows;
+                },
+              }),
+            ),
+          options,
+        ),
+    });
+    const store = createStore(graph, backend, {
+      coalesceUnchangedUpserts: true,
+    });
+
+    const results = await store.edges.knows.bulkGetOrCreateByEndpoints(
+      [
+        {
+          from: alice,
+          to: bob,
+          props: { since: "same-key", note: "old" },
+        },
+      ],
+      { matchOn: ["since"], ifExists: "update" },
+    );
+
+    expect(results[0]?.action).toBe("updated");
+    expect(results[0]?.edge.note).toBe("old");
+    const storedEdges = await setup.edges.knows.findFrom(alice);
+    expect(storedEdges[0]?.note).toBe("old");
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {
