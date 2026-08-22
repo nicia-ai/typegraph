@@ -98,6 +98,8 @@ const READ_MEMBERS = [
 export const ENTITY_WRITE_MEMBERS = [
   "insertNode",
   "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -107,6 +109,7 @@ export const ENTITY_WRITE_MEMBERS = [
   "hardDeleteNode",
   "insertEdge",
   "insertEdgeIfEndpointsLive",
+  "insertEdgeIfEndpointsLiveWithSchemaFence",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",

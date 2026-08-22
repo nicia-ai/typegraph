@@ -80,6 +80,7 @@ import {
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -1772,7 +1773,7 @@ export function createPostgresBackend(
         const { backend: txBackend, drainAndClose } =
           bindTransactionBackend(tx);
         try {
-          return await fn(txBackend, tx);
+          return await fn(markSchemaFencedInsertEligible(txBackend), tx);
         } finally {
           // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
           // instant the callback settles, and those control statements do not
@@ -1838,6 +1839,7 @@ export function createPostgresBackend(
   // arm is reachable only from a test that builds a backend bypassing the
   // declared capabilities while still carrying this mark.
   markFirstPartyFactory(backend);
+  markSchemaFencedInsertEligible(backend);
   return backend;
 }
 
@@ -2363,6 +2365,7 @@ function createPostgresOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
+    schemaFenceLockClause: sql.raw("FOR SHARE"),
     tableExistenceCache: { cacheExisting: false },
   });
 

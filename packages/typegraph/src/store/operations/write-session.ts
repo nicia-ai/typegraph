@@ -58,6 +58,7 @@ import {
   type RawQueryExecutionBackend,
   type RawStatementExecutionBackend,
   type SchemaReadBackend,
+  type SchemaWriteFenceParams,
   type SqlCompilationBackend,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -144,11 +145,17 @@ export type WriteTarget = Readonly<
     SqlCompilationBackend &
     RawQueryExecutionBackend &
     RawStatementExecutionBackend &
-    Pick<GraphBackend, "insertNodeIfAbsent"> &
+    Pick<
+      GraphBackend,
+      | "insertNodeIfAbsent"
+      | "insertNodeIfAbsentWithSchemaFence"
+      | "insertNodeWithSchemaFence"
+    > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
       GraphBackend,
       | "insertEdgeIfEndpointsLive"
+      | "insertEdgeIfEndpointsLiveWithSchemaFence"
       | "claimEdgeCardinality"
       | "claimEdgeCardinalityGuarded"
       | "claimEdgeCardinalityBatch"
@@ -308,6 +315,14 @@ export type NodeWriteSession = Readonly<{
   createNode: (work: NodeInsertWork) => Promise<NodeRow>;
   /** A conflict-safe insert for a no-claim create; undefined means occupied. */
   createNodeIfAbsent: (work: NodeInsertWork) => Promise<NodeRow | undefined>;
+  createNodeIfAbsentWithSchemaFence: (
+    work: NodeInsertWork,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
+  createNodeWithSchemaFence: (
+    work: NodeInsertWork,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
   createNodeNoReturn: (work: NodeInsertWork) => Promise<void>;
   createNodes: (work: readonly NodeInsertWork[]) => Promise<readonly NodeRow[]>;
   createNodesNoReturn: (work: readonly NodeInsertWork[]) => Promise<void>;
@@ -334,6 +349,10 @@ export type EdgeWriteSession = Readonly<{
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
   createEdgeIfEndpointsLive: (
     work: EdgeInsertWork,
+  ) => Promise<EdgeRow | undefined>;
+  createEdgeIfEndpointsLiveWithSchemaFence: (
+    params: InsertEdgeParams,
+    schemaFence: SchemaWriteFenceParams,
   ) => Promise<EdgeRow | undefined>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
@@ -408,6 +427,24 @@ export function createWriteSession(
 
     createNodeIfAbsent: async (work) => {
       const row = await runInsertIfAbsent(dispatch, work.params);
+      if (row === undefined) return;
+      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      return row;
+    },
+
+    createNodeIfAbsentWithSchemaFence: async (work, schemaFence) => {
+      const insert = target.insertNodeIfAbsentWithSchemaFence;
+      if (insert === undefined) return;
+      const row = await insert(work.params, schemaFence);
+      if (row === undefined) return;
+      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      return row;
+    },
+
+    createNodeWithSchemaFence: async (work, schemaFence) => {
+      const insert = target.insertNodeWithSchemaFence;
+      if (insert === undefined) return;
+      const row = await insert(work.params, schemaFence);
       if (row === undefined) return;
       await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
       return row;
@@ -507,6 +544,12 @@ export function createWriteSession(
         return;
       }
       return insertEdgeIfEndpointsLive(work.params);
+    },
+
+    createEdgeIfEndpointsLiveWithSchemaFence: (params, schemaFence) => {
+      const insert = target.insertEdgeIfEndpointsLiveWithSchemaFence;
+      if (insert === undefined) return Promise.resolve(undefined);
+      return insert(params, schemaFence);
     },
 
     createEdgeNoReturn: async (work) => {

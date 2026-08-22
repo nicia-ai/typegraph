@@ -7,6 +7,7 @@ import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
   InsertNodeParams,
+  SchemaWriteFenceParams,
   UpdateNodeParams,
   UpdateNodeSetParams,
 } from "../../types";
@@ -75,6 +76,72 @@ export function buildInsertNodeIfAbsent(
       ${timestamp}, ${timestamp}
     )
     ON CONFLICT (graph_id, kind, id) DO NOTHING
+    RETURNING *
+  `;
+}
+
+/**
+ * The one-statement schema-fenced counterpart to `buildInsertNodeIfAbsent`.
+ * The caller supplies the dialect-owned lock clause: PostgreSQL uses `FOR
+ * SHARE`; SQLite's `BEGIN IMMEDIATE` is already its transaction fence.
+ */
+export function buildInsertNodeIfAbsentWithSchemaFence(
+  tables: Tables,
+  params: InsertNodeParams,
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  const propsJson = JSON.stringify(params.props);
+  const columns = nodeColumnList(nodes);
+
+  return sql`
+    INSERT INTO ${nodes} (${columns})
+    SELECT
+      ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
+      1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    FROM (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    ) AS "schema_fence"
+    WHERE TRUE
+    ON CONFLICT (graph_id, kind, id) DO NOTHING
+    RETURNING *
+  `;
+}
+
+/** Schema-fenced fresh-id node insert; no identity conflict is expected. */
+export function buildInsertNodeWithSchemaFence(
+  tables: Tables,
+  params: InsertNodeParams,
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  const propsJson = JSON.stringify(params.props);
+  const columns = nodeColumnList(nodes);
+
+  return sql`
+    INSERT INTO ${nodes} (${columns})
+    SELECT
+      ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
+      1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    FROM (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    ) AS "schema_fence"
     RETURNING *
   `;
 }

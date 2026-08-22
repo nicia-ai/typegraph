@@ -38,6 +38,7 @@ import type {
   InsertUniqueParams,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
+  SchemaWriteFenceParams,
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
@@ -82,6 +83,7 @@ import {
   buildHardDeleteEdgesByNode,
   buildInsertEdge,
   buildInsertEdgeIfEndpointsLive,
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
@@ -96,9 +98,11 @@ import {
   buildHardDeleteNode,
   buildInsertNode,
   buildInsertNodeIfAbsent,
+  buildInsertNodeIfAbsentWithSchemaFence,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
+  buildInsertNodeWithSchemaFence,
   buildUpdateNode,
   buildUpdateNodeSet,
 } from "./nodes";
@@ -183,6 +187,18 @@ export type CommonOperationStrategy = Readonly<{
     params: InsertNodeParams,
     timestamp: string,
   ) => SQL;
+  buildInsertNodeIfAbsentWithSchemaFence: (
+    params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertNodeWithSchemaFence: (
+    params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
   buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
@@ -202,6 +218,12 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertEdgeIfEndpointsLive: (
     params: InsertEdgeParams,
     timestamp: string,
+  ) => SQL;
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence: (
+    params: InsertEdgeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
   ) => SQL;
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
@@ -377,6 +399,8 @@ function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
 const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNode,
   buildInsertNodeIfAbsent,
+  buildInsertNodeIfAbsentWithSchemaFence,
+  buildInsertNodeWithSchemaFence,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
@@ -387,6 +411,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildHardDeleteNode,
   buildInsertEdge,
   buildInsertEdgeIfEndpointsLive,
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,

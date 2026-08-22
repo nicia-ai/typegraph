@@ -1416,7 +1416,7 @@ type EdgeEndpointSide = "from" | "to";
 export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeIfEndpointsLiveWithSchemaFence" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 export type EdgeExistsBetweenParams = Readonly<{
@@ -1814,6 +1814,8 @@ export type GraphBackend = Readonly<{
     vectorStrategy?: VectorStrategy | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
+    insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
+    insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -1825,6 +1827,7 @@ export type GraphBackend = Readonly<{
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
     insertEdgeIfEndpointsLive?: (this: void, params: InsertEdgeParams) => Promise<EdgeRow | undefined>;
+    insertEdgeIfEndpointsLiveWithSchemaFence?: (this: void, params: InsertEdgeParams, schemaFence: SchemaWriteFenceParams) => Promise<EdgeRow | undefined>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
@@ -2345,7 +2348,7 @@ export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -2723,6 +2726,9 @@ export type SchemaVersionRow = Readonly<{
 
 // @public (undocumented)
 export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite">;
+
+// @public
+type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
 
 // @public
 export type SerializedClosures = Readonly<{
@@ -3122,6 +3128,21 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "reasoned";
         readonly reason: "A stronger first-party single-claim operation whose member presence explicitly permits the store to fold the legacy entity probe into the claim; custom and legacy claim backends keep probe-then-claim, so it is not part of the claims bundle's required portable surface.";
         readonly accesses: 1;
+    };
+    readonly insertNodeIfAbsentWithSchemaFence: {
+        readonly kind: "reasoned";
+        readonly reason: "First-party schema-managed insert fast path selected only by the node create session; a missing member retains the ordinary fence then insert path.";
+        readonly accesses: 6;
+    };
+    readonly insertNodeWithSchemaFence: {
+        readonly kind: "reasoned";
+        readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
+        readonly accesses: 6;
+    };
+    readonly insertEdgeIfEndpointsLiveWithSchemaFence: {
+        readonly kind: "reasoned";
+        readonly reason: "First-party schema-fenced endpoint insert fast path; custom backends retain the existing endpoint-read and ordinary schema-fence path.";
+        readonly accesses: 7;
     };
     readonly insertEdgeIfEndpointsLive: {
         readonly kind: "reasoned";

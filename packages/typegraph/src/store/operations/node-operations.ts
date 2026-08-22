@@ -54,6 +54,7 @@ import {
   type ClaimsVerdictThunk,
   missingRequiredExtras,
 } from "../../backend/capabilities/resolve";
+import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import { deriveBackend } from "../../backend/derive-backend";
 import {
   type GraphBackend,
@@ -166,8 +167,13 @@ import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
 import {
   type NodeInsertWork,
   type NodeWriteSession,
+  unfencedTarget,
   type WriteTarget,
 } from "./write-session";
+import {
+  diagnoseFusedSchemaFenceNoRow,
+  lockSchemaVersionForStoreWrite,
+} from "./write-transaction";
 
 // ============================================================
 // Types
@@ -366,6 +372,40 @@ function nodeCreateRequiresIdentityLock<G extends GraphDef>(
   input: Readonly<{ id?: string }>,
 ): boolean {
   return input.id !== undefined && nodeRequiresIdentityLock(ctx);
+}
+
+/**
+ * A schema fence can move into the first INSERT only when it remains the first
+ * lock-bearing operation. Claims, identity, recorded capture and revision
+ * tracking all acquire a lock before row work, so they deliberately retain the
+ * ordinary explicit fence.
+ */
+function canFuseNodeCreateSchemaFence<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: CreateNodeInput,
+  backend: GraphBackend | TransactionBackend,
+): boolean {
+  if (
+    ctx.schemaVersion === undefined ||
+    !isSchemaFencedInsertEligible(backend) ||
+    !backend.capabilities.transactions ||
+    ctx.historyEnabled ||
+    ctx.revisionTrackingEnabled ||
+    (input.id !== undefined && ctx.identity !== undefined) ||
+    !hasOwnKey(ctx.graph.nodes, input.kind)
+  ) {
+    return false;
+  }
+  const registration = getNodeRegistration(ctx.graph, input.kind);
+  if (
+    (registration.unique?.length ?? 0) !== 0 ||
+    ctx.registry.getDisjointKinds(input.kind).length > 0
+  ) {
+    return false;
+  }
+  return input.id === undefined ?
+      backend.insertNodeWithSchemaFence !== undefined
+    : backend.insertNodeIfAbsentWithSchemaFence !== undefined;
 }
 
 /** Whether any member of a node-create batch can participate in identity. */
@@ -1728,6 +1768,11 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const id = input.id ?? generateId();
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
+  const schemaFenceInFirstWrite = canFuseNodeCreateSchemaFence(
+    ctx,
+    input,
+    backend,
+  );
 
   return runHookedWritePlan(
     nodeWritePlanContext(ctx),
@@ -1738,6 +1783,17 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     ),
     backend,
     async (session, target) => {
+      // The outer backend's mark chooses the optimistic plan, but a custom
+      // transaction wrapper can replace its callback target. Re-check the
+      // factory-owned origin at the actual write receiver before letting that
+      // receiver carry the schema fence; otherwise a wrapper that dropped the
+      // ordinary diagnostic fence could silently write a verified store.
+      const targetBackend = unfencedTarget(target);
+      const fuseSchemaFenceInFirstWrite =
+        schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
+      if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
       const identity = ctx.identity;
       const prepared = await validateAndPrepareNodeCreate(
         ctx,
@@ -1761,10 +1817,37 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         return shouldReturnRow ? rowToNode(resurrected) : undefined;
       }
 
+      if (fuseSchemaFenceInFirstWrite) {
+        const schemaFence = {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        };
+        const work = nodeInsertWork(prepared);
+        const inserted =
+          prepared.insertIfAbsent ?
+            await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
+          : await session.createNodeWithSchemaFence(work, schemaFence);
+        if (inserted !== undefined) {
+          return shouldReturnRow ? rowToNode(inserted) : undefined;
+        }
+
+        // The fused statement's empty result is intentionally ambiguous. Its
+        // ordinary active-schema diagnostic preserves the settled version in
+        // StaleVersionError.details.actual without a second PostgreSQL lock.
+        await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+        if (!prepared.insertIfAbsent) {
+          throw new DatabaseOperationError(
+            `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
+            { operation: "insert", entity: "node" },
+          );
+        }
+      }
+
       if (prepared.insertIfAbsent) {
-        const inserted = await session.createNodeIfAbsent(
-          nodeInsertWork(prepared),
-        );
+        const inserted =
+          fuseSchemaFenceInFirstWrite ? undefined : (
+            await session.createNodeIfAbsent(nodeInsertWork(prepared))
+          );
         if (inserted !== undefined) {
           if (identity !== undefined) {
             await identity.foldCreated(target, foldReferences([prepared]));
@@ -1829,6 +1912,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       if (row === undefined) return;
       return rowToNode(row);
     },
+    { schemaFenceInFirstWrite },
   );
 }
 

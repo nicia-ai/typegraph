@@ -12,6 +12,7 @@ import {
   type InsertNodeParams,
   type InternalTransactionOptions,
   type NodeRow,
+  type SchemaWriteFenceParams,
   type TransactionBackend,
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
@@ -453,6 +454,45 @@ function createRecordedTransactionBackend(
         },
       }),
 
+    ...(target.insertNodeIfAbsentWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(
+            target.insertNodeIfAbsentWithSchemaFence,
+          )(params, schemaFence);
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
+    ...(target.insertNodeWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(target.insertNodeWithSchemaFence)(
+            params,
+            schemaFence,
+          );
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
     ...(target.insertNodeNoReturn === undefined ?
       {}
     : {
@@ -566,6 +606,25 @@ function createRecordedTransactionBackend(
           const row = await requireDefined(target.insertEdgeIfEndpointsLive)(
             params,
           );
+          if (row !== undefined) {
+            session.touchEdge(params.graphId, params.id, row);
+          }
+          return row;
+        },
+      }),
+
+    ...(target.insertEdgeIfEndpointsLiveWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertEdgeIfEndpointsLiveWithSchemaFence(
+          params: InsertEdgeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<EdgeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(
+            target.insertEdgeIfEndpointsLiveWithSchemaFence,
+          )(params, schemaFence);
           if (row !== undefined) {
             session.touchEdge(params.graphId, params.id, row);
           }
@@ -774,6 +833,38 @@ export function createRecordedBackend(
         },
       }),
 
+    ...(backend.insertNodeIfAbsentWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeIfAbsentWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
     ...(backend.insertNodeNoReturn === undefined ?
       {}
     : {
@@ -849,6 +940,22 @@ export function createRecordedBackend(
         ): Promise<EdgeRow | undefined> {
           return capture((target) =>
             requireDefined(target.insertEdgeIfEndpointsLive)(params),
+          );
+        },
+      }),
+
+    ...(backend.insertEdgeIfEndpointsLiveWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertEdgeIfEndpointsLiveWithSchemaFence(
+          params: InsertEdgeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<EdgeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertEdgeIfEndpointsLiveWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
           );
         },
       }),

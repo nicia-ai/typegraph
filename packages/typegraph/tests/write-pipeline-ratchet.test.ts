@@ -77,27 +77,39 @@ const RATCHET = {
   managedWriteEntryPoints: 2,
   /**
    * `unfencedTarget()` escapes — the typed hole that hands row work the full
-   * backend union back. It was nonzero from the first batch that moved call
-   * sites onto the executor and fell to one as the union-typed preparation
-   * helpers, constraint and uniqueness probes, and identity hooks were
-   * re-typed onto the read projection.
-   *
-   * ONE is a reasoned floor, not slack. The bulk getOrCreate's nested legs
-   * re-enter the executor against their enclosing frame's target, and re-entry
-   * mints a session, which writes — so it needs the full union by
-   * construction. Removing it would mean inlining those legs' row work, which
-   * would drop the nested frames' schema fence and revision-clock advance: a
-   * behavior change. A SECOND escape is migration debt, and fails here.
+   * backend union back. Each remaining escape has a distinct contract owner in
+   * `UNFENCED_TARGET_ESCAPE_INVENTORY`; a fourth has no owner and fails here.
    */
-  unfencedTargetEscapes: 1,
+  unfencedTargetEscapes: 3,
 } as const;
+
+/**
+ * The permanent widening sites. The bulk convergence leg re-enters the
+ * executor; the two fused-create receiver checks must inspect the exact
+ * row-work backend before allowing it to carry the schema fence. Narrowing
+ * either check to `WriteTarget` would make an adopted or custom transaction
+ * wrapper able to bypass the verified-store fallback it owns.
+ */
+const UNFENCED_TARGET_ESCAPE_INVENTORY = [
+  {
+    file: "store/operations/edge-operations.ts",
+    count: 2,
+    reason:
+      "the schema-fenced receiver check and bulk convergence executor re-entry",
+  },
+  {
+    file: "store/operations/node-operations.ts",
+    count: 1,
+    reason: "the schema-fenced receiver check",
+  },
+] as const;
 
 /**
  * `GraphBackend`'s member count, recorded so the classification's size is
  * visible. Adding a member moves this number and forces the new member into a
  * class — which is the point: whoever adds it decides whether it is a write.
  */
-const MEMBER_COUNT = 116;
+const MEMBER_COUNT = 119;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 
@@ -230,6 +242,13 @@ function countOccurrences(pattern: RegExp): number {
     .reduce((total, count) => total + count, 0);
 }
 
+function countFileOccurrences(file: string, pattern: RegExp): number {
+  return (
+    fs.readFileSync(path.join(SOURCE_ROOT, file), "utf8").match(pattern)
+      ?.length ?? 0
+  );
+}
+
 const bannedMembers = new Set(WRITE_MEMBER_NAMES);
 const violations = scanSourceTree(bannedMembers);
 const violatingFiles = new Set(violations.map((violation) => violation.file));
@@ -355,6 +374,17 @@ describe("write-pipeline ratchet", () => {
     expect(countOccurrences(/\bunfencedTarget\(/g) - 1).toBeLessThanOrEqual(
       RATCHET.unfencedTargetEscapes,
     );
+    expect(
+      UNFENCED_TARGET_ESCAPE_INVENTORY.reduce(
+        (total, entry) => total + entry.count,
+        0,
+      ),
+    ).toBe(RATCHET.unfencedTargetEscapes);
+    for (const entry of UNFENCED_TARGET_ESCAPE_INVENTORY) {
+      expect(countFileOccurrences(entry.file, /\bunfencedTarget\(/g)).toBe(
+        entry.count,
+      );
+    }
   });
 
   it("catches a violation the exemption list does not cover", () => {
