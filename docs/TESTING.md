@@ -131,6 +131,53 @@ run-count knob for deep runs:
 TYPEGRAPH_ORACLE_RUNS=100 pnpm test
 ```
 
+### Performance fixtures
+
+Location: `packages/typegraph/tests/perf/`
+
+A registered manifest (`tests/perf/inventory.ts`'s `PERF_FIXTURES`) rather than
+a bag of scripts: every file in the directory is checked, by
+`perf-fixture-inventory.test.ts`, against a live scan of the directory itself
+and against the mode/gating it claims. Each entry names the regression it
+guards and the mutation shown red-then-restored to prove it can fail.
+
+Two modes:
+
+- **`report`** — prints timings, asserts nothing, and is gated on
+  `TYPEGRAPH_PERF=1` via `describe.runIf` so it costs a normal `pnpm test` run
+  nothing. `identity-current-traversal-scaling.test.ts` and
+  `identity-historical-traversal-scaling.test.ts` are this mode; they were the
+  measurement protocol validated during the 0.46.0 identity-traversal
+  hardening (typegraph#270, typegraph#310, typegraph#391, typegraph#396) and
+  are kept green here.
+- **`assert`** — a normal, ungated test that runs in every default `pnpm test`
+  invocation. `write-pipeline-statement-budget.test.ts` pins the exact,
+  enumerated statement multiset a managed write issues, on both PostgreSQL
+  (PGlite) and SQLite (`better-sqlite3`, wrapped by
+  `tests/statement-recorder.ts`'s `createRecordedSqliteStore`), and asserts a
+  batch's statement count does not grow with row count.
+  `claim-fence-overhead.test.ts` asserts an unconstrained write pays no
+  per-graph lock and writes no claim, and that a declared constraint's
+  per-claim cost is a constant, isolated by differencing rather than by a
+  raw total (so it holds independent of the base statement cost or the lock
+  count). The four `explain/` suites
+  (`identity-frontier-expansion.test.ts`, `variable-length-traversal.test.ts`,
+  `coalesce-probe.test.ts`, `claim-upsert.test.ts`) are also `assert` mode:
+  each asserts an `EXPLAIN` plan's shape (row-count ceiling, join kind) on
+  both PostgreSQL and SQLite via `forEachExplainEngine`, so a regression that
+  reintroduces a correlated scan fails deterministically without timing.
+
+```bash
+# Assert-mode fixtures run in every default invocation
+pnpm test
+
+# Report-mode fixtures, SQLite only
+TYPEGRAPH_PERF=1 pnpm vitest run tests/perf/identity-current-traversal-scaling.test.ts
+
+# Report-mode fixtures, with a PostgreSQL leg too
+POSTGRES_URL=... TYPEGRAPH_PERF=1 pnpm vitest run tests/perf/identity-historical-traversal-scaling.test.ts
+```
+
 ## Running Tests
 
 ```bash
@@ -466,6 +513,8 @@ only SQLite unit/property tests). The jobs are:
 | **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |
 | **Test (Durable Objects SQLite)** | `test:do` — the workerd / Cloudflare Durable Objects SQLite lane |
+| **Size budget** | `test:size` — per-entrypoint bundle budgets, single-symbol tree-shakeability probes, dist artifact totals |
+| **Perf lane advisory** *(advisory)* | Prints whether this PR's size or label makes the EC2 timing lane mandatory by policy — informational only, never a blocking gate |
 | **Build artifacts** | `turbo run build` in parallel with the test jobs |
 | **Build** | Final required gate that succeeds only after the build and every test job above pass |
 
@@ -477,3 +526,54 @@ To reproduce the core gate locally before pushing, run `pnpm fix && pnpm
 typecheck && pnpm test`, then `pnpm test:postgres` (Docker-backed) for any
 change touching backend, store, or collection code. Coverage thresholds are
 enforced by `pnpm test:coverage`.
+
+### Performance timing lane (EC2)
+
+The deterministic checks that guard performance in every PR are the
+`EXPLAIN`-shape assertions (`packages/typegraph/tests/perf/explain/`) and the
+size budget above — both run in normal CI, on every PR, with no timing
+involved. Wall-clock timing measurement is a separate lane
+(`.github/workflows/perf-timing-lane.yml`) that never runs in the shared CI
+runners: it drives `bench:regression` on a dedicated, ephemeral EC2 instance
+over SSM (see
+[`packages/benchmarks/docs/ec2-regression-lane.md`](../packages/benchmarks/docs/ec2-regression-lane.md)),
+because a shared, contended CI runner cannot produce trustworthy timing
+numbers.
+
+The timing lane runs on the `perf-lane` PR label, on `workflow_dispatch`, and
+weekly on a schedule (Monday 07:17 UTC) — never as a required check on an
+ordinary PR. It is **mandatory by policy, not by gate**: a PR labeled
+`major-feature` or `refactor`, or one that changes more than 200 lines under
+`packages/typegraph/src/{query,store,backend}`, is expected to also carry the
+`perf-lane` label before merge, and the `Perf lane advisory` CI job
+(table above) states that verdict on every PR so a reviewer doesn't have to
+compute it by hand — but nothing in CI enforces the label; this phase, that
+enforcement is a review convention, not automation. A fork PR cannot trigger
+the timing lane via the label (it has no access to this repository's AWS
+OIDC role); use `workflow_dispatch` with an explicit `ref` instead.
+
+The 200-line threshold is a large-diff backstop (see
+`.github/scripts/perf-lane-advisory.sh`'s comment for the commit-history scan
+behind the number), not a claim that every smaller query/store/backend diff
+is risk-free — this repository's history has genuine capability additions
+under 200 lines (some under 100). Catching those depends on the author
+applying `major-feature`/`refactor`/`perf-lane` themselves; a reviewer who
+sees an unlabeled but behaviorally significant query/store/backend diff
+under the threshold should still ask for the label rather than trusting the
+line count alone.
+
+### Size budget window
+
+`pnpm test:size` (from the repo root or `packages/typegraph`) bundles every
+published entrypoint and a set of single-symbol probes with esbuild, and
+compares the result against the recorded actuals in
+`packages/typegraph/etc/size-budget.json`. A measurement passes when it falls
+at or below `recorded × 1.05` — the ceiling is anchored to the byte count
+recorded the last time someone ran `pnpm size-budget:update`, not to the
+previous PR's measurement, so small increments cannot ratchet the budget
+upward over time.
+
+To re-seed after an intentional size change, run `pnpm size-budget:update`
+(from the repo root or `packages/typegraph`) and commit the resulting diff to
+`etc/size-budget.json`. Every re-seed diff must be justified in the PR body —
+explain which entrypoints moved, by how much, and why.

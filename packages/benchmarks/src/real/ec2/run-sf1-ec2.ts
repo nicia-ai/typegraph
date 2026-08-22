@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import { resolveGitSha } from "../../git";
 import { resolveHistoryPath } from "../../history";
 import { SNB_ENGINE_NAMES } from "../harness/doctor";
-import { stringifyError, writeJsonFile } from "../harness/process";
+import { writeJsonFile } from "../harness/process";
 import {
   type AwsCliOptions,
   describeInstanceState,
@@ -50,12 +50,19 @@ import {
   TERMINAL_COMMAND_STATUSES,
 } from "./aws-cli";
 import {
-  BOOTSTRAP_COMPLETE_SENTINEL,
-  BOOTSTRAP_FAILED_SENTINEL,
-  BOOTSTRAP_LOG_PATH,
-  renderBootstrapScript,
+  deadManSwitchMinutes as computeDeadManSwitchMinutes,
+  renderBootstrapWaitScript,
   REPO_DIR,
-} from "./bootstrap-script";
+} from "./bootstrap-common";
+import { renderBootstrapScript } from "./bootstrap-script";
+import {
+  extractExitCode,
+  fetchRemoteText,
+  pollCommand,
+  renderExitCodeCapture,
+  sleep,
+  waitUntil,
+} from "./ssm-run";
 
 // Profile-aware: SF10's load phase consumes memory proportional to
 // available RAM, not a fixed budget (see reports/snb-lane1-results.md's
@@ -105,11 +112,6 @@ const DEFAULT_BENCHMARK_TIMEOUT_SECONDS_BY_PROFILE: Readonly<
 const DEFAULT_POLL_INTERVAL_SECONDS = 60;
 const HEARTBEAT_EVERY_N_POLLS = 5;
 
-const EXIT_CODE_MARKER = {
-  start: "===EXIT_CODE_START===",
-  end: "===EXIT_CODE_END===",
-};
-
 /**
  * Sentinel file the backgrounded benchmark script writes at startup, so
  * `collect()` can compute the correct `tail -n +N` offset into
@@ -136,59 +138,6 @@ function requireArgValue(argv: readonly string[], name: string): string {
   return value;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Retries `check()` until it returns true or `timeoutMs` elapses. A thrown
- * error from `check()` is treated as "not ready yet" rather than a fatal
- * failure — `describeInstanceState` right after `run-instances` reliably
- * hits AWS's own eventual-consistency window (`InvalidInstanceID.NotFound`
- * for an instance id the API itself just returned), and propagating that
- * immediately killed the whole launch instead of retrying a few seconds
- * later like everything else in this poll loop already does. The last error
- * is surfaced in the timeout message so a genuine, persistent failure (bad
- * credentials, wrong region) is still diagnosable instead of silently
- * retrying to a generic timeout.
- */
-async function waitUntil(
-  description: string,
-  intervalMs: number,
-  timeoutMs: number,
-  check: () => Promise<boolean>,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-  for (;;) {
-    try {
-      if (await check()) return;
-      lastError = undefined;
-    } catch (error) {
-      lastError = error;
-    }
-    if (Date.now() >= deadline) {
-      const suffix =
-        lastError === undefined ? "" : (
-          ` (last error: ${stringifyError(lastError)})`
-        );
-      throw new Error(`Timed out waiting for: ${description}${suffix}`);
-    }
-    await sleep(intervalMs);
-  }
-}
-
-function extractSection(
-  text: string,
-  marker: { start: string; end: string },
-): string | undefined {
-  const startIndex = text.indexOf(marker.start);
-  const endIndex = text.indexOf(marker.end);
-  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex)
-    return undefined;
-  return text.slice(startIndex + marker.start.length, endIndex).trim();
-}
-
 function bareCommand(argv: readonly string[]): "launch" | "collect" {
   const first = argv[0];
   if (first === "collect") return "collect";
@@ -199,21 +148,6 @@ function benchmarksRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   // src/real/ec2/ -> ../../..
   return path.join(here, "..", "..", "..");
-}
-
-/** Renders the SSM command that waits for the bootstrap sentinel, then fails loudly on timeout. */
-function renderBootstrapWaitScript(timeoutSeconds: number): string {
-  const iterations = Math.ceil(timeoutSeconds / 10);
-  return `#!/bin/bash
-for i in $(seq 1 ${iterations}); do
-  if [ -f ${BOOTSTRAP_COMPLETE_SENTINEL} ]; then echo BOOTSTRAP_OK; exit 0; fi
-  if [ -f ${BOOTSTRAP_FAILED_SENTINEL} ]; then cat ${BOOTSTRAP_FAILED_SENTINEL}; exit 1; fi
-  sleep 10
-done
-echo "bootstrap did not complete within ${timeoutSeconds}s"
-tail -n 200 ${BOOTSTRAP_LOG_PATH} || true
-exit 1
-`;
 }
 
 /** Absolute path to the benchmarks package on the remote instance. */
@@ -239,17 +173,13 @@ function remoteBenchDir(): string {
  */
 function renderBenchmarkRunScript(profile: string): string {
   const benchDir = remoteBenchDir();
-  return `#!/bin/bash
-set +e
-cd ${benchDir}
-wc -l < reports/history.jsonl 2>/dev/null > ${HISTORY_LINES_BEFORE_SENTINEL} || echo 0 > ${HISTORY_LINES_BEFORE_SENTINEL}
-pnpm bench:snb:${profile} --check > /var/log/typegraph-bench.log 2>&1
-EXIT_CODE=$?
-echo "${EXIT_CODE_MARKER.start}"
-echo $EXIT_CODE
-echo "${EXIT_CODE_MARKER.end}"
-exit $EXIT_CODE
-`;
+  return renderExitCodeCapture({
+    preamble: [
+      `cd ${benchDir}`,
+      `wc -l < reports/history.jsonl 2>/dev/null > ${HISTORY_LINES_BEFORE_SENTINEL} || echo 0 > ${HISTORY_LINES_BEFORE_SENTINEL}`,
+    ],
+    command: `pnpm bench:snb:${profile} --check > /var/log/typegraph-bench.log 2>&1`,
+  });
 }
 
 /** Renders the SSM command that `cat`s one remote file, defaulting to `{}` if it's missing. */
@@ -330,18 +260,15 @@ async function launch(argv: readonly string[]): Promise<void> {
   const amiId = await resolveUbuntu2404Ami(awsOptions);
   console.log(`AMI: ${amiId}`);
 
-  // Comfortably longer than both SSM executionTimeouts below, so this
-  // "nobody ever collected" safety net can never race a benchmark that's
-  // still legitimately running (see docs/ec2-benchmark-runner.md).
-  const deadManSwitchMinutes =
-    Math.ceil((bootstrapTimeoutSeconds + benchmarkTimeoutSeconds) / 60) + 60;
-
   console.log(`Ref to clone: ${ref} (from ${repoUrl})`);
   const userData = renderBootstrapScript({
     repoUrl,
     ref,
     profile: benchProfile,
-    deadManSwitchMinutes,
+    deadManSwitchMinutes: computeDeadManSwitchMinutes(
+      bootstrapTimeoutSeconds,
+      benchmarkTimeoutSeconds,
+    ),
     sshPublicKey,
   });
 
@@ -359,6 +286,7 @@ async function launch(argv: readonly string[]): Promise<void> {
     name,
     runId,
     associatePublicIp,
+    lane: "snb",
   });
   console.log(`Instance: ${instanceId}`);
 
@@ -435,52 +363,6 @@ async function launch(argv: readonly string[]): Promise<void> {
   console.log("");
 }
 
-async function pollCommand(
-  awsOptions: AwsCliOptions,
-  instanceId: string,
-  commandId: string,
-  intervalMs: number,
-  timeoutSeconds: number,
-): Promise<{ status: string; stdout: string; stderr: string }> {
-  const deadline = Date.now() + timeoutSeconds * 1000;
-  for (;;) {
-    const invocation = await getCommandInvocation(
-      awsOptions,
-      instanceId,
-      commandId,
-    );
-    if (TERMINAL_COMMAND_STATUSES.includes(invocation.status)) {
-      return invocation;
-    }
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `Timed out waiting for SSM command ${commandId} on ${instanceId}.`,
-      );
-    }
-    await sleep(intervalMs);
-  }
-}
-
-/** Runs a short shell command via SSM and returns its stdout, trimmed. */
-async function fetchRemoteText(
-  awsOptions: AwsCliOptions,
-  instanceId: string,
-  script: string,
-  timeoutSeconds = 60,
-): Promise<string> {
-  const commandId = await sendShellCommand(awsOptions, instanceId, script, {
-    timeoutSeconds,
-  });
-  const result = await pollCommand(
-    awsOptions,
-    instanceId,
-    commandId,
-    2_000,
-    timeoutSeconds + 30,
-  );
-  return result.stdout.trim();
-}
-
 async function collect(argv: readonly string[]): Promise<void> {
   const region = requireArgValue(argv, "region");
   const awsProfile = parseArgValue(argv, "aws-profile");
@@ -518,7 +400,7 @@ async function collect(argv: readonly string[]): Promise<void> {
   console.log(`Command finished with status: ${invocation.status}`);
 
   try {
-    const exitCodeText = extractSection(invocation.stdout, EXIT_CODE_MARKER);
+    const exitCode = extractExitCode(invocation.stdout);
 
     // Fetched via separate SSM commands (not embedded in the main command's
     // own stdout) so each artifact gets its own 24,000-character
@@ -631,7 +513,7 @@ async function collect(argv: readonly string[]): Promise<void> {
     if (hasParseableResults) {
       console.log(`Results written to ${localDir}`);
     }
-    console.log(`Benchmark exit code: ${exitCodeText ?? "unknown"}`);
+    console.log(`Benchmark exit code: ${exitCode ?? "unknown"}`);
 
     // A `--check` run reports parity/engine failures via a
     // nonzero exit code, not by omitting results.json — some engines can
@@ -653,8 +535,8 @@ async function collect(argv: readonly string[]): Promise<void> {
     // it's checked independently.
     if (
       invocation.status !== "Success" ||
-      exitCodeText === undefined ||
-      exitCodeText !== "0" ||
+      exitCode === undefined ||
+      exitCode !== 0 ||
       !hasParseableResults ||
       !hasParseableSummary ||
       !hasHistoryLines ||
@@ -672,7 +554,7 @@ async function collect(argv: readonly string[]): Promise<void> {
         ),
       );
       throw new Error(
-        `Benchmark run did not succeed (SSM status: ${invocation.status}, exit code: ${exitCodeText ?? "unknown"}, ` +
+        `Benchmark run did not succeed (SSM status: ${invocation.status}, exit code: ${exitCode ?? "unknown"}, ` +
           `parseable results: ${hasParseableResults}, parseable summary: ${hasParseableSummary}, history lines: ${hasHistoryLines}, ` +
           `missing engines: ${missingEngines.length > 0 ? missingEngines.join(", ") : "none"}).` +
           (hasParseableResults || hasParseableSummary || hasHistoryLines ?

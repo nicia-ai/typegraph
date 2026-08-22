@@ -1,0 +1,290 @@
+{
+  "entrypoints": {
+    ".": {
+      "minified": 732249,
+      "gzip": 200719,
+      "excludedDomains": [
+        "graph-merge",
+        "interchange",
+        "profiler",
+        "provenance"
+      ]
+    },
+    "./adapters/drizzle/indexes": {
+      "minified": 25222,
+      "gzip": 6956,
+      "excludedDomains": [
+        "(root)",
+        "constraints",
+        "core",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry",
+        "schema",
+        "store"
+      ]
+    },
+    "./adapters/drizzle/postgres": {
+      "minified": 167923,
+      "gzip": 44952,
+      "excludedDomains": [
+        "core",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry"
+      ]
+    },
+    "./adapters/drizzle/postgres/pglite": {
+      "minified": 169017,
+      "gzip": 45622,
+      "excludedDomains": [
+        "core",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry"
+      ]
+    },
+    "./adapters/drizzle/sqlite": {
+      "minified": 153650,
+      "gzip": 40865,
+      "excludedDomains": [
+        "core",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry"
+      ]
+    },
+    "./adapters/drizzle/sqlite/libsql": {
+      "minified": 159287,
+      "gzip": 42384,
+      "excludedDomains": [
+        "core",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry"
+      ]
+    },
+    "./adapters/drizzle/sqlite/local": {
+      "minified": 163004,
+      "gzip": 43759,
+      "excludedDomains": [
+        "core",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry"
+      ]
+    },
+    "./backend": {
+      "minified": 65214,
+      "gzip": 18154,
+      "excludedDomains": [
+        "constraints",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "indexes",
+        "interchange",
+        "profiler",
+        "provenance",
+        "registry",
+        "schema",
+        "store"
+      ]
+    },
+    "./core": {
+      "minified": 18188,
+      "gzip": 6555,
+      "excludedDomains": [
+        "(root)",
+        "backend",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "profiler",
+        "provenance",
+        "query",
+        "registry",
+        "schema"
+      ]
+    },
+    "./graph-extension": {
+      "minified": 37501,
+      "gzip": 10996,
+      "excludedDomains": [
+        "(root)",
+        "backend",
+        "constraints",
+        "graph-merge",
+        "identity",
+        "indexes",
+        "interchange",
+        "profiler",
+        "provenance",
+        "schema"
+      ]
+    },
+    "./graph-merge": {
+      "minified": 849426,
+      "gzip": 237642,
+      "excludedDomains": ["profiler", "provenance"]
+    },
+    "./indexes": {
+      "minified": 44630,
+      "gzip": 12536,
+      "excludedDomains": [
+        "constraints",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "interchange",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry",
+        "schema",
+        "store"
+      ]
+    },
+    "./interchange": {
+      "minified": 108193,
+      "gzip": 31341,
+      "excludedDomains": [
+        "graph-extension",
+        "graph-merge",
+        "ontology",
+        "profiler",
+        "provenance",
+        "registry"
+      ]
+    },
+    "./postgres/pglite": {
+      "minified": 822234,
+      "gzip": 225259,
+      "excludedDomains": [
+        "graph-merge",
+        "interchange",
+        "profiler",
+        "provenance"
+      ]
+    },
+    "./profiler": {
+      "minified": 17350,
+      "gzip": 5410,
+      "excludedDomains": [
+        "(root)",
+        "backend",
+        "constraints",
+        "errors",
+        "graph-extension",
+        "graph-merge",
+        "identity",
+        "indexes",
+        "interchange",
+        "ontology",
+        "provenance",
+        "registry",
+        "schema",
+        "store"
+      ]
+    },
+    "./provenance": {
+      "minified": 43813,
+      "gzip": 13178,
+      "excludedDomains": [
+        "graph-extension",
+        "graph-merge",
+        "indexes",
+        "interchange",
+        "ontology",
+        "profiler",
+        "registry"
+      ]
+    },
+    "./schema": {
+      "minified": 146554,
+      "gzip": 42424,
+      "excludedDomains": [
+        "graph-merge",
+        "interchange",
+        "profiler",
+        "provenance"
+      ]
+    },
+    "./sqlite/local": {
+      "minified": 816778,
+      "gzip": 223858,
+      "excludedDomains": [
+        "graph-merge",
+        "interchange",
+        "profiler",
+        "provenance"
+      ]
+    }
+  },
+  "probes": {
+    ".#defineNode": {
+      "minified": 5516,
+      "gzip": 2351
+    },
+    "./core#defineNode": {
+      "minified": 5516,
+      "gzip": 2352
+    },
+    "./schema#computeSchemaHash": {
+      "minified": 833,
+      "gzip": 490
+    },
+    "./indexes#generateIndexDDL": {
+      "minified": 23279,
+      "gzip": 7072
+    },
+    "./interchange#trustedImportGraph": {
+      "minified": 12397,
+      "gzip": 4327
+    },
+    "./graph-merge#planMerge": {
+      "minified": 108105,
+      "gzip": 33592
+    },
+    "./adapters/drizzle/sqlite#createSqliteBackend": {
+      "minified": 153370,
+      "gzip": 40763
+    }
+  },
+  "artifacts": {
+    "esmBytes": 2487820,
+    "cjsBytes": 2647038,
+    "declarationBytes": 3078147
+  }
+}

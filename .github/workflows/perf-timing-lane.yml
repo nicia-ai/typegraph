@@ -1,0 +1,199 @@
+name: Perf Timing Lane
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to check out and clone onto the EC2 instance (default: main, or the labeled PR's head)"
+        required: false
+        type: string
+      backend:
+        description: "sqlite, postgres, or both"
+        required: false
+        type: string
+        default: both
+      lanes:
+        description: "Comma-separated lane ids (default: the regression harness's own default set)"
+        required: false
+        type: string
+      base:
+        description: "--base override for bench:regression"
+        required: false
+        type: string
+      tag:
+        description: "--tag override for bench:regression"
+        required: false
+        type: string
+      feature_baseline:
+        description: "--feature-baseline for bench:regression"
+        required: false
+        type: string
+      instance_type:
+        description: "EC2 instance type override"
+        required: false
+        type: string
+      keep:
+        description: "Leave the EC2 instance running after collect (debugging only)"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 7 * * 1"
+  pull_request:
+    types: [labeled]
+
+concurrency:
+  # Never cancel a run holding a live, billable EC2 instance.
+  group: perf-timing-lane
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  NODE_OPTIONS: --max-old-space-size=8192
+
+jobs:
+  refuse-fork-label:
+    name: Refuse perf-lane label from a fork
+    runs-on: ubuntu-24.04
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.label.name == 'perf-lane' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Explain why a fork PR cannot trigger this lane
+        run: |
+          echo "The perf-lane label on a fork PR cannot launch the EC2 timing lane:" >&2
+          echo "the lane needs this repository's AWS OIDC role, which a fork's" >&2
+          echo "workflow run does not have." >&2
+          echo "Ask a maintainer to run this workflow via workflow_dispatch with" >&2
+          echo "--ref=<fork-branch> (or --repo-url=<fork-url> if the runner needs it)" >&2
+          echo "instead." >&2
+          exit 1
+
+  timing-lane:
+    name: EC2 timing lane
+    runs-on: ubuntu-24.04
+    if: >-
+      github.repository == 'nicia-ai/typegraph' &&
+      (github.event_name != 'pull_request' ||
+        (github.event.label.name == 'perf-lane' &&
+          github.event.pull_request.head.repo.full_name == github.repository))
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: >-
+            ${{
+              github.event.inputs.ref ||
+              github.event.pull_request.head.sha ||
+              'main'
+            }}
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Preflight AWS configuration
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -z "${{ vars.PERF_LANE_AWS_REGION }}" ]] && missing+=("vars.PERF_LANE_AWS_REGION")
+          [[ -z "${{ vars.PERF_LANE_SUBNET_ID }}" ]] && missing+=("vars.PERF_LANE_SUBNET_ID")
+          [[ -z "${{ vars.PERF_LANE_SECURITY_GROUP_ID }}" ]] && missing+=("vars.PERF_LANE_SECURITY_GROUP_ID")
+          [[ -z "${{ vars.PERF_LANE_IAM_INSTANCE_PROFILE }}" ]] && missing+=("vars.PERF_LANE_IAM_INSTANCE_PROFILE")
+          [[ -z "${{ secrets.PERF_LANE_AWS_ROLE_ARN }}" ]] && missing+=("secrets.PERF_LANE_AWS_ROLE_ARN")
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            echo "Missing required perf-lane AWS configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.PERF_LANE_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.PERF_LANE_AWS_REGION }}
+
+      - name: Launch regression EC2 lane
+        id: launch
+        env:
+          OUTPUT_DIR: packages/benchmarks/reports/regression/ec2-${{ github.run_id }}
+          # Threaded through env rather than interpolated straight into the
+          # run: script below: dispatch inputs are free-text fields a
+          # maintainer types into the workflow_dispatch form, so the same
+          # quoting hazard the perf-lane-advisory job's labels_json carried
+          # applies here too, even though triggering dispatch itself already
+          # requires write access.
+          AWS_REGION_VALUE: ${{ vars.PERF_LANE_AWS_REGION }}
+          SUBNET_ID: ${{ vars.PERF_LANE_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ vars.PERF_LANE_SECURITY_GROUP_ID }}
+          IAM_INSTANCE_PROFILE: ${{ vars.PERF_LANE_IAM_INSTANCE_PROFILE }}
+          BACKEND_INPUT: ${{ github.event.inputs.backend }}
+          REF_INPUT: ${{ github.event.inputs.ref }}
+          LANES_INPUT: ${{ github.event.inputs.lanes }}
+          BASE_INPUT: ${{ github.event.inputs.base }}
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          FEATURE_BASELINE_INPUT: ${{ github.event.inputs.feature_baseline }}
+          INSTANCE_TYPE_INPUT: ${{ github.event.inputs.instance_type }}
+        run: |
+          set -euo pipefail
+          args=(
+            "--region=$AWS_REGION_VALUE"
+            "--subnet-id=$SUBNET_ID"
+            "--security-group-id=$SECURITY_GROUP_ID"
+            "--iam-instance-profile=$IAM_INSTANCE_PROFILE"
+            "--output=$OUTPUT_DIR"
+            "--backend=${BACKEND_INPUT:-both}"
+          )
+          [[ -n "$REF_INPUT" ]] && args+=("--ref=$REF_INPUT")
+          [[ -n "$LANES_INPUT" ]] && args+=("--lanes=$LANES_INPUT")
+          [[ -n "$BASE_INPUT" ]] && args+=("--base=$BASE_INPUT")
+          [[ -n "$TAG_INPUT" ]] && args+=("--tag=$TAG_INPUT")
+          [[ -n "$FEATURE_BASELINE_INPUT" ]] && args+=("--feature-baseline=$FEATURE_BASELINE_INPUT")
+          [[ -n "$INSTANCE_TYPE_INPUT" ]] && args+=("--instance-type=$INSTANCE_TYPE_INPUT")
+          pnpm bench:regression:ec2 -- "${args[@]}"
+          echo "launch_json_path=$OUTPUT_DIR/launch.json" >> "$GITHUB_OUTPUT"
+
+      - name: Collect regression EC2 lane
+        env:
+          KEEP_INPUT: ${{ github.event.inputs.keep }}
+          LAUNCH_JSON_PATH: ${{ steps.launch.outputs.launch_json_path }}
+        run: |
+          set -euo pipefail
+          keep_flag=""
+          [[ "$KEEP_INPUT" == "true" ]] && keep_flag="--keep"
+          pnpm bench:regression:ec2:collect -- \
+            "--launch-json=$LAUNCH_JSON_PATH" \
+            $keep_flag
+
+      - name: Upload regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-timing-lane-reports-${{ github.run_id }}
+          path: packages/benchmarks/reports/regression/ec2-*
+          if-no-files-found: warn
+
+      - name: Terminate the EC2 instance (best-effort backstop)
+        # Always reached: collect's own `finally` already terminates on every
+        # normal path; this step only covers a launch that failed before
+        # collect ran. The bootstrap dead-man's switch is the last backstop
+        # for a cancelled or crashed runner.
+        if: always() && github.event.inputs.keep != 'true'
+        env:
+          OUTPUT_DIR: packages/benchmarks/reports/regression/ec2-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          instance_json="$OUTPUT_DIR/instance.json"
+          if [[ -f "$instance_json" ]]; then
+            instance_id="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf-8")).instanceId)' "$instance_json")"
+            aws ec2 terminate-instances --region "${{ vars.PERF_LANE_AWS_REGION }}" --instance-ids "$instance_id" || true
+          fi

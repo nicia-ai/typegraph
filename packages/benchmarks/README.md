@@ -18,6 +18,14 @@ Two benchmark programs live in this package:
 The full program design lives in `docs/design/benchmark-program-plan.md`
 (gitignored, local to the repo checkout that approved it).
 
+Regression mode (`pnpm bench:regression`) compares a candidate against the
+last published tag, the PR base, and an optional feature baseline, and
+flags/fails on a median regression above a configured threshold — see
+[`docs/regression-mode.md`](docs/regression-mode.md). It can also run on a
+dedicated EC2 instance instead of locally (`pnpm bench:regression:ec2`) —
+see [`docs/ec2-regression-lane.md`](docs/ec2-regression-lane.md), the runner
+behind the scheduled/on-demand `Perf Timing Lane` GitHub Actions workflow.
+
 ## Real-workload benchmarks (`src/real/`)
 
 ### Lane 1 — LDBC SNB Interactive short reads (IS1-IS7)

@@ -48,15 +48,26 @@ export type SpawnStatusResult = Readonly<{
   timedOut: boolean;
 }>;
 
+export type SpawnStatusOptions = Readonly<{
+  cwd?: string;
+  env?: Readonly<Record<string, string>>;
+  onOutput?: (chunk: string) => void;
+}>;
+
 /** Like `spawnCapture`, but resolves (never rejects) with the exit status. */
 export function spawnStatus(
   command: string,
   commandArgs: readonly string[],
   timeoutMs: number,
+  options?: SpawnStatusOptions,
 ): Promise<SpawnStatusResult> {
   return new Promise((resolve) => {
     const child = spawn(command, commandArgs, {
       stdio: ["ignore", "pipe", "pipe"],
+      ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options?.env === undefined ?
+        {}
+      : { env: { ...process.env, ...options.env } }),
     });
     let stdout = "";
     let stderr = "";
@@ -73,10 +84,14 @@ export function spawnStatus(
       resolve({ ...result, timedOut });
     };
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += String(chunk);
+      const text = String(chunk);
+      stdout += text;
+      options?.onOutput?.(text);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += String(chunk);
+      const text = String(chunk);
+      stderr += text;
+      options?.onOutput?.(text);
     });
     child.on("error", (error) => {
       finish({ code: null, stdout, stderr, error: stringifyError(error) });
