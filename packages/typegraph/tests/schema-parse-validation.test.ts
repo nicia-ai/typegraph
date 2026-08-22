@@ -97,6 +97,36 @@ describe("serializedSchemaZod", () => {
       expect(result.success).toBe(true);
     });
 
+    it("defaults omitted unique constraint scope and collation", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        nodes: {
+          Person: {
+            kind: "Person",
+            properties: {},
+            uniqueConstraints: [
+              {
+                name: "email_unique",
+                fields: ["email"],
+              },
+            ],
+            onDelete: "restrict",
+          },
+        },
+      };
+
+      const parsed = parseSerializedSchema(JSON.stringify(document));
+
+      expect(parsed.nodes["Person"]?.uniqueConstraints).toEqual([
+        {
+          name: "email_unique",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ]);
+    });
+
     it("accepts extra fields on nested objects (forward compatibility)", () => {
       const document = createValidSchemaDocument();
       const withExtra = {
