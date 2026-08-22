@@ -137,6 +137,7 @@ export const SIDECAR_WRITE_MEMBERS = [
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
   "upsertEmbedding",

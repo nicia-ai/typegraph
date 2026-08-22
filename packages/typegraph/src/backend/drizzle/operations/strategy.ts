@@ -63,9 +63,11 @@ import {
   buildDisjointOverlapAudit,
 } from "./constraint-fence-audit";
 import {
+  buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
   buildPurgeEdgeClaims,
   buildTakeOverEdgeClaim,
+  buildTakeOverEdgeClaimGuarded,
 } from "./edge-claims";
 import {
   buildCountEdgesFrom,
@@ -278,7 +280,15 @@ export type CommonOperationStrategy = Readonly<{
     entries: readonly ClaimEdgeCardinalityParams[],
     timestamp: string,
   ) => SQL;
+  buildLockEdgeClaimGuarded: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
   buildTakeOverEdgeClaim: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
+  buildTakeOverEdgeClaimGuarded: (
     params: ClaimEdgeCardinalityParams,
     timestamp: string,
   ) => SQL;
@@ -620,11 +630,23 @@ function createCommonOperationStrategy(
     ): SQL {
       return buildLockEdgeClaims(tables, entries, timestamp);
     },
+    buildLockEdgeClaimGuarded(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildLockEdgeClaimGuarded(tables, params, timestamp);
+    },
     buildTakeOverEdgeClaim(
       params: ClaimEdgeCardinalityParams,
       timestamp: string,
     ): SQL {
       return buildTakeOverEdgeClaim(tables, params, timestamp);
+    },
+    buildTakeOverEdgeClaimGuarded(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildTakeOverEdgeClaimGuarded(tables, params, timestamp);
     },
     buildPurgeEdgeClaims(params: PurgeEdgeClaimsParams): SQL {
       return buildPurgeEdgeClaims(tables, params);

@@ -96,14 +96,26 @@ function createEdgeWithFusedEndpointCheck(
   session: WriteSession,
 ): Promise<unknown> {
   return session.createEdgeIfEndpointsLive({
-    graphId: GRAPH_ID,
-    kind: "links",
-    id: "edge-fast-fused",
-    fromKind: "Doc",
-    fromId: "fused",
-    toKind: "Doc",
-    toId: "fused-b",
-    props: {},
+    params: {
+      graphId: GRAPH_ID,
+      kind: "links",
+      id: "edge-fast-fused",
+      fromKind: "Doc",
+      fromId: "fused",
+      toKind: "Doc",
+      toId: "fused-b",
+      props: {},
+    },
+    claim: {
+      graphId: GRAPH_ID,
+      cardinality: "unique",
+      edgeKind: "links",
+      edgeId: "edge-fast-fused",
+      fromKind: "Doc",
+      fromId: "fused",
+      toKind: "Doc",
+      toId: "fused-b",
+    },
   });
 }
 
@@ -161,6 +173,7 @@ const WATCHED_MEMBERS = [
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
   "upsertFulltext",
@@ -589,9 +602,9 @@ const CASES: Record<keyof WriteSession, Case> = {
       const work = edgeInsertWork("edge-new-l", "l", "l-b");
       return (session) => session.createEdge(work);
     },
-    sidecars: ["claimEdgeCardinality"],
+    sidecars: ["claimEdgeCardinalityGuarded"],
     row: "insertEdge",
-    preRow: ["claimEdgeCardinality"],
+    preRow: ["claimEdgeCardinalityGuarded"],
     plan: EDGE_PLAN,
   },
   createEdgeIfEndpointsLive: {
@@ -599,8 +612,9 @@ const CASES: Record<keyof WriteSession, Case> = {
       await seed(raw, "fused");
       return createEdgeWithFusedEndpointCheck;
     },
-    sidecars: [],
+    sidecars: ["claimEdgeCardinalityGuarded"],
     row: "insertEdgeIfEndpointsLive",
+    preRow: ["claimEdgeCardinalityGuarded"],
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {
@@ -609,9 +623,9 @@ const CASES: Record<keyof WriteSession, Case> = {
       const work = edgeInsertWork("edge-new-m", "m", "m-b");
       return (session) => session.createEdgeNoReturn(work);
     },
-    sidecars: ["claimEdgeCardinality"],
+    sidecars: ["claimEdgeCardinalityGuarded"],
     row: "insertEdgeNoReturn",
-    preRow: ["claimEdgeCardinality"],
+    preRow: ["claimEdgeCardinalityGuarded"],
     plan: EDGE_PLAN,
   },
   createEdges: {

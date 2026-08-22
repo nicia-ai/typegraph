@@ -129,6 +129,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
   | "claimEdgeCardinality"
+  | "claimEdgeCardinalityGuarded"
   | "claimEdgeCardinalityBatch"
   | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
@@ -500,6 +501,45 @@ export function createCommonOperationBackend(
     return entries.map(
       (entry) => outcomes.get(targetKey(entry)) ?? { status: "claimed" },
     );
+  }
+
+  /**
+   * Single-claim fast path. The lock statement reports both the committed
+   * claim holder and whether a claimless live edge already occupies the axis.
+   * A stale foreign holder is taken over only through a second guarded
+   * statement whose fresh snapshot rechecks the entire axis.
+   */
+  async function claimEdgeCardinalityGuarded(
+    params: ClaimEdgeCardinalityParams,
+  ): Promise<EdgeClaimOutcome> {
+    const rows = await execution.execAll<{
+      holder_edge_id: string;
+      has_incumbent: boolean | number;
+    }>(operationStrategy.buildLockEdgeClaimGuarded(params, nowIso()));
+    const locked = rows[0];
+    if (locked === undefined) {
+      throw new DatabaseOperationError(
+        "Guarded edge claim did not return its locked claim row.",
+        { operation: "insert", entity: "edge" },
+      );
+    }
+    const hasIncumbent =
+      locked.has_incumbent === true || locked.has_incumbent === 1;
+    if (locked.holder_edge_id === params.edgeId) {
+      return hasIncumbent ?
+          { status: "refused", holderEdgeId: params.edgeId }
+        : { status: "claimed" };
+    }
+    if (hasIncumbent) {
+      return { status: "refused", holderEdgeId: locked.holder_edge_id };
+    }
+
+    const takeOver = await execution.execAll<{ holder_edge_id: string }>(
+      operationStrategy.buildTakeOverEdgeClaimGuarded(params, nowIso()),
+    );
+    return takeOver.length > 0 ?
+        { status: "claimed" }
+      : { status: "refused", holderEdgeId: locked.holder_edge_id };
   }
 
   // Returns 0 when no row is currently active — that's the sentinel
@@ -1132,6 +1172,8 @@ export function createCommonOperationBackend(
       const [outcome] = await claimEdgeCardinalityEntries([params]);
       return outcome ?? { status: "claimed" };
     },
+
+    claimEdgeCardinalityGuarded,
 
     claimEdgeCardinalityBatch(
       entries: readonly ClaimEdgeCardinalityParams[],

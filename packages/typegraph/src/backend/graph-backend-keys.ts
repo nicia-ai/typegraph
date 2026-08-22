@@ -62,6 +62,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "checkUnique",
   "checkUniqueBatch",
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
   "readConstraintFenceViolations",

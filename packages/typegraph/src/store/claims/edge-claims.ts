@@ -238,6 +238,40 @@ async function withEdgeClaimRelationPrecondition<T>(
 
 /** The backend an edge claim is written to — the object inside the transaction. */
 type ClaimTargetBackend = GraphBackend | TransactionBackend;
+type ClaimModeTarget = Readonly<
+  Partial<
+    Pick<
+      GraphBackend,
+      (typeof CLAIMS)["core"][number] | "claimEdgeCardinalityGuarded"
+    >
+  >
+>;
+
+/**
+ * The one owner of whether a single write may replace its entity probe with a
+ * guarded claim. Both claim-bundle support and the optional strong member are
+ * required: the member is the backend's explicit opt-in contract, while the
+ * bundle verdict proves the target can actually persist claims. Either absence
+ * deliberately preserves the legacy probe-then-claim protocol.
+ */
+export function edgeCardinalityClaimMode(
+  backend: ClaimModeTarget,
+  verdict: BundleVerdictOf<typeof CLAIMS>,
+):
+  | Readonly<{
+      kind: "guarded";
+      claim: NonNullable<GraphBackend["claimEdgeCardinalityGuarded"]>;
+    }>
+  | Readonly<{
+      kind: "probeThenClaim";
+      support: ReturnType<typeof claimSupport>;
+    }> {
+  const support = claimSupport(backend, verdict);
+  const guardedClaim = backend.claimEdgeCardinalityGuarded;
+  return !support.supported || guardedClaim === undefined ?
+      { kind: "probeThenClaim", support }
+    : { kind: "guarded", claim: guardedClaim };
+}
 
 /**
  * Issues ONE edge cardinality claim against the object the row write goes to,
@@ -253,7 +287,15 @@ export async function claimEdgeCardinality(
   verdict: BundleVerdictOf<typeof CLAIMS>,
   claim: ClaimEdgeCardinalityParams,
 ): Promise<void> {
-  const support = claimSupport(backend, verdict);
+  const mode = edgeCardinalityClaimMode(backend, verdict);
+  if (mode.kind === "guarded") {
+    const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
+      mode.claim(claim),
+    );
+    if (outcome.status === "refused") throw edgeClaimRefusal(claim);
+    return;
+  }
+  const support = mode.support;
   if (!support.supported) return;
   const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
     support.claims.claimEdgeCardinality(claim),
