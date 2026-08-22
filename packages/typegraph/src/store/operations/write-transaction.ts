@@ -34,6 +34,9 @@
  * {@link file://../recorded-capture/clock.ts} states the rule this order
  * exists to satisfy: a lock namespace belongs to ONE acquire-order position,
  * and sharing a key across two positions creates a circular wait.
+ * Bundled PostgreSQL transaction targets may acquire positions 1 and 2 with
+ * one optional strong member; its SQL preserves this same order inside the
+ * statement. Every other target retains the two portable acquisitions.
  *
  * Constrained writes (see `fencesConstraintProbe` below) therefore reuse the
  * EXISTING `typegraph:recorded-graph-write` key rather than introducing a
@@ -70,6 +73,7 @@ import {
 } from "../recorded-capture";
 import {
   type GraphWriteLock,
+  memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
 import { type OperationHookContext } from "../types";
@@ -371,9 +375,6 @@ export function runInWriteTransaction<T>(
     ctx.revisionTrackingEnabled ||
     fenceReason !== undefined;
   return runOptionallyInTransaction(backend, async (target) => {
-    if (!options?.schemaFenceInFirstWrite) {
-      await lockSchemaVersionForStoreWrite(ctx, target);
-    }
     const session =
       needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
     // Either constructor yields the same compile-time evidence token; which one
@@ -400,15 +401,48 @@ export function runInWriteTransaction<T>(
     // one connection either way, so observing an in-flight claim as held is
     // correct. A failed acquisition retracts the claim.
     if (acquiresLock) held.add(ctx.graphId);
-    const lock =
-      acquiresLock ?
-        await lockRecordedGraphWrite(target, ctx.graphId).catch(
-          (error: unknown) => {
-            held.delete(ctx.graphId);
-            throw error;
+    const expectedSchemaVersion = ctx.schemaVersion;
+    const combinedSchemaGraphFence =
+      (
+        !options?.schemaFenceInFirstWrite &&
+        expectedSchemaVersion !== undefined &&
+        acquiresLock &&
+        !("transaction" in target)
+      ) ?
+        {
+          acquire: target.lockSchemaVersionAndGraphWrite,
+          params: {
+            graphId: ctx.graphId,
+            expectedVersion: expectedSchemaVersion,
           },
-        )
-      : (session?.lock ?? uncapturedGraphWriteLock());
+        }
+      : undefined;
+    let lock: GraphWriteLock;
+    try {
+      if (combinedSchemaGraphFence?.acquire === undefined) {
+        if (!options?.schemaFenceInFirstWrite) {
+          await lockSchemaVersionForStoreWrite(ctx, target);
+        }
+        lock =
+          acquiresLock ?
+            await lockRecordedGraphWrite(target, ctx.graphId)
+          : (session?.lock ?? uncapturedGraphWriteLock());
+      } else {
+        // The optional strong member owns the same canonical order as the two
+        // portable calls: schema row first, graph advisory lock second. It is
+        // one statement only when THIS frame owes both acquisitions; a held
+        // graph lock must never suppress the per-write schema fence.
+        await combinedSchemaGraphFence.acquire(combinedSchemaGraphFence.params);
+        memoizeAcquiredRecordedGraphWriteLock(target, ctx.graphId);
+        // The statement above acquired the real lock. This constructor is the
+        // existing evidence token used when an enclosing frame already holds
+        // it; runtime evidence carries no payload.
+        lock = uncapturedGraphWriteLock();
+      }
+    } catch (error) {
+      if (acquiresLock) held.delete(ctx.graphId);
+      throw error;
+    }
     if (session !== undefined) session.lock = lock;
     const result = await (acquiresLock ?
       fn(target, lock).finally(() => held.delete(ctx.graphId))

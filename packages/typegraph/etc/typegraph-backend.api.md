@@ -1880,6 +1880,7 @@ export type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<void>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
@@ -2725,7 +2726,7 @@ export type SchemaVersionRow = Readonly<{
 }>;
 
 // @public (undocumented)
-export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite">;
+export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite" | "lockSchemaVersionAndGraphWrite">;
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
@@ -3075,7 +3076,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & Pick<GraphBackend, "lockSchemaVersionForWrite"> & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -3172,6 +3173,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly lockSchemaVersionForWrite: {
         readonly kind: "reasoned";
         readonly reason: "Same family; also the one schema member on TransactionBackend, so bundling it would re-open the accessor's B-1 port-typing question for no pilot consumer.";
+        readonly accesses: 1;
+    };
+    readonly lockSchemaVersionAndGraphWrite: {
+        readonly kind: "reasoned";
+        readonly reason: "PostgreSQL/PGlite transaction-only latency seam which preserves the existing schema-then-graph lock order in one dependent-CTE statement; SQLite and custom backends retain the two portable lock operations.";
         readonly accesses: 1;
     };
     readonly schemaWriteTransaction: {

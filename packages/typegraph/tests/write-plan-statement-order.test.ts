@@ -73,9 +73,16 @@ import {
   createClaimsVerdictThunk,
   uniqueSidecarBatchVerdict,
 } from "../src/backend/capabilities/resolve";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
-import { type GraphBackend } from "../src/backend/types";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../src/backend/types";
 import { lockIdentityGraph } from "../src/identity/service-read";
 import {
   type GraphData,
@@ -228,7 +235,7 @@ function indexOfAdvisoryLock(namespace: string): number {
   return statements.findIndex(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      (statement.params[0] === namespace ||
+      (statement.params.includes(namespace) ||
         statement.query.includes(`'${namespace}'`)),
   );
 }
@@ -237,7 +244,7 @@ function countAdvisoryLocks(namespace: string): number {
   return statements.filter(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      (statement.params[0] === namespace ||
+      (statement.params.includes(namespace) ||
         statement.query.includes(`'${namespace}'`)),
   ).length;
 }
@@ -750,10 +757,100 @@ describe("the executor's own frame keeps that order", () => {
     // executor's options leaves this write unfenced.
     expect(countAdvisoryLocks(GRAPH_WRITE_NAMESPACE)).toBe(1);
     expect(schemaFence).toBeGreaterThanOrEqual(0);
-    expect(graphWriteLock).toBeGreaterThan(schemaFence);
+    // First-party PostgreSQL folds positions one and two into one statement;
+    // the SQL builder still acquires the schema row before the advisory lock.
+    // Portable targets retain two statements, so equality is permitted but a
+    // graph lock before the schema fence never is.
+    expect(graphWriteLock).toBeGreaterThanOrEqual(schemaFence);
+    expect(graphWriteLock).toBe(schemaFence);
+    expect(statements[schemaFence]?.query).toMatch(
+      /for share[\s\S]*pg_advisory_xact_lock/iu,
+    );
     // Identity is acquired BEFORE row work, not after it.
     expect(identityLock).toBeGreaterThan(graphWriteLock);
     expect(firstRow).toBeGreaterThan(identityLock);
     expect(identityLocks).toEqual([identityLock]);
+  });
+
+  it("retains separate schema and graph locks when the target lacks the combined member", async () => {
+    const fallbackBackend = deriveBackend(backend, {
+      transaction<T>(
+        fn: (target: TransactionBackend) => Promise<T>,
+        options?: Parameters<GraphBackend["transaction"]>[1],
+      ): Promise<T> {
+        return backend.transaction(
+          (target) =>
+            fn(
+              projectBackendWithout(target, ["lockSchemaVersionAndGraphWrite"]),
+            ),
+          options,
+        );
+      },
+    });
+
+    await runWritePlan(
+      {
+        graphId: graph.id,
+        registry: buildKindRegistry(graph),
+        schemaVersion: store.introspect().schemaVersion,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+        revisionSchema: createSqlSchema(),
+        claimsVerdict: createClaimsVerdictThunk(fallbackBackend),
+        uniqueSidecarBatch: uniqueSidecarBatchVerdict(fallbackBackend),
+      },
+      nodeWritePlan("nodeUniquenessScope", false),
+      fallbackBackend,
+      (session) =>
+        session.createNode({
+          params: {
+            graphId: graph.id,
+            kind: "Plain",
+            id: "executor-fallback-node",
+            props: { name: "executor fallback" },
+          },
+          claim: {
+            kind: "Plain",
+            id: "executor-fallback-node",
+            props: { name: "executor fallback" },
+            constraints: [],
+          },
+          sideEffects: {
+            kind: "Plain",
+            id: "executor-fallback-node",
+            schema: Plain.schema,
+            props: { name: "executor fallback" },
+            uniqueConstraints: [],
+          },
+        }),
+    );
+
+    const schemaFence = indexOfSchemaFence();
+    const graphWriteLock = indexOfAdvisoryLock(GRAPH_WRITE_NAMESPACE);
+    expect(schemaFence).toBeGreaterThanOrEqual(0);
+    expect(graphWriteLock).toBeGreaterThan(schemaFence);
+  });
+});
+
+describe("captured combined-lock trace", () => {
+  it("seeds the capture memo so one write emits one graph-lock statement", async () => {
+    const [historyStore] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    statements.splice(0);
+
+    await historyStore.nodes.Loose.create(
+      { name: "captured combined lock" },
+      { id: "captured-combined-lock" },
+    );
+
+    expect(countAdvisoryLocks(GRAPH_WRITE_NAMESPACE)).toBe(1);
+    const combinedStatements = statements.filter(
+      (statement) =>
+        /for share/iu.test(statement.query) &&
+        statement.query.includes("pg_advisory_xact_lock") &&
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
+    );
+    expect(combinedStatements).toHaveLength(1);
   });
 });

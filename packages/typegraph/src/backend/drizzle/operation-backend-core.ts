@@ -144,6 +144,7 @@ export type CommonOperationBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
+  | "lockSchemaVersionAndGraphWrite"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -246,6 +247,8 @@ type CreateCommonOperationBackendOptions = Readonly<{
   rowMappers: OperationBackendRowMappers;
   /** Present only on bundled dialect backends that own the fused SQL contract. */
   schemaFenceLockClause?: SQL | undefined;
+  /** Present only for a bundled PostgreSQL transaction-scoped backend. */
+  schemaGraphWriteLockNamespace?: string | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -618,10 +621,49 @@ export function createCommonOperationBackend(
         },
       };
 
+  const schemaGraphWriteLockNamespace =
+    options.schemaGraphWriteLockNamespace;
+  const buildLockSchemaVersionAndGraphWrite =
+    operationStrategy.buildLockSchemaVersionAndGraphWrite;
+  const schemaGraphWriteFenceMembers =
+    schemaGraphWriteLockNamespace === undefined ||
+    buildLockSchemaVersionAndGraphWrite === undefined ?
+      {}
+    : {
+        async lockSchemaVersionAndGraphWrite(
+          params: SchemaWriteFenceParams,
+        ): Promise<void> {
+          const row = await execution.execGet<Record<string, unknown>>(
+            buildLockSchemaVersionAndGraphWrite(
+              params,
+              schemaGraphWriteLockNamespace,
+            ),
+          );
+          if (row !== undefined) return;
+
+          // A blocked `FOR SHARE` can recheck the old active row out of its
+          // statement snapshot without substituting the winner's new row. As
+          // in the ordinary fence, diagnose with a fresh, non-locking read.
+          const settledRow = await execution.execGet<Record<string, unknown>>(
+            operationStrategy.buildGetActiveSchema(params.graphId),
+          );
+          const settled =
+            settledRow === undefined ?
+              undefined
+            : rowMappers.toSchemaVersionRow(settledRow);
+          throw new StaleVersionError({
+            graphId: params.graphId,
+            expected: params.expectedVersion,
+            actual: settled?.version ?? 0,
+          });
+        },
+      };
+
   return {
     tableExists,
 
     ...schemaFenceMembers,
+    ...schemaGraphWriteFenceMembers,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

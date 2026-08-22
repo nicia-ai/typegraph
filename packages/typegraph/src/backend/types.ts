@@ -2185,6 +2185,23 @@ export type GraphBackend = Readonly<{
     params: Readonly<{ graphId: string; expectedVersion: number }>,
   ) => Promise<void>;
   /**
+   * PostgreSQL/PGlite transaction-scoped fast path that takes the active
+   * schema `FOR SHARE` fence and the recorded graph advisory lock in one SQL
+   * statement, in that order. The graph-lock CTE is reachable only through a
+   * matching schema row, so a stale Store never acquires the later lock.
+   *
+   * Bundled PostgreSQL/PGlite transaction targets expose this member; their
+   * root backends omit it so it cannot be used outside an already-open
+   * transaction. SQLite/custom transaction backends omit it too. A zero-row
+   * fence runs the same honest active-version diagnostic as
+   * {@link GraphBackend.lockSchemaVersionForWrite} and throws its
+   * `StaleVersionError`.
+   */
+  lockSchemaVersionAndGraphWrite?: (
+    this: void,
+    params: SchemaWriteFenceParams,
+  ) => Promise<void>;
+  /**
    * Internal schema-lifecycle seam for features whose data preflight must
    * commit atomically with the schema CAS. The callback runs in the same
    * write transaction after the schema write fence is acquired and before the
@@ -3103,7 +3120,7 @@ export type SchemaCommitBackend = Pick<
 
 export type SchemaWriteFenceBackend = Pick<
   GraphBackend,
-  "lockSchemaVersionForWrite"
+  "lockSchemaVersionForWrite" | "lockSchemaVersionAndGraphWrite"
 >;
 
 export type VectorOperationBackend = Pick<
@@ -3226,7 +3243,7 @@ export type TransactionBackend = Readonly<
       | "purgeEdgeClaims"
     > &
     SchemaReadBackend &
-    Pick<GraphBackend, "lockSchemaVersionForWrite"> &
+    SchemaWriteFenceBackend &
     VectorOperationBackend &
     FulltextOperationBackend &
     IndexMaterializationBackend &
