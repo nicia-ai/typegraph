@@ -2019,6 +2019,19 @@ export type GraphBackend = Readonly<{
     params: ClaimEdgeCardinalityParams,
   ) => Promise<EdgeClaimOutcome>;
   /**
+   * Strong single-claim variant which, while holding the claim row, also
+   * refuses any claimless live edge that already matches the declared axis.
+   *
+   * Member presence is an explicit optimization contract: callers may omit
+   * the separate entity-relation cardinality probe only when the exact write
+   * target exposes this operation. Custom and legacy backends that implement
+   * only `claimEdgeCardinality` retain the probe-first path unchanged.
+   */
+  claimEdgeCardinalityGuarded?: (
+    this: void,
+    params: ClaimEdgeCardinalityParams,
+  ) => Promise<EdgeClaimOutcome>;
+  /**
    * Batched variant of `claimEdgeCardinality`: one multi-row create-or-lock
    * statement, then a takeover statement only for the entries a different edge
    * holds. Outcomes are returned positionally, one per entry.
@@ -3179,7 +3192,10 @@ export type TransactionBackend = Readonly<
     // entrypoint exports.
     Pick<
       GraphBackend,
-      "claimEdgeCardinality" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"
+      | "claimEdgeCardinality"
+      | "claimEdgeCardinalityGuarded"
+      | "claimEdgeCardinalityBatch"
+      | "purgeEdgeClaims"
     > &
     SchemaReadBackend &
     Pick<GraphBackend, "lockSchemaVersionForWrite"> &

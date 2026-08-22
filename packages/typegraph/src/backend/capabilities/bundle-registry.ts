@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 84 optional
- * `GraphBackend` members are bundled here; the other 69 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 85 optional
+ * `GraphBackend` members are bundled here; the other 70 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -776,7 +776,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 68, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 70, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -818,12 +818,18 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 21 `reasoned` + 48 `deferred` members — 67 + 197 = 264 accesses
+ * The 22 `reasoned` + 48 `deferred` members — 68 + 197 = 265 accesses
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 69 = 84 members total with the pilot's 15.
+ * access), 15 + 70 = 85 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  claimEdgeCardinalityGuarded: {
+    kind: "reasoned",
+    reason:
+      "A stronger first-party single-claim operation whose member presence explicitly permits the store to fold the legacy entity probe into the claim; custom and legacy claim backends keep probe-then-claim, so it is not part of the claims bundle's required portable surface.",
+    accesses: 1,
+  },
   insertEdgeIfEndpointsLive: {
     kind: "reasoned",
     reason:
@@ -1369,7 +1375,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 84 optional members.
+// (i) Totality: the three-way partition covers exactly the 85 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,
