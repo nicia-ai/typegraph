@@ -79,6 +79,7 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
@@ -2368,6 +2369,12 @@ function createPostgresOperationBackend(
       toUniqueRow,
     },
     schemaFenceLockClause: sql.raw("FOR SHARE"),
+    ...(transactionScoped ?
+      {
+        schemaGraphWriteLockNamespace:
+          RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+      }
+    : {}),
     tableExistenceCache: { cacheExisting: false },
   });
 

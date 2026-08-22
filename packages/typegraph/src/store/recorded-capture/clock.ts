@@ -1,3 +1,4 @@
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../../backend/advisory-lock-namespaces";
 import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind";
 import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
@@ -45,8 +46,6 @@ type RevisionOriginBackend = Pick<
 const RECORDED_MIN_REVISION = 0;
 const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
-const RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE =
-  "typegraph:recorded-graph-write";
 
 /**
  * Builds a `pg_advisory_xact_lock` call scoped to a `(namespace, graphId)` pair.
@@ -150,6 +149,25 @@ export function createRecordedGraphLockMemo(): RecordedGraphLockMemo {
 }
 
 const recordedGraphLockMemos = new WeakMap<object, RecordedGraphLockMemo>();
+const ACQUIRED_GRAPH_WRITE_LOCK = Promise.resolve();
+
+/**
+ * Seeds the registered single-flight memo after another statement acquired the
+ * same transaction-scoped graph lock.
+ *
+ * The combined schema/graph fence is the only caller: it invokes this only
+ * after its statement succeeds. An existing entry is never replaced — it may
+ * be an in-flight acquisition whose rejection must retain the ordinary
+ * eviction/error semantics.
+ */
+export function memoizeAcquiredRecordedGraphWriteLock(
+  backend: object,
+  graphId: string,
+): void {
+  const memo = recordedGraphLockMemos.get(backend);
+  if (memo === undefined || memo.has(graphId)) return;
+  memo.set(graphId, ACQUIRED_GRAPH_WRITE_LOCK);
+}
 
 export function registerRecordedGraphLockMemo(
   backend: object,
