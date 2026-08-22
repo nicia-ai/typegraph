@@ -167,7 +167,7 @@ function firstIndexMatching(
 }
 
 describe("constrained writes take the per-graph write fence", () => {
-  it("fences an edge create whose cardinality is probed, and orders the lock before the probe", async () => {
+  it("fences a constrained edge create and orders the lock before its guarded claim", async () => {
     const { store, statements, reset } = await createLoggedStore();
     const alice = await store.nodes.Person.create({ name: "Alice" });
     const bob = await store.nodes.Person.create({ name: "Bob" });
@@ -176,15 +176,22 @@ describe("constrained writes take the per-graph write fence", () => {
     await store.edges.reportsTo.create(alice, bob, {});
 
     expect(graphWriteLockCount(statements)).toBe(1);
-    // The count probe (`SELECT COUNT(*) ... FROM typegraph_edges`) and the
-    // INSERT it authorizes must both sit after the lock, or the verdict was
-    // computed outside the exclusion it depends on.
+    // The guarded claim folds the old count probe into its RETURNING
+    // projection. That claim and the edge INSERT it authorizes must both sit
+    // after the lock, or the verdict was computed outside the exclusion it
+    // depends on.
     const lockIndex = graphWriteLockIndex(statements);
-    const probeIndex = firstIndexMatching(statements, "count");
-    const insertIndex = firstIndexMatching(statements, "INSERT INTO");
+    const claimIndex = firstIndexMatching(
+      statements,
+      'INSERT INTO "typegraph_edge_claims"',
+    );
+    const insertIndex = firstIndexMatching(
+      statements,
+      'INSERT INTO "typegraph_edges"',
+    );
     expect(lockIndex).toBeGreaterThanOrEqual(0);
-    expect(probeIndex).toBeGreaterThan(lockIndex);
-    expect(insertIndex).toBeGreaterThan(probeIndex);
+    expect(claimIndex).toBeGreaterThan(lockIndex);
+    expect(insertIndex).toBeGreaterThan(claimIndex);
   });
 
   it("does NOT fence an edge create with cardinality many", async () => {
