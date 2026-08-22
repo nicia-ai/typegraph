@@ -88,7 +88,7 @@ function graphWriteLockCount(statements: readonly LoggedStatement[]): number {
   return statements.filter(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      statement.params[0] === GRAPH_WRITE_NAMESPACE,
+      statement.params.includes(GRAPH_WRITE_NAMESPACE),
   ).length;
 }
 
@@ -123,8 +123,10 @@ describe("recorded graph-write advisory lock churn", () => {
     });
     expect(graphWriteLockCount(statements)).toBe(1);
 
-    // --- Single autocommit write: also exactly one (was two — the
-    //     write-transaction boundary plus the delegate's own write). ---
+    // --- Single managed write: the combined schema/graph fence seeds the
+    //     capture delegate's memo, so the row wrapper does not issue a second
+    //     advisory-lock statement. This is asserted at the driver trace, not
+    //     inferred from backend-member calls. ---
     statements.length = 0;
     await store.nodes.Person.create({ name: "solo" }, { id: "solo" });
     expect(graphWriteLockCount(statements)).toBe(1);
@@ -177,7 +179,7 @@ describe("recorded graph-write advisory lock churn", () => {
     const lockIndex = statements.findIndex(
       (statement) =>
         statement.query.includes("pg_advisory_xact_lock") &&
-        statement.params[0] === GRAPH_WRITE_NAMESPACE,
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
     );
     const insertIndex = statements.findIndex((statement) =>
       statement.query.includes("typegraph_nodes"),

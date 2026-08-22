@@ -110,6 +110,7 @@ import {
   buildGetActiveSchema,
   buildGetSchemaVersion,
   buildInsertSchema,
+  buildLockSchemaVersionAndGraphWrite,
   buildSetActiveSchema,
 } from "./schema";
 import {
@@ -335,6 +336,11 @@ export type CommonOperationStrategy = Readonly<{
     kinds: readonly [string, string],
   ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
+  /** PostgreSQL-only dependent schema-row + graph-advisory fence. */
+  buildLockSchemaVersionAndGraphWrite?: (
+    params: SchemaWriteFenceParams,
+    advisoryLockNamespace: string,
+  ) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
   buildSetActiveSchema: (
@@ -811,5 +817,13 @@ export function createPostgresOperationStrategy(
   tables: PostgresTables,
   fulltextStrategy: FulltextStrategy,
 ): PostgresOperationStrategy {
-  return createCommonOperationStrategy(tables, "postgres", fulltextStrategy);
+  return {
+    ...createCommonOperationStrategy(tables, "postgres", fulltextStrategy),
+    buildLockSchemaVersionAndGraphWrite: (params, advisoryLockNamespace) =>
+      buildLockSchemaVersionAndGraphWrite(
+        tables,
+        params,
+        advisoryLockNamespace,
+      ),
+  };
 }

@@ -71,6 +71,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "commitSchemaVersion",
   "commitSchemaVersionIfKindsEmpty",
   "lockSchemaVersionForWrite",
+  "lockSchemaVersionAndGraphWrite",
   "commitSchemaVersionWithPreflight",
   "setActiveVersion",
   "schemaWriteTransaction",

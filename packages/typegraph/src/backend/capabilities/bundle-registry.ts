@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 88 optional
- * `GraphBackend` members are bundled here; the other 73 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 89 optional
+ * `GraphBackend` members are bundled here; the other 74 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -818,10 +818,10 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 25 `reasoned` + 48 `deferred` members — 87 + 197 = 284 accesses
+ * The 26 `reasoned` + 48 `deferred` members — 90 + 197 = 287 accesses
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 73 = 88 members total with the pilot's 15.
+ * access), 15 + 74 = 89 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   claimEdgeCardinalityGuarded: {
@@ -885,6 +885,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Same family; also the one schema member on TransactionBackend, so bundling it would re-open the accessor's B-1 port-typing question for no pilot consumer.",
+    accesses: 1,
+  },
+  lockSchemaVersionAndGraphWrite: {
+    kind: "reasoned",
+    reason:
+      "PostgreSQL/PGlite transaction-only latency seam which preserves the existing schema-then-graph lock order in one dependent-CTE statement; SQLite and custom backends retain the two portable lock operations.",
     accesses: 1,
   },
   schemaWriteTransaction: {
@@ -1393,7 +1399,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 88 optional members.
+// (i) Totality: the three-way partition covers exactly the 89 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

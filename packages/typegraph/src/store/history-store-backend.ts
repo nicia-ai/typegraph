@@ -31,6 +31,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "commitSchemaVersion",
   "commitSchemaVersionIfKindsEmpty",
   "lockSchemaVersionForWrite",
+  "lockSchemaVersionAndGraphWrite",
   "compileSql",
   "countEdgesByKind",
   "countEdgesFrom",

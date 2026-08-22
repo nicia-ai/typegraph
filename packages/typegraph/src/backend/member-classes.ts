@@ -188,6 +188,7 @@ const SCHEMA_MEMBERS = [
   "commitSchemaVersionWithPreflight",
   "setActiveVersion",
   "lockSchemaVersionForWrite",
+  "lockSchemaVersionAndGraphWrite",
   "schemaWriteTransaction",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
