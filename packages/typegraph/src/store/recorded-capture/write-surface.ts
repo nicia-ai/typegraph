@@ -51,6 +51,7 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertEdgeNoReturn",
   "insertEdgeIfEndpointsLive",
   "insertEdgeIfEndpointsLiveWithSchemaFence",
+  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
   "deleteEdgesBatch",

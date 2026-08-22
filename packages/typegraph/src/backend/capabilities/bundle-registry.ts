@@ -26,7 +26,7 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 89 optional
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 90 optional
  * `GraphBackend` members are bundled here; the other 74 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
@@ -818,10 +818,10 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 26 `reasoned` + 48 `deferred` members — 90 + 197 = 287 accesses
+ * The 27 `reasoned` + 48 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 74 = 89 members total with the pilot's 15.
+ * access), 15 + 75 = 90 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   claimEdgeCardinalityGuarded: {
@@ -852,6 +852,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "A first-party latency fast path selected only by the edge create session; custom backends fall back to portable endpoint reads, so it is not an independently negotiable feature family.",
+    accesses: 6,
+  },
+  insertEdgeIfEndpointsLiveWithCardinalityClaim: {
+    kind: "reasoned",
+    reason:
+      "A transaction-only first-party edge latency fast path that atomically combines live endpoint validation, a guarded cardinality claim, and the edge insert; custom and legacy backends retain the existing guarded-claim plus endpoint-aware insert protocol.",
     accesses: 6,
   },
   bootstrapTables: {
@@ -1399,7 +1405,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 89 optional members.
+// (i) Totality: the three-way partition covers exactly the 90 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

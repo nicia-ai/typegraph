@@ -99,6 +99,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "insertEdge",
   "insertEdgeIfEndpointsLive",
   "insertEdgeIfEndpointsLiveWithSchemaFence",
+  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",

@@ -164,6 +164,13 @@ export function edgeCardinalityClaim(
  * so the fence's error is `instanceof` the same class and carries the same
  * payload as the probe's for the same violation (I3).
  */
+/**
+ * Builds the public cardinality refusal for a claim decision.
+ *
+ * Both the ordinary claim path and the fused claim-plus-edge path call this
+ * owner. Keeping the translation here prevents a backend result discriminator
+ * from growing a second spelling of the same typed error.
+ */
 function edgeClaimRefusal(
   params: ClaimEdgeCardinalityParams,
 ): CardinalityError {
@@ -210,7 +217,7 @@ function edgeClaimRefusal(
  * relation existed reaches it here, on the first constrained edge write, with
  * an error that says what to run instead of an opaque driver failure.
  */
-async function withEdgeClaimRelationPrecondition<T>(
+export async function withEdgeClaimRelationPrecondition<T>(
   graphId: string,
   issue: () => Promise<T>,
 ): Promise<T> {
