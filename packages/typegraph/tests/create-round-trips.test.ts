@@ -284,16 +284,17 @@ describe("the read-counting double itself", () => {
 });
 
 describe("create-path round trips", () => {
-  it("reads the created id exactly once on a plain graph", async () => {
+  it("does not read a claim-free caller-supplied id on a plain graph", async () => {
     const { backend, counts, reset } = countingBackend("solo");
     const store = await createInitializedStore(plainGraph, backend);
 
     reset();
     await store.nodes.Person.create({ name: "Solo" }, { id: "solo" });
 
-    // One probe answers both questions the create path asks: is the id taken,
-    // and is it a tombstone to resurrect.
-    expect(counts.targetNodeReads).toBe(1);
+    // First-party backends make the INSERT itself answer whether the primary
+    // key is free. There are no claims on this graph, so no preclaim needs
+    // compensation when the slot is occupied.
+    expect(counts.targetNodeReads).toBe(0);
   });
 
   it("re-checks a tombstone immediately before resurrection", async () => {
@@ -432,7 +433,7 @@ describe("create-path round trips", () => {
     reset();
     await store.nodes.Person.create({ name: "Supplied" }, { id: "supplied" });
 
-    expect(counts.targetNodeReads).toBe(1);
+    expect(counts.targetNodeReads).toBe(0);
     // Three node kinds are registered; the fold is still a single bare-id
     // lookup, which `typegraph_nodes_id_idx` serves as an indexed seek.
     expect(counts.foldProbes).toBe(1);

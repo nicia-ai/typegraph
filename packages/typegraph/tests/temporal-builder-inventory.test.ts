@@ -47,17 +47,18 @@ const COLUMN_MENTION = /validFrom|valid_from/;
 /**
  * The writer files, with the exact number of call sites of each owner.
  *
- * `operations/nodes.ts` has five stamping sites, not four: `buildUpdateNode`'s
+ * `operations/nodes.ts` has six stamping sites: `buildUpdateNode`'s
  * `clearDeleted` leg RESETS the window rather than retaining it, so it chooses a
  * bound exactly as an insert does — and it is reachable unguarded from a `create`
- * whose id names an existing tombstone.
+ * whose id names an existing tombstone. The insert-if-absent fast path is a
+ * separate INSERT builder and therefore owns its stamped lower bound too.
  *
  * `operations/edges.ts` has four and ONE pass-through: an edge resurrection that
  * names no `validFrom` retains the stored window instead of stamping, so its
  * window-writing leg only runs when the caller stated a bound.
  */
 const WRITER_INVENTORY = {
-  "drizzle/operations/nodes.ts": { stamping: 5, stated: 0 },
+  "drizzle/operations/nodes.ts": { stamping: 6, stated: 0 },
   "drizzle/operations/edges.ts": { stamping: 4, stated: 1 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
 } as const satisfies Readonly<

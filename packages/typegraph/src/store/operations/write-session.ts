@@ -81,6 +81,7 @@ import {
   nodeInsertDispatch,
   runInsertBatch,
   runInsertBatchReturning,
+  runInsertIfAbsent,
   runInsertNoReturn,
 } from "../insert-dispatch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -143,6 +144,7 @@ export type WriteTarget = Readonly<
     SqlCompilationBackend &
     RawQueryExecutionBackend &
     RawStatementExecutionBackend &
+    Pick<GraphBackend, "insertNodeIfAbsent"> &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<VectorOperationBackend, "vectorSearch"> &
     Pick<FulltextOperationBackend, "fulltextSearch">
@@ -295,6 +297,8 @@ function edgeBatchClaims(
 export type NodeWriteSession = Readonly<{
   // ---- B0: delegates to node-write-pipeline.ts + insert-dispatch.ts
   createNode: (work: NodeInsertWork) => Promise<NodeRow>;
+  /** A conflict-safe insert for a no-claim create; undefined means occupied. */
+  createNodeIfAbsent: (work: NodeInsertWork) => Promise<NodeRow | undefined>;
   createNodeNoReturn: (work: NodeInsertWork) => Promise<void>;
   createNodes: (work: readonly NodeInsertWork[]) => Promise<readonly NodeRow[]>;
   createNodesNoReturn: (work: readonly NodeInsertWork[]) => Promise<void>;
@@ -386,6 +390,13 @@ export function createWriteSession(
         target,
         () => dispatch.one(work.params),
       );
+      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      return row;
+    },
+
+    createNodeIfAbsent: async (work) => {
+      const row = await runInsertIfAbsent(dispatch, work.params);
+      if (row === undefined) return;
       await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
       return row;
     },

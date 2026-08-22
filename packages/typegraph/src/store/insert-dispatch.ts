@@ -10,6 +10,7 @@ import { requireDefined } from "../utils/presence";
 
 export type InsertDispatch<Params, Row> = Readonly<{
   one: (params: Params) => Promise<Row>;
+  ifAbsent?: ((params: Params) => Promise<Row | undefined>) | undefined;
   oneNoReturn?: ((params: Params) => Promise<void>) | undefined;
   batch?: ((params: readonly Params[]) => Promise<void>) | undefined;
   batchReturning?:
@@ -23,6 +24,10 @@ export function nodeInsertDispatch(
 ): InsertDispatch<InsertNodeParams, NodeRow> {
   return {
     one: (params) => backend.insertNode(params),
+    ifAbsent:
+      backend.insertNodeIfAbsent === undefined ?
+        undefined
+      : (params) => requireDefined(backend.insertNodeIfAbsent)(params),
     oneNoReturn:
       backend.insertNodeNoReturn === undefined ?
         undefined
@@ -36,6 +41,14 @@ export function nodeInsertDispatch(
         undefined
       : (params) => requireDefined(backend.insertNodesBatchReturning)(params),
   };
+}
+
+export async function runInsertIfAbsent<Params, Row>(
+  dispatch: InsertDispatch<Params, Row>,
+  params: Params,
+): Promise<Row | undefined> {
+  if (dispatch.ifAbsent === undefined) return undefined;
+  return dispatch.ifAbsent(params);
 }
 
 export function edgeInsertDispatch(

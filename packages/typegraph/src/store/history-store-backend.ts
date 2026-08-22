@@ -99,6 +99,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
   "insertNode",
+  "insertNodeIfAbsent",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",

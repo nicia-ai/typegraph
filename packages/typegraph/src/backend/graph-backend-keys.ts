@@ -23,6 +23,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "fulltextStrategy",
   "vectorStrategy",
   "insertNode",
+  "insertNodeIfAbsent",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",

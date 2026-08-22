@@ -137,6 +137,7 @@ export type CommonOperationBackend = Pick<
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
   | "insertNode"
+  | "insertNodeIfAbsent"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -547,6 +548,14 @@ export function createCommonOperationBackend(
           },
         );
       return rowMappers.toNodeRow(row);
+    },
+
+    async insertNodeIfAbsent(
+      params: InsertNodeParams,
+    ): Promise<NodeRow | undefined> {
+      const query = operationStrategy.buildInsertNodeIfAbsent(params, nowIso());
+      const row = await execution.execGet<Record<string, unknown>>(query);
+      return row === undefined ? undefined : rowMappers.toNodeRow(row);
     },
 
     async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {

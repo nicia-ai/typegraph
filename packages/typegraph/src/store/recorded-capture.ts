@@ -437,6 +437,22 @@ function createRecordedTransactionBackend(
       return row;
     },
 
+    ...(target.insertNodeIfAbsent === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsent(
+          params: InsertNodeParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(target.insertNodeIfAbsent)(params);
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
     ...(target.insertNodeNoReturn === undefined ?
       {}
     : {
@@ -727,6 +743,18 @@ export function createRecordedBackend(
     async insertNode(params) {
       return capture((target) => target.insertNode(params));
     },
+
+    ...(backend.insertNodeIfAbsent === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsent(
+          params: InsertNodeParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeIfAbsent)(params),
+          );
+        },
+      }),
 
     ...(backend.insertNodeNoReturn === undefined ?
       {}

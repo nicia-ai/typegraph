@@ -1813,6 +1813,7 @@ export type GraphBackend = Readonly<{
     fulltextStrategy?: FulltextStrategy | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
+    insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -2342,7 +2343,7 @@ export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3425,6 +3426,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly bundle: "batchEntityWrite";
         readonly ceiling: 4;
     };
+    readonly insertNodeIfAbsent: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "batchEntityWrite";
+        readonly ceiling: 7;
+    };
     readonly insertNodesBatch: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
@@ -3890,7 +3897,7 @@ type WriteFenceTarget = Readonly<{
 
 // @public
 export const WS5B_SEED_BUNDLES: {
-    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertEdgeNoReturn", "updateNodeSet"];
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "updateNodeSet"];
     readonly endpointSetRead: readonly ["findEdgesByEndpointSet"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
