@@ -503,9 +503,9 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(result.edge.since).toBe("original");
     const storedEdges = await setup.edges.knows.findFrom(alice);
     expect(storedEdges).toHaveLength(2);
-    expect(
-      storedEdges.find((edge) => edge.id === original.id)?.since,
-    ).toBe("changed");
+    expect(storedEdges.find((edge) => edge.id === original.id)?.since).toBe(
+      "changed",
+    );
   });
 
   it("reports stale transaction reads honestly when convergence cannot stabilize", async () => {
