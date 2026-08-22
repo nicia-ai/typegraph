@@ -33,11 +33,11 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 61;
+const REASONED_FLOOR = 63;
 const DEFERRED_LIVE_TOTAL = 187;
 const DEFERRED_DECLARED_TOTAL = 190;
 const EXCLUDED_COUNT = 4;
-const TOTAL_ROW_COUNT = 261;
+const TOTAL_ROW_COUNT = 263;
 
 function rowKey(
   row: Readonly<{ file: string; line: number; member: string }>,
@@ -170,7 +170,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 261)", () => {
+  it("the class partition covers every scanned row (total 263)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.
