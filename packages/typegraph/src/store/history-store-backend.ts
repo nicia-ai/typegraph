@@ -149,6 +149,7 @@ type _historyStoreContainsClaimsCore = Assert<
 type UnsafeHistoryStoreBackendMember =
   | "clearGraph"
   | "commitSchemaVersionWithPreflight"
+  | "instantiateGraphTemplate"
   | "executeDdl"
   | "executeRaw"
   | "executeStatement"
@@ -157,6 +158,7 @@ type UnsafeHistoryStoreBackendMember =
   | "rebuildContribution"
   | "recordedTableDdl"
   | "repairContributions"
+  | "registerGraphTemplate"
   | "schemaWriteTransaction"
   | "transaction"
   | "trustedImport";

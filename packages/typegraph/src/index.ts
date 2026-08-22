@@ -532,10 +532,14 @@ export {
 // exists at all. Also available from the "./schema" subpath alongside the
 // migration machinery.
 export type { IdentityChange, SerializedSchema } from "./schema";
+export type { GraphTemplate, InstantiateGraphTemplateResult } from "./schema";
 export {
   getActiveSchema,
   getCommittedSchemaVersion,
+  instantiateGraph,
+  instantiateGraphTemplate,
   isSchemaInitialized,
+  registerGraphTemplate,
 } from "./schema";
 export type {
   AlgorithmCyclePolicy,

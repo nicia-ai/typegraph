@@ -65,6 +65,7 @@ export type PostgresTableNames = Readonly<{
   uniques: string;
   edgeClaims: string;
   schemaVersions: string;
+  graphTemplates: string;
   fulltext: string;
   indexMaterializations: string;
   contributionMaterializations: string;
@@ -96,6 +97,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   schemaVersions: "typegraph_schema_versions",
+  graphTemplates: "typegraph_graph_templates",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
   contributionMaterializations: "typegraph_contribution_materializations",
@@ -447,6 +449,17 @@ export function createPostgresTables(
     ],
   );
 
+  const graphTemplates = pgTable(
+    n.graphTemplates,
+    {
+      templateId: text("template_id").notNull(),
+      schemaHash: text("schema_hash").notNull(),
+      schemaDoc: jsonb("schema_doc").notNull(),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.templateId] })],
+  );
+
   /**
    * Per-deployment record of which declared indexes have been
    * materialized against this database. Owned and written by
@@ -620,6 +633,7 @@ export function createPostgresTables(
     uniques,
     edgeClaims,
     schemaVersions,
+    graphTemplates,
     indexMaterializations,
     contributionMaterializations,
     kindRemovals,

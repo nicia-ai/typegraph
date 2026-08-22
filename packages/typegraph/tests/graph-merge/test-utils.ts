@@ -170,6 +170,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     contributionMaterializations: `${prefix}_contribution_materializations`,
     kindRemovals: `${prefix}_kind_removals`,
     reconciliationMarkers: `${prefix}_reconciliation_markers`,
+    graphTemplates: `${prefix}_graph_templates`,
   };
 }
 

@@ -539,6 +539,14 @@ export type SchemaVersionRow = Readonly<{
   is_active: boolean;
 }>;
 
+/** A durable, server-resident materialized schema template. */
+export type GraphTemplateRow = Readonly<{
+  template_id: string;
+  schema_hash: string;
+  schema_doc: string;
+  created_at: string;
+}>;
+
 // ============================================================
 // Insert Parameters
 // ============================================================
@@ -2153,6 +2161,33 @@ export type GraphBackend = Readonly<{
     this: void,
     params: SetActiveVersionParams,
   ) => Promise<void>;
+
+  /** Register an immutable materialized schema template. */
+  registerGraphTemplate?: (
+    this: void,
+    params: Readonly<{
+      templateId: string;
+      schemaHash: string;
+      schemaDoc: SerializedSchema;
+    }>,
+  ) => Promise<GraphTemplateRow>;
+  /**
+   * Instantiate a v1 schema from a registered template in one database
+   * statement. The caller supplies the hash of the graph-id-rebound document;
+   * the large schema document remains server-side.
+   */
+  instantiateGraphTemplate?: (
+    this: void,
+    params: Readonly<{
+      templateId: string;
+      templateSchemaHash: string;
+      graphId: string;
+      schemaHash: string;
+    }>,
+  ) => Promise<
+    | Readonly<{ status: "ready"; row: SchemaVersionRow }>
+    | Readonly<{ status: "refused" }>
+  >;
 
   /**
    * Run an administrative callback while holding the same per-graph lock as
