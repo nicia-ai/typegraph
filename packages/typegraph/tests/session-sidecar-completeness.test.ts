@@ -184,6 +184,7 @@ const WATCHED_MEMBERS = [
   "deleteEmbedding",
   "insertEdge",
   "insertEdgeIfEndpointsLive",
+  "insertEdgeIfEndpointsLiveWithSchemaFence",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -194,6 +195,8 @@ const WATCHED_MEMBERS = [
   "hardDeleteEdgesBatch",
   "insertNode",
   "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -410,6 +413,7 @@ type Case = Readonly<{
 
 const NODE_PLAN = nodeWritePlan(undefined, false);
 const EDGE_PLAN = edgeWritePlan(undefined);
+let fusedSchemaEdgeCounter = 0;
 
 /**
  * Exhaustive over the session by type: a method with no case here does not
@@ -435,6 +439,32 @@ const CASES: Record<keyof WriteSession, Case> = {
       Promise.resolve((session) => session.createNodeIfAbsent(insertWork("a"))),
     sidecars: ["upsertFulltext", "upsertEmbedding"],
     row: "insertNodeIfAbsent",
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
+    plan: NODE_PLAN,
+  },
+  createNodeIfAbsentWithSchemaFence: {
+    run: () =>
+      Promise.resolve((session) =>
+        session.createNodeIfAbsentWithSchemaFence(insertWork("schema-a"), {
+          expectedVersion: 1,
+          graphId: GRAPH_ID,
+        }),
+      ),
+    sidecars: ["upsertFulltext", "upsertEmbedding"],
+    row: "insertNodeIfAbsentWithSchemaFence",
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
+    plan: NODE_PLAN,
+  },
+  createNodeWithSchemaFence: {
+    run: () =>
+      Promise.resolve((session) =>
+        session.createNodeWithSchemaFence(insertWork("schema-b"), {
+          expectedVersion: 1,
+          graphId: GRAPH_ID,
+        }),
+      ),
+    sidecars: ["upsertFulltext", "upsertEmbedding"],
+    row: "insertNodeWithSchemaFence",
     postRowFans: ["upsertFulltext", "upsertEmbedding"],
     plan: NODE_PLAN,
   },
@@ -615,6 +645,29 @@ const CASES: Record<keyof WriteSession, Case> = {
     sidecars: ["claimEdgeCardinalityGuarded"],
     row: "insertEdgeIfEndpointsLive",
     preRow: ["claimEdgeCardinalityGuarded"],
+    plan: EDGE_PLAN,
+  },
+  createEdgeIfEndpointsLiveWithSchemaFence: {
+    run: async (raw) => {
+      await seed(raw, "fused-schema");
+      fusedSchemaEdgeCounter += 1;
+      return (session) =>
+        session.createEdgeIfEndpointsLiveWithSchemaFence(
+          {
+            fromId: "fused-schema",
+            fromKind: "Doc",
+            graphId: GRAPH_ID,
+            id: `edge-fused-schema-${fusedSchemaEdgeCounter}`,
+            kind: "links",
+            props: {},
+            toId: "fused-schema-b",
+            toKind: "Doc",
+          },
+          { expectedVersion: 1, graphId: GRAPH_ID },
+        );
+    },
+    sidecars: [],
+    row: "insertEdgeIfEndpointsLiveWithSchemaFence",
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {

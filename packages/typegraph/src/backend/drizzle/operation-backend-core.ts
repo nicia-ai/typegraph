@@ -1,4 +1,4 @@
-import { is } from "drizzle-orm";
+import { is, type SQL, sql as drizzleSql } from "drizzle-orm";
 
 import {
   ConfigurationError,
@@ -69,6 +69,7 @@ import type {
   ReadConstraintFenceViolationsParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
+  SchemaWriteFenceParams,
   SetActiveVersionParams,
   TransactionBackend,
   UniqueRow,
@@ -135,11 +136,14 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
   | "insertEdgeIfEndpointsLive"
+  | "insertEdgeIfEndpointsLiveWithSchemaFence"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
   | "insertNode"
   | "insertNodeIfAbsent"
+  | "insertNodeIfAbsentWithSchemaFence"
+  | "insertNodeWithSchemaFence"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -240,6 +244,8 @@ type CreateCommonOperationBackendOptions = Readonly<{
   nowIso?: (() => string) | undefined;
   operationStrategy: CommonOperationStrategy;
   rowMappers: OperationBackendRowMappers;
+  /** Present only on bundled dialect backends that own the fused SQL contract. */
+  schemaFenceLockClause?: SQL | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -551,8 +557,71 @@ export function createCommonOperationBackend(
     return row === undefined ? 0 : rowMappers.toSchemaVersionRow(row).version;
   }
 
+  const schemaFenceMembers =
+    options.schemaFenceLockClause === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          const query = operationStrategy.buildInsertNodeIfAbsentWithSchemaFence(
+            params,
+            nowIso(),
+            schemaFence,
+            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+          );
+          const row = await execution.execGet<Record<string, unknown>>(query);
+          return row === undefined ? undefined : rowMappers.toNodeRow(row);
+        },
+
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          const query = operationStrategy.buildInsertNodeWithSchemaFence(
+            params,
+            nowIso(),
+            schemaFence,
+            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+          );
+          const row = await withDuplicateKeyClassification(
+            () => execution.execGet<Record<string, unknown>>(query),
+            {
+              entity: "node",
+              relation: operationStrategy.primaryKeyConstraints.nodes,
+              attempted: attemptedInserts([params]),
+            },
+          );
+          return row === undefined ? undefined : rowMappers.toNodeRow(row);
+        },
+
+        async insertEdgeIfEndpointsLiveWithSchemaFence(
+          params: InsertEdgeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<EdgeRow | undefined> {
+          const query = operationStrategy.buildInsertEdgeIfEndpointsLiveWithSchemaFence(
+            params,
+            nowIso(),
+            schemaFence,
+            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+          );
+          const row = await withDuplicateKeyClassification(
+            () => execution.execGet<Record<string, unknown>>(query),
+            {
+              entity: "edge",
+              relation: operationStrategy.primaryKeyConstraints.edges,
+              attempted: attemptedInserts([params]),
+            },
+          );
+          return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+        },
+      };
+
   return {
     tableExists,
+
+    ...schemaFenceMembers,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

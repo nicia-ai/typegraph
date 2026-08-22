@@ -61,7 +61,7 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
+import { ConfigurationError, StaleVersionError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type ConstraintFenceReason } from "../constraints";
 import {
@@ -192,6 +192,35 @@ export async function lockSchemaVersionForStoreWrite(
 }
 
 /**
+ * Interprets a no-row result from a schema-fenced INSERT without taking a
+ * second schema lock. PostgreSQL's first `FOR SHARE` may wake from a
+ * concurrent schema flip with no row in its statement snapshot; taking a
+ * second locking read can deadlock with the next flip. The ordinary active
+ * schema read observes the settled committed version and is sufficient here:
+ * the fused INSERT wrote nothing when its predicate failed.
+ *
+ * A matching version leaves the caller to diagnose its own ordinary no-row
+ * cause (such as an occupied `DO NOTHING` key or a missing edge endpoint).
+ */
+export async function diagnoseFusedSchemaFenceNoRow(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined) return;
+
+  const active = await backend.getActiveSchema(ctx.graphId);
+  const actualVersion = active?.version ?? 0;
+  if (actualVersion !== expectedVersion) {
+    throw new StaleVersionError({
+      graphId: ctx.graphId,
+      expected: expectedVersion,
+      actual: actualVersion,
+    });
+  }
+}
+
+/**
  * How a write states whether it needs the per-graph write fence.
  *
  * `fencesConstraintProbe` is an assertion about THIS write's body: "it runs a
@@ -208,6 +237,13 @@ export async function lockSchemaVersionForStoreWrite(
 export type WriteTransactionOptions<T> = Readonly<{
   didWrite?: (result: T) => boolean;
   fencesConstraintProbe?: ConstraintFenceReason | undefined;
+  /**
+   * The row-work callback's first statement carries the schema fence itself.
+   * This is a narrowly-scoped first-party insert optimization: callers must
+   * take no graph or identity lock before that statement and must perform the
+   * ordinary fence diagnostic before handling a zero-row result.
+   */
+  schemaFenceInFirstWrite?: boolean | undefined;
 }>;
 
 /** What a caller must change to make each refused constraint class writable. */
@@ -335,7 +371,9 @@ export function runInWriteTransaction<T>(
     ctx.revisionTrackingEnabled ||
     fenceReason !== undefined;
   return runOptionallyInTransaction(backend, async (target) => {
-    await lockSchemaVersionForStoreWrite(ctx, target);
+    if (!options?.schemaFenceInFirstWrite) {
+      await lockSchemaVersionForStoreWrite(ctx, target);
+    }
     const session =
       needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
     // Either constructor yields the same compile-time evidence token; which one
