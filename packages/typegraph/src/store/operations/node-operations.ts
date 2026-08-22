@@ -259,6 +259,11 @@ type NodeCreatePrepared = Readonly<{
    * insert-vs-resurrect without re-reading the same (graph, kind, id).
    */
   tombstone: BackendNodeRow | undefined;
+  /**
+   * This caller-supplied id has no pre/post claims, so a first-party backend
+   * can learn whether the primary-key slot is free from the INSERT itself.
+   */
+  insertIfAbsent: boolean;
 }>;
 
 type CachedNodeRow = Awaited<ReturnType<GraphBackend["getNode"]>>;
@@ -825,14 +830,36 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   draft: NodeCreateDraft,
   backend: WriteTarget,
+  allowInsertIfAbsent = true,
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
+
+  // Claim-free caller ids are the one safe shape for an insert-first path. A
+  // pre-insert claim would have to be compensated when `DO NOTHING` reports an
+  // occupied row; keep that larger transition out of this optimization until it
+  // has its own atomic claim outcome. `nodeClaimEntries` is the single owner of
+  // whether either uniqueness or disjointness applies, so this does not grow a
+  // second spelling of the constraint decision.
+  const insertIfAbsent =
+    allowInsertIfAbsent &&
+    draft.idProvided &&
+    backend.insertNodeIfAbsent !== undefined &&
+    nodeClaimEntries(
+      ctx.registry,
+      kind,
+      id,
+      validatedProps,
+      uniqueConstraints,
+      "create",
+    ).length === 0;
 
   // A generated id is fresh by construction, so probing it for a duplicate or
   // tombstone can only report absence. Caller-supplied ids retain the probe:
   // they may name either a live duplicate or a tombstone to resurrect.
   const existingNode =
-    draft.idProvided ? await backend.getNode(ctx.graphId, kind, id) : undefined;
+    draft.idProvided && !insertIfAbsent ?
+      await backend.getNode(ctx.graphId, kind, id)
+    : undefined;
   if (existingNode && !existingNode.deleted_at) {
     throw createAlreadyExistsError("node", kind, id);
   }
@@ -845,7 +872,7 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   // Disjointness is also keyed by the id. A generated id cannot already be
   // present under a disjoint kind, so its cross-kind reads are the same pure
   // cost as the same-kind existence probe above.
-  if (draft.idProvided) {
+  if (draft.idProvided && !insertIfAbsent) {
     await checkDisjointnessConstraint(constraintContext, kind, id);
   }
 
@@ -867,6 +894,7 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
     id,
     idProvided: draft.idProvided,
     tombstone: existingNode,
+    insertIfAbsent,
     nodeKind: draft.nodeKind,
     validatedProps,
     uniqueConstraints,
@@ -1442,6 +1470,7 @@ async function prepareBatchCreates<G extends GraphDef>(
       ctx,
       draft,
       validationBackend,
+      false,
     );
     preparedCreates.push(prepared);
     registerPendingNode(prepared.insertParams);
@@ -1720,6 +1749,46 @@ async function executeNodeCreateInternal<G extends GraphDef>(
 
       const existing = prepared.tombstone;
       if (existing !== undefined) {
+        const resurrected = await resurrectPreparedNode(
+          ctx,
+          session,
+          target,
+          prepared,
+        );
+        if (identity !== undefined) {
+          await identity.foldCreated(target, foldReferences([prepared]));
+        }
+        return shouldReturnRow ? rowToNode(resurrected) : undefined;
+      }
+
+      if (prepared.insertIfAbsent) {
+        const inserted = await session.createNodeIfAbsent(
+          nodeInsertWork(prepared),
+        );
+        if (inserted !== undefined) {
+          if (identity !== undefined) {
+            await identity.foldCreated(target, foldReferences([prepared]));
+          }
+          return shouldReturnRow ? rowToNode(inserted) : undefined;
+        }
+
+        // `ON CONFLICT DO NOTHING` leaves PostgreSQL's transaction usable. A
+        // single read now classifies the occupied slot, rather than paying it
+        // on every successful caller-supplied-id create.
+        const occupied = await target.getNode(
+          ctx.graphId,
+          prepared.kind,
+          prepared.id,
+        );
+        if (occupied === undefined) {
+          throw new DatabaseOperationError(
+            `Node disappeared after insert-if-absent conflict: ${prepared.kind} ${prepared.id}`,
+            { operation: "insert", entity: "node" },
+          );
+        }
+        if (occupied.deleted_at === undefined) {
+          throw createAlreadyExistsError("node", prepared.kind, prepared.id);
+        }
         const resurrected = await resurrectPreparedNode(
           ctx,
           session,

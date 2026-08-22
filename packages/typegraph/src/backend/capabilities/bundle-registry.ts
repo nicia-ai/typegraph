@@ -776,7 +776,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 67, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 68, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -818,10 +818,10 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 20 `reasoned` + 47 `deferred` members — 61 + 190 = 251 accesses
+ * The 20 `reasoned` + 48 `deferred` members — 61 + 197 = 258 accesses
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 67 = 82 members total with the pilot's 15.
+ * access), 15 + 68 = 83 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   bootstrapTables: {
@@ -1158,6 +1158,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "batchEntityWrite",
     ceiling: 4,
   },
+  insertNodeIfAbsent: {
+    kind: "deferred",
+    workstream: "WS5b",
+    bundle: "batchEntityWrite",
+    ceiling: 7,
+  },
   insertNodesBatch: {
     kind: "deferred",
     workstream: "WS5b",
@@ -1247,6 +1253,7 @@ export const WS5B_SEED_BUNDLES = {
     "deleteEdgesBatch",
     "hardDeleteEdgesBatch",
     "insertNodeNoReturn",
+    "insertNodeIfAbsent",
     "insertEdgeNoReturn",
     "updateNodeSet",
   ],
@@ -1356,7 +1363,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 82 optional members.
+// (i) Totality: the three-way partition covers exactly the 83 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

@@ -1802,6 +1802,19 @@ export type GraphBackend = Readonly<{
 
   // === Node Operations ===
   insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
+  /**
+   * Inserts a node only when its primary-key slot is empty. `undefined` means
+   * the slot was already occupied; unlike `insertNode`, that outcome is not a
+   * database error and leaves the surrounding transaction usable.
+   *
+   * First-party SQL backends expose this for the caller-supplied-id create
+   * fast path. Custom backends may omit it and retain the probe-then-insert
+   * path.
+   */
+  insertNodeIfAbsent?: (
+    this: void,
+    params: InsertNodeParams,
+  ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
   insertNodesBatch?: (
     this: void,
@@ -2970,6 +2983,7 @@ export type NodeEntityReadBackend = Pick<
 export type NodeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertNode"
+  | "insertNodeIfAbsent"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
