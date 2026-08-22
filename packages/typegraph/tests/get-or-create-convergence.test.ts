@@ -501,11 +501,10 @@ describe("getOrCreateByEndpoints convergence", () => {
 
     expect(result.action).toBe("created");
     expect(result.edge.since).toBe("original");
-    expect(await setup.edges.knows.findFrom(alice)).toHaveLength(2);
+    const storedEdges = await setup.edges.knows.findFrom(alice);
+    expect(storedEdges).toHaveLength(2);
     expect(
-      (await setup.edges.knows.findFrom(alice)).find(
-        (edge) => edge.id === original.id,
-      )?.since,
+      storedEdges.find((edge) => edge.id === original.id)?.since,
     ).toBe("changed");
   });
 
@@ -600,7 +599,8 @@ describe("getOrCreateByEndpoints convergence", () => {
 
     expect(results[0]?.action).toBe("updated");
     expect(results[0]?.edge.note).toBe("old");
-    expect((await setup.edges.knows.findFrom(alice))[0]?.note).toBe("old");
+    const storedEdges = await setup.edges.knows.findFrom(alice);
+    expect(storedEdges[0]?.note).toBe("old");
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {
