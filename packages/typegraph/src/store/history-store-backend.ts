@@ -24,6 +24,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   // neither can bypass a capture flush, and a history-enabled store that could
   // not reach them would write constrained edges unfenced.
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "claimIndexMaterialization",
   "close",

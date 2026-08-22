@@ -120,7 +120,10 @@ import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { edgeCardinalityClaim } from "../claims/edge-claims";
+import {
+  edgeCardinalityClaim,
+  edgeCardinalityClaimMode,
+} from "../claims/edge-claims";
 import {
   shouldCoalesceUpsert,
   type UpsertDirtyCheck,
@@ -299,7 +302,10 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   input: CreateEdgeInput,
   id: string,
   backend: WriteTarget,
-  options?: Readonly<{ validateEndpoints?: boolean }>,
+  options?: Readonly<{
+    validateEndpoints?: boolean;
+    validateCardinality?: boolean;
+  }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
   const fromKind = input.fromKind;
@@ -358,16 +364,18 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     registry: ctx.registry,
     backend,
   };
-  await checkCardinalityConstraint(
-    constraintContext,
-    kind,
-    cardinality,
-    fromKind,
-    input.fromId,
-    toKind,
-    input.toId,
-    validTo,
-  );
+  if (options?.validateCardinality ?? true) {
+    await checkCardinalityConstraint(
+      constraintContext,
+      kind,
+      cardinality,
+      fromKind,
+      input.fromId,
+      toKind,
+      input.toId,
+      validTo,
+    );
+  }
 
   return {
     cardinality,
@@ -539,17 +547,25 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         }
       }
 
+      const declaredCardinality = edgeCardinality(ctx, kind);
+      const usesGuardedCardinalityClaim =
+        declaredCardinality !== "many" &&
+        edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind ===
+          "guarded";
       const canFuseEndpointCheck =
         input.id === undefined &&
         convergeOn === undefined &&
-        edgeCardinality(ctx, kind) === "many" &&
+        (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
         target.insertEdgeIfEndpointsLive !== undefined;
       let prepared = await validateAndPrepareEdgeCreate(
         ctx,
         input,
         id,
         target,
-        { validateEndpoints: !canFuseEndpointCheck },
+        {
+          validateEndpoints: !canFuseEndpointCheck,
+          validateCardinality: !usesGuardedCardinalityClaim,
+        },
       );
 
       // A plain, generated-id `many` edge owes no cardinality claim and no
@@ -559,13 +575,16 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       // from an empty RETURNING result: retry the ordinary ordered validation
       // below, which preserves source-before-target typed refusals and handles
       // a concurrent endpoint revival before we report anything.
-      if (canFuseEndpointCheck && prepared.cardinality === "many") {
+      if (canFuseEndpointCheck) {
+        const fusedWork = edgeInsertWork(prepared);
         const fusedRow = await withAlreadyExistsTranslation("edge", () =>
-          session.createEdgeIfEndpointsLive(prepared.insertParams),
+          session.createEdgeIfEndpointsLive(fusedWork),
         );
         if (fusedRow !== undefined) return rowToEdge(fusedRow);
 
-        prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target);
+        prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+          validateCardinality: !usesGuardedCardinalityClaim,
+        });
       }
 
       // An edge create has no existence probe at all — its id is either

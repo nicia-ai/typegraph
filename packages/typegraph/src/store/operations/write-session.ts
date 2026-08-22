@@ -146,7 +146,15 @@ export type WriteTarget = Readonly<
     RawStatementExecutionBackend &
     Pick<GraphBackend, "insertNodeIfAbsent"> &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
-    Pick<GraphBackend, "insertEdgeIfEndpointsLive"> &
+    Pick<
+      GraphBackend,
+      | "insertEdgeIfEndpointsLive"
+      | "claimEdgeCardinality"
+      | "claimEdgeCardinalityGuarded"
+      | "claimEdgeCardinalityBatch"
+      | "purgeEdgeClaims"
+      | "hardDeleteUniquesByConcreteKind"
+    > &
     Pick<VectorOperationBackend, "vectorSearch"> &
     Pick<FulltextOperationBackend, "fulltextSearch">
 >;
@@ -325,7 +333,7 @@ export type EdgeWriteSession = Readonly<{
   // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
   createEdgeIfEndpointsLive: (
-    params: InsertEdgeParams,
+    work: EdgeInsertWork,
   ) => Promise<EdgeRow | undefined>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
@@ -490,12 +498,15 @@ export function createWriteSession(
       return edgeDispatch.one(work.params);
     },
 
-    createEdgeIfEndpointsLive: (params) => {
+    createEdgeIfEndpointsLive: async (work) => {
+      if (work.claim !== undefined) {
+        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
+      }
       const insertEdgeIfEndpointsLive = target.insertEdgeIfEndpointsLive;
       if (insertEdgeIfEndpointsLive === undefined) {
-        return Promise.resolve(undefined);
+        return;
       }
-      return insertEdgeIfEndpointsLive(params);
+      return insertEdgeIfEndpointsLive(work.params);
     },
 
     createEdgeNoReturn: async (work) => {
