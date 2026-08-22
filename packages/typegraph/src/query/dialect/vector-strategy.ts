@@ -167,6 +167,24 @@ export type VectorStrategy = Readonly<{
   ) => readonly SqlFragment[];
 
   /**
+   * Emits one atomic upsert sourced from a node `RETURNING` CTE.
+   *
+   * The source alias is backend-owned SQL (normally `inserted_node`), never
+   * caller input. The strategy must take graph/node identity from the source
+   * row rather than from the embedding parameters, so a node insert and its
+   * sidecar cannot disagree about identity. Strategies whose storage needs
+   * more than one statement omit this capability and use {@link buildUpsert}
+   * on the ordinary sidecar path.
+   */
+  buildUpsertFromInsertedNode?: (
+    this: void,
+    slot: VectorSlot,
+    sourceAlias: string,
+    embedding: readonly number[],
+    timestamp: string,
+  ) => SqlFragment;
+
+  /**
    * Emits the statement(s) that upsert MANY embeddings into the slot's
    * storage in multi-row form. Optional — the backend falls back to one
    * {@link buildUpsert} per row when unset. The backend guarantees the

@@ -1556,6 +1556,7 @@ function importNodeInsertWork(
       props,
       uniqueConstraints: registration.unique ?? [],
     },
+    projections: [],
   };
 }
 

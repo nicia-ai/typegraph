@@ -64,7 +64,7 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
-  NodeFulltextSync,
+  NodeInsertPlan,
   NodeRow,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
@@ -124,29 +124,6 @@ function assertMatchingFusedEdgeClaim(
       },
     },
   );
-}
-
-function assertMatchingNodeFulltextSync(
-  params: InsertNodeParams,
-  fulltext: NodeFulltextSync,
-): void {
-  if (
-    fulltext.graphId !== params.graphId ||
-    fulltext.nodeKind !== params.kind ||
-    fulltext.nodeId !== params.id
-  ) {
-    throw new CompilerInvariantError(
-      "A fused node fulltext sync must describe the node being inserted.",
-      {
-        node: {
-          graphId: params.graphId,
-          kind: params.kind,
-          id: params.id,
-        },
-        fulltext,
-      },
-    );
-  }
 }
 
 /**
@@ -209,8 +186,7 @@ export type CommonOperationBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
-  | "insertNodeWithFulltext"
-  | "insertNodeWithSchemaFenceAndFulltext"
+  | "insertNodeWithProjections"
   | "lockSchemaVersionAndGraphWrite"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
@@ -318,8 +294,20 @@ type CreateCommonOperationBackendOptions = Readonly<{
   schemaGraphWriteLockNamespace?: string | undefined;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   edgeCardinalityInsertFusion?: boolean | undefined;
-  /** Present only for bundled PostgreSQL/PGlite operation backends. */
-  nodeFulltextInsertFusion?: boolean | undefined;
+  /** Present only for bundled projection-aware operation backends. */
+  nodeProjectionInsertFusion?: boolean | undefined;
+  /** Read-only prerequisite gate run before a fused projection statement. */
+  beforeNodeProjectionInsert?:
+    | ((params: InsertNodeParams, plan: NodeInsertPlan) => Promise<void>)
+    | undefined;
+  /** Error-path projection storage classifier; must rethrow or return never. */
+  refuseNodeProjectionError?:
+    | ((
+        params: InsertNodeParams,
+        plan: NodeInsertPlan,
+        error: unknown,
+      ) => Promise<never>)
+    | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -763,62 +751,53 @@ export function createCommonOperationBackend(
     };
   })();
 
-  const nodeFulltextInsertFusionMembers = (() => {
-    const buildInsertNodeWithFulltext =
-      operationStrategy.buildInsertNodeWithFulltext;
-    const buildInsertNodeWithSchemaFenceAndFulltext =
-      operationStrategy.buildInsertNodeWithSchemaFenceAndFulltext;
+  const nodeProjectionInsertFusionMembers = (() => {
+    const buildInsertNodeWithProjections =
+      operationStrategy.buildInsertNodeWithProjections;
     if (
-      options.nodeFulltextInsertFusion !== true ||
-      buildInsertNodeWithFulltext === undefined
+      options.nodeProjectionInsertFusion !== true ||
+      buildInsertNodeWithProjections === undefined
     ) {
       return {};
     }
     return {
-      async insertNodeWithFulltext(
+      async insertNodeWithProjections(
         params: InsertNodeParams,
-        fulltext: NodeFulltextSync,
-      ): Promise<NodeRow> {
-        assertMatchingNodeFulltextSync(params, fulltext);
-        const query = buildInsertNodeWithFulltext(
-          params,
-          fulltext,
-          nowIso(),
-        );
-        const row = await withDuplicateKeyClassification(
-          () => execution.execGet<Record<string, unknown>>(query),
-          {
-            entity: "node",
-            relation: operationStrategy.primaryKeyConstraints.nodes,
-            attempted: attemptedInserts([params]),
-          },
-        );
-        if (row === undefined) {
-          throw new DatabaseOperationError(
-            "Fused node/fulltext insert failed: no row returned",
-            { operation: "insert", entity: "node", reason: "no_row_returned" },
+        plan: NodeInsertPlan,
+      ): Promise<NodeRow | undefined> {
+        if (
+          plan.mode.kind === "schema-fenced" &&
+          plan.mode.schemaFence.graphId !== params.graphId
+        ) {
+          throw new CompilerInvariantError(
+            "A node projection plan's schema fence must match its node graph.",
+            {
+              nodeGraphId: params.graphId,
+              fenceGraphId: plan.mode.schemaFence.graphId,
+            },
           );
         }
-        return rowMappers.toNodeRow(row);
-      },
-      ...(buildInsertNodeWithSchemaFenceAndFulltext === undefined ||
-      options.schemaFenceLockClause === undefined ?
-        {}
-      : {
-          async insertNodeWithSchemaFenceAndFulltext(
-            params: InsertNodeParams,
-            fulltext: NodeFulltextSync,
-            schemaFence: SchemaWriteFenceParams,
-          ): Promise<NodeRow | undefined> {
-            assertMatchingNodeFulltextSync(params, fulltext);
-            const query = buildInsertNodeWithSchemaFenceAndFulltext(
-              params,
-              fulltext,
-              nowIso(),
-              schemaFence,
-              options.schemaFenceLockClause ?? drizzleSql.raw(""),
-            );
-            const row = await withDuplicateKeyClassification(
+        const query = buildInsertNodeWithProjections(
+          params,
+          plan,
+          nowIso(),
+          options.schemaFenceLockClause,
+        );
+        if (query === undefined) {
+          throw new CompilerInvariantError(
+            "The backend accepted a node projection plan it cannot compile.",
+            {
+              graphId: params.graphId,
+              kind: params.kind,
+              id: params.id,
+              projections: plan.projections.map((projection) => projection.kind),
+            },
+          );
+        }
+        await options.beforeNodeProjectionInsert?.(params, plan);
+        const row = await (async () => {
+          try {
+            return await withDuplicateKeyClassification(
               () => execution.execGet<Record<string, unknown>>(query),
               {
                 entity: "node",
@@ -826,9 +805,21 @@ export function createCommonOperationBackend(
                 attempted: attemptedInserts([params]),
               },
             );
-            return row === undefined ? undefined : rowMappers.toNodeRow(row);
-          },
-        }),
+          } catch (error) {
+            if (options.refuseNodeProjectionError !== undefined) {
+              return options.refuseNodeProjectionError(params, plan, error);
+            }
+            throw error;
+          }
+        })();
+        if (row === undefined && plan.mode.kind === "ordinary") {
+          throw new DatabaseOperationError(
+            "Fused node projection insert failed: no row returned",
+            { operation: "insert", entity: "node", reason: "no_row_returned" },
+          );
+        }
+        return row === undefined ? undefined : rowMappers.toNodeRow(row);
+      },
     };
   })();
 
@@ -838,7 +829,7 @@ export function createCommonOperationBackend(
     ...schemaFenceMembers,
     ...schemaGraphWriteFenceMembers,
     ...edgeCardinalityInsertFusionMembers,
-    ...nodeFulltextInsertFusionMembers,
+    ...nodeProjectionInsertFusionMembers,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

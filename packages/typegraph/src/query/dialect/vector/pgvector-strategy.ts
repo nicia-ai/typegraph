@@ -254,6 +254,30 @@ export const pgvectorStrategy: VectorStrategy = {
     ];
   },
 
+  buildUpsertFromInsertedNode(slot, sourceAlias, embedding, timestamp) {
+    const table = sql.identifier(
+      tableName(slot.graphId, slot.nodeKind, slot.fieldPath),
+    );
+    const source = sql.identifier(sourceAlias);
+    const sourceColumn = (name: string): SqlFragment =>
+      sql`${source}.${sql.identifier(name)}`;
+    const value = vectorLiteral(embedding, "embedding");
+
+    return sql`
+      INSERT INTO ${table}
+        ("graph_id", "node_id", "embedding", "created_at", "updated_at")
+      SELECT
+        ${sourceColumn("graph_id")}, ${sourceColumn("id")},
+        ${value}, ${timestamp}, ${timestamp}
+      FROM ${source}
+      ON CONFLICT ("graph_id", "node_id")
+      DO UPDATE SET
+        "embedding" = EXCLUDED."embedding",
+        "updated_at" = EXCLUDED."updated_at"
+      RETURNING 1
+    `;
+  },
+
   buildUpsertBatch(
     slot,
     params: UpsertEmbeddingBatchParams,

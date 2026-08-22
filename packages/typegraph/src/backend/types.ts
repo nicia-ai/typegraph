@@ -852,6 +852,50 @@ export type UpsertEmbeddingParams = Readonly<{
 }>;
 
 /**
+ * A projection written from the node row's `RETURNING` source by a fused
+ * generated-id insert. Identity is deliberately absent: the backend derives
+ * graph, kind, and id from the inserted-row CTE, so a sidecar cannot disagree
+ * with the node row it accompanies.
+ */
+export type NodeInsertProjection =
+  | Readonly<{
+      kind: "embedding";
+      fieldPath: string;
+      embedding: readonly number[];
+      dimensions: number;
+      metric: VectorMetric;
+      indexType: VectorIndexType;
+    }>
+  | Readonly<{
+      kind: "fulltext";
+      action: "upsert";
+      content: string;
+      language: string;
+    }>
+  | Readonly<{
+      kind: "fulltext";
+      action: "delete";
+    }>;
+
+/** The two atomic node-insert shapes supported by a projection-aware backend. */
+export type NodeInsertMode =
+  | Readonly<{ kind: "ordinary" }>
+  | Readonly<{
+      kind: "schema-fenced";
+      schemaFence: SchemaWriteFenceParams;
+    }>;
+
+/**
+ * Complete plan for a projection-aware node insert. The insert params carry
+ * row identity; this plan carries only the projections and whether the node
+ * statement must acquire the active-schema fence.
+ */
+export type NodeInsertPlan = Readonly<{
+  mode: NodeInsertMode;
+  projections: readonly NodeInsertProjection[];
+}>;
+
+/**
  * One row of a batched embedding upsert.
  */
 export type UpsertEmbeddingBatchRow = Readonly<{
@@ -1096,11 +1140,7 @@ export type UpsertFulltextParams = Readonly<{
   language: string;
 }>;
 
-/**
- * The fulltext side effect of a freshly inserted node. `delete` is distinct
- * from no action: a searchable schema with empty values must clear a stale
- * projection row left by an earlier hard delete.
- */
+/** Parameters for the ordinary post-insert fulltext synchronization path. */
 export type NodeFulltextSync =
   | Readonly<{
       graphId: string;
@@ -1853,21 +1893,14 @@ export type GraphBackend = Readonly<{
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
   /**
-   * Bundled PostgreSQL/PGlite fast path. Inserts a node and applies its
-   * fulltext projection from the same INSERT ... RETURNING source. The
-   * statement is atomic on both root and transaction-scoped handles.
+   * Optional atomic projection-aware insert. The backend must either apply
+   * every requested projection in the same statement as the node insert or
+   * omit this member; the store never partially fuses a plan.
    */
-  insertNodeWithFulltext?: (
+  insertNodeWithProjections?: (
     this: void,
     params: InsertNodeParams,
-    fulltext: NodeFulltextSync,
-  ) => Promise<NodeRow>;
-  /** Schema-fenced counterpart of `insertNodeWithFulltext`. */
-  insertNodeWithSchemaFenceAndFulltext?: (
-    this: void,
-    params: InsertNodeParams,
-    fulltext: NodeFulltextSync,
-    schemaFence: SchemaWriteFenceParams,
+    plan: NodeInsertPlan,
   ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
   insertNodesBatch?: (
@@ -3103,8 +3136,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
-  | "insertNodeWithFulltext"
-  | "insertNodeWithSchemaFenceAndFulltext"
+  | "insertNodeWithProjections"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"

@@ -128,10 +128,12 @@ import {
   type HybridSearchRow,
   type IdentityTableNames,
   type IndexMaterializationRow,
+  type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
+  type NodeInsertPlan,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
@@ -348,6 +350,26 @@ type PostgresBatchChunkSizes = Readonly<{
   uniqueInsertBatchSize: number;
 }>;
 
+function vectorSlotsFromNodeInsertPlan(
+  params: InsertNodeParams,
+  plan: NodeInsertPlan,
+): readonly VectorSlot[] {
+  return plan.projections.flatMap((projection) =>
+    projection.kind === "embedding" ?
+      [
+        {
+          graphId: params.graphId,
+          nodeKind: params.kind,
+          fieldPath: projection.fieldPath,
+          dimensions: projection.dimensions,
+          metric: projection.metric,
+          indexType: projection.indexType,
+        },
+      ]
+    : [],
+  );
+}
+
 function computePostgresBatchChunkSizes(
   maxBindParameters: number,
 ): PostgresBatchChunkSizes {
@@ -500,7 +522,9 @@ function reportParallelWorkerResetFailure(
     if (typeof console === "undefined" || typeof console.error !== "function") {
       return;
     }
-    const reported = (console.error as (...data: readonly unknown[]) => unknown)(
+    const reported = (
+      console.error as (...data: readonly unknown[]) => unknown
+    )(
       `[typegraph] The serial vector index rebuild failed and cleanup also failed. ${parallelWorkerResetError(tableName, resetError).message}`,
       resetError,
     );
@@ -553,12 +577,7 @@ export async function runVectorIndexBuildWithSerialFallback(
         );
       }
     }
-    await runSerialVectorIndexBuild(
-      execute,
-      tableName,
-      indexStatement,
-      error,
-    );
+    await runSerialVectorIndexBuild(execute, tableName, indexStatement, error);
   }
 }
 
@@ -806,6 +825,7 @@ export function createPostgresBackend(
   const operationStrategy = createPostgresOperationStrategy(
     tables,
     fulltextStrategy,
+    vectorStrategy,
   );
 
   // Whether `tableName` currently exists, via the same catalog probe `clear()`
@@ -1311,7 +1331,9 @@ export function createPostgresBackend(
       recordedTableNames,
     ): Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>> {
       const contributions = recordedContributionsFor(recordedTableNames);
-      function ddlFor(logicalName: keyof RecordedTableNames): RecordedRelationDdl {
+      function ddlFor(
+        logicalName: keyof RecordedTableNames,
+      ): RecordedRelationDdl {
         const contribution = requireDefined(
           contributions.find((entry) => entry.logicalName === logicalName),
           `recordedTableDdl: no contribution for ${logicalName}.`,
@@ -2369,7 +2391,48 @@ function createPostgresOperationBackend(
       toUniqueRow,
     },
     schemaFenceLockClause: sql.raw("FOR SHARE"),
-    nodeFulltextInsertFusion: true,
+    nodeProjectionInsertFusion: true,
+    async beforeNodeProjectionInsert(params, plan): Promise<void> {
+      const vectorSlots = vectorSlotsFromNodeInsertPlan(params, plan);
+      await contributionMaterializer.assertNodeInsertProjections(
+        params.graphId,
+        {
+          fulltext: plan.projections.some(
+            (projection) => projection.kind === "fulltext",
+          ),
+          vectorSlots,
+        },
+      );
+    },
+    async refuseNodeProjectionError(params, plan, error): Promise<never> {
+      const embeddingProjections = plan.projections.filter(
+        (projection) => projection.kind === "embedding",
+      );
+      const dimensionProjection =
+        embeddingProjections.find(
+          (projection) => projection.embedding.length !== projection.dimensions,
+        ) ??
+        (embeddingProjections.length === 1 ?
+          embeddingProjections[0]
+        : undefined);
+      if (dimensionProjection !== undefined) {
+        const mapped = mapVectorWriteError(error, {
+          nodeKind: params.kind,
+          fieldPath: dimensionProjection.fieldPath,
+        });
+        if (mapped !== error) throw mapped;
+      }
+      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
+        params.graphId,
+        {
+          fulltext: plan.projections.some(
+            (projection) => projection.kind === "fulltext",
+          ),
+          vectorSlots: vectorSlotsFromNodeInsertPlan(params, plan),
+        },
+        error,
+      );
+    },
     ...(transactionScoped ?
       {
         schemaGraphWriteLockNamespace:

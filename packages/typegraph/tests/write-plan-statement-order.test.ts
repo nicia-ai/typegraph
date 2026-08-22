@@ -748,6 +748,7 @@ describe("the executor's own frame keeps that order", () => {
             props: { name: "executor" },
             uniqueConstraints: [],
           },
+          projections: [],
         }),
     );
 
@@ -825,6 +826,7 @@ describe("the executor's own frame keeps that order", () => {
             props: { name: "executor fallback" },
             uniqueConstraints: [],
           },
+          projections: [],
         }),
     );
 

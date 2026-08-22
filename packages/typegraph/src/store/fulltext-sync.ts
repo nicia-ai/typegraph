@@ -14,6 +14,7 @@ import { type z } from "zod";
 import {
   type GraphBackend,
   type NodeFulltextSync,
+  type NodeInsertProjection,
   type TransactionBackend,
 } from "../backend/types";
 import {
@@ -79,6 +80,18 @@ export function computeFulltextContent(
  * `undefined` means the schema has no searchable fields; an explicit delete
  * keeps an all-empty searchable row from being mistaken for no projection.
  */
+export function resolveNodeFulltextProjection(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+): NodeInsertProjection | undefined {
+  if (getSearchableFields(schema).length === 0) return undefined;
+  const computed = computeFulltextContent(schema, props);
+  return computed === undefined ?
+      { kind: "fulltext", action: "delete" }
+    : { kind: "fulltext", action: "upsert", ...computed };
+}
+
+/** Resolves the ordinary identity-carrying fulltext synchronization input. */
 export function resolveNodeFulltextSync(
   schema: z.ZodType,
   props: Record<string, unknown>,

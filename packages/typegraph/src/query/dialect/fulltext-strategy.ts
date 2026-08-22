@@ -19,7 +19,7 @@ import {
   type FulltextBatchRow,
   type FulltextCapabilities,
   type FulltextQueryMode,
-  type NodeFulltextSync,
+  type NodeInsertProjection,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
 } from "../../backend/types";
@@ -189,7 +189,7 @@ export type FulltextStrategy = Readonly<{
     this: void,
     tableName: string,
     sourceAlias: string,
-    sync: NodeFulltextSync,
+    projection: Extract<NodeInsertProjection, { kind: "fulltext" }>,
     timestamp: string,
   ) => SqlFragment;
 
@@ -472,13 +472,13 @@ export const tsvectorStrategy: FulltextStrategy = {
     ];
   },
 
-  buildSyncFromInsertedNode(tableName, sourceAlias, sync, timestamp) {
+  buildSyncFromInsertedNode(tableName, sourceAlias, projection, timestamp) {
     const table = sql.identifier(tableName);
     const source = sql.identifier(sourceAlias);
     const sourceColumn = (name: string): SqlFragment =>
       sql`${source}.${sql.identifier(name)}`;
 
-    if (sync.action === "delete") {
+    if (projection.action === "delete") {
       return sql`
         DELETE FROM ${table} AS "fulltext_target"
         USING ${source}
@@ -494,7 +494,7 @@ export const tsvectorStrategy: FulltextStrategy = {
         ("graph_id", "node_kind", "node_id", "content", "language", "updated_at")
       SELECT
         ${sourceColumn("graph_id")}, ${sourceColumn("kind")},
-        ${sourceColumn("id")}, ${sync.content}, ${sync.language}::regconfig,
+        ${sourceColumn("id")}, ${projection.content}, ${projection.language}::regconfig,
         ${timestamp}
       FROM ${source}
       ON CONFLICT ("graph_id", "node_kind", "node_id")

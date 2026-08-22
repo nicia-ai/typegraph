@@ -7,7 +7,11 @@
  */
 import { type z } from "zod";
 
-import { type GraphBackend, type TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  type NodeInsertProjection,
+  type TransactionBackend,
+} from "../backend/types";
 import {
   type ResolvedEmbeddingField,
   resolveEmbeddingFields,
@@ -72,6 +76,33 @@ export function getEmbeddingFields(
 // ============================================================
 // Embedding Sync Operations
 // ============================================================
+
+/**
+ * Resolves the present embedding sidecar for a fresh generated-id node.
+ * Missing optional values are intentionally omitted because no row can exist
+ * for a generated id before this insert. Caller-supplied ids use the regular
+ * sync path, which retains its delete semantics for missing values.
+ */
+export function resolveNodeEmbeddingProjections(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+): readonly NodeInsertProjection[] {
+  return getEmbeddingFields(schema).flatMap((field) => {
+    const value = readOwnProperty(props, field.fieldPath);
+    return isValidEmbeddingValue(value) ?
+        [
+          {
+            kind: "embedding",
+            fieldPath: field.fieldPath,
+            embedding: value,
+            dimensions: field.dimensions,
+            metric: field.metric,
+            indexType: field.indexType,
+          },
+        ]
+      : [];
+  });
+}
 
 /**
  * Syncs embeddings after a node create or update operation.

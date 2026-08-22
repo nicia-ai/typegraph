@@ -297,6 +297,7 @@ function insertWork(id: string): NodeInsertWork {
       props: documentProps(id),
       uniqueConstraints,
     },
+    projections: [],
   };
 }
 

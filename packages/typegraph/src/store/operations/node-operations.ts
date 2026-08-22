@@ -44,11 +44,14 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
+import { type z } from "zod";
+
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
+import { supportsNodeInsertProjections } from "../../backend/capabilities/node-insert-projections";
 import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -60,6 +63,7 @@ import {
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
+  type NodeInsertProjection,
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
   type TransactionBackend,
@@ -134,8 +138,14 @@ import {
   type ConstraintFenceReason,
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
-import { getEmbeddingFields } from "../embedding-sync";
-import { getSearchableFields, resolveNodeFulltextSync } from "../fulltext-sync";
+import {
+  getEmbeddingFields,
+  resolveNodeEmbeddingProjections,
+} from "../embedding-sync";
+import {
+  getSearchableFields,
+  resolveNodeFulltextProjection,
+} from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
@@ -987,6 +997,18 @@ function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
   };
 }
 
+/** Resolves every projection owed by a fresh generated-id node in one place. */
+function resolveNodeInsertProjections(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+): readonly NodeInsertProjection[] {
+  const fulltext = resolveNodeFulltextProjection(schema, props);
+  return [
+    ...(fulltext === undefined ? [] : [fulltext]),
+    ...resolveNodeEmbeddingProjections(schema, props),
+  ];
+}
+
 /**
  * One prepared create as the session's insert unit: the row params, the claims
  * the row owes, and the sidecar inputs, as ONE value.
@@ -999,13 +1021,13 @@ function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
  */
 function nodeInsertWork(
   prepared: NodeCreatePrepared,
-  fulltext?: ReturnType<typeof resolveNodeFulltextSync>,
+  projections: readonly NodeInsertProjection[] = [],
 ): NodeInsertWork {
   return {
     params: prepared.insertParams,
     claim: nodeCreateClaimItem(prepared),
     sideEffects: nodeCreateSideEffectItem(prepared),
-    ...(fulltext === undefined ? {} : { fulltext }),
+    projections,
   };
 }
 
@@ -1830,23 +1852,19 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       target,
       options,
     );
-    const fulltext = resolveNodeFulltextSync(
+    const projections = resolveNodeInsertProjections(
       prepared.nodeKind.schema,
       prepared.validatedProps,
-      {
-        graphId: ctx.graphId,
-        nodeKind: prepared.kind,
-        nodeId: prepared.id,
-      },
     );
-    const fulltextFusionEligible =
-      shouldReturnRow && !prepared.idProvided && fulltext !== undefined;
-    const fuseFulltext =
-      fulltextFusionEligible && target.insertNodeWithFulltext !== undefined;
-    const fuseSchemaFenceWithFulltext =
+    const projectionFusionEligible =
+      shouldReturnRow && !prepared.idProvided && projections.length > 0;
+    const fuseProjections =
+      projectionFusionEligible &&
+      supportsNodeInsertProjections(target, projections);
+    const fuseSchemaFenceProjections =
       fuseSchemaFenceInFirstWrite &&
-      fulltextFusionEligible &&
-      target.insertNodeWithSchemaFenceAndFulltext !== undefined;
+      projectionFusionEligible &&
+      supportsNodeInsertProjections(target, projections);
 
     const existing = prepared.tombstone;
     if (existing !== undefined) {
@@ -1868,8 +1886,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         expectedVersion: requireDefined(ctx.schemaVersion),
       };
       const work =
-        fuseSchemaFenceWithFulltext ?
-          nodeInsertWork(prepared, fulltext)
+        fuseSchemaFenceProjections ?
+          nodeInsertWork(prepared, projections)
         : nodeInsertWork(prepared);
       const inserted =
         prepared.insertIfAbsent ?
@@ -1891,9 +1909,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       }
     }
 
-    if (fuseFulltext && !fuseSchemaFenceWithFulltext) {
+    if (fuseProjections && !fuseSchemaFenceProjections) {
       const row = await withAlreadyExistsTranslation("node", () =>
-        session.createNode(nodeInsertWork(prepared, fulltext)),
+        session.createNode(nodeInsertWork(prepared, projections)),
       );
       return rowToNode(row);
     }
