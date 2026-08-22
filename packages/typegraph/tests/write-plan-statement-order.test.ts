@@ -254,16 +254,28 @@ const CASES: readonly OrderCase[] = [
   {
     entryPoint: "node create (constrained: shared-scope unique)",
     run: () =>
-      store.nodes.Employee.create({
-        email: "create@example.com",
-        name: "Created",
-      }),
+      store.nodes.Employee.create(
+        { email: "create@example.com", name: "Created" },
+        { id: "employee-created" },
+      ),
     graphWriteLocks: 1,
     identityLock: true,
   },
   {
-    entryPoint: "node create (unconstrained)",
+    entryPoint: "node create (unconstrained, generated id)",
     run: () => store.nodes.Loose.create({ name: "loose" }),
+    graphWriteLocks: 0,
+    // Generated ids cannot collide across kinds, so this create has no
+    // identity fold to protect and must not pay for the identity lock.
+    identityLock: false,
+  },
+  {
+    entryPoint: "node create (unconstrained, caller-supplied id)",
+    run: () =>
+      store.nodes.Loose.create(
+        { name: "loose-explicit" },
+        { id: "loose-explicit" },
+      ),
     graphWriteLocks: 0,
     identityLock: true,
   },
@@ -551,6 +563,28 @@ describe("every managed write locks before it writes", () => {
       );
     });
   }
+});
+
+describe("generated node ids avoid identity lock round trips", () => {
+  it("omits identity locks when no cross-kind fold is possible", async () => {
+    statements.splice(0);
+    await store.nodes.Loose.create({ name: "generated-id" });
+    const generatedIdentityLocks = countAdvisoryLocks(IDENTITY_NAMESPACE);
+
+    statements.splice(0);
+    await store.nodes.Loose.create(
+      { name: "caller-id" },
+      { id: "caller-id-for-lock-count" },
+    );
+    const callerSuppliedIdentityLocks = countAdvisoryLocks(IDENTITY_NAMESPACE);
+
+    // The caller-supplied path acquires the write-frame lock and the identity
+    // fold helper's lock. Generated ids cannot collide across kinds, so it
+    // needs neither. This is the measured RTT reduction for the common
+    // generated-id create path, not a statement-count estimate.
+    expect(generatedIdentityLocks).toBe(0);
+    expect(callerSuppliedIdentityLocks).toBe(2);
+  });
 });
 
 /**
