@@ -541,8 +541,8 @@ export const serializedSchemaZod = z.object({
                 name: z.string(),
                 fields: z.array(z.string()),
                 where: z.string().optional(),
-                scope: uniquenessScopeZod,
-                collation: collationZod,
+                scope: uniquenessScopeZod.default("kind"),
+                collation: collationZod.default("binary"),
               })
               .loose(),
           ),
