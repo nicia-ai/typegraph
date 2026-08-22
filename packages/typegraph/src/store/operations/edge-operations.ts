@@ -150,6 +150,7 @@ import {
   validityEndAfterMutation,
 } from "../validity-end";
 import { withAlreadyExistsTranslation } from "./already-exists";
+import { isAutocommitSingleStatementWrite } from "./autocommit-single-statement";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
   assertEdgeIdentityMatches,
@@ -161,7 +162,11 @@ import {
   withUnmatchedEdgeUpdateRefusal,
 } from "./edge-write-fences";
 import { type EdgeUpdateWork } from "./edge-write-pipeline";
-import { runHookedWritePlan, runWritePlan } from "./write-executor";
+import {
+  runAutocommitSingleStatementWritePlan,
+  runHookedWritePlan,
+  runWritePlan,
+} from "./write-executor";
 import {
   assertsStoredWindowState,
   type EdgeUpdateFences,
@@ -527,128 +532,145 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     convergeOn === undefined &&
     edgeCardinality(ctx, kind) === "many" &&
     backend.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined;
-
-  return runHookedWritePlan(
-    ctx,
-    opContext,
-    // A create that runs a cardinality probe, or one converging on a match
-    // key, decides something the write must not have invalidated. A plain
-    // `many` create decides nothing and takes no lock.
-    edgeWritePlan(
-      convergeOn === undefined ?
-        edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
-      : "edgeMatchKeyConvergence",
-    ),
-    backend,
-    async (session, target): Promise<Edge | undefined> => {
-      // See node create's matching receiver check: a custom transaction
-      // wrapper may replace the marked outer backend with an unmarked target.
-      // Fall back to the ordinary fence before any row work in that case.
-      const targetBackend = unfencedTarget(target);
-      const fuseSchemaFenceInFirstWrite =
-        schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
-      if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
-      }
-      if (convergeOn !== undefined) {
-        const candidateRows = await target.findEdgesByKind({
-          graphId: ctx.graphId,
-          kind,
-          fromKind: input.fromKind,
-          fromId: input.fromId,
-          toKind: input.toKind,
-          toId: input.toId,
-          excludeDeleted: false,
-          temporalMode: "includeTombstones",
-        });
-        const { liveRow, deletedRow } = findMatchingEdge(
-          candidateRows,
-          convergeOn.matchOn,
-          convergeOn.props,
-        );
-        if (liveRow !== undefined || deletedRow !== undefined) {
-          throw new EdgeConvergenceRaced(kind);
-        }
-      }
-
-      const declaredCardinality = edgeCardinality(ctx, kind);
-      const usesGuardedCardinalityClaim =
-        declaredCardinality !== "many" &&
-        edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind ===
-          "guarded";
-      const canFuseEndpointCheck =
-        input.id === undefined &&
-        convergeOn === undefined &&
-        (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
-        (target.insertEdgeIfEndpointsLive !== undefined ||
-          (fuseSchemaFenceInFirstWrite &&
-            target.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined));
-      let prepared = await validateAndPrepareEdgeCreate(
-        ctx,
-        input,
-        id,
-        target,
-        {
-          validateEndpoints: !canFuseEndpointCheck,
-          validateCardinality: !usesGuardedCardinalityClaim,
-        },
-      );
-
-      // A plain, generated-id `many` edge owes no cardinality claim and no
-      // sidecar. Its only pre-insert database reads were endpoint existence
-      // probes, so first-party backends can make their live-node predicates
-      // part of the INSERT ... SELECT itself. Do not infer an endpoint error
-      // from an empty RETURNING result: retry the ordinary ordered validation
-      // below, which preserves source-before-target typed refusals and handles
-      // a concurrent endpoint revival before we report anything.
-      if (canFuseEndpointCheck) {
-        const fusedWork = edgeInsertWork(prepared);
-        const fusedRow = await withAlreadyExistsTranslation("edge", () =>
-          fuseSchemaFenceInFirstWrite ?
-            session.createEdgeIfEndpointsLiveWithSchemaFence(
-              prepared.insertParams,
-              {
-                graphId: ctx.graphId,
-                expectedVersion: requireDefined(ctx.schemaVersion),
-              },
-            )
-          : session.createEdgeIfEndpointsLive(fusedWork),
-        );
-        if (fusedRow !== undefined) return rowToEdge(fusedRow);
-
-        if (fuseSchemaFenceInFirstWrite) {
-          await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
-        }
-
-        prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-          validateCardinality: !usesGuardedCardinalityClaim,
-        });
-      }
-
-      // An edge create has no existence probe at all — its id is either
-      // caller-supplied or freshly generated — so the engine's refusal is the ONLY
-      // report that the id is taken. Translated here, that report is the same
-      // already-exists error a node create raises. The translation spans the fused
-      // unit — the claim and the row — which is inert for the claim half: a
-      // contended claim raises a `CardinalityError`, never a duplicate-key insert
-      // report.
-      //
-      // The claim is DECIDED here (a pure function of the cardinality this
-      // preparation resolved) and ISSUED by the session, before the row it gates:
-      // the probe above read a population no key fences, so the claim row is what
-      // stops a concurrent writer that read the same population from also
-      // committing, and a refusal there has written no edge row.
-      const work = edgeInsertWork(prepared);
-      const row = await withAlreadyExistsTranslation("edge", async () => {
-        if (shouldReturnRow) return session.createEdge(work);
-        await session.createEdgeNoReturn(work);
-        return;
-      });
-
-      return row === undefined ? undefined : rowToEdge(row);
-    },
-    { schemaFenceInFirstWrite },
+  const autocommitBackend = "transaction" in backend ? backend : undefined;
+  const autocommitSingleStatement =
+    autocommitBackend !== undefined &&
+    hasOwnKey(ctx.graph.edges, kind) &&
+    isAutocommitSingleStatementWrite({
+      kind: "edge",
+      candidate: {
+        backend: autocommitBackend,
+        schemaVersion: ctx.schemaVersion,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+        idGenerated: input.id === undefined,
+        kindRegistered: true,
+        convergesOnMatchKey: convergeOn !== undefined,
+        cardinality: edgeCardinality(ctx, kind),
+      },
+    });
+  const plan = edgeWritePlan(
+    convergeOn === undefined ?
+      edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
+    : "edgeMatchKeyConvergence",
   );
+
+  const rowWork = async (
+    session: EdgeWriteSession,
+    target: WriteTarget,
+  ): Promise<Edge | undefined> => {
+    // See node create's matching receiver check: a custom transaction
+    // wrapper may replace the marked outer backend with an unmarked target.
+    // Fall back to the ordinary fence before any row work in that case.
+    const targetBackend = unfencedTarget(target);
+    const fuseSchemaFenceInFirstWrite =
+      schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
+    if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
+      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+    }
+    if (convergeOn !== undefined) {
+      const candidateRows = await target.findEdgesByKind({
+        graphId: ctx.graphId,
+        kind,
+        fromKind: input.fromKind,
+        fromId: input.fromId,
+        toKind: input.toKind,
+        toId: input.toId,
+        excludeDeleted: false,
+        temporalMode: "includeTombstones",
+      });
+      const { liveRow, deletedRow } = findMatchingEdge(
+        candidateRows,
+        convergeOn.matchOn,
+        convergeOn.props,
+      );
+      if (liveRow !== undefined || deletedRow !== undefined) {
+        throw new EdgeConvergenceRaced(kind);
+      }
+    }
+
+    const declaredCardinality = edgeCardinality(ctx, kind);
+    const usesGuardedCardinalityClaim =
+      declaredCardinality !== "many" &&
+      edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind === "guarded";
+    const canFuseEndpointCheck =
+      input.id === undefined &&
+      convergeOn === undefined &&
+      (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
+      (target.insertEdgeIfEndpointsLive !== undefined ||
+        (fuseSchemaFenceInFirstWrite &&
+          target.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined));
+    let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+      validateEndpoints: !canFuseEndpointCheck,
+      validateCardinality: !usesGuardedCardinalityClaim,
+    });
+
+    // A plain, generated-id `many` edge owes no cardinality claim and no
+    // sidecar. Its only pre-insert database reads were endpoint existence
+    // probes, so first-party backends can make their live-node predicates
+    // part of the INSERT ... SELECT itself. Do not infer an endpoint error
+    // from an empty RETURNING result: retry the ordinary ordered validation
+    // below, which preserves source-before-target typed refusals and handles
+    // a concurrent endpoint revival before we report anything.
+    if (canFuseEndpointCheck) {
+      const fusedWork = edgeInsertWork(prepared);
+      const fusedRow = await withAlreadyExistsTranslation("edge", () =>
+        fuseSchemaFenceInFirstWrite ?
+          session.createEdgeIfEndpointsLiveWithSchemaFence(
+            prepared.insertParams,
+            {
+              graphId: ctx.graphId,
+              expectedVersion: requireDefined(ctx.schemaVersion),
+            },
+          )
+        : session.createEdgeIfEndpointsLive(fusedWork),
+      );
+      if (fusedRow !== undefined) return rowToEdge(fusedRow);
+
+      if (fuseSchemaFenceInFirstWrite) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+      }
+
+      prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+        validateCardinality: !usesGuardedCardinalityClaim,
+      });
+    }
+
+    // An edge create has no existence probe at all — its id is either
+    // caller-supplied or freshly generated — so the engine's refusal is the ONLY
+    // report that the id is taken. Translated here, that report is the same
+    // already-exists error a node create raises. The translation spans the fused
+    // unit — the claim and the row — which is inert for the claim half: a
+    // contended claim raises a `CardinalityError`, never a duplicate-key insert
+    // report.
+    //
+    // The claim is DECIDED here (a pure function of the cardinality this
+    // preparation resolved) and ISSUED by the session, before the row it gates:
+    // the probe above read a population no key fences, so the claim row is what
+    // stops a concurrent writer that read the same population from also
+    // committing, and a refusal there has written no edge row.
+    const work = edgeInsertWork(prepared);
+    const row = await withAlreadyExistsTranslation("edge", async () => {
+      if (shouldReturnRow) return session.createEdge(work);
+      await session.createEdgeNoReturn(work);
+      return;
+    });
+
+    return row === undefined ? undefined : rowToEdge(row);
+  };
+
+  if (autocommitSingleStatement) {
+    return runAutocommitSingleStatementWritePlan(
+      ctx,
+      opContext,
+      plan,
+      autocommitBackend,
+      rowWork,
+    );
+  }
+  return runHookedWritePlan(ctx, opContext, plan, backend, rowWork, {
+    schemaFenceInFirstWrite,
+  });
 }
 
 /**

@@ -31,6 +31,7 @@ import {
 
 import { ConfigurationError } from "../../errors";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
+import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
 import { generateSqliteDDL } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
@@ -365,7 +366,7 @@ export function createLocalSqliteBackend(
       sqlite.close();
     });
 
-    return { backend: managedBackend, db };
+    return { backend: markBundledRootAutocommitEligible(managedBackend), db };
   } catch (error) {
     try {
       sqlite.close();

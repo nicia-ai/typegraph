@@ -41,6 +41,7 @@ import { type Extension, PGlite } from "@electric-sql/pglite";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 
 import { ConfigurationError } from "../../errors";
+import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
 export type { GraphIdentityConfig } from "../../core/define-graph";
 import {
@@ -210,7 +211,11 @@ export async function createLocalPgliteBackend(
       await client.close();
     });
 
-    return { backend: managedBackend, db, client };
+    return {
+      backend: markBundledRootAutocommitEligible(managedBackend),
+      db,
+      client,
+    };
   } catch (error) {
     return closeAfterFailure(client, error);
   }

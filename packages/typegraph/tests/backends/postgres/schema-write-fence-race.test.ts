@@ -29,6 +29,7 @@ import {
   describe,
   expect,
   it,
+  vi,
 } from "vitest";
 import { z } from "zod";
 
@@ -177,6 +178,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
     });
 
     afterEach(async () => {
+      vi.restoreAllMocks();
       // Only reached when a test failed before committing the held flip; the
       // connection may already be unusable, so the rollback is best-effort.
       if (flipHolder === undefined) return;
@@ -229,16 +231,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
      * exactly when the fence wakes) is enough to hit it.
      */
     it("resolves the empty locked read without locking the row again", async () => {
-      const statements: string[] = [];
-      const backend = createPostgresBackend(
-        drizzle(requirePool(), {
-          logger: {
-            logQuery(query: string) {
-              statements.push(query);
-            },
-          },
-        }),
-      );
+      const querySpy = vi.spyOn(requirePool(), "query");
+      const backend = createPostgresBackend(drizzle(requirePool()));
       const [store] = await createStoreWithSchema(
         makeGraph(FENCE_GRAPH_ID),
         backend,
@@ -246,7 +240,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
       flipHolder = await beginHeldSchemaFlip(FENCE_GRAPH_ID, 2);
 
-      statements.length = 0;
+      querySpy.mockClear();
       const rejection = store.nodes.Person.create({ name: "Alice" }).catch(
         (error: unknown) => error,
       );
@@ -259,6 +253,20 @@ describe.runIf(process.env["POSTGRES_URL"])(
       flipHolder = undefined;
 
       expect(await rejection).toBeInstanceOf(StaleVersionError);
+      const statements = querySpy.mock.calls.flatMap((call) => {
+        const query: unknown = call[0];
+        if (typeof query === "string") return [query];
+        if (
+          typeof query === "object" &&
+          query !== null &&
+          "text" in query &&
+          typeof query.text === "string"
+        ) {
+          return [query.text];
+        }
+        return [];
+      });
+      querySpy.mockRestore();
       expect(lockingReadCount(statements)).toBe(1);
     });
 
