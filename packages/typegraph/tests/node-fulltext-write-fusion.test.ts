@@ -11,6 +11,8 @@ import {
   type GraphBackend,
   type InsertNodeParams,
   type NodeFulltextSync,
+  type NodeInsertPlan,
+  type NodeInsertProjection,
   type SchemaWriteFenceParams,
   type TransactionBackend,
 } from "../src/backend/types";
@@ -49,6 +51,34 @@ function hasSchemaFence(query: string): boolean {
   return /typegraph_schema_versions/iu.test(query);
 }
 
+function fulltextProjection(fulltext: NodeFulltextSync): NodeInsertProjection {
+  return fulltext.action === "upsert" ?
+      {
+        kind: "fulltext",
+        action: "upsert",
+        content: fulltext.content,
+        language: fulltext.language,
+      }
+    : { kind: "fulltext", action: "delete" };
+}
+
+function ordinaryPlan(fulltext: NodeFulltextSync): NodeInsertPlan {
+  return {
+    mode: { kind: "ordinary" },
+    projections: [fulltextProjection(fulltext)],
+  };
+}
+
+function schemaFencedPlan(
+  fulltext: NodeFulltextSync,
+  schemaFence: SchemaWriteFenceParams,
+): NodeInsertPlan {
+  return {
+    mode: { kind: "schema-fenced", schemaFence },
+    projections: [fulltextProjection(fulltext)],
+  };
+}
+
 describe("fresh node + fulltext write fusion", () => {
   it("uses one schema-fenced statement for a generated searchable node", async () => {
     const fixture = await createRecordedPostgresStore(graph);
@@ -77,19 +107,17 @@ describe("fresh node + fulltext write fusion", () => {
     const fixture = await createRecordedPostgresStore(graph);
     const [store] = await createStoreWithSchema(graph, fixture.backend);
     requireDefined(
-      fixture.backend.insertNodeWithSchemaFenceAndFulltext,
-      "schema-fenced fulltext member",
+      fixture.backend.insertNodeWithProjections,
+      "projection member",
     );
-    const spy = vi.spyOn(
-      fixture.backend,
-      "insertNodeWithSchemaFenceAndFulltext",
-    );
+    const spy = vi.spyOn(fixture.backend, "insertNodeWithProjections");
     const transactionSpy = vi.spyOn(fixture.backend, "transaction");
 
     await store.nodes.Document.create({ title: "root dispatch" });
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.results[0]?.type).toBe("return");
+    expect(spy.mock.calls[0]?.[1].mode.kind).toBe("schema-fenced");
     expect(transactionSpy).not.toHaveBeenCalled();
     spy.mockRestore();
     transactionSpy.mockRestore();
@@ -115,7 +143,10 @@ describe("fresh node + fulltext write fusion", () => {
 
     fixture.reset();
     await fixture.backend.transaction(async (tx) => {
-      await requireDefined(tx.insertNodeWithFulltext)(params, fulltext);
+      await requireDefined(tx.insertNodeWithProjections)(
+        params,
+        ordinaryPlan(fulltext),
+      );
     });
 
     expect(fixture.statements).toHaveLength(1);
@@ -151,37 +182,28 @@ describe("fresh node + fulltext write fusion", () => {
   it("uses schema-fenced fusion without requiring the ordinary fused member", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     let fusedCallCount = 0;
-    const schemaOnlyBackend: GraphBackend = deriveBackend(
-      projectBackendWithout(fixture.backend, ["insertNodeWithFulltext"]),
-      {
-        async transaction<T>(
-          fn: (tx: TransactionBackend) => Promise<T>,
-          options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
-        ): Promise<T> {
-          return fixture.backend.transaction((tx) => {
-            const projected = projectBackendWithout(tx, [
-              "insertNodeWithFulltext",
-            ]);
-            const insert = requireDefined(
-              projected.insertNodeWithSchemaFenceAndFulltext,
-              "schema-fenced fulltext member",
-            );
-            return fn(
-              deriveBackend(projected, {
-                async insertNodeWithSchemaFenceAndFulltext(
-                  params: InsertNodeParams,
-                  fulltext: NodeFulltextSync,
-                  schemaFence: SchemaWriteFenceParams,
-                ) {
-                  fusedCallCount += 1;
-                  return insert(params, fulltext, schemaFence);
-                },
-              }),
-            );
-          }, options);
-        },
+    const schemaOnlyBackend: GraphBackend = deriveBackend(fixture.backend, {
+      async transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
+      ): Promise<T> {
+        return fixture.backend.transaction((tx) => {
+          const insert = requireDefined(tx.insertNodeWithProjections);
+          return fn(
+            deriveBackend(tx, {
+              async insertNodeWithProjections(
+                params: InsertNodeParams,
+                plan: NodeInsertPlan,
+              ) {
+                fusedCallCount += 1;
+                expect(plan.mode.kind).toBe("schema-fenced");
+                return insert(params, plan);
+              },
+            }),
+          );
+        }, options);
       },
-    );
+    });
     const [store] = await createStoreWithSchema(graph, schemaOnlyBackend);
 
     await store.nodes.Document.create({ title: "schema member independently" });
@@ -251,7 +273,10 @@ describe("fresh node + fulltext write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) => {
-        await requireDefined(tx.insertNodeWithFulltext)(params, fulltext);
+        await requireDefined(tx.insertNodeWithProjections)(
+          params,
+          ordinaryPlan(fulltext),
+        );
       }),
     ).rejects.toThrow();
 
@@ -289,7 +314,10 @@ describe("fresh node + fulltext write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) => {
-        await requireDefined(tx.insertNodeWithFulltext)(params, fulltext);
+        await requireDefined(tx.insertNodeWithProjections)(
+          params,
+          ordinaryPlan(fulltext),
+        );
       }),
     ).rejects.toThrow();
 
@@ -304,7 +332,7 @@ describe("fresh node + fulltext write fusion", () => {
     ).toHaveLength(0);
   });
 
-  it("refuses a fulltext action for a different node before writing either row", async () => {
+  it("refuses a projection plan whose schema fence targets another graph", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     await createStoreWithSchema(graph, fixture.backend);
     const params: InsertNodeParams = {
@@ -313,10 +341,10 @@ describe("fresh node + fulltext write fusion", () => {
       id: "correlated-node",
       props: { title: "correlated content" },
     };
-    const mismatchedFulltext: NodeFulltextSync = {
+    const projection: NodeFulltextSync = {
       graphId: graph.id,
       nodeKind: "Document",
-      nodeId: "different-node",
+      nodeId: params.id,
       action: "upsert",
       content: "correlated content",
       language: "english",
@@ -324,7 +352,13 @@ describe("fresh node + fulltext write fusion", () => {
 
     await fixture.backend.transaction(async (tx) => {
       await expect(
-        requireDefined(tx.insertNodeWithFulltext)(params, mismatchedFulltext),
+        requireDefined(tx.insertNodeWithProjections)(
+          params,
+          schemaFencedPlan(projection, {
+            graphId: "different-graph",
+            expectedVersion: 1,
+          }),
+        ),
       ).rejects.toMatchObject({ code: "COMPILER_INVARIANT_ERROR" });
     });
 
@@ -395,13 +429,7 @@ describe("fresh node + fulltext write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction(
-          (tx) =>
-            fn(
-              projectBackendWithout(tx, [
-                "insertNodeWithFulltext",
-                "insertNodeWithSchemaFenceAndFulltext",
-              ]),
-            ),
+          (tx) => fn(projectBackendWithout(tx, ["insertNodeWithProjections"])),
           options,
         );
       },
@@ -422,7 +450,7 @@ describe("fresh node + fulltext write fusion", () => {
   it("keeps SQLite on its ordinary sidecar path", async () => {
     const database = createTestDatabase();
     const backend = createSqliteBackend(database);
-    expect(backend.insertNodeWithFulltext).toBeUndefined();
+    expect(backend.insertNodeWithProjections).toBeUndefined();
 
     const [store] = await createStoreWithSchema(graph, backend);
     const node = await store.nodes.Document.create({ title: "sqlite" });

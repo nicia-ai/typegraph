@@ -9,6 +9,7 @@
 import { type z } from "zod";
 
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
+import { supportsNodeInsertProjectionRequirements } from "../../backend/capabilities/node-insert-projections";
 import { type GraphBackend } from "../../backend/types";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
@@ -72,10 +73,15 @@ export function isAutocommitSingleStatementWrite(
         candidate.kindRegistered &&
         candidate.uniqueConstraintCount === 0 &&
         candidate.disjointKindCount === 0 &&
-        getEmbeddingFields(candidate.schema).length === 0 &&
-        (getSearchableFields(candidate.schema).length === 0 ?
-          candidate.backend.insertNodeWithSchemaFence !== undefined
-        : candidate.backend.insertNodeWithSchemaFenceAndFulltext !== undefined)
+        ((
+          getEmbeddingFields(candidate.schema).length > 0 ||
+          getSearchableFields(candidate.schema).length > 0
+        ) ?
+          supportsNodeInsertProjectionRequirements(candidate.backend, {
+            embedding: getEmbeddingFields(candidate.schema).length > 0,
+            fulltext: getSearchableFields(candidate.schema).length > 0,
+          })
+        : candidate.backend.insertNodeWithSchemaFence !== undefined)
       );
     }
 

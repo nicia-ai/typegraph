@@ -395,8 +395,6 @@ export type GatableFulltextBackend = Pick<
   | "deleteFulltextBatch"
   | "fulltextSearch"
   | "hardDeleteNode"
-  | "insertNodeWithFulltext"
-  | "insertNodeWithSchemaFenceAndFulltext"
 >;
 
 type RefuseUnavailableFulltext = (
@@ -530,24 +528,6 @@ export function gateFulltextMethods(
       );
     };
   }
-  if (source.insertNodeWithFulltext) {
-    const raw = source.insertNodeWithFulltext;
-    gated.insertNodeWithFulltext = async (params, fulltext) =>
-      executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params, fulltext),
-      );
-  }
-  if (source.insertNodeWithSchemaFenceAndFulltext) {
-    const raw = source.insertNodeWithSchemaFenceAndFulltext;
-    gated.insertNodeWithSchemaFenceAndFulltext = async (
-      params,
-      fulltext,
-      schemaFence,
-    ) =>
-      executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params, fulltext, schemaFence),
-      );
-  }
   if (source.fulltextSearch) {
     const raw = source.fulltextSearch;
     gated.fulltextSearch = async (params) => {
@@ -676,6 +656,15 @@ export type ContributionMaterializer = Readonly<{
    * other failure is rethrown unchanged.
    */
   refuseUnavailableFulltext: RefuseUnavailableFulltext;
+  /** Classifies missing storage named by a fused node projection statement. */
+  refuseUnavailableNodeInsertProjections: (
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+    error: unknown,
+  ) => Promise<never>;
   /**
    * Privileged materializer for one vector slot's `ownedTables`
    * contribution(s): creates the per-`(kind, field)` table and records
@@ -706,6 +695,17 @@ export type ContributionMaterializer = Readonly<{
   assertVectorSlot: (slot: VectorSlot) => Promise<void>;
   /** Batch form used by verified attach to perform one marker read. */
   assertVectorSlots: (slots: readonly VectorSlot[]) => Promise<void>;
+  /**
+   * One marker gate for every projection a fused node insert will write.
+   * Fulltext and all vector slots share the same marker read on a cold cache.
+   */
+  assertNodeInsertProjections: (
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ) => Promise<void>;
   /**
    * Forget a vector slot: delete its `ownedTables` contribution
    * marker(s) and evict the per-instance cache. Called after the slot's
@@ -1220,6 +1220,34 @@ export function createContributionMaterializer(
     throw error;
   }
 
+  async function refuseUnavailableNodeInsertProjections(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+    error: unknown,
+  ): Promise<never> {
+    await Promise.resolve();
+    if (!isMissingTableError(error)) throw error;
+    const vectorContributions =
+      groupVectorContributions(projections.vectorSlots).get(graphId) ?? [];
+    const missingContribution = [
+      ...(projections.fulltext ? runtimeContributions() : []),
+      ...vectorContributions,
+    ].find((contribution) =>
+      missingTableErrorNames(error, contribution.tableName),
+    );
+    if (missingContribution !== undefined) {
+      throw new ContributionUnavailableError(
+        graphId,
+        missingContribution.tableName,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
   async function ensureVectorSlot(
     slot: VectorSlot,
     options?: Readonly<{ force?: boolean; onDrift?: "throw" | "skip" }>,
@@ -1260,6 +1288,21 @@ export function createContributionMaterializer(
     for (const [graphId, contributions] of groupVectorContributions(slots)) {
       await assertContributions(graphId, contributions);
     }
+  }
+
+  async function assertNodeInsertProjections(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): Promise<void> {
+    const vectorContributions =
+      groupVectorContributions(projections.vectorSlots).get(graphId) ?? [];
+    await assertContributions(graphId, [
+      ...(projections.fulltext ? runtimeContributions() : []),
+      ...vectorContributions,
+    ]);
   }
 
   function verificationTargetsByGraph(
@@ -1837,10 +1880,12 @@ export function createContributionMaterializer(
     ensureRuntimeContributions,
     assertInitialized,
     refuseUnavailableFulltext,
+    refuseUnavailableNodeInsertProjections,
     ensureVectorSlot,
     ensureVectorSlots,
     assertVectorSlot,
     assertVectorSlots,
+    assertNodeInsertProjections,
     dropVectorSlot,
     evictVectorSlot,
     verifyContributions,

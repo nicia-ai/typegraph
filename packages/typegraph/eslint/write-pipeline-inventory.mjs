@@ -13,7 +13,7 @@
  */
 
 /**
- * The 40 backend members no module outside the seam may call: the three WRITE
+ * The 42 backend members no module outside the seam may call: the three WRITE
  * classes of `src/backend/member-classes.ts` — graph-entity writes, their
  * sidecars (both claim relations included), and backend-owned bulk ingestion.
  */
@@ -23,8 +23,7 @@ export const WRITE_MEMBER_NAMES = [
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",
   "insertNodeWithSchemaFence",
-  "insertNodeWithFulltext",
-  "insertNodeWithSchemaFenceAndFulltext",
+  "insertNodeWithProjections",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -257,8 +256,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "insertNodeIfAbsent",
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",
-      "insertNodeWithFulltext",
-      "insertNodeWithSchemaFenceAndFulltext",
+      "insertNodeWithProjections",
       "updateNode",
       "updateNodeSet",
       "deleteNode",
@@ -332,8 +330,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "insertEdgeIfEndpointsLiveWithSchemaFence",
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",
-      "insertNodeWithFulltext",
-      "insertNodeWithSchemaFenceAndFulltext",
+      "insertNodeWithProjections",
     ],
     allowedImports: WRITE_PIPELINE_INTERNAL_IMPORT_NAMES,
   },

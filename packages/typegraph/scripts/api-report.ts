@@ -158,6 +158,13 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * #533 then widened the transaction schema-fence facet with the fused
  * schema-plus-graph lock member, adding one measured symbol to the 12
  * entrypoints which render that facet.
+ *
+ * Generated-node projection fusion (#533): replacing the two fulltext-only
+ * members with the generic `insertNodeWithProjections` contract makes
+ * `NodeInsertMode`, `NodeInsertPlan`, and `NodeInsertProjection` reachable
+ * through the 12 entrypoints which render `GraphBackend` without exporting
+ * those backend-authoring types directly (+3 each). `.` and `./backend`
+ * export all three names, so their forgotten-export debt is unchanged.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -169,24 +176,24 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 208,
-    sha256: "25d5d01fa61be3f8ce8da8a4dde58622982c42fcc70d14490a8bba8dcd8732f7",
+    count: 211,
+    sha256: "984e911321776526b657167ebd13c4294a2987c5e16eb360f2e48aa686a2cbc3",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 212,
-    sha256: "1226ed2b41f7b9844761148c373ec615286f494e9330668b715395d8f5533858",
+    count: 215,
+    sha256: "a8fefce432e6387ce3901cbec21539700c52647ce9bfcbfc686359deb534d437",
   },
   "./adapters/drizzle/sqlite": {
-    count: 209,
-    sha256: "f4f9269a5e692e4bdd2ea587a3bc35da25239e1fd0b9dc3238adae37368f4d24",
+    count: 212,
+    sha256: "6d8f49c49400333d3348fe268318c3d2f12becc14f08e867d2254db159a2389e",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 212,
-    sha256: "81aae036d8b881859239d1ab237783c7e689ccd8a72281e1f388911db4a3ba17",
+    count: 215,
+    sha256: "37d09a193a00e65c7e0c1e4fe7815fdc51808f575ef82d6cf1b959ccad8fda44",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 212,
-    sha256: "81aae036d8b881859239d1ab237783c7e689ccd8a72281e1f388911db4a3ba17",
+    count: 215,
+    sha256: "37d09a193a00e65c7e0c1e4fe7815fdc51808f575ef82d6cf1b959ccad8fda44",
   },
   "./backend": {
     count: 12,
@@ -201,36 +208,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 624,
-    sha256: "b487a2432e948033dcee830d1b66dea72ad088f91a1532b5b1e22546ed6d6cc1",
+    count: 627,
+    sha256: "09ccac6dc7b2d6f11b8c7523cee100e7a763eef4d1c2eb54ef79ec4321d25dc2",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 610,
-    sha256: "e0bfa932580ebcbe6179d6b950ff36894dc33f5008b8cea310ca2eec885c5a99",
+    count: 613,
+    sha256: "8f6948f4d1d3a8e7cf11f33121106c73b9b6b42f4a6152d883c7f52a2240371d",
   },
   "./postgres/pglite": {
-    count: 614,
-    sha256: "3704accf6d9b1390bbc07f47df6554f184ace3e1a1bafb1eafb37e3881bed236",
+    count: 617,
+    sha256: "9f76aea1b0ffede41efb2658f7db4bacb455039c2f0ff0754bf0b25c8375f87f",
   },
   "./profiler": {
-    count: 612,
-    sha256: "6996e94841d29ae96ac981a91da88fc53341a903802a20d6b6d3ef9da6594720",
+    count: 615,
+    sha256: "eeacc19bd15300115060b32cc1a541cd8fca0c9f154a67c704054225e2e4c7b5",
   },
   "./provenance": {
-    count: 618,
-    sha256: "4767c4aa4d2596b845c9d1b128ed7af2ae7b35bc1a959917e9dc3edcf2443fbe",
+    count: 621,
+    sha256: "42a57f31396a679655e4a5818be185f6cc9ba25dd8d39794d7e158c981ed852c",
   },
   "./schema": {
-    count: 229,
-    sha256: "22dd87487e1650ea720656540f4a7c82ec7111945f0a75bb0cfd234918985e68",
+    count: 232,
+    sha256: "afb404126b93ad9d34519972754d5b66b32c4baccc0757e56adf9e752f207648",
   },
   "./sqlite/local": {
-    count: 614,
-    sha256: "3704accf6d9b1390bbc07f47df6554f184ace3e1a1bafb1eafb37e3881bed236",
+    count: 617,
+    sha256: "9f76aea1b0ffede41efb2658f7db4bacb455039c2f0ff0754bf0b25c8375f87f",
   },
 };
 

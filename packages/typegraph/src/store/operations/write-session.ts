@@ -39,6 +39,7 @@
 import { type z } from "zod";
 
 import { type UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import { supportsNodeInsertProjections } from "../../backend/capabilities/node-insert-projections";
 import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -53,7 +54,8 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
-  type NodeFulltextSync,
+  type NodeInsertPlan,
+  type NodeInsertProjection,
   type NodeRow,
   type QueryExecutionBackend,
   type RawQueryExecutionBackend,
@@ -153,8 +155,7 @@ export type WriteTarget = Readonly<
       | "insertNodeIfAbsent"
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
-      | "insertNodeWithFulltext"
-      | "insertNodeWithSchemaFenceAndFulltext"
+      | "insertNodeWithProjections"
     > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
@@ -242,7 +243,7 @@ export type NodeInsertWork = Readonly<{
   params: InsertNodeParams;
   claim: NodeClaimItem;
   sideEffects: NodeInsertSideEffects;
-  fulltext?: NodeFulltextSync;
+  projections: readonly NodeInsertProjection[];
 }>;
 
 /**
@@ -422,28 +423,43 @@ export function createWriteSession(
     // seam owns the two groups and the compensation between them; this surface
     // owns only "the row write it gates is THIS one".
     createNode: async (work) => {
+      const projectionsFused = supportsNodeInsertProjections(
+        target,
+        work.projections,
+      );
       const row = await withNodeCreateClaims(
         writeContext,
         work.claim,
         target,
         () => {
-          const fulltext = work.fulltext;
-          if (fulltext === undefined) return dispatch.one(work.params);
-          const insert = target.insertNodeWithFulltext;
-          if (insert === undefined) return dispatch.one(work.params);
-          return insert(work.params, fulltext);
+          const insert = target.insertNodeWithProjections;
+          if (!projectionsFused || insert === undefined) {
+            return dispatch.one(work.params);
+          }
+          const plan: NodeInsertPlan = {
+            mode: { kind: "ordinary" },
+            projections: work.projections,
+          };
+          return insert(work.params, plan).then((row) => {
+            if (row === undefined) {
+              throw new CompilerInvariantError(
+                "An ordinary projection-aware node insert returned no row.",
+                {
+                  graphId: work.params.graphId,
+                  kind: work.params.kind,
+                  id: work.params.id,
+                },
+              );
+            }
+            return row;
+          });
         },
       );
       await applyNodeInsertSyncFans(
         writeContext,
         {
           ...work.sideEffects,
-          ...((
-            work.fulltext !== undefined &&
-            target.insertNodeWithFulltext !== undefined
-          ) ?
-            { fulltextFused: true }
-          : {}),
+          ...(projectionsFused ? { projectionsFused: true } : {}),
         },
         target,
       );
@@ -467,41 +483,42 @@ export function createWriteSession(
     },
 
     createNodeWithSchemaFence: async (work, schemaFence) => {
-      const result = await (async () => {
-        const fulltext = work.fulltext;
-        if (fulltext === undefined) {
-          const insert = target.insertNodeWithSchemaFence;
-          if (insert === undefined) return { row: undefined, fused: false };
-          return { row: await insert(work.params, schemaFence), fused: false };
-        }
-        const fusedInsert = target.insertNodeWithSchemaFenceAndFulltext;
-        if (fusedInsert === undefined) {
-          throw new CompilerInvariantError(
-            "Schema-fenced node work carrying a fulltext action requires the fused backend member.",
-            {
-              graphId: work.params.graphId,
-              kind: work.params.kind,
-              id: work.params.id,
-            },
+      const projectionsFused = supportsNodeInsertProjections(
+        target,
+        work.projections,
+      );
+      if (work.projections.length > 0 && !projectionsFused) {
+        throw new CompilerInvariantError(
+          "Schema-fenced node work carrying projections requires the fused backend member.",
+          {
+            graphId: work.params.graphId,
+            kind: work.params.kind,
+            id: work.params.id,
+          },
+        );
+      }
+      const row = await (async () => {
+        if (projectionsFused) {
+          const insert = target.insertNodeWithProjections;
+          if (insert === undefined) return;
+          const plan: NodeInsertPlan = {
+            mode: { kind: "schema-fenced", schemaFence },
+            projections: work.projections,
+          };
+          return withNodeCreateClaims(writeContext, work.claim, target, () =>
+            insert(work.params, plan),
           );
         }
-        return {
-          row: await withNodeCreateClaims(
-            writeContext,
-            work.claim,
-            target,
-            () => fusedInsert(work.params, fulltext, schemaFence),
-          ),
-          fused: true,
-        };
+        const insert = target.insertNodeWithSchemaFence;
+        if (insert === undefined) return;
+        return insert(work.params, schemaFence);
       })();
-      const row = result.row;
       if (row === undefined) return;
       await applyNodeInsertSyncFans(
         writeContext,
         {
           ...work.sideEffects,
-          ...(result.fused ? { fulltextFused: true } : {}),
+          ...(projectionsFused ? { projectionsFused: true } : {}),
         },
         target,
       );

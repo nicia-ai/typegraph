@@ -1,6 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
+import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
 import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
 import { isPresent } from "../../../utils/presence";
@@ -36,7 +37,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
-  NodeFulltextSync,
+  NodeInsertPlan,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   SchemaWriteFenceParams,
@@ -94,10 +95,8 @@ import {
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
 import {
-  buildInsertNodeWithFulltext as buildNodeWithFulltext,
-  buildInsertNodeWithSchemaFenceAndFulltext as buildNodeWithSchemaFenceAndFulltext,
-  INSERTED_NODE_CTE_ALIAS,
-} from "./node-fulltext";
+  buildInsertNodeWithProjections,
+} from "./node-projections";
 import {
   buildDeleteNode,
   buildGetNode,
@@ -207,18 +206,12 @@ export type CommonOperationStrategy = Readonly<{
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
-  buildInsertNodeWithFulltext?: (
+  buildInsertNodeWithProjections?: (
     params: InsertNodeParams,
-    fulltext: NodeFulltextSync,
+    plan: NodeInsertPlan,
     timestamp: string,
-  ) => SQL;
-  buildInsertNodeWithSchemaFenceAndFulltext?: (
-    params: InsertNodeParams,
-    fulltext: NodeFulltextSync,
-    timestamp: string,
-    schemaFence: SchemaWriteFenceParams,
-    schemaLockClause: SQL,
-  ) => SQL;
+    schemaLockClause?: SQL,
+  ) => SQL | undefined;
   buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
@@ -838,55 +831,33 @@ export function createSqliteOperationStrategy(
   return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
 }
 
-function createPostgresNodeFulltextBuilders(
+function createPostgresNodeProjectionBuilders(
   tables: PostgresTables,
   dialect: SqlDialect,
   fulltextStrategy: FulltextStrategy,
+  vectorStrategy: VectorStrategy | undefined,
 ): Pick<
   CommonOperationStrategy,
-  | "buildInsertNodeWithFulltext"
-  | "buildInsertNodeWithSchemaFenceAndFulltext"
+  "buildInsertNodeWithProjections"
 > {
-  const buildSync = fulltextStrategy.buildSyncFromInsertedNode;
-  if (buildSync === undefined) return {};
-  const syncBuilder = buildSync;
-
   const fulltextTable = tables.fulltextTableName;
-  function fulltextSync(fulltext: NodeFulltextSync, timestamp: string): SQL {
-    return toDrizzleSql(
-      syncBuilder(
-        fulltextTable,
-        INSERTED_NODE_CTE_ALIAS,
-        fulltext,
-        timestamp,
-      ),
-      dialect,
-    );
-  }
-
   return {
-    buildInsertNodeWithFulltext(params, fulltext, timestamp) {
-      return buildNodeWithFulltext(
-        tables,
-        params,
-        timestamp,
-        fulltextSync(fulltext, timestamp),
-      );
-    },
-    buildInsertNodeWithSchemaFenceAndFulltext(
+    buildInsertNodeWithProjections(
       params,
-      fulltext,
+      plan,
       timestamp,
-      schemaFence,
       schemaLockClause,
     ) {
-      return buildNodeWithSchemaFenceAndFulltext(
+      return buildInsertNodeWithProjections(
         tables,
         params,
+        plan,
         timestamp,
-        schemaFence,
+        dialect,
+        fulltextTable,
+        fulltextStrategy,
+        vectorStrategy,
         schemaLockClause,
-        fulltextSync(fulltext, timestamp),
       );
     },
   };
@@ -895,10 +866,16 @@ function createPostgresNodeFulltextBuilders(
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
   fulltextStrategy: FulltextStrategy,
+  vectorStrategy?: VectorStrategy,
 ): PostgresOperationStrategy {
   return {
     ...createCommonOperationStrategy(tables, "postgres", fulltextStrategy),
-    ...createPostgresNodeFulltextBuilders(tables, "postgres", fulltextStrategy),
+    ...createPostgresNodeProjectionBuilders(
+      tables,
+      "postgres",
+      fulltextStrategy,
+      vectorStrategy,
+    ),
     buildInsertEdgeIfEndpointsLiveWithCardinalityClaim: (
       params,
       claim,
