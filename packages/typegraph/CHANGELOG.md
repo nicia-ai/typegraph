@@ -1,5 +1,11 @@
 # @nicia-ai/typegraph
 
+## 0.51.1
+
+### Patch Changes
+
+- [#526](https://github.com/nicia-ai/typegraph/pull/526) [`dbe8ee6`](https://github.com/nicia-ai/typegraph/commit/dbe8ee6a6d0f41ccb43204c0c3433e5dbe653e17) Thanks [@pdlug](https://github.com/pdlug)! - Read persisted unique constraints that omit `scope` or `collation` by applying the documented `"kind"` and `"binary"` defaults. Schema-management APIs can now inspect databases written with those omitted fields instead of reporting a malformed schema document.
+
 ## 0.51.0
 
 ### Minor Changes
