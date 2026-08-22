@@ -29,6 +29,7 @@ export const WRITE_MEMBER_NAMES = [
   "deleteNode",
   "hardDeleteNode",
   "insertEdge",
+  "insertEdgeIfEndpointsLive",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -251,6 +252,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "deleteNode",
       "hardDeleteNode",
       "insertEdge",
+      "insertEdgeIfEndpointsLive",
       "updateEdge",
       "deleteEdge",
       "deleteEdgesBatch",
@@ -310,7 +312,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     reason:
       "The fused session is the sole ordinary owner of insert-dispatch and row-step mutation helpers.",
     permanent: true,
-    allowedMembers: [],
+    allowedMembers: ["insertEdgeIfEndpointsLive"],
     allowedImports: WRITE_PIPELINE_INTERNAL_IMPORT_NAMES,
   },
   {

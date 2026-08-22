@@ -1,4 +1,4 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
   resolveStampedValidityLowerBound,
@@ -18,6 +18,7 @@ import {
   edgeColumnList,
   expectedValidFromPredicate,
   quotedColumn,
+  quotedTableName,
   sqlNull,
   type Tables,
 } from "./shared";
@@ -48,6 +49,52 @@ export function buildInsertEdge(
       ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
+    RETURNING *
+  `;
+}
+
+/**
+ * Inserts an edge through two live-node predicates, so the usual endpoint
+ * validation reads and row INSERT are one database statement on the success
+ * path. A missing returned row is deliberately ambiguous: callers must run
+ * their normal ordered endpoint diagnostics to preserve which public
+ * `EndpointNotFoundError` wins when both endpoints are unavailable.
+ *
+ * The edge primary key remains an ordinary INSERT constraint. Consequently a
+ * duplicate identity still raises the database error that the common backend
+ * classifies, rather than being confused with a failed endpoint predicate.
+ */
+export function buildInsertEdgeIfEndpointsLive(
+  tables: Tables,
+  params: InsertEdgeParams,
+  timestamp: string,
+): SQL {
+  const { edges, nodes } = tables;
+  const propsJson = JSON.stringify(params.props);
+  const columns = edgeColumnList(edges);
+  const nodeTable = quotedTableName(getTableName(nodes));
+  const from = (column: { name: string }): SQL =>
+    sql.raw(`"from_node"."${column.name.replaceAll('"', '""')}"`);
+  const to = (column: { name: string }): SQL =>
+    sql.raw(`"to_node"."${column.name.replaceAll('"', '""')}"`);
+
+  return sql`
+    INSERT INTO ${edges} (${columns})
+    SELECT
+      ${params.graphId}, ${params.id}, ${params.kind},
+      ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
+      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    FROM ${nodeTable} AS "from_node"
+    CROSS JOIN ${nodeTable} AS "to_node"
+    WHERE ${from(nodes.graphId)} = ${params.graphId}
+      AND ${from(nodes.kind)} = ${params.fromKind}
+      AND ${from(nodes.id)} = ${params.fromId}
+      AND ${from(nodes.deletedAt)} IS NULL
+      AND ${to(nodes.graphId)} = ${params.graphId}
+      AND ${to(nodes.kind)} = ${params.toKind}
+      AND ${to(nodes.id)} = ${params.toId}
+      AND ${to(nodes.deletedAt)} IS NULL
     RETURNING *
   `;
 }
