@@ -59,6 +59,7 @@
  * would make the claim above false wherever it matters most. Unconstrained
  * writes assert nothing and keep working on those backends.
  */
+import { isFirstPartyFactory } from "../../backend/capabilities/write-fence";
 import {
   type GraphBackend,
   runOptionallyInTransaction,
@@ -97,6 +98,51 @@ interface WriteTransactionSession {
 }
 
 const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
+
+/**
+ * Schema fences deliberately do not normally memoize: PostgreSQL releases a
+ * lock acquired after a savepoint when a caller rolls back to that savepoint.
+ * The one safe exception is a TypeGraph-owned Store transaction whose public
+ * surface has no native SQL handle. Its first managed write therefore cannot
+ * follow a caller-controlled savepoint; once that write acquires the fence,
+ * subsequent managed writes can reuse it until the outer transaction ends.
+ *
+ * The key includes the expected version rather than only the graph id. A
+ * transaction target is also the cache owner, never the root backend, so a
+ * pooled connection cannot inherit a prior transaction's success.
+ */
+const leasedSchemaFences = new WeakMap<object, Map<string, Promise<void>>>();
+
+function schemaFenceLeaseKey(graphId: string, expectedVersion: number): string {
+  return `${graphId}\u0000${expectedVersion}`;
+}
+
+/**
+ * Marks a TypeGraph-owned transaction as eligible for lazy schema-fence
+ * leasing. The first managed write acquires the fence; read-only transactions
+ * pay nothing and retain their existing visibility/locking behavior.
+ *
+ * Custom transaction backends deliberately take the callback unchanged: their
+ * savepoint/connection lifetime has not been audited by TypeGraph, so their
+ * managed writes retain the conservative per-call fence behavior.
+ */
+export async function withTransactionSchemaFenceLease<T>(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  target: TransactionBackend,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined || !isFirstPartyFactory(target)) {
+    return fn();
+  }
+
+  leasedSchemaFences.set(target, new Map());
+  try {
+    return await fn();
+  } finally {
+    leasedSchemaFences.delete(target);
+  }
+}
 
 /** Forces the enclosing managed Store transaction to consume one revision. */
 export function forceWriteTransactionRevision(
@@ -160,6 +206,28 @@ export async function withWriteTransactionSession<T>(
  * without a live fence.
  */
 export async function lockSchemaVersionForStoreWrite(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined) return;
+
+  const leases = leasedSchemaFences.get(backend);
+  const leaseKey = schemaFenceLeaseKey(ctx.graphId, expectedVersion);
+  const existingLease = leases?.get(leaseKey);
+  if (existingLease !== undefined) return existingLease;
+
+  const acquisition = lockSchemaVersionForStoreWriteUncached(ctx, backend);
+  leases?.set(leaseKey, acquisition);
+  try {
+    await acquisition;
+  } catch (error) {
+    if (leases?.get(leaseKey) === acquisition) leases.delete(leaseKey);
+    throw error;
+  }
+}
+
+async function lockSchemaVersionForStoreWriteUncached(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
