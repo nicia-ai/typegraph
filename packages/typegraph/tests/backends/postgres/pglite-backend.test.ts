@@ -747,6 +747,45 @@ describe("PGlite backend", () => {
       expect(await store.nodes.Person.getById(result.bob.id)).toBeDefined();
     });
 
+    it("leases the schema fence once for a TypeGraph-owned transaction", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const statements: string[] = [];
+      const backend = createPostgresBackend(
+        drizzle(client, {
+          logger: {
+            logQuery(query: string) {
+              statements.push(query);
+            },
+          },
+        }),
+        { vector: false },
+      );
+      const [store] = await createStoreWithSchema(peopleGraph, backend);
+
+      statements.length = 0;
+      await store.transaction((tx) => tx.nodes.Person.count());
+
+      // Merely opening a portable transaction stays read-only: eligibility is
+      // registered before the callback, but its schema fence is lazy.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(0);
+
+      statements.length = 0;
+      await store.transaction(async (tx) => {
+        await tx.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+        await tx.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+      });
+
+      // Replacing the leased-fence fast path with the ordinary per-write
+      // fence makes this count 2.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(1);
+    });
+
     it("disables vector with vector: false (no extension, CRUD still works)", async () => {
       const { backend } = await createLocalPgliteBackend({ vector: false });
       cleanups.push(() => backend.close());

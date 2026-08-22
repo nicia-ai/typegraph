@@ -2404,17 +2404,19 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  return createSqliteOperationBackend({
-    capabilities: options.capabilities,
-    db: options.db,
-    executionAdapter: txExecutionAdapter,
-    operationStrategy: options.operationStrategy,
-    tableNames: options.tableNames,
-    fulltextStrategy: options.fulltextStrategy,
-    vectorStrategy: options.vectorStrategy,
-    contributionMaterializer: options.contributionMaterializer,
-    transactionScoped: true,
-  });
+  return markFirstPartyFactory(
+    createSqliteOperationBackend({
+      capabilities: options.capabilities,
+      db: options.db,
+      executionAdapter: txExecutionAdapter,
+      operationStrategy: options.operationStrategy,
+      tableNames: options.tableNames,
+      fulltextStrategy: options.fulltextStrategy,
+      vectorStrategy: options.vectorStrategy,
+      contributionMaterializer: options.contributionMaterializer,
+      transactionScoped: true,
+    }),
+  );
 }
 
 // Re-export schema utilities

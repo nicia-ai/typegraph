@@ -2929,22 +2929,24 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  const backend = createPostgresOperationBackend({
-    db: options.db,
-    executionAdapter: txExecutionAdapter,
-    adapterOptions: options.adapterOptions,
-    operationStrategy: options.operationStrategy,
-    tableNames: options.tableNames,
-    capabilities: options.capabilities,
-    fulltextStrategy: options.fulltextStrategy,
-    vectorStrategy: options.vectorStrategy,
-    contributionMaterializer: options.contributionMaterializer,
-    // The probe is process-wide truth, so the outer instance's is reused
-    // rather than a fresh one per transaction.
-    iterativeScanProbe: options.iterativeScanProbe,
-    schemaVersionsTable: options.schemaVersionsTable,
-    transactionScoped: true,
-  });
+  const backend = markFirstPartyFactory(
+    createPostgresOperationBackend({
+      db: options.db,
+      executionAdapter: txExecutionAdapter,
+      adapterOptions: options.adapterOptions,
+      operationStrategy: options.operationStrategy,
+      tableNames: options.tableNames,
+      capabilities: options.capabilities,
+      fulltextStrategy: options.fulltextStrategy,
+      vectorStrategy: options.vectorStrategy,
+      contributionMaterializer: options.contributionMaterializer,
+      // The probe is process-wide truth, so the outer instance's is reused
+      // rather than a fresh one per transaction.
+      iterativeScanProbe: options.iterativeScanProbe,
+      schemaVersionsTable: options.schemaVersionsTable,
+      transactionScoped: true,
+    }),
+  );
 
   return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
 }

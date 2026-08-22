@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   type CompiledRowsSql,
+  createStoreWithSchema,
   DatabaseOperationError,
   defineGraph,
   defineNode,
@@ -135,6 +136,47 @@ function countingBackend(targetId: string): Readonly<{
       counts.foldProbes = 0;
     },
   };
+}
+
+/**
+ * A transaction wrapper TypeGraph did not create. Its target is intentionally
+ * not first-party marked, so schema-fence leasing must keep the conservative
+ * per-write behavior rather than inferring savepoint lifetime from the outer
+ * backend's dialect.
+ */
+function customTransactionFenceBackend(): Readonly<{
+  backend: GraphBackend;
+  schemaFenceCalls: () => number;
+}> {
+  const base = createTestBackend();
+  let calls = 0;
+  const backend: GraphBackend = deriveBackend(base, {
+    transaction: (fn, options) =>
+      base.transaction((target) => {
+        const customTarget = new Proxy(target, {
+          get(source, property, receiver) {
+            const value: unknown = Reflect.get(source, property, receiver);
+            if (
+              property !== "lockSchemaVersionForWrite" ||
+              typeof value !== "function"
+            ) {
+              return value;
+            }
+            const lockSchemaVersionForWrite = value as NonNullable<
+              TransactionBackend["lockSchemaVersionForWrite"]
+            >;
+            return (
+              params: Parameters<typeof lockSchemaVersionForWrite>[0],
+            ) => {
+              calls += 1;
+              return lockSchemaVersionForWrite(params);
+            };
+          },
+        });
+        return fn(customTarget);
+      }, options),
+  });
+  return { backend, schemaFenceCalls: () => calls };
 }
 
 function peerResurrectionBackend(targetId: string): GraphBackend {
@@ -278,7 +320,34 @@ describe("the read-counting double itself", () => {
   });
 });
 
+describe("transaction-scoped backend contract", () => {
+  it("does not expose a nested transaction runner", async () => {
+    const backend = createTestBackend();
+    await backend.transaction((target) => {
+      // `runInWriteTransaction` receives this target. Without a top-level
+      // transaction runner, `runOptionallyInTransaction` cannot open an
+      // internal savepoint before the lazy schema-fence acquisition.
+      expect("transaction" in target).toBe(false);
+      return Promise.resolve();
+    });
+  });
+});
+
 describe("create-path round trips", () => {
+  it("keeps schema fencing per-write for a custom transaction target", async () => {
+    const observed = customTransactionFenceBackend();
+    const [store] = await createStoreWithSchema(plainGraph, observed.backend);
+
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "First" }, { id: "first" });
+      await tx.nodes.Person.create({ name: "Second" }, { id: "second" });
+    });
+
+    // The target's unmarked wrapper could implement arbitrary savepoint
+    // semantics, so it must not borrow the bundled backend's lease.
+    expect(observed.schemaFenceCalls()).toBe(2);
+  });
+
   it("reads the created id exactly once on a plain graph", async () => {
     const { backend, counts, reset } = countingBackend("solo");
     const store = await createInitializedStore(plainGraph, backend);
