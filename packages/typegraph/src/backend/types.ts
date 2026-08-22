@@ -1846,6 +1846,19 @@ export type GraphBackend = Readonly<{
 
   // === Edge Operations ===
   insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
+  /**
+   * Inserts an edge only when both referenced nodes are live, using the
+   * INSERT statement itself as the endpoint check. `undefined` means that at
+   * least one endpoint was missing or tombstoned; the store performs the
+   * ordered diagnostic read that turns that fact into its public typed error.
+   *
+   * Optional because custom backends retain the portable read-then-insert
+   * path. The bundled SQLite and PostgreSQL backends implement it.
+   */
+  insertEdgeIfEndpointsLive?: (
+    this: void,
+    params: InsertEdgeParams,
+  ) => Promise<EdgeRow | undefined>;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
     this: void,
@@ -3009,6 +3022,7 @@ export type EdgeEntityReadBackend = Pick<
 export type EdgeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertEdge"
+  | "insertEdgeIfEndpointsLive"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"

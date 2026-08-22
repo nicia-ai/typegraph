@@ -299,6 +299,7 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   input: CreateEdgeInput,
   id: string,
   backend: WriteTarget,
+  options?: Readonly<{ validateEndpoints?: boolean }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
   const fromKind = input.fromKind;
@@ -318,26 +319,16 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   );
   if (endpointError) throw endpointError;
 
-  // Validate source node exists
-  const fromNode = await backend.getNode(ctx.graphId, fromKind, input.fromId);
-  if (!fromNode || fromNode.deleted_at) {
-    throw new EndpointNotFoundError({
-      edgeKind: kind,
-      endpoint: "from",
-      nodeKind: fromKind,
-      nodeId: input.fromId,
-    });
-  }
-
-  // Validate target node exists
-  const toNode = await backend.getNode(ctx.graphId, toKind, input.toId);
-  if (!toNode || toNode.deleted_at) {
-    throw new EndpointNotFoundError({
-      edgeKind: kind,
-      endpoint: "to",
-      nodeKind: toKind,
-      nodeId: input.toId,
-    });
+  if (options?.validateEndpoints ?? true) {
+    await assertLiveEdgeEndpoints(
+      ctx,
+      kind,
+      fromKind,
+      input.fromId,
+      toKind,
+      input.toId,
+      backend,
+    );
   }
 
   // Validate props with full context
@@ -393,6 +384,41 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
       validTo,
     ),
   };
+}
+
+/**
+ * Gives endpoint refusals their public ordering: source wins when both inputs
+ * are unavailable. The fused INSERT uses this only after its predicate
+ * produced no row, so it never spends the reads on a successful create.
+ */
+async function assertLiveEdgeEndpoints<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  edgeKindName: string,
+  fromKind: string,
+  fromId: string,
+  toKind: string,
+  toId: string,
+  backend: WriteTarget,
+): Promise<void> {
+  const fromNode = await backend.getNode(ctx.graphId, fromKind, fromId);
+  if (!fromNode || fromNode.deleted_at) {
+    throw new EndpointNotFoundError({
+      edgeKind: edgeKindName,
+      endpoint: "from",
+      nodeKind: fromKind,
+      nodeId: fromId,
+    });
+  }
+
+  const toNode = await backend.getNode(ctx.graphId, toKind, toId);
+  if (!toNode || toNode.deleted_at) {
+    throw new EndpointNotFoundError({
+      edgeKind: edgeKindName,
+      endpoint: "to",
+      nodeKind: toKind,
+      nodeId: toId,
+    });
+  }
 }
 
 // ============================================================
@@ -513,12 +539,34 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         }
       }
 
-      const prepared = await validateAndPrepareEdgeCreate(
+      const canFuseEndpointCheck =
+        input.id === undefined &&
+        convergeOn === undefined &&
+        edgeCardinality(ctx, kind) === "many" &&
+        target.insertEdgeIfEndpointsLive !== undefined;
+      let prepared = await validateAndPrepareEdgeCreate(
         ctx,
         input,
         id,
         target,
+        { validateEndpoints: !canFuseEndpointCheck },
       );
+
+      // A plain, generated-id `many` edge owes no cardinality claim and no
+      // sidecar. Its only pre-insert database reads were endpoint existence
+      // probes, so first-party backends can make their live-node predicates
+      // part of the INSERT ... SELECT itself. Do not infer an endpoint error
+      // from an empty RETURNING result: retry the ordinary ordered validation
+      // below, which preserves source-before-target typed refusals and handles
+      // a concurrent endpoint revival before we report anything.
+      if (canFuseEndpointCheck && prepared.cardinality === "many") {
+        const fusedRow = await withAlreadyExistsTranslation("edge", () =>
+          session.createEdgeIfEndpointsLive(prepared.insertParams),
+        );
+        if (fusedRow !== undefined) return rowToEdge(fusedRow);
+
+        prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target);
+      }
 
       // An edge create has no existence probe at all — its id is either
       // caller-supplied or freshly generated — so the engine's refusal is the ONLY

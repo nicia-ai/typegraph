@@ -133,6 +133,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
+  | "insertEdgeIfEndpointsLive"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
@@ -743,6 +744,25 @@ export function createCommonOperationBackend(
           },
         );
       return rowMappers.toEdgeRow(row);
+    },
+
+    async insertEdgeIfEndpointsLive(
+      params: InsertEdgeParams,
+    ): Promise<EdgeRow | undefined> {
+      const timestamp = nowIso();
+      const query = operationStrategy.buildInsertEdgeIfEndpointsLive(
+        params,
+        timestamp,
+      );
+      const row = await withDuplicateKeyClassification(
+        () => execution.execGet<Record<string, unknown>>(query),
+        {
+          entity: "edge",
+          relation: operationStrategy.primaryKeyConstraints.edges,
+          attempted: attemptedInserts([params]),
+        },
+      );
+      return row === undefined ? undefined : rowMappers.toEdgeRow(row);
     },
 
     async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {

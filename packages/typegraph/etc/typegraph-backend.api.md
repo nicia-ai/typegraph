@@ -1416,7 +1416,7 @@ type EdgeEndpointSide = "from" | "to";
 export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 export type EdgeExistsBetweenParams = Readonly<{
@@ -1824,6 +1824,7 @@ export type GraphBackend = Readonly<{
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
+    insertEdgeIfEndpointsLive?: (this: void, params: InsertEdgeParams) => Promise<EdgeRow | undefined>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
@@ -3116,6 +3117,11 @@ type TypeGraphErrorOptions = Readonly<{
 
 // @public
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly insertEdgeIfEndpointsLive: {
+        readonly kind: "reasoned";
+        readonly reason: "A first-party latency fast path selected only by the edge create session; custom backends fall back to portable endpoint reads, so it is not an independently negotiable feature family.";
+        readonly accesses: 6;
+    };
     readonly bootstrapTables: {
         readonly kind: "reasoned";
         readonly reason: "One-shot provisioning hook consulted by createStore before any capability question exists; it has no operation that could refuse or degrade.";

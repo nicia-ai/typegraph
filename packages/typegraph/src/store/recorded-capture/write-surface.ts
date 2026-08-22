@@ -47,6 +47,7 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodesBatchReturning",
   "updateNodeSet",
   "insertEdgeNoReturn",
+  "insertEdgeIfEndpointsLive",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
   "deleteEdgesBatch",
