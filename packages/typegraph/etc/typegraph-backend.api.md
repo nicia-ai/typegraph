@@ -1759,6 +1759,7 @@ export type FulltextStrategy = Readonly<{
     snippetExpression: (this: void, tableName: string, query: string, mode: FulltextQueryMode, language?: string) => SqlFragment;
     ownedTables: (this: void, primaryTableName: string) => readonly StrategyTableContribution[];
     buildUpsert: (this: void, tableName: string, params: UpsertFulltextParams, timestamp: string) => readonly SqlFragment[];
+    buildSyncFromInsertedNode?: (this: void, tableName: string, sourceAlias: string, sync: NodeFulltextSync, timestamp: string) => SqlFragment;
     buildBatchUpsert: (this: void, tableName: string, params: UpsertFulltextBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, tableName: string, params: DeleteFulltextParams) => readonly SqlFragment[];
     buildBatchDelete: (this: void, tableName: string, params: DeleteFulltextBatchParams) => readonly SqlFragment[];
@@ -1816,6 +1817,8 @@ export type GraphBackend = Readonly<{
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
+    insertNodeWithFulltext?: (this: void, params: InsertNodeParams, fulltext: NodeFulltextSync) => Promise<NodeRow>;
+    insertNodeWithSchemaFenceAndFulltext?: (this: void, params: InsertNodeParams, fulltext: NodeFulltextSync, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -2350,7 +2353,22 @@ export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeWithFulltext" | "insertNodeWithSchemaFenceAndFulltext" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+
+// @public
+export type NodeFulltextSync = Readonly<{
+    graphId: string;
+    nodeKind: string;
+    nodeId: string;
+    action: "upsert";
+    content: string;
+    language: string;
+}> | Readonly<{
+    graphId: string;
+    nodeKind: string;
+    nodeId: string;
+    action: "delete";
+}>;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3139,6 +3157,16 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly insertNodeWithSchemaFence: {
         readonly kind: "reasoned";
         readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
+        readonly accesses: 7;
+    };
+    readonly insertNodeWithFulltext: {
+        readonly kind: "reasoned";
+        readonly reason: "A bundled PostgreSQL/PGlite node-plus-fulltext statement selected only when the active strategy proves one-statement sync; other backends retain the ordinary node then sidecar path.";
+        readonly accesses: 7;
+    };
+    readonly insertNodeWithSchemaFenceAndFulltext: {
+        readonly kind: "reasoned";
+        readonly reason: "The schema-fenced counterpart of the bundled PostgreSQL/PGlite node-plus-fulltext statement; absence retains the existing schema-fenced node write and sidecar path.";
         readonly accesses: 7;
     };
     readonly insertEdgeIfEndpointsLiveWithSchemaFence: {

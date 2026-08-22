@@ -73,8 +73,9 @@ export function isAutocommitSingleStatementWrite(
         candidate.uniqueConstraintCount === 0 &&
         candidate.disjointKindCount === 0 &&
         getEmbeddingFields(candidate.schema).length === 0 &&
-        getSearchableFields(candidate.schema).length === 0 &&
-        candidate.backend.insertNodeWithSchemaFence !== undefined
+        (getSearchableFields(candidate.schema).length === 0 ?
+          candidate.backend.insertNodeWithSchemaFence !== undefined
+        : candidate.backend.insertNodeWithSchemaFenceAndFulltext !== undefined)
       );
     }
 

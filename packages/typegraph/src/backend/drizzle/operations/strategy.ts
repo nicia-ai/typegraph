@@ -36,6 +36,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
+  NodeFulltextSync,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   SchemaWriteFenceParams,
@@ -92,6 +93,11 @@ import {
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
+import {
+  buildInsertNodeWithFulltext as buildNodeWithFulltext,
+  buildInsertNodeWithSchemaFenceAndFulltext as buildNodeWithSchemaFenceAndFulltext,
+  INSERTED_NODE_CTE_ALIAS,
+} from "./node-fulltext";
 import {
   buildDeleteNode,
   buildGetNode,
@@ -197,6 +203,18 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildInsertNodeWithSchemaFence: (
     params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertNodeWithFulltext?: (
+    params: InsertNodeParams,
+    fulltext: NodeFulltextSync,
+    timestamp: string,
+  ) => SQL;
+  buildInsertNodeWithSchemaFenceAndFulltext?: (
+    params: InsertNodeParams,
+    fulltext: NodeFulltextSync,
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
@@ -820,12 +838,67 @@ export function createSqliteOperationStrategy(
   return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
 }
 
+function createPostgresNodeFulltextBuilders(
+  tables: PostgresTables,
+  dialect: SqlDialect,
+  fulltextStrategy: FulltextStrategy,
+): Pick<
+  CommonOperationStrategy,
+  | "buildInsertNodeWithFulltext"
+  | "buildInsertNodeWithSchemaFenceAndFulltext"
+> {
+  const buildSync = fulltextStrategy.buildSyncFromInsertedNode;
+  if (buildSync === undefined) return {};
+  const syncBuilder = buildSync;
+
+  const fulltextTable = tables.fulltextTableName;
+  function fulltextSync(fulltext: NodeFulltextSync, timestamp: string): SQL {
+    return toDrizzleSql(
+      syncBuilder(
+        fulltextTable,
+        INSERTED_NODE_CTE_ALIAS,
+        fulltext,
+        timestamp,
+      ),
+      dialect,
+    );
+  }
+
+  return {
+    buildInsertNodeWithFulltext(params, fulltext, timestamp) {
+      return buildNodeWithFulltext(
+        tables,
+        params,
+        timestamp,
+        fulltextSync(fulltext, timestamp),
+      );
+    },
+    buildInsertNodeWithSchemaFenceAndFulltext(
+      params,
+      fulltext,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) {
+      return buildNodeWithSchemaFenceAndFulltext(
+        tables,
+        params,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+        fulltextSync(fulltext, timestamp),
+      );
+    },
+  };
+}
+
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
   fulltextStrategy: FulltextStrategy,
 ): PostgresOperationStrategy {
   return {
     ...createCommonOperationStrategy(tables, "postgres", fulltextStrategy),
+    ...createPostgresNodeFulltextBuilders(tables, "postgres", fulltextStrategy),
     buildInsertEdgeIfEndpointsLiveWithCardinalityClaim: (
       params,
       claim,

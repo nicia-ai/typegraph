@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 75 unbundled = 90, with no member counted twice", () => {
+  it("15 pilot + 77 unbundled = 92, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(75);
+    expect(unbundledNames.length).toBe(77);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(90);
+    expect(bundledSet.size + unbundledNames.length).toBe(92);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("27 reasoned entries sum to 96 accesses; 48 deferred entries sum to 197", () => {
+  it("29 reasoned entries sum to 110 accesses; 48 deferred entries sum to 197", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(27);
+    expect(reasoned.length).toBe(29);
     expect(deferred.length).toBe(48);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -124,7 +124,7 @@ describe("capability bundle totality (T9)", () => {
     // transaction and autocommit factories, adding the scanner's twelve
     // receiver-scoped accesses. The registry remains the source of truth;
     // this totality test is its deliberately visible sum.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(96);
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(110);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(197);
   });
 });

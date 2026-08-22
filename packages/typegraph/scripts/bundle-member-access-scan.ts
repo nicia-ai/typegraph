@@ -16,7 +16,7 @@
  *
  * ## The receiver test, in two arms
  *
- * A candidate node's member name matching one of the 82 optional members is
+ * A candidate node's member name matching one of the 92 optional members is
  * necessary but not sufficient — `currentState.ctx.vectorStrategy`
  * (`query/compiler/standard-pass-pipeline.ts`) also spells `.vectorStrategy`
  * off SOME receiver, and that receiver is a compiler-pass context, not a
@@ -130,7 +130,7 @@ export type BundleMemberAccessRow = Readonly<{
 export type BundleMemberAccessScan = Readonly<{
   rows: readonly BundleMemberAccessRow[];
   byClass: Readonly<Record<BundleMemberAccessClass, number>>;
-  /** Live count per member name, over every one of the 82 optional members (0 included). */
+  /** Live count per member name, over every one of the 92 optional members (0 included). */
   perMember: Readonly<Record<string, number>>;
 }>;
 
@@ -392,9 +392,9 @@ function deriveOptionalGraphBackendMembers(
     .getPropertiesOfType(graphBackendType)
     .filter((property) => (property.flags & ts.SymbolFlags.Optional) !== 0)
     .map((property) => property.name);
-  if (optionalNames.length !== 90) {
+  if (optionalNames.length !== 92) {
     throw new Error(
-      `Expected exactly 90 optional GraphBackend members (the scan's own precondition); found ${optionalNames.length}. GraphBackend's optional surface has changed — re-derive every partition constant before trusting this scan.`,
+      `Expected exactly 92 optional GraphBackend members (the scan's own precondition); found ${optionalNames.length}. GraphBackend's optional surface has changed — re-derive every partition constant before trusting this scan.`,
     );
   }
   return new Set(optionalNames);

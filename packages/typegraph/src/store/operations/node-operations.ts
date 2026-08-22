@@ -135,7 +135,7 @@ import {
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
-import { getSearchableFields } from "../fulltext-sync";
+import { getSearchableFields, resolveNodeFulltextSync } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
@@ -997,11 +997,15 @@ function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
  * the whole unit and applies all three in the pinned order (pre-insert claims,
  * row, post-insert claims, sync fans).
  */
-function nodeInsertWork(prepared: NodeCreatePrepared): NodeInsertWork {
+function nodeInsertWork(
+  prepared: NodeCreatePrepared,
+  fulltext?: ReturnType<typeof resolveNodeFulltextSync>,
+): NodeInsertWork {
   return {
     params: prepared.insertParams,
     claim: nodeCreateClaimItem(prepared),
     sideEffects: nodeCreateSideEffectItem(prepared),
+    ...(fulltext === undefined ? {} : { fulltext }),
   };
 }
 
@@ -1826,6 +1830,23 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       target,
       options,
     );
+    const fulltext = resolveNodeFulltextSync(
+      prepared.nodeKind.schema,
+      prepared.validatedProps,
+      {
+        graphId: ctx.graphId,
+        nodeKind: prepared.kind,
+        nodeId: prepared.id,
+      },
+    );
+    const fulltextFusionEligible =
+      shouldReturnRow && !prepared.idProvided && fulltext !== undefined;
+    const fuseFulltext =
+      fulltextFusionEligible && target.insertNodeWithFulltext !== undefined;
+    const fuseSchemaFenceWithFulltext =
+      fuseSchemaFenceInFirstWrite &&
+      fulltextFusionEligible &&
+      target.insertNodeWithSchemaFenceAndFulltext !== undefined;
 
     const existing = prepared.tombstone;
     if (existing !== undefined) {
@@ -1846,7 +1867,10 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         graphId: ctx.graphId,
         expectedVersion: requireDefined(ctx.schemaVersion),
       };
-      const work = nodeInsertWork(prepared);
+      const work =
+        fuseSchemaFenceWithFulltext ?
+          nodeInsertWork(prepared, fulltext)
+        : nodeInsertWork(prepared);
       const inserted =
         prepared.insertIfAbsent ?
           await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
@@ -1865,6 +1889,13 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           { operation: "insert", entity: "node" },
         );
       }
+    }
+
+    if (fuseFulltext && !fuseSchemaFenceWithFulltext) {
+      const row = await withAlreadyExistsTranslation("node", () =>
+        session.createNode(nodeInsertWork(prepared, fulltext)),
+      );
+      return rowToNode(row);
     }
 
     if (prepared.insertIfAbsent) {
