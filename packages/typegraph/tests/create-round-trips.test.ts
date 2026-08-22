@@ -50,6 +50,8 @@ const PEER_RESURRECTION_VALID_FROM = "2024-01-01T00:00:00.000Z";
 const RACED_RESURRECTION_VALID_FROM = "2023-06-01T00:00:00.000Z";
 
 type ReadCounts = Readonly<{
+  /** All `getNode` probes, including generated ids unknown to the test. */
+  allNodeReads: number;
   /** `getNode` probes issued for the node being created. */
   targetNodeReads: number;
   /** Bare-id cross-kind fold probes issued by identity. */
@@ -79,7 +81,7 @@ function countingBackend(targetId: string): Readonly<{
   reset: () => void;
 }> {
   const base = createTestBackend();
-  const counts = { targetNodeReads: 0, foldProbes: 0 };
+  const counts = { allNodeReads: 0, targetNodeReads: 0, foldProbes: 0 };
 
   function countTransactionReads(
     target: TransactionBackend,
@@ -95,6 +97,7 @@ function countingBackend(targetId: string): Readonly<{
         const method = value as (...args: unknown[]) => unknown;
         if (property === "getNode") {
           return (...args: unknown[]) => {
+            counts.allNodeReads += 1;
             if (args[2] === targetId) counts.targetNodeReads += 1;
             return method.apply(source, args);
           };
@@ -116,6 +119,7 @@ function countingBackend(targetId: string): Readonly<{
   // `deriveBackend` just carried — exactly the loss the spread had.
   const backend: GraphBackend = deriveBackend(base, {
     getNode: (graphId: string, kind: string, id: string) => {
+      counts.allNodeReads += 1;
       if (id === targetId) counts.targetNodeReads += 1;
       return base.getNode(graphId, kind, id);
     },
@@ -131,6 +135,7 @@ function countingBackend(targetId: string): Readonly<{
     backend,
     counts,
     reset: () => {
+      counts.allNodeReads = 0;
       counts.targetNodeReads = 0;
       counts.foldProbes = 0;
     },
@@ -414,7 +419,9 @@ describe("create-path round trips", () => {
     await store.nodes.Person.create({ name: "Generated" });
 
     // A generated id cannot already exist under another kind, so there is
-    // nothing to fold against and the probe is pure cost.
+    // nothing to find under the same or another kind. Both probes are pure
+    // network cost on the successful create path.
+    expect(counts.allNodeReads).toBe(0);
     expect(counts.foldProbes).toBe(0);
   });
 
