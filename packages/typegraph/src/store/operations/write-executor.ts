@@ -69,7 +69,8 @@ export type HookedWritePlanContext = WritePlanContext &
  * "accepted then dropped" failure that deleted the lock-plan field. Written as
  * an `Omit` of the existing options type rather than a fresh literal, so an
  * option added to `WriteTransactionOptions` reaches plan callers on its own;
- * today the residue is exactly `didWrite`.
+ * today the residue is `didWrite` plus the private first-statement schema
+ * fence marker used by the qualifying insert paths.
  */
 export type WritePlanOptions<T> = Omit<
   WriteTransactionOptions<T>,

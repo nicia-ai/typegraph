@@ -1815,6 +1815,22 @@ export type GraphBackend = Readonly<{
     this: void,
     params: InsertNodeParams,
   ) => Promise<NodeRow | undefined>;
+  /**
+   * First-party transactional fast path: the INSERT takes the active-schema
+   * shared fence in its source query. A missing row is deliberately ambiguous
+   * (stale schema versus an occupied id) and must be diagnosed by the caller.
+   */
+  insertNodeIfAbsentWithSchemaFence?: (
+    this: void,
+    params: InsertNodeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
+  /** Like `insertNode`, but acquires the schema fence in that INSERT. */
+  insertNodeWithSchemaFence?: (
+    this: void,
+    params: InsertNodeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
   insertNodesBatch?: (
     this: void,
@@ -1858,6 +1874,15 @@ export type GraphBackend = Readonly<{
   insertEdgeIfEndpointsLive?: (
     this: void,
     params: InsertEdgeParams,
+  ) => Promise<EdgeRow | undefined>;
+  /**
+   * First-party transactional fast path which combines the active-schema
+   * fence and both live-endpoint predicates with the edge INSERT.
+   */
+  insertEdgeIfEndpointsLiveWithSchemaFence?: (
+    this: void,
+    params: InsertEdgeParams,
+    schemaFence: SchemaWriteFenceParams,
   ) => Promise<EdgeRow | undefined>;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
@@ -3010,6 +3035,8 @@ export type NodeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertNode"
   | "insertNodeIfAbsent"
+  | "insertNodeIfAbsentWithSchemaFence"
+  | "insertNodeWithSchemaFence"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -3036,6 +3063,7 @@ export type EdgeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertEdge"
   | "insertEdgeIfEndpointsLive"
+  | "insertEdgeIfEndpointsLiveWithSchemaFence"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
@@ -3640,6 +3668,9 @@ export type LockSchemaVersionForWriteParams = Readonly<{
   graphId: string;
   expectedVersion: number;
 }>;
+
+/** Parameters shared by the ordinary and fused schema-write fences. */
+export type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
 
 /**
  * Optional schema-managed write identity for a trusted import. Supplying it

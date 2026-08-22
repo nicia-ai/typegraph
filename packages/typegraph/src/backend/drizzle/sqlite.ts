@@ -58,6 +58,7 @@ import {
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -733,6 +734,7 @@ function createSqliteOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
+    schemaFenceLockClause: sql.raw(""),
   });
 
   const executeCompiled = executionAdapter.executeCompiled;
@@ -2306,10 +2308,12 @@ export function createSqliteBackend(
 
           try {
             const result = await fn(
-              gateFulltext(
-                txBackend,
-                contributionMaterializer.assertInitialized,
-                contributionMaterializer.refuseUnavailableFulltext,
+              markSchemaFencedInsertEligible(
+                gateFulltext(
+                  txBackend,
+                  contributionMaterializer.assertInitialized,
+                  contributionMaterializer.refuseUnavailableFulltext,
+                ),
               ),
               db,
             );
@@ -2324,7 +2328,7 @@ export function createSqliteBackend(
 
       if (transactionMode === "do-sqlite") {
         return runDoSqliteStorageTransaction(async () =>
-          fn(bindTransactionBackend(db), db),
+          fn(markSchemaFencedInsertEligible(bindTransactionBackend(db)), db),
         );
       }
 
@@ -2333,12 +2337,16 @@ export function createSqliteBackend(
       return runWithSerializedQueue(
         serializedQueue,
         async () =>
-          db.transaction(async (tx) => fn(bindTransactionBackend(tx), tx), {
+          db.transaction(
+            async (tx) =>
+              fn(markSchemaFencedInsertEligible(bindTransactionBackend(tx)), tx),
+            {
             behavior:
               options?.accessMode === "read_only" || temporaryWrites ?
                 "deferred"
               : "immediate",
-          }) as Promise<T>,
+            },
+          ) as Promise<T>,
       );
     },
 
@@ -2385,6 +2393,7 @@ export function createSqliteBackend(
   // is reachable only from a test that builds a backend bypassing the
   // declared capabilities while still carrying this mark.
   markFirstPartyFactory(backend);
+  markSchemaFencedInsertEligible(backend);
 
   return backend;
 }

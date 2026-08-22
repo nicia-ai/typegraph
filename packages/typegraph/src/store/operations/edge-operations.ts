@@ -81,6 +81,7 @@ import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
+import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import {
   type ClaimEdgeCardinalityParams,
   type EdgeRow as BackendEdgeRow,
@@ -172,6 +173,10 @@ import {
   unfencedTarget,
   type WriteTarget,
 } from "./write-session";
+import {
+  diagnoseFusedSchemaFenceNoRow,
+  lockSchemaVersionForStoreWrite,
+} from "./write-transaction";
 
 // ============================================================
 // Types
@@ -512,6 +517,16 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   const opContext = ctx.createOperationContext("create", "edge", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
   const convergeOn = options?.convergeOn;
+  const schemaFenceInFirstWrite =
+    ctx.schemaVersion !== undefined &&
+    isSchemaFencedInsertEligible(backend) &&
+    backend.capabilities.transactions &&
+    !ctx.historyEnabled &&
+    !ctx.revisionTrackingEnabled &&
+    input.id === undefined &&
+    convergeOn === undefined &&
+    edgeCardinality(ctx, kind) === "many" &&
+    backend.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined;
 
   return runHookedWritePlan(
     ctx,
@@ -526,6 +541,15 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     ),
     backend,
     async (session, target): Promise<Edge | undefined> => {
+      // See node create's matching receiver check: a custom transaction
+      // wrapper may replace the marked outer backend with an unmarked target.
+      // Fall back to the ordinary fence before any row work in that case.
+      const targetBackend = unfencedTarget(target);
+      const fuseSchemaFenceInFirstWrite =
+        schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
+      if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
       if (convergeOn !== undefined) {
         const candidateRows = await target.findEdgesByKind({
           graphId: ctx.graphId,
@@ -556,7 +580,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         input.id === undefined &&
         convergeOn === undefined &&
         (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
-        target.insertEdgeIfEndpointsLive !== undefined;
+        (target.insertEdgeIfEndpointsLive !== undefined ||
+          (fuseSchemaFenceInFirstWrite &&
+            target.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined));
       let prepared = await validateAndPrepareEdgeCreate(
         ctx,
         input,
@@ -578,9 +604,21 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       if (canFuseEndpointCheck) {
         const fusedWork = edgeInsertWork(prepared);
         const fusedRow = await withAlreadyExistsTranslation("edge", () =>
-          session.createEdgeIfEndpointsLive(fusedWork),
+          fuseSchemaFenceInFirstWrite ?
+            session.createEdgeIfEndpointsLiveWithSchemaFence(
+              prepared.insertParams,
+              {
+                graphId: ctx.graphId,
+                expectedVersion: requireDefined(ctx.schemaVersion),
+              },
+            )
+          : session.createEdgeIfEndpointsLive(fusedWork),
         );
         if (fusedRow !== undefined) return rowToEdge(fusedRow);
+
+        if (fuseSchemaFenceInFirstWrite) {
+          await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+        }
 
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
           validateCardinality: !usesGuardedCardinalityClaim,
@@ -609,6 +647,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
 
       return row === undefined ? undefined : rowToEdge(row);
     },
+    { schemaFenceInFirstWrite },
   );
 }
 
