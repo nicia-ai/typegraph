@@ -112,6 +112,48 @@ await papers.create({
 
 A complete runnable version is in [`examples/16-graph-extensions.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/16-graph-extensions.ts).
 
+## Instantiate a graph template
+
+For many tenant graphs with the same final shape, register a verified schema
+once and instantiate each target as schema version 1. The template document
+stays in the database; instantiation sends only its id, the target graph id,
+and a client-computed content hash.
+
+```ts
+const [source] = await createAdapterStoreWithSchema(baseGraph, adminBackend);
+const template = await registerGraphTemplate(adminBackend, {
+  templateId: "research-corpus-v1",
+  reconciled: source.reconciledSchema,
+});
+
+const target = await instantiateGraph(adminBackend, {
+  template,
+  graphId: "tenant-123",
+});
+
+// The returned target snapshot can create a request-scoped Store without
+// another schema read. `tenantGraph` is the same compile-time shape with id
+// "tenant-123".
+const store = createAdapterStore(tenantGraph, runtimeBackend, {
+  reconciled: target.reconciled,
+});
+```
+
+Instantiation is idempotent for the same template and target. A target already
+initialized with a different schema is refused. On PostgreSQL the clone
+statement takes the same graph advisory-lock key as schema commits; SQLite's
+single write statement is serialized by its writer lock.
+
+Templates are currently **schema-only**: they do not seed graph rows or create
+runtime-contribution markers. The returned snapshot is therefore for an
+unverified, zero-RTT `createAdapterStore` attach; a target cannot be reopened
+with `createVerifiedStore` until the normal privileged
+`createStoreWithSchema()` boot path has materialized its markers. This matters
+even without `searchable()` fields because verified opens always assert the
+runtime-contribution marker. Templates containing embedding fields are refused
+because their vector storage is graph-scoped and cannot safely be cloned by a
+schema-only statement.
+
 ## The graph extension
 
 `defineGraphExtension` accepts a structured value describing the new

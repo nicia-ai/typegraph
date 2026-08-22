@@ -863,6 +863,18 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.",
     accesses: 4,
   },
+  registerGraphTemplate: {
+    kind: "reasoned",
+    reason:
+      "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.",
+    accesses: 1,
+  },
+  instantiateGraphTemplate: {
+    kind: "reasoned",
+    reason:
+      "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.",
+    accesses: 1,
+  },
   ensureIdentityTables: {
     kind: "reasoned",
     reason:

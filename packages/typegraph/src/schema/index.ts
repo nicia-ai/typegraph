@@ -31,6 +31,15 @@ export type {
 // ============================================================
 
 export { type DeserializedSchema, deserializeSchema } from "./deserializer";
+export type {
+  GraphTemplate,
+  InstantiateGraphTemplateResult,
+} from "./graph-templates";
+export {
+  instantiateGraph,
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "./graph-templates";
 export {
   computeSchemaHash,
   deserializeWherePredicate,

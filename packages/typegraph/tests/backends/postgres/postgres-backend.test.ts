@@ -907,6 +907,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           "tg_reprobe_contribution_materializations",
         kindRemovals: "tg_reprobe_kind_removals",
         reconciliationMarkers: "tg_reprobe_reconciliation_markers",
+        graphTemplates: "tg_reprobe_graph_templates",
       } as const;
       const reprobeTables = createPostgresTables(tableNames);
       const ddl = generatePostgresDDL(reprobeTables);
@@ -988,6 +989,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
           "tg_search_path_contribution_materializations",
         kindRemovals: "tg_search_path_kind_removals",
         reconciliationMarkers: "tg_search_path_reconciliation_markers",
+        graphTemplates: "tg_search_path_graph_templates",
       } as const;
       const tables = createPostgresTables(tableNames);
       const ddl = generatePostgresDDL(tables);
