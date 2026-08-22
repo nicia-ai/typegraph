@@ -5,6 +5,7 @@ import {
 } from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
+  type ClaimEdgeCardinalityParams,
   type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
@@ -632,6 +633,25 @@ function createRecordedTransactionBackend(
         },
       }),
 
+    ...(target.insertEdgeIfEndpointsLiveWithCardinalityClaim === undefined ?
+      {}
+    : {
+        async insertEdgeIfEndpointsLiveWithCardinalityClaim(
+          params: InsertEdgeParams,
+          claim: ClaimEdgeCardinalityParams,
+        ): Promise<EdgeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(
+            target.insertEdgeIfEndpointsLiveWithCardinalityClaim,
+          )(params, claim);
+          if (row !== undefined) {
+            session.touchEdge(params.graphId, params.id, row);
+          }
+          return row;
+        },
+      }),
+
     ...(target.insertEdgeNoReturn === undefined ?
       {}
     : {
@@ -956,6 +976,21 @@ export function createRecordedBackend(
               params,
               schemaFence,
             ),
+          );
+        },
+      }),
+
+    ...(backend.insertEdgeIfEndpointsLiveWithCardinalityClaim === undefined ?
+      {}
+    : {
+        async insertEdgeIfEndpointsLiveWithCardinalityClaim(
+          params: InsertEdgeParams,
+          claim: ClaimEdgeCardinalityParams,
+        ): Promise<EdgeRow | undefined> {
+          return capture((target) =>
+            requireDefined(
+              target.insertEdgeIfEndpointsLiveWithCardinalityClaim,
+            )(params, claim),
           );
         },
       }),

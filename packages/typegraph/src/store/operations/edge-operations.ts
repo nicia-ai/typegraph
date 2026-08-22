@@ -593,11 +593,15 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     const usesGuardedCardinalityClaim =
       declaredCardinality !== "many" &&
       edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind === "guarded";
+    const usesFusedCardinalityInsert =
+      usesGuardedCardinalityClaim &&
+      target.insertEdgeIfEndpointsLiveWithCardinalityClaim !== undefined;
     const canFuseEndpointCheck =
       input.id === undefined &&
       convergeOn === undefined &&
       (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
       (target.insertEdgeIfEndpointsLive !== undefined ||
+        usesFusedCardinalityInsert ||
         (fuseSchemaFenceInFirstWrite &&
           target.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined));
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
@@ -632,7 +636,8 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       }
 
       prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-        validateCardinality: !usesGuardedCardinalityClaim,
+        validateCardinality:
+          !usesGuardedCardinalityClaim || usesFusedCardinalityInsert,
       });
     }
 

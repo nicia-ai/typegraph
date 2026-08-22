@@ -176,10 +176,9 @@ describe("constrained writes take the per-graph write fence", () => {
     await store.edges.reportsTo.create(alice, bob, {});
 
     expect(graphWriteLockCount(statements)).toBe(1);
-    // The guarded claim folds the old count probe into its RETURNING
-    // projection. That claim and the edge INSERT it authorizes must both sit
-    // after the lock, or the verdict was computed outside the exclusion it
-    // depends on.
+    // The guarded claim and edge insert now share one statement. That fused
+    // statement must sit after the lock, or its verdict was computed outside
+    // the exclusion it depends on.
     const lockIndex = graphWriteLockIndex(statements);
     const claimIndex = firstIndexMatching(
       statements,
@@ -191,7 +190,7 @@ describe("constrained writes take the per-graph write fence", () => {
     );
     expect(lockIndex).toBeGreaterThanOrEqual(0);
     expect(claimIndex).toBeGreaterThan(lockIndex);
-    expect(insertIndex).toBeGreaterThan(claimIndex);
+    expect(insertIndex).toBe(claimIndex);
   });
 
   it("does NOT fence an edge create with cardinality many", async () => {

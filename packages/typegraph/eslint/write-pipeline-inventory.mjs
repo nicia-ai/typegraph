@@ -32,6 +32,7 @@ export const WRITE_MEMBER_NAMES = [
   "hardDeleteNode",
   "insertEdge",
   "insertEdgeIfEndpointsLive",
+  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
   "insertEdgeIfEndpointsLiveWithSchemaFence",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
@@ -260,6 +261,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "hardDeleteNode",
       "insertEdge",
       "insertEdgeIfEndpointsLive",
+      "insertEdgeIfEndpointsLiveWithCardinalityClaim",
       "insertEdgeIfEndpointsLiveWithSchemaFence",
       "updateEdge",
       "deleteEdge",
@@ -322,6 +324,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
     allowedMembers: [
       "insertEdgeIfEndpointsLive",
+      "insertEdgeIfEndpointsLiveWithCardinalityClaim",
       "insertEdgeIfEndpointsLiveWithSchemaFence",
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",

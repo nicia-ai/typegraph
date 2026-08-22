@@ -2370,6 +2370,7 @@ function createPostgresOperationBackend(
       {
         schemaGraphWriteLockNamespace:
           RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+        edgeCardinalityInsertFusion: true,
       }
     : {}),
     tableExistenceCache: { cacheExisting: false },

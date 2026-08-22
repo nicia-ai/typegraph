@@ -71,6 +71,7 @@ import { type Assert, type Equal } from "../../utils/type-assert";
 import {
   claimEdgeCardinality,
   claimEdgeCardinalityBatch,
+  withEdgeClaimRelationPrecondition,
 } from "../claims/edge-claims";
 import {
   type NodeClaimItem,
@@ -156,6 +157,7 @@ export type WriteTarget = Readonly<
       GraphBackend,
       | "insertEdgeIfEndpointsLive"
       | "insertEdgeIfEndpointsLiveWithSchemaFence"
+      | "insertEdgeIfEndpointsLiveWithCardinalityClaim"
       | "claimEdgeCardinality"
       | "claimEdgeCardinalityGuarded"
       | "claimEdgeCardinalityBatch"
@@ -536,8 +538,16 @@ export function createWriteSession(
     },
 
     createEdgeIfEndpointsLive: async (work) => {
-      if (work.claim !== undefined) {
-        await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
+      const fusedClaimInsert =
+        target.insertEdgeIfEndpointsLiveWithCardinalityClaim;
+      const claim = work.claim;
+      if (claim !== undefined) {
+        if (fusedClaimInsert !== undefined) {
+          return withEdgeClaimRelationPrecondition(claim.graphId, () =>
+            fusedClaimInsert(work.params, claim),
+          );
+        }
+        await claimEdgeCardinality(target, ctx.claimsVerdict(), claim);
       }
       const insertEdgeIfEndpointsLive = target.insertEdgeIfEndpointsLive;
       if (insertEdgeIfEndpointsLive === undefined) {

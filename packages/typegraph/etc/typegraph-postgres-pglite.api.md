@@ -1132,7 +1132,7 @@ type EdgeEndpointSide = "from" | "to";
 type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeIfEndpointsLiveWithSchemaFence" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeIfEndpointsLiveWithSchemaFence" | "insertEdgeIfEndpointsLiveWithCardinalityClaim" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 type EdgeExistsBetweenParams = Readonly<{
@@ -1797,6 +1797,7 @@ type GraphBackend = Readonly<{
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
     insertEdgeIfEndpointsLive?: (this: void, params: InsertEdgeParams) => Promise<EdgeRow | undefined>;
     insertEdgeIfEndpointsLiveWithSchemaFence?: (this: void, params: InsertEdgeParams, schemaFence: SchemaWriteFenceParams) => Promise<EdgeRow | undefined>;
+    insertEdgeIfEndpointsLiveWithCardinalityClaim?: (this: void, params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams) => Promise<EdgeRow | undefined>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;

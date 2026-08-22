@@ -1884,6 +1884,17 @@ export type GraphBackend = Readonly<{
     params: InsertEdgeParams,
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<EdgeRow | undefined>;
+  /**
+   * PostgreSQL/PGlite transaction-only fast path for a constrained edge.
+   * Endpoint validation, the guarded claim upsert, and the edge INSERT share
+   * one statement. A contended claim deliberately remains unresolved so the
+   * caller can run the existing fresh-snapshot takeover path.
+   */
+  insertEdgeIfEndpointsLiveWithCardinalityClaim?: (
+    this: void,
+    params: InsertEdgeParams,
+    claim: ClaimEdgeCardinalityParams,
+  ) => Promise<EdgeRow | undefined>;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
     this: void,
@@ -3081,6 +3092,7 @@ export type EdgeEntityWriteBackend = Pick<
   | "insertEdge"
   | "insertEdgeIfEndpointsLive"
   | "insertEdgeIfEndpointsLiveWithSchemaFence"
+  | "insertEdgeIfEndpointsLiveWithCardinalityClaim"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
