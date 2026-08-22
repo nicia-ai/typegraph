@@ -3143,6 +3143,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * transaction — the caller's transaction is the single commit/rollback
    * boundary.
    *
+   * Do not call a managed write on this root Store from inside the caller's
+   * `db.transaction(...)` callback. On a single-connection PostgreSQL handle,
+   * a root-store write opens its own `BEGIN` / `COMMIT`; PostgreSQL accepts the
+   * nested `BEGIN` with a warning, then that `COMMIT` closes the caller's
+   * transaction. Build this adopted context from the callback's `externalTx`
+   * and use its collections for every graph write instead. History-enabled
+   * stores use {@link withRecordedTransaction}, which adopts the same handle
+   * and flushes capture before the caller commits.
+   *
    * `withTransaction` is driver-agnostic; how the caller opens the
    * transaction is not. **Async drivers** (node-postgres,
    * `neon-serverless` Pool, libsql) use `db.transaction(async …)`.
