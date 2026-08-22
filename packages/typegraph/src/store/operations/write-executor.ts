@@ -20,7 +20,10 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { requireDefined } from "../../utils/presence";
-import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  type GraphWriteLock,
+  uncapturedGraphWriteLock,
+} from "../recorded-capture/clock";
 import { type OperationHookContext } from "../types";
 import { type RowWorkKind, type WritePlan } from "./write-plan";
 import {
@@ -213,5 +216,27 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
     backend,
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
+  );
+}
+
+/**
+ * Runs a proven single-statement write directly on a bundled root backend.
+ *
+ * The eligibility classifier is deliberately outside this generic executor:
+ * it owns the operation-specific proof that row work has no claim, sidecar,
+ * identity, capture, revision, or recovery statement. This helper owns only
+ * the resulting execution shape — no `BEGIN` / `COMMIT` and no transaction
+ * target — while preserving the ordinary hook boundary. A completed SQL
+ * statement is already durably committed, so `onOperationEnd` remains truthful.
+ */
+export function runAutocommitSingleStatementWritePlan<K extends RowWorkKind, T>(
+  ctx: HookedWritePlanContext,
+  opContext: OperationHookContext,
+  plan: WritePlan<K>,
+  backend: GraphBackend,
+  rowWork: WriteRowWork<K, T>,
+): Promise<T> {
+  return ctx.withOperationHooks(opContext, () =>
+    planFrame(ctx, plan, rowWork)(backend, uncapturedGraphWriteLock()),
   );
 }

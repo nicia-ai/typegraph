@@ -38,14 +38,24 @@
  * call sites above run through the executor; the executor case below is what
  * makes them bite at B0 as well.
  *
- * PGlite plus drizzle's `logger`, following `constraint-write-fence.test.ts`.
+ * PGlite's driver query boundary plus drizzle's logger. The driver boundary
+ * sees prepared root executions while the logger sees transaction-scoped
+ * executions, which PGlite routes through a separate transaction client.
  * ONE instance and ONE store for the whole table: instance creation plus DDL
  * costs about a second and the table is 20 cases wide, so it is paid once and
  * the statement log is cleared per case.
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import {
@@ -167,13 +177,21 @@ const BULK_EDGE = asEdgeId<typeof knows>("edge-bulk");
 
 beforeAll(async () => {
   const client = await PGlite.create();
-  closeClient = () => client.close();
+  const query = client.query.bind(client);
+  const querySpy = vi.spyOn(client, "query").mockImplementation((...args) => {
+    statements.push({ query: args[0], params: args[1] ?? [] });
+    return query(...args);
+  });
+  closeClient = async () => {
+    querySpy.mockRestore();
+    await client.close();
+  };
   await client.exec(generatePostgresDDL().join("\n\n"));
   backend = createPostgresBackend(
     drizzle(client, {
       logger: {
-        logQuery(query: string, params: unknown[]): void {
-          statements.push({ query, params });
+        logQuery(queryText: string, params: unknown[]): void {
+          statements.push({ query: queryText, params });
         },
       },
     }),
