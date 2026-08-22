@@ -1097,6 +1097,27 @@ export type UpsertFulltextParams = Readonly<{
 }>;
 
 /**
+ * The fulltext side effect of a freshly inserted node. `delete` is distinct
+ * from no action: a searchable schema with empty values must clear a stale
+ * projection row left by an earlier hard delete.
+ */
+export type NodeFulltextSync =
+  | Readonly<{
+      graphId: string;
+      nodeKind: string;
+      nodeId: string;
+      action: "upsert";
+      content: string;
+      language: string;
+    }>
+  | Readonly<{
+      graphId: string;
+      nodeKind: string;
+      nodeId: string;
+      action: "delete";
+    }>;
+
+/**
  * Parameters for deleting a single fulltext entry.
  */
 export type DeleteFulltextParams = Readonly<{
@@ -1829,6 +1850,23 @@ export type GraphBackend = Readonly<{
   insertNodeWithSchemaFence?: (
     this: void,
     params: InsertNodeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
+  /**
+   * Bundled PostgreSQL/PGlite fast path. Inserts a node and applies its
+   * fulltext projection from the same INSERT ... RETURNING source. The
+   * statement is atomic on both root and transaction-scoped handles.
+   */
+  insertNodeWithFulltext?: (
+    this: void,
+    params: InsertNodeParams,
+    fulltext: NodeFulltextSync,
+  ) => Promise<NodeRow>;
+  /** Schema-fenced counterpart of `insertNodeWithFulltext`. */
+  insertNodeWithSchemaFenceAndFulltext?: (
+    this: void,
+    params: InsertNodeParams,
+    fulltext: NodeFulltextSync,
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
@@ -3065,6 +3103,8 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
+  | "insertNodeWithFulltext"
+  | "insertNodeWithSchemaFenceAndFulltext"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"

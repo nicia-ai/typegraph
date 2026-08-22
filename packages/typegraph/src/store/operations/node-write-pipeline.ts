@@ -228,6 +228,8 @@ export type NodeInsertSyncItem = Readonly<{
   schema: z.ZodType;
   props: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
+  /** True only when the fused node statement already wrote fulltext. */
+  fulltextFused?: boolean;
 }>;
 
 /**
@@ -245,17 +247,14 @@ export async function applyNodeInsertSyncFans(
   args: NodeInsertSyncItem,
   backend: Backend,
 ): Promise<void> {
+  const syncContext = nodeSyncContext(ctx, args.kind, args.id, backend);
+  if (args.fulltextFused === true) {
+    await syncEmbeddings(syncContext, args.schema, args.props);
+    return;
+  }
   await Promise.all([
-    syncEmbeddings(
-      nodeSyncContext(ctx, args.kind, args.id, backend),
-      args.schema,
-      args.props,
-    ),
-    syncFulltext(
-      nodeSyncContext(ctx, args.kind, args.id, backend),
-      args.schema,
-      args.props,
-    ),
+    syncEmbeddings(syncContext, args.schema, args.props),
+    syncFulltext(syncContext, args.schema, args.props),
   ]);
 }
 

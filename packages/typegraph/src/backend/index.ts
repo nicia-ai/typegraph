@@ -254,6 +254,7 @@ export type {
   LockSchemaVersionForWriteParams,
   NodeEntityReadBackend,
   NodeEntityWriteBackend,
+  NodeFulltextSync,
   NodeRow,
   PessimisticLockCapabilities,
   PopulatedSchemaKind,

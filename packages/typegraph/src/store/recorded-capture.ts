@@ -12,6 +12,7 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
+  type NodeFulltextSync,
   type NodeRow,
   type SchemaWriteFenceParams,
   type TransactionBackend,
@@ -494,6 +495,44 @@ function createRecordedTransactionBackend(
         },
       }),
 
+    ...(target.insertNodeWithFulltext === undefined ?
+      {}
+    : {
+        async insertNodeWithFulltext(
+          params: InsertNodeParams,
+          fulltext: NodeFulltextSync,
+        ): Promise<NodeRow> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(target.insertNodeWithFulltext)(
+            params,
+            fulltext,
+          );
+          session.touchNode(params.graphId, params.kind, params.id, row);
+          return row;
+        },
+      }),
+
+    ...(target.insertNodeWithSchemaFenceAndFulltext === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFenceAndFulltext(
+          params: InsertNodeParams,
+          fulltext: NodeFulltextSync,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(
+            target.insertNodeWithSchemaFenceAndFulltext,
+          )(params, fulltext, schemaFence);
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
     ...(target.insertNodeNoReturn === undefined ?
       {}
     : {
@@ -879,6 +918,37 @@ export function createRecordedBackend(
           return capture((target) =>
             requireDefined(target.insertNodeWithSchemaFence)(
               params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeWithFulltext === undefined ?
+      {}
+    : {
+        async insertNodeWithFulltext(
+          params: InsertNodeParams,
+          fulltext: NodeFulltextSync,
+        ): Promise<NodeRow> {
+          return capture((target) =>
+            requireDefined(target.insertNodeWithFulltext)(params, fulltext),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeWithSchemaFenceAndFulltext === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFenceAndFulltext(
+          params: InsertNodeParams,
+          fulltext: NodeFulltextSync,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeWithSchemaFenceAndFulltext)(
+              params,
+              fulltext,
               schemaFence,
             ),
           );
