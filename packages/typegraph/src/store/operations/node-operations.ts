@@ -828,9 +828,11 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
 
-  // This is the fast-path existence gate. Resurrection repeats it immediately
-  // before the update because the row can change while constraints are checked.
-  const existingNode = await backend.getNode(ctx.graphId, kind, id);
+  // A generated id is fresh by construction, so probing it for a duplicate or
+  // tombstone can only report absence. Caller-supplied ids retain the probe:
+  // they may name either a live duplicate or a tombstone to resurrect.
+  const existingNode =
+    draft.idProvided ? await backend.getNode(ctx.graphId, kind, id) : undefined;
   if (existingNode && !existingNode.deleted_at) {
     throw createAlreadyExistsError("node", kind, id);
   }
@@ -840,7 +842,12 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
     registry: ctx.registry,
     backend,
   };
-  await checkDisjointnessConstraint(constraintContext, kind, id);
+  // Disjointness is also keyed by the id. A generated id cannot already be
+  // present under a disjoint kind, so its cross-kind reads are the same pure
+  // cost as the same-kind existence probe above.
+  if (draft.idProvided) {
+    await checkDisjointnessConstraint(constraintContext, kind, id);
+  }
 
   await checkUniquenessConstraints(
     createUniquenessContext(
