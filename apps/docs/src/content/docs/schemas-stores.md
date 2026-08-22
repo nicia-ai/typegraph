@@ -653,6 +653,51 @@ rejected by this fence. See
 [Store lifetime after a schema commit](/schema-management#store-lifetime-after-a-schema-commit)
 for the `StoreRef` and cross-process cache patterns.
 
+#### Managed-write latency and batching
+
+A single managed write is intentionally a small read/write protocol, not one
+blind `INSERT` or `UPDATE`. Its statement count includes the schema-version
+fence, the per-graph fence for a declared check-then-write constraint, identity
+coordination when a caller-supplied node id can fold across kinds, the
+operation's existence/endpoint/constraint probes, and the row plus its claim
+and sidecar writes. The exact count depends on the graph declaration and
+backend capabilities.
+
+The schema fence is rechecked for every managed write, including writes made
+through one `store.transaction(...)` callback. Do not cache that probe in an
+adapter: PostgreSQL releases row locks acquired after a savepoint when the
+transaction rolls back to that savepoint, so a cached verdict could let a
+later write run without a live schema fence. The per-graph write lock is
+already reused for nested operation frames on the same transaction target;
+there is no equivalent cache for the schema fence.
+
+Likewise, endpoint and duplicate-id checks are not folded into a blind write.
+Node creates must distinguish a live duplicate from a tombstone to preserve
+resurrection behavior and typed errors. Edge writes must validate both
+endpoints and preserve the claim/row/sidecar ordering. `getOrCreateByEndpoints`
+uses an outside read only for its no-write found fast path; every create,
+resurrection, or update re-reads inside its fenced write transaction so the
+match-key decision and the write share one exclusion.
+
+For networked deployments, amortize the safe costs at the call boundary:
+
+- Use `bulkCreate`, `bulkInsert`, `bulkUpsertById`, and the bulk get-or-create
+  methods for batches. They batch endpoint and node validation and use one
+  transaction and set-based writes where the backend supports them.
+- Group several related writes in `store.transaction(async (tx) => ...)` to
+  amortize transaction framing and per-transaction graph-lock acquisition.
+  Always use the `tx` collections inside the callback. Calling the root Store
+  there can open a second transaction or use the wrong connection.
+- Keep schema-managed writes on a transactional backend. A non-transactional
+  adapter cannot provide the schema or constraint fences and fails closed for
+  those writes.
+
+There is no supported option to disable these checks for a single write. If an
+application has already established stronger invariants, it may use a direct
+backend write under its own transaction and coordination policy, but that is
+outside the Store's typed validation, claim, sidecar, history, and identity
+contracts.
+
 ## Store Projection
 
 ### `StoreProjection<G, N, E>`

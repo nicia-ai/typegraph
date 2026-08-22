@@ -351,6 +351,29 @@ function nodeRequiresIdentityLock<G extends GraphDef>(
   return ctx.identity !== undefined;
 }
 
+/**
+ * A generated id cannot already belong to another node, so it cannot take
+ * part in identity folding. Keep the identity advisory lock for caller-
+ * supplied ids, whose cross-kind collision probe and fold do need it.
+ */
+function nodeCreateRequiresIdentityLock<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: Readonly<{ id?: string }>,
+): boolean {
+  return input.id !== undefined && nodeRequiresIdentityLock(ctx);
+}
+
+/** Whether any member of a node-create batch can participate in identity. */
+function nodeBatchCreateRequiresIdentityLock<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  inputs: readonly Readonly<{ id?: string }>[],
+): boolean {
+  return (
+    nodeRequiresIdentityLock(ctx) &&
+    inputs.some((input) => input.id !== undefined)
+  );
+}
+
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
   return encodeTupleKey([graphId, kind, id]);
 }
@@ -1675,7 +1698,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     opContext,
     nodeWritePlan(
       nodeFencesConstraintProbe(ctx, kind, "create"),
-      nodeRequiresIdentityLock(ctx),
+      nodeCreateRequiresIdentityLock(ctx, input),
     ),
     backend,
     async (session, target) => {
@@ -1777,7 +1800,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     nodeBatchWritePlan(
       nodeBatchConstraintProbes(ctx, inputs, "create"),
-      nodeRequiresIdentityLock(ctx),
+      nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
     backend,
     async (session, target) => {
