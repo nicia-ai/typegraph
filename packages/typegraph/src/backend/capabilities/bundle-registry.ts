@@ -840,13 +840,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
-    accesses: 6,
+    accesses: 7,
   },
   insertEdgeIfEndpointsLiveWithSchemaFence: {
     kind: "reasoned",
     reason:
       "First-party schema-fenced endpoint insert fast path; custom backends retain the existing endpoint-read and ordinary schema-fence path.",
-    accesses: 7,
+    accesses: 8,
   },
   insertEdgeIfEndpointsLive: {
     kind: "reasoned",

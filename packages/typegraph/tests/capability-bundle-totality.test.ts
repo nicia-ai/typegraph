@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("25 reasoned entries sum to 87 accesses; 48 deferred entries sum to 197", () => {
+  it("25 reasoned entries sum to 89 accesses; 48 deferred entries sum to 197", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -124,7 +124,7 @@ describe("capability bundle totality (T9)", () => {
     // transaction and autocommit factories, adding the scanner's twelve
     // receiver-scoped accesses. The registry remains the source of truth;
     // this totality test is its deliberately visible sum.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(87);
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(89);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(197);
   });
 });

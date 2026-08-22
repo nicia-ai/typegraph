@@ -156,9 +156,11 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
+import { isAutocommitSingleStatementWrite } from "./autocommit-single-statement";
 import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
   type HookedWritePlanContext,
+  runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
 } from "./write-executor";
@@ -1773,145 +1775,183 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     input,
     backend,
   );
+  const autocommitBackend = "transaction" in backend ? backend : undefined;
+  const registeredKind =
+    hasOwnKey(ctx.graph.nodes, kind) ?
+      getNodeRegistration(ctx.graph, kind)
+    : undefined;
+  const autocommitSingleStatement =
+    autocommitBackend !== undefined &&
+    registeredKind !== undefined &&
+    isAutocommitSingleStatementWrite({
+      kind: "node",
+      candidate: {
+        backend: autocommitBackend,
+        schemaVersion: ctx.schemaVersion,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+        identityEnabled: ctx.identity !== undefined,
+        idGenerated: input.id === undefined,
+        kindRegistered: true,
+        uniqueConstraintCount: registeredKind.unique?.length ?? 0,
+        disjointKindCount: ctx.registry.getDisjointKinds(kind).length,
+        schema: registeredKind.type.schema,
+      },
+    });
+  const plan = nodeWritePlan(
+    nodeFencesConstraintProbe(ctx, kind, "create"),
+    nodeCreateRequiresIdentityLock(ctx, input),
+  );
 
-  return runHookedWritePlan(
-    nodeWritePlanContext(ctx),
-    opContext,
-    nodeWritePlan(
-      nodeFencesConstraintProbe(ctx, kind, "create"),
-      nodeCreateRequiresIdentityLock(ctx, input),
-    ),
-    backend,
-    async (session, target) => {
-      // The outer backend's mark chooses the optimistic plan, but a custom
-      // transaction wrapper can replace its callback target. Re-check the
-      // factory-owned origin at the actual write receiver before letting that
-      // receiver carry the schema fence; otherwise a wrapper that dropped the
-      // ordinary diagnostic fence could silently write a verified store.
-      const targetBackend = unfencedTarget(target);
-      const fuseSchemaFenceInFirstWrite =
-        schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
-      if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
-      }
-      const identity = ctx.identity;
-      const prepared = await validateAndPrepareNodeCreate(
+  const rowWork = async (
+    session: NodeWriteSession,
+    target: WriteTarget,
+  ): Promise<Node | undefined> => {
+    // The outer backend's mark chooses the optimistic plan, but a custom
+    // transaction wrapper can replace its callback target. Re-check the
+    // factory-owned origin at the actual write receiver before letting that
+    // receiver carry the schema fence; otherwise a wrapper that dropped the
+    // ordinary diagnostic fence could silently write a verified store.
+    const targetBackend = unfencedTarget(target);
+    const fuseSchemaFenceInFirstWrite =
+      schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
+    if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
+      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+    }
+    const identity = ctx.identity;
+    const prepared = await validateAndPrepareNodeCreate(
+      ctx,
+      input,
+      id,
+      target,
+      options,
+    );
+
+    const existing = prepared.tombstone;
+    if (existing !== undefined) {
+      const resurrected = await resurrectPreparedNode(
         ctx,
-        input,
-        id,
+        session,
         target,
-        options,
+        prepared,
       );
-
-      const existing = prepared.tombstone;
-      if (existing !== undefined) {
-        const resurrected = await resurrectPreparedNode(
-          ctx,
-          session,
-          target,
-          prepared,
-        );
-        if (identity !== undefined) {
-          await identity.foldCreated(target, foldReferences([prepared]));
-        }
-        return shouldReturnRow ? rowToNode(resurrected) : undefined;
-      }
-
-      if (fuseSchemaFenceInFirstWrite) {
-        const schemaFence = {
-          graphId: ctx.graphId,
-          expectedVersion: requireDefined(ctx.schemaVersion),
-        };
-        const work = nodeInsertWork(prepared);
-        const inserted =
-          prepared.insertIfAbsent ?
-            await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
-          : await session.createNodeWithSchemaFence(work, schemaFence);
-        if (inserted !== undefined) {
-          return shouldReturnRow ? rowToNode(inserted) : undefined;
-        }
-
-        // The fused statement's empty result is intentionally ambiguous. Its
-        // ordinary active-schema diagnostic preserves the settled version in
-        // StaleVersionError.details.actual without a second PostgreSQL lock.
-        await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
-        if (!prepared.insertIfAbsent) {
-          throw new DatabaseOperationError(
-            `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
-            { operation: "insert", entity: "node" },
-          );
-        }
-      }
-
-      if (prepared.insertIfAbsent) {
-        const inserted =
-          fuseSchemaFenceInFirstWrite ? undefined : (
-            await session.createNodeIfAbsent(nodeInsertWork(prepared))
-          );
-        if (inserted !== undefined) {
-          if (identity !== undefined) {
-            await identity.foldCreated(target, foldReferences([prepared]));
-          }
-          return shouldReturnRow ? rowToNode(inserted) : undefined;
-        }
-
-        // `ON CONFLICT DO NOTHING` leaves PostgreSQL's transaction usable. A
-        // single read now classifies the occupied slot, rather than paying it
-        // on every successful caller-supplied-id create.
-        const occupied = await target.getNode(
-          ctx.graphId,
-          prepared.kind,
-          prepared.id,
-        );
-        if (occupied === undefined) {
-          throw new DatabaseOperationError(
-            `Node disappeared after insert-if-absent conflict: ${prepared.kind} ${prepared.id}`,
-            { operation: "insert", entity: "node" },
-          );
-        }
-        if (occupied.deleted_at === undefined) {
-          throw createAlreadyExistsError("node", prepared.kind, prepared.id);
-        }
-        const resurrected = await resurrectPreparedNode(
-          ctx,
-          session,
-          target,
-          prepared,
-        );
-        if (identity !== undefined) {
-          await identity.foldCreated(target, foldReferences([prepared]));
-        }
-        return shouldReturnRow ? rowToNode(resurrected) : undefined;
-      }
-
-      // The existence probe above is not the last word: on an engine that does
-      // not serialize the two writers, a concurrent create of the same new id
-      // can commit between the probe and this INSERT, and only the engine's
-      // refusal reports it. Both routes to that conclusion raise the same error.
-      //
-      // The claims are the session's, at their declared placements: the
-      // pre-insert group gates the row and is compensated away if it does not
-      // land, the post-insert group follows it. The translation spans the fused
-      // unit — claims, row AND sidecars — because the session applies them
-      // together. That widening is inert: `isDuplicateKeyInsertError` fires only
-      // on a classified node-INSERT duplicate, which no claim, fulltext or
-      // embedding write raises. The alternative — the session owning the
-      // translation — would change import's create-leg error type on a lost
-      // race, which it must not.
-      const row = await withAlreadyExistsTranslation("node", async () => {
-        const work = nodeInsertWork(prepared);
-        if (shouldReturnRow) return session.createNode(work);
-        await session.createNodeNoReturn(work);
-        return;
-      });
-
       if (identity !== undefined) {
         await identity.foldCreated(target, foldReferences([prepared]));
       }
+      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+    }
 
-      if (row === undefined) return;
-      return rowToNode(row);
-    },
+    if (fuseSchemaFenceInFirstWrite) {
+      const schemaFence = {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      };
+      const work = nodeInsertWork(prepared);
+      const inserted =
+        prepared.insertIfAbsent ?
+          await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
+        : await session.createNodeWithSchemaFence(work, schemaFence);
+      if (inserted !== undefined) {
+        return shouldReturnRow ? rowToNode(inserted) : undefined;
+      }
+
+      // The fused statement's empty result is intentionally ambiguous. Its
+      // ordinary active-schema diagnostic preserves the settled version in
+      // StaleVersionError.details.actual without a second PostgreSQL lock.
+      await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+      if (!prepared.insertIfAbsent) {
+        throw new DatabaseOperationError(
+          `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
+          { operation: "insert", entity: "node" },
+        );
+      }
+    }
+
+    if (prepared.insertIfAbsent) {
+      const inserted =
+        fuseSchemaFenceInFirstWrite ? undefined : (
+          await session.createNodeIfAbsent(nodeInsertWork(prepared))
+        );
+      if (inserted !== undefined) {
+        if (identity !== undefined) {
+          await identity.foldCreated(target, foldReferences([prepared]));
+        }
+        return shouldReturnRow ? rowToNode(inserted) : undefined;
+      }
+
+      // `ON CONFLICT DO NOTHING` leaves PostgreSQL's transaction usable. A
+      // single read now classifies the occupied slot, rather than paying it
+      // on every successful caller-supplied-id create.
+      const occupied = await target.getNode(
+        ctx.graphId,
+        prepared.kind,
+        prepared.id,
+      );
+      if (occupied === undefined) {
+        throw new DatabaseOperationError(
+          `Node disappeared after insert-if-absent conflict: ${prepared.kind} ${prepared.id}`,
+          { operation: "insert", entity: "node" },
+        );
+      }
+      if (occupied.deleted_at === undefined) {
+        throw createAlreadyExistsError("node", prepared.kind, prepared.id);
+      }
+      const resurrected = await resurrectPreparedNode(
+        ctx,
+        session,
+        target,
+        prepared,
+      );
+      if (identity !== undefined) {
+        await identity.foldCreated(target, foldReferences([prepared]));
+      }
+      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+    }
+
+    // The existence probe above is not the last word: on an engine that does
+    // not serialize the two writers, a concurrent create of the same new id
+    // can commit between the probe and this INSERT, and only the engine's
+    // refusal reports it. Both routes to that conclusion raise the same error.
+    //
+    // The claims are the session's, at their declared placements: the
+    // pre-insert group gates the row and is compensated away if it does not
+    // land, the post-insert group follows it. The translation spans the fused
+    // unit — claims, row AND sidecars — because the session applies them
+    // together. That widening is inert: `isDuplicateKeyInsertError` fires only
+    // on a classified node-INSERT duplicate, which no claim, fulltext or
+    // embedding write raises. The alternative — the session owning the
+    // translation — would change import's create-leg error type on a lost
+    // race, which it must not.
+    const row = await withAlreadyExistsTranslation("node", async () => {
+      const work = nodeInsertWork(prepared);
+      if (shouldReturnRow) return session.createNode(work);
+      await session.createNodeNoReturn(work);
+      return;
+    });
+
+    if (identity !== undefined) {
+      await identity.foldCreated(target, foldReferences([prepared]));
+    }
+
+    if (row === undefined) return;
+    return rowToNode(row);
+  };
+
+  if (autocommitSingleStatement) {
+    return runAutocommitSingleStatementWritePlan(
+      nodeWritePlanContext(ctx),
+      opContext,
+      plan,
+      autocommitBackend,
+      rowWork,
+    );
+  }
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
+    opContext,
+    plan,
+    backend,
+    rowWork,
     { schemaFenceInFirstWrite },
   );
 }

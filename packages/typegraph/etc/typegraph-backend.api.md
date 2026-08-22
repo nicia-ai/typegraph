@@ -3137,12 +3137,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly insertNodeWithSchemaFence: {
         readonly kind: "reasoned";
         readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
-        readonly accesses: 6;
+        readonly accesses: 7;
     };
     readonly insertEdgeIfEndpointsLiveWithSchemaFence: {
         readonly kind: "reasoned";
         readonly reason: "First-party schema-fenced endpoint insert fast path; custom backends retain the existing endpoint-read and ordinary schema-fence path.";
-        readonly accesses: 7;
+        readonly accesses: 8;
     };
     readonly insertEdgeIfEndpointsLive: {
         readonly kind: "reasoned";

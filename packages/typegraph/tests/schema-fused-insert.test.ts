@@ -33,6 +33,13 @@ import type {
   GraphBackend,
   TransactionBackend,
 } from "../src/backend/types";
+import { embedding } from "../src/core/embedding";
+import { searchable } from "../src/core/searchable";
+import {
+  type EdgeAutocommitSingleStatementCandidate,
+  isAutocommitSingleStatementWrite,
+  type NodeAutocommitSingleStatementCandidate,
+} from "../src/store/operations/autocommit-single-statement";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -82,24 +89,33 @@ function expectFusedWriteExecution(
   ).toHaveLength(1);
 }
 
+/** A root-autocommit fast path must emit only its fused INSERT. */
+function expectOneAutocommitWriteCommand(statements: readonly string[]): void {
+  expect(statements).toHaveLength(1);
+  expect(statements[0]?.toLowerCase()).toContain("insert into");
+  expect(statements[0]?.toLowerCase()).not.toContain("begin");
+  expect(statements[0]?.toLowerCase()).not.toContain("commit");
+}
+
 async function createRecordedPgliteBackend(): Promise<RecordedSqlBackend> {
   const client = await PGlite.create();
   await client.exec(generatePostgresDDL().join("\n\n"));
   const statements: string[] = [];
-  const backend = createPostgresBackend(
-    drizzlePglite(client, {
-      logger: {
-        logQuery(query: string): void {
-          statements.push(query);
-        },
-      },
-    }),
-    { vector: false },
-  );
+  const query = client.query.bind(client);
+  const querySpy = vi.spyOn(client, "query").mockImplementation((...args) => {
+    statements.push(args[0]);
+    return query(...args);
+  });
+  const backend = createPostgresBackend(drizzlePglite(client), {
+    vector: false,
+  });
 
   return {
     backend,
-    close: () => client.close(),
+    async close(): Promise<void> {
+      querySpy.mockRestore();
+      await client.close();
+    },
     reset: () => {
       statements.splice(0);
     },
@@ -346,11 +362,13 @@ describe("schema-fenced insert budget", () => {
       statements.splice(0);
       const alice = await store.nodes.Person.create({ name: "Alice" });
       expectFusedWriteExecution(statements, "typegraph_nodes");
+      expectOneAutocommitWriteCommand(statements);
 
       const bob = await store.nodes.Person.create({ name: "Bob" });
       statements.splice(0);
       await store.edges.knows.create(alice, bob, {});
       expectFusedWriteExecution(statements, "typegraph_edges");
+      expectOneAutocommitWriteCommand(statements);
     } finally {
       prepareSpy.mockRestore();
       await backend.close();
@@ -368,11 +386,13 @@ describe("schema-fenced insert budget", () => {
       recorded.reset();
       const alice = await store.nodes.Person.create({ name: "Alice" });
       expectFusedWriteExecution(recorded.statements, "typegraph_nodes");
+      expectOneAutocommitWriteCommand(recorded.statements);
 
       const bob = await store.nodes.Person.create({ name: "Bob" });
       recorded.reset();
       await store.edges.knows.create(alice, bob, {});
       expectFusedWriteExecution(recorded.statements, "typegraph_edges");
+      expectOneAutocommitWriteCommand(recorded.statements);
     } finally {
       await recorded.close();
     }
@@ -523,6 +543,94 @@ describe("schema-fenced insert budget", () => {
         backend,
         "schema_fused_continue_postgres",
       );
+    } finally {
+      await backend.close();
+    }
+  });
+});
+
+describe("single-statement autocommit eligibility", () => {
+  it("refuses every node guard and does not trust derived backends", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const plainSchema = z.object({ name: z.string() });
+    const candidate: NodeAutocommitSingleStatementCandidate = {
+      backend,
+      schemaVersion: 1,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+      identityEnabled: false,
+      idGenerated: true,
+      kindRegistered: true,
+      uniqueConstraintCount: 0,
+      disjointKindCount: 0,
+      schema: plainSchema,
+    };
+    const eligible = (
+      overrides: Partial<
+        Omit<NodeAutocommitSingleStatementCandidate, "schemaVersion">
+      > &
+        Readonly<{ schemaVersion?: number | undefined }> = {},
+    ) =>
+      isAutocommitSingleStatementWrite({
+        kind: "node",
+        candidate: { ...candidate, ...overrides },
+      });
+
+    try {
+      expect(eligible()).toBe(true);
+      expect(eligible({ schemaVersion: undefined })).toBe(false);
+      expect(eligible({ historyEnabled: true })).toBe(false);
+      expect(eligible({ revisionTrackingEnabled: true })).toBe(false);
+      expect(eligible({ identityEnabled: true })).toBe(false);
+      expect(eligible({ idGenerated: false })).toBe(false);
+      expect(eligible({ kindRegistered: false })).toBe(false);
+      expect(eligible({ uniqueConstraintCount: 1 })).toBe(false);
+      expect(eligible({ disjointKindCount: 1 })).toBe(false);
+      expect(eligible({ schema: z.object({ name: searchable() }) })).toBe(
+        false,
+      );
+      expect(eligible({ schema: z.object({ vector: embedding(2) }) })).toBe(
+        false,
+      );
+      expect(eligible({ backend: deriveBackend(backend, {}) })).toBe(false);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("refuses every edge guard and only accepts a plain many-edge create", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const candidate: EdgeAutocommitSingleStatementCandidate = {
+      backend,
+      schemaVersion: 1,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+      idGenerated: true,
+      kindRegistered: true,
+      convergesOnMatchKey: false,
+      cardinality: "many" as const,
+    };
+    const eligible = (
+      overrides: Partial<
+        Omit<EdgeAutocommitSingleStatementCandidate, "schemaVersion">
+      > &
+        Readonly<{ schemaVersion?: number | undefined }> = {},
+    ) =>
+      isAutocommitSingleStatementWrite({
+        kind: "edge",
+        candidate: { ...candidate, ...overrides },
+      });
+
+    try {
+      expect(eligible()).toBe(true);
+      expect(eligible({ schemaVersion: undefined })).toBe(false);
+      expect(eligible({ historyEnabled: true })).toBe(false);
+      expect(eligible({ revisionTrackingEnabled: true })).toBe(false);
+      expect(eligible({ idGenerated: false })).toBe(false);
+      expect(eligible({ kindRegistered: false })).toBe(false);
+      expect(eligible({ convergesOnMatchKey: true })).toBe(false);
+      expect(eligible({ cardinality: "one" })).toBe(false);
+      expect(eligible({ backend: deriveBackend(backend, {}) })).toBe(false);
     } finally {
       await backend.close();
     }

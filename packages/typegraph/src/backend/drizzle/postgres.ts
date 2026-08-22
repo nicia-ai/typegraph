@@ -79,6 +79,7 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
+import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
@@ -1840,6 +1841,7 @@ export function createPostgresBackend(
   // declared capabilities while still carrying this mark.
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
+  markBundledRootAutocommitEligible(backend);
   return backend;
 }
 
