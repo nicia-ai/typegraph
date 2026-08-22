@@ -542,10 +542,12 @@ const backend = createPostgresBackend(db, {
 });
 ```
 
-The cache that maps SQL text → statement name is LRU-bounded (default 256
-entries, override via `preparedStatementCacheMax`). Worst-case server-side
-footprint is roughly `cap × pool size` prepared statements across all pooled
-connections.
+The in-process cache that maps SQL text → statement name is LRU-bounded
+(default 256 entries, override via `preparedStatementCacheMax`). Eviction
+never recycles a name, because a live connection may still retain that name for
+its original SQL. Therefore this setting does not bound server-side prepared
+statement memory. For a high-cardinality stream of SQL text, use
+`prepareStatements: false` instead.
 
 ### Connection Pooling
 

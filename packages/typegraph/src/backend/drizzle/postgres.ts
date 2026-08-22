@@ -295,15 +295,12 @@ export type PostgresBackendOptions = Readonly<{
    */
   prepareStatements?: boolean;
   /**
-   * Cap on the number of distinct SQL strings tracked for
-   * prepared-statement naming. Defaults to 256. The cache is LRU-
-   * bounded so high-cardinality SQL text (variable-length IN-lists,
-   * generated aliases, `backend.execute()` calls with one-off SQL)
-   * doesn't grow unbounded in either the Node process or in
-   * PostgreSQL's per-session prepared-statement memory. Worst-case
-   * server-side footprint is roughly `cap × pool size` statements
-   * across all pooled connections. Ignored when
-   * `prepareStatements` is `false`.
+   * Cap on the number of distinct SQL strings retained in TypeGraph's
+   * in-process SQL-to-statement-name lookup. Defaults to 256. Eviction never
+   * reuses a name, so this does not deallocate or bound prepared statements
+   * retained on live PostgreSQL connections. Set `prepareStatements: false`
+   * for high-cardinality SQL text when server-side statement retention is not
+   * acceptable. Ignored when `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
   /**

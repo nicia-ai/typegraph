@@ -544,28 +544,58 @@ describe("postgres execution adapter", () => {
       expect(new Set(namesUsed).size).toBe(3);
     });
 
-    it("never recycles statement names after eviction", async () => {
+    it("keeps names unique after eviction on a connection that remembers prepared SQL", async () => {
       resetStatementNameCacheForTests();
       const { db, query } = makeMockPgDb();
+      // node-postgres remembers each prepared statement's SQL text for the
+      // lifetime of a connection and rejects a name paired with different
+      // text. Model that contract here rather than only counting generated
+      // names: a name-reuse regression fails at the same second eviction that
+      // reaches a real long-lived connection.
+      const preparedSqlByName = new Map<string, string>();
+      query.mockImplementation((configOrSql) => {
+        if (typeof configOrSql === "string") {
+          return Promise.resolve({ rows: [] });
+        }
+        const config = configOrSql as Readonly<{
+          name: string;
+          text: string;
+        }>;
+        const existingSql = preparedSqlByName.get(config.name);
+        if (existingSql !== undefined && existingSql !== config.text) {
+          return Promise.reject(
+            new Error(
+              `Prepared statements must be unique - '${config.name}' was used for a different statement`,
+            ),
+          );
+        }
+        preparedSqlByName.set(config.name, config.text);
+        return Promise.resolve({ rows: [{ sqlText: config.text }] });
+      });
       const adapter = createPostgresExecutionAdapter(db, {
         preparedStatementCacheMax: 2,
       });
 
-      await adapter.execute(sql`q1`);
-      const firstName = (query.mock.calls[0]?.[0] as { name: string }).name;
-
-      await adapter.execute(sql`q2`);
-      await adapter.execute(sql`q3`); // evicts q1
-      await adapter.execute(sql`q4`); // evicts q2
+      // Four distinct statements exceed a two-entry LRU twice. A cache that
+      // recycled either evicted name would be rejected by the modeled pg
+      // connection instead of safely preparing the new SQL text.
+      const executedSql = await Promise.all(
+        [sql`q1`, sql`q2`, sql`q3`, sql`q4`].map(async (statement) => {
+          const rows = await adapter.execute<{ sqlText: string }>(statement);
+          return rows[0]?.sqlText;
+        }),
+      );
 
       const namesUsed = query.mock.calls.map(
         (call) => (call[0] as { name: string }).name,
       );
-      // After two evictions, four distinct names must have been issued —
-      // recycling firstName for q3 or q4 would collide with the still-
-      // prepared statement on a long-lived pg connection.
+      expect(executedSql).toEqual([
+        "SELECT 1 AS x",
+        "SELECT 2 AS x",
+        "SELECT 3 AS x",
+        "SELECT 4 AS x",
+      ]);
       expect(new Set(namesUsed).size).toBe(4);
-      expect(namesUsed.slice(1)).not.toContain(firstName);
     });
 
     it("promotes recently-used entries so they are not evicted next", async () => {
