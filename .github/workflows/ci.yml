@@ -21,7 +21,7 @@ env:
 jobs:
   detect-release-metadata-push:
     name: Detect release metadata push
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       skip_heavy_ci: ${{ steps.detect.outputs.skip_heavy_ci }}
     steps:
@@ -60,7 +60,7 @@ jobs:
 
   lint-and-check:
     name: Lint & Type Check
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
@@ -97,7 +97,7 @@ jobs:
 
   test-sqlite-unit:
     name: Test Unit (SQLite, Node 22, shard ${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
@@ -123,7 +123,7 @@ jobs:
 
   test-sqlite-property:
     name: Test Property (SQLite, Node 24)
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
@@ -145,7 +145,7 @@ jobs:
 
   test-sqlite-smoke:
     name: Test Smoke (SQLite, Node 24)
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 10
@@ -170,7 +170,7 @@ jobs:
 
   test-strict-local-consumers:
     name: Test Strict Packed Consumers (TypeScript 5 and 6)
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
@@ -192,7 +192,7 @@ jobs:
 
   test-coverage:
     name: Coverage shard ${{ matrix.shard }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 30
@@ -244,7 +244,7 @@ jobs:
 
   test-coverage-merge:
     name: Test (Coverage)
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push, test-coverage]
     if: >-
       ${{
@@ -284,7 +284,7 @@ jobs:
 
   test-typescript-compat:
     name: Type Tests (TS ${{ matrix.typescript-version }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
@@ -326,7 +326,7 @@ jobs:
 
   test-postgres:
     name: Test (PostgreSQL, shard ${{ matrix.shard }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 20
@@ -413,7 +413,7 @@ jobs:
 
   test-durable-objects:
     name: Test (Durable Objects SQLite)
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
     timeout-minutes: 15
@@ -435,7 +435,7 @@ jobs:
 
   build-artifacts:
     name: Build artifacts
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
@@ -465,7 +465,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - build-artifacts
       - detect-release-metadata-push
@@ -496,7 +496,7 @@ jobs:
 
   release-metadata-push:
     name: Release metadata push check
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [detect-release-metadata-push]
     if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci == 'true' }}
     steps:
