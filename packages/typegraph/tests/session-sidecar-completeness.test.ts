@@ -164,6 +164,7 @@ const WATCHED_MEMBERS = [
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
   "insertNode",
+  "insertNodeIfAbsent",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -397,6 +398,14 @@ const CASES: Record<keyof WriteSession, Case> = {
     // fence — is pinned in `write-plan-statement-order.test.ts`, against real
     // SQL and a `kindWithSubClasses` scope.
     postRowClaims: ["insertUnique"],
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
+    plan: NODE_PLAN,
+  },
+  createNodeIfAbsent: {
+    run: () =>
+      Promise.resolve((session) => session.createNodeIfAbsent(insertWork("a"))),
+    sidecars: ["upsertFulltext", "upsertEmbedding"],
+    row: "insertNodeIfAbsent",
     postRowFans: ["upsertFulltext", "upsertEmbedding"],
     plan: NODE_PLAN,
   },

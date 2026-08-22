@@ -97,6 +97,7 @@ const READ_MEMBERS = [
  */
 export const ENTITY_WRITE_MEMBERS = [
   "insertNode",
+  "insertNodeIfAbsent",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",

@@ -42,6 +42,7 @@ export const RECORDED_REQUIRED_WRITE_METHODS = [
 
 export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodeNoReturn",
+  "insertNodeIfAbsent",
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNodeSet",

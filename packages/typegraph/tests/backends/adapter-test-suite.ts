@@ -137,6 +137,36 @@ export function createAdapterTestSuite(
         expect(requireDefined(fetched).kind).toBe("Person");
       });
 
+      it("keeps a transaction usable after insertNodeIfAbsent finds an occupied slot", async () => {
+        if (backend.insertNodeIfAbsent === undefined) return;
+
+        const params = {
+          graphId: "test_graph",
+          kind: "Person",
+          id: "if-absent-occupied",
+          props: { name: "Original" },
+        };
+        await backend.insertNode(params);
+
+        await backend.transaction(async (transaction) => {
+          const result = await requireDefined(transaction.insertNodeIfAbsent)({
+            ...params,
+            props: { name: "Duplicate" },
+          });
+          expect(result).toBeUndefined();
+
+          // PostgreSQL considers a caught unique violation transaction-fatal;
+          // `ON CONFLICT DO NOTHING` must instead allow the classification
+          // read that the store's insert-first create path performs next.
+          const existing = await transaction.getNode(
+            params.graphId,
+            params.kind,
+            params.id,
+          );
+          expect(requireDefined(existing).deleted_at).toBeUndefined();
+        });
+      });
+
       it("supports insertNodeNoReturn when available", async () => {
         if (backend.insertNodeNoReturn === undefined) return;
 

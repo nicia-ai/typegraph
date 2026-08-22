@@ -52,6 +52,34 @@ export function buildInsertNode(
 }
 
 /**
+ * Builds an insert that reports an occupied node primary key as an ordinary
+ * no-row result. This is deliberately a `DO NOTHING` rather than a caught
+ * duplicate error: PostgreSQL marks a transaction failed after a constraint
+ * violation, while this statement keeps the frame usable for the follow-up
+ * live/tombstone read.
+ */
+export function buildInsertNodeIfAbsent(
+  tables: Tables,
+  params: InsertNodeParams,
+  timestamp: string,
+): SQL {
+  const { nodes } = tables;
+  const propsJson = JSON.stringify(params.props);
+  const columns = nodeColumnList(nodes);
+
+  return sql`
+    INSERT INTO ${nodes} (${columns})
+    VALUES (
+      ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
+      1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    )
+    ON CONFLICT (graph_id, kind, id) DO NOTHING
+    RETURNING *
+  `;
+}
+
+/**
  * Builds an INSERT query for a node without RETURNING payload.
  */
 export function buildInsertNodeNoReturn(

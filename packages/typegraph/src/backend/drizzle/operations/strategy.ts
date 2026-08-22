@@ -92,6 +92,7 @@ import {
   buildGetNodes,
   buildHardDeleteNode,
   buildInsertNode,
+  buildInsertNodeIfAbsent,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
@@ -175,6 +176,10 @@ export type CommonOperationStrategy = Readonly<{
     vectorScoreDescending: boolean,
   ) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
+  buildInsertNodeIfAbsent: (
+    params: InsertNodeParams,
+    timestamp: string,
+  ) => SQL;
   buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
@@ -356,6 +361,7 @@ function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
 
 const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNode,
+  buildInsertNodeIfAbsent,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,

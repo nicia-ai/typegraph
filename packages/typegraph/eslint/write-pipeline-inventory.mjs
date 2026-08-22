@@ -20,6 +20,7 @@
 export const WRITE_MEMBER_NAMES = [
   // ENTITY_WRITE_MEMBERS
   "insertNode",
+  "insertNodeIfAbsent",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -182,6 +183,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
     allowedMembers: [
       "insertNode",
+      "insertNodeIfAbsent",
       "insertNodeNoReturn",
       "insertNodesBatch",
       "insertNodesBatchReturning",
@@ -243,6 +245,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
     allowedMembers: [
       "insertNode",
+      "insertNodeIfAbsent",
       "updateNode",
       "updateNodeSet",
       "deleteNode",
