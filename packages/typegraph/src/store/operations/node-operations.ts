@@ -51,7 +51,10 @@ import {
   BATCH_POINT_READ,
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
-import { supportsNodeInsertProjections } from "../../backend/capabilities/node-insert-projections";
+import {
+  supportsNodeInsertClaims,
+  supportsNodeInsertProjections,
+} from "../../backend/capabilities/node-insert-projections";
 import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -128,6 +131,8 @@ import {
   checkUniquenessConstraints,
   createUniquenessContext,
   nodeClaimEntries,
+  planNodeCreateClaims,
+  type NodeCreateClaimPlan,
   type NodeClaimItem,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
@@ -261,6 +266,7 @@ type NodeCreatePrepared = Readonly<{
   nodeKind: NodeType;
   validatedProps: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
+  claimPlan: NodeCreateClaimPlan;
   insertParams: InsertNodeParams;
   /**
    * `true` when the caller supplied `input.id`. A generated id cannot
@@ -811,6 +817,10 @@ type NodeCreateInternalOptions = Readonly<{
   propsPreValidated?: boolean;
 }>;
 
+/** Whether create preparation retains application probes or defers them to
+ * the authoritative verdict returned by the planned insert statement. */
+type NodeCreatePreparationMode = "probe" | "authoritative-plan";
+
 export type NodeCreateDraft = Readonly<{
   kind: string;
   id: string;
@@ -883,8 +893,13 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   draft: NodeCreateDraft,
   backend: WriteTarget,
   allowInsertIfAbsent = true,
+  mode: NodeCreatePreparationMode = "probe",
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
+  const claimPlan = planNodeCreateClaims(
+    { graphId: ctx.graphId, registry: ctx.registry },
+    { kind, id, props: validatedProps, constraints: uniqueConstraints },
+  );
 
   // Claim-free caller ids are the one safe shape for an insert-first path. A
   // pre-insert claim would have to be compensated when `DO NOTHING` reports an
@@ -916,35 +931,46 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
     throw createAlreadyExistsError("node", kind, id);
   }
 
-  const constraintContext: ConstraintContext = {
-    graphId: ctx.graphId,
-    registry: ctx.registry,
-    backend,
-  };
-  // Disjointness is also keyed by the id. A generated id cannot already be
-  // present under a disjoint kind, so its cross-kind reads are the same pure
-  // cost as the same-kind existence probe above.
-  if (draft.idProvided && !insertIfAbsent) {
-    await checkDisjointnessConstraint(constraintContext, kind, id);
-  }
-
-  await checkUniquenessConstraints(
-    createUniquenessContext(
-      ctx.graphId,
-      ctx.registry,
+  // A fresh row whose claims are going through the transaction-scoped
+  // planned insert gets its ownership verdict from that statement. Keep the
+  // same probes for fallback backends, no-return writes, and tombstones (the
+  // latter route through the resurrection transition rather than this plan).
+  const deferConstraintProbes =
+    mode === "authoritative-plan" &&
+    existingNode === undefined &&
+    claimPlan.claims.length > 0;
+  if (!deferConstraintProbes) {
+    const constraintContext: ConstraintContext = {
+      graphId: ctx.graphId,
+      registry: ctx.registry,
       backend,
-      ctx.uniqueSidecarBatch,
-    ),
-    kind,
-    id,
-    validatedProps,
-    uniqueConstraints,
-  );
+    };
+    // Disjointness is also keyed by the id. A generated id cannot already be
+    // present under a disjoint kind, so its cross-kind reads are the same pure
+    // cost as the same-kind existence probe above.
+    if (draft.idProvided && !insertIfAbsent) {
+      await checkDisjointnessConstraint(constraintContext, kind, id);
+    }
+
+    await checkUniquenessConstraints(
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
+      kind,
+      id,
+      validatedProps,
+      uniqueConstraints,
+    );
+  }
 
   return {
     kind,
     id,
     idProvided: draft.idProvided,
+    claimPlan,
     tombstone: existingNode,
     insertIfAbsent,
     nodeKind: draft.nodeKind,
@@ -967,11 +993,14 @@ async function validateAndPrepareNodeCreate<G extends GraphDef>(
   id: string,
   backend: WriteTarget,
   options?: NodeCreateInternalOptions,
+  mode: NodeCreatePreparationMode = "probe",
 ): Promise<NodeCreatePrepared> {
   return finishNodeCreatePreparation(
     ctx,
     draftNodeCreate(ctx, input, id, options),
     backend,
+    true,
+    mode,
   );
 }
 
@@ -1026,6 +1055,7 @@ function nodeInsertWork(
   return {
     params: prepared.insertParams,
     claim: nodeCreateClaimItem(prepared),
+    claimPlan: prepared.claimPlan,
     sideEffects: nodeCreateSideEffectItem(prepared),
     projections,
   };
@@ -1845,12 +1875,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
     const identity = ctx.identity;
+    const preparationMode: NodeCreatePreparationMode =
+      shouldReturnRow && supportsNodeInsertClaims(target) ? "authoritative-plan"
+      : "probe";
     const prepared = await validateAndPrepareNodeCreate(
       ctx,
       input,
       id,
       target,
       options,
+      preparationMode,
     );
     const projections = resolveNodeInsertProjections(
       prepared.nodeKind.schema,

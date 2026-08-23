@@ -82,6 +82,7 @@ import {
 } from "../claims/edge-claims";
 import {
   type NodeClaimItem,
+  type NodeCreateClaimPlan,
   planNodeCreateClaims,
   refuseNodeCreateClaimError,
   withNodeCreateClaims,
@@ -247,6 +248,8 @@ type NodeInsertSideEffects = Readonly<{
 export type NodeInsertWork = Readonly<{
   params: InsertNodeParams;
   claim: NodeClaimItem;
+  /** The preparation-time claim decision, when this is a single create. */
+  claimPlan?: NodeCreateClaimPlan;
   sideEffects: NodeInsertSideEffects;
   projections: readonly NodeInsertProjection[];
 }>;
@@ -428,7 +431,8 @@ export function createWriteSession(
     // seam owns the two groups and the compensation between them; this surface
     // owns only "the row write it gates is THIS one".
     createNode: async (work) => {
-      const claimPlan = planNodeCreateClaims(writeContext, work.claim);
+      const claimPlan =
+        work.claimPlan ?? planNodeCreateClaims(writeContext, work.claim);
       const insertPlanFused = supportsNodeInsertPlan(target, {
         claims: claimPlan.claims,
         projections: work.projections,
@@ -459,7 +463,7 @@ export function createWriteSession(
           }
           return row;
         } catch (error) {
-          refuseNodeCreateClaimError(error, claimPlan.entries);
+          refuseNodeCreateClaimError(error, claimPlan);
         }
       };
       const row = await insertPlannedNode();

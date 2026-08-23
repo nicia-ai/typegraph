@@ -47,6 +47,27 @@ export function supportsNodeInsertProjections(
   });
 }
 
+/**
+ * Whether the receiver can make uniqueness/disjointness claims authoritative
+ * inside the planned node statement.
+ *
+ * Claims are reported by the statement as a verdict, so the caller must have a
+ * transaction boundary around the statement before it can safely defer the
+ * application probes. A root backend is deliberately excluded: its
+ * `insertNodeWithProjections` member is also used for projection-only
+ * autocommit writes, but a claim refusal must roll back the node and any
+ * claims it touched together.
+ */
+export function supportsNodeInsertClaims(
+  target: NodeProjectionInsertTarget,
+): boolean {
+  return (
+    target.insertNodeWithProjections !== undefined &&
+    !("transaction" in target) &&
+    target.capabilities.atomicNodeInsertClaims === true
+  );
+}
+
 /** Whether the receiver can lower this complete insert plan atomically. */
 export function supportsNodeInsertPlan(
   target: NodeProjectionInsertTarget,
@@ -62,9 +83,8 @@ export function supportsNodeInsertPlan(
   // so the caller-owned transaction is the rollback boundary. Root graph
   // backends expose `transaction`; transaction-scoped operation backends do
   // not. Keep this exported predicate aligned with the execution contract.
-  if ("transaction" in target) return false;
   return (
-    target.capabilities.atomicNodeInsertClaims === true &&
+    supportsNodeInsertClaims(target) &&
     supportsNodeInsertProjectionRequirements(target, {
       fulltext: input.projections.some(
         (projection) => projection.kind === "fulltext",
