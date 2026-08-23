@@ -507,7 +507,7 @@ export type NodeClaimItem = Readonly<{
  * typed refusal complete: uniqueness errors regain their declared fields, and
  * disjoint errors retain the exact partner kind that made the claim apply.
  */
-export type NodeCreateClaimVerdict =
+type NodeCreateClaimVerdict =
   | Readonly<{
       claim: NodeInsertClaim;
       probeKinds: readonly string[];

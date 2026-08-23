@@ -92,7 +92,7 @@ export function resolveNodeFulltextProjection(
 }
 
 /** Resolves the ordinary identity-carrying fulltext synchronization input. */
-export function resolveNodeFulltextSync(
+function resolveNodeFulltextSync(
   schema: z.ZodType,
   props: Record<string, unknown>,
   identity: Readonly<{
