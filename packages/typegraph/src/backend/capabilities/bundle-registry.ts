@@ -845,7 +845,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   insertNodeWithProjections: {
     kind: "reasoned",
     reason:
-      "A bundled PostgreSQL/PGlite node-plus-projections statement selected only when every requested strategy proves one-statement sync; other backends retain the ordinary node then sidecar path.",
+      "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.",
     accesses: 6,
   },
   insertEdgeIfEndpointsLiveWithSchemaFence: {

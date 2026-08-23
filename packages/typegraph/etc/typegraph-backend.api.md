@@ -44,6 +44,7 @@ export type BackendCapabilities = Readonly<{
     returning?: boolean;
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
+    readonly atomicNodeInsertClaims?: boolean;
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
@@ -2379,6 +2380,14 @@ export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
 }>;
 
 // @public
+export type NodeInsertClaim = Readonly<{
+    axis: string;
+    constraintName: string;
+    key: string;
+    placement: "pre-insert" | "post-insert";
+}>;
+
+// @public
 export type NodeInsertMode = Readonly<{
     kind: "ordinary";
 }> | Readonly<{
@@ -2389,6 +2398,7 @@ export type NodeInsertMode = Readonly<{
 // @public
 export type NodeInsertPlan = Readonly<{
     mode: NodeInsertMode;
+    claims?: readonly NodeInsertClaim[];
     projections: readonly NodeInsertProjection[];
 }>;
 
@@ -3194,7 +3204,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly insertNodeWithProjections: {
         readonly kind: "reasoned";
-        readonly reason: "A bundled PostgreSQL/PGlite node-plus-projections statement selected only when every requested strategy proves one-statement sync; other backends retain the ordinary node then sidecar path.";
+        readonly reason: "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.";
         readonly accesses: 6;
     };
     readonly insertEdgeIfEndpointsLiveWithSchemaFence: {

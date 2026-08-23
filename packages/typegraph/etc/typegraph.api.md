@@ -202,6 +202,7 @@ export type BackendCapabilities = Readonly<{
     returning?: boolean;
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
+    readonly atomicNodeInsertClaims?: boolean;
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
@@ -4511,6 +4512,14 @@ export type NodeIndexWhereBuilder<N extends NodeType> = Readonly<{
 }>;
 
 // @public
+export type NodeInsertClaim = Readonly<{
+    axis: string;
+    constraintName: string;
+    key: string;
+    placement: "pre-insert" | "post-insert";
+}>;
+
+// @public
 export type NodeInsertMode = Readonly<{
     kind: "ordinary";
 }> | Readonly<{
@@ -4521,6 +4530,7 @@ export type NodeInsertMode = Readonly<{
 // @public
 export type NodeInsertPlan = Readonly<{
     mode: NodeInsertMode;
+    claims?: readonly NodeInsertClaim[];
     projections: readonly NodeInsertProjection[];
 }>;
 

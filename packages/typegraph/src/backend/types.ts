@@ -336,6 +336,13 @@ export type BackendCapabilities = Readonly<{
    * whose declaration and surface disagree in either direction.
    */
   readonly constraintClaims?: boolean;
+  /**
+   * Whether `insertNodeWithProjections` can atomically apply the claim portion
+   * of a {@link NodeInsertPlan}. Absent means projection-only: method presence
+   * alone is not evidence that a custom backend understands the newer plan
+   * field, so the store retains the standalone claim fallback.
+   */
+  readonly atomicNodeInsertClaims?: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
@@ -877,7 +884,22 @@ export type NodeInsertProjection =
       action: "delete";
     }>;
 
-/** The two atomic node-insert shapes supported by a projection-aware backend. */
+/**
+ * A uniqueness-relation claim carried by an atomic node-insert plan.
+ *
+ * Node identity is deliberately absent: the backend derives the owner pair
+ * from the node insert parameters, so the claim cannot name a different row.
+ * Placement is decided by the store's claim-site owner and preserved by the
+ * SQL compiler as an explicit dependency around the node insert.
+ */
+export type NodeInsertClaim = Readonly<{
+  axis: string;
+  constraintName: string;
+  key: string;
+  placement: "pre-insert" | "post-insert";
+}>;
+
+/** The two atomic node-insert shapes supported by a planned-write backend. */
 export type NodeInsertMode =
   | Readonly<{ kind: "ordinary" }>
   | Readonly<{
@@ -886,12 +908,14 @@ export type NodeInsertMode =
     }>;
 
 /**
- * Complete plan for a projection-aware node insert. The insert params carry
- * row identity; this plan carries only the projections and whether the node
- * statement must acquire the active-schema fence.
+ * Complete plan for an atomic node insert. The insert params carry row
+ * identity; this plan carries its constraint claims, generated projections,
+ * and whether the statement must acquire the active-schema fence.
  */
 export type NodeInsertPlan = Readonly<{
   mode: NodeInsertMode;
+  /** Omitted by projection-only callers written before claim planning. */
+  claims?: readonly NodeInsertClaim[];
   projections: readonly NodeInsertProjection[];
 }>;
 
@@ -1893,9 +1917,9 @@ export type GraphBackend = Readonly<{
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
   /**
-   * Optional atomic projection-aware insert. The backend must either apply
-   * every requested projection in the same statement as the node insert or
-   * omit this member; the store never partially fuses a plan.
+   * Optional atomic planned insert. The backend must apply every requested
+   * claim and projection in the same statement as the node insert, or refuse
+   * the plan; the store never partially fuses one.
    */
   insertNodeWithProjections?: (
     this: void,
@@ -4087,6 +4111,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   // The bundled schema ships both claim relations and the shared operation
   // backend implements every claim member.
   constraintClaims: true,
+  atomicNodeInsertClaims: true,
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
   recursiveTraversal: Object.freeze({ supported: true }),

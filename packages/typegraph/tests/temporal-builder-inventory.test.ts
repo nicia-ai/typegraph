@@ -61,6 +61,7 @@ const COLUMN_MENTION = /validFrom|valid_from/;
  */
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 8, stated: 0 },
+  "drizzle/operations/node-projections.ts": { stamping: 2, stated: 0 },
   "drizzle/operations/edges.ts": { stamping: 6, stated: 1 },
   "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
@@ -84,6 +85,7 @@ const WRITER_INVENTORY = {
  */
 const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
   "drizzle/operations/edge-claims.ts": [],
+  "drizzle/operations/node-projections.ts": [],
   "drizzle/operations/nodes.ts": [
     // The compare-and-set fence's column argument — a READ of the bound the
     // caller asserted, never a choice about what to store.
@@ -117,6 +119,8 @@ const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/operations/edge-claims.ts":
     "writer — fused cardinality claim and edge insert",
   "drizzle/operations/nodes.ts": "writer — five stamping sites",
+  "drizzle/operations/node-projections.ts":
+    "writer — planned node insert in ordinary and schema-fenced modes",
   "drizzle/operations/edges.ts":
     "writer — four stamping sites, one pass-through",
   "drizzle/trusted-import.ts":
@@ -223,6 +227,6 @@ describe("the stamping-site inventory (I5)", () => {
     for (const role of Object.values(BACKEND_COLUMN_FILES)) {
       expect(role.length).toBeGreaterThan(0);
     }
-    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(14);
+    expect(Object.keys(BACKEND_COLUMN_FILES)).toHaveLength(15);
   });
 });

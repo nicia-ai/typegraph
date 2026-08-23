@@ -296,6 +296,8 @@ type CreateCommonOperationBackendOptions = Readonly<{
   edgeCardinalityInsertFusion?: boolean | undefined;
   /** Present only for bundled projection-aware operation backends. */
   nodeProjectionInsertFusion?: boolean | undefined;
+  /** Claim plans require a caller-owned transaction to roll back refusals. */
+  nodeClaimInsertFusion?: boolean | undefined;
   /** Read-only prerequisite gate run before a fused projection statement. */
   beforeNodeProjectionInsert?:
     | ((params: InsertNodeParams, plan: NodeInsertPlan) => Promise<void>)
@@ -765,6 +767,32 @@ export function createCommonOperationBackend(
         params: InsertNodeParams,
         plan: NodeInsertPlan,
       ): Promise<NodeRow | undefined> {
+        const plannedClaims = plan.claims ?? [];
+        if (plannedClaims.length > 0 && options.nodeClaimInsertFusion !== true) {
+          throw new ConfigurationError(
+            "A node insert plan carrying uniqueness claims requires a transaction-scoped backend.",
+            {
+              capability: "insertNodeWithProjections",
+              graphId: params.graphId,
+              kind: params.kind,
+              id: params.id,
+            },
+          );
+        }
+        if (
+          plannedClaims.length > 0 &&
+          plan.mode.kind === "schema-fenced"
+        ) {
+          throw new ConfigurationError(
+            "A schema-fenced node insert plan cannot carry uniqueness claims.",
+            {
+              capability: "insertNodeWithProjections",
+              graphId: params.graphId,
+              kind: params.kind,
+              id: params.id,
+            },
+          );
+        }
         if (
           plan.mode.kind === "schema-fenced" &&
           plan.mode.schemaFence.graphId !== params.graphId
@@ -812,6 +840,35 @@ export function createCommonOperationBackend(
             throw error;
           }
         })();
+        if (row?.["write_discriminator"] === "claim_conflict") {
+          const constraintName = row["claim_constraint_name"];
+          const holderKind = row["claim_holder_kind"];
+          const holderId = row["claim_holder_id"];
+          const axis = row["claim_axis"];
+          if (
+            typeof constraintName !== "string" ||
+            typeof holderKind !== "string" ||
+            typeof holderId !== "string" ||
+            typeof axis !== "string"
+          ) {
+            throw new CompilerInvariantError(
+              "A planned node claim refusal returned incomplete conflict metadata.",
+              {
+                graphId: params.graphId,
+                kind: params.kind,
+                id: params.id,
+              },
+            );
+          }
+          throw new UniquenessError({
+            constraintName,
+            kind: holderKind,
+            existingId: holderId,
+            newId: params.id,
+            fields: [],
+            axis,
+          });
+        }
         if (row === undefined && plan.mode.kind === "ordinary") {
           throw new DatabaseOperationError(
             "Fused node projection insert failed: no row returned",

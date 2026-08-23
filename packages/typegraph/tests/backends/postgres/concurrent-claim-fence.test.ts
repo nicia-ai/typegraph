@@ -480,6 +480,10 @@ function backendPausingAfterFirstClaim(
         let claimsIssued = 0;
         return run(
           deriveBackend(target, {
+            capabilities: {
+              ...target.capabilities,
+              atomicNodeInsertClaims: false,
+            },
             insertUnique: async (params) => {
               await target.insertUnique(params);
               claimsIssued += 1;
@@ -515,6 +519,10 @@ function backendPausingBeforeClaim(
         const insertUniqueBatch = target.insertUniqueBatch;
         return run(
           deriveBackend(target, {
+            capabilities: {
+              ...target.capabilities,
+              atomicNodeInsertClaims: false,
+            },
             insertUnique: async (params) => {
               await pause();
               return target.insertUnique(params);

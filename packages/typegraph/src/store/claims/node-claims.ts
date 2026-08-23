@@ -22,6 +22,7 @@ import {
 import {
   type GraphBackend,
   type InsertUniqueParams,
+  type NodeInsertClaim,
   type TransactionBackend,
   type UniqueConstraintBackend,
 } from "../../backend/types";
@@ -250,6 +251,15 @@ function mapClaimRefusal(
   );
 }
 
+/** Re-raises a planned claim failure through the claim family's typed error. */
+export function refuseNodeCreateClaimError(
+  error: unknown,
+  entries: readonly NodeClaimEntry[],
+): never {
+  if (error instanceof UniquenessError) mapClaimRefusal(error, entries);
+  throw error;
+}
+
 /**
  * Runs a claim statement, re-raising a foreign owner as the declared refusal of
  * whichever family owed the claim.
@@ -469,6 +479,12 @@ type PlacedClaim = Readonly<{
   target: ClaimTarget;
 }>;
 
+/** The complete, canonically ordered claim portion of one node insert plan. */
+export type NodeCreateClaimPlan = Readonly<{
+  entries: readonly NodeClaimEntry[];
+  claims: readonly NodeInsertClaim[];
+}>;
+
 /**
  * How one placement group.s statements are issued.
  *
@@ -504,6 +520,52 @@ function claimInsertParams(
     key: claim.entry.key,
     nodeId: claim.item.id,
     concreteKind: claim.item.kind,
+  };
+}
+
+function placedNodeCreateClaims(
+  ctx: Pick<NodeClaimContext, "graphId" | "registry">,
+  items: readonly NodeClaimItem[],
+): readonly PlacedClaim[] {
+  return items.flatMap((item) =>
+    nodeClaimEntries(
+      ctx.registry,
+      item.kind,
+      item.id,
+      item.props,
+      item.constraints,
+      "create",
+    ).map((entry) => ({
+      item,
+      entry,
+      target: claimTarget(ctx.graphId, entry),
+    })),
+  );
+}
+
+/**
+ * Resolves one create's claims once for either the atomic plan or fallback
+ * seam. The returned list preserves the claim-site placement decision and the
+ * same canonical target order standalone claim statements use.
+ */
+export function planNodeCreateClaims(
+  ctx: Pick<NodeClaimContext, "graphId" | "registry">,
+  item: NodeClaimItem,
+): NodeCreateClaimPlan {
+  const placed = placedNodeCreateClaims(ctx, [item]).toSorted((left, right) => {
+    if (left.entry.placement !== right.entry.placement) {
+      return left.entry.placement === "pre-insert" ? -1 : 1;
+    }
+    return compareClaimTargets(left.target, right.target);
+  });
+  return {
+    entries: placed.map((claim) => claim.entry),
+    claims: placed.map((claim) => ({
+      axis: claim.entry.axis,
+      constraintName: claim.entry.constraintName,
+      key: claim.entry.key,
+      placement: claim.entry.placement,
+    })),
   };
 }
 
@@ -627,20 +689,7 @@ async function withNodeCreateClaimsIssuedBy<T>(
     backend,
     ctx.uniqueSidecarBatch,
   );
-  const claims = items.flatMap((item) =>
-    nodeClaimEntries(
-      ctx.registry,
-      item.kind,
-      item.id,
-      item.props,
-      item.constraints,
-      "create",
-    ).map((entry) => ({
-      item,
-      entry,
-      target: claimTarget(ctx.graphId, entry),
-    })),
-  );
+  const claims = placedNodeCreateClaims(ctx, items);
 
   const refusal = claimFenceRefusal(
     ctx,
