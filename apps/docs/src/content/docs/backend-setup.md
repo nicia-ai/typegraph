@@ -549,6 +549,68 @@ its original SQL. Therefore this setting does not bound server-side prepared
 statement memory. For a high-cardinality stream of SQL text, use
 `prepareStatements: false` instead.
 
+### Authoritative command sessions
+
+Store create paths use the backend's `commands` port for writes whose
+decision and mutation must share one command boundary. First-party paths pass
+an explicit command context: a root port owns any internal transaction it
+needs and cannot inherit caller coordination, while a transaction-scoped
+backend uses the active caller or Store transaction. A
+transaction command may additionally carry a coordination token only after it
+has acquired the graph's advisory lock; the token is bound to that graph and
+transaction session and cannot authorize work on another connection.
+On PostgreSQL, the lock statement also observes the effective transaction
+isolation and binds it to the same token. Match-key convergence therefore
+accepts only read committed or serializable based on database state, not the
+caller-requested option or the server's assumed default.
+
+`GraphBackend.commands` is a required member as of the authoritative command
+port release. Custom backends must expose `{ session, execute }` and implement
+the `node.create`, `edge.create`, and `edge.converge-create` commands, or return
+a typed `unsupported` result for dimensions they do not provide. The former
+optional managed-create and specialized edge-insert hooks are no longer a
+complete backend implementation; migrate those branches into the command
+port before upgrading.
+
+For a custom backend, the migration shape is:
+
+```typescript
+const commands: GraphCommandPort = {
+  session: "transaction", // use "root" for a single-statement backend
+  execute(command, context) {
+    // Apply every requested dimension, or explicitly refuse the command.
+    switch (command.kind) {
+      case "node.create": {
+        return { outcome: "unsupported", entity: "node", dimensions: ["claims"] };
+      }
+      case "edge.create": {
+        return {
+          outcome: "unsupported",
+          entity: "edge",
+          dimensions: ["endpointPredicate"],
+        };
+      }
+      case "edge.converge-create": {
+        return { outcome: "unsupported", entity: "edge", dimensions: ["convergence"] };
+      }
+    }
+  },
+};
+const backend: GraphBackend = { ...members, commands };
+```
+
+Every command port caller must provide the explicit context. TypeGraph-owned
+write paths use the command helper, which verifies that any coordination token
+belongs to the active graph and transaction session and carries a supported
+effective isolation before executing convergence. The portable PostgreSQL
+graph-lock path records that isolation automatically. A custom implementation
+of `lockSchemaVersionAndGraphWrite` must return the normalized
+`GraphCommandIsolation` observed by its combined lock statement. When
+decorating a first-party backend with `deriveBackend`, a same-session
+`commands` override retains the session identity. A wrapper that changes
+session or forwards to a different connection is a new command boundary and
+cannot reuse a token from the original port.
+
 ### Connection Pooling
 
 For production, always use connection pooling:

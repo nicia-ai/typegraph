@@ -25,9 +25,13 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
   UniquenessError,
 } from "../src";
-import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type EdgeRow,
@@ -46,12 +50,34 @@ const knows = defineEdge("knows", {
   schema: z.object({ since: z.string().default("2024") }),
 });
 
+const annotated = defineEdge("annotated", {
+  schema: z.object({ label: z.object({ value: z.string().optional() }) }),
+});
+
+const dated = defineEdge("dated", {
+  schema: z.object({ at: z.date() }),
+});
+
+const oneActive = defineEdge("oneActive", {
+  schema: z.object({ label: z.string() }),
+});
+
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
 
 const graph = defineGraph({
   id: "get_or_create_convergence",
   nodes: { Person: { type: Person } },
-  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  edges: {
+    knows: { type: knows, from: [Person], to: [Person] },
+    annotated: { type: annotated, from: [Person], to: [Person] },
+    dated: { type: dated, from: [Person], to: [Person] },
+    oneActive: {
+      type: oneActive,
+      from: [Person],
+      to: [Person],
+      cardinality: "oneActive",
+    },
+  },
 });
 
 const Account = defineNode("Account", {
@@ -146,6 +172,36 @@ function staleRootReadBackend(
           ),
         options,
       ),
+  });
+}
+
+/** Deletes an endpoint after portable validation but before the fallback write. */
+function endpointDiesBeforeConvergenceFallback(
+  base: GraphBackend,
+): GraphBackend {
+  return deriveBackend(base, {
+    transaction: (run, options) =>
+      base.transaction((target) => {
+        let deleted = false;
+        const withoutGuardedClaim = projectBackendWithout(target, [
+          "claimEdgeCardinalityGuarded",
+        ]);
+        return run(
+          deriveBackend(withoutGuardedClaim, {
+            findEdgesByKind: async (params) => {
+              if (!deleted) {
+                deleted = true;
+                await target.deleteNode({
+                  graphId: params.graphId,
+                  kind: params.fromKind ?? "Person",
+                  id: params.fromId ?? "",
+                });
+              }
+              return target.findEdgesByKind(params);
+            },
+          }),
+        );
+      }, options),
   });
 }
 
@@ -266,10 +322,14 @@ describe("getOrCreateByEndpoints convergence", () => {
     const bob = await setup.nodes.Person.create({ name: "Bob" });
 
     const competitor = createStore(graph, raw);
+    let competitorEdgeId: string | undefined;
     const store = createStore(
       graph,
       racingBackend(raw, 1, async () => {
-        await competitor.edges.knows.create(alice, bob, { since: "winner" });
+        const competitorEdge = await competitor.edges.knows.create(alice, bob, {
+          since: "winner",
+        });
+        competitorEdgeId = competitorEdge.id;
       }),
     );
 
@@ -279,6 +339,10 @@ describe("getOrCreateByEndpoints convergence", () => {
 
     expect(result.action).toBe("found");
     expect(result.edge.since).toBe("winner");
+    // The winner has a different generated id. A found convergence result is
+    // authoritative even though its row identity cannot equal the losing
+    // create plan's generated id.
+    expect(result.edge.id).toBe(competitorEdgeId);
     // The contract, stated as the observable it protects: ONE edge per match
     // key. Before the guard this read returned two.
     expect(await setup.edges.knows.findFrom(alice)).toHaveLength(1);
@@ -696,6 +760,49 @@ describe("getOrCreateByEndpoints convergence", () => {
     await expect(setup.edges.knows.findFrom(alice)).resolves.toHaveLength(1);
   });
 
+  it("checks a constrained incumbent match before endpoint or cardinality probes", async () => {
+    const setup = createStore(cardinalGraph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const winner = await setup.edges.reportsTo.create(alice, bob, {});
+    let cardinalityProbes = 0;
+    let endpointProbes = 0;
+
+    const store = createStore(
+      cardinalGraph,
+      deriveBackend(raw, {
+        findEdgesByKind: () => Promise.resolve([]),
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  getNode: async (graphId, nodeKind, id) => {
+                    endpointProbes += 1;
+                    return target.getNode(graphId, nodeKind, id);
+                  },
+                  countEdgesFrom: async (params) => {
+                    cardinalityProbes += 1;
+                    return target.countEdgesFrom(params);
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const result = await store.edges.reportsTo.getOrCreateByEndpoints(
+      alice,
+      bob,
+      {},
+    );
+
+    expect(result).toMatchObject({ action: "found", edge: { id: winner.id } });
+    expect(endpointProbes).toBe(0);
+    expect(cardinalityProbes).toBe(0);
+  });
+
   it("retains an authoritative stale-positive disproof without repeating reads", async () => {
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
@@ -775,5 +882,89 @@ describe("getOrCreateByEndpoints convergence", () => {
     );
     expect(resurrected.action).toBe("resurrected");
     expect(resurrected.edge.id).toBe(created.edge.id);
+  });
+
+  it("matches the JSON-persisted form of validated properties", async () => {
+    const store = createStore(graph, raw);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    const props = { label: { value: undefined } };
+
+    const created = await store.edges.annotated.getOrCreateByEndpoints(
+      alice,
+      bob,
+      props,
+      { matchOn: ["label"] },
+    );
+    const found = await store.edges.annotated.getOrCreateByEndpoints(
+      alice,
+      bob,
+      props,
+      { matchOn: ["label"] },
+    );
+
+    expect(created.action).toBe("created");
+    expect(found.action).toBe("found");
+    expect(found.edge.id).toBe(created.edge.id);
+  });
+
+  it("uses persisted match properties for single, bulk, and endpoint reads", async () => {
+    const store = createStore(graph, raw);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    const at = new Date("2024-01-01T00:00:00.000Z");
+
+    const created = await store.edges.dated.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { at },
+      { matchOn: ["at"] },
+    );
+    const bulk = await store.edges.dated.bulkGetOrCreateByEndpoints(
+      [{ from: alice, to: bob, props: { at } }],
+      { matchOn: ["at"] },
+    );
+    const found = await store.edges.dated.findByEndpoints(alice, bob, {
+      matchOn: ["at"],
+      props: { at },
+    });
+
+    expect(created.action).toBe("created");
+    expect(bulk[0]).toMatchObject({
+      action: "found",
+      edge: { id: created.edge.id },
+    });
+    expect(found?.id).toBe(created.edge.id);
+    expect(await store.edges.dated.findFrom(alice)).toHaveLength(1);
+  });
+
+  it("revalidates an endpoint after a non-fusable convergence fallback", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const store = createStore(
+      graph,
+      endpointDiesBeforeConvergenceFallback(raw),
+    );
+
+    await expect(
+      store.edges.oneActive.getOrCreateByEndpoints(
+        alice,
+        bob,
+        { label: "requested" },
+        {
+          matchOn: ["label"],
+          validTo: "2020-01-01T00:00:00.000Z",
+        },
+      ),
+    ).rejects.toBeInstanceOf(EndpointNotFoundError);
+    expect(
+      await raw.findEdgesByKind({
+        graphId: graph.id,
+        kind: "oneActive",
+        excludeDeleted: false,
+        temporalMode: "includeTombstones",
+      }),
+    ).toEqual([]);
   });
 });

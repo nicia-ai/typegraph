@@ -17,13 +17,13 @@ import {
   defineNode,
   ValidationError,
 } from "../src";
+import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import type { GraphBackend, ManagedCreatePlan } from "../src/backend/types";
+import type { EdgeCreateCommand, GraphBackend } from "../src/backend/types";
 import { createStore } from "../src/store";
-import { requireDefined } from "../src/utils/presence";
 import { createRecordedPostgresStore } from "./statement-recorder";
 import { createInitializedStore, disableTransactions } from "./test-utils";
 
@@ -148,11 +148,17 @@ describe("caller-id unconstrained edge managed create", () => {
   it("uses one managed plan and keeps source-before-target diagnostics", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const nonTransactional = disableTransactions(fixture.backend);
-    const plans: ManagedCreatePlan[] = [];
+    const commands: EdgeCreateCommand[] = [];
     const backend = deriveBackend(nonTransactional, {
-      executeManagedCreate(plan) {
-        plans.push(plan);
-        return requireDefined(nonTransactional.executeManagedCreate)(plan);
+      commands: {
+        session: nonTransactional.commands.session,
+        execute(command) {
+          commands.push(command as EdgeCreateCommand);
+          return nonTransactional.commands.execute(
+            command,
+            graphCommandExecutionContext("root"),
+          );
+        },
       },
     });
     const store = createStore(graph, backend);
@@ -167,7 +173,7 @@ describe("caller-id unconstrained edge managed create", () => {
       { id: "caller-id-one-plan" },
     );
     expect(created.id).toBe("caller-id-one-plan");
-    expect(plans).toHaveLength(1);
+    expect(commands).toHaveLength(1);
 
     await expect(
       store.edges.knows.create(
@@ -207,12 +213,15 @@ describe("caller-id unconstrained edge managed create", () => {
     const fixture = await createRecordedPostgresStore(graph);
     const nonTransactional = disableTransactions(fixture.backend);
     const backend = deriveBackend(nonTransactional, {
-      executeManagedCreate: () =>
-        Promise.resolve({
-          outcome: "rejected" as const,
-          entity: "node" as const,
-          reason: "unknown" as const,
-        }),
+      commands: {
+        session: nonTransactional.commands.session,
+        execute: () =>
+          Promise.resolve({
+            outcome: "rejected" as const,
+            entity: "node" as const,
+            reason: "unknown" as const,
+          }),
+      },
     });
     const store = createStore(graph, backend);
     const from = await store.nodes.Person.create({ name: "from" });

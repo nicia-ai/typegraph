@@ -65,21 +65,33 @@ describe("api-surface-exceptions-ledger", () => {
     }
   }, 30_000);
 
-  it("the shipped ledger parses and resolves against current findings", () => {
+  it("the shipped ledger resolves and rejects stale entries", () => {
     const ledgerSource = readFileSync(
       path.join(PACKAGE_ROOT, EXCEPTIONS_LEDGER_RELATIVE_PATH),
       "utf8",
     );
     const entries = parseExceptionsLedger(ledgerSource);
-    expect(validateExceptionsLedger(entries, [])).toEqual([]);
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((entry) => entry.issue === "#533")).toBe(true);
 
-    // Seeding with a stale synthetic entry (a member that does not exist)
-    // must surface as an issue rather than being silently accepted.
+    // Feed the validator a matching breaking finding for every shipped entry;
+    // this exercises the same exact-tuple resolution used by the API-surface
+    // script without requiring this unit test to resolve a git base tag.
+    const matchingFindings: SurfaceFinding[] = entries.map((entry) => ({
+      ...entry,
+      severity: "fail",
+      message: "test fixture finding",
+    }));
+    expect(validateExceptionsLedger(entries, matchingFindings)).toEqual([]);
+
     const staleEntries = [
       ...entries,
       makeEntry({ member: "thisMemberDoesNotExist" }),
     ];
-    const staleIssues = validateExceptionsLedger(staleEntries, []);
+    const staleIssues = validateExceptionsLedger(
+      staleEntries,
+      matchingFindings,
+    );
     expect(staleIssues).toHaveLength(1);
     expect(staleIssues[0]?.entry.member).toBe("thisMemberDoesNotExist");
   }, 30_000);
@@ -149,12 +161,20 @@ describe("api-surface-exceptions-ledger", () => {
     ).toThrow(ApiSurfaceLedgerError);
   }, 30_000);
 
-  it("the shipped exceptions ledger is empty at the pilot freeze", () => {
+  it("records the required GraphBackend command-port break", () => {
     const ledgerSource = readFileSync(
       path.join(PACKAGE_ROOT, EXCEPTIONS_LEDGER_RELATIVE_PATH),
       "utf8",
     );
-    expect(parseExceptionsLedger(ledgerSource)).toEqual([]);
+    expect(parseExceptionsLedger(ledgerSource)).toContainEqual(
+      expect.objectContaining({
+        entrypoint: "typegraph.api.md",
+        declaration: "GraphBackend",
+        member: "commands",
+        kind: "required-member-added",
+        issue: "#533",
+      }),
+    );
   });
 
   it("a nested value-type member is not expressible as a ledger entry", () => {

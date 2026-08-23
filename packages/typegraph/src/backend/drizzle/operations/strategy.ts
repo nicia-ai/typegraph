@@ -73,7 +73,9 @@ import {
   buildTakeOverEdgeClaim,
   buildTakeOverEdgeClaimGuarded,
 } from "./edge-claims";
+import type { ConvergeEdgeCreateParams } from "./edges";
 import {
+  buildConvergeEdgeCreate,
   buildCountEdgesFrom,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
@@ -233,6 +235,8 @@ export type CommonOperationStrategy = Readonly<{
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
+  /** PostgreSQL single-statement match-key convergence. */
+  buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
   /** PostgreSQL transaction-only claim + endpoint + edge write. */
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (
     params: InsertEdgeParams,
@@ -874,6 +878,8 @@ export function createPostgresOperationStrategy(
         claim,
         timestamp,
       ),
+    buildConvergeEdgeCreate: (params) =>
+      buildConvergeEdgeCreate(tables, params),
     buildLockSchemaVersionAndGraphWrite: (params, advisoryLockNamespace) =>
       buildLockSchemaVersionAndGraphWrite(
         tables,

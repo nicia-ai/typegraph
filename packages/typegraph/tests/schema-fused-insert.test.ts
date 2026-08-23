@@ -20,6 +20,7 @@ import {
   defineGraphExtension,
   defineNode,
 } from "../src";
+import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -154,9 +155,15 @@ function countFusedStatements(backend: GraphBackend): {
         counts.node += 1;
         return requireDefined(target.insertNodeIfAbsent)(params);
       },
-      async executeManagedCreate(plan) {
-        counts.edge += 1;
-        return requireDefined(target.executeManagedCreate)(plan);
+      commands: {
+        session: target.commands.session,
+        async execute(plan) {
+          counts.edge += 1;
+          return target.commands.execute(
+            plan,
+            graphCommandExecutionContext("transaction"),
+          );
+        },
       },
     });
   }
@@ -267,15 +274,17 @@ async function statementCountForGeneratedNodeCreate(
   graphId: string,
   useFusedInsert: boolean,
 ): Promise<number> {
-  const portableBackend =
+  // The command port is required. The schema-fenced insert members remain
+  // optional, so omit only those members to force the ordinary fence-plus-row
+  // fallback while retaining the current backend contract.
+  const target =
     useFusedInsert ? backend : (
       projectBackendWithout(backend, [
-        "executeManagedCreate",
         "insertNodeIfAbsentWithSchemaFence",
         "insertNodeWithSchemaFence",
       ])
     );
-  const observed = countFusedStatements(portableBackend);
+  const observed = countFusedStatements(target);
   const [store] = await createStoreWithSchema(graph(graphId), observed.backend);
   await store.nodes.Person.create({ name: "Alice" });
   return observed.counts.fence + observed.counts.node + observed.counts.edge;

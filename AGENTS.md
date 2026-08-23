@@ -262,7 +262,7 @@ describe("Feature", () => {
 
 # Contract Discipline
 
-Three rules, each distilled from a recurring class of real defects:
+These rules are each distilled from a recurring class of real defects:
 
 - **One predicate, one owner.** A comparison, classification, or validation
   decision consumed by more than one path must be a single exported function
@@ -277,6 +277,18 @@ Three rules, each distilled from a recurring class of real defects:
   API lying to its caller. Audit every option a change touches: each one is
   either threaded to the write that honors it or refused on the path that
   cannot.
+- **A fused command is an optimization attempt, not evidence that its
+  dimensions ran.** A command returning `unsupported` has executed no SQL and
+  the Store must re-enter the complete portable validation/write path. Skip a
+  portable predicate only after the command result proves that the command
+  applied it. Every new command dimension ships with a custom-port refusal test
+  that reaches the fallback and proves no partial row or sidecar write occurred.
+- **Runtime evidence is bound to the resource that earned it.** A lock or
+  isolation token must identify the graph and transaction session that owns the
+  database guarantee; module provenance or a capability boolean is not enough.
+  Transparent command-port wrappers inherit that session identity only through
+  `deriveBackend`, and execution checks the actual transaction target before
+  any decision-driving read.
 - **A changed contract re-audits its consumers.** When a change alters what a
   shared function throws, returns, orders, or asserts, enumerate its callers
   and disposition each against the new semantics before merging — verifying
@@ -289,6 +301,13 @@ Three rules, each distilled from a recurring class of real defects:
   prefer returning the decision itself (the predicate, the fence, the plan)
   over a flag a caller re-derives it from — a consumer that cannot spell its
   own version cannot drift.
+- **Session facts come from the session that enforces them.** Transaction
+  isolation, locks, and similar execution facts must be observed on the pinned
+  database session and carried in the evidence minted by that observation.
+  Never infer an effective fact from a requested option or a server default;
+  configuration can rewrite either between environments. When an existing
+  fence statement can return the fact, fold it into that statement rather than
+  adding a probe round trip.
 - **A backend is derived through `src/backend/derive-backend.ts`, never
   copied.** `deriveBackend` to decorate, `projectBackend` /
   `projectBackendWithout` / `projectGraphBackend` to narrow. A spread,

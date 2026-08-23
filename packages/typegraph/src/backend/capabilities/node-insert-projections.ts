@@ -7,7 +7,7 @@ import type {
 } from "../types";
 
 export type NodeProjectionInsertTarget = BackendIdentity &
-  Pick<GraphBackend, "executeManagedCreate">;
+  Pick<GraphBackend, "commands">;
 
 export type NodeInsertProjectionRequirements = Readonly<{
   fulltext: boolean;
@@ -19,7 +19,6 @@ export function supportsNodeInsertProjectionRequirements(
   requirements: NodeInsertProjectionRequirements,
 ): boolean {
   return (
-    target.executeManagedCreate !== undefined &&
     (!requirements.fulltext ||
       target.fulltextStrategy?.buildSyncFromInsertedNode !== undefined) &&
     (!requirements.embedding ||
@@ -55,13 +54,12 @@ export function supportsNodeInsertProjections(
  * Claims are reported by the statement as a verdict, so the caller must have a
  * transaction boundary around the statement before it can safely defer the
  * application probes. A root backend is deliberately excluded: its
- * `executeManagedCreate` member is also used for projection-only
+ * command port is also used for projection-only
  * autocommit writes, but a claim refusal must roll back the node and any
  * claims it touched together.
  */
 function supportsNodeInsertClaims(target: NodeProjectionInsertTarget): boolean {
   return (
-    target.executeManagedCreate !== undefined &&
     !("transaction" in target) &&
     target.capabilities.atomicNodeInsertClaims === true
   );

@@ -6,7 +6,15 @@ import {
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
-import { type GraphBackend } from "../../backend/types";
+import {
+  mintGraphCommandCoordination,
+  normalizeGraphCommandIsolation,
+} from "../../backend/command-contract";
+import type {
+  GraphBackend,
+  GraphCommandCoordination,
+  GraphCommandIsolation,
+} from "../../backend/types";
 import {
   createRecordedInstant,
   parseRecordedInstant,
@@ -75,13 +83,15 @@ export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
 export function recordedGraphWriteAdvisoryLockSql(
   graphId: string,
 ): SqlFragment {
-  return graphAdvisoryLockSql(
-    RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
-    graphId,
-  );
+  return sql`
+    SELECT
+      pg_advisory_xact_lock(
+        hashtext(${RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE}),
+        hashtext(${graphId})
+      ),
+      current_setting('transaction_isolation') AS transaction_isolation
+  `;
 }
-
-declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
 
 /**
  * Compile-time evidence that the per-graph write-lock discipline was
@@ -93,17 +103,38 @@ declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
  * "sidecar write before lock" is a compile error rather than a lock-order
  * inversion found in review.
  */
+declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
+
 export type GraphWriteLock = Readonly<{
   [GRAPH_WRITE_LOCK_BRAND]: true;
+  coordination: GraphCommandCoordination | undefined;
 }>;
 
-// The brand is compile-time only (a `unique symbol` with no runtime value —
-// see the `declare const` above), so the token carries no actual per-call
-// data and every acquisition can share this one frozen empty instance.
-const GRAPH_WRITE_LOCK_EVIDENCE = Object.freeze({}) as GraphWriteLock;
+const UNCOORDINATED_GRAPH_WRITE_LOCK = Object.freeze({
+  coordination: undefined,
+}) as GraphWriteLock;
 
-function graphWriteLockEvidence(): GraphWriteLock {
-  return GRAPH_WRITE_LOCK_EVIDENCE;
+function acquiredGraphWriteLock(
+  target: Pick<GraphBackend, "commands">,
+  graphId: string,
+  isolation: GraphCommandIsolation,
+): GraphWriteLock {
+  return Object.freeze({
+    coordination: mintGraphCommandCoordination(
+      target.commands,
+      graphId,
+      isolation,
+    ),
+  }) as GraphWriteLock;
+}
+
+/** Record an advisory lock acquired by a combined backend primitive. */
+export function acquiredGraphWriteLockFromCombinedFence(
+  target: Pick<GraphBackend, "commands">,
+  graphId: string,
+  isolation: GraphCommandIsolation,
+): GraphWriteLock {
+  return acquiredGraphWriteLock(target, graphId, isolation);
 }
 
 /**
@@ -113,7 +144,7 @@ function graphWriteLockEvidence(): GraphWriteLock {
  * on a history store.
  */
 export function uncapturedGraphWriteLock(): GraphWriteLock {
-  return graphWriteLockEvidence();
+  return UNCOORDINATED_GRAPH_WRITE_LOCK;
 }
 
 /**
@@ -142,15 +173,13 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * acquisition evicts its entry so a retry is not poisoned (in practice a
  * failed statement has aborted the Postgres transaction anyway).
  */
-export type RecordedGraphLockMemo = Map<string, Promise<void>>;
+export type RecordedGraphLockMemo = Map<string, Promise<GraphCommandIsolation>>;
 
 export function createRecordedGraphLockMemo(): RecordedGraphLockMemo {
   return new Map();
 }
 
 const recordedGraphLockMemos = new WeakMap<object, RecordedGraphLockMemo>();
-const ACQUIRED_GRAPH_WRITE_LOCK = Promise.resolve();
-
 /**
  * Seeds the registered single-flight memo after another statement acquired the
  * same transaction-scoped graph lock.
@@ -163,10 +192,11 @@ const ACQUIRED_GRAPH_WRITE_LOCK = Promise.resolve();
 export function memoizeAcquiredRecordedGraphWriteLock(
   backend: object,
   graphId: string,
+  isolation: GraphCommandIsolation,
 ): void {
   const memo = recordedGraphLockMemos.get(backend);
   if (memo === undefined || memo.has(graphId)) return;
-  memo.set(graphId, ACQUIRED_GRAPH_WRITE_LOCK);
+  memo.set(graphId, Promise.resolve(isolation));
 }
 
 export function registerRecordedGraphLockMemo(
@@ -179,14 +209,18 @@ export function registerRecordedGraphLockMemo(
 async function acquireRecordedGraphWriteLock(
   target: Pick<GraphBackend, "execute">,
   graphId: string,
-): Promise<void> {
-  await target.execute(
-    asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)),
-  );
+): Promise<GraphCommandIsolation> {
+  const rows = await target.execute<
+    Readonly<{ transaction_isolation: unknown }>
+  >(asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)));
+  return normalizeGraphCommandIsolation(rows[0]?.transaction_isolation);
 }
 
 export async function lockRecordedGraphWrite(
-  target: Pick<GraphBackend, "capabilities" | "dialect" | "execute">,
+  target: Pick<
+    GraphBackend,
+    "capabilities" | "commands" | "dialect" | "execute"
+  >,
   graphId: string,
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
@@ -198,7 +232,10 @@ export async function lockRecordedGraphWrite(
   );
   switch (fence.kind) {
     case "engine-serialized": {
-      return graphWriteLockEvidence();
+      // A writer slot can serialize ordinary row work, but it is not an
+      // advisory acquisition bound to this graph/port. It cannot authorize
+      // the PostgreSQL convergence command.
+      return uncapturedGraphWriteLock();
     }
     case "lock": {
       break;
@@ -209,8 +246,8 @@ export async function lockRecordedGraphWrite(
   }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
-    await acquireRecordedGraphWriteLock(target, graphId);
-    return graphWriteLockEvidence();
+    const isolation = await acquireRecordedGraphWriteLock(target, graphId);
+    return acquiredGraphWriteLock(target, graphId, isolation);
   }
   let pending = effectiveMemo.get(graphId);
   if (pending === undefined) {
@@ -222,8 +259,8 @@ export async function lockRecordedGraphWrite(
     );
     effectiveMemo.set(graphId, pending);
   }
-  await pending;
-  return graphWriteLockEvidence();
+  const isolation = await pending;
+  return acquiredGraphWriteLock(target, graphId, isolation);
 }
 
 function failInvalidClock(value: unknown, cause?: unknown): never {

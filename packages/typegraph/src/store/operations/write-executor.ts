@@ -25,6 +25,7 @@ import {
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
 import { type OperationHookContext } from "../types";
+import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import { type RowWorkKind, type WritePlan } from "./write-plan";
 import {
   createWriteSession,
@@ -119,6 +120,7 @@ export type WriteRowWork<K extends RowWorkKind, T> = (
   session: WriteSessionFor<K>,
   target: WriteTarget,
   overlaidSession: OverlaidSessionMint<K>,
+  lock: GraphWriteLock,
 ) => Promise<T>;
 
 /**
@@ -164,6 +166,7 @@ function planFrame<K extends RowWorkKind, T>(
       mintSessionOver(target) as WriteSessionFor<K>,
       target,
       mintOverlaidSession,
+      lock,
     );
   };
 }
@@ -217,14 +220,6 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
   );
-}
-
-/** Internal signal that a zero-row autocommit attempt needs portable recovery. */
-export class AutocommitWriteRequiresTransaction extends Error {
-  constructor() {
-    super("The managed autocommit attempt requires transactional recovery.");
-    this.name = "AutocommitWriteRequiresTransaction";
-  }
 }
 
 /**

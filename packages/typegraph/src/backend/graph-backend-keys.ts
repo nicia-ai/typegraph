@@ -24,7 +24,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "vectorStrategy",
   "insertNode",
   "insertNodeIfAbsent",
-  "executeManagedCreate",
+  "commands",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",

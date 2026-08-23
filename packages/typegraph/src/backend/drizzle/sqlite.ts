@@ -722,6 +722,7 @@ function createSqliteOperationBackend(
   );
   const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
+    commandSession: transactionScoped ? "transaction" : "root",
     execution: {
       execAll,
       execGet,

@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 90 optional
- * `GraphBackend` members are bundled here; the other 75 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 89 optional
+ * `GraphBackend` members are bundled here; the other 74 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -46,7 +46,7 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 /**
- * Every optional `GraphBackend` member — 90 of them, verified equal to the
+ * Every optional `GraphBackend` member — 89 of them, verified equal to the
  * names parsed from `etc/typegraph-backend.api.md` (§Baselines). Derived,
  * never hand-written: a member added or removed from `GraphBackend` changes
  * this type automatically, and the totality proof below fails loudly if the
@@ -776,7 +776,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 75, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 74, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -818,10 +818,10 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 27 `reasoned` + 48 `deferred` members
+ * The 26 `reasoned` + 48 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 75 = 90 members total.
+ * access), 15 + 74 = 89 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   claimEdgeCardinalityGuarded: {
@@ -841,12 +841,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     reason:
       "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
     accesses: 7,
-  },
-  executeManagedCreate: {
-    kind: "reasoned",
-    reason:
-      "A first-party managed-create entrypoint. It applies every requested node or edge write dimension in one statement or returns an explicit unsupported verdict; custom and legacy backends retain the portable read-then-write protocol.",
-    accesses: 11,
   },
   bootstrapTables: {
     kind: "reasoned",
@@ -1361,7 +1355,7 @@ export const WS5B_SEED_BUNDLES = {
 // infers `MCore` correctly but, for a gated bundle with no `extras` field
 // (`CLAIMS`), leaves `MExtra` with NO inference candidate — and TypeScript's
 // fallback for an unmatched `infer` is the type parameter's CONSTRAINT
-// (`OptionalGraphBackendMember`, the full 90), not `never`, silently widening
+// (`OptionalGraphBackendMember`, the full 89), not `never`, silently widening
 // `MCore | MExtra` to every optional member. The structural form below has no
 // such unmatched parameter: `extras` is read only when the field is actually
 // present, so a bundle without one contributes no `ExtrasMembersOf` members
@@ -1405,7 +1399,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 90 optional members.
+// (i) Totality: the three-way partition covers exactly the 89 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

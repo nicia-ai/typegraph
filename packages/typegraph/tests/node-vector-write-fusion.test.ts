@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { defineGraph, defineNode, embedding, searchable } from "../src";
 import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
+import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import { generatePostgresMigrationSQL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createSqliteBackend } from "../src/backend/sqlite";
@@ -230,28 +231,34 @@ describe("fresh node + vector write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeManagedCreate)({
-          entity: "node",
-          params: {
-            graphId: singleGraph.id,
-            kind: "SingleVectorDocument",
-            id: "malformed-vector-node",
-            props: { title: "bad vector", embedding: [1, 0] },
-          },
-          idGenerated: false,
-          mode: { kind: "ordinary" },
-          claims: [],
-          projections: [
-            {
-              kind: "embedding",
-              fieldPath: "embedding",
-              embedding: [1, 0],
-              dimensions: 3,
-              metric: "cosine",
-              indexType: "hnsw",
+        tx.commands.execute(
+          {
+            kind: "node.create",
+            plan: {
+              entity: "node",
+              params: {
+                graphId: singleGraph.id,
+                kind: "SingleVectorDocument",
+                id: "malformed-vector-node",
+                props: { title: "bad vector", embedding: [1, 0] },
+              },
+              idGenerated: false,
+              mode: { kind: "ordinary" },
+              claims: [],
+              projections: [
+                {
+                  kind: "embedding",
+                  fieldPath: "embedding",
+                  embedding: [1, 0],
+                  dimensions: 3,
+                  metric: "cosine",
+                  indexType: "hnsw",
+                },
+              ],
             },
-          ],
-        }),
+          },
+          graphCommandExecutionContext("transaction"),
+        ),
       ),
     ).rejects.toBeInstanceOf(EmbeddingDimensionChangedError);
     await expect(

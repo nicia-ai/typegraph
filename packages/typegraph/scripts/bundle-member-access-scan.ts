@@ -392,9 +392,9 @@ function deriveOptionalGraphBackendMembers(
     .getPropertiesOfType(graphBackendType)
     .filter((property) => (property.flags & ts.SymbolFlags.Optional) !== 0)
     .map((property) => property.name);
-  if (optionalNames.length !== 90) {
+  if (optionalNames.length !== 89) {
     throw new Error(
-      `Expected exactly 90 optional GraphBackend members (the scan's own precondition); found ${optionalNames.length}. GraphBackend's optional surface has changed — re-derive every partition constant before trusting this scan.`,
+      `Expected exactly 89 optional GraphBackend members (the scan's own precondition); found ${optionalNames.length}. GraphBackend's optional surface has changed — re-derive every partition constant before trusting this scan.`,
     );
   }
   return new Set(optionalNames);

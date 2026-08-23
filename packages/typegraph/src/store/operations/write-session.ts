@@ -47,10 +47,13 @@ import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
-import { assertManagedCreateResultMatchesPlan } from "../../backend/managed-create";
+import { assertCommandResultMatchesCommand } from "../../backend/command";
+import { executeAuthoritativeGraphCommand } from "../../backend/command-contract";
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
+  type EdgeCreateCommand,
+  type EdgeCreateCommandResult,
   type EdgeRow,
   type FulltextOperationBackend,
   type GraphBackend,
@@ -58,9 +61,7 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
-  type ManagedCreateResult,
-  type ManagedEdgeCreatePlan,
-  type ManagedNodeCreatePlan,
+  type NodeCreateCommand,
   type NodeInsertProjection,
   type NodeRow,
   type QueryExecutionBackend,
@@ -75,7 +76,7 @@ import {
   type VectorOperationBackend,
 } from "../../backend/types";
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
-import { CompilerInvariantError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
@@ -99,6 +100,7 @@ import {
   runInsertNoReturn,
 } from "../insert-dispatch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import {
   applyEdgeHardDelete,
   applyEdgeSoftDelete,
@@ -163,7 +165,7 @@ export type WriteTarget = Readonly<
       | "insertNodeIfAbsent"
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
-      | "executeManagedCreate"
+      | "commands"
     > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
@@ -204,6 +206,27 @@ export function unfencedTarget(
   target: WriteTarget,
 ): GraphBackend | TransactionBackend {
   return target as GraphBackend | TransactionBackend;
+}
+
+/** Refuses a root fallback that would split a fused row and projection write. */
+function assertPortableNodeFallbackCanRun(
+  target: WriteTarget,
+  params: InsertNodeParams,
+  projections: readonly NodeInsertProjection[],
+): void {
+  if (projections.length === 0 || !("transaction" in unfencedTarget(target)))
+    return;
+  if (target.capabilities.transactions) {
+    throw new AutocommitWriteRequiresTransaction();
+  }
+  throw new ConfigurationError(
+    "This backend cannot fall back from a fused node projection command without a transaction.",
+    {
+      code: "NODE_PROJECTION_TRANSACTION_REQUIRED",
+      graphId: params.graphId,
+      kind: params.kind,
+    },
+  );
 }
 
 /** The graph-scoped state every session method's step modules need. */
@@ -393,13 +416,12 @@ export type EdgeWriteSession = Readonly<{
   // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
   /**
-   * Executes one prepared endpoint-checked create through the complete plan
-   * when the target exposes it. An absent executor is an explicit signal for
-   * the caller to run the portable diagnostic/fallback path.
+   * Executes one prepared endpoint-checked create command. An unsupported
+   * result is an explicit signal for the caller to run the portable fallback.
    */
   createEdgeWithPlan: (
-    plan: ManagedEdgeCreatePlan,
-  ) => Promise<ManagedCreateResult | undefined>;
+    command: EdgeCreateCommand,
+  ) => Promise<EdgeCreateCommandResult>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
   createEdgesNoReturn: (work: readonly EdgeInsertWork[]) => Promise<void>;
@@ -470,48 +492,65 @@ export function createWriteSession(
         projections: work.projections,
         allowNonTransactionalClaims: work.allowNonTransactionalClaims,
       });
-      const insertPlannedNode = async (): Promise<NodeRow> => {
-        const insert = target.executeManagedCreate;
-        if (!insertPlanFused || insert === undefined) {
-          return withNodeCreateClaims(writeContext, work.claim, target, () =>
-            dispatch.one(work.params),
-          );
+      const insertPortableNode = (): Promise<NodeRow> =>
+        withNodeCreateClaims(writeContext, work.claim, target, () =>
+          dispatch.one(work.params),
+        );
+      const insertPlannedNode = async (): Promise<
+        Readonly<{ row: NodeRow; projectionsFused: boolean }>
+      > => {
+        if (!insertPlanFused) {
+          return { row: await insertPortableNode(), projectionsFused: false };
         }
         try {
-          const plan: ManagedNodeCreatePlan = {
-            entity: "node",
-            params: work.params,
-            idGenerated: work.idGenerated ?? false,
-            mode: { kind: "ordinary" },
-            claims: claimPlan.claims,
-            projections: work.projections,
+          const command: NodeCreateCommand = {
+            kind: "node.create",
+            plan: {
+              entity: "node",
+              params: work.params,
+              idGenerated: work.idGenerated ?? false,
+              mode: { kind: "ordinary" },
+              claims: claimPlan.claims,
+              projections: work.projections,
+            },
           };
-          const result = await insert(plan);
-          assertManagedCreateResultMatchesPlan(plan, result);
-          if (result.outcome !== "created" || result.entity !== "node") {
+          const result = await executeAuthoritativeGraphCommand(
+            target.commands,
+            command,
+          );
+          assertCommandResultMatchesCommand(command, result);
+          if (result.outcome === "unsupported") {
+            assertPortableNodeFallbackCanRun(
+              target,
+              work.params,
+              work.projections,
+            );
+            return {
+              row: await insertPortableNode(),
+              projectionsFused: false,
+            };
+          }
+          if (result.outcome !== "created") {
             throw new CompilerInvariantError(
               "An ordinary planned node insert did not return a node row.",
               {
                 graphId: work.params.graphId,
                 kind: work.params.kind,
                 id: work.params.id,
-                ...(result.outcome === "unsupported" ?
-                  { dimensions: result.dimensions }
-                : {}),
               },
             );
           }
-          return result.row;
+          return { row: result.row, projectionsFused: true };
         } catch (error) {
           refuseNodeCreateClaimError(error, claimPlan);
         }
       };
-      const row = await insertPlannedNode();
+      const { row, projectionsFused } = await insertPlannedNode();
       await applyNodeInsertSyncFans(
         writeContext,
         {
           ...work.sideEffects,
-          ...(insertPlanFused && work.projections.length > 0 ?
+          ...(projectionsFused && work.projections.length > 0 ?
             { projectionsFused: true }
           : {}),
         },
@@ -539,63 +578,61 @@ export function createWriteSession(
     },
 
     createNodeWithSchemaFence: async (work, schemaFence) => {
-      const projectionsFused = supportsNodeInsertProjections(
+      const projectionFusionEligible = supportsNodeInsertProjections(
         target,
         work.projections,
       );
-      if (work.projections.length > 0 && !projectionsFused) {
-        throw new CompilerInvariantError(
-          "Schema-fenced node work carrying projections requires the fused backend member.",
-          {
-            graphId: work.params.graphId,
-            kind: work.params.kind,
-            id: work.params.id,
-          },
-        );
-      }
-      const row = await (async () => {
-        if (projectionsFused) {
-          const insert = target.executeManagedCreate;
+      const inserted = await (async (): Promise<
+        Readonly<{ row: NodeRow | undefined; projectionsFused: boolean }>
+      > => {
+        const insertPortableNode = async (): Promise<NodeRow | undefined> => {
+          const insert = target.insertNodeWithSchemaFence;
           if (insert === undefined) return;
-          const plan: ManagedNodeCreatePlan = {
-            entity: "node",
-            params: work.params,
-            idGenerated: work.idGenerated ?? false,
-            mode: { kind: "schema-fenced", schemaFence },
-            claims: [],
-            projections: work.projections,
+          return insert(work.params, schemaFence);
+        };
+        if (projectionFusionEligible) {
+          const command: NodeCreateCommand = {
+            kind: "node.create",
+            plan: {
+              entity: "node",
+              params: work.params,
+              idGenerated: work.idGenerated ?? false,
+              mode: { kind: "schema-fenced", schemaFence },
+              claims: [],
+              projections: work.projections,
+            },
           };
           return withNodeCreateClaims(
             writeContext,
             work.claim,
             target,
             async () => {
-              const result = await insert(plan);
-              assertManagedCreateResultMatchesPlan(plan, result);
-              if (result.outcome === "rejected" && result.entity === "node") {
-                return;
+              const result = await executeAuthoritativeGraphCommand(
+                target.commands,
+                command,
+              );
+              assertCommandResultMatchesCommand(command, result);
+              if (result.outcome === "rejected") {
+                return { row: undefined, projectionsFused: false };
               }
-              if (result.outcome !== "created" || result.entity !== "node") {
-                throw new CompilerInvariantError(
-                  "A schema-fenced planned node insert did not return a node row.",
-                  {
-                    graphId: work.params.graphId,
-                    kind: work.params.kind,
-                    id: work.params.id,
-                    ...(result.outcome === "unsupported" ?
-                      { dimensions: result.dimensions }
-                    : {}),
-                  },
+              if (result.outcome === "unsupported") {
+                assertPortableNodeFallbackCanRun(
+                  target,
+                  work.params,
+                  work.projections,
                 );
+                return {
+                  row: await insertPortableNode(),
+                  projectionsFused: false,
+                };
               }
-              return result.row;
+              return { row: result.row, projectionsFused: true };
             },
           );
         }
-        const insert = target.insertNodeWithSchemaFence;
-        if (insert === undefined) return;
-        return insert(work.params, schemaFence);
+        return { row: await insertPortableNode(), projectionsFused: false };
       })();
+      const { row, projectionsFused } = inserted;
       if (row === undefined) return;
       await applyNodeInsertSyncFans(
         writeContext,
@@ -693,35 +730,39 @@ export function createWriteSession(
       return edgeDispatch.one(work.params);
     },
 
-    createEdgeWithPlan: async (plan) => {
-      const execute = target.executeManagedCreate;
-      if (execute !== undefined) {
-        const result = await execute(plan);
-        assertManagedCreateResultMatchesPlan(plan, result);
-        if (
-          result.outcome === "unsupported" &&
-          result.entity === "edge" &&
-          result.dimensions.length === 1 &&
-          result.dimensions[0] === "cardinalityClaim" &&
-          plan.schemaFence === undefined &&
-          plan.cardinalityClaim !== undefined
-        ) {
-          await claimEdgeCardinality(
-            target,
-            ctx.claimsVerdict(),
-            plan.cardinalityClaim,
-          );
-          const retryPlan: ManagedEdgeCreatePlan = {
+    createEdgeWithPlan: async (command) => {
+      const result = await executeAuthoritativeGraphCommand(
+        target.commands,
+        command,
+      );
+      assertCommandResultMatchesCommand(command, result);
+      if (
+        result.outcome === "unsupported" &&
+        result.dimensions.length === 1 &&
+        result.dimensions[0] === "cardinalityClaim" &&
+        command.plan.schemaFence === undefined &&
+        command.plan.cardinalityClaim !== undefined
+      ) {
+        await claimEdgeCardinality(
+          target,
+          ctx.claimsVerdict(),
+          command.plan.cardinalityClaim,
+        );
+        const retryCommand: EdgeCreateCommand = {
+          kind: "edge.create",
+          plan: {
             entity: "edge",
-            params: plan.params,
-          };
-          const retryResult = await execute(retryPlan);
-          assertManagedCreateResultMatchesPlan(retryPlan, retryResult);
-          return retryResult;
-        }
-        return result;
+            params: command.plan.params,
+          },
+        };
+        const retryResult = await executeAuthoritativeGraphCommand(
+          target.commands,
+          retryCommand,
+        );
+        assertCommandResultMatchesCommand(retryCommand, retryResult);
+        return retryResult;
       }
-      return;
+      return result;
     },
 
     createEdgeNoReturn: async (work) => {

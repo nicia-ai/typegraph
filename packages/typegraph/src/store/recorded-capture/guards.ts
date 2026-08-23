@@ -2,6 +2,7 @@ import {
   recordedRevisionOriginsVerdict,
   statementExecutionVerdict,
 } from "../../backend/capabilities/resolve";
+import { normalizeGraphCommandIsolation } from "../../backend/command-contract";
 import {
   type GraphBackend,
   type TransactionBackend,
@@ -118,11 +119,6 @@ export function assertRequestedRecordedIsolation(
   throw unsupportedPostgresIsolationError(isolationLevel);
 }
 
-function normalizeIsolationLevel(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  return value.replaceAll(" ", "_").toLowerCase();
-}
-
 export async function assertRecordedCaptureTransactionIsolation(
   target: Pick<TransactionBackend, "dialect" | "execute">,
   options?: TransactionOptions,
@@ -135,10 +131,10 @@ export async function assertRecordedCaptureTransactionIsolation(
       SELECT current_setting('transaction_isolation') AS transaction_isolation
     `),
   );
-  const isolationLevel = normalizeIsolationLevel(
+  const isolationLevel = normalizeGraphCommandIsolation(
     rows[0]?.transaction_isolation,
   );
-  if (isSupportedRecordedIsolationLevel(isolationLevel)) return;
+  if (isolationLevel === "read_committed") return;
 
   throw unsupportedPostgresIsolationError(isolationLevel);
 }

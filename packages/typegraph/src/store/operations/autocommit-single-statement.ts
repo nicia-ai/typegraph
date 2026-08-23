@@ -14,6 +14,14 @@ import { type GraphBackend } from "../../backend/types";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 
+/** Internal signal that a zero-row autocommit attempt needs transactional recovery. */
+export class AutocommitWriteRequiresTransaction extends Error {
+  constructor() {
+    super("The managed autocommit attempt requires transactional recovery.");
+    this.name = "AutocommitWriteRequiresTransaction";
+  }
+}
+
 export type NodeAutocommitSingleStatementCandidate = Readonly<{
   backend: GraphBackend;
   schemaVersion: number | undefined;
@@ -94,8 +102,7 @@ export function isAutocommitSingleStatementWrite(
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
         !candidate.convergesOnMatchKey &&
-        candidate.cardinality === "many" &&
-        candidate.backend.executeManagedCreate !== undefined
+        candidate.cardinality === "many"
       );
     }
   }
