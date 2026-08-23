@@ -59,9 +59,7 @@ export function supportsNodeInsertProjections(
  * autocommit writes, but a claim refusal must roll back the node and any
  * claims it touched together.
  */
-function supportsNodeInsertClaims(
-  target: NodeProjectionInsertTarget,
-): boolean {
+function supportsNodeInsertClaims(target: NodeProjectionInsertTarget): boolean {
   return (
     target.executeManagedCreate !== undefined &&
     !("transaction" in target) &&
