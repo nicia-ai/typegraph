@@ -80,6 +80,20 @@ export async function instantiateGraphTemplate<G extends GraphDef>(
 ): Promise<InstantiateGraphTemplateResult<G>> {
   const instantiate = backend.instantiateGraphTemplate;
   if (instantiate === undefined) throw graphTemplatesUnsupportedError(backend);
+  const sourceVersion = params.template.reconciled.version;
+  const reconciledHash = params.template.reconciled.hash;
+  if (sourceVersion === undefined || reconciledHash === undefined) {
+    throw graphTemplateHandleMismatchError(params.template.id);
+  }
+  const sourceHash = await computeSchemaHash(
+    serializeSchema(params.template.reconciled.graph, sourceVersion),
+  );
+  if (
+    sourceHash !== params.template.schemaHash ||
+    reconciledHash !== params.template.schemaHash
+  ) {
+    throw graphTemplateHandleMismatchError(params.template.id);
+  }
   const targetGraph: G = Object.freeze({
     ...params.template.reconciled.graph,
     id: params.graphId,
@@ -120,6 +134,15 @@ export async function instantiateGraphTemplate<G extends GraphDef>(
     }),
     schema: result.row,
   });
+}
+
+function graphTemplateHandleMismatchError(
+  templateId: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    `Graph template handle "${templateId}" does not match its reconciled schema snapshot.`,
+    { code: "GRAPH_TEMPLATE_HANDLE_MISMATCH", templateId },
+  );
 }
 
 /** Short public name for {@link instantiateGraphTemplate}. */

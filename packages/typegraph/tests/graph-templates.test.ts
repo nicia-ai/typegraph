@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../src/backend/derive-backend";
 import { instantiateGraphTemplateStatement } from "../src/backend/drizzle/graph-template-sql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { defineGraph } from "../src/core/define-graph";
@@ -136,7 +137,7 @@ describe("graph templates", () => {
     ).rejects.toMatchObject({ name: "StoreNotInitializedError" });
   });
 
-  it("refuses a stale template handle instead of cloning a different registry row", async () => {
+  it("refuses a stale template handle before consulting the backend registry", async () => {
     const backend = createTestBackend();
     const [source] = await createAdapterStoreWithSchema(templateGraph, backend);
     const template = await registerGraphTemplate(backend, {
@@ -147,14 +148,53 @@ describe("graph templates", () => {
       ...template,
       schemaHash: "stale-source-hash",
     });
+    let instantiateCalls = 0;
+    const instantiate = backend.instantiateGraphTemplate;
+    if (instantiate === undefined)
+      throw new Error("Expected template instantiation support");
+    const observedBackend = deriveBackend(backend, {
+      async instantiateGraphTemplate(params) {
+        instantiateCalls += 1;
+        return instantiate(params);
+      },
+    });
 
     await expect(
-      instantiateGraphTemplate(backend, {
+      instantiateGraphTemplate(observedBackend, {
         template: staleTemplate,
         graphId: "tenant-stale",
       }),
     ).rejects.toMatchObject({
-      details: { code: "GRAPH_TEMPLATE_INSTANTIATION_REFUSED" },
+      details: { code: "GRAPH_TEMPLATE_HANDLE_MISMATCH" },
+    });
+    expect(instantiateCalls).toBe(0);
+  });
+
+  it("refuses a handle whose local graph differs from its registered hash", async () => {
+    const backend = createTestBackend();
+    const [source] = await createAdapterStoreWithSchema(templateGraph, backend);
+    const template = await registerGraphTemplate(backend, {
+      templateId: "people-v1",
+      reconciled: source.reconciledSchema,
+    });
+    const mismatchedTemplate = Object.freeze({
+      ...template,
+      reconciled: Object.freeze({
+        ...template.reconciled,
+        graph: Object.freeze({
+          ...template.reconciled.graph,
+          id: "different-source",
+        }),
+      }),
+    });
+
+    await expect(
+      instantiateGraphTemplate(backend, {
+        template: mismatchedTemplate,
+        graphId: "tenant-mismatched",
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "GRAPH_TEMPLATE_HANDLE_MISMATCH" },
     });
   });
 
