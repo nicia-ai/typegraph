@@ -30,6 +30,7 @@ const PGLITE_GLOBS = [
   "tests/constraint-write-fence.test.ts",
   "tests/contribution-rebuild-lock.test.ts",
   "tests/materialize-trigram-extension.test.ts",
+  "tests/node-claim-write-fusion.test.ts",
   // T15/T16 (B10): each posture in `tests/lock-fence-test-utils.ts`'s
   // `createLoggedPostgresBackend` boots its own in-process PGlite instance —
   // several per file — so these belong here for the same reason the

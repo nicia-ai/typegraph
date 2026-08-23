@@ -615,7 +615,7 @@ describe("a create issues each claim on the side of the row its placement names"
       handle: z.string(),
     }),
   });
-  /** One claim in each group: the shape that emits TWO claim statements. */
+  /** One claim in each group: the shape that exercises both claim phases. */
   const BothLeaf = defineNode("BothLeaf", {
     schema: z.object({
       email: z.string(),
@@ -648,7 +648,7 @@ describe("a create issues each claim on the side of the row its placement names"
     ],
   });
 
-  it("keeps an own-kind claim AFTER the row, which is the order it ships in", async () => {
+  it("keeps an own-kind claim AFTER the row within the fused statement", async () => {
     const { store, statements, reset } =
       await createRecordedPostgresStore(placementGraph);
 
@@ -657,10 +657,15 @@ describe("a create issues each claim on the side of the row its placement names"
 
     const claims = claimIndexes(statements);
     expect(claims).toHaveLength(1);
-    expect(nodeInsertIndex(statements)).toBeLessThan(claims[0] ?? -1);
+    expect(nodeInsertIndex(statements)).toBe(claims[0]);
+    const statement = statements[claims[0] ?? 0];
+    expect(statement?.query).toMatch(/node_inserted/iu);
+    expect(statement?.query.indexOf('"node_inserted"')).toBeLessThan(
+      statement?.query.indexOf('"node_post_claimed"') ?? -1,
+    );
   });
 
-  it("issues a cross-kind claim BEFORE the row it gates", async () => {
+  it("issues cross-kind claims BEFORE the row they gate within one statement", async () => {
     const { store, statements, reset } =
       await createRecordedPostgresStore(placementGraph);
 
@@ -675,15 +680,21 @@ describe("a create issues each claim on the side of the row its placement names"
     // in canonical order (by constraint name, the axis being equal), not in the
     // order the schema lists them.
     const claims = claimIndexes(statements);
-    expect(claims).toHaveLength(2);
-    expect(claims[1] ?? -1).toBeLessThan(nodeInsertIndex(statements));
-    expect(claims.map((index) => statements[index]?.params[2])).toEqual([
-      "placement_alias",
-      "placement_email",
-    ]);
+    expect(claims).toHaveLength(1);
+    expect(nodeInsertIndex(statements)).toBe(claims[0]);
+    const statement = statements[claims[0] ?? 0];
+    expect(statement?.query.indexOf('"node_pre_claimed"')).toBeLessThan(
+      statement?.query.indexOf('"node_inserted"') ?? -1,
+    );
+    expect(
+      statement?.params.filter(
+        (parameter): parameter is string =>
+          parameter === "placement_alias" || parameter === "placement_email",
+      ),
+    ).toEqual(["placement_alias", "placement_email"]);
   });
 
-  it("splits a kind owing both into two statements, one on each side of the row", async () => {
+  it("keeps claims on both sides of the row within one statement", async () => {
     const { store, statements, reset } =
       await createRecordedPostgresStore(placementGraph);
 
@@ -696,12 +707,22 @@ describe("a create issues each claim on the side of the row its placement names"
 
     const claims = claimIndexes(statements);
     const insertIndex = nodeInsertIndex(statements);
-    expect(claims).toHaveLength(2);
-    expect(claims[0] ?? -1).toBeLessThan(insertIndex);
-    expect(insertIndex).toBeLessThan(claims[1] ?? -1);
+    expect(claims).toHaveLength(1);
+    expect(insertIndex).toBe(claims[0]);
+    const statement = statements[claims[0] ?? 0];
+    expect(statement?.query.indexOf('"node_pre_claimed"')).toBeLessThan(
+      statement?.query.indexOf('"node_inserted"') ?? -1,
+    );
+    expect(statement?.query.indexOf('"node_inserted"')).toBeLessThan(
+      statement?.query.indexOf('"node_post_claimed"') ?? -1,
+    );
 
-    expect(statements[claims[0] ?? 0]?.params[2]).toBe("placement_email");
-    expect(statements[claims[1] ?? 0]?.params[2]).toBe("placement_handle");
+    expect(
+      statement?.params.filter(
+        (parameter): parameter is string =>
+          parameter === "placement_email" || parameter === "placement_handle",
+      ),
+    ).toEqual(["placement_email", "placement_handle"]);
   });
 
   it("sorts one batch statement's claims canonically, whatever order the rows arrive in", async () => {

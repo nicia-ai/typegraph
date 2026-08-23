@@ -39,7 +39,10 @@
 import { type z } from "zod";
 
 import { type UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
-import { supportsNodeInsertProjections } from "../../backend/capabilities/node-insert-projections";
+import {
+  supportsNodeInsertPlan,
+  supportsNodeInsertProjections,
+} from "../../backend/capabilities/node-insert-projections";
 import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -79,6 +82,8 @@ import {
 } from "../claims/edge-claims";
 import {
   type NodeClaimItem,
+  planNodeCreateClaims,
+  refuseNodeCreateClaimError,
   withNodeCreateClaims,
   withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
@@ -423,43 +428,48 @@ export function createWriteSession(
     // seam owns the two groups and the compensation between them; this surface
     // owns only "the row write it gates is THIS one".
     createNode: async (work) => {
-      const projectionsFused = supportsNodeInsertProjections(
-        target,
-        work.projections,
-      );
-      const row = await withNodeCreateClaims(
-        writeContext,
-        work.claim,
-        target,
-        () => {
-          const insert = target.insertNodeWithProjections;
-          if (!projectionsFused || insert === undefined) {
-            return dispatch.one(work.params);
-          }
+      const claimPlan = planNodeCreateClaims(writeContext, work.claim);
+      const insertPlanFused = supportsNodeInsertPlan(target, {
+        claims: claimPlan.claims,
+        projections: work.projections,
+      });
+      const insertPlannedNode = async (): Promise<NodeRow> => {
+        const insert = target.insertNodeWithProjections;
+        if (!insertPlanFused || insert === undefined) {
+          return withNodeCreateClaims(writeContext, work.claim, target, () =>
+            dispatch.one(work.params),
+          );
+        }
+        try {
           const plan: NodeInsertPlan = {
             mode: { kind: "ordinary" },
+            claims: claimPlan.claims,
             projections: work.projections,
           };
-          return insert(work.params, plan).then((row) => {
-            if (row === undefined) {
-              throw new CompilerInvariantError(
-                "An ordinary projection-aware node insert returned no row.",
-                {
-                  graphId: work.params.graphId,
-                  kind: work.params.kind,
-                  id: work.params.id,
-                },
-              );
-            }
-            return row;
-          });
-        },
-      );
+          const row = await insert(work.params, plan);
+          if (row === undefined) {
+            throw new CompilerInvariantError(
+              "An ordinary planned node insert returned no row.",
+              {
+                graphId: work.params.graphId,
+                kind: work.params.kind,
+                id: work.params.id,
+              },
+            );
+          }
+          return row;
+        } catch (error) {
+          refuseNodeCreateClaimError(error, claimPlan.entries);
+        }
+      };
+      const row = await insertPlannedNode();
       await applyNodeInsertSyncFans(
         writeContext,
         {
           ...work.sideEffects,
-          ...(projectionsFused ? { projectionsFused: true } : {}),
+          ...(insertPlanFused && work.projections.length > 0 ?
+            { projectionsFused: true }
+          : {}),
         },
         target,
       );
@@ -503,6 +513,7 @@ export function createWriteSession(
           if (insert === undefined) return;
           const plan: NodeInsertPlan = {
             mode: { kind: "schema-fenced", schemaFence },
+            claims: [],
             projections: work.projections,
           };
           return withNodeCreateClaims(writeContext, work.claim, target, () =>

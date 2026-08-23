@@ -1,6 +1,7 @@
 import type {
   BackendIdentity,
   GraphBackend,
+  NodeInsertClaim,
   NodeInsertProjection,
 } from "../types";
 
@@ -44,4 +45,33 @@ export function supportsNodeInsertProjections(
       (projection) => projection.kind === "embedding",
     ),
   });
+}
+
+/** Whether the receiver can lower this complete insert plan atomically. */
+export function supportsNodeInsertPlan(
+  target: NodeProjectionInsertTarget,
+  input: Readonly<{
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+  }>,
+): boolean {
+  if (input.claims.length === 0) {
+    return supportsNodeInsertProjections(target, input.projections);
+  }
+  // A claim refusal is discovered from the data-modifying statement's result,
+  // so the caller-owned transaction is the rollback boundary. Root graph
+  // backends expose `transaction`; transaction-scoped operation backends do
+  // not. Keep this exported predicate aligned with the execution contract.
+  if ("transaction" in target) return false;
+  return (
+    target.capabilities.atomicNodeInsertClaims === true &&
+    supportsNodeInsertProjectionRequirements(target, {
+      fulltext: input.projections.some(
+        (projection) => projection.kind === "fulltext",
+      ),
+      embedding: input.projections.some(
+        (projection) => projection.kind === "embedding",
+      ),
+    })
+  );
 }

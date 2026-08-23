@@ -152,18 +152,6 @@ const graph = defineGraph({
 
 const statements: LoggedStatement[] = [];
 
-/**
- * The relation names the claim-placement matchers below look for, read from the
- * same schema builder the store uses rather than spelled as literals: a
- * configured table prefix would silently make a substring matcher match nothing,
- * and a matcher that matches nothing passes every "before" comparison it is not
- * guarded against.
- */
-const SCHEMA_TABLES = {
-  nodes: "typegraph_nodes",
-  nodeUniques: "typegraph_node_uniques",
-} as const;
-
 let store: Store<typeof graph>;
 let backend: GraphBackend;
 let closeClient: () => Promise<void>;
@@ -646,19 +634,15 @@ describe("unconstrained edge endpoint fusion", () => {
  * covers uniqueness and disjointness alike.
  */
 function indexOfClaimStatement(): number {
-  return statements.findIndex(
-    (statement) =>
-      /^\s*insert/i.test(statement.query) &&
-      statement.query.includes(SCHEMA_TABLES.nodeUniques),
+  return statements.findIndex((statement) =>
+    /insert\s+into\s+"typegraph_node_uniques"/iu.test(statement.query),
   );
 }
 
 /** The first statement that writes the node row itself. */
 function indexOfNodeRowStatement(): number {
-  return statements.findIndex(
-    (statement) =>
-      /^\s*insert/i.test(statement.query) &&
-      statement.query.includes(SCHEMA_TABLES.nodes),
+  return statements.findIndex((statement) =>
+    /insert\s+into\s+"typegraph_nodes"/iu.test(statement.query),
   );
 }
 
@@ -676,10 +660,9 @@ function indexOfNodeRowStatement(): number {
  * fence, and a sync fan issued before the row can write derived data for a row
  * that never landed.
  *
- * Named mutation, verified to bite: invert the placement partition in
- * `withNodeCreateClaimsIssuedBy` (`claims/node-claims.ts`) so the post-insert
- * group is issued first → this case fails, because the claim then follows the
- * row it is supposed to gate.
+ * Named mutation, verified to bite: omit the claim list at the session-to-
+ * backend plan boundary → the fused statement no longer contains the claim
+ * relation and this case fails.
  *
  * The other half of the pinned order — the sync fans FOLLOW the row — is pinned
  * in `session-sidecar-completeness.test.ts`, whose fixture actually declares a
@@ -687,7 +670,7 @@ function indexOfNodeRowStatement(): number {
  * case here would assert against a statement that is never emitted.
  */
 describe("claims and row work keep their pinned order", () => {
-  it("issues a pre-insert claim BEFORE the row it gates", async () => {
+  it("issues a pre-insert claim before the row it gates in one statement", async () => {
     // A `kindWithSubClasses` scope: the axis spans sibling kinds no single
     // primary key backs, which is exactly the claim that must precede its row.
     await store.nodes.Employee.create({
@@ -699,7 +682,11 @@ describe("claims and row work keep their pinned order", () => {
     const row = indexOfNodeRowStatement();
     expect(claim).toBeGreaterThanOrEqual(0);
     expect(row).toBeGreaterThanOrEqual(0);
-    expect(claim).toBeLessThan(row);
+    expect(claim).toBe(row);
+    const query = statements[claim]?.query ?? "";
+    expect(query.indexOf('"node_pre_claimed"')).toBeLessThan(
+      query.indexOf('"node_inserted"'),
+    );
   });
 });
 

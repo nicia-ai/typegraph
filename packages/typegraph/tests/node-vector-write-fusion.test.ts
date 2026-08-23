@@ -239,6 +239,7 @@ describe("fresh node + vector write fusion", () => {
           },
           {
             mode: { kind: "ordinary" },
+            claims: [],
             projections: [
               {
                 kind: "embedding",

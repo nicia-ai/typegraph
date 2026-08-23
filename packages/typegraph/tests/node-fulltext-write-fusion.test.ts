@@ -65,6 +65,7 @@ function fulltextProjection(fulltext: NodeFulltextSync): NodeInsertProjection {
 function ordinaryPlan(fulltext: NodeFulltextSync): NodeInsertPlan {
   return {
     mode: { kind: "ordinary" },
+    claims: [],
     projections: [fulltextProjection(fulltext)],
   };
 }
@@ -75,6 +76,7 @@ function schemaFencedPlan(
 ): NodeInsertPlan {
   return {
     mode: { kind: "schema-fenced", schemaFence },
+    claims: [],
     projections: [fulltextProjection(fulltext)],
   };
 }

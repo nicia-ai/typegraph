@@ -255,6 +255,7 @@ export type {
   NodeEntityReadBackend,
   NodeEntityWriteBackend,
   NodeFulltextSync,
+  NodeInsertClaim,
   NodeInsertMode,
   NodeInsertPlan,
   NodeInsertProjection,
