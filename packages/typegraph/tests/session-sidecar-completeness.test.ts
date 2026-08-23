@@ -96,7 +96,7 @@ const GRAPH_ID = "session_sidecar_completeness";
 
 function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
   const work: EdgeInsertWork = {
-      params: {
+    params: {
       graphId: GRAPH_ID,
       kind: "links",
       id: "edge-fast-fused",
@@ -104,9 +104,9 @@ function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
       fromId: "fused",
       toKind: "Doc",
       toId: "fused-b",
-        props: {},
-      },
-      claim: undefined,
+      props: {},
+    },
+    claim: undefined,
   };
   const plan: EdgeCreatePlan = {};
   return session.createEdgeWithPlan(work, plan);
