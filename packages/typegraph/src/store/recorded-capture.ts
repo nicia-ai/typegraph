@@ -5,8 +5,8 @@ import {
 } from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
-  type ClaimEdgeCardinalityParams,
   type DeleteEdgesBatchParams,
+  type EdgeCreatePlan,
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
@@ -617,59 +617,23 @@ function createRecordedTransactionBackend(
       return row;
     },
 
-    ...(target.insertEdgeIfEndpointsLive === undefined ?
+    ...(target.executeEdgeCreatePlan === undefined ?
       {}
     : {
-        async insertEdgeIfEndpointsLive(
+        async executeEdgeCreatePlan(
           params: InsertEdgeParams,
-        ): Promise<EdgeRow | undefined> {
+          plan: EdgeCreatePlan,
+        ) {
           session.assertOpen();
           await lockGraph(params.graphId);
-          const row = await requireDefined(target.insertEdgeIfEndpointsLive)(
+          const result = await requireDefined(target.executeEdgeCreatePlan)(
             params,
+            plan,
           );
-          if (row !== undefined) {
-            session.touchEdge(params.graphId, params.id, row);
+          if (result.outcome === "created") {
+            session.touchEdge(params.graphId, params.id, result.row);
           }
-          return row;
-        },
-      }),
-
-    ...(target.insertEdgeIfEndpointsLiveWithSchemaFence === undefined ?
-      {}
-    : {
-        async insertEdgeIfEndpointsLiveWithSchemaFence(
-          params: InsertEdgeParams,
-          schemaFence: SchemaWriteFenceParams,
-        ): Promise<EdgeRow | undefined> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const row = await requireDefined(
-            target.insertEdgeIfEndpointsLiveWithSchemaFence,
-          )(params, schemaFence);
-          if (row !== undefined) {
-            session.touchEdge(params.graphId, params.id, row);
-          }
-          return row;
-        },
-      }),
-
-    ...(target.insertEdgeIfEndpointsLiveWithCardinalityClaim === undefined ?
-      {}
-    : {
-        async insertEdgeIfEndpointsLiveWithCardinalityClaim(
-          params: InsertEdgeParams,
-          claim: ClaimEdgeCardinalityParams,
-        ): Promise<EdgeRow | undefined> {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const row = await requireDefined(
-            target.insertEdgeIfEndpointsLiveWithCardinalityClaim,
-          )(params, claim);
-          if (row !== undefined) {
-            session.touchEdge(params.graphId, params.id, row);
-          }
-          return row;
+          return result;
         },
       }),
 
@@ -986,45 +950,15 @@ export function createRecordedBackend(
       return capture((target) => target.insertEdge(params));
     },
 
-    ...(backend.insertEdgeIfEndpointsLive === undefined ?
+    ...(backend.executeEdgeCreatePlan === undefined ?
       {}
     : {
-        async insertEdgeIfEndpointsLive(
+        async executeEdgeCreatePlan(
           params: InsertEdgeParams,
-        ): Promise<EdgeRow | undefined> {
+          plan: EdgeCreatePlan,
+        ) {
           return capture((target) =>
-            requireDefined(target.insertEdgeIfEndpointsLive)(params),
-          );
-        },
-      }),
-
-    ...(backend.insertEdgeIfEndpointsLiveWithSchemaFence === undefined ?
-      {}
-    : {
-        async insertEdgeIfEndpointsLiveWithSchemaFence(
-          params: InsertEdgeParams,
-          schemaFence: SchemaWriteFenceParams,
-        ): Promise<EdgeRow | undefined> {
-          return capture((target) =>
-            requireDefined(target.insertEdgeIfEndpointsLiveWithSchemaFence)(
-              params,
-              schemaFence,
-            ),
-          );
-        },
-      }),
-
-    ...(backend.insertEdgeIfEndpointsLiveWithCardinalityClaim === undefined ?
-      {}
-    : {
-        async insertEdgeIfEndpointsLiveWithCardinalityClaim(
-          params: InsertEdgeParams,
-          claim: ClaimEdgeCardinalityParams,
-        ): Promise<EdgeRow | undefined> {
-          return capture((target) =>
-            requireDefined(
-              target.insertEdgeIfEndpointsLiveWithCardinalityClaim,
-            )(params, claim),
+            requireDefined(target.executeEdgeCreatePlan)(params, plan),
           );
         },
       }),

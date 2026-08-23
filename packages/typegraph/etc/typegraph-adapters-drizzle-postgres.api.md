@@ -3368,13 +3368,31 @@ export const edgeClaims: drizzle_orm_pg_core.PgTableWithColumns<{
 }>;
 
 // @public
+type EdgeCreatePlan = Readonly<{
+    schemaFence?: SchemaWriteFenceParams;
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
+}>;
+
+// @public
+type EdgeCreateResult = Readonly<{
+    outcome: "created";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    dimensions: readonly ("schemaFence" | "cardinalityClaim")[];
+}>;
+
+// @public
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
 type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeIfEndpointsLiveWithSchemaFence" | "insertEdgeIfEndpointsLiveWithCardinalityClaim" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "executeEdgeCreatePlan" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 type EdgeExistsBetweenParams = Readonly<{
@@ -4093,9 +4111,7 @@ type GraphBackend = Readonly<{
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
-    insertEdgeIfEndpointsLive?: (this: void, params: InsertEdgeParams) => Promise<EdgeRow | undefined>;
-    insertEdgeIfEndpointsLiveWithSchemaFence?: (this: void, params: InsertEdgeParams, schemaFence: SchemaWriteFenceParams) => Promise<EdgeRow | undefined>;
-    insertEdgeIfEndpointsLiveWithCardinalityClaim?: (this: void, params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams) => Promise<EdgeRow | undefined>;
+    executeEdgeCreatePlan?: (this: void, params: InsertEdgeParams, plan: EdgeCreatePlan) => Promise<EdgeCreateResult>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;

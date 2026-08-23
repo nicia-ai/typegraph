@@ -50,6 +50,8 @@ import {
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
+  type EdgeCreatePlan,
+  type EdgeCreateResult,
   type EdgeRow,
   type FulltextOperationBackend,
   type GraphBackend,
@@ -78,7 +80,6 @@ import { type Assert, type Equal } from "../../utils/type-assert";
 import {
   claimEdgeCardinality,
   claimEdgeCardinalityBatch,
-  withEdgeClaimRelationPrecondition,
 } from "../claims/edge-claims";
 import {
   type NodeClaimItem,
@@ -165,9 +166,7 @@ export type WriteTarget = Readonly<
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
       GraphBackend,
-      | "insertEdgeIfEndpointsLive"
-      | "insertEdgeIfEndpointsLiveWithSchemaFence"
-      | "insertEdgeIfEndpointsLiveWithCardinalityClaim"
+      | "executeEdgeCreatePlan"
       | "claimEdgeCardinality"
       | "claimEdgeCardinalityGuarded"
       | "claimEdgeCardinalityBatch"
@@ -315,10 +314,12 @@ type NodeResurrectWork = Readonly<{
  */
 export type EdgeInsertWork = Readonly<{
   params: InsertEdgeParams;
-  claim?: ClaimEdgeCardinalityParams;
+  claim: ClaimEdgeCardinalityParams | undefined;
 }>;
 
-/** The claims a batch of edge inserts owes, in the order the batch writer sorts. */
+/**
+ * The claims a batch of edge inserts owes, in the order the batch writer sorts.
+ */
 function edgeBatchClaims(
   work: readonly EdgeInsertWork[],
 ): readonly ClaimEdgeCardinalityParams[] {
@@ -362,13 +363,15 @@ export type NodeWriteSession = Readonly<{
 export type EdgeWriteSession = Readonly<{
   // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
-  createEdgeIfEndpointsLive: (
+  /**
+   * Executes one prepared endpoint-checked create through the complete plan
+   * when the target exposes it. An absent executor is an explicit signal for
+   * the caller to run the portable diagnostic/fallback path.
+   */
+  createEdgeWithPlan: (
     work: EdgeInsertWork,
-  ) => Promise<EdgeRow | undefined>;
-  createEdgeIfEndpointsLiveWithSchemaFence: (
-    params: InsertEdgeParams,
-    schemaFence: SchemaWriteFenceParams,
-  ) => Promise<EdgeRow | undefined>;
+    plan: EdgeCreatePlan,
+  ) => Promise<EdgeCreateResult | undefined>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
   createEdgesNoReturn: (work: readonly EdgeInsertWork[]) => Promise<void>;
@@ -623,29 +626,27 @@ export function createWriteSession(
       return edgeDispatch.one(work.params);
     },
 
-    createEdgeIfEndpointsLive: async (work) => {
-      const fusedClaimInsert =
-        target.insertEdgeIfEndpointsLiveWithCardinalityClaim;
-      const claim = work.claim;
-      if (claim !== undefined) {
-        if (fusedClaimInsert !== undefined) {
-          return withEdgeClaimRelationPrecondition(claim.graphId, () =>
-            fusedClaimInsert(work.params, claim),
+    createEdgeWithPlan: async (work, plan) => {
+      const execute = target.executeEdgeCreatePlan;
+      if (execute !== undefined) {
+        const result = await execute(work.params, plan);
+        if (
+          result.outcome === "unsupported" &&
+          result.dimensions.length === 1 &&
+          result.dimensions[0] === "cardinalityClaim" &&
+          plan.schemaFence === undefined &&
+          plan.cardinalityClaim !== undefined
+        ) {
+          await claimEdgeCardinality(
+            target,
+            ctx.claimsVerdict(),
+            plan.cardinalityClaim,
           );
+          return execute(work.params, {});
         }
-        await claimEdgeCardinality(target, ctx.claimsVerdict(), claim);
+        return result;
       }
-      const insertEdgeIfEndpointsLive = target.insertEdgeIfEndpointsLive;
-      if (insertEdgeIfEndpointsLive === undefined) {
-        return;
-      }
-      return insertEdgeIfEndpointsLive(work.params);
-    },
-
-    createEdgeIfEndpointsLiveWithSchemaFence: (params, schemaFence) => {
-      const insert = target.insertEdgeIfEndpointsLiveWithSchemaFence;
-      if (insert === undefined) return Promise.resolve(undefined);
-      return insert(params, schemaFence);
+      return;
     },
 
     createEdgeNoReturn: async (work) => {

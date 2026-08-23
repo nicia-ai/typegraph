@@ -97,7 +97,7 @@ export function isAutocommitSingleStatementWrite(
         candidate.kindRegistered &&
         !candidate.convergesOnMatchKey &&
         candidate.cardinality === "many" &&
-        candidate.backend.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined
+        candidate.backend.executeEdgeCreatePlan !== undefined
       );
     }
   }

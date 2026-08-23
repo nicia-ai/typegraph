@@ -521,6 +521,21 @@ export type EdgeRow = Readonly<{
   deleted_at: string | undefined;
 }>;
 
+/** Dimensions selected by the edge-write planner. */
+export type EdgeCreatePlan = Readonly<{
+  schemaFence?: SchemaWriteFenceParams;
+  cardinalityClaim?: ClaimEdgeCardinalityParams;
+}>;
+
+/** Result of executing an edge create plan. */
+export type EdgeCreateResult =
+  | Readonly<{ outcome: "created"; row: EdgeRow }>
+  | Readonly<{ outcome: "rejected"; reason: "unknown" }>
+  | Readonly<{
+      outcome: "unsupported";
+      dimensions: readonly ("schemaFence" | "cardinalityClaim")[];
+    }>;
+
 /**
  * A row from the typegraph_node_uniques table.
  */
@@ -1976,38 +1991,16 @@ export type GraphBackend = Readonly<{
   // === Edge Operations ===
   insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
   /**
-   * Inserts an edge only when both referenced nodes are live, using the
-   * INSERT statement itself as the endpoint check. `undefined` means that at
-   * least one endpoint was missing or tombstoned; the store performs the
-   * ordered diagnostic read that turns that fact into its public typed error.
-   *
-   * Optional because custom backends retain the portable read-then-insert
-   * path. The bundled SQLite and PostgreSQL backends implement it.
+   * Executes every dimension selected by the edge-write planner, or refuses
+   * the plan. A rejected result is deliberately ambiguous: SQLite's
+   * INSERT ... RETURNING cannot emit a diagnostic row when its source
+   * predicate produces no rows, so the store owns portable diagnostics.
    */
-  insertEdgeIfEndpointsLive?: (
+  executeEdgeCreatePlan?: (
     this: void,
     params: InsertEdgeParams,
-  ) => Promise<EdgeRow | undefined>;
-  /**
-   * First-party transactional fast path which combines the active-schema
-   * fence and both live-endpoint predicates with the edge INSERT.
-   */
-  insertEdgeIfEndpointsLiveWithSchemaFence?: (
-    this: void,
-    params: InsertEdgeParams,
-    schemaFence: SchemaWriteFenceParams,
-  ) => Promise<EdgeRow | undefined>;
-  /**
-   * PostgreSQL/PGlite transaction-only fast path for a constrained edge.
-   * Endpoint validation, the guarded claim upsert, and the edge INSERT share
-   * one statement. A contended claim deliberately remains unresolved so the
-   * caller can run the existing fresh-snapshot takeover path.
-   */
-  insertEdgeIfEndpointsLiveWithCardinalityClaim?: (
-    this: void,
-    params: InsertEdgeParams,
-    claim: ClaimEdgeCardinalityParams,
-  ) => Promise<EdgeRow | undefined>;
+    plan: EdgeCreatePlan,
+  ) => Promise<EdgeCreateResult>;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
     this: void,
@@ -3204,9 +3197,7 @@ export type EdgeEntityReadBackend = Pick<
 export type EdgeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertEdge"
-  | "insertEdgeIfEndpointsLive"
-  | "insertEdgeIfEndpointsLiveWithSchemaFence"
-  | "insertEdgeIfEndpointsLiveWithCardinalityClaim"
+  | "executeEdgeCreatePlan"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"

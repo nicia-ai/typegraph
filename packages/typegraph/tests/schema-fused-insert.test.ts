@@ -146,13 +146,6 @@ function countFusedStatements(backend: GraphBackend): {
           fence,
         );
       },
-      async insertEdgeIfEndpointsLiveWithSchemaFence(params, fence) {
-        counts.edge += 1;
-        return requireDefined(target.insertEdgeIfEndpointsLiveWithSchemaFence)(
-          params,
-          fence,
-        );
-      },
       async insertNode(params) {
         counts.node += 1;
         return target.insertNode(params);
@@ -161,9 +154,9 @@ function countFusedStatements(backend: GraphBackend): {
         counts.node += 1;
         return requireDefined(target.insertNodeIfAbsent)(params);
       },
-      async insertEdgeIfEndpointsLive(params) {
+      async executeEdgeCreatePlan(params, plan) {
         counts.edge += 1;
-        return requireDefined(target.insertEdgeIfEndpointsLive)(params);
+        return requireDefined(target.executeEdgeCreatePlan)(params, plan);
       },
     });
   }
@@ -227,9 +220,9 @@ function countUnmarkedTransactionFallback(backend: GraphBackend): {
         counts.node += 1;
         return unmarkedTarget.insertNode(params);
       },
-      async insertEdgeIfEndpointsLive(params) {
+      async insertEdge(params) {
         counts.edge += 1;
-        return requireDefined(unmarkedTarget.insertEdgeIfEndpointsLive)(params);
+        return unmarkedTarget.insertEdge(params);
       },
     });
   }
@@ -277,7 +270,7 @@ async function statementCountForGeneratedNodeCreate(
   const portableBackend =
     useFusedInsert ? backend : (
       projectBackendWithout(backend, [
-        "insertEdgeIfEndpointsLiveWithSchemaFence",
+        "executeEdgeCreatePlan",
         "insertNodeIfAbsentWithSchemaFence",
         "insertNodeWithSchemaFence",
       ])
@@ -303,7 +296,10 @@ async function assertUnmarkedTransactionFallback(
   observed.counts.fence = 0;
   observed.counts.node = 0;
   await store.edges.knows.create(alice, bob, {});
-  expect(observed.counts).toEqual({ edge: 1, fence: 1, node: 0 });
+  // An unmarked transaction cannot use the planned executor. The ordinary
+  // endpoint probes and insert remain portable, but no fused-plan member is
+  // reached.
+  expect(observed.counts).toEqual({ edge: 0, fence: 1, node: 0 });
 }
 
 async function assertZeroRowContinuation(

@@ -2767,7 +2767,7 @@ function importEdgeInsertWork(
 ): EdgeInsertWork {
   const params = edgeInsertParamsOf(graphId, candidate);
   const claim = edgeCardinalityClaim(cardinality, params);
-  return { params, ...(claim === undefined ? {} : { claim }) };
+  return { params, claim };
 }
 
 // ============================================================

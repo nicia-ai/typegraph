@@ -61,6 +61,7 @@ import {
 } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
+  type EdgeCreatePlan,
   type GraphBackend,
   type LiveNodeRow,
   type NodeRow,
@@ -93,11 +94,9 @@ import { requireDefined } from "../src/utils/presence";
 
 const GRAPH_ID = "session_sidecar_completeness";
 
-function createEdgeWithFusedEndpointCheck(
-  session: WriteSession,
-): Promise<unknown> {
-  return session.createEdgeIfEndpointsLive({
-    params: {
+function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
+  const work: EdgeInsertWork = {
+      params: {
       graphId: GRAPH_ID,
       kind: "links",
       id: "edge-fast-fused",
@@ -105,19 +104,12 @@ function createEdgeWithFusedEndpointCheck(
       fromId: "fused",
       toKind: "Doc",
       toId: "fused-b",
-      props: {},
-    },
-    claim: {
-      graphId: GRAPH_ID,
-      cardinality: "unique",
-      edgeKind: "links",
-      edgeId: "edge-fast-fused",
-      fromKind: "Doc",
-      fromId: "fused",
-      toKind: "Doc",
-      toId: "fused-b",
-    },
-  });
+        props: {},
+      },
+      claim: undefined,
+  };
+  const plan: EdgeCreatePlan = {};
+  return session.createEdgeWithPlan(work, plan);
 }
 
 const Document = defineNode("Doc", {
@@ -184,9 +176,7 @@ const WATCHED_MEMBERS = [
   "upsertEmbeddingBatch",
   "deleteEmbedding",
   "insertEdge",
-  "insertEdgeIfEndpointsLive",
-  "insertEdgeIfEndpointsLiveWithSchemaFence",
-  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
+  "executeEdgeCreatePlan",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -418,7 +408,6 @@ type Case = Readonly<{
 
 const NODE_PLAN = nodeWritePlan(undefined, false);
 const EDGE_PLAN = edgeWritePlan(undefined);
-let fusedSchemaEdgeCounter = 0;
 
 /**
  * Exhaustive over the session by type: a method with no case here does not
@@ -642,37 +631,13 @@ const CASES: Record<keyof WriteSession, Case> = {
     preRow: ["claimEdgeCardinalityGuarded"],
     plan: EDGE_PLAN,
   },
-  createEdgeIfEndpointsLive: {
+  createEdgeWithPlan: {
     run: async (raw) => {
       await seed(raw, "fused");
-      return createEdgeWithFusedEndpointCheck;
-    },
-    sidecars: ["claimEdgeCardinalityGuarded"],
-    row: "insertEdgeIfEndpointsLive",
-    preRow: ["claimEdgeCardinalityGuarded"],
-    plan: EDGE_PLAN,
-  },
-  createEdgeIfEndpointsLiveWithSchemaFence: {
-    run: async (raw) => {
-      await seed(raw, "fused-schema");
-      fusedSchemaEdgeCounter += 1;
-      return (session) =>
-        session.createEdgeIfEndpointsLiveWithSchemaFence(
-          {
-            fromId: "fused-schema",
-            fromKind: "Doc",
-            graphId: GRAPH_ID,
-            id: `edge-fused-schema-${fusedSchemaEdgeCounter}`,
-            kind: "links",
-            props: {},
-            toId: "fused-schema-b",
-            toKind: "Doc",
-          },
-          { expectedVersion: 1, graphId: GRAPH_ID },
-        );
+      return createEdgeWithPlan;
     },
     sidecars: [],
-    row: "insertEdgeIfEndpointsLiveWithSchemaFence",
+    row: "executeEdgeCreatePlan",
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {

@@ -49,6 +49,8 @@ import type {
   DeleteUniqueParams,
   DisjointOverlapRow,
   EdgeClaimOutcome,
+  EdgeCreatePlan,
+  EdgeCreateResult,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
@@ -176,9 +178,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
-  | "insertEdgeIfEndpointsLive"
-  | "insertEdgeIfEndpointsLiveWithSchemaFence"
-  | "insertEdgeIfEndpointsLiveWithCardinalityClaim"
+  | "executeEdgeCreatePlan"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
@@ -660,26 +660,6 @@ export function createCommonOperationBackend(
           return row === undefined ? undefined : rowMappers.toNodeRow(row);
         },
 
-        async insertEdgeIfEndpointsLiveWithSchemaFence(
-          params: InsertEdgeParams,
-          schemaFence: SchemaWriteFenceParams,
-        ): Promise<EdgeRow | undefined> {
-          const query = operationStrategy.buildInsertEdgeIfEndpointsLiveWithSchemaFence(
-            params,
-            nowIso(),
-            schemaFence,
-            options.schemaFenceLockClause ?? drizzleSql.raw(""),
-          );
-          const row = await withDuplicateKeyClassification(
-            () => execution.execGet<Record<string, unknown>>(query),
-            {
-              entity: "edge",
-              relation: operationStrategy.primaryKeyConstraints.edges,
-              attempted: attemptedInserts([params]),
-            },
-          );
-          return row === undefined ? undefined : rowMappers.toEdgeRow(row);
-        },
       };
 
   const schemaGraphWriteLockNamespace =
@@ -720,26 +700,17 @@ export function createCommonOperationBackend(
         },
       };
 
-  const edgeCardinalityInsertFusionMembers = (() => {
-    const buildInsertEdgeIfEndpointsLiveWithCardinalityClaim =
-      operationStrategy.buildInsertEdgeIfEndpointsLiveWithCardinalityClaim;
-    if (
-      options.edgeCardinalityInsertFusion !== true ||
-      buildInsertEdgeIfEndpointsLiveWithCardinalityClaim === undefined
-    ) {
-      return {};
-    }
-    return {
-      async insertEdgeIfEndpointsLiveWithCardinalityClaim(
+  const buildEdgeCardinalityInsert =
+    operationStrategy.buildInsertEdgeIfEndpointsLiveWithCardinalityClaim;
+  const executeEdgeCardinalityInsert =
+    options.edgeCardinalityInsertFusion === true &&
+    buildEdgeCardinalityInsert !== undefined ?
+      async function executeEdgeCardinalityInsert(
         params: InsertEdgeParams,
         claim: ClaimEdgeCardinalityParams,
       ): Promise<EdgeRow | undefined> {
         assertMatchingFusedEdgeClaim(params, claim);
-        const query = buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
-          params,
-          claim,
-          nowIso(),
-        );
+        const query = buildEdgeCardinalityInsert(params, claim, nowIso());
         const row = await withDuplicateKeyClassification(
           () => execution.execGet<Record<string, unknown>>(query),
           {
@@ -749,9 +720,8 @@ export function createCommonOperationBackend(
           },
         );
         return row === undefined ? undefined : rowMappers.toEdgeRow(row);
-      },
-    };
-  })();
+      }
+    : undefined;
 
   const nodeProjectionInsertFusionMembers = (() => {
     const buildInsertNodeWithProjections =
@@ -896,13 +866,107 @@ export function createCommonOperationBackend(
     };
   })();
 
+  async function executeEdgeEndpointInsert(
+    params: InsertEdgeParams,
+  ): Promise<EdgeRow | undefined> {
+    const query = operationStrategy.buildInsertEdgeIfEndpointsLive(
+      params,
+      nowIso(),
+    );
+    const row = await withDuplicateKeyClassification(
+      () => execution.execGet<Record<string, unknown>>(query),
+      {
+        entity: "edge",
+        relation: operationStrategy.primaryKeyConstraints.edges,
+        attempted: attemptedInserts([params]),
+      },
+    );
+    return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+  }
+
+  async function executeEdgeSchemaFencedInsert(
+    params: InsertEdgeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ): Promise<EdgeRow | undefined> {
+    const schemaLockClause = options.schemaFenceLockClause;
+    if (schemaLockClause === undefined) {
+      throw new ConfigurationError(
+        "This backend cannot execute an edge create plan with a schema fence.",
+        { capability: "executeEdgeCreatePlan", dimension: "schemaFence" },
+      );
+    }
+    const query = operationStrategy.buildInsertEdgeIfEndpointsLiveWithSchemaFence(
+      params,
+      nowIso(),
+      schemaFence,
+      schemaLockClause,
+    );
+    const row = await withDuplicateKeyClassification(
+      () => execution.execGet<Record<string, unknown>>(query),
+      {
+        entity: "edge",
+        relation: operationStrategy.primaryKeyConstraints.edges,
+        attempted: attemptedInserts([params]),
+      },
+    );
+    return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+  }
+
+  async function executeEdgeCreatePlan(
+    params: InsertEdgeParams,
+    plan: EdgeCreatePlan,
+  ): Promise<EdgeCreateResult> {
+    if (plan.schemaFence !== undefined && plan.cardinalityClaim !== undefined) {
+      return {
+        outcome: "unsupported",
+        dimensions: ["schemaFence", "cardinalityClaim"],
+      };
+    }
+    if (
+      plan.schemaFence !== undefined &&
+      options.schemaFenceLockClause === undefined
+    ) {
+      return { outcome: "unsupported", dimensions: ["schemaFence"] };
+    }
+    if (
+      plan.cardinalityClaim !== undefined &&
+      executeEdgeCardinalityInsert === undefined
+    ) {
+      return { outcome: "unsupported", dimensions: ["cardinalityClaim"] };
+    }
+
+    let row: EdgeRow | undefined;
+    if (plan.schemaFence !== undefined) {
+      row = await executeEdgeSchemaFencedInsert(params, plan.schemaFence);
+    } else if (plan.cardinalityClaim === undefined) {
+      row = await executeEdgeEndpointInsert(params);
+    } else {
+      // The unsupported case is returned above before any SQL executes.
+      if (executeEdgeCardinalityInsert === undefined) {
+        throw new CompilerInvariantError(
+          "Edge create plan support changed between preflight and execution.",
+          { capability: "executeEdgeCreatePlan", dimension: "cardinalityClaim" },
+        );
+      }
+      row = await executeEdgeCardinalityInsert(
+        params,
+        plan.cardinalityClaim,
+      );
+    }
+
+    return row === undefined ?
+        { outcome: "rejected", reason: "unknown" }
+      : { outcome: "created", row };
+  }
+
   return {
     tableExists,
 
     ...schemaFenceMembers,
     ...schemaGraphWriteFenceMembers,
-    ...edgeCardinalityInsertFusionMembers,
     ...nodeProjectionInsertFusionMembers,
+
+    executeEdgeCreatePlan,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));
@@ -1134,25 +1198,6 @@ export function createCommonOperationBackend(
           },
         );
       return rowMappers.toEdgeRow(row);
-    },
-
-    async insertEdgeIfEndpointsLive(
-      params: InsertEdgeParams,
-    ): Promise<EdgeRow | undefined> {
-      const timestamp = nowIso();
-      const query = operationStrategy.buildInsertEdgeIfEndpointsLive(
-        params,
-        timestamp,
-      );
-      const row = await withDuplicateKeyClassification(
-        () => execution.execGet<Record<string, unknown>>(query),
-        {
-          entity: "edge",
-          relation: operationStrategy.primaryKeyConstraints.edges,
-          attempted: attemptedInserts([params]),
-        },
-      );
-      return row === undefined ? undefined : rowMappers.toEdgeRow(row);
     },
 
     async insertEdgeNoReturn(params: InsertEdgeParams): Promise<void> {

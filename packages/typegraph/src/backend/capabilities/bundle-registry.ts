@@ -848,22 +848,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.",
     accesses: 6,
   },
-  insertEdgeIfEndpointsLiveWithSchemaFence: {
+  executeEdgeCreatePlan: {
     kind: "reasoned",
     reason:
-      "First-party schema-fenced endpoint insert fast path; custom backends retain the existing endpoint-read and ordinary schema-fence path.",
-    accesses: 8,
-  },
-  insertEdgeIfEndpointsLive: {
-    kind: "reasoned",
-    reason:
-      "A first-party latency fast path selected only by the edge create session; custom backends fall back to portable endpoint reads, so it is not an independently negotiable feature family.",
-    accesses: 6,
-  },
-  insertEdgeIfEndpointsLiveWithCardinalityClaim: {
-    kind: "reasoned",
-    reason:
-      "A transaction-only first-party edge latency fast path that atomically combines live endpoint validation, a guarded cardinality claim, and the edge insert; custom and legacy backends retain the existing guarded-claim plus endpoint-aware insert protocol.",
+      "A first-party edge planned-write entrypoint. It applies every requested schema-fence and cardinality dimension or refuses the plan; custom and legacy backends retain the portable read-then-write protocol.",
     accesses: 6,
   },
   bootstrapTables: {

@@ -161,6 +161,8 @@ export type {
   ContributionRepairResult,
   ContributionRepopulationStats,
   DeleteFulltextBatchParams,
+  EdgeCreatePlan,
+  EdgeCreateResult,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   FilteredApproximateSearch,

@@ -1411,13 +1411,31 @@ export type EdgeClaimOutcome = Readonly<{
 }>;
 
 // @public
+export type EdgeCreatePlan = Readonly<{
+    schemaFence?: SchemaWriteFenceParams;
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
+}>;
+
+// @public
+export type EdgeCreateResult = Readonly<{
+    outcome: "created";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    dimensions: readonly ("schemaFence" | "cardinalityClaim")[];
+}>;
+
+// @public
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
 export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeIfEndpointsLive" | "insertEdgeIfEndpointsLiveWithSchemaFence" | "insertEdgeIfEndpointsLiveWithCardinalityClaim" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "executeEdgeCreatePlan" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 export type EdgeExistsBetweenParams = Readonly<{
@@ -1831,9 +1849,7 @@ export type GraphBackend = Readonly<{
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
-    insertEdgeIfEndpointsLive?: (this: void, params: InsertEdgeParams) => Promise<EdgeRow | undefined>;
-    insertEdgeIfEndpointsLiveWithSchemaFence?: (this: void, params: InsertEdgeParams, schemaFence: SchemaWriteFenceParams) => Promise<EdgeRow | undefined>;
-    insertEdgeIfEndpointsLiveWithCardinalityClaim?: (this: void, params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams) => Promise<EdgeRow | undefined>;
+    executeEdgeCreatePlan?: (this: void, params: InsertEdgeParams, plan: EdgeCreatePlan) => Promise<EdgeCreateResult>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
@@ -3218,19 +3234,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.";
         readonly accesses: 6;
     };
-    readonly insertEdgeIfEndpointsLiveWithSchemaFence: {
+    readonly executeEdgeCreatePlan: {
         readonly kind: "reasoned";
-        readonly reason: "First-party schema-fenced endpoint insert fast path; custom backends retain the existing endpoint-read and ordinary schema-fence path.";
-        readonly accesses: 8;
-    };
-    readonly insertEdgeIfEndpointsLive: {
-        readonly kind: "reasoned";
-        readonly reason: "A first-party latency fast path selected only by the edge create session; custom backends fall back to portable endpoint reads, so it is not an independently negotiable feature family.";
-        readonly accesses: 6;
-    };
-    readonly insertEdgeIfEndpointsLiveWithCardinalityClaim: {
-        readonly kind: "reasoned";
-        readonly reason: "A transaction-only first-party edge latency fast path that atomically combines live endpoint validation, a guarded cardinality claim, and the edge insert; custom and legacy backends retain the existing guarded-claim plus endpoint-aware insert protocol.";
+        readonly reason: "A first-party edge planned-write entrypoint. It applies every requested schema-fence and cardinality dimension or refuses the plan; custom and legacy backends retain the portable read-then-write protocol.";
         readonly accesses: 6;
     };
     readonly bootstrapTables: {

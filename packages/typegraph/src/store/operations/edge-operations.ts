@@ -84,6 +84,7 @@ import {
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import {
   type ClaimEdgeCardinalityParams,
+  type EdgeCreatePlan,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type GraphReadBackend,
@@ -268,7 +269,7 @@ function edgeInsertWork(prepared: EdgeCreatePrepared): EdgeInsertWork {
   );
   return {
     params: prepared.insertParams,
-    ...(claim === undefined ? {} : { claim }),
+    claim,
   };
 }
 
@@ -548,7 +549,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     input.id === undefined &&
     convergeOn === undefined &&
     edgeCardinality(ctx, kind) === "many" &&
-    backend.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined;
+    backend.executeEdgeCreatePlan !== undefined;
   const autocommitBackend = "transaction" in backend ? backend : undefined;
   const autocommitSingleStatement =
     autocommitBackend !== undefined &&
@@ -614,8 +615,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       declaredCardinality !== "many" &&
       edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind === "guarded";
     const usesFusedCardinalityInsert =
-      usesGuardedCardinalityClaim &&
-      target.insertEdgeIfEndpointsLiveWithCardinalityClaim !== undefined;
+      usesGuardedCardinalityClaim && target.executeEdgeCreatePlan !== undefined;
     // The match-key lookup above was derived from this transaction target
     // while the graph convergence fence is held. Once it reports no match,
     // endpoint existence is the only remaining pre-insert read, so let the
@@ -624,10 +624,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     const canFuseEndpointCheck =
       input.id === undefined &&
       (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
-      (target.insertEdgeIfEndpointsLive !== undefined ||
-        usesFusedCardinalityInsert ||
-        (fuseSchemaFenceInFirstWrite &&
-          target.insertEdgeIfEndpointsLiveWithSchemaFence !== undefined));
+      target.executeEdgeCreatePlan !== undefined;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
       validateEndpoints: !canFuseEndpointCheck,
       validateCardinality: !usesGuardedCardinalityClaim,
@@ -642,22 +639,27 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     // a concurrent endpoint revival before we report anything.
     if (canFuseEndpointCheck) {
       const fusedWork = edgeInsertWork(prepared);
-      const fusedRow = await withAlreadyExistsTranslation("edge", () =>
-        fuseSchemaFenceInFirstWrite ?
-          session.createEdgeIfEndpointsLiveWithSchemaFence(
-            prepared.insertParams,
-            {
+      const fusedPlan: EdgeCreatePlan = {
+        ...(fuseSchemaFenceInFirstWrite ?
+          {
+            schemaFence: {
               graphId: ctx.graphId,
               expectedVersion: requireDefined(ctx.schemaVersion),
             },
-          )
-        : session.createEdgeIfEndpointsLive(fusedWork),
+          }
+        : {}),
+        ...(usesFusedCardinalityInsert && fusedWork.claim !== undefined ?
+          { cardinalityClaim: fusedWork.claim }
+        : {}),
+      };
+      const fusedResult = await withAlreadyExistsTranslation("edge", () =>
+        session.createEdgeWithPlan(fusedWork, fusedPlan),
       );
-      if (fusedRow !== undefined) {
+      if (fusedResult?.outcome === "created") {
         if (fuseSchemaFenceInFirstWrite) {
           memoizeLeasedSchemaFence(ctx, targetBackend);
         }
-        return rowToEdge(fusedRow);
+        return rowToEdge(fusedResult.row);
       }
 
       if (fuseSchemaFenceInFirstWrite) {

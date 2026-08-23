@@ -213,6 +213,8 @@ export type {
   DropVectorIndexParams,
   EdgeCardinalityDeclaration,
   EdgeClaimOutcome,
+  EdgeCreatePlan,
+  EdgeCreateResult,
   EdgeEntityReadBackend,
   EdgeEntityWriteBackend,
   EdgeExistsBetweenParams,
