@@ -1626,9 +1626,12 @@ export function buildStandardHybridRrfOrderBy(
   // non-finite / negative values before we reach here. sql.raw on these
   // numeric constants is deliberate — they're schema-level config, not
   // user-bindable.
+  // `* 1.0` is also deliberate: PostgreSQL otherwise performs integer
+  // division when the default weight and rank constant are integers. Keep
+  // this promotion in lockstep with the backend hybrid statement emitter.
   const rrfOrder = sql.raw(
-    `(COALESCE(${vectorWeight} / (${k} + ${EMBEDDINGS_CTE_ALIAS}.ord), 0) + ` +
-      `COALESCE(${fulltextWeight} / (${k} + ${FULLTEXT_CTE_ALIAS}.ord), 0)) DESC`,
+    `(COALESCE((${vectorWeight} * 1.0) / (${k} + ${EMBEDDINGS_CTE_ALIAS}.ord), 0) + ` +
+      `COALESCE((${fulltextWeight} * 1.0) / (${k} + ${FULLTEXT_CTE_ALIAS}.ord), 0)) DESC`,
   );
   // Deterministic tiebreak on the CTE-projected node_id. At least one of
   // the two CTEs always has a non-NULL node_id for any row returned by
