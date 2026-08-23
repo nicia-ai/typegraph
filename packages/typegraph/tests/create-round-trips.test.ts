@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import {
   type CompiledRowsSql,
+  createStoreWithSchema,
   DatabaseOperationError,
   defineGraph,
   defineNode,
@@ -50,6 +51,8 @@ const PEER_RESURRECTION_VALID_FROM = "2024-01-01T00:00:00.000Z";
 const RACED_RESURRECTION_VALID_FROM = "2023-06-01T00:00:00.000Z";
 
 type ReadCounts = Readonly<{
+  /** All `getNode` probes, including generated ids unknown to the test. */
+  allNodeReads: number;
   /** `getNode` probes issued for the node being created. */
   targetNodeReads: number;
   /** Bare-id cross-kind fold probes issued by identity. */
@@ -79,7 +82,7 @@ function countingBackend(targetId: string): Readonly<{
   reset: () => void;
 }> {
   const base = createTestBackend();
-  const counts = { targetNodeReads: 0, foldProbes: 0 };
+  const counts = { allNodeReads: 0, targetNodeReads: 0, foldProbes: 0 };
 
   function countTransactionReads(
     target: TransactionBackend,
@@ -95,6 +98,7 @@ function countingBackend(targetId: string): Readonly<{
         const method = value as (...args: unknown[]) => unknown;
         if (property === "getNode") {
           return (...args: unknown[]) => {
+            counts.allNodeReads += 1;
             if (args[2] === targetId) counts.targetNodeReads += 1;
             return method.apply(source, args);
           };
@@ -116,6 +120,7 @@ function countingBackend(targetId: string): Readonly<{
   // `deriveBackend` just carried — exactly the loss the spread had.
   const backend: GraphBackend = deriveBackend(base, {
     getNode: (graphId: string, kind: string, id: string) => {
+      counts.allNodeReads += 1;
       if (id === targetId) counts.targetNodeReads += 1;
       return base.getNode(graphId, kind, id);
     },
@@ -131,10 +136,52 @@ function countingBackend(targetId: string): Readonly<{
     backend,
     counts,
     reset: () => {
+      counts.allNodeReads = 0;
       counts.targetNodeReads = 0;
       counts.foldProbes = 0;
     },
   };
+}
+
+/**
+ * A transaction wrapper TypeGraph did not create. Its target is intentionally
+ * not first-party marked, so schema-fence leasing must keep the conservative
+ * per-write behavior rather than inferring savepoint lifetime from the outer
+ * backend's dialect.
+ */
+function customTransactionFenceBackend(): Readonly<{
+  backend: GraphBackend;
+  schemaFenceCalls: () => number;
+}> {
+  const base = createTestBackend();
+  let calls = 0;
+  const backend: GraphBackend = deriveBackend(base, {
+    transaction: (fn, options) =>
+      base.transaction((target) => {
+        const customTarget = new Proxy(target, {
+          get(source, property, receiver) {
+            const value: unknown = Reflect.get(source, property, receiver);
+            if (
+              property !== "lockSchemaVersionForWrite" ||
+              typeof value !== "function"
+            ) {
+              return value;
+            }
+            const lockSchemaVersionForWrite = value as NonNullable<
+              TransactionBackend["lockSchemaVersionForWrite"]
+            >;
+            return (
+              params: Parameters<typeof lockSchemaVersionForWrite>[0],
+            ) => {
+              calls += 1;
+              return lockSchemaVersionForWrite(params);
+            };
+          },
+        });
+        return fn(customTarget);
+      }, options),
+  });
+  return { backend, schemaFenceCalls: () => calls };
 }
 
 function peerResurrectionBackend(targetId: string): GraphBackend {
@@ -278,17 +325,45 @@ describe("the read-counting double itself", () => {
   });
 });
 
+describe("transaction-scoped backend contract", () => {
+  it("does not expose a nested transaction runner", async () => {
+    const backend = createTestBackend();
+    await backend.transaction((target) => {
+      // `runInWriteTransaction` receives this target. Without a top-level
+      // transaction runner, `runOptionallyInTransaction` cannot open an
+      // internal savepoint before the lazy schema-fence acquisition.
+      expect("transaction" in target).toBe(false);
+      return Promise.resolve();
+    });
+  });
+});
+
 describe("create-path round trips", () => {
-  it("reads the created id exactly once on a plain graph", async () => {
+  it("keeps schema fencing per-write for a custom transaction target", async () => {
+    const observed = customTransactionFenceBackend();
+    const [store] = await createStoreWithSchema(plainGraph, observed.backend);
+
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "First" }, { id: "first" });
+      await tx.nodes.Person.create({ name: "Second" }, { id: "second" });
+    });
+
+    // The target's unmarked wrapper could implement arbitrary savepoint
+    // semantics, so it must not borrow the bundled backend's lease.
+    expect(observed.schemaFenceCalls()).toBe(2);
+  });
+
+  it("does not read a claim-free caller-supplied id on a plain graph", async () => {
     const { backend, counts, reset } = countingBackend("solo");
     const store = await createInitializedStore(plainGraph, backend);
 
     reset();
     await store.nodes.Person.create({ name: "Solo" }, { id: "solo" });
 
-    // One probe answers both questions the create path asks: is the id taken,
-    // and is it a tombstone to resurrect.
-    expect(counts.targetNodeReads).toBe(1);
+    // First-party backends make the INSERT itself answer whether the primary
+    // key is free. There are no claims on this graph, so no preclaim needs
+    // compensation when the slot is occupied.
+    expect(counts.targetNodeReads).toBe(0);
   });
 
   it("re-checks a tombstone immediately before resurrection", async () => {
@@ -414,7 +489,9 @@ describe("create-path round trips", () => {
     await store.nodes.Person.create({ name: "Generated" });
 
     // A generated id cannot already exist under another kind, so there is
-    // nothing to fold against and the probe is pure cost.
+    // nothing to find under the same or another kind. Both probes are pure
+    // network cost on the successful create path.
+    expect(counts.allNodeReads).toBe(0);
     expect(counts.foldProbes).toBe(0);
   });
 
@@ -425,7 +502,7 @@ describe("create-path round trips", () => {
     reset();
     await store.nodes.Person.create({ name: "Supplied" }, { id: "supplied" });
 
-    expect(counts.targetNodeReads).toBe(1);
+    expect(counts.targetNodeReads).toBe(0);
     // Three node kinds are registered; the fold is still a single bare-id
     // lookup, which `typegraph_nodes_id_idx` serves as an indexed seek.
     expect(counts.foldProbes).toBe(1);

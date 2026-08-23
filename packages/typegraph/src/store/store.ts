@@ -273,6 +273,7 @@ import {
 } from "./operations";
 import {
   runInWriteTransaction,
+  withTransactionSchemaFenceLease,
   withWriteTransactionSession,
 } from "./operations/write-transaction";
 import {
@@ -3046,14 +3047,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // never touches fulltext requires no fulltext initialization.
     //
     // A schema-version fence is acquired and validated at every managed write
-    // when this Store came from schema reconciliation. Rechecking is required
-    // because adapter-native SQL can roll back a savepoint and release a
-    // PostgreSQL row lock acquired after it. Snapshot-isolated transactions
-    // retain their normal serialization-failure semantics rather than
-    // validating a stale version after a concurrent commit. The separate
-    // recorded graph lock is still taken at each write boundary; callers that
-    // need read-before-write serialization for graph data acquire that lock
-    // explicitly.
+    // when this Store came from schema reconciliation. A TypeGraph-owned Store
+    // transaction on a bundled backend is the narrow exception: its first
+    // managed write acquires the fence and leases that success to later
+    // managed writes. Such a callback has neither a nested transaction runner
+    // nor a native SQL handle, so no savepoint can predate that acquisition;
+    // adapter-native and caller-adopted transactions retain the per-write
+    // check because their raw SQL can roll back a savepoint and release a
+    // PostgreSQL row lock acquired after it.
+    // Snapshot-isolated transactions retain their normal serialization-failure
+    // semantics rather than validating a stale version after a concurrent
+    // commit. The separate recorded graph lock is still taken at each write
+    // boundary; callers that need read-before-write serialization for graph
+    // data acquire that lock explicitly.
     //
     // Operation hooks inside the callback run BUFFERED: an operation nested
     // in this transaction completes only when the transaction commits, so its
@@ -3085,8 +3091,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               runBulkHooks,
             ),
           );
+        const invokeWithSchemaFenceLease = (): Promise<T> =>
+          this.#adapterBackend === undefined ?
+            withTransactionSchemaFenceLease(
+              {
+                graphId: this.graphId,
+                schemaVersion: this.#schemaMetadata.schemaVersion,
+              },
+              txBackend,
+              invokeTransaction,
+            )
+          : invokeTransaction();
         if (!this.#captureEnabled && !this.#revisionTrackingEnabled) {
-          return invokeTransaction();
+          return invokeWithSchemaFenceLease();
         }
         return withWriteTransactionSession(
           txBackend,
@@ -3097,7 +3114,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             revisionTrackingEnabled: this.#revisionTrackingEnabled,
             revisionSchema: this.#sqlSchema(),
           },
-          invokeTransaction,
+          invokeWithSchemaFenceLease,
         );
       };
       const result =

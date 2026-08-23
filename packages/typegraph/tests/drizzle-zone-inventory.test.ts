@@ -152,7 +152,7 @@ describe("drizzle zone inventory (I1)", () => {
   );
 
   it("every zone entry names an existing file and carries a non-empty reason", () => {
-    expect(DRIZZLE_ZONE.length).toBe(30);
+    expect(DRIZZLE_ZONE.length).toBe(31);
 
     const seen = new Set<string>();
     const duplicates: string[] = [];

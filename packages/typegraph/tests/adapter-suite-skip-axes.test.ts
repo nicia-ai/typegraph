@@ -29,27 +29,28 @@ import {
  * that one is the population ratchet.
  */
 const RECORDED_GUARDS: readonly MemberGuard[] = [
-  { line: 141, members: ["insertNodeNoReturn"], form: "single" },
-  { line: 160, members: ["insertNodesBatch"], form: "single" },
-  { line: 192, members: ["insertNodesBatchReturning"], form: "single" },
-  { line: 217, members: ["getNodes"], form: "single" },
-  { line: 464, members: ["insertEdgeNoReturn"], form: "single" },
-  { line: 483, members: ["insertEdgesBatch"], form: "single" },
-  { line: 515, members: ["insertEdgesBatchReturning"], form: "single" },
-  { line: 548, members: ["getEdges"], form: "single" },
-  { line: 1191, members: ["compileSql"], form: "single" },
-  { line: 1202, members: ["compileSql", "executeRaw"], form: "conjunction" },
+  { line: 141, members: ["insertNodeIfAbsent"], form: "single" },
+  { line: 171, members: ["insertNodeNoReturn"], form: "single" },
+  { line: 190, members: ["insertNodesBatch"], form: "single" },
+  { line: 222, members: ["insertNodesBatchReturning"], form: "single" },
+  { line: 247, members: ["getNodes"], form: "single" },
+  { line: 494, members: ["insertEdgeNoReturn"], form: "single" },
+  { line: 513, members: ["insertEdgesBatch"], form: "single" },
+  { line: 545, members: ["insertEdgesBatchReturning"], form: "single" },
+  { line: 578, members: ["getEdges"], form: "single" },
+  { line: 1221, members: ["compileSql"], form: "single" },
+  { line: 1232, members: ["compileSql", "executeRaw"], form: "conjunction" },
 ];
 
-const RECORDED_OPTION_AXIS_SITES = [71, 90, 1161];
-const RECORDED_UNGUARDED_TRANSACTION_CALL_LINES = [1035, 1061, 1082, 1096];
+const RECORDED_OPTION_AXIS_SITES = [71, 90, 1191];
+const RECORDED_UNGUARDED_TRANSACTION_CALL_LINES = [151, 1065, 1091, 1112, 1126];
 
 describe("adapter suite skip axes", () => {
   // Provenance pin — see the comment on RECORDED_GUARDS above.
-  it("has the recorded ten guards (nine single, one conjunction), both directions", () => {
+  it("has the recorded eleven guards (ten single, one conjunction), both directions", () => {
     const inventory = scanAdapterSuiteSkipAxes();
 
-    expect(inventory.guards.length).toBe(10);
+    expect(inventory.guards.length).toBe(11);
     expect(inventory.guards).toEqual(RECORDED_GUARDS);
 
     const singleGuards = inventory.guards.filter(
@@ -58,13 +59,13 @@ describe("adapter suite skip axes", () => {
     const conjunctionGuards = inventory.guards.filter(
       (guard) => guard.form === "conjunction",
     );
-    expect(singleGuards.length).toBe(9);
+    expect(singleGuards.length).toBe(10);
     expect(conjunctionGuards.length).toBe(1);
   });
 
   // The population ratchet — line-insensitive; see the comment on
   // RECORDED_GUARDS above.
-  it("names exactly ten distinct guarded members, both directions", () => {
+  it("names exactly eleven distinct guarded members, both directions", () => {
     const inventory = scanAdapterSuiteSkipAxes();
     const scannedMembers = new Set(
       inventory.guards.flatMap((guard) => guard.members),
@@ -73,7 +74,7 @@ describe("adapter suite skip axes", () => {
       RECORDED_GUARDS.flatMap((guard) => guard.members),
     );
 
-    expect(scannedMembers.size).toBe(10);
+    expect(scannedMembers.size).toBe(11);
     for (const member of scannedMembers) {
       expect(
         recordedMembers.has(member),

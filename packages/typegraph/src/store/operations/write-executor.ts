@@ -20,7 +20,10 @@ import {
   type TransactionBackend,
 } from "../../backend/types";
 import { requireDefined } from "../../utils/presence";
-import { type GraphWriteLock } from "../recorded-capture/clock";
+import {
+  type GraphWriteLock,
+  uncapturedGraphWriteLock,
+} from "../recorded-capture/clock";
 import { type OperationHookContext } from "../types";
 import { type RowWorkKind, type WritePlan } from "./write-plan";
 import {
@@ -69,7 +72,8 @@ export type HookedWritePlanContext = WritePlanContext &
  * "accepted then dropped" failure that deleted the lock-plan field. Written as
  * an `Omit` of the existing options type rather than a fresh literal, so an
  * option added to `WriteTransactionOptions` reaches plan callers on its own;
- * today the residue is exactly `didWrite`.
+ * today the residue is `didWrite` plus the private first-statement schema
+ * fence marker used by the qualifying insert paths.
  */
 export type WritePlanOptions<T> = Omit<
   WriteTransactionOptions<T>,
@@ -213,4 +217,44 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
   );
+}
+
+/** Internal signal that a zero-row autocommit attempt needs portable recovery. */
+export class AutocommitWriteRequiresTransaction extends Error {
+  constructor() {
+    super("The managed autocommit attempt requires transactional recovery.");
+    this.name = "AutocommitWriteRequiresTransaction";
+  }
+}
+
+/**
+ * Runs a proven single-statement write directly on a bundled root backend.
+ *
+ * The eligibility classifier is deliberately outside this generic executor:
+ * it owns the operation-specific proof that row work has no claim, sidecar,
+ * identity, capture, revision, or recovery statement. This helper owns only
+ * the resulting execution shape — no `BEGIN` / `COMMIT` and no transaction
+ * target — while preserving the ordinary hook boundary. A completed SQL
+ * statement is already durably committed, so `onOperationEnd` remains truthful.
+ */
+export function runAutocommitSingleStatementWritePlan<K extends RowWorkKind, T>(
+  ctx: HookedWritePlanContext,
+  opContext: OperationHookContext,
+  plan: WritePlan<K>,
+  backend: GraphBackend,
+  rowWork: WriteRowWork<K, T>,
+  fallbackOptions?: WritePlanOptions<T>,
+): Promise<T> {
+  return ctx.withOperationHooks(opContext, async () => {
+    try {
+      return await planFrame(
+        ctx,
+        plan,
+        rowWork,
+      )(backend, uncapturedGraphWriteLock());
+    } catch (error) {
+      if (!(error instanceof AutocommitWriteRequiresTransaction)) throw error;
+      return runWritePlan(ctx, plan, backend, rowWork, fallbackOptions);
+    }
+  });
 }

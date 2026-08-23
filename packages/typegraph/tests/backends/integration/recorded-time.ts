@@ -428,6 +428,10 @@ function rejectUniqueFinalization(): Promise<never> {
 
 function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
   return deriveBackend(unfrozenSeamCopy(backend), {
+    capabilities: {
+      ...backend.capabilities,
+      atomicNodeInsertClaims: false,
+    },
     insertUnique(): Promise<void> {
       return rejectUniqueFinalization();
     },
@@ -435,6 +439,10 @@ function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
       return backend.transaction((target) => {
         const failingTarget: TransactionBackend = {
           ...target,
+          capabilities: {
+            ...target.capabilities,
+            atomicNodeInsertClaims: false,
+          },
           insertUnique(): Promise<void> {
             return rejectUniqueFinalization();
           },

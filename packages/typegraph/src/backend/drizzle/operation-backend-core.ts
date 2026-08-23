@@ -1,6 +1,7 @@
-import { is } from "drizzle-orm";
+import { is, type SQL, sql as drizzleSql } from "drizzle-orm";
 
 import {
+  CompilerInvariantError,
   ConfigurationError,
   DatabaseOperationError,
   MigrationError,
@@ -26,6 +27,7 @@ import {
   isDuplicatePrimaryKeyError,
   type PrimaryKeyRelation,
 } from "../../utils/sql-errors";
+import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
   resolveEdgeEndpointIds,
   resolveHeterogeneousEdgeRead,
@@ -63,12 +65,16 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
+  ManagedCreatePlan,
+  ManagedCreateResult,
+  ManagedNodeCreatePlan,
   NodeRow,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
   SchemaKindEmptinessProbe,
   SchemaVersionRow,
+  SchemaWriteFenceParams,
   SetActiveVersionParams,
   TransactionBackend,
   UniqueRow,
@@ -83,6 +89,61 @@ import {
   createCachedTableExistence,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
+
+function assertMatchingFusedEdgeClaim(
+  params: InsertEdgeParams,
+  claim: ClaimEdgeCardinalityParams,
+): void {
+  const matchesEdge =
+    claim.graphId === params.graphId &&
+    claim.edgeId === params.id &&
+    claim.edgeKind === params.kind &&
+    claim.fromKind === params.fromKind &&
+    claim.fromId === params.fromId &&
+    claim.toKind === params.toKind &&
+    claim.toId === params.toId;
+  if (matchesEdge) return;
+
+  throw new CompilerInvariantError(
+    "A fused edge cardinality claim must describe the edge being inserted.",
+    {
+      edge: {
+        graphId: params.graphId,
+        id: params.id,
+        kind: params.kind,
+        fromKind: params.fromKind,
+        fromId: params.fromId,
+        toKind: params.toKind,
+        toId: params.toId,
+      },
+      claim: {
+        graphId: claim.graphId,
+        edgeId: claim.edgeId,
+        edgeKind: claim.edgeKind,
+        fromKind: claim.fromKind,
+        fromId: claim.fromId,
+        toKind: claim.toKind,
+        toId: claim.toId,
+      },
+    },
+  );
+}
+
+function assertMatchingNodeSchemaFence(
+  params: InsertNodeParams,
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (schemaFence.graphId === params.graphId) return;
+
+  throw new CompilerInvariantError(
+    "A node schema fence must match its node graph.",
+    {
+      nodeGraphId: params.graphId,
+      fenceGraphId: schemaFence.graphId,
+      id: params.id,
+    },
+  );
+}
 
 /**
  * The owner a claim write proposes. Reading it off the params in one place is
@@ -129,14 +190,20 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteEdgesBatch"
   | "hardDeleteNode"
   | "claimEdgeCardinality"
+  | "claimEdgeCardinalityGuarded"
   | "claimEdgeCardinalityBatch"
   | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
+  | "executeManagedCreate"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
   | "insertNode"
+  | "insertNodeIfAbsent"
+  | "insertNodeIfAbsentWithSchemaFence"
+  | "insertNodeWithSchemaFence"
+  | "lockSchemaVersionAndGraphWrite"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -237,6 +304,28 @@ type CreateCommonOperationBackendOptions = Readonly<{
   nowIso?: (() => string) | undefined;
   operationStrategy: CommonOperationStrategy;
   rowMappers: OperationBackendRowMappers;
+  /** Present only on bundled dialect backends that own the fused SQL contract. */
+  schemaFenceLockClause?: SQL | undefined;
+  /** Present only for a bundled PostgreSQL transaction-scoped backend. */
+  schemaGraphWriteLockNamespace?: string | undefined;
+  /** Present only for a bundled PostgreSQL transaction-scoped backend. */
+  edgeCardinalityInsertFusion?: boolean | undefined;
+  /** Present only for bundled projection-aware operation backends. */
+  nodeProjectionInsertFusion?: boolean | undefined;
+  /** Claim plans require a caller-owned transaction to roll back refusals. */
+  nodeClaimInsertFusion?: boolean | undefined;
+  /** Read-only prerequisite gate run before a fused projection statement. */
+  beforeNodeProjectionInsert?:
+    | ((params: InsertNodeParams, plan: ManagedNodeCreatePlan) => Promise<void>)
+    | undefined;
+  /** Error-path projection storage classifier; must rethrow or return never. */
+  refuseNodeProjectionError?:
+    | ((
+        params: InsertNodeParams,
+        plan: ManagedNodeCreatePlan,
+        error: unknown,
+      ) => Promise<never>)
+    | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -500,6 +589,45 @@ export function createCommonOperationBackend(
     );
   }
 
+  /**
+   * Single-claim fast path. The lock statement reports both the committed
+   * claim holder and whether a claimless live edge already occupies the axis.
+   * A stale foreign holder is taken over only through a second guarded
+   * statement whose fresh snapshot rechecks the entire axis.
+   */
+  async function claimEdgeCardinalityGuarded(
+    params: ClaimEdgeCardinalityParams,
+  ): Promise<EdgeClaimOutcome> {
+    const rows = await execution.execAll<{
+      holder_edge_id: string;
+      has_incumbent: boolean | number;
+    }>(operationStrategy.buildLockEdgeClaimGuarded(params, nowIso()));
+    const locked = rows[0];
+    if (locked === undefined) {
+      throw new DatabaseOperationError(
+        "Guarded edge claim did not return its locked claim row.",
+        { operation: "insert", entity: "edge" },
+      );
+    }
+    const hasIncumbent =
+      locked.has_incumbent === true || locked.has_incumbent === 1;
+    if (locked.holder_edge_id === params.edgeId) {
+      return hasIncumbent ?
+          { status: "refused", holderEdgeId: params.edgeId }
+        : { status: "claimed" };
+    }
+    if (hasIncumbent) {
+      return { status: "refused", holderEdgeId: locked.holder_edge_id };
+    }
+
+    const takeOver = await execution.execAll<{ holder_edge_id: string }>(
+      operationStrategy.buildTakeOverEdgeClaimGuarded(params, nowIso()),
+    );
+    return takeOver.length > 0 ?
+        { status: "claimed" }
+      : { status: "refused", holderEdgeId: locked.holder_edge_id };
+  }
+
   // Returns 0 when no row is currently active — that's the sentinel
   // `expected: { kind: "initial" }` matches against.
   async function readActiveVersion(graphId: string): Promise<number> {
@@ -509,8 +637,438 @@ export function createCommonOperationBackend(
     return row === undefined ? 0 : rowMappers.toSchemaVersionRow(row).version;
   }
 
+  const schemaFenceMembers =
+    options.schemaFenceLockClause === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          assertMatchingNodeSchemaFence(params, schemaFence);
+          const query =
+            operationStrategy.buildInsertNodeIfAbsentWithSchemaFence(
+              params,
+              nowIso(),
+              schemaFence,
+              options.schemaFenceLockClause ?? drizzleSql.raw(""),
+            );
+          const row = await execution.execGet<Record<string, unknown>>(query);
+          return row === undefined ? undefined : rowMappers.toNodeRow(row);
+        },
+
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          assertMatchingNodeSchemaFence(params, schemaFence);
+          const query = operationStrategy.buildInsertNodeWithSchemaFence(
+            params,
+            nowIso(),
+            schemaFence,
+            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+          );
+          const row = await withDuplicateKeyClassification(
+            () => execution.execGet<Record<string, unknown>>(query),
+            {
+              entity: "node",
+              relation: operationStrategy.primaryKeyConstraints.nodes,
+              attempted: attemptedInserts([params]),
+            },
+          );
+          return row === undefined ? undefined : rowMappers.toNodeRow(row);
+        },
+      };
+
+  const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
+  const buildLockSchemaVersionAndGraphWrite =
+    operationStrategy.buildLockSchemaVersionAndGraphWrite;
+  const schemaGraphWriteFenceMembers =
+    (
+      schemaGraphWriteLockNamespace === undefined ||
+      buildLockSchemaVersionAndGraphWrite === undefined
+    ) ?
+      {}
+    : {
+        async lockSchemaVersionAndGraphWrite(
+          params: SchemaWriteFenceParams,
+        ): Promise<void> {
+          const row = await execution.execGet<Record<string, unknown>>(
+            buildLockSchemaVersionAndGraphWrite(
+              params,
+              schemaGraphWriteLockNamespace,
+            ),
+          );
+          if (row !== undefined) return;
+
+          // A blocked `FOR SHARE` can recheck the old active row out of its
+          // statement snapshot without substituting the winner's new row. As
+          // in the ordinary fence, diagnose with a fresh, non-locking read.
+          const settledRow = await execution.execGet<Record<string, unknown>>(
+            operationStrategy.buildGetActiveSchema(params.graphId),
+          );
+          const settled =
+            settledRow === undefined ? undefined : (
+              rowMappers.toSchemaVersionRow(settledRow)
+            );
+          throw new StaleVersionError({
+            graphId: params.graphId,
+            expected: params.expectedVersion,
+            actual: settled?.version ?? 0,
+          });
+        },
+      };
+
+  const buildEdgeCardinalityInsert =
+    operationStrategy.buildInsertEdgeIfEndpointsLiveWithCardinalityClaim;
+  const executeEdgeCardinalityInsert =
+    (
+      options.edgeCardinalityInsertFusion === true &&
+      buildEdgeCardinalityInsert !== undefined
+    ) ?
+      async function executeEdgeCardinalityInsert(
+        params: InsertEdgeParams,
+        claim: ClaimEdgeCardinalityParams,
+      ): Promise<EdgeRow | undefined> {
+        assertMatchingFusedEdgeClaim(params, claim);
+        const query = buildEdgeCardinalityInsert(params, claim, nowIso());
+        const row = await withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+          },
+        );
+        return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+      }
+    : undefined;
+
+  const buildInsertNodeWithProjections =
+    operationStrategy.buildInsertNodeWithProjections;
+
+  async function executeNodeManagedCreate(
+    plan: ManagedNodeCreatePlan,
+  ): Promise<ManagedCreateResult> {
+    if (plan.mode.kind === "schema-fenced") {
+      assertMatchingNodeSchemaFence(plan.params, plan.mode.schemaFence);
+    }
+    if (plan.claims.length > 0 && plan.mode.kind === "schema-fenced") {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["schemaFence", "claims"],
+      };
+    }
+    const rephasedPlan =
+      options.nodeClaimInsertFusion === true ?
+        undefined
+      : rephaseNonTransactionalNodeClaimPlan(plan);
+    if (
+      plan.claims.length > 0 &&
+      options.nodeClaimInsertFusion !== true &&
+      rephasedPlan === undefined
+    ) {
+      return { outcome: "unsupported", entity: "node", dimensions: ["claims"] };
+    }
+    const executablePlan = rephasedPlan ?? plan;
+    const { params } = executablePlan;
+    const plannedClaims = executablePlan.claims;
+    if (
+      executablePlan.mode.kind === "schema-fenced" &&
+      options.schemaFenceLockClause === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["schemaFence"],
+      };
+    }
+    if (
+      executablePlan.projections.length > 0 &&
+      (options.nodeProjectionInsertFusion !== true ||
+        buildInsertNodeWithProjections === undefined)
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["projections"],
+      };
+    }
+
+    if (
+      (plannedClaims.length > 0 || executablePlan.projections.length > 0) &&
+      buildInsertNodeWithProjections === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions:
+          plannedClaims.length === 0 ? ["projections"]
+          : executablePlan.projections.length === 0 ? ["claims"]
+          : ["claims", "projections"],
+      };
+    }
+
+    if (plannedClaims.length === 0 && executablePlan.projections.length === 0) {
+      const query =
+        executablePlan.mode.kind === "schema-fenced" ?
+          operationStrategy.buildInsertNodeWithSchemaFence(
+            params,
+            nowIso(),
+            executablePlan.mode.schemaFence,
+            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+          )
+        : operationStrategy.buildInsertNode(params, nowIso());
+      const row = await withDuplicateKeyClassification(
+        () => execution.execGet<Record<string, unknown>>(query),
+        {
+          entity: "node",
+          relation: operationStrategy.primaryKeyConstraints.nodes,
+          attempted: attemptedInserts([params]),
+        },
+      );
+      return row === undefined ?
+          { outcome: "rejected", entity: "node", reason: "unknown" }
+        : {
+            outcome: "created",
+            entity: "node",
+            row: rowMappers.toNodeRow(row),
+          };
+    }
+
+    if (buildInsertNodeWithProjections === undefined) {
+      throw new CompilerInvariantError(
+        "The backend accepted a managed node plan it cannot compile.",
+        { graphId: params.graphId, kind: params.kind, id: params.id },
+      );
+    }
+    const query = buildInsertNodeWithProjections(
+      params,
+      executablePlan,
+      nowIso(),
+      options.schemaFenceLockClause,
+    );
+    if (query === undefined) {
+      return {
+        outcome: "unsupported",
+        entity: "node",
+        dimensions: ["projections"],
+      };
+    }
+    await options.beforeNodeProjectionInsert?.(params, executablePlan);
+    const row = await (async () => {
+      try {
+        return await withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "node",
+            relation: operationStrategy.primaryKeyConstraints.nodes,
+            attempted: attemptedInserts([params]),
+          },
+        );
+      } catch (error) {
+        if (options.refuseNodeProjectionError !== undefined) {
+          return options.refuseNodeProjectionError(
+            params,
+            executablePlan,
+            error,
+          );
+        }
+        throw error;
+      }
+    })();
+    if (row?.["write_discriminator"] === "claim_conflict") {
+      const constraintName = row["claim_constraint_name"];
+      const holderKind = row["claim_holder_kind"];
+      const holderId = row["claim_holder_id"];
+      const axis = row["claim_axis"];
+      if (
+        typeof constraintName !== "string" ||
+        typeof holderKind !== "string" ||
+        typeof holderId !== "string" ||
+        typeof axis !== "string"
+      ) {
+        throw new CompilerInvariantError(
+          "A planned node claim refusal returned incomplete conflict metadata.",
+          { graphId: params.graphId, kind: params.kind, id: params.id },
+        );
+      }
+      const conflictingClaim = plannedClaims.find((claim) => {
+        if (
+          claim.constraintName !== constraintName ||
+          claim.key !== row["claim_key"]
+        ) {
+          return false;
+        }
+        if (claim.verdict.kind === "disjointness") {
+          return claim.axis === axis;
+        }
+        return claim.verdict.probeAxes.includes(axis);
+      });
+      const fields =
+        conflictingClaim?.verdict.kind === "uniqueness" ?
+          conflictingClaim.verdict.fields
+        : [];
+      throw new UniquenessError({
+        constraintName,
+        kind: holderKind,
+        existingId: holderId,
+        newId: params.id,
+        fields,
+        axis,
+      });
+    }
+    if (row === undefined && executablePlan.mode.kind === "ordinary") {
+      throw new DatabaseOperationError(
+        "Fused node projection insert failed: no row returned",
+        { operation: "insert", entity: "node", reason: "no_row_returned" },
+      );
+    }
+    return row === undefined ?
+        { outcome: "rejected", entity: "node", reason: "unknown" }
+      : { outcome: "created", entity: "node", row: rowMappers.toNodeRow(row) };
+  }
+
+  async function executeEdgeEndpointInsert(
+    params: InsertEdgeParams,
+  ): Promise<EdgeRow | undefined> {
+    const query = operationStrategy.buildInsertEdgeIfEndpointsLive(
+      params,
+      nowIso(),
+    );
+    const row = await withDuplicateKeyClassification(
+      () => execution.execGet<Record<string, unknown>>(query),
+      {
+        entity: "edge",
+        relation: operationStrategy.primaryKeyConstraints.edges,
+        attempted: attemptedInserts([params]),
+      },
+    );
+    return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+  }
+
+  async function executeEdgeSchemaFencedInsert(
+    params: InsertEdgeParams,
+    schemaFence: SchemaWriteFenceParams,
+  ): Promise<EdgeRow | undefined> {
+    const schemaLockClause = options.schemaFenceLockClause;
+    if (schemaLockClause === undefined) {
+      throw new ConfigurationError(
+        "This backend cannot execute a managed edge create with a schema fence.",
+        { capability: "executeManagedCreate", dimension: "schemaFence" },
+      );
+    }
+    const query =
+      operationStrategy.buildInsertEdgeIfEndpointsLiveWithSchemaFence(
+        params,
+        nowIso(),
+        schemaFence,
+        schemaLockClause,
+      );
+    const row = await withDuplicateKeyClassification(
+      () => execution.execGet<Record<string, unknown>>(query),
+      {
+        entity: "edge",
+        relation: operationStrategy.primaryKeyConstraints.edges,
+        attempted: attemptedInserts([params]),
+      },
+    );
+    return row === undefined ? undefined : rowMappers.toEdgeRow(row);
+  }
+
+  async function executeEdgeManagedCreate(
+    plan: Extract<ManagedCreatePlan, { entity: "edge" }>,
+  ): Promise<ManagedCreateResult> {
+    const { params } = plan;
+    if (
+      plan.schemaFence !== undefined &&
+      plan.schemaFence.graphId !== params.graphId
+    ) {
+      throw new CompilerInvariantError(
+        "A managed edge create's schema fence must match its edge graph.",
+        {
+          edgeGraphId: params.graphId,
+          fenceGraphId: plan.schemaFence.graphId,
+          id: params.id,
+        },
+      );
+    }
+    if (plan.schemaFence !== undefined && plan.cardinalityClaim !== undefined) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["schemaFence", "cardinalityClaim"],
+      };
+    }
+    if (
+      plan.schemaFence !== undefined &&
+      options.schemaFenceLockClause === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["schemaFence"],
+      };
+    }
+    if (
+      plan.cardinalityClaim !== undefined &&
+      executeEdgeCardinalityInsert === undefined
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["cardinalityClaim"],
+      };
+    }
+
+    let row: EdgeRow | undefined;
+    if (plan.schemaFence !== undefined) {
+      row = await executeEdgeSchemaFencedInsert(params, plan.schemaFence);
+    } else if (plan.cardinalityClaim === undefined) {
+      row = await executeEdgeEndpointInsert(params);
+    } else {
+      // The unsupported case is returned above before any SQL executes.
+      if (executeEdgeCardinalityInsert === undefined) {
+        throw new CompilerInvariantError(
+          "Edge create plan support changed between preflight and execution.",
+          { capability: "executeManagedCreate", dimension: "cardinalityClaim" },
+        );
+      }
+      row = await executeEdgeCardinalityInsert(params, plan.cardinalityClaim);
+    }
+
+    return row === undefined ?
+        { outcome: "rejected", entity: "edge", reason: "unknown" }
+      : { outcome: "created", entity: "edge", row };
+  }
+
+  async function executeManagedCreate(
+    plan: ManagedCreatePlan,
+  ): Promise<ManagedCreateResult> {
+    switch (plan.entity) {
+      case "node": {
+        return executeNodeManagedCreate(plan);
+      }
+      case "edge": {
+        return executeEdgeManagedCreate(plan);
+      }
+      default: {
+        plan satisfies never;
+        throw new CompilerInvariantError(
+          "The managed create plan names an unknown entity.",
+          { capability: "executeManagedCreate" },
+        );
+      }
+    }
+  }
+
   return {
     tableExists,
+
+    ...schemaFenceMembers,
+    ...schemaGraphWriteFenceMembers,
+    executeManagedCreate,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));
@@ -547,6 +1105,14 @@ export function createCommonOperationBackend(
           },
         );
       return rowMappers.toNodeRow(row);
+    },
+
+    async insertNodeIfAbsent(
+      params: InsertNodeParams,
+    ): Promise<NodeRow | undefined> {
+      const query = operationStrategy.buildInsertNodeIfAbsent(params, nowIso());
+      const row = await execution.execGet<Record<string, unknown>>(query);
+      return row === undefined ? undefined : rowMappers.toNodeRow(row);
     },
 
     async insertNodeNoReturn(params: InsertNodeParams): Promise<void> {
@@ -1103,6 +1669,8 @@ export function createCommonOperationBackend(
       const [outcome] = await claimEdgeCardinalityEntries([params]);
       return outcome ?? { status: "claimed" };
     },
+
+    claimEdgeCardinalityGuarded,
 
     claimEdgeCardinalityBatch(
       entries: readonly ClaimEdgeCardinalityParams[],

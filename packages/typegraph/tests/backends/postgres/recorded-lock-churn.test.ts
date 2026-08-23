@@ -88,11 +88,57 @@ function graphWriteLockCount(statements: readonly LoggedStatement[]): number {
   return statements.filter(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      statement.params[0] === GRAPH_WRITE_NAMESPACE,
+      statement.params.includes(GRAPH_WRITE_NAMESPACE),
   ).length;
 }
 
+function schemaFenceLockCount(statements: readonly LoggedStatement[]): number {
+  return statements.filter((statement) => /for share/i.test(statement.query))
+    .length;
+}
+
 describe("recorded graph-write advisory lock churn", () => {
+  it("leases one schema fence to every write in a TypeGraph-owned transaction", async (ctx) => {
+    const activePool = requirePostgres(ctx);
+    const statements: LoggedStatement[] = [];
+    const backend = createPostgresBackend(
+      drizzle(activePool, {
+        logger: {
+          logQuery(query: string, params: unknown[]) {
+            statements.push({ query, params });
+          },
+        },
+      }),
+    );
+    // `createStoreWithSchema`, rather than `createAdapterStoreWithSchema`,
+    // deliberately exposes the portable Store transaction surface. It has no
+    // `tx.sql`, so the fence acquired before its callback cannot have been
+    // acquired after a caller-controlled savepoint.
+    const [store] = await createStoreWithSchema(
+      buildGraph("schema_fence_lease_churn"),
+      backend,
+    );
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "first" }, { id: "first" });
+      await tx.nodes.Person.create({ name: "second" }, { id: "second" });
+    });
+
+    // Removing the transaction-local lease makes this 2: each create calls
+    // the same `lockSchemaVersionForWrite` fence independently.
+    expect(schemaFenceLockCount(statements)).toBe(1);
+
+    statements.length = 0;
+    await store.transaction(async (tx) => {
+      await tx.nodes.Person.create({ name: "third" }, { id: "third" });
+    });
+
+    // The lease belongs to the transaction target, never the pool/root
+    // backend, so a new transaction always validates again.
+    expect(schemaFenceLockCount(statements)).toBe(1);
+  });
+
   it("acquires the lock once per transaction, not once per write", async (ctx) => {
     const activePool = requirePostgres(ctx);
     const statements: LoggedStatement[] = [];
@@ -123,8 +169,10 @@ describe("recorded graph-write advisory lock churn", () => {
     });
     expect(graphWriteLockCount(statements)).toBe(1);
 
-    // --- Single autocommit write: also exactly one (was two — the
-    //     write-transaction boundary plus the delegate's own write). ---
+    // --- Single managed write: the combined schema/graph fence seeds the
+    //     capture delegate's memo, so the row wrapper does not issue a second
+    //     advisory-lock statement. This is asserted at the driver trace, not
+    //     inferred from backend-member calls. ---
     statements.length = 0;
     await store.nodes.Person.create({ name: "solo" }, { id: "solo" });
     expect(graphWriteLockCount(statements)).toBe(1);
@@ -177,7 +225,7 @@ describe("recorded graph-write advisory lock churn", () => {
     const lockIndex = statements.findIndex(
       (statement) =>
         statement.query.includes("pg_advisory_xact_lock") &&
-        statement.params[0] === GRAPH_WRITE_NAMESPACE,
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
     );
     const insertIndex = statements.findIndex((statement) =>
       statement.query.includes("typegraph_nodes"),

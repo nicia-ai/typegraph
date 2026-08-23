@@ -1,6 +1,7 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
+import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
 import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
 import { isPresent } from "../../../utils/presence";
@@ -36,8 +37,10 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
+  ManagedNodeCreatePlan,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
+  SchemaWriteFenceParams,
   SqlDialect,
   UpdateEdgeParams,
   UpdateNodeParams,
@@ -63,9 +66,12 @@ import {
   buildDisjointOverlapAudit,
 } from "./constraint-fence-audit";
 import {
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
+  buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
   buildPurgeEdgeClaims,
   buildTakeOverEdgeClaim,
+  buildTakeOverEdgeClaimGuarded,
 } from "./edge-claims";
 import {
   buildCountEdgesFrom,
@@ -79,6 +85,8 @@ import {
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
   buildInsertEdge,
+  buildInsertEdgeIfEndpointsLive,
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
@@ -86,15 +94,19 @@ import {
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
+import { buildInsertNodeWithProjections } from "./node-projections";
 import {
   buildDeleteNode,
   buildGetNode,
   buildGetNodes,
   buildHardDeleteNode,
   buildInsertNode,
+  buildInsertNodeIfAbsent,
+  buildInsertNodeIfAbsentWithSchemaFence,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
+  buildInsertNodeWithSchemaFence,
   buildUpdateNode,
   buildUpdateNodeSet,
 } from "./nodes";
@@ -102,6 +114,7 @@ import {
   buildGetActiveSchema,
   buildGetSchemaVersion,
   buildInsertSchema,
+  buildLockSchemaVersionAndGraphWrite,
   buildSetActiveSchema,
 } from "./schema";
 import {
@@ -175,6 +188,25 @@ export type CommonOperationStrategy = Readonly<{
     vectorScoreDescending: boolean,
   ) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
+  buildInsertNodeIfAbsent: (params: InsertNodeParams, timestamp: string) => SQL;
+  buildInsertNodeIfAbsentWithSchemaFence: (
+    params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertNodeWithSchemaFence: (
+    params: InsertNodeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertNodeWithProjections?: (
+    params: InsertNodeParams,
+    plan: ManagedNodeCreatePlan,
+    timestamp: string,
+    schemaLockClause?: SQL,
+  ) => SQL | undefined;
   buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
@@ -191,6 +223,22 @@ export type CommonOperationStrategy = Readonly<{
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
+  buildInsertEdgeIfEndpointsLive: (
+    params: InsertEdgeParams,
+    timestamp: string,
+  ) => SQL;
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence: (
+    params: InsertEdgeParams,
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  /** PostgreSQL transaction-only claim + endpoint + edge write. */
+  buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (
+    params: InsertEdgeParams,
+    claim: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
     params: readonly InsertEdgeParams[],
@@ -268,7 +316,15 @@ export type CommonOperationStrategy = Readonly<{
     entries: readonly ClaimEdgeCardinalityParams[],
     timestamp: string,
   ) => SQL;
+  buildLockEdgeClaimGuarded: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
   buildTakeOverEdgeClaim: (
+    params: ClaimEdgeCardinalityParams,
+    timestamp: string,
+  ) => SQL;
+  buildTakeOverEdgeClaimGuarded: (
     params: ClaimEdgeCardinalityParams,
     timestamp: string,
   ) => SQL;
@@ -293,6 +349,11 @@ export type CommonOperationStrategy = Readonly<{
     kinds: readonly [string, string],
   ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
+  /** PostgreSQL-only dependent schema-row + graph-advisory fence. */
+  buildLockSchemaVersionAndGraphWrite?: (
+    params: SchemaWriteFenceParams,
+    advisoryLockNamespace: string,
+  ) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
   buildSetActiveSchema: (
@@ -356,6 +417,9 @@ function bindTableOperationBuilders<TBuilders extends TableOperationBuilderMap>(
 
 const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNode,
+  buildInsertNodeIfAbsent,
+  buildInsertNodeIfAbsentWithSchemaFence,
+  buildInsertNodeWithSchemaFence,
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
@@ -365,6 +429,8 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildDeleteNode,
   buildHardDeleteNode,
   buildInsertEdge,
+  buildInsertEdgeIfEndpointsLive,
+  buildInsertEdgeIfEndpointsLiveWithSchemaFence,
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
@@ -608,11 +674,23 @@ function createCommonOperationStrategy(
     ): SQL {
       return buildLockEdgeClaims(tables, entries, timestamp);
     },
+    buildLockEdgeClaimGuarded(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildLockEdgeClaimGuarded(tables, params, timestamp);
+    },
     buildTakeOverEdgeClaim(
       params: ClaimEdgeCardinalityParams,
       timestamp: string,
     ): SQL {
       return buildTakeOverEdgeClaim(tables, params, timestamp);
+    },
+    buildTakeOverEdgeClaimGuarded(
+      params: ClaimEdgeCardinalityParams,
+      timestamp: string,
+    ): SQL {
+      return buildTakeOverEdgeClaimGuarded(tables, params, timestamp);
     },
     buildPurgeEdgeClaims(params: PurgeEdgeClaimsParams): SQL {
       return buildPurgeEdgeClaims(tables, params);
@@ -748,9 +826,59 @@ export function createSqliteOperationStrategy(
   return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
 }
 
+function createPostgresNodeProjectionBuilders(
+  tables: PostgresTables,
+  dialect: SqlDialect,
+  fulltextStrategy: FulltextStrategy,
+  vectorStrategy: VectorStrategy | undefined,
+): Pick<CommonOperationStrategy, "buildInsertNodeWithProjections"> {
+  const fulltextTable = tables.fulltextTableName;
+  return {
+    buildInsertNodeWithProjections(params, plan, timestamp, schemaLockClause) {
+      return buildInsertNodeWithProjections(
+        tables,
+        params,
+        plan,
+        timestamp,
+        dialect,
+        fulltextTable,
+        fulltextStrategy,
+        vectorStrategy,
+        schemaLockClause,
+      );
+    },
+  };
+}
+
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
   fulltextStrategy: FulltextStrategy,
+  vectorStrategy?: VectorStrategy,
 ): PostgresOperationStrategy {
-  return createCommonOperationStrategy(tables, "postgres", fulltextStrategy);
+  return {
+    ...createCommonOperationStrategy(tables, "postgres", fulltextStrategy),
+    ...createPostgresNodeProjectionBuilders(
+      tables,
+      "postgres",
+      fulltextStrategy,
+      vectorStrategy,
+    ),
+    buildInsertEdgeIfEndpointsLiveWithCardinalityClaim: (
+      params,
+      claim,
+      timestamp,
+    ) =>
+      buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
+        tables,
+        params,
+        claim,
+        timestamp,
+      ),
+    buildLockSchemaVersionAndGraphWrite: (params, advisoryLockNamespace) =>
+      buildLockSchemaVersionAndGraphWrite(
+        tables,
+        params,
+        advisoryLockNamespace,
+      ),
+  };
 }

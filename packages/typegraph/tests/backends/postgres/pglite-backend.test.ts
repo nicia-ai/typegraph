@@ -63,6 +63,12 @@ const peopleGraph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {},
 });
+const knows = defineEdge("knows", { schema: z.object({}) });
+const connectedPeopleGraph = defineGraph({
+  id: "pglite_connected_people",
+  nodes: { Person: { type: Person } },
+  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+});
 const peopleImportGraph = defineGraph({
   id: "pglite_people_import",
   nodes: { Person: { type: Person } },
@@ -745,6 +751,69 @@ describe("PGlite backend", () => {
 
       expect(await store.nodes.Person.getById(result.alice.id)).toBeDefined();
       expect(await store.nodes.Person.getById(result.bob.id)).toBeDefined();
+    });
+
+    it("leases the schema fence once for a TypeGraph-owned transaction", async () => {
+      const client = await PGlite.create();
+      cleanups.push(() => client.close());
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const statements: string[] = [];
+      const backend = createPostgresBackend(
+        drizzle(client, {
+          logger: {
+            logQuery(query: string) {
+              statements.push(query);
+            },
+          },
+        }),
+        { vector: false },
+      );
+      const [store] = await createStoreWithSchema(peopleGraph, backend);
+
+      statements.length = 0;
+      await store.transaction((tx) => tx.nodes.Person.count());
+
+      // Merely opening a portable transaction stays read-only: eligibility is
+      // registered before the callback, but its schema fence is lazy.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(0);
+
+      statements.length = 0;
+      await store.transaction(async (tx) => {
+        await tx.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+        await tx.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+      });
+
+      // Replacing the leased-fence fast path with the ordinary per-write
+      // fence makes this count 2.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(1);
+
+      const [connectedStore] = await createStoreWithSchema(
+        connectedPeopleGraph,
+        backend,
+      );
+      statements.length = 0;
+      await connectedStore.transaction(async (tx) => {
+        const alice = await tx.nodes.Person.create(
+          { name: "Alice" },
+          { id: "connected-alice" },
+        );
+        const bob = await tx.nodes.Person.create(
+          { name: "Bob" },
+          { id: "connected-bob" },
+        );
+        await tx.edges.knows.create(alice, bob, {});
+      });
+
+      // The edge create is independently eligible for a fused schema fence.
+      // A leased transaction must make it reuse the lock acquired by the
+      // first node create instead of embedding a second fence in its INSERT.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(1);
     });
 
     it("disables vector with vector: false (no extension, CRUD still works)", async () => {

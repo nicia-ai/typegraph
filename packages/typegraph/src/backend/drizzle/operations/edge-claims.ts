@@ -4,11 +4,19 @@ import {
   EDGE_CARDINALITY_SPECS,
   edgeCardinalityClaimTarget,
 } from "../../../store/claims/edge-claims";
+import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   ClaimEdgeCardinalityParams,
+  InsertEdgeParams,
   PurgeEdgeClaimsParams,
 } from "../../types";
-import { quotedColumn, type Tables } from "./shared";
+import {
+  edgeColumnList,
+  quotedColumn,
+  quotedTableName,
+  sqlNull,
+  type Tables,
+} from "./shared";
 
 /**
  * Qualifies a column with its relation, the one rendering both dialects read
@@ -18,6 +26,44 @@ import { quotedColumn, type Tables } from "./shared";
  */
 function qualified(tableName: string, column: Readonly<{ name: string }>): SQL {
   return sql.raw(`"${tableName}"."${column.name}"`);
+}
+
+function qualifiedAlias(
+  alias: string,
+  column: Readonly<{ name: string }>,
+): SQL {
+  return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
+}
+
+/**
+ * The live entity predicate a claim guards, excluding the proposed holder.
+ * Both the guarded lock and guarded takeover use this exact fragment so the
+ * fast path cannot disagree about what constitutes a claimless incumbent.
+ */
+function competingLiveEdgePredicate(
+  tables: Tables,
+  params: ClaimEdgeCardinalityParams,
+): SQL {
+  const { edges } = tables;
+  const edgesName = getTableName(edges);
+  const spec = EDGE_CARDINALITY_SPECS[params.cardinality];
+  const toEndpointTerms =
+    spec.keyShape === "fromAndTo" ?
+      sql` AND ${qualified(edgesName, edges.toKind)} = ${params.toKind} AND ${qualified(edgesName, edges.toId)} = ${params.toId}`
+    : sql``;
+  const activeTerm =
+    spec.holderLiveness === "liveAndActive" ?
+      sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
+    : sql``;
+
+  return sql`
+    ${qualified(edgesName, edges.graphId)} = ${params.graphId}
+      AND ${qualified(edgesName, edges.id)} <> ${params.edgeId}
+      AND ${qualified(edgesName, edges.deletedAt)} IS NULL
+      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
+      AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
+      AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+  `;
 }
 
 /**
@@ -66,6 +112,142 @@ export function buildLockEdgeClaims(
       ${quotedColumn(edgeClaims.axis)} as axis,
       ${quotedColumn(edgeClaims.key)} as key,
       ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
+  `;
+}
+
+/**
+ * Single-row create-or-lock with an entity-relation guard in its RETURNING
+ * projection. The upsert first establishes the cardinality-axis row lock; its
+ * returned holder resolves concurrent claimants, while `has_incumbent`
+ * catches rows imported or written before the claim relation existed.
+ *
+ * A matching row with the proposed id is excluded. That is the legitimate
+ * resurrection/reopen case: the same edge is reclaiming the same axis.
+ * PostgreSQL's READ COMMITTED snapshot does not refresh this `EXISTS` after an
+ * `ON CONFLICT` wait. Managed constrained writes consume the probe-folding
+ * contract only while holding TypeGraph's graph advisory lock, so committed
+ * preexisting rows are visible and peers cannot publish a claimless row during
+ * this statement. Claim-aware writers outside that lock still serialize on the
+ * returned claim holder. A direct writer that bypasses both TypeGraph's lock
+ * and its claim relation is outside the enforceable cardinality contract.
+ */
+export function buildLockEdgeClaimGuarded(
+  tables: Tables,
+  params: ClaimEdgeCardinalityParams,
+  timestamp: string,
+): SQL {
+  const { edgeClaims, edges } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const target = edgeCardinalityClaimTarget(params);
+
+  return sql`
+    INSERT INTO ${edgeClaims} (
+      ${sql.identifier(edgeClaims.graphId.name)},
+      ${sql.identifier(edgeClaims.axis.name)},
+      ${sql.identifier(edgeClaims.key.name)},
+      ${sql.identifier(edgeClaims.edgeId.name)},
+      ${sql.identifier(edgeClaims.updatedAt.name)}
+    ) VALUES (
+      ${params.graphId}, ${target.axis}, ${target.key}, ${params.edgeId}, ${timestamp}
+    )
+    ON CONFLICT (
+      ${sql.identifier(edgeClaims.graphId.name)},
+      ${sql.identifier(edgeClaims.axis.name)},
+      ${sql.identifier(edgeClaims.key.name)}
+    ) DO UPDATE SET
+      ${quotedColumn(edgeClaims.updatedAt)} = ${qualified(claimsName, edgeClaims.updatedAt)}
+    RETURNING
+      ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id,
+      EXISTS (
+        SELECT 1 FROM ${edges}
+        WHERE ${competingLiveEdgePredicate(tables, params)}
+      ) AS has_incumbent
+  `;
+}
+
+/**
+ * Endpoint-dependent constrained edge write.
+ *
+ * The endpoint CTE is deliberately the dependency of the claim INSERT. An
+ * unavailable endpoint therefore produces no claim row and no claim refresh.
+ * A foreign claim is reported, not taken over: PostgreSQL data-modifying CTEs
+ * share one snapshot, so stale-holder takeover remains a separate fresh
+ * statement in the caller.
+ */
+export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
+  tables: Tables,
+  params: InsertEdgeParams,
+  claim: ClaimEdgeCardinalityParams,
+  timestamp: string,
+): SQL {
+  const { edgeClaims, edges, nodes } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const nodeTable = quotedTableName(getTableName(nodes));
+  const propsJson = JSON.stringify(params.props);
+  const columns = edgeColumnList(edges);
+  const target = edgeCardinalityClaimTarget(claim);
+  const from = (column: Readonly<{ name: string }>): SQL =>
+    qualifiedAlias("from_node", column);
+  const to = (column: Readonly<{ name: string }>): SQL =>
+    qualifiedAlias("to_node", column);
+
+  return sql`
+    WITH live_endpoints AS MATERIALIZED (
+      SELECT 1 AS present
+      FROM ${nodeTable} AS "from_node"
+      CROSS JOIN ${nodeTable} AS "to_node"
+      WHERE ${from(nodes.graphId)} = ${params.graphId}
+        AND ${from(nodes.kind)} = ${params.fromKind}
+        AND ${from(nodes.id)} = ${params.fromId}
+        AND ${from(nodes.deletedAt)} IS NULL
+        AND ${to(nodes.graphId)} = ${params.graphId}
+        AND ${to(nodes.kind)} = ${params.toKind}
+        AND ${to(nodes.id)} = ${params.toId}
+        AND ${to(nodes.deletedAt)} IS NULL
+    ),
+    claimable_axis AS MATERIALIZED (
+      SELECT present
+      FROM live_endpoints
+      WHERE NOT EXISTS (
+        SELECT 1 FROM ${edges}
+        WHERE ${competingLiveEdgePredicate(tables, claim)}
+      )
+    ),
+    claim AS (
+      INSERT INTO ${edgeClaims} (
+        ${sql.identifier(edgeClaims.graphId.name)},
+        ${sql.identifier(edgeClaims.axis.name)},
+        ${sql.identifier(edgeClaims.key.name)},
+        ${sql.identifier(edgeClaims.edgeId.name)},
+        ${sql.identifier(edgeClaims.updatedAt.name)}
+      )
+      SELECT
+        ${claim.graphId}, ${target.axis}, ${target.key},
+        ${claim.edgeId}, ${timestamp}
+      FROM claimable_axis
+      ON CONFLICT (
+        ${sql.identifier(edgeClaims.graphId.name)},
+        ${sql.identifier(edgeClaims.axis.name)},
+        ${sql.identifier(edgeClaims.key.name)}
+      ) DO UPDATE SET
+        ${quotedColumn(edgeClaims.updatedAt)} = ${qualified(claimsName, edgeClaims.updatedAt)}
+      RETURNING
+        ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id
+    ),
+    inserted AS (
+      INSERT INTO ${edges} (${columns})
+      SELECT
+        ${params.graphId}, ${params.id}, ${params.kind},
+        ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
+        ${propsJson},
+        ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))},
+        ${sqlNull(params.validTo)}, ${timestamp}, ${timestamp}
+      FROM live_endpoints
+      CROSS JOIN claim
+      WHERE claim.holder_edge_id = ${claim.edgeId}
+      RETURNING *
+    )
+    SELECT * FROM inserted
   `;
 }
 
@@ -125,6 +307,36 @@ export function buildTakeOverEdgeClaim(
           AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
           AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
           AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+      )
+    RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
+  `;
+}
+
+/**
+ * Guarded takeover: a stale claim can move only when the whole declared axis,
+ * not merely the recorded holder id, contains no competing live edge. This is
+ * what makes takeover safe for legacy/imported rows that have no sidecar.
+ */
+export function buildTakeOverEdgeClaimGuarded(
+  tables: Tables,
+  params: ClaimEdgeCardinalityParams,
+  timestamp: string,
+): SQL {
+  const { edgeClaims, edges } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const target = edgeCardinalityClaimTarget(params);
+
+  return sql`
+    UPDATE ${edgeClaims}
+    SET ${quotedColumn(edgeClaims.edgeId)} = ${params.edgeId},
+        ${quotedColumn(edgeClaims.updatedAt)} = ${timestamp}
+    WHERE ${qualified(claimsName, edgeClaims.graphId)} = ${params.graphId}
+      AND ${qualified(claimsName, edgeClaims.axis)} = ${target.axis}
+      AND ${qualified(claimsName, edgeClaims.key)} = ${target.key}
+      AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
+      AND NOT EXISTS (
+        SELECT 1 FROM ${edges}
+        WHERE ${competingLiveEdgePredicate(tables, params)}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;

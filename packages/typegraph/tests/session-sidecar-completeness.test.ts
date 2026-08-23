@@ -46,6 +46,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CompilerInvariantError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -63,6 +64,7 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
   type LiveNodeRow,
+  type ManagedCreatePlan,
   type NodeRow,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -74,6 +76,7 @@ import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
 import { edgeCardinalityClaim } from "../src/store/claims/edge-claims";
+import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import {
   runWritePlan,
   type WritePlanContext,
@@ -85,12 +88,30 @@ import {
 } from "../src/store/operations/write-plan";
 import {
   type EdgeInsertWork,
-  type NodeInsertWork,
+  type NodeCreateWork,
   type WriteSession,
 } from "../src/store/operations/write-session";
 import { requireDefined } from "../src/utils/presence";
 
 const GRAPH_ID = "session_sidecar_completeness";
+
+function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
+  const work: EdgeInsertWork = {
+    params: {
+      graphId: GRAPH_ID,
+      kind: "links",
+      id: "edge-fast-fused",
+      fromKind: "Doc",
+      fromId: "fused",
+      toKind: "Doc",
+      toId: "fused-b",
+      props: {},
+    },
+    claim: undefined,
+  };
+  const plan: ManagedCreatePlan = { entity: "edge", params: work.params };
+  return session.createEdgeWithPlan(plan);
+}
 
 const Document = defineNode("Doc", {
   schema: z.object({
@@ -146,6 +167,7 @@ const WATCHED_MEMBERS = [
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
   "upsertFulltext",
@@ -155,6 +177,7 @@ const WATCHED_MEMBERS = [
   "upsertEmbeddingBatch",
   "deleteEmbedding",
   "insertEdge",
+  "executeManagedCreate",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -164,6 +187,9 @@ const WATCHED_MEMBERS = [
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
   "insertNode",
+  "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -247,15 +273,17 @@ function documentProps(id: string): Record<string, unknown> {
   };
 }
 
-function insertWork(id: string): NodeInsertWork {
+function createWork(id: string): NodeCreateWork {
+  const claim = {
+    kind: "Doc",
+    id,
+    props: documentProps(id),
+    constraints: uniqueConstraints,
+  } as const;
   return {
     params: { graphId: GRAPH_ID, kind: "Doc", id, props: documentProps(id) },
-    claim: {
-      kind: "Doc",
-      id,
-      props: documentProps(id),
-      constraints: uniqueConstraints,
-    },
+    claim,
+    claimPlan: planNodeCreateClaims({ graphId: GRAPH_ID, registry }, claim),
     sideEffects: {
       kind: "Doc",
       id,
@@ -263,6 +291,17 @@ function insertWork(id: string): NodeInsertWork {
       props: documentProps(id),
       uniqueConstraints,
     },
+    projections: [],
+  };
+}
+
+function claimFreeCreateWork(id: string): NodeCreateWork {
+  const work = createWork(id);
+  const claim = { ...work.claim, constraints: [] };
+  return {
+    ...work,
+    claim,
+    claimPlan: planNodeCreateClaims({ graphId: GRAPH_ID, registry }, claim),
   };
 }
 
@@ -388,7 +427,7 @@ const EDGE_PLAN = edgeWritePlan(undefined);
 const CASES: Record<keyof WriteSession, Case> = {
   createNode: {
     run: () =>
-      Promise.resolve((session) => session.createNode(insertWork("a"))),
+      Promise.resolve((session) => session.createNode(createWork("a"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNode",
     // The fixture's constraint is `scope: "kind"`, whose own primary key IS the
@@ -400,9 +439,48 @@ const CASES: Record<keyof WriteSession, Case> = {
     postRowFans: ["upsertFulltext", "upsertEmbedding"],
     plan: NODE_PLAN,
   },
+  createNodeIfAbsent: {
+    run: () =>
+      Promise.resolve((session) =>
+        session.createNodeIfAbsent(claimFreeCreateWork("a")),
+      ),
+    sidecars: ["upsertFulltext", "upsertEmbedding"],
+    row: "insertNodeIfAbsent",
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
+    plan: NODE_PLAN,
+  },
+  createNodeIfAbsentWithSchemaFence: {
+    run: () =>
+      Promise.resolve((session) =>
+        session.createNodeIfAbsentWithSchemaFence(
+          claimFreeCreateWork("schema-a"),
+          {
+            expectedVersion: 1,
+            graphId: GRAPH_ID,
+          },
+        ),
+      ),
+    sidecars: ["upsertFulltext", "upsertEmbedding"],
+    row: "insertNodeIfAbsentWithSchemaFence",
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
+    plan: NODE_PLAN,
+  },
+  createNodeWithSchemaFence: {
+    run: () =>
+      Promise.resolve((session) =>
+        session.createNodeWithSchemaFence(createWork("schema-b"), {
+          expectedVersion: 1,
+          graphId: GRAPH_ID,
+        }),
+      ),
+    sidecars: ["upsertFulltext", "upsertEmbedding"],
+    row: "insertNodeWithSchemaFence",
+    postRowFans: ["upsertFulltext", "upsertEmbedding"],
+    plan: NODE_PLAN,
+  },
   createNodeNoReturn: {
     run: () =>
-      Promise.resolve((session) => session.createNodeNoReturn(insertWork("b"))),
+      Promise.resolve((session) => session.createNodeNoReturn(createWork("b"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNodeNoReturn",
     postRowClaims: ["insertUnique"],
@@ -412,7 +490,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodes: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodes([insertWork("c"), insertWork("d")]),
+        session.createNodes([createWork("c"), createWork("d")]),
       ),
     sidecars: [
       "insertUniqueBatch",
@@ -427,7 +505,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodesNoReturn: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodesNoReturn([insertWork("e"), insertWork("f")]),
+        session.createNodesNoReturn([createWork("e"), createWork("f")]),
       ),
     sidecars: [
       "insertUniqueBatch",
@@ -564,9 +642,18 @@ const CASES: Record<keyof WriteSession, Case> = {
       const work = edgeInsertWork("edge-new-l", "l", "l-b");
       return (session) => session.createEdge(work);
     },
-    sidecars: ["claimEdgeCardinality"],
+    sidecars: ["claimEdgeCardinalityGuarded"],
     row: "insertEdge",
-    preRow: ["claimEdgeCardinality"],
+    preRow: ["claimEdgeCardinalityGuarded"],
+    plan: EDGE_PLAN,
+  },
+  createEdgeWithPlan: {
+    run: async (raw) => {
+      await seed(raw, "fused");
+      return createEdgeWithPlan;
+    },
+    sidecars: [],
+    row: "executeManagedCreate",
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {
@@ -575,9 +662,9 @@ const CASES: Record<keyof WriteSession, Case> = {
       const work = edgeInsertWork("edge-new-m", "m", "m-b");
       return (session) => session.createEdgeNoReturn(work);
     },
-    sidecars: ["claimEdgeCardinality"],
+    sidecars: ["claimEdgeCardinalityGuarded"],
     row: "insertEdgeNoReturn",
-    preRow: ["claimEdgeCardinality"],
+    preRow: ["claimEdgeCardinalityGuarded"],
     plan: EDGE_PLAN,
   },
   createEdges: {
@@ -666,6 +753,32 @@ const CASES: Record<keyof WriteSession, Case> = {
 };
 
 describe("write session sidecar completeness", () => {
+  it.each(["ordinary", "schema-fenced"] as const)(
+    "refuses a %s insert-if-absent unit that carries claims",
+    async (mode) => {
+      const { backend: raw } = createLocalSqliteBackend();
+      try {
+        await createStoreWithSchema(graph, raw);
+        const { backend, counts } = withCallCounts(raw);
+
+        await expect(
+          runWritePlan(writeContext(backend), NODE_PLAN, backend, (session) =>
+            mode === "ordinary" ?
+              session.createNodeIfAbsent(createWork(`claimed-${mode}`))
+            : session.createNodeIfAbsentWithSchemaFence(
+                createWork(`claimed-${mode}`),
+                { expectedVersion: 1, graphId: GRAPH_ID },
+              ),
+          ),
+        ).rejects.toBeInstanceOf(CompilerInvariantError);
+        expect(counts.insertNodeIfAbsent).toBe(0);
+        expect(counts.insertNodeIfAbsentWithSchemaFence).toBe(0);
+      } finally {
+        await raw.close();
+      }
+    },
+  );
+
   for (const [method, testCase] of Object.entries(CASES)) {
     it(`${method} applies every sidecar its row work obliges`, async () => {
       const { backend: raw } = createLocalSqliteBackend();

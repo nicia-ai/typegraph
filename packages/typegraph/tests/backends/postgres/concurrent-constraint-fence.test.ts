@@ -63,8 +63,13 @@ import {
   subClassOf,
   UniquenessError,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import type {
+  GraphBackend,
+  ManagedCreatePlan,
+} from "../../../src/backend/types";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -233,6 +238,34 @@ function partitionSettled<T>(
   };
 }
 
+/** Records the transaction-scoped managed plans without changing capability truth. */
+function recordManagedPlans(
+  backend: GraphBackend,
+  plans: ManagedCreatePlan[],
+): GraphBackend {
+  return deriveBackend(backend, {
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run(
+            deriveBackend(target, {
+              executeManagedCreate: async (plan) => {
+                const execute = target.executeManagedCreate;
+                if (execute === undefined) {
+                  throw new Error(
+                    "Expected the PostgreSQL transaction backend to support managed creates",
+                  );
+                }
+                plans.push(plan);
+                return execute(plan);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
 describe.runIf(process.env["POSTGRES_URL"])(
   "constrained writes under genuine contention (PostgreSQL)",
   () => {
@@ -325,8 +358,16 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const storeA = createStore(graph, createPostgresBackend(live.first));
-        const storeB = createStore(graph, createPostgresBackend(live.second));
+        const plansA: ManagedCreatePlan[] = [];
+        const plansB: ManagedCreatePlan[] = [];
+        const storeA = createStore(
+          graph,
+          recordManagedPlans(createPostgresBackend(live.first), plansA),
+        );
+        const storeB = createStore(
+          graph,
+          recordManagedPlans(createPostgresBackend(live.second), plansB),
+        );
 
         // Employee and Contractor are SIBLINGS under Worker. Their uniques rows
         // are keyed by their own kinds, so the sidecar's primary key cannot
@@ -354,6 +395,17 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const employees = await storeA.nodes.Employee.find();
         const contractors = await storeA.nodes.Contractor.find();
         expect(employees.length + contractors.length).toBe(1);
+        expect([...plansA, ...plansB]).toHaveLength(2);
+        expect([...plansA, ...plansB]).toEqual([
+          expect.objectContaining({
+            entity: "node",
+            claims: [expect.anything()],
+          }),
+          expect.objectContaining({
+            entity: "node",
+            claims: [expect.anything()],
+          }),
+        ]);
       },
     );
 

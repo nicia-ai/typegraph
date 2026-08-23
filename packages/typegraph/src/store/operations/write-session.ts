@@ -40,9 +40,14 @@ import { type z } from "zod";
 
 import { type UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
 import {
+  supportsNodeCreatePlan,
+  supportsNodeInsertProjections,
+} from "../../backend/capabilities/node-insert-projections";
+import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
+import { assertManagedCreateResultMatchesPlan } from "../../backend/managed-create";
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
@@ -53,11 +58,16 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
+  type ManagedCreateResult,
+  type ManagedEdgeCreatePlan,
+  type ManagedNodeCreatePlan,
+  type NodeInsertProjection,
   type NodeRow,
   type QueryExecutionBackend,
   type RawQueryExecutionBackend,
   type RawStatementExecutionBackend,
   type SchemaReadBackend,
+  type SchemaWriteFenceParams,
   type SqlCompilationBackend,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -65,6 +75,7 @@ import {
   type VectorOperationBackend,
 } from "../../backend/types";
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
+import { CompilerInvariantError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
@@ -73,6 +84,9 @@ import {
 } from "../claims/edge-claims";
 import {
   type NodeClaimItem,
+  type NodeCreateClaimPlan,
+  planNodeCreateClaims,
+  refuseNodeCreateClaimError,
   withNodeCreateClaims,
   withNodeCreateClaimsBatch,
 } from "../claims/node-claims";
@@ -81,6 +95,7 @@ import {
   nodeInsertDispatch,
   runInsertBatch,
   runInsertBatchReturning,
+  runInsertIfAbsent,
   runInsertNoReturn,
 } from "../insert-dispatch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -143,7 +158,22 @@ export type WriteTarget = Readonly<
     SqlCompilationBackend &
     RawQueryExecutionBackend &
     RawStatementExecutionBackend &
+    Pick<
+      GraphBackend,
+      | "insertNodeIfAbsent"
+      | "insertNodeIfAbsentWithSchemaFence"
+      | "insertNodeWithSchemaFence"
+      | "executeManagedCreate"
+    > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
+    Pick<
+      GraphBackend,
+      | "claimEdgeCardinality"
+      | "claimEdgeCardinalityGuarded"
+      | "claimEdgeCardinalityBatch"
+      | "purgeEdgeClaims"
+      | "hardDeleteUniquesByConcreteKind"
+    > &
     Pick<VectorOperationBackend, "vectorSearch"> &
     Pick<FulltextOperationBackend, "fulltextSearch">
 >;
@@ -160,15 +190,15 @@ export type WriteTarget = Readonly<
  * the ratchet drove the count down as those signatures were re-typed. An `as`
  * cast at each site would have been the same unsoundness with no counter.
  *
- * **Exactly one caller remains, and it is structural, not debt.**
- * `executeEdgeBulkGetOrCreateByEndpoints` runs nested managed writes inside its
+ * **Exactly three callers remain, and they are structural, not debt.** The
+ * planned node and edge create paths inspect the exact row-work receiver before
+ * allowing it to carry a schema fence. The third caller,
+ * `executeEdgeBulkGetOrCreateByEndpoints`, runs nested managed writes inside its
  * own frame: each nested leg re-enters the executor against THIS transaction
- * target, and re-entry needs the full union by construction — it mints a
- * session, which writes. Inlining those legs' row work would drop the nested
- * frames' schema fence and revision-clock advance, i.e. change behavior. The
- * ratchet therefore records ONE as a reasoned floor, the same way it records
- * two permanently allowlisted managed-write entry points, rather than pretending
- * a zero it would have to buy with a statement change.
+ * target, and re-entry needs the full union by construction because it mints a
+ * session that writes. The ratchet records these three reasoned escapes rather
+ * than pretending a zero that would weaken receiver validation or change the
+ * nested write's fence and revision-clock behavior.
  */
 export function unfencedTarget(
   target: WriteTarget,
@@ -214,11 +244,42 @@ type NodeInsertSideEffects = Readonly<{
  * owe" and "when is each due", and a caller that could hand over a prepared
  * entry list could hand over a shorter one.
  */
-export type NodeInsertWork = Readonly<{
+export type NodeCreateWork = Readonly<{
   params: InsertNodeParams;
+  idGenerated?: boolean | undefined;
+  allowNonTransactionalClaims?: boolean;
   claim: NodeClaimItem;
+  /** The preparation-time claim decision, shared by fused and fallback paths. */
+  claimPlan: NodeCreateClaimPlan;
   sideEffects: NodeInsertSideEffects;
+  projections: readonly NodeInsertProjection[];
 }>;
+
+/** Refuses an insert-if-absent unit that would silently drop a node claim. */
+function assertClaimFreeInsertIfAbsentWork(
+  ctx: Pick<WriteSessionContext, "graphId" | "registry">,
+  work: NodeCreateWork,
+): void {
+  const derivedPlan = planNodeCreateClaims(ctx, work.claim);
+  if (
+    derivedPlan.claims.length === 0 &&
+    work.claimPlan.entries.length === 0 &&
+    work.claimPlan.claims.length === 0 &&
+    work.claimPlan.verdicts.length === 0
+  ) {
+    return;
+  }
+  throw new CompilerInvariantError(
+    "A node insert-if-absent unit cannot carry claims.",
+    {
+      graphId: work.params.graphId,
+      kind: work.params.kind,
+      id: work.params.id,
+      derivedClaimCount: derivedPlan.claims.length,
+      plannedClaimCount: work.claimPlan.claims.length,
+    },
+  );
+}
 
 /**
  * One node update. The validity lower-bound predicate is NOT here: it is the
@@ -282,10 +343,12 @@ type NodeResurrectWork = Readonly<{
  */
 export type EdgeInsertWork = Readonly<{
   params: InsertEdgeParams;
-  claim?: ClaimEdgeCardinalityParams;
+  claim: ClaimEdgeCardinalityParams | undefined;
 }>;
 
-/** The claims a batch of edge inserts owes, in the order the batch writer sorts. */
+/**
+ * The claims a batch of edge inserts owes, in the order the batch writer sorts.
+ */
 function edgeBatchClaims(
   work: readonly EdgeInsertWork[],
 ): readonly ClaimEdgeCardinalityParams[] {
@@ -294,10 +357,20 @@ function edgeBatchClaims(
 
 export type NodeWriteSession = Readonly<{
   // ---- B0: delegates to node-write-pipeline.ts + insert-dispatch.ts
-  createNode: (work: NodeInsertWork) => Promise<NodeRow>;
-  createNodeNoReturn: (work: NodeInsertWork) => Promise<void>;
-  createNodes: (work: readonly NodeInsertWork[]) => Promise<readonly NodeRow[]>;
-  createNodesNoReturn: (work: readonly NodeInsertWork[]) => Promise<void>;
+  createNode: (work: NodeCreateWork) => Promise<NodeRow>;
+  /** A conflict-safe insert for a no-claim create; undefined means occupied. */
+  createNodeIfAbsent: (work: NodeCreateWork) => Promise<NodeRow | undefined>;
+  createNodeIfAbsentWithSchemaFence: (
+    work: NodeCreateWork,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
+  createNodeWithSchemaFence: (
+    work: NodeCreateWork,
+    schemaFence: SchemaWriteFenceParams,
+  ) => Promise<NodeRow | undefined>;
+  createNodeNoReturn: (work: NodeCreateWork) => Promise<void>;
+  createNodes: (work: readonly NodeCreateWork[]) => Promise<readonly NodeRow[]>;
+  createNodesNoReturn: (work: readonly NodeCreateWork[]) => Promise<void>;
   reviseNode: (
     work: NodeUpdateWork,
     fences: NodeUpdateFences,
@@ -319,6 +392,14 @@ export type NodeWriteSession = Readonly<{
 export type EdgeWriteSession = Readonly<{
   // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
+  /**
+   * Executes one prepared endpoint-checked create through the complete plan
+   * when the target exposes it. An absent executor is an explicit signal for
+   * the caller to run the portable diagnostic/fallback path.
+   */
+  createEdgeWithPlan: (
+    plan: ManagedEdgeCreatePlan,
+  ) => Promise<ManagedCreateResult | undefined>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
   createEdgesNoReturn: (work: readonly EdgeInsertWork[]) => Promise<void>;
@@ -380,13 +461,150 @@ export function createWriteSession(
     // seam owns the two groups and the compensation between them; this surface
     // owns only "the row write it gates is THIS one".
     createNode: async (work) => {
-      const row = await withNodeCreateClaims(
+      const claimPlan = work.claimPlan;
+      const insertPlanFused = supportsNodeCreatePlan(target, {
+        params: work.params,
+        idGenerated: work.idGenerated ?? false,
+        mode: { kind: "ordinary" },
+        claims: claimPlan.claims,
+        projections: work.projections,
+        allowNonTransactionalClaims: work.allowNonTransactionalClaims,
+      });
+      const insertPlannedNode = async (): Promise<NodeRow> => {
+        const insert = target.executeManagedCreate;
+        if (!insertPlanFused || insert === undefined) {
+          return withNodeCreateClaims(writeContext, work.claim, target, () =>
+            dispatch.one(work.params),
+          );
+        }
+        try {
+          const plan: ManagedNodeCreatePlan = {
+            entity: "node",
+            params: work.params,
+            idGenerated: work.idGenerated ?? false,
+            mode: { kind: "ordinary" },
+            claims: claimPlan.claims,
+            projections: work.projections,
+          };
+          const result = await insert(plan);
+          assertManagedCreateResultMatchesPlan(plan, result);
+          if (result.outcome !== "created" || result.entity !== "node") {
+            throw new CompilerInvariantError(
+              "An ordinary planned node insert did not return a node row.",
+              {
+                graphId: work.params.graphId,
+                kind: work.params.kind,
+                id: work.params.id,
+                ...(result.outcome === "unsupported" ?
+                  { dimensions: result.dimensions }
+                : {}),
+              },
+            );
+          }
+          return result.row;
+        } catch (error) {
+          refuseNodeCreateClaimError(error, claimPlan);
+        }
+      };
+      const row = await insertPlannedNode();
+      await applyNodeInsertSyncFans(
         writeContext,
-        work.claim,
+        {
+          ...work.sideEffects,
+          ...(insertPlanFused && work.projections.length > 0 ?
+            { projectionsFused: true }
+          : {}),
+        },
         target,
-        () => dispatch.one(work.params),
       );
+      return row;
+    },
+
+    createNodeIfAbsent: async (work) => {
+      assertClaimFreeInsertIfAbsentWork(ctx, work);
+      const row = await runInsertIfAbsent(dispatch, work.params);
+      if (row === undefined) return;
       await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      return row;
+    },
+
+    createNodeIfAbsentWithSchemaFence: async (work, schemaFence) => {
+      assertClaimFreeInsertIfAbsentWork(ctx, work);
+      const insert = target.insertNodeIfAbsentWithSchemaFence;
+      if (insert === undefined) return;
+      const row = await insert(work.params, schemaFence);
+      if (row === undefined) return;
+      await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
+      return row;
+    },
+
+    createNodeWithSchemaFence: async (work, schemaFence) => {
+      const projectionsFused = supportsNodeInsertProjections(
+        target,
+        work.projections,
+      );
+      if (work.projections.length > 0 && !projectionsFused) {
+        throw new CompilerInvariantError(
+          "Schema-fenced node work carrying projections requires the fused backend member.",
+          {
+            graphId: work.params.graphId,
+            kind: work.params.kind,
+            id: work.params.id,
+          },
+        );
+      }
+      const row = await (async () => {
+        if (projectionsFused) {
+          const insert = target.executeManagedCreate;
+          if (insert === undefined) return;
+          const plan: ManagedNodeCreatePlan = {
+            entity: "node",
+            params: work.params,
+            idGenerated: work.idGenerated ?? false,
+            mode: { kind: "schema-fenced", schemaFence },
+            claims: [],
+            projections: work.projections,
+          };
+          return withNodeCreateClaims(
+            writeContext,
+            work.claim,
+            target,
+            async () => {
+              const result = await insert(plan);
+              assertManagedCreateResultMatchesPlan(plan, result);
+              if (result.outcome === "rejected" && result.entity === "node") {
+                return;
+              }
+              if (result.outcome !== "created" || result.entity !== "node") {
+                throw new CompilerInvariantError(
+                  "A schema-fenced planned node insert did not return a node row.",
+                  {
+                    graphId: work.params.graphId,
+                    kind: work.params.kind,
+                    id: work.params.id,
+                    ...(result.outcome === "unsupported" ?
+                      { dimensions: result.dimensions }
+                    : {}),
+                  },
+                );
+              }
+              return result.row;
+            },
+          );
+        }
+        const insert = target.insertNodeWithSchemaFence;
+        if (insert === undefined) return;
+        return insert(work.params, schemaFence);
+      })();
+      if (row === undefined) return;
+      await applyNodeInsertSyncFans(
+        writeContext,
+        {
+          ...work.sideEffects,
+          ...(projectionsFused ? { projectionsFused: true } : {}),
+        },
+        target,
+      );
       return row;
     },
 
@@ -473,6 +691,37 @@ export function createWriteSession(
         await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
       }
       return edgeDispatch.one(work.params);
+    },
+
+    createEdgeWithPlan: async (plan) => {
+      const execute = target.executeManagedCreate;
+      if (execute !== undefined) {
+        const result = await execute(plan);
+        assertManagedCreateResultMatchesPlan(plan, result);
+        if (
+          result.outcome === "unsupported" &&
+          result.entity === "edge" &&
+          result.dimensions.length === 1 &&
+          result.dimensions[0] === "cardinalityClaim" &&
+          plan.schemaFence === undefined &&
+          plan.cardinalityClaim !== undefined
+        ) {
+          await claimEdgeCardinality(
+            target,
+            ctx.claimsVerdict(),
+            plan.cardinalityClaim,
+          );
+          const retryPlan: ManagedEdgeCreatePlan = {
+            entity: "edge",
+            params: plan.params,
+          };
+          const retryResult = await execute(retryPlan);
+          assertManagedCreateResultMatchesPlan(retryPlan, retryResult);
+          return retryResult;
+        }
+        return result;
+      }
+      return;
     },
 
     createEdgeNoReturn: async (work) => {

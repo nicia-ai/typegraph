@@ -81,13 +81,16 @@ import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
+import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import {
   type ClaimEdgeCardinalityParams,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
+  type ManagedEdgeCreatePlan,
   rowPropsToObject,
+  runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
@@ -120,7 +123,10 @@ import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import { edgeCardinalityClaim } from "../claims/edge-claims";
+import {
+  edgeCardinalityClaim,
+  edgeCardinalityClaimMode,
+} from "../claims/edge-claims";
 import {
   shouldCoalesceUpsert,
   type UpsertDirtyCheck,
@@ -146,6 +152,7 @@ import {
   validityEndAfterMutation,
 } from "../validity-end";
 import { withAlreadyExistsTranslation } from "./already-exists";
+import { isAutocommitSingleStatementWrite } from "./autocommit-single-statement";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
 import {
   assertEdgeIdentityMatches,
@@ -157,7 +164,12 @@ import {
   withUnmatchedEdgeUpdateRefusal,
 } from "./edge-write-fences";
 import { type EdgeUpdateWork } from "./edge-write-pipeline";
-import { runHookedWritePlan, runWritePlan } from "./write-executor";
+import {
+  AutocommitWriteRequiresTransaction,
+  runAutocommitSingleStatementWritePlan,
+  runHookedWritePlan,
+  runWritePlan,
+} from "./write-executor";
 import {
   assertsStoredWindowState,
   type EdgeUpdateFences,
@@ -169,6 +181,12 @@ import {
   unfencedTarget,
   type WriteTarget,
 } from "./write-session";
+import {
+  diagnoseFusedSchemaFenceNoRow,
+  hasLeasedSchemaFence,
+  lockSchemaVersionForStoreWrite,
+  memoizeLeasedSchemaFence,
+} from "./write-transaction";
 
 // ============================================================
 // Types
@@ -252,7 +270,7 @@ function edgeInsertWork(prepared: EdgeCreatePrepared): EdgeInsertWork {
   );
   return {
     params: prepared.insertParams,
-    ...(claim === undefined ? {} : { claim }),
+    claim,
   };
 }
 
@@ -299,6 +317,10 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   input: CreateEdgeInput,
   id: string,
   backend: WriteTarget,
+  options?: Readonly<{
+    validateEndpoints?: boolean;
+    validateCardinality?: boolean;
+  }>,
 ): Promise<EdgeCreatePrepared> {
   const kind = input.kind;
   const fromKind = input.fromKind;
@@ -318,26 +340,16 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   );
   if (endpointError) throw endpointError;
 
-  // Validate source node exists
-  const fromNode = await backend.getNode(ctx.graphId, fromKind, input.fromId);
-  if (!fromNode || fromNode.deleted_at) {
-    throw new EndpointNotFoundError({
-      edgeKind: kind,
-      endpoint: "from",
-      nodeKind: fromKind,
-      nodeId: input.fromId,
-    });
-  }
-
-  // Validate target node exists
-  const toNode = await backend.getNode(ctx.graphId, toKind, input.toId);
-  if (!toNode || toNode.deleted_at) {
-    throw new EndpointNotFoundError({
-      edgeKind: kind,
-      endpoint: "to",
-      nodeKind: toKind,
-      nodeId: input.toId,
-    });
+  if (options?.validateEndpoints ?? true) {
+    await assertLiveEdgeEndpoints(
+      ctx,
+      kind,
+      fromKind,
+      input.fromId,
+      toKind,
+      input.toId,
+      backend,
+    );
   }
 
   // Validate props with full context
@@ -367,16 +379,18 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     registry: ctx.registry,
     backend,
   };
-  await checkCardinalityConstraint(
-    constraintContext,
-    kind,
-    cardinality,
-    fromKind,
-    input.fromId,
-    toKind,
-    input.toId,
-    validTo,
-  );
+  if (options?.validateCardinality ?? true) {
+    await checkCardinalityConstraint(
+      constraintContext,
+      kind,
+      cardinality,
+      fromKind,
+      input.fromId,
+      toKind,
+      input.toId,
+      validTo,
+    );
+  }
 
   return {
     cardinality,
@@ -393,6 +407,41 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
       validTo,
     ),
   };
+}
+
+/**
+ * Gives endpoint refusals their public ordering: source wins when both inputs
+ * are unavailable. The fused INSERT uses this only after its predicate
+ * produced no row, so it never spends the reads on a successful create.
+ */
+async function assertLiveEdgeEndpoints<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  edgeKindName: string,
+  fromKind: string,
+  fromId: string,
+  toKind: string,
+  toId: string,
+  backend: WriteTarget,
+): Promise<void> {
+  const fromNode = await backend.getNode(ctx.graphId, fromKind, fromId);
+  if (!fromNode || fromNode.deleted_at) {
+    throw new EndpointNotFoundError({
+      edgeKind: edgeKindName,
+      endpoint: "from",
+      nodeKind: fromKind,
+      nodeId: fromId,
+    });
+  }
+
+  const toNode = await backend.getNode(ctx.graphId, toKind, toId);
+  if (!toNode || toNode.deleted_at) {
+    throw new EndpointNotFoundError({
+      edgeKind: edgeKindName,
+      endpoint: "to",
+      nodeKind: toKind,
+      nodeId: toId,
+    });
+  }
 }
 
 // ============================================================
@@ -452,12 +501,26 @@ type EdgeConvergenceGuard = Readonly<{
  * this.
  */
 class EdgeConvergenceRaced extends Error {
-  constructor(kind: string) {
+  readonly row: BackendEdgeRow;
+
+  constructor(kind: string, row: BackendEdgeRow) {
     super(
       `A competing writer claimed the ${kind} match key; re-resolving it. ` +
         `This is internal to getOrCreateByEndpoints and is never returned to a caller.`,
     );
     this.name = "EdgeConvergenceRaced";
+    this.row = row;
+  }
+}
+
+/** A dispatcher-selected edge no longer carries the requested match key. */
+class EdgeMatchKeyMoved extends Error {
+  constructor(kind: string, id: string) {
+    super(
+      `The ${kind} edge "${id}" no longer has the requested match key; ` +
+        "re-resolving it. This is internal and is never returned to a caller.",
+    );
+    this.name = "EdgeMatchKeyMoved";
   }
 }
 
@@ -478,71 +541,180 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   const opContext = ctx.createOperationContext("create", "edge", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
   const convergeOn = options?.convergeOn;
+  const schemaFenceInFirstWrite =
+    ctx.schemaVersion !== undefined &&
+    isSchemaFencedInsertEligible(backend) &&
+    backend.capabilities.transactions &&
+    !ctx.historyEnabled &&
+    !ctx.revisionTrackingEnabled &&
+    convergeOn === undefined &&
+    edgeCardinality(ctx, kind) === "many" &&
+    backend.executeManagedCreate !== undefined;
+  const autocommitBackend = "transaction" in backend ? backend : undefined;
+  const autocommitSingleStatement =
+    autocommitBackend !== undefined &&
+    hasOwnKey(ctx.graph.edges, kind) &&
+    isAutocommitSingleStatementWrite({
+      kind: "edge",
+      candidate: {
+        backend: autocommitBackend,
+        schemaVersion: ctx.schemaVersion,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+        kindRegistered: true,
+        convergesOnMatchKey: convergeOn !== undefined,
+        cardinality: edgeCardinality(ctx, kind),
+      },
+    });
+  const plan = edgeWritePlan(
+    convergeOn === undefined ?
+      edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
+    : "edgeMatchKeyConvergence",
+  );
 
-  return runHookedWritePlan(
-    ctx,
-    opContext,
-    // A create that runs a cardinality probe, or one converging on a match
-    // key, decides something the write must not have invalidated. A plain
-    // `many` create decides nothing and takes no lock.
-    edgeWritePlan(
-      convergeOn === undefined ?
-        edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
-      : "edgeMatchKeyConvergence",
-    ),
-    backend,
-    async (session, target): Promise<Edge | undefined> => {
-      if (convergeOn !== undefined) {
-        const candidateRows = await target.findEdgesByKind({
-          graphId: ctx.graphId,
-          kind,
-          fromKind: input.fromKind,
-          fromId: input.fromId,
-          toKind: input.toKind,
-          toId: input.toId,
-          excludeDeleted: false,
-          temporalMode: "includeTombstones",
-        });
-        const { liveRow, deletedRow } = findMatchingEdge(
-          candidateRows,
-          convergeOn.matchOn,
-          convergeOn.props,
-        );
-        if (liveRow !== undefined || deletedRow !== undefined) {
-          throw new EdgeConvergenceRaced(kind);
+  const rowWork = async (
+    session: EdgeWriteSession,
+    target: WriteTarget,
+  ): Promise<Edge | undefined> => {
+    // See node create's matching receiver check: a custom transaction
+    // wrapper may replace the marked outer backend with an unmarked target.
+    // Fall back to the ordinary fence before any row work in that case.
+    const targetBackend = unfencedTarget(target);
+    const fuseSchemaFenceInFirstWrite =
+      schemaFenceInFirstWrite &&
+      isSchemaFencedInsertEligible(targetBackend) &&
+      !hasLeasedSchemaFence(ctx, targetBackend);
+    if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
+      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+    }
+    if (convergeOn !== undefined) {
+      const candidateRows = await target.findEdgesByKind({
+        graphId: ctx.graphId,
+        kind,
+        fromKind: input.fromKind,
+        fromId: input.fromId,
+        toKind: input.toKind,
+        toId: input.toId,
+        excludeDeleted: false,
+        temporalMode: "includeTombstones",
+      });
+      const { liveRow, deletedRow } = findMatchingEdge(
+        candidateRows,
+        convergeOn.matchOn,
+        convergeOn.props,
+      );
+      const matchedRow = liveRow ?? deletedRow;
+      if (matchedRow !== undefined) {
+        throw new EdgeConvergenceRaced(kind, matchedRow);
+      }
+    }
+
+    const declaredCardinality = edgeCardinality(ctx, kind);
+    const usesGuardedCardinalityClaim =
+      declaredCardinality !== "many" &&
+      edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind === "guarded";
+    const usesFusedCardinalityInsert =
+      usesGuardedCardinalityClaim && target.executeManagedCreate !== undefined;
+    // The match-key lookup above was derived from this transaction target
+    // while the graph convergence fence is held. Once it reports no match,
+    // endpoint existence is the only remaining pre-insert read, so let the
+    // existing endpoint-predicate INSERT remove those two RTTs even though
+    // this create leg carries a convergence guard.
+    const canFuseEndpointCheck =
+      (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
+      target.executeManagedCreate !== undefined;
+    let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+      validateEndpoints: !canFuseEndpointCheck,
+      validateCardinality: !usesGuardedCardinalityClaim,
+    });
+
+    // A plain, generated-id `many` edge owes no cardinality claim and no
+    // sidecar. Its only pre-insert database reads were endpoint existence
+    // probes, so first-party backends can make their live-node predicates
+    // part of the INSERT ... SELECT itself. Do not infer an endpoint error
+    // from an empty RETURNING result: retry the ordinary ordered validation
+    // below, which preserves source-before-target typed refusals and handles
+    // a concurrent endpoint revival before we report anything.
+    if (canFuseEndpointCheck) {
+      const fusedWork = edgeInsertWork(prepared);
+      const fusedPlan: ManagedEdgeCreatePlan = {
+        entity: "edge",
+        params: fusedWork.params,
+        ...(fuseSchemaFenceInFirstWrite ?
+          {
+            schemaFence: {
+              graphId: ctx.graphId,
+              expectedVersion: requireDefined(ctx.schemaVersion),
+            },
+          }
+        : {}),
+        ...(usesFusedCardinalityInsert && fusedWork.claim !== undefined ?
+          { cardinalityClaim: fusedWork.claim }
+        : {}),
+      };
+      const fusedResult = await withAlreadyExistsTranslation("edge", () =>
+        session.createEdgeWithPlan(fusedPlan),
+      );
+      if (fusedResult?.outcome === "created" && fusedResult.entity === "edge") {
+        if (fuseSchemaFenceInFirstWrite) {
+          memoizeLeasedSchemaFence(ctx, targetBackend);
         }
+        return rowToEdge(fusedResult.row);
       }
 
-      const prepared = await validateAndPrepareEdgeCreate(
-        ctx,
-        input,
-        id,
-        target,
-      );
+      if (fuseSchemaFenceInFirstWrite) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+        if (autocommitSingleStatement && "transaction" in targetBackend) {
+          throw new AutocommitWriteRequiresTransaction();
+        }
+        // Endpoint predicates can reject the INSERT before PostgreSQL
+        // evaluates the nested locking subquery. Re-establish the portable
+        // fence before the ordered fallback probes or a later leased write.
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
 
-      // An edge create has no existence probe at all — its id is either
-      // caller-supplied or freshly generated — so the engine's refusal is the ONLY
-      // report that the id is taken. Translated here, that report is the same
-      // already-exists error a node create raises. The translation spans the fused
-      // unit — the claim and the row — which is inert for the claim half: a
-      // contended claim raises a `CardinalityError`, never a duplicate-key insert
-      // report.
-      //
-      // The claim is DECIDED here (a pure function of the cardinality this
-      // preparation resolved) and ISSUED by the session, before the row it gates:
-      // the probe above read a population no key fences, so the claim row is what
-      // stops a concurrent writer that read the same population from also
-      // committing, and a refusal there has written no edge row.
-      const work = edgeInsertWork(prepared);
-      const row = await withAlreadyExistsTranslation("edge", async () => {
-        if (shouldReturnRow) return session.createEdge(work);
-        await session.createEdgeNoReturn(work);
-        return;
+      prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+        validateCardinality:
+          !usesGuardedCardinalityClaim || usesFusedCardinalityInsert,
       });
+    }
 
-      return row === undefined ? undefined : rowToEdge(row);
-    },
-  );
+    // An edge create has no existence probe at all — its id is either
+    // caller-supplied or freshly generated — so the engine's refusal is the ONLY
+    // report that the id is taken. Translated here, that report is the same
+    // already-exists error a node create raises. The translation spans the fused
+    // unit — the claim and the row — which is inert for the claim half: a
+    // contended claim raises a `CardinalityError`, never a duplicate-key insert
+    // report.
+    //
+    // The claim is DECIDED here (a pure function of the cardinality this
+    // preparation resolved) and ISSUED by the session, before the row it gates:
+    // the probe above read a population no key fences, so the claim row is what
+    // stops a concurrent writer that read the same population from also
+    // committing, and a refusal there has written no edge row.
+    const work = edgeInsertWork(prepared);
+    const row = await withAlreadyExistsTranslation("edge", async () => {
+      if (shouldReturnRow) return session.createEdge(work);
+      await session.createEdgeNoReturn(work);
+      return;
+    });
+
+    return row === undefined ? undefined : rowToEdge(row);
+  };
+
+  if (autocommitSingleStatement) {
+    return runAutocommitSingleStatementWritePlan(
+      ctx,
+      opContext,
+      plan,
+      autocommitBackend,
+      rowWork,
+      { schemaFenceInFirstWrite },
+    );
+  }
+  return runHookedWritePlan(ctx, opContext, plan, backend, rowWork, {
+    schemaFenceInFirstWrite,
+  });
 }
 
 /**
@@ -841,7 +1013,11 @@ async function performEdgeUpdate<G extends GraphDef>(
   input: UpsertUpdateEdgeInput,
   session: EdgeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
+  }>,
 ): Promise<Edge> {
   const id = input.id;
 
@@ -861,6 +1037,9 @@ async function performEdgeUpdate<G extends GraphDef>(
     edgeIdentityFromRow(existing),
     "update",
   );
+  if (options?.matchOn !== undefined && options.matchProps !== undefined) {
+    assertEdgeMatchKey(existing, options.matchOn, options.matchProps);
+  }
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
@@ -1050,7 +1229,11 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
   input: UpsertUpdateEdgeInput,
   session: EdgeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
+  }>,
 ): Promise<Edge> {
   for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
     try {
@@ -1151,6 +1334,8 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     clearDeleted?: boolean;
     coalesceUnchanged?: boolean;
     coalesceCandidate?: BackendEdgeRow;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
   }>,
 ): Promise<EdgeUpsertUpdateOutcome> {
   if (input.clearValidTo === true) {
@@ -1173,8 +1358,10 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     async (session, target) => {
       if (options?.coalesceUnchanged === true && !options.clearDeleted) {
         const existing =
-          options.coalesceCandidate ??
-          (await target.getEdge(ctx.graphId, input.id));
+          options.matchOn !== undefined && options.matchProps !== undefined ?
+            await target.getEdge(ctx.graphId, input.id)
+          : (options.coalesceCandidate ??
+            (await target.getEdge(ctx.graphId, input.id)));
         if (existing !== undefined && existing.deleted_at === undefined) {
           assertEdgeIdentityMatches(
             input.id,
@@ -1182,6 +1369,12 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
             edgeIdentityFromRow(existing),
             "update",
           );
+          if (
+            options.matchOn !== undefined &&
+            options.matchProps !== undefined
+          ) {
+            assertEdgeMatchKey(existing, options.matchOn, options.matchProps);
+          }
           const runDirtyCheck = () =>
             edgeUpsertDirtyCheck(
               ctx,
@@ -1219,7 +1412,11 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
   backend: GraphBackend | TransactionBackend,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: Readonly<{
+    clearDeleted?: boolean;
+    matchOn?: readonly string[];
+    matchProps?: Record<string, unknown>;
+  }>,
 ): Promise<Edge> {
   const outcome = await executeEdgeUpsertUpdateWithOutcome(
     ctx,
@@ -1507,6 +1704,18 @@ function findMatchingEdge(
   return { liveRow, deletedRow };
 }
 
+/** Rechecks a dispatcher-selected row against the authoritative match key. */
+function assertEdgeMatchKey(
+  row: BackendEdgeRow,
+  matchOn: readonly string[],
+  matchProps: Record<string, unknown>,
+): void {
+  const match = findMatchingEdge([row], matchOn, matchProps);
+  if (match.liveRow === undefined && match.deletedRow === undefined) {
+    throw new EdgeMatchKeyMoved(row.kind, row.id);
+  }
+}
+
 /**
  * Executes a single findByEndpoints operation.
  *
@@ -1649,13 +1858,10 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     );
   }
 
-  // Probe outside the transaction: with ifExists "return", the common found
-  // path performs no write, so it must not pay for a write transaction
-  // (BEGIN IMMEDIATE on SQLite, the per-graph advisory lock under history).
-  // The transactional body re-queries, so a concurrent create between this
-  // probe and the write lock is still handled correctly.
-  if (ifExists === "return") {
-    const probeRows = await backend.findEdgesByKind({
+  const findCandidates = async (
+    target: GraphBackend | TransactionBackend,
+  ): Promise<readonly BackendEdgeRow[]> =>
+    target.findEdgesByKind({
       graphId: ctx.graphId,
       kind,
       fromKind,
@@ -1665,14 +1871,55 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       excludeDeleted: false,
       temporalMode: "includeTombstones",
     });
-    const { liveRow: probedLiveRow } = findMatchingEdge(
-      probeRows,
-      matchOn,
-      validatedProps,
+
+  async function findCandidatesInTransaction(): Promise<
+    readonly BackendEdgeRow[]
+  > {
+    return runOptionallyInTransaction(
+      backend,
+      (target) => findCandidates(target),
+      { transaction: { accessMode: "read_only" } },
     );
+  }
+
+  // The return-mode probe is also the dispatcher read for a create. Retain its
+  // result, including whether it came from a transaction, so a stale positive
+  // disproved by the authoritative read does not repeat either lookup before
+  // the create transaction performs its own convergence check.
+  let initialCandidateRead:
+    | Readonly<{
+        rows: readonly BackendEdgeRow[];
+        authoritative: boolean;
+      }>
+    | undefined;
+
+  // A root read is only a dispatcher hint. Confirm a positive result through
+  // the transaction target before returning it; a cache may replay a stale
+  // positive just as it may replay a stale empty result.
+  if (ifExists === "return") {
+    const probeRows = await findCandidates(backend);
+    const { liveRow: probedLiveRow, deletedRow: probedDeletedRow } =
+      findMatchingEdge(probeRows, matchOn, validatedProps);
     if (probedLiveRow !== undefined) {
-      assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
-      return { edge: rowToEdge(probedLiveRow), action: "found" };
+      const currentRows = await findCandidatesInTransaction();
+      const { liveRow: currentLiveRow } = findMatchingEdge(
+        currentRows,
+        matchOn,
+        validatedProps,
+      );
+      if (currentLiveRow !== undefined) {
+        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
+        return { edge: rowToEdge(currentLiveRow), action: "found" };
+      }
+      initialCandidateRead = {
+        rows: currentRows,
+        authoritative: true,
+      };
+    } else if (probedDeletedRow === undefined) {
+      initialCandidateRead = {
+        rows: probeRows,
+        authoritative: false,
+      };
     }
   }
 
@@ -1691,26 +1938,109 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // in-transaction re-read and its endpoint-predicated UPDATE are what make
   // that write land on the row this lookup meant, not a re-derivation of the
   // dispatcher's choice.
-  async function attempt(): Promise<
-    Readonly<{ edge: Edge; action: GetOrCreateAction }>
-  > {
-    // Query all edges of this kind between (from, to) including tombstones
-    const candidateRows = await backend.findEdgesByKind({
-      graphId: ctx.graphId,
-      kind,
-      fromKind,
-      fromId,
-      toKind,
-      toId,
-      excludeDeleted: false,
-      temporalMode: "includeTombstones",
-    });
+  async function resolveMatchedRow(
+    matchedRow: BackendEdgeRow,
+    isDeleted: boolean,
+  ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
+    if (!isDeleted) {
+      if (ifExists === "return") {
+        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
+        return { edge: rowToEdge(matchedRow), action: "found" };
+      }
+      const outcome = await executeEdgeUpsertUpdateWithOutcome(
+        ctx,
+        {
+          id: matchedRow.id,
+          identity: { kind, fromKind, fromId, toKind, toId },
+          props: validatedProps,
+          ...(validFrom !== undefined && { validFrom }),
+          ...(validTo !== undefined && { validTo }),
+          ...(options?.clearValidTo === true && {
+            clearValidTo: true as const,
+          }),
+          ...(options?.onImmutableLowerBound !== undefined && {
+            onImmutableLowerBound: options.onImmutableLowerBound,
+          }),
+        },
+        backend,
+        {
+          coalesceUnchanged:
+            ctx.coalesceUnchangedUpsertsEnabled &&
+            shouldCoalesceUpsert(matchedRow, options, () =>
+              edgeUpsertDirtyCheck(
+                ctx,
+                matchedRow.kind,
+                matchedRow.id,
+                rowPropsToObject(matchedRow.props),
+                validatedProps,
+              ),
+            ),
+          matchOn,
+          matchProps: validatedProps,
+        },
+      );
+      return {
+        edge: outcome.edge,
+        action: outcome.wrote ? "updated" : "found",
+      };
+    }
 
-    const { liveRow, deletedRow } = findMatchingEdge(
-      candidateRows,
+    const edge = await executeEdgeUpsertUpdate(
+      ctx,
+      {
+        id: matchedRow.id,
+        identity: { kind, fromKind, toKind, fromId, toId },
+        props: validatedProps,
+        ...(validFrom !== undefined && { validFrom }),
+        ...(validTo !== undefined && { validTo }),
+        ...(options?.clearValidTo === true && { clearValidTo: true as const }),
+        ...(options?.onImmutableLowerBound !== undefined && {
+          onImmutableLowerBound: options.onImmutableLowerBound,
+        }),
+      },
+      backend,
+      { clearDeleted: true, matchOn, matchProps: validatedProps },
+    );
+    return { edge, action: "resurrected" };
+  }
+
+  async function attempt(
+    forceTransactionRead: boolean,
+  ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
+    const retainedRead = initialCandidateRead;
+    initialCandidateRead = undefined;
+    const candidateRead =
+      retainedRead ??
+      (forceTransactionRead ?
+        {
+          rows: await findCandidatesInTransaction(),
+          authoritative: true,
+        }
+      : {
+          rows: await findCandidates(backend),
+          authoritative: false,
+        });
+
+    let { liveRow, deletedRow } = findMatchingEdge(
+      candidateRead.rows,
       matchOn,
       validatedProps,
     );
+
+    // A root match is a dispatcher hint only. Use the transaction-scoped row
+    // before selecting an update/resurrection id, since cached root reads may
+    // be stale in either direction.
+    if (
+      !candidateRead.authoritative &&
+      (liveRow !== undefined || deletedRow !== undefined)
+    ) {
+      const currentRows = await findCandidatesInTransaction();
+      ({ liveRow, deletedRow } = findMatchingEdge(
+        currentRows,
+        matchOn,
+        validatedProps,
+      ));
+    }
 
     // No match → create new edge
     if (liveRow === undefined && deletedRow === undefined) {
@@ -1737,121 +2067,61 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       return { edge: created, action: "created" };
     }
 
-    // Live match found
-    if (liveRow !== undefined) {
-      if (ifExists === "return") {
-        assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
-        return { edge: rowToEdge(liveRow), action: "found" };
-      }
-      // ifExists === "update". `validFrom` is forwarded even though an in-place
-      // update stores no lower bound: the shared write guard is what judges it,
-      // refusing a bound that differs from the one the live row holds instead of
-      // dropping it here where the caller would never hear about it.
-      const outcome = await executeEdgeUpsertUpdateWithOutcome(
-        ctx,
-        {
-          id: liveRow.id,
-          identity: { kind, fromKind, fromId, toKind, toId },
-          props: validatedProps,
-          ...(validFrom !== undefined && { validFrom }),
-          ...(validTo !== undefined && { validTo }),
-          ...(options?.clearValidTo === true && {
-            clearValidTo: true as const,
-          }),
-          ...(options?.onImmutableLowerBound !== undefined && {
-            onImmutableLowerBound: options.onImmutableLowerBound,
-          }),
-        },
-        backend,
-        {
-          coalesceUnchanged:
-            ctx.coalesceUnchangedUpsertsEnabled &&
-            shouldCoalesceUpsert(liveRow, options, () =>
-              edgeUpsertDirtyCheck(
-                ctx,
-                liveRow.kind,
-                liveRow.id,
-                rowPropsToObject(liveRow.props),
-                validatedProps,
-              ),
-            ),
-        },
-      );
-      return {
-        edge: outcome.edge,
-        action: outcome.wrote ? "updated" : "found",
-      };
-    }
-
-    // Deleted match only → resurrect. The shared update path derives the
-    // resulting live/active state and re-checks cardinality under the same
-    // transaction fence as the revival it authorizes.
+    if (liveRow !== undefined) return resolveMatchedRow(liveRow, false);
     if (deletedRow === undefined) {
       throw new Error("Expected deletedRow to be defined");
     }
-    const matchedDeletedRow = deletedRow;
-
-    // A resurrection forwards `validFrom` as the create leg does: naming it
-    // restates the revived row's WHOLE window (the backend rewrites both
-    // endpoints together), which is the only way to revive a row into a window
-    // that closed before the row originally began. Dropping it here silently
-    // ignored a stated lower bound and left the caller no way to satisfy the
-    // window-ordering guard.
-    const edge = await executeEdgeUpsertUpdate(
-      ctx,
-      {
-        id: matchedDeletedRow.id,
-        identity: { kind, fromKind, fromId, toKind, toId },
-        props: validatedProps,
-        ...(validFrom !== undefined && { validFrom }),
-        ...(validTo !== undefined && { validTo }),
-        ...(options?.clearValidTo === true && {
-          clearValidTo: true as const,
-        }),
-        ...(options?.onImmutableLowerBound !== undefined && {
-          onImmutableLowerBound: options.onImmutableLowerBound,
-        }),
-      },
-      backend,
-      { clearDeleted: true },
-    );
-    return { edge, action: "resurrected" };
+    return resolveMatchedRow(deletedRow, true);
   }
 
   // Convergence loop. Under the fence a losing writer learns about the winner
   // from its own in-transaction lookup ({@link EdgeConvergenceRaced}) rather
   // than from a constraint violation, so the ordinary path is one re-dispatch
-  // that finds the winner's edge. The `CardinalityError` arm remains the
+  // that uses the row the transaction just observed. The `CardinalityError`
+  // arm remains the
   // backstop for the paths the fence cannot cover — a competitor whose write is
   // not a `getOrCreateByEndpoints` at all.
   //
   // ATTEMPT_LIMIT bounds a pathological ping-pong (a competitor that creates
-  // and hard-deletes the same match key repeatedly) rather than spinning; the
-  // last attempt would otherwise be indistinguishable from a livelock. On the
-  // FINAL attempt a retryable signal is no longer retryable, so it is reported:
-  // a `CardinalityError` as itself (the caller's own constraint is what failed),
-  // and an exhausted convergence race as the terminal error below, which names
-  // the interference rather than leaking an internal signal.
+  // and hard-deletes the same match key repeatedly) rather than spinning.
   const ATTEMPT_LIMIT = 3;
+  let forceTransactionRead = false;
   for (let remaining = ATTEMPT_LIMIT; remaining > 0; remaining -= 1) {
     try {
-      return await attempt();
-    } catch (error) {
-      const retryable =
-        error instanceof CardinalityError ||
-        error instanceof EdgeConvergenceRaced;
-      if (!retryable || remaining === 1) {
+      try {
+        return await attempt(forceTransactionRead);
+      } catch (error) {
         if (!(error instanceof EdgeConvergenceRaced)) throw error;
-        throw new DatabaseOperationError(
-          `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
-            `and ${toKind} "${toId}" lost its match key to a competing writer ` +
-            `${String(ATTEMPT_LIMIT)} times without converging. A concurrent ` +
-            `writer is repeatedly creating and removing this edge; serialize ` +
-            `those callers or retry the operation.`,
-          { operation: "insert", entity: "edge" },
-          { cause: error },
+
+        // The create guard found this row through the transaction target. Do
+        // not re-dispatch through a caching root handle. Keep this recovery
+        // inside the outer attempt catch so a match key that moves before the
+        // update re-read consumes the same bounded retry budget.
+        return await resolveMatchedRow(
+          error.row,
+          error.row.deleted_at !== undefined,
         );
       }
+    } catch (error) {
+      if (
+        error instanceof EdgeMatchKeyMoved ||
+        error instanceof EdgeNotFoundError
+      ) {
+        if (remaining === 1) {
+          throw new DatabaseOperationError(
+            `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
+              `and ${toKind} "${toId}" could not resolve a stable matching edge ` +
+              `after ${String(ATTEMPT_LIMIT)} attempts; a concurrent writer ` +
+              "keeps changing or deleting it. Retry the operation.",
+            { operation: "insert", entity: "edge" },
+            { cause: error },
+          );
+        }
+        forceTransactionRead = true;
+        continue;
+      }
+      if (error instanceof CardinalityError && remaining > 1) continue;
+      throw error;
     }
   }
   // Unreachable: the loop either returns or throws on its final iteration.

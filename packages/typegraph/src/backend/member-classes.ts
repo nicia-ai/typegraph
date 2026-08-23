@@ -97,6 +97,10 @@ const READ_MEMBERS = [
  */
 export const ENTITY_WRITE_MEMBERS = [
   "insertNode",
+  "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
+  "executeManagedCreate",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -135,6 +139,7 @@ export const SIDECAR_WRITE_MEMBERS = [
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
   "upsertEmbedding",
@@ -182,6 +187,7 @@ const SCHEMA_MEMBERS = [
   "commitSchemaVersionWithPreflight",
   "setActiveVersion",
   "lockSchemaVersionForWrite",
+  "lockSchemaVersionAndGraphWrite",
   "schemaWriteTransaction",
 ] as const satisfies readonly (keyof GraphBackend)[];
 

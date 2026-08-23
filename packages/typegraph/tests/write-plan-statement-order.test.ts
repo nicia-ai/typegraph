@@ -38,14 +38,24 @@
  * call sites above run through the executor; the executor case below is what
  * makes them bite at B0 as well.
  *
- * PGlite plus drizzle's `logger`, following `constraint-write-fence.test.ts`.
+ * PGlite's driver query boundary plus drizzle's logger. The driver boundary
+ * sees prepared root executions while the logger sees transaction-scoped
+ * executions, which PGlite routes through a separate transaction client.
  * ONE instance and ONE store for the whole table: instance creation plus DDL
  * costs about a second and the table is 20 cases wide, so it is paid once and
  * the statement log is cleared per case.
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { z } from "zod";
 
 import {
@@ -63,9 +73,16 @@ import {
   createClaimsVerdictThunk,
   uniqueSidecarBatchVerdict,
 } from "../src/backend/capabilities/resolve";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
-import { type GraphBackend } from "../src/backend/types";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../src/backend/types";
 import { lockIdentityGraph } from "../src/identity/service-read";
 import {
   type GraphData,
@@ -75,6 +92,7 @@ import {
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry";
 import { type Store } from "../src/store";
+import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import { runWritePlan } from "../src/store/operations/write-executor";
 import { nodeWritePlan } from "../src/store/operations/write-plan";
 
@@ -135,18 +153,6 @@ const graph = defineGraph({
 
 const statements: LoggedStatement[] = [];
 
-/**
- * The relation names the claim-placement matchers below look for, read from the
- * same schema builder the store uses rather than spelled as literals: a
- * configured table prefix would silently make a substring matcher match nothing,
- * and a matcher that matches nothing passes every "before" comparison it is not
- * guarded against.
- */
-const SCHEMA_TABLES = {
-  nodes: "typegraph_nodes",
-  nodeUniques: "typegraph_node_uniques",
-} as const;
-
 let store: Store<typeof graph>;
 let backend: GraphBackend;
 let closeClient: () => Promise<void>;
@@ -167,13 +173,21 @@ const BULK_EDGE = asEdgeId<typeof knows>("edge-bulk");
 
 beforeAll(async () => {
   const client = await PGlite.create();
-  closeClient = () => client.close();
+  const query = client.query.bind(client);
+  const querySpy = vi.spyOn(client, "query").mockImplementation((...args) => {
+    statements.push({ query: args[0], params: args[1] ?? [] });
+    return query(...args);
+  });
+  closeClient = async () => {
+    querySpy.mockRestore();
+    await client.close();
+  };
   await client.exec(generatePostgresDDL().join("\n\n"));
   backend = createPostgresBackend(
     drizzle(client, {
       logger: {
-        logQuery(query: string, params: unknown[]): void {
-          statements.push({ query, params });
+        logQuery(queryText: string, params: unknown[]): void {
+          statements.push({ query: queryText, params });
         },
       },
     }),
@@ -210,7 +224,7 @@ function indexOfAdvisoryLock(namespace: string): number {
   return statements.findIndex(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      (statement.params[0] === namespace ||
+      (statement.params.includes(namespace) ||
         statement.query.includes(`'${namespace}'`)),
   );
 }
@@ -219,7 +233,7 @@ function countAdvisoryLocks(namespace: string): number {
   return statements.filter(
     (statement) =>
       statement.query.includes("pg_advisory_xact_lock") &&
-      (statement.params[0] === namespace ||
+      (statement.params.includes(namespace) ||
         statement.query.includes(`'${namespace}'`)),
   ).length;
 }
@@ -235,8 +249,11 @@ function indexOfSchemaFence(): number {
  * protect. Lock statements are `SELECT`s, so they cannot be mistaken for one.
  */
 function indexOfFirstRowStatement(): number {
-  return statements.findIndex((statement) =>
-    /^\s*(insert|update|delete)/i.test(statement.query),
+  return statements.findIndex(
+    (statement) =>
+      /^\s*(insert|update|delete)\b/iu.test(statement.query) ||
+      (/^\s*with\b/iu.test(statement.query) &&
+        /\b(?:insert\s+into|update|delete\s+from)\b/iu.test(statement.query)),
   );
 }
 
@@ -254,16 +271,28 @@ const CASES: readonly OrderCase[] = [
   {
     entryPoint: "node create (constrained: shared-scope unique)",
     run: () =>
-      store.nodes.Employee.create({
-        email: "create@example.com",
-        name: "Created",
-      }),
+      store.nodes.Employee.create(
+        { email: "create@example.com", name: "Created" },
+        { id: "employee-created" },
+      ),
     graphWriteLocks: 1,
     identityLock: true,
   },
   {
-    entryPoint: "node create (unconstrained)",
+    entryPoint: "node create (unconstrained, generated id)",
     run: () => store.nodes.Loose.create({ name: "loose" }),
+    graphWriteLocks: 0,
+    // Generated ids cannot collide across kinds, so this create has no
+    // identity fold to protect and must not pay for the identity lock.
+    identityLock: false,
+  },
+  {
+    entryPoint: "node create (unconstrained, caller-supplied id)",
+    run: () =>
+      store.nodes.Loose.create(
+        { name: "loose-explicit" },
+        { id: "loose-explicit" },
+      ),
     graphWriteLocks: 0,
     identityLock: true,
   },
@@ -553,25 +582,68 @@ describe("every managed write locks before it writes", () => {
   }
 });
 
+describe("generated node ids avoid identity lock round trips", () => {
+  it("omits identity locks when no cross-kind fold is possible", async () => {
+    statements.splice(0);
+    await store.nodes.Loose.create({ name: "generated-id" });
+    const generatedIdentityLocks = countAdvisoryLocks(IDENTITY_NAMESPACE);
+
+    statements.splice(0);
+    await store.nodes.Loose.create(
+      { name: "caller-id" },
+      { id: "caller-id-for-lock-count" },
+    );
+    const callerSuppliedIdentityLocks = countAdvisoryLocks(IDENTITY_NAMESPACE);
+
+    // The caller-supplied path acquires the write-frame lock and the identity
+    // fold helper's lock. Generated ids cannot collide across kinds, so it
+    // needs neither. This is the measured RTT reduction for the common
+    // generated-id create path, not a statement-count estimate.
+    expect(generatedIdentityLocks).toBe(0);
+    expect(callerSuppliedIdentityLocks).toBe(2);
+  });
+});
+
+describe("unconstrained edge endpoint fusion", () => {
+  it("uses one edge INSERT and no endpoint probes for a generated-id create", async () => {
+    await store.edges.knows.create(
+      { kind: "Plain", id: SEEDED.plainA },
+      { kind: "Plain", id: SEEDED.plainB },
+      { note: "fused-endpoints" },
+    );
+
+    const endpointProbes = statements.filter(
+      (statement) =>
+        /^\s*select/i.test(statement.query) &&
+        statement.query.includes("typegraph_nodes"),
+    );
+    const edgeInserts = statements.filter(
+      (statement) =>
+        /^\s*insert/i.test(statement.query) &&
+        statement.query.includes("typegraph_edges"),
+    );
+
+    expect(endpointProbes).toEqual([]);
+    expect(edgeInserts).toHaveLength(1);
+    expect(edgeInserts[0]?.query).toContain('CROSS JOIN "typegraph_nodes"');
+  });
+});
+
 /**
  * The first statement that writes the CLAIM relation a node's declared
  * constraints reserve in. Both claim families live in `uniques`, so one matcher
  * covers uniqueness and disjointness alike.
  */
 function indexOfClaimStatement(): number {
-  return statements.findIndex(
-    (statement) =>
-      /^\s*insert/i.test(statement.query) &&
-      statement.query.includes(SCHEMA_TABLES.nodeUniques),
+  return statements.findIndex((statement) =>
+    /insert\s+into\s+"typegraph_node_uniques"/iu.test(statement.query),
   );
 }
 
 /** The first statement that writes the node row itself. */
 function indexOfNodeRowStatement(): number {
-  return statements.findIndex(
-    (statement) =>
-      /^\s*insert/i.test(statement.query) &&
-      statement.query.includes(SCHEMA_TABLES.nodes),
+  return statements.findIndex((statement) =>
+    /insert\s+into\s+"typegraph_nodes"/iu.test(statement.query),
   );
 }
 
@@ -589,10 +661,9 @@ function indexOfNodeRowStatement(): number {
  * fence, and a sync fan issued before the row can write derived data for a row
  * that never landed.
  *
- * Named mutation, verified to bite: invert the placement partition in
- * `withNodeCreateClaimsIssuedBy` (`claims/node-claims.ts`) so the post-insert
- * group is issued first → this case fails, because the claim then follows the
- * row it is supposed to gate.
+ * Named mutation, verified to bite: omit the claim list at the session-to-
+ * backend plan boundary → the fused statement no longer contains the claim
+ * relation and this case fails.
  *
  * The other half of the pinned order — the sync fans FOLLOW the row — is pinned
  * in `session-sidecar-completeness.test.ts`, whose fixture actually declares a
@@ -600,7 +671,7 @@ function indexOfNodeRowStatement(): number {
  * case here would assert against a statement that is never emitted.
  */
 describe("claims and row work keep their pinned order", () => {
-  it("issues a pre-insert claim BEFORE the row it gates", async () => {
+  it("issues a pre-insert claim before the row it gates in one statement", async () => {
     // A `kindWithSubClasses` scope: the axis spans sibling kinds no single
     // primary key backs, which is exactly the claim that must precede its row.
     await store.nodes.Employee.create({
@@ -612,7 +683,11 @@ describe("claims and row work keep their pinned order", () => {
     const row = indexOfNodeRowStatement();
     expect(claim).toBeGreaterThanOrEqual(0);
     expect(row).toBeGreaterThanOrEqual(0);
-    expect(claim).toBeLessThan(row);
+    expect(claim).toBe(row);
+    const query = statements[claim]?.query ?? "";
+    expect(query.indexOf('"node_pre_claimed"')).toBeLessThan(
+      query.indexOf('"node_inserted"'),
+    );
   });
 });
 
@@ -654,6 +729,15 @@ describe("the executor's own frame keeps that order", () => {
             props: { name: "executor" },
             constraints: [],
           },
+          claimPlan: planNodeCreateClaims(
+            { graphId: graph.id, registry: buildKindRegistry(graph) },
+            {
+              kind: "Plain",
+              id: "executor-node",
+              props: { name: "executor" },
+              constraints: [],
+            },
+          ),
           sideEffects: {
             kind: "Plain",
             id: "executor-node",
@@ -661,6 +745,7 @@ describe("the executor's own frame keeps that order", () => {
             props: { name: "executor" },
             uniqueConstraints: [],
           },
+          projections: [],
         }),
     );
 
@@ -673,10 +758,110 @@ describe("the executor's own frame keeps that order", () => {
     // executor's options leaves this write unfenced.
     expect(countAdvisoryLocks(GRAPH_WRITE_NAMESPACE)).toBe(1);
     expect(schemaFence).toBeGreaterThanOrEqual(0);
-    expect(graphWriteLock).toBeGreaterThan(schemaFence);
+    // First-party PostgreSQL folds positions one and two into one statement;
+    // the SQL builder still acquires the schema row before the advisory lock.
+    // Portable targets retain two statements, so equality is permitted but a
+    // graph lock before the schema fence never is.
+    expect(graphWriteLock).toBeGreaterThanOrEqual(schemaFence);
+    expect(graphWriteLock).toBe(schemaFence);
+    expect(statements[schemaFence]?.query).toMatch(
+      /for share[\s\S]*pg_advisory_xact_lock/iu,
+    );
     // Identity is acquired BEFORE row work, not after it.
     expect(identityLock).toBeGreaterThan(graphWriteLock);
     expect(firstRow).toBeGreaterThan(identityLock);
     expect(identityLocks).toEqual([identityLock]);
+  });
+
+  it("retains separate schema and graph locks when the target lacks the combined member", async () => {
+    const fallbackBackend = deriveBackend(backend, {
+      transaction<T>(
+        fn: (target: TransactionBackend) => Promise<T>,
+        options?: Parameters<GraphBackend["transaction"]>[1],
+      ): Promise<T> {
+        return backend.transaction(
+          (target) =>
+            fn(
+              projectBackendWithout(target, ["lockSchemaVersionAndGraphWrite"]),
+            ),
+          options,
+        );
+      },
+    });
+
+    await runWritePlan(
+      {
+        graphId: graph.id,
+        registry: buildKindRegistry(graph),
+        schemaVersion: store.introspect().schemaVersion,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+        revisionSchema: createSqlSchema(),
+        claimsVerdict: createClaimsVerdictThunk(fallbackBackend),
+        uniqueSidecarBatch: uniqueSidecarBatchVerdict(fallbackBackend),
+      },
+      nodeWritePlan("nodeUniquenessScope", false),
+      fallbackBackend,
+      (session) =>
+        session.createNode({
+          params: {
+            graphId: graph.id,
+            kind: "Plain",
+            id: "executor-fallback-node",
+            props: { name: "executor fallback" },
+          },
+          claim: {
+            kind: "Plain",
+            id: "executor-fallback-node",
+            props: { name: "executor fallback" },
+            constraints: [],
+          },
+          claimPlan: planNodeCreateClaims(
+            { graphId: graph.id, registry: buildKindRegistry(graph) },
+            {
+              kind: "Plain",
+              id: "executor-fallback-node",
+              props: { name: "executor fallback" },
+              constraints: [],
+            },
+          ),
+          sideEffects: {
+            kind: "Plain",
+            id: "executor-fallback-node",
+            schema: Plain.schema,
+            props: { name: "executor fallback" },
+            uniqueConstraints: [],
+          },
+          projections: [],
+        }),
+    );
+
+    const schemaFence = indexOfSchemaFence();
+    const graphWriteLock = indexOfAdvisoryLock(GRAPH_WRITE_NAMESPACE);
+    expect(schemaFence).toBeGreaterThanOrEqual(0);
+    expect(graphWriteLock).toBeGreaterThan(schemaFence);
+  });
+});
+
+describe("captured combined-lock trace", () => {
+  it("seeds the capture memo so one write emits one graph-lock statement", async () => {
+    const [historyStore] = await createStoreWithSchema(graph, backend, {
+      history: true,
+    });
+    statements.splice(0);
+
+    await historyStore.nodes.Loose.create(
+      { name: "captured combined lock" },
+      { id: "captured-combined-lock" },
+    );
+
+    expect(countAdvisoryLocks(GRAPH_WRITE_NAMESPACE)).toBe(1);
+    const combinedStatements = statements.filter(
+      (statement) =>
+        /for share/iu.test(statement.query) &&
+        statement.query.includes("pg_advisory_xact_lock") &&
+        statement.params.includes(GRAPH_WRITE_NAMESPACE),
+    );
+    expect(combinedStatements).toHaveLength(1);
   });
 });

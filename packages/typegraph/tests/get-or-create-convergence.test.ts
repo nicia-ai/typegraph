@@ -20,10 +20,17 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, UniquenessError } from "../src";
+import {
+  DatabaseOperationError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  UniquenessError,
+} from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
+  type EdgeRow,
   type FindEdgesByKindParams,
   type GraphBackend,
 } from "../src/backend/types";
@@ -90,8 +97,8 @@ const cardinalGraph = defineGraph({
  * The interception is on the TOP-LEVEL backend, so the create leg's own
  * in-transaction lookup (the convergence guard) is not intercepted and sees the
  * competitor as ordinary committed state. `afterCall` selects which lookup to
- * follow: with `ifExists: "return"` the first is the found-fast-path probe and
- * the second is the dispatcher's, so racing the dispatcher means `afterCall: 2`.
+ * follow. In return mode the initial root probe is also the dispatcher read on
+ * a no-match path, so racing that decision uses `afterCall: 1`.
  */
 function racingBackend(
   base: GraphBackend,
@@ -113,11 +120,144 @@ function racingBackend(
   });
 }
 
+/**
+ * Models a cache-backed root handle such as Hyperdrive: root reads can lag a
+ * committed edge, while a transaction-scoped handle reads its own snapshot.
+ * The wrapper deliberately returns an empty root result, but delegates the
+ * transaction target to the real backend so a match-key read can observe the
+ * edge that is already committed (or was written earlier in that transaction).
+ */
+function staleRootReadBackend(
+  base: GraphBackend,
+  onTransactionRead: () => void,
+): GraphBackend {
+  return deriveBackend(base, {
+    findEdgesByKind: () => Promise.resolve([]),
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              findEdgesByKind: async (params) => {
+                onTransactionRead();
+                return target.findEdgesByKind(params);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
+/**
+ * Carries a transaction-discovered match back from the create guard, then
+ * makes the selected row's match key move during its update re-read.
+ * `movesBeforeStable` controls whether a later retry can settle.
+ */
+function movingMatchKeyBackend(
+  base: GraphBackend,
+  matchedRow: EdgeRow,
+  movesBeforeStable: number,
+  onMovedRead: () => void,
+): GraphBackend {
+  let movedReads = 0;
+  return deriveBackend(base, {
+    findEdgesByKind: () => Promise.resolve([]),
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              findEdgesByKind: () => Promise.resolve([matchedRow]),
+              getEdge: async (graphId, id) => {
+                const row = await target.getEdge(graphId, id);
+                if (row === undefined || movedReads >= movesBeforeStable) {
+                  return row;
+                }
+                movedReads += 1;
+                onMovedRead();
+                return { ...row, props: { since: "moved" } };
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
+/** Makes a transaction-carried match disappear from its recovery read. */
+function disappearingMatchBackend(
+  base: GraphBackend,
+  matchedRow: EdgeRow,
+  disappearancesBeforeStable: number,
+  onDisappearedRead: () => void,
+): GraphBackend {
+  let disappearedReads = 0;
+  return deriveBackend(base, {
+    findEdgesByKind: () => Promise.resolve([]),
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              findEdgesByKind: () => Promise.resolve([matchedRow]),
+              getEdge: (graphId, id) => {
+                if (disappearedReads >= disappearancesBeforeStable) {
+                  return target.getEdge(graphId, id);
+                }
+                disappearedReads += 1;
+                onDisappearedRead();
+                return Promise.resolve(undefined);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
 describe("getOrCreateByEndpoints convergence", () => {
   let raw: GraphBackend;
 
   beforeEach(() => {
     ({ backend: raw } = createLocalSqliteBackend());
+  });
+
+  it("reuses a negative root probe before the fenced create check", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    let endpointReads = 0;
+
+    const counted = deriveBackend(raw, {
+      findEdgesByKind: async (params) => {
+        endpointReads += 1;
+        return raw.findEdgesByKind(params);
+      },
+      transaction: (fn, options) =>
+        raw.transaction(
+          (target) =>
+            fn(
+              deriveBackend(target, {
+                findEdgesByKind: async (params) => {
+                  endpointReads += 1;
+                  return target.findEdgesByKind(params);
+                },
+              }),
+            ),
+          options,
+        ),
+    });
+
+    const result = await createStore(
+      graph,
+      counted,
+    ).edges.knows.getOrCreateByEndpoints(alice, bob, { since: "2024" });
+
+    expect(result.action).toBe("created");
+    // One root dispatcher read plus the create transaction's authoritative
+    // convergence read. Before the optimization this was three.
+    expect(endpointReads).toBe(2);
   });
 
   it("resolves to the competitor's edge instead of inserting a second one", async () => {
@@ -128,7 +268,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "winner" });
       }),
     );
@@ -152,7 +292,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "2020" });
       }),
     );
@@ -177,7 +317,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "1999" });
       }),
     );
@@ -295,7 +435,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "winner" });
       }),
       {
@@ -342,7 +482,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     let afterCompetitor: string | undefined;
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "winner" });
         afterCompetitor = await competitor.revisionNow();
       }),
@@ -358,12 +498,11 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(await setup.revisionNow()).toBe(afterCompetitor);
   });
 
-  it("reports a terminal error when the match key never settles", async () => {
-    // The convergence loop is bounded: a competitor that keeps claiming and
-    // releasing the same match key would otherwise spin forever. Injected here
-    // by making the create leg's in-transaction guard ALWAYS see a competitor
-    // while the dispatcher's own lookup sees none — a permanent version of the
-    // real interleaving.
+  it("uses the transaction-carried row instead of a false competing-writer error", async () => {
+    // The root dispatcher is allowed to be stale, but the transaction read is
+    // authoritative. A row found there is carried with the convergence signal
+    // and returned directly; re-dispatching through the stale root would turn
+    // an honest found result into a false terminal competing-writer error.
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
     const bob = await setup.nodes.Person.create({ name: "Bob" });
@@ -384,31 +523,232 @@ describe("getOrCreateByEndpoints convergence", () => {
     const store = createStore(
       graph,
       deriveBackend(raw, {
-        // The dispatcher reads through the top level and must see NOTHING, so it
-        // keeps electing to create.
+        // The dispatcher reads through the top level and must see NOTHING.
         findEdgesByKind: () => Promise.resolve([]),
         transaction: (fn, options) =>
           raw.transaction(
             (target) =>
-              fn({
-                ...target,
-                // The guard reads through the transaction and always sees a
-                // competitor, so every attempt aborts.
-                findEdgesByKind: () => {
-                  attempts += 1;
-                  return Promise.resolve([phantom]);
-                },
-              }),
+              fn(
+                deriveBackend(target, {
+                  // The guard reads through the transaction and sees the
+                  // authoritative row, so the create attempt carries it back.
+                  findEdgesByKind: () => {
+                    attempts += 1;
+                    return Promise.resolve([phantom]);
+                  },
+                }),
+              ),
             options,
           ),
       }),
     );
 
-    await expect(
-      store.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "x" }),
-    ).rejects.toThrow(/lost its match key/u);
-    // Bounded, and it really did use every attempt before giving up.
-    expect(attempts).toBe(3);
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "x",
+    });
+    expect(result.action).toBe("found");
+    expect(result.edge.id).toBe(phantom.id);
+    // One authoritative transaction read settled the operation; no retry loop
+    // or root-cache re-dispatch was needed.
+    expect(attempts).toBe(1);
+  });
+
+  it("retries when a transaction-carried match key moves before update", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const matchedRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "moving-once",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    let movedReads = 0;
+    const store = createStore(
+      graph,
+      movingMatchKeyBackend(raw, matchedRow, 1, () => {
+        movedReads += 1;
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "requested" },
+      { ifExists: "update", matchOn: ["since"] },
+    );
+
+    expect(result.action).toBe("updated");
+    expect(result.edge.id).toBe(matchedRow.id);
+    expect(movedReads).toBe(1);
+  });
+
+  it("retries when a transaction-carried match disappears before recovery", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const matchedRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "disappearing-once",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    let disappearedReads = 0;
+    const store = createStore(
+      graph,
+      disappearingMatchBackend(raw, matchedRow, 1, () => {
+        disappearedReads += 1;
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "requested" },
+      { ifExists: "update", matchOn: ["since"] },
+    );
+
+    expect(result.action).toBe("updated");
+    expect(result.edge.id).toBe(matchedRow.id);
+    expect(disappearedReads).toBe(1);
+  });
+
+  it("reports an unstable match key after exhausting the retry budget", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const matchedRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "always-moving",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    let movedReads = 0;
+    const store = createStore(
+      graph,
+      movingMatchKeyBackend(raw, matchedRow, Number.POSITIVE_INFINITY, () => {
+        movedReads += 1;
+      }),
+    );
+
+    const attempt = store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "requested" },
+      { ifExists: "update", matchOn: ["since"] },
+    );
+
+    const error: unknown = await attempt.catch((error_: unknown) => error_);
+    expect(error).toBeInstanceOf(DatabaseOperationError);
+    if (!(error instanceof DatabaseOperationError)) {
+      throw new Error("Expected DatabaseOperationError");
+    }
+    expect(error.code).toBe("DATABASE_OPERATION_ERROR");
+    expect(error.message).toContain(
+      "could not resolve a stable matching edge after 3 attempts",
+    );
+    expect(movedReads).toBe(3);
+  });
+
+  it("resolves a stale root read from the transaction match-key read", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const winner = await setup.edges.knows.create(alice, bob, {
+      since: "winner",
+    });
+
+    let transactionReads = 0;
+    const store = createStore(
+      graph,
+      staleRootReadBackend(raw, () => {
+        transactionReads += 1;
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "winner",
+    });
+
+    expect(result.action).toBe("found");
+    expect(result.edge.id).toBe(winner.id);
+    expect(transactionReads).toBeGreaterThan(0);
+    // The stale root never supplied the match; the transaction-scoped read
+    // did. A retry-loop "competing writer" diagnostic would be false here.
+    await expect(setup.edges.knows.findFrom(alice)).resolves.toHaveLength(1);
+  });
+
+  it("retains an authoritative stale-positive disproof without repeating reads", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const staleRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "stale-positive",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    await raw.hardDeleteEdge({ graphId: graph.id, id: staleRow.id });
+
+    let rootReads = 0;
+    let transactionReads = 0;
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        findEdgesByKind: () => {
+          rootReads += 1;
+          return Promise.resolve([staleRow]);
+        },
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  findEdgesByKind: async (params) => {
+                    transactionReads += 1;
+                    return target.findEdgesByKind(params);
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "requested",
+    });
+
+    expect(result.action).toBe("created");
+    expect(result.edge.id).not.toBe(staleRow.id);
+    // One root hint, one transaction disproof, then the create transaction's
+    // convergence read. Repeating the dispatcher would make these 2 and 3.
+    expect(rootReads).toBe(1);
+    expect(transactionReads).toBe(2);
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {

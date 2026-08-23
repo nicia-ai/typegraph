@@ -167,6 +167,7 @@ beforeEach(async () => {
 const GATED_INSERT_METHODS = new Set([
   "insertNode",
   "insertNodeNoReturn",
+  "executeManagedCreate",
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "insertEdge",

@@ -103,6 +103,7 @@ type BackendCapabilities = Readonly<{
     returning?: boolean;
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
+    readonly atomicNodeInsertClaims?: boolean;
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
@@ -1097,7 +1098,7 @@ type EdgeEndpointSide = "from" | "to";
 type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "executeManagedCreate" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 type EdgeExistsBetweenParams = Readonly<{
@@ -1679,6 +1680,9 @@ type FulltextStrategy = Readonly<{
     snippetExpression: (this: void, tableName: string, query: string, mode: FulltextQueryMode, language?: string) => SqlFragment;
     ownedTables: (this: void, primaryTableName: string) => readonly StrategyTableContribution[];
     buildUpsert: (this: void, tableName: string, params: UpsertFulltextParams, timestamp: string) => readonly SqlFragment[];
+    buildSyncFromInsertedNode?: (this: void, tableName: string, sourceAlias: string, projection: Extract<NodeInsertProjection, {
+        kind: "fulltext";
+    }>, timestamp: string) => SqlFragment;
     buildBatchUpsert: (this: void, tableName: string, params: UpsertFulltextBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, tableName: string, params: DeleteFulltextParams) => readonly SqlFragment[];
     buildBatchDelete: (this: void, tableName: string, params: DeleteFulltextBatchParams) => readonly SqlFragment[];
@@ -1753,6 +1757,9 @@ type GraphBackend = Readonly<{
     fulltextStrategy?: FulltextStrategy | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
+    insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
+    insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
+    insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -1763,6 +1770,7 @@ type GraphBackend = Readonly<{
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
+    executeManagedCreate?: (this: void, plan: ManagedCreatePlan) => Promise<ManagedCreateResult>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
@@ -1790,6 +1798,7 @@ type GraphBackend = Readonly<{
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
     checkUniqueBatch?: (this: void, params: CheckUniqueBatchParams) => Promise<readonly UniqueRow[]>;
     claimEdgeCardinality?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
+    claimEdgeCardinalityGuarded?: (this: void, params: ClaimEdgeCardinalityParams) => Promise<EdgeClaimOutcome>;
     claimEdgeCardinalityBatch?: (this: void, entries: readonly ClaimEdgeCardinalityParams[]) => Promise<readonly EdgeClaimOutcome[]>;
     purgeEdgeClaims?: (this: void, params: PurgeEdgeClaimsParams) => Promise<void>;
     readConstraintFenceViolations?: (this: void, params: ReadConstraintFenceViolationsParams) => Promise<ConstraintFenceViolationRows>;
@@ -1814,6 +1823,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<void>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
@@ -2617,6 +2627,70 @@ type LiteralValue = Readonly<{
     valueType?: ValueType | undefined;
 }>;
 
+// @public (undocumented)
+type LockSchemaVersionForWriteParams = Readonly<{
+    graphId: string;
+    expectedVersion: number;
+}>;
+
+// @public
+type ManagedCreatePlan = ManagedNodeCreatePlan | ManagedEdgeCreatePlan;
+
+// @public (undocumented)
+type ManagedCreateResult = Readonly<{
+    outcome: "created";
+    entity: "node";
+    row: NodeRow;
+}> | Readonly<{
+    outcome: "created";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "node" | "edge";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "node";
+    dimensions: readonly [
+    "schemaFence" | "claims" | "projections",
+    ...(readonly ("schemaFence" | "claims" | "projections")[])
+    ];
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "edge";
+    dimensions: readonly [
+    "schemaFence" | "cardinalityClaim",
+    ...(readonly ("schemaFence" | "cardinalityClaim")[])
+    ];
+}>;
+
+// @public
+type ManagedEdgeCreatePlan = Readonly<{
+    entity: "edge";
+    params: InsertEdgeParams;
+    schemaFence?: SchemaWriteFenceParams;
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
+}>;
+
+// @public
+type ManagedNodeCreateMode = Readonly<{
+    kind: "ordinary";
+}> | Readonly<{
+    kind: "schema-fenced";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+type ManagedNodeCreatePlan = Readonly<{
+    entity: "node";
+    params: InsertNodeParams;
+    idGenerated: boolean;
+    mode: ManagedNodeCreateMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+}>;
+
 // @public
 type MapRowToMeta<R extends Readonly<Record<string, unknown>>, M extends Readonly<Record<string, string>>> = Readonly<{
     [SnakeKey in keyof M as M[SnakeKey] & string]: SnakeKey extends keyof R ? R[SnakeKey] : never;
@@ -2845,7 +2919,7 @@ type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<Nod
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeManagedCreate" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 type NodeGetOrCreateByConstraintOptions = Readonly<{
@@ -2873,6 +2947,43 @@ type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
+}>;
+
+// @public (undocumented)
+type NodeInsertClaim = Readonly<{
+    axis: string;
+    constraintName: string;
+    key: string;
+    placement: "pre-insert" | "post-insert";
+    verdict: NodeInsertClaimVerdict;
+}>;
+
+// @public
+type NodeInsertClaimVerdict = Readonly<{
+    kind: "uniqueness";
+    probeAxes: readonly string[];
+    fields: readonly string[];
+}> | Readonly<{
+    kind: "disjointness";
+    conflictingKinds: readonly string[];
+}>;
+
+// @public
+type NodeInsertProjection = Readonly<{
+    kind: "embedding";
+    fieldPath: string;
+    embedding: readonly number[];
+    dimensions: number;
+    metric: VectorMetric;
+    indexType: VectorIndexType;
+}> | Readonly<{
+    kind: "fulltext";
+    action: "upsert";
+    content: string;
+    language: string;
+}> | Readonly<{
+    kind: "fulltext";
+    action: "delete";
 }>;
 
 // @public (undocumented)
@@ -3736,6 +3847,12 @@ type SchemaVersionRow = Readonly<{
     created_at: string;
     is_active: boolean;
 }>;
+
+// @public (undocumented)
+type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite" | "lockSchemaVersionAndGraphWrite">;
+
+// @public
+type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
 
 // @public
 type ScopedMeasure<Context> = <T>(fn: (scoped: Context) => Promise<T>) => Promise<TransactionOutcome<T>>;
@@ -4630,7 +4747,7 @@ type TemporalOptions = Readonly<{
 const TRANSACTION_RUNTIME: unique symbol;
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & Pick<GraphBackend, "lockSchemaVersionForWrite"> & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionCollections<G extends GraphDef> = Readonly<{
@@ -5228,6 +5345,7 @@ type VectorStrategy = Readonly<{
     tableName: (this: void, graphId: string, nodeKind: string, fieldPath: string) => string;
     ownedTables: (this: void, slot: VectorSlot) => readonly StrategyTableContribution[];
     buildUpsert: (this: void, slot: VectorSlot, params: UpsertEmbeddingParams, timestamp: string) => readonly SqlFragment[];
+    buildUpsertFromInsertedNode?: (this: void, slot: VectorSlot, sourceAlias: string, embedding: readonly number[], timestamp: string) => SqlFragment;
     buildUpsertBatch?: (this: void, slot: VectorSlot, params: UpsertEmbeddingBatchParams, timestamp: string) => readonly SqlFragment[];
     buildDelete: (this: void, slot: VectorSlot, params: DeleteEmbeddingParams) => readonly SqlFragment[];
     buildDeleteBatch: (this: void, slot: VectorSlot, params: Omit<DeleteEmbeddingParams, "nodeId"> & Readonly<{

@@ -99,7 +99,11 @@ import {
 import { type IdentityTarget } from "../identity/sql-target";
 import { type KindRegistry } from "../registry/kind-registry";
 import { edgeCardinalityClaim } from "../store/claims/edge-claims";
-import { checkUniquenessConstraints } from "../store/claims/node-claims";
+import {
+  checkUniquenessConstraints,
+  type NodeClaimItem,
+  planNodeCreateClaims,
+} from "../store/claims/node-claims";
 import {
   checkCardinalityConstraint,
   checkDisjointnessConstraint,
@@ -118,7 +122,7 @@ import {
 import { mixedWritePlan } from "../store/operations/write-plan";
 import {
   type EdgeInsertWork,
-  type NodeInsertWork,
+  type NodeCreateWork,
   type WriteSession,
   type WriteTarget,
 } from "../store/operations/write-session";
@@ -1488,8 +1492,9 @@ async function processNodeSlice(
   if (accepted.length > 0) {
     await frame.session.createNodesNoReturn(
       accepted.map((candidate) =>
-        importNodeInsertWork(
+        importNodeCreateWork(
           graphId,
+          registry,
           candidate.node,
           candidate.schemaEntry.registration,
           candidate.props,
@@ -1535,20 +1540,23 @@ function buildImportInsertParams(
  * seam call and its own side-effect record, which is the shape in which they
  * drift — and the shape in which a path forgets one of them entirely.
  */
-function importNodeInsertWork(
+function importNodeCreateWork(
   graphId: string,
+  registry: KindRegistry,
   node: InterchangeNode,
   registration: NodeRegistration,
   props: Record<string, unknown>,
-): NodeInsertWork {
+): NodeCreateWork {
+  const claim = {
+    kind: node.kind,
+    id: node.id,
+    props,
+    constraints: registration.unique ?? [],
+  } satisfies NodeClaimItem;
   return {
     params: buildImportInsertParams(graphId, node, props),
-    claim: {
-      kind: node.kind,
-      id: node.id,
-      props,
-      constraints: registration.unique ?? [],
-    },
+    claim,
+    claimPlan: planNodeCreateClaims({ graphId, registry }, claim),
     sideEffects: {
       kind: node.kind,
       id: node.id,
@@ -1556,6 +1564,7 @@ function importNodeInsertWork(
       props,
       uniqueConstraints: registration.unique ?? [],
     },
+    projections: [],
   };
 }
 
@@ -2140,7 +2149,13 @@ async function processNode(
   // The RETURNING single-insert shape, whose row this path discards, because
   // that is the statement this leg emitted before the migration.
   await frame.session.createNode(
-    importNodeInsertWork(graphId, node, registration, propsResult.data),
+    importNodeCreateWork(
+      graphId,
+      registry,
+      node,
+      registration,
+      propsResult.data,
+    ),
   );
 
   return { status: "created" };
@@ -2738,7 +2753,7 @@ async function processEdge(
  * claim the row owes.
  *
  * ONE owner, shared by the batched slice and the per-row fallback, for the same
- * reason {@link importNodeInsertWork} is one: two spellings of the same row are
+ * reason {@link importNodeCreateWork} is one: two spellings of the same row are
  * two spellings that can drift. The claim is built here and ISSUED by the
  * session, which is the only handle in this module that reaches a write member.
  */
@@ -2752,7 +2767,7 @@ function importEdgeInsertWork(
 ): EdgeInsertWork {
   const params = edgeInsertParamsOf(graphId, candidate);
   const claim = edgeCardinalityClaim(cardinality, params);
-  return { params, ...(claim === undefined ? {} : { claim }) };
+  return { params, claim };
 }
 
 // ============================================================

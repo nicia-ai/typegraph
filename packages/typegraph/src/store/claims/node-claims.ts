@@ -22,6 +22,7 @@ import {
 import {
   type GraphBackend,
   type InsertUniqueParams,
+  type NodeInsertClaim,
   type TransactionBackend,
   type UniqueConstraintBackend,
 } from "../../backend/types";
@@ -231,7 +232,31 @@ type DisjointnessClaimEntry = NodeClaimEntry &
 function mapClaimRefusal(
   error: UniquenessError,
   entries: readonly NodeClaimEntry[],
+  verdicts: readonly NodeCreateClaimVerdict[] = [],
 ): never {
+  const verdict = verdicts.find(
+    (candidate) =>
+      candidate.claim.constraintName === error.details.constraintName &&
+      (candidate.refusal.kind === "uniqueness" ||
+        candidate.claim.key === error.details.newId) &&
+      (error.details.axis === undefined ||
+        candidate.claim.axis === error.details.axis ||
+        (candidate.claim.verdict.kind === "uniqueness" &&
+          candidate.claim.verdict.probeAxes.includes(error.details.axis))),
+  );
+  const uniquenessVerdict =
+    verdict !== undefined && isNodeCreateUniquenessVerdict(verdict) ?
+      verdict
+    : undefined;
+  if (uniquenessVerdict !== undefined && error.details.fields.length === 0) {
+    throw new UniquenessError(
+      {
+        ...error.details,
+        fields: uniquenessVerdict.refusal.constraint.fields,
+      },
+      { cause: error },
+    );
+  }
   const owed = entries.find(
     (entry): entry is DisjointnessClaimEntry =>
       entry.refusal.kind === "disjointness" &&
@@ -248,6 +273,17 @@ function mapClaimRefusal(
     },
     { cause: error },
   );
+}
+
+/** Re-raises a planned claim failure through the claim family's typed error. */
+export function refuseNodeCreateClaimError(
+  error: unknown,
+  plan: NodeCreateClaimPlan,
+): never {
+  if (error instanceof UniquenessError) {
+    mapClaimRefusal(error, plan.entries, plan.verdicts);
+  }
+  throw error;
 }
 
 /**
@@ -462,11 +498,50 @@ export type NodeClaimItem = Readonly<{
   constraints: readonly UniqueConstraint[];
 }>;
 
+/**
+ * The ownership verdict metadata a planned claim would have produced if the
+ * store had read the claim relation first.
+ *
+ * The authoritative insert uses the claim row's primary key instead of these
+ * probe coordinates, but carrying the coordinates with the plan keeps the
+ * typed refusal complete: uniqueness errors regain their declared fields, and
+ * disjoint errors retain the exact partner kind that made the claim apply.
+ */
+type NodeCreateClaimVerdict =
+  | Readonly<{
+      claim: NodeInsertClaim;
+      probeKinds: readonly string[];
+      disjointOtherKind: undefined;
+      refusal: Extract<ClaimRefusal, { kind: "uniqueness" }>;
+    }>
+  | Readonly<{
+      claim: NodeInsertClaim;
+      probeKinds: readonly string[];
+      disjointOtherKind: string;
+      refusal: Extract<ClaimRefusal, { kind: "disjointness" }>;
+    }>;
+
+function isNodeCreateUniquenessVerdict(
+  verdict: NodeCreateClaimVerdict,
+): verdict is Extract<
+  NodeCreateClaimVerdict,
+  { refusal: { kind: "uniqueness" } }
+> {
+  return verdict.refusal.kind === "uniqueness";
+}
+
 /** One row's claim, with the owner it will be written under. */
 type PlacedClaim = Readonly<{
   item: NodeClaimItem;
   entry: NodeClaimEntry;
   target: ClaimTarget;
+}>;
+
+/** The complete, canonically ordered claim portion of one node insert plan. */
+export type NodeCreateClaimPlan = Readonly<{
+  entries: readonly NodeClaimEntry[];
+  claims: readonly NodeInsertClaim[];
+  verdicts: readonly NodeCreateClaimVerdict[];
 }>;
 
 /**
@@ -504,6 +579,88 @@ function claimInsertParams(
     key: claim.entry.key,
     nodeId: claim.item.id,
     concreteKind: claim.item.kind,
+  };
+}
+
+function placedNodeCreateClaims(
+  ctx: Pick<NodeClaimContext, "graphId" | "registry">,
+  items: readonly NodeClaimItem[],
+): readonly PlacedClaim[] {
+  return items.flatMap((item) =>
+    nodeClaimEntries(
+      ctx.registry,
+      item.kind,
+      item.id,
+      item.props,
+      item.constraints,
+      "create",
+    ).map((entry) => ({
+      item,
+      entry,
+      target: claimTarget(ctx.graphId, entry),
+    })),
+  );
+}
+
+/**
+ * Resolves one create's claims once for either the atomic plan or fallback
+ * seam. The returned list preserves the claim-site placement decision and the
+ * same canonical target order standalone claim statements use.
+ */
+export function planNodeCreateClaims(
+  ctx: Pick<NodeClaimContext, "graphId" | "registry">,
+  item: NodeClaimItem,
+): NodeCreateClaimPlan {
+  const placed = placedNodeCreateClaims(ctx, [item]).toSorted((left, right) => {
+    if (left.entry.placement !== right.entry.placement) {
+      return left.entry.placement === "pre-insert" ? -1 : 1;
+    }
+    return compareClaimTargets(left.target, right.target);
+  });
+  const verdicts = placed.map((claim) => {
+    const baseClaim = {
+      axis: claim.entry.axis,
+      constraintName: claim.entry.constraintName,
+      key: claim.entry.key,
+      placement: claim.entry.placement,
+    };
+    if (claim.entry.refusal.kind === "uniqueness") {
+      const probeKinds = uniquenessProbeKinds(
+        claim.item.kind,
+        claim.entry.refusal.constraint.scope,
+        ctx.registry,
+      );
+      return {
+        claim: {
+          ...baseClaim,
+          verdict: {
+            kind: "uniqueness" as const,
+            probeAxes: probeKinds,
+            fields: claim.entry.refusal.constraint.fields,
+          },
+        } satisfies NodeInsertClaim,
+        probeKinds,
+        disjointOtherKind: undefined,
+        refusal: claim.entry.refusal,
+      } satisfies NodeCreateClaimVerdict;
+    }
+    return {
+      claim: {
+        ...baseClaim,
+        verdict: {
+          kind: "disjointness" as const,
+          conflictingKinds: [claim.entry.refusal.otherKind],
+        },
+      } satisfies NodeInsertClaim,
+      probeKinds: [],
+      disjointOtherKind: claim.entry.refusal.otherKind,
+      refusal: claim.entry.refusal,
+    } satisfies NodeCreateClaimVerdict;
+  });
+  return {
+    entries: placed.map((claim) => claim.entry),
+    claims: verdicts.map((verdict) => verdict.claim),
+    verdicts,
   };
 }
 
@@ -627,20 +784,7 @@ async function withNodeCreateClaimsIssuedBy<T>(
     backend,
     ctx.uniqueSidecarBatch,
   );
-  const claims = items.flatMap((item) =>
-    nodeClaimEntries(
-      ctx.registry,
-      item.kind,
-      item.id,
-      item.props,
-      item.constraints,
-      "create",
-    ).map((entry) => ({
-      item,
-      entry,
-      target: claimTarget(ctx.graphId, entry),
-    })),
-  );
+  const claims = placedNodeCreateClaims(ctx, items);
 
   const refusal = claimFenceRefusal(
     ctx,
