@@ -612,9 +612,13 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     const usesFusedCardinalityInsert =
       usesGuardedCardinalityClaim &&
       target.insertEdgeIfEndpointsLiveWithCardinalityClaim !== undefined;
+    // The match-key lookup above was derived from this transaction target
+    // while the graph convergence fence is held. Once it reports no match,
+    // endpoint existence is the only remaining pre-insert read, so let the
+    // existing endpoint-predicate INSERT remove those two RTTs even though
+    // this create leg carries a convergence guard.
     const canFuseEndpointCheck =
       input.id === undefined &&
-      convergeOn === undefined &&
       (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
       (target.insertEdgeIfEndpointsLive !== undefined ||
         usesFusedCardinalityInsert ||
