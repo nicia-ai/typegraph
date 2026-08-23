@@ -108,10 +108,7 @@ describe("fresh node + fulltext write fusion", () => {
   it("dispatches the root generated-ID path through the fused member", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const [store] = await createStoreWithSchema(graph, fixture.backend);
-    requireDefined(
-      fixture.backend.executeNodeCreatePlan,
-      "projection member",
-    );
+    requireDefined(fixture.backend.executeNodeCreatePlan, "projection member");
     const spy = vi.spyOn(fixture.backend, "executeNodeCreatePlan");
     const transactionSpy = vi.spyOn(fixture.backend, "transaction");
 
