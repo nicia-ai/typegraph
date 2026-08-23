@@ -300,6 +300,8 @@ async function main(argv: readonly string[]): Promise<void> {
       : { sqliteStorage: options.sqliteStorage }),
       scale: options.scale,
       userCount: 0,
+      warmupIterations: WARMUP_ITERATIONS,
+      sampleIterations: SAMPLE_ITERATIONS,
       latencies,
     });
     console.log(`\nappended run to ${historyPath}`);

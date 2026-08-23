@@ -24,6 +24,8 @@ type HistoryEntry = Readonly<{
   sqliteStorage?: SqliteStorage;
   scale: number;
   userCount: number;
+  warmupIterations: number;
+  sampleIterations: number;
   latencies: Readonly<
     Record<string, Readonly<{ median: number; p95: number }>>
   >;
@@ -67,6 +69,8 @@ type WriteHistoryInput = Readonly<{
   sqliteStorage?: SqliteStorage;
   scale: number;
   userCount: number;
+  warmupIterations: number;
+  sampleIterations: number;
   latencies: LatencyRecord;
 }>;
 
@@ -84,6 +88,8 @@ export function writeHistoryEntry(input: WriteHistoryInput): string {
     : { sqliteStorage: input.sqliteStorage }),
     scale: input.scale,
     userCount: input.userCount,
+    warmupIterations: input.warmupIterations,
+    sampleIterations: input.sampleIterations,
     latencies: serializeLatencies(input.latencies),
   };
   return appendHistoryLine(entry);

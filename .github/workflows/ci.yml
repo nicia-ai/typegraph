@@ -433,6 +433,59 @@ jobs:
       - name: Run Durable Objects SQLite tests (workerd)
         run: pnpm --filter @nicia-ai/typegraph test:do
 
+  size-budget:
+    name: Size budget
+    runs-on: ubuntu-24.04
+    needs: [detect-release-metadata-push]
+    if: ${{ needs.detect-release-metadata-push.outputs.skip_heavy_ci != 'true' }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run size budget check
+        run: pnpm test:size
+
+  perf-lane-advisory:
+    name: Perf lane advisory
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Advisory only this phase — see docs/TESTING.md's "Performance timing
+      # lane (EC2)" section. Deliberately NOT added to build.needs: the
+      # EC2 timing lane this points to runs on its own schedule/label/dispatch
+      # triggers, never as a blocking PR gate.
+      - name: Determine perf-lane advisory verdict
+        shell: bash
+        env:
+          # Never interpolate these directly into the `run:` script below:
+          # LABELS_JSON carries attacker-influenced PR label text (a label
+          # containing a single quote would break out of a `'...'`-quoted
+          # `${{ }}` substitution), so every value crosses the trust boundary
+          # through `env:` and is read back as a shell variable instead.
+          LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          labels_csv="$(echo "$LABELS_JSON" | jq -r 'join(",")')"
+          verdict="$(.github/scripts/perf-lane-advisory.sh "$BASE_SHA" "$HEAD_SHA" "$labels_csv")"
+          echo "### Perf timing lane advisory: \`$verdict\`" >> "$GITHUB_STEP_SUMMARY"
+
   build-artifacts:
     name: Build artifacts
     runs-on: ubuntu-24.04
@@ -478,6 +531,7 @@ jobs:
       - test-typescript-compat
       - test-postgres
       - test-durable-objects
+      - size-budget
     if: >-
       ${{
         !cancelled() &&

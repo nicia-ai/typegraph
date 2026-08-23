@@ -21,6 +21,13 @@ const config: KnipConfig = {
         "examples/**/*.ts",
         "test-d/**/*.ts",
         "type-smoke/**/*.ts",
+        // `scripts/size-budget/index.ts` is already an entry via its
+        // `test:size` package.json script, but knip only parses a file's
+        // imports (and therefore its dependency usage) when the file is
+        // also within `project` — an entry outside `project` is registered
+        // as reachable but not examined. Without this, `esbuild` (imported
+        // by `measure.ts`, several hops from the entry) reads as unused.
+        "scripts/size-budget/*.ts",
       ],
       ignore: [
         "**/test-utils.ts",
