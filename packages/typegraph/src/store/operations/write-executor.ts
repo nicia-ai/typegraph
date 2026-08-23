@@ -39,6 +39,7 @@ import {
   runHookedWriteOperation,
   runInWriteTransaction,
   type WriteTransactionContext,
+  type WriteTransactionMode,
   type WriteTransactionOptions,
 } from "./write-transaction";
 
@@ -81,6 +82,16 @@ export type WritePlanOptions<T> = Omit<
   "fencesConstraintProbe"
 >;
 
+/** Classifies a successful command whose contract guarantees a mutation. */
+export function writeResultAlwaysChanges(): boolean {
+  return true;
+}
+
+/** Classifies a command that returns its authoritative mutation verdict. */
+export function booleanWriteResultChanges(result: boolean): boolean {
+  return result;
+}
+
 /**
  * Mints a second session for THIS write frame over a READ OVERLAY of its
  * target: the frame's own handle, answering some reads from a pending-aware
@@ -121,6 +132,7 @@ export type WriteRowWork<K extends RowWorkKind, T> = (
   target: WriteTarget,
   overlaidSession: OverlaidSessionMint<K>,
   lock: GraphWriteLock,
+  transactionMode: WriteTransactionMode,
 ) => Promise<T>;
 
 /**
@@ -140,6 +152,7 @@ function planFrame<K extends RowWorkKind, T>(
   return async (
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
+    transactionMode: WriteTransactionMode,
   ): Promise<T> => {
     if (plan.requiresIdentityLock) {
       const acquireIdentityLock = requireDefined(
@@ -167,6 +180,7 @@ function planFrame<K extends RowWorkKind, T>(
       target,
       mintOverlaidSession,
       lock,
+      transactionMode,
     );
   };
 }
@@ -240,16 +254,20 @@ export function runAutocommitSingleStatementWritePlan<K extends RowWorkKind, T>(
   rowWork: WriteRowWork<K, T>,
   fallbackOptions?: WritePlanOptions<T>,
 ): Promise<T> {
-  return ctx.withOperationHooks(opContext, async () => {
-    try {
-      return await planFrame(
-        ctx,
-        plan,
-        rowWork,
-      )(backend, uncapturedGraphWriteLock());
-    } catch (error) {
-      if (!(error instanceof AutocommitWriteRequiresTransaction)) throw error;
-      return runWritePlan(ctx, plan, backend, rowWork, fallbackOptions);
-    }
-  });
+  return ctx.withOperationHooks(
+    opContext,
+    async () => {
+      try {
+        return await planFrame(ctx, plan, rowWork)(
+          backend,
+          uncapturedGraphWriteLock(),
+          "none",
+        );
+      } catch (error) {
+        if (!(error instanceof AutocommitWriteRequiresTransaction)) throw error;
+        return runWritePlan(ctx, plan, backend, rowWork, fallbackOptions);
+      }
+    },
+    fallbackOptions?.didWrite,
+  );
 }

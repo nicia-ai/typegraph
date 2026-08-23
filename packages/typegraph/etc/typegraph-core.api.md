@@ -114,6 +114,12 @@ type EdgeIndexDirection = "out" | "in" | "none";
 export type EdgeKinds<G extends GraphDef> = keyof G["edges"] & string;
 
 // @public
+export type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
+    name: string;
+    fields: readonly (keyof z.infer<E["schema"]> & string)[];
+}>;
+
+// @public
 export type EdgeProps<E extends AnyEdgeType> = z.infer<E["schema"]>;
 
 // @public
@@ -123,6 +129,7 @@ export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes exte
     to: readonly ToTypes[];
     cardinality?: Cardinality;
     endpointExistence?: EndpointExistence;
+    matchIdentity?: EdgeMatchIdentity<E>;
 }>;
 
 // @public

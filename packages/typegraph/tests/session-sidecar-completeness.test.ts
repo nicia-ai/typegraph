@@ -186,6 +186,7 @@ const WATCHED_MEMBERS = [
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
+  "insertEdgesDurableBatchReturning",
   "updateEdge",
   "deleteEdge",
   "deleteEdgesBatch",
@@ -691,6 +692,26 @@ const CASES: Record<keyof WriteSession, Case> = {
     },
     sidecars: ["claimEdgeCardinalityBatch"],
     row: "insertEdgesBatchReturning",
+    preRow: ["claimEdgeCardinalityBatch"],
+    plan: EDGE_PLAN,
+  },
+  createEdgesDurable: {
+    run: async (raw) => {
+      await seed(raw, "durable");
+      const work = [
+        edgeInsertWork("edge-new-durable-1", "durable", "durable"),
+        edgeInsertWork("edge-new-durable-2", "durable", "durable-b"),
+      ].map((item) => ({
+        ...item,
+        params: {
+          ...item.params,
+          matchIdentity: { name: "owns-endpoints", key: item.params.id },
+        },
+      }));
+      return (session) => requireDefined(session.createEdgesDurable)(work);
+    },
+    sidecars: ["claimEdgeCardinalityBatch"],
+    row: "insertEdgesDurableBatchReturning",
     preRow: ["claimEdgeCardinalityBatch"],
     plan: EDGE_PLAN,
   },

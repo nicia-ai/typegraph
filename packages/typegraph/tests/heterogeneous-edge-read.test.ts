@@ -41,6 +41,37 @@ describe("resolveHeterogeneousEdgeRead", () => {
     ).toThrow(ConfigurationError);
   });
 
+  it("deduplicates and budgets exact directed pairs independently", () => {
+    const resolved = resolveHeterogeneousEdgeRead(
+      {
+        graphId: "graph",
+        side: "from",
+        endpoints: [
+          {
+            kind: "Person",
+            id: "hub",
+            opposite: { kind: "Person", id: "first" },
+          },
+          {
+            kind: "Person",
+            id: "hub",
+            opposite: { kind: "Person", id: "second" },
+          },
+          {
+            kind: "Person",
+            id: "hub",
+            opposite: { kind: "Person", id: "first" },
+          },
+        ],
+        edgeKinds: ["knows"],
+      },
+      13,
+    );
+
+    expect(resolved.endpoints).toHaveLength(2);
+    expect(resolved.endpointChunkSize).toBe(2);
+  });
+
   it("rejects an invalid per-endpoint cap", () => {
     expect(() =>
       resolveHeterogeneousEdgeRead(
@@ -54,5 +85,33 @@ describe("resolveHeterogeneousEdgeRead", () => {
         999,
       ),
     ).toThrow(ConfigurationError);
+  });
+
+  it("refuses mixed incident and exact-pair endpoint modes", () => {
+    expect(() =>
+      resolveHeterogeneousEdgeRead(
+        {
+          graphId: "graph",
+          side: "from",
+          endpoints: [
+            { kind: "Person", id: "hub" },
+            {
+              kind: "Person",
+              id: "hub",
+              opposite: { kind: "Person", id: "target" },
+            },
+          ],
+          edgeKinds: ["knows"],
+        },
+        999,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        details: {
+          code: "EDGE_HETEROGENEOUS_READ_MIXED_ENDPOINT_MODES",
+          graphId: "graph",
+        },
+      }),
+    );
   });
 });

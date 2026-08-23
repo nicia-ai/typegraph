@@ -57,6 +57,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   // beside, they create storage-level scaffolding and write no graph row, so
   // neither can bypass a capture flush.
   "ensureExtension",
+  "ensureEdgeMatchIdentityStorage",
   "ensureFulltextTable",
   "ensureIndexMaterializationsTable",
   "ensureKindRemovalsTable",
@@ -101,6 +102,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
+  "insertEdgesDurableBatchReturning",
   "insertNode",
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",

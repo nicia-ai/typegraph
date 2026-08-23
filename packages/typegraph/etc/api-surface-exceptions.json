@@ -26,17 +26,25 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -210,17 +218,25 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -394,17 +410,25 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -578,17 +602,25 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -762,17 +794,25 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -962,17 +1002,25 @@
   {
     "entrypoint": "typegraph-backend.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-backend.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -1202,17 +1250,25 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -1458,17 +1514,25 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -1714,17 +1778,25 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -1970,17 +2042,25 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -2226,17 +2306,25 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -2482,17 +2570,25 @@
   {
     "entrypoint": "typegraph-schema.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-schema.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -2738,17 +2834,25 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
@@ -2994,17 +3098,25 @@
   {
     "entrypoint": "typegraph.api.md",
     "declaration": "EdgeConvergenceMatch",
-    "member": "matchOn",
+    "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {
     "entrypoint": "typegraph.api.md",
-    "declaration": "EdgeConvergenceMatch",
-    "member": "props",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "key",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeMatchIdentityStorage",
+    "member": "name",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 durable edge identity makes the database arbiter authoritative across backend command implementations.",
     "issue": "#533"
   },
   {

@@ -174,10 +174,12 @@ import {
 import { isAutocommitSingleStatementWrite } from "./autocommit-single-statement";
 import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
+  booleanWriteResultChanges,
   type HookedWritePlanContext,
   runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
+  writeResultAlwaysChanges,
 } from "./write-executor";
 import { type NodeUpdateFences } from "./write-fences";
 import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
@@ -227,6 +229,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   withOperationHooks: <T>(
     ctx: OperationHookContext,
     fn: () => Promise<T>,
+    didWrite?: (result: T) => boolean,
   ) => Promise<T>;
   createBulkOperationContext: (
     operation: "updateWhere",
@@ -2074,6 +2077,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       plan,
       autocommitBackend,
       rowWork,
+      { didWrite: writeResultAlwaysChanges },
     );
   }
   return runHookedWritePlan(
@@ -2082,7 +2086,10 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     plan,
     backend,
     rowWork,
-    { schemaFenceInFirstWrite },
+    {
+      schemaFenceInFirstWrite,
+      didWrite: writeResultAlwaysChanges,
+    },
   );
 }
 
@@ -2163,6 +2170,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
         await identity.foldCreated(target, foldReferences(preparedCreates));
       }
     },
+    { didWrite: writeResultAlwaysChanges },
   );
 }
 
@@ -2231,6 +2239,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 
       return rows.map((row) => rowToNode(row));
     },
+    { didWrite: writeResultAlwaysChanges },
   );
 }
 
@@ -2297,6 +2306,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
       }
       return node;
     },
+    { didWrite: writeResultAlwaysChanges },
   );
 }
 
@@ -2509,6 +2519,7 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       }
       return node;
     },
+    { didWrite: writeResultAlwaysChanges },
   );
 }
 
@@ -2532,7 +2543,7 @@ export async function executeNodeDelete<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  return runHookedWritePlan(
+  await runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
     nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),
@@ -2545,7 +2556,7 @@ export async function executeNodeDelete<G extends GraphDef>(
       // props-derived constraint keys), and this in-transaction read is
       // the concurrency-correct source for it.
       const preflight = await target.getNode(ctx.graphId, kind, id);
-      if (!preflight || !isLiveNodeRow(preflight)) return;
+      if (!preflight || !isLiveNodeRow(preflight)) return false;
 
       // The cascade (connected edges, uniques, embeddings, fulltext, node) is
       // not individually atomic, so it runs in one write transaction. Under
@@ -2560,7 +2571,9 @@ export async function executeNodeDelete<G extends GraphDef>(
       if (identity !== undefined) {
         await identity.detachDeleted(target, { kind, id }, "soft");
       }
+      return true;
     },
+    { didWrite: booleanWriteResultChanges },
   );
 }
 

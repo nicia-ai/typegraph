@@ -8,6 +8,7 @@ import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
+  EdgeConvergenceMatch,
   EdgeExistsBetweenParams,
   FindEdgesConnectedToParams,
   HardDeleteEdgeParams,
@@ -25,7 +26,7 @@ import {
 } from "./shared";
 
 /**
- * Inputs for the PostgreSQL edge convergence statement.
+ * Inputs for the dialect-specific edge convergence statement.
  *
  * `matchOn` is deliberately a call-level key: it is validated against the
  * edge schema by the store before it reaches this backend seam. The statement
@@ -34,9 +35,10 @@ import {
  */
 export type ConvergeEdgeCreateParams = Readonly<{
   params: InsertEdgeParams;
-  matchOn: readonly string[];
-  matchProps: Record<string, unknown>;
+  match: EdgeConvergenceMatch;
   timestamp: string;
+  schemaFence?: SchemaWriteFenceParams;
+  schemaLockClause?: SQL;
 }>;
 
 function qualifiedColumn(
@@ -117,7 +119,8 @@ export function buildInsertEdge(
     VALUES (
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(params.matchIdentity?.name)}, ${sqlNull(params.matchIdentity?.key)},
+      ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
     RETURNING *
@@ -150,7 +153,8 @@ export function buildInsertEdgeIfEndpointsLive(
     SELECT
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(params.matchIdentity?.name)}, ${sqlNull(params.matchIdentity?.key)},
+      ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     FROM ${nodeTable} AS "from_node"
     CROSS JOIN ${nodeTable} AS "to_node"
@@ -169,16 +173,15 @@ export function buildInsertEdgeIfEndpointsLive(
  * row mappers ignore it while the command executor can distinguish `found`
  * from `created` without a second round trip.
  *
- * This builder is PostgreSQL-specific because SQLite stores `props` as text.
- * It is not included in the common strategy, so a caller must explicitly
- * select the portable transaction fallback when this member is absent.
+ * The dialect adapter owns the JSON match predicate, so both bundled SQL
+ * engines consume this common statement shape.
  */
 export function buildConvergeEdgeCreate(
   tables: Tables,
   input: ConvergeEdgeCreateParams,
 ): SQL {
   const { edges, nodes } = tables;
-  const { params, matchOn, matchProps, timestamp } = input;
+  const { params, match, timestamp } = input;
   const propsJson = JSON.stringify(params.props);
   const columns = edgeColumnList(edges);
   const edgeTable = quotedTableName(getTableName(edges));
@@ -194,6 +197,51 @@ export function buildConvergeEdgeCreate(
   const edgeCreatedAt = qualifiedColumn("candidate", edges.createdAt);
   const edgeId = qualifiedColumn("candidate", edges.id);
 
+  if (match.kind === "durable") {
+    const matchIdentityName = sql.identifier(edges.matchIdentityName.name);
+    const matchIdentityKey = sql.identifier(edges.matchIdentityKey.name);
+    const schemaFenceJoin =
+      input.schemaFence === undefined ? sql`` :
+        sql`
+          CROSS JOIN (
+            SELECT ${tables.schemaVersions.version}
+            FROM ${tables.schemaVersions}
+            WHERE ${tables.schemaVersions.graphId} = ${input.schemaFence.graphId}
+              AND ${tables.schemaVersions.version} = ${input.schemaFence.expectedVersion}
+              AND ${tables.schemaVersions.isActive} = TRUE
+            ${input.schemaLockClause ?? sql``}
+          ) AS "schema_fence"
+        `;
+    return sql`
+      INSERT INTO ${edges} (${columns})
+      SELECT
+        ${params.graphId}, ${params.id}, ${params.kind},
+        ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
+        ${propsJson}, ${match.identity.name}, ${match.identity.key},
+        ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+        ${timestamp}, ${timestamp}
+      FROM (SELECT 1 AS present) AS "candidate_write"
+      ${schemaFenceJoin}
+      WHERE EXISTS (
+        SELECT 1
+        FROM ${nodeTable} AS "from_node"
+        CROSS JOIN ${nodeTable} AS "to_node"
+        WHERE ${buildLiveEndpointPredicate(nodes, params)}
+      ) OR EXISTS (
+        SELECT 1
+        FROM ${edges} AS "identity_owner"
+        WHERE ${qualifiedColumn("identity_owner", edges.graphId)} = ${params.graphId}
+          AND ${qualifiedColumn("identity_owner", edges.kind)} = ${params.kind}
+          AND ${qualifiedColumn("identity_owner", edges.matchIdentityName)} = ${match.identity.name}
+          AND ${qualifiedColumn("identity_owner", edges.matchIdentityKey)} = ${match.identity.key}
+      )
+      ON CONFLICT (${sql.identifier(edges.graphId.name)}, ${sql.identifier(edges.kind.name)}, ${matchIdentityName}, ${matchIdentityKey})
+      DO UPDATE SET ${matchIdentityKey} = excluded.${matchIdentityKey}
+      WHERE ${edges.id} <> ${params.id}
+      RETURNING *, CASE WHEN ${edges.id} = ${params.id} THEN 1 ELSE 0 END AS write_discriminator
+    `;
+  }
+
   return sql`
     WITH existing AS MATERIALIZED (
       SELECT "candidate".*, 0::integer AS write_discriminator
@@ -204,7 +252,7 @@ export function buildConvergeEdgeCreate(
         AND ${edgeFromId} = ${params.fromId}
         AND ${edgeToKind} = ${params.toKind}
         AND ${edgeToId} = ${params.toId}
-        AND ${buildMatchKeyPredicate(edgeProps, matchOn, matchProps)}
+        AND ${buildMatchKeyPredicate(edgeProps, match.matchOn, match.props)}
       ORDER BY ${edgeDeletedAt} IS NULL DESC, ${edgeCreatedAt} DESC, ${edgeId} DESC
       LIMIT 1
     ),
@@ -213,7 +261,8 @@ export function buildConvergeEdgeCreate(
       SELECT
         ${params.graphId}, ${params.id}, ${params.kind},
         ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-        ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+        ${propsJson}, ${sqlNull(params.matchIdentity?.name)}, ${sqlNull(params.matchIdentity?.key)},
+        ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
         ${timestamp}, ${timestamp}
       FROM ${nodeTable} AS "from_node"
       CROSS JOIN ${nodeTable} AS "to_node"
@@ -250,7 +299,8 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
     SELECT
       ${params.graphId}, ${params.id}, ${params.kind},
       ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${propsJson}, ${sqlNull(params.matchIdentity?.name)}, ${sqlNull(params.matchIdentity?.key)},
+      ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     FROM ${nodeTable} AS "from_node"
     CROSS JOIN ${nodeTable} AS "to_node"
@@ -276,18 +326,24 @@ export function buildInsertEdgeNoReturn(
   timestamp: string,
 ): SQL {
   const { edges } = tables;
-  const propsJson = JSON.stringify(params.props);
   const columns = edgeColumnList(edges);
 
   return sql`
     INSERT INTO ${edges} (${columns})
-    VALUES (
-      ${params.graphId}, ${params.id}, ${params.kind},
-      ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
-      ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
-      ${timestamp}, ${timestamp}
-    )
+    VALUES ${edgeInsertValue(params, timestamp)}
   `;
+}
+
+function edgeInsertValue(params: InsertEdgeParams, timestamp: string): SQL {
+  const propsJson = JSON.stringify(params.props);
+  return sql`(${params.graphId}, ${params.id}, ${params.kind}, ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId}, ${propsJson}, ${sqlNull(params.matchIdentity?.name)}, ${sqlNull(params.matchIdentity?.key)}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)}, ${timestamp}, ${timestamp})`;
+}
+
+function edgeInsertValues(
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+): SQL[] {
+  return params.map((edgeParams) => edgeInsertValue(edgeParams, timestamp));
 }
 
 /**
@@ -300,10 +356,7 @@ export function buildInsertEdgesBatch(
 ): SQL {
   const { edges } = tables;
   const columns = edgeColumnList(edges);
-  const values = params.map((edgeParams) => {
-    const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(edgeParams.validFrom, edgeParams.validTo, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
-  });
+  const values = edgeInsertValues(params, timestamp);
 
   return sql`
     INSERT INTO ${edges} (${columns})
@@ -321,14 +374,39 @@ export function buildInsertEdgesBatchReturning(
 ): SQL {
   const { edges } = tables;
   const columns = edgeColumnList(edges);
-  const values = params.map((edgeParams) => {
-    const propsJson = JSON.stringify(edgeParams.props);
-    return sql`(${edgeParams.graphId}, ${edgeParams.id}, ${edgeParams.kind}, ${edgeParams.fromKind}, ${edgeParams.fromId}, ${edgeParams.toKind}, ${edgeParams.toId}, ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(edgeParams.validFrom, edgeParams.validTo, timestamp))}, ${sqlNull(edgeParams.validTo)}, ${timestamp}, ${timestamp})`;
-  });
+  const values = edgeInsertValues(params, timestamp);
 
   return sql`
     INSERT INTO ${edges} (${columns})
     VALUES ${sql.join(values, sql`, `)}
+    RETURNING *
+  `;
+}
+
+/**
+ * Builds one durable-identity batch insert. Identity conflicts are deliberately
+ * ignored and omitted from RETURNING; the store maps those omissions to the
+ * typed durable-identity refusal, while primary-key conflicts still reach the
+ * normal duplicate-key classifier.
+ */
+export function buildInsertEdgesDurableBatchReturning(
+  tables: Tables,
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+): SQL {
+  const { edges } = tables;
+  const columns = edgeColumnList(edges);
+  const values = edgeInsertValues(params, timestamp);
+
+  return sql`
+    INSERT INTO ${edges} (${columns})
+    VALUES ${sql.join(values, sql`, `)}
+    ON CONFLICT (
+      ${sql.identifier(edges.graphId.name)},
+      ${sql.identifier(edges.kind.name)},
+      ${sql.identifier(edges.matchIdentityName.name)},
+      ${sql.identifier(edges.matchIdentityKey.name)}
+    ) DO NOTHING
     RETURNING *
   `;
 }

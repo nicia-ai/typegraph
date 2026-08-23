@@ -240,6 +240,8 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
         ${params.graphId}, ${params.id}, ${params.kind},
         ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
         ${propsJson},
+        ${sqlNull(params.matchIdentity?.name)},
+        ${sqlNull(params.matchIdentity?.key)},
         ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))},
         ${sqlNull(params.validTo)}, ${timestamp}, ${timestamp}
       FROM live_endpoints

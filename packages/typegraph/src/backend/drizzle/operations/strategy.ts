@@ -92,6 +92,7 @@ import {
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
+  buildInsertEdgesDurableBatchReturning,
   buildUpdateEdge,
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
@@ -235,8 +236,10 @@ export type CommonOperationStrategy = Readonly<{
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
-  /** PostgreSQL single-statement match-key convergence. */
+  /** Single-statement match-key convergence. */
   buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
+  /** Whether the builder may inspect dynamic JSON match fields. */
+  dynamicEdgeConvergence: boolean;
   /** PostgreSQL transaction-only claim + endpoint + edge write. */
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (
     params: InsertEdgeParams,
@@ -249,6 +252,10 @@ export type CommonOperationStrategy = Readonly<{
     timestamp: string,
   ) => SQL;
   buildInsertEdgesBatchReturning: (
+    params: readonly InsertEdgeParams[],
+    timestamp: string,
+  ) => SQL;
+  buildInsertEdgesDurableBatchReturning: (
     params: readonly InsertEdgeParams[],
     timestamp: string,
   ) => SQL;
@@ -285,7 +292,7 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildFindEdgesByHeterogeneousEndpointSet: (
     params: FindEdgesByHeterogeneousEndpointSetParams,
-    endpoints: readonly Readonly<{ kind: string; id: string }>[],
+    endpoints: FindEdgesByHeterogeneousEndpointSetParams["endpoints"],
     edgeKinds: readonly string[],
   ) => SQL;
   buildCountEdgesByKind: (params: CountEdgesByKindParams) => SQL;
@@ -649,6 +656,11 @@ function createCommonOperationStrategy(
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    buildConvergeEdgeCreate: (params) =>
+      buildConvergeEdgeCreate(tables, params),
+    buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
+      buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
+    dynamicEdgeConvergence: dialect === "postgres",
     primaryKeyConstraints: {
       nodes: nodePrimaryKeyConstraint(tables.nodes),
       edges: edgePrimaryKeyConstraint(tables.edges),
@@ -878,8 +890,6 @@ export function createPostgresOperationStrategy(
         claim,
         timestamp,
       ),
-    buildConvergeEdgeCreate: (params) =>
-      buildConvergeEdgeCreate(tables, params),
     buildLockSchemaVersionAndGraphWrite: (params, advisoryLockNamespace) =>
       buildLockSchemaVersionAndGraphWrite(
         tables,

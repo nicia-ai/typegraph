@@ -197,13 +197,33 @@ function sqliteErrorCode(link: unknown): unknown {
 }
 
 /**
+ * SQLite driver messages normalized independently of transport decoration.
+ * Native SQLite usually returns the engine text alone, while libSQL prefixes
+ * that same text with its symbolic result code. Classifiers compare the
+ * canonical engine message so every SQLite error shape has one owner.
+ */
+function sqliteErrorMessage(link: unknown): string | undefined {
+  const message = messageProperty(link);
+  const code = sqliteErrorCode(link);
+  if (
+    typeof message === "string" &&
+    typeof code === "string" &&
+    code.startsWith("SQLITE_") &&
+    message.startsWith(`${code}: `)
+  ) {
+    return message.slice(code.length + 2);
+  }
+  return message;
+}
+
+/**
  * Cloudflare D1 / Durable Objects may surface a missing-table failure as the
  * generic SQLite code with no detail. Accept the bare marker, but do not
  * substring-match detailed `SQLITE_ERROR: ...` failures: those include syntax
  * errors and bind-limit faults that must stay loud.
  */
 function isBareSqliteErrorMarker(link: unknown): boolean {
-  const message = messageProperty(link);
+  const message = sqliteErrorMessage(link);
   if (message === SQLITE_GENERIC_ERROR_CODE) return true;
   if (sqliteErrorCode(link) !== SQLITE_GENERIC_ERROR_CODE) return false;
   return (
@@ -331,6 +351,8 @@ const POSTGRES_RELATION_FIELDS = ["table", "table_name"] as const;
  */
 const SQLITE_PRIMARY_KEY_VIOLATION_CODE = "SQLITE_CONSTRAINT_PRIMARYKEY";
 const SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE = 1555;
+const SQLITE_UNIQUE_VIOLATION_CODE = "SQLITE_CONSTRAINT_UNIQUE";
+const SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE = 2067;
 const SQLITE_EXTENDED_CODE_FIELDS = ["rawCode", "extendedCode"] as const;
 
 /**
@@ -341,6 +363,8 @@ const SQLITE_EXTENDED_CODE_FIELDS = ["rawCode", "extendedCode"] as const;
 export type PrimaryKeyRelation = Readonly<{
   table: string;
   constraintNames: readonly string[];
+  /** SQLite/libSQL's remote protocol reports the violated key by columns. */
+  sqliteColumns: readonly string[];
 }>;
 
 function firstStringField(
@@ -376,11 +400,15 @@ function isPostgresPrimaryKeyViolation(
 }
 
 /**
- * Whether SQLite reported this link as a PRIMARY KEY duplicate. The relation is
- * not checked because SQLite does not report one — see
- * {@link isDuplicatePrimaryKeyError} for why the call site supplies that scope.
+ * Whether SQLite reported this link as a PRIMARY KEY duplicate. Native SQLite
+ * reports an extended code; remote libSQL reports only the generic constraint
+ * code and the complete violated-column message, so the relation's columns
+ * are also checked for that transport shape.
  */
-function isSqlitePrimaryKeyViolation(link: object): boolean {
+function isSqlitePrimaryKeyViolation(
+  link: object,
+  relation: PrimaryKeyRelation,
+): boolean {
   if (Reflect.get(link, "code") === SQLITE_PRIMARY_KEY_VIOLATION_CODE) {
     return true;
   }
@@ -393,7 +421,12 @@ function isSqlitePrimaryKeyViolation(link: object): boolean {
       return true;
     }
   }
-  return false;
+  if (Reflect.get(link, "code") !== "SQLITE_CONSTRAINT") return false;
+  const message = sqliteErrorMessage(link);
+  const expectedColumns = relation.sqliteColumns
+    .map((column) => `${relation.table}.${column}`)
+    .join(", ");
+  return message === `UNIQUE constraint failed: ${expectedColumns}`;
 }
 
 /**
@@ -428,7 +461,102 @@ export function isDuplicatePrimaryKeyError(
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     if (isPostgresPrimaryKeyViolation(link, relation)) return true;
-    if (isSqlitePrimaryKeyViolation(link)) return true;
+    if (isSqlitePrimaryKeyViolation(link, relation)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the engine reported a duplicate of one unique index.
+ *
+ * PostgreSQL identifies the index directly. SQLite exposes only its extended
+ * result code and ordered column list, so both must match; the result code by
+ * itself would misclassify every other unique index on the relation.
+ */
+export function isDuplicateUniqueIndexError(
+  error: unknown,
+  relation: Readonly<{
+    table: string;
+    indexName: string;
+    sqliteColumns: readonly string[];
+  }>,
+): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    if (
+      Reflect.get(link, "code") === POSTGRES_UNIQUE_VIOLATION_CODE &&
+      firstStringField(link, POSTGRES_RELATION_FIELDS) === relation.table &&
+      firstStringField(link, POSTGRES_CONSTRAINT_FIELDS) === relation.indexName
+    ) {
+      return true;
+    }
+    const isSqliteUniqueViolation =
+      Reflect.get(link, "code") === SQLITE_UNIQUE_VIOLATION_CODE ||
+      Reflect.get(link, "code") === "SQLITE_CONSTRAINT" ||
+      SQLITE_EXTENDED_CODE_FIELDS.some(
+        (field) =>
+          Reflect.get(link, field) === SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE,
+      );
+    const message = sqliteErrorMessage(link);
+    const expectedColumns = relation.sqliteColumns
+      .map((column) => `${relation.table}.${column}`)
+      .join(", ");
+    if (
+      isSqliteUniqueViolation &&
+      message === `UNIQUE constraint failed: ${expectedColumns}`
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a durable convergence statement proved that the adapter's static
+ * capability declaration has not been provisioned in this database yet.
+ *
+ * This predicate is intentionally consumed only by the durable convergence
+ * command, whose conflict target and two identity columns are known. SQLSTATE
+ * 42P10 structurally identifies a missing PostgreSQL conflict arbiter; the
+ * remaining messages are SQLite's only structured-enough reports for the same
+ * missing index/column states.
+ */
+export function isEdgeMatchIdentityStorageUnavailableError(
+  error: unknown,
+): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    if (code === "42P10") return true;
+    const message = sqliteErrorMessage(link);
+    if (code === "42703") {
+      const column = firstStringField(link, ["column"]);
+      if (column === "match_identity_name" || column === "match_identity_key") {
+        return true;
+      }
+      if (
+        typeof message === "string" &&
+        /\bmatch_identity_(?:name|key)\b/i.test(message)
+      ) {
+        return true;
+      }
+    }
+    if (typeof message !== "string") continue;
+    if (
+      code === "SQLITE_ERROR" &&
+      message ===
+        "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"
+    ) {
+      return true;
+    }
+    if (
+      code === "SQLITE_ERROR" &&
+      /^(?:no such column: (?:[^.]+\.)?|table .+ has no column named |no column named )match_identity_(?:name|key)$/.test(
+        message,
+      )
+    ) {
+      return true;
+    }
   }
   return false;
 }

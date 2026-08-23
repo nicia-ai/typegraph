@@ -245,6 +245,14 @@ export function asEdgeId<E extends AnyEdgeType = AnyEdgeType>(
  */
 export type EdgeProps<E extends AnyEdgeType> = z.infer<E["schema"]>;
 
+/**
+ * The graph-local fields that identify an edge for durable matching.
+ */
+export type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
+  name: string;
+  fields: readonly (keyof z.infer<E["schema"]> & string)[];
+}>;
+
 // ============================================================
 // Configuration Types
 // ============================================================
@@ -367,6 +375,7 @@ export type EdgeRegistration<
   to: readonly ToTypes[];
   cardinality?: Cardinality;
   endpointExistence?: EndpointExistence;
+  matchIdentity?: EdgeMatchIdentity<E>;
 }>;
 
 // ============================================================

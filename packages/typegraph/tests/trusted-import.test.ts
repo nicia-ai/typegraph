@@ -64,6 +64,20 @@ const identityTrustedGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
+const edgeMatchTrustedGraph = defineGraph({
+  id: "trusted_import_edge_match_test",
+  nodes: { TrustedPerson: { type: Person } },
+  edges: {
+    trustedKnows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      cardinality: "many",
+      matchIdentity: { name: "trusted-since", fields: ["since"] },
+    },
+  },
+});
+
 function graphData(
   nodes: GraphData["nodes"],
   edges: GraphData["edges"] = [],
@@ -237,6 +251,39 @@ describe("trusted import", () => {
       [],
     );
     expect(indexes?.[0]?.index_count).toBeGreaterThan(0);
+  });
+
+  it("persists the declared edge match identity", async () => {
+    const backend = createTestBackend();
+    const store = createStore(edgeMatchTrustedGraph, backend);
+    await trustedImportGraph(
+      store,
+      graphData(
+        [
+          { kind: "TrustedPerson", id: "alice", properties: { name: "A" } },
+          { kind: "TrustedPerson", id: "bob", properties: { name: "B" } },
+        ],
+        [
+          {
+            kind: "trustedKnows",
+            id: "knows-1",
+            from: { kind: "TrustedPerson", id: "alice" },
+            to: { kind: "TrustedPerson", id: "bob" },
+            properties: { since: 2020 },
+          },
+        ],
+      ),
+    );
+
+    const rows = await backend.executeRaw?.<{
+      match_identity_key: string | undefined;
+      match_identity_name: string | undefined;
+    }>(
+      `SELECT match_identity_name, match_identity_key FROM typegraph_edges WHERE graph_id = ? AND id = ?`,
+      [edgeMatchTrustedGraph.id, "knows-1"],
+    );
+    expect(rows?.[0]?.match_identity_name).toBe("trusted-since");
+    expect(rows?.[0]?.match_identity_key).toEqual(expect.any(String));
   });
 
   it("rolls back data and index changes when a later chunk fails", async () => {

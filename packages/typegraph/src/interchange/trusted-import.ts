@@ -1,3 +1,4 @@
+import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import { snapshotExportContention } from "../backend/transaction-resource";
 import type {
   InsertEdgeParams,
@@ -8,7 +9,9 @@ import type {
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
+import type { EdgeRegistration } from "../core/types";
 import { TrustedImportError } from "../errors";
+import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { isCanonicalIsoDate, isInvertedValidityWindow } from "../utils/date";
@@ -30,6 +33,14 @@ export type TrustedImportResult = Readonly<{
 function rejectUnsupportedStoreFeatures<G extends GraphDef>(
   store: Store<G>,
 ): void {
+  const backend = storeBackend(store);
+  for (const [kind, registration] of Object.entries(store.graph.edges)) {
+    assertEdgeMatchIdentityBackendSupport(
+      registration.matchIdentity,
+      backend.capabilities,
+      kind,
+    );
+  }
   if (store.historyEnabled) {
     throw new TrustedImportError(
       "Trusted import does not support recorded-time history capture.",
@@ -201,7 +212,22 @@ function nodeParams(graphId: string, node: InterchangeNode): InsertNodeParams {
   };
 }
 
-function edgeParams(graphId: string, edge: InterchangeEdge): InsertEdgeParams {
+function edgeParams(
+  graphId: string,
+  edge: InterchangeEdge,
+  registration: EdgeRegistration,
+): InsertEdgeParams {
+  const matchIdentity = resolveEdgeMatchIdentityStorage(
+    registration.matchIdentity,
+    {
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props: edge.properties,
+    },
+    { graphId, edgeKind: edge.kind },
+  );
   return {
     graphId,
     id: edge.id,
@@ -211,6 +237,7 @@ function edgeParams(graphId: string, edge: InterchangeEdge): InsertEdgeParams {
     toKind: edge.to.kind,
     toId: edge.to.id,
     props: edge.properties,
+    ...(matchIdentity === undefined ? {} : { matchIdentity }),
     ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
     ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),
   };
@@ -338,7 +365,13 @@ async function consumeTrustedChunks<G extends GraphDef>(
           );
         }
         await session.insertEdges(
-          chunk.edges.map((edge) => edgeParams(store.graphId, edge)),
+          chunk.edges.map((edge) =>
+            edgeParams(
+              store.graphId,
+              edge,
+              store.graph.edges[edge.kind] as EdgeRegistration,
+            ),
+          ),
         );
         edgeCount += chunk.edges.length;
         break;

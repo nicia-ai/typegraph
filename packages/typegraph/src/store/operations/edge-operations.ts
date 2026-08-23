@@ -87,6 +87,7 @@ import {
   assertGraphCommandConvergenceIsolation,
   executeAuthoritativeGraphCommand,
 } from "../../backend/command-contract";
+import { assertEdgeMatchIdentityBackendSupport } from "../../backend/edge-match-identity";
 import {
   type ClaimEdgeCardinalityParams,
   type EdgeConvergeCreateCommand,
@@ -108,8 +109,10 @@ import {
 } from "../../core/types";
 import {
   CardinalityError,
+  CompilerInvariantError,
   ConfigurationError,
   DatabaseOperationError,
+  EdgeMatchIdentityConflictError,
   EdgeNotFoundError,
   EndpointNotFoundError,
   KindNotFoundError,
@@ -130,6 +133,7 @@ import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
+  claimEdgeCardinality,
   edgeCardinalityClaim,
   edgeCardinalityClaimMode,
 } from "../claims/edge-claims";
@@ -144,6 +148,14 @@ import {
   type ConstraintFenceReason,
   edgeWriteNeedsConstraintFence,
 } from "../constraints";
+import { classifyDurableEdgeBatchOutcomes } from "../durable-edge-batch";
+import {
+  buildEdgeMatchKey,
+  canonicalPersistedJsonValue,
+  edgeMatchIdentityUpdateRefusal,
+  normalizePersistedEdgeMatchProps,
+  resolveEdgeMatchIdentityStorage,
+} from "../edge-match-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
@@ -179,6 +191,7 @@ import {
   runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
+  writeResultAlwaysChanges,
 } from "./write-executor";
 import {
   assertsStoredWindowState,
@@ -188,6 +201,7 @@ import { edgeWritePlan } from "./write-plan";
 import {
   type EdgeInsertWork,
   type EdgeWriteSession,
+  nestedManagedWriteTarget,
   unfencedTarget,
   type WriteTarget,
 } from "./write-session";
@@ -240,6 +254,7 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
   withOperationHooks: <T>(
     ctx: OperationHookContext,
     fn: () => Promise<T>,
+    didWrite?: (result: T) => boolean,
   ) => Promise<T>;
 }>;
 
@@ -295,6 +310,7 @@ function buildInsertEdgeParams(
   props: Record<string, unknown>,
   validFrom: string | undefined,
   validTo: string | undefined,
+  matchIdentity?: Readonly<{ name: string; key: string }>,
 ): InsertEdgeParams {
   const insertParams: {
     graphId: string;
@@ -307,6 +323,7 @@ function buildInsertEdgeParams(
     props: Record<string, unknown>;
     validFrom?: string;
     validTo?: string;
+    matchIdentity?: Readonly<{ name: string; key: string }>;
   } = {
     graphId,
     id,
@@ -319,6 +336,7 @@ function buildInsertEdgeParams(
   };
   if (validFrom !== undefined) insertParams.validFrom = validFrom;
   if (validTo !== undefined) insertParams.validTo = validTo;
+  if (matchIdentity !== undefined) insertParams.matchIdentity = matchIdentity;
   return insertParams;
 }
 
@@ -339,6 +357,11 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   // Validate kind exists and get registration
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
+  assertEdgeMatchIdentityBackendSupport(
+    registration.matchIdentity,
+    backend.capabilities,
+    kind,
+  );
 
   // Validate endpoint types
   const endpointError = validateEdgeEndpoints(
@@ -367,6 +390,17 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     kind,
     operation: "create",
   });
+  const matchIdentity = resolveEdgeMatchIdentityStorage(
+    registration.matchIdentity,
+    {
+      fromKind,
+      fromId: input.fromId,
+      toKind,
+      toId: input.toId,
+      props: validatedProps,
+    },
+    { graphId: ctx.graphId, edgeKind: kind },
+  );
 
   // Validate temporal fields
   const validFrom = validateOptionalCanonicalIsoDate(
@@ -415,6 +449,7 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
       validatedProps,
       validFrom,
       validTo,
+      matchIdentity,
     ),
   };
 }
@@ -486,41 +521,27 @@ function edgeCardinality<G extends GraphDef>(
  * The only way the promise survives two concurrent callers is for the lookup
  * that decides "create" and the INSERT it authorizes to happen under one
  * per-graph mutual exclusion, so the create leg re-runs the lookup here, inside
- * the fence, and reports a race rather than inserting a duplicate.
+ * the fence, and returns the incumbent rather than inserting a duplicate.
  */
 type EdgeConvergenceGuard = Readonly<{
   matchOn: readonly string[];
   props: Record<string, unknown>;
 }>;
 
-/**
- * A guarded create leg that found a competitor's edge under the fence.
- *
- * THROWN rather than returned, and that choice is the whole point: the leg is
- * wrapped in operation hooks and a write transaction, and both of them read
- * "did this operation do what it said" from whether the body threw. Returning a
- * "nothing happened" value instead left `onOperationEnd` reporting a successful
- * create for an id no row carries, and left the revision clock advancing for a
- * write that never occurred. Throwing routes the abort through `onError` — the
- * same report the pre-existing `CardinalityError` retry has always produced for
- * a losing attempt — and skips the clock advance by construction rather than by
- * a `didWrite` predicate that a later edit could forget to pass.
- *
- * Never escapes {@link executeEdgeGetOrCreateByEndpoints}: the convergence loop
- * is the only caller that sets the guard, and it is the only code that catches
- * this.
- */
-class EdgeConvergenceRaced extends Error {
-  readonly row: BackendEdgeRow;
+type EdgeCreateInternalResult =
+  | Readonly<{ outcome: "created"; edge: Edge | undefined }>
+  | Readonly<{ outcome: "found"; edge: Edge; row: BackendEdgeRow }>;
 
-  constructor(kind: string, row: BackendEdgeRow) {
-    super(
-      `A competing writer claimed the ${kind} match key; re-resolving it. ` +
-        `This is internal to getOrCreateByEndpoints and is never returned to a caller.`,
-    );
-    this.name = "EdgeConvergenceRaced";
-    this.row = row;
-  }
+function createdEdgeResult(edge: Edge | undefined): EdgeCreateInternalResult {
+  return { outcome: "created", edge };
+}
+
+function foundEdgeResult(row: BackendEdgeRow): EdgeCreateInternalResult {
+  return { outcome: "found", edge: rowToEdge(row), row };
+}
+
+function edgeCreateDidWrite(result: EdgeCreateInternalResult): boolean {
+  return result.outcome === "created";
 }
 
 /** A dispatcher-selected edge no longer carries the requested match key. */
@@ -535,17 +556,17 @@ class EdgeMatchKeyMoved extends Error {
 }
 
 /**
- * Reads the transaction target's candidate rows and turns an incumbent match
- * into the internal convergence signal. Both portable convergence paths use
- * this one lookup so they keep identical live-over-tombstone selection.
+ * Reads the transaction target's candidate rows. Both portable convergence
+ * paths use this one lookup so they keep identical live-over-tombstone
+ * selection.
  */
-async function throwIfConvergenceMatch(
+async function findConvergenceMatch(
   target: Pick<GraphReadBackend, "findEdgesByKind">,
   graphId: string,
   kind: string,
   input: Pick<CreateEdgeInput, "fromKind" | "fromId" | "toKind" | "toId">,
   convergeOn: EdgeConvergenceGuard,
-): Promise<void> {
+): Promise<BackendEdgeRow | undefined> {
   const candidateRows = await target.findEdgesByKind({
     graphId,
     kind,
@@ -562,9 +583,35 @@ async function throwIfConvergenceMatch(
     convergeOn.props,
   );
   const matchedRow = liveRow ?? deletedRow;
-  if (matchedRow !== undefined) {
-    throw new EdgeConvergenceRaced(kind, matchedRow);
+  return matchedRow;
+}
+
+/**
+ * A durable direct create with the incumbent's explicit id is intentionally
+ * omitted by the identity upsert's `DO UPDATE ... WHERE` clause. That keeps a
+ * same-id incumbent distinguishable from a newly inserted row, but the
+ * resulting empty RETURNING set is otherwise indistinguishable from a failed
+ * endpoint predicate. Re-read the id only in that refusal case and preserve
+ * the public durable-identity conflict contract (including tombstones).
+ */
+async function durableIdentityIdConflict(
+  target: Pick<GraphReadBackend, "getEdge">,
+  graphId: string,
+  id: string,
+  identity: Readonly<{ name: string; key: string }>,
+  kind: string,
+): Promise<EdgeMatchIdentityConflictError | undefined> {
+  const row = await target.getEdge(graphId, id);
+  if (
+    row?.kind === kind &&
+    row.match_identity_name === identity.name &&
+    row.match_identity_key === identity.key
+  ) {
+    return new EdgeMatchIdentityConflictError({
+      attempted: [{ id, identityName: identity.name, kind }],
+    });
   }
+  return undefined;
 }
 
 /**
@@ -577,20 +624,34 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   options?: Readonly<{
     returnRow?: boolean;
     convergeOn?: EdgeConvergenceGuard;
+    /** Batch callers deliberately skip per-item operation hooks. */
+    skipHooks?: boolean;
   }>,
-): Promise<Edge | undefined> {
+): Promise<EdgeCreateInternalResult> {
   const kind = input.kind;
   const id = input.id ?? generateId();
+  const registration = getEdgeRegistration(ctx.graph, kind);
+  // Refuse on the caller-visible backend before a write plan can replace it
+  // with a transaction target whose capability declaration came from the
+  // underlying adapter. A derived backend is allowed to narrow capabilities;
+  // opening its delegated transaction must not silently widen them again.
+  assertEdgeMatchIdentityBackendSupport(
+    registration.matchIdentity,
+    backend.capabilities,
+    kind,
+  );
   const opContext = ctx.createOperationContext("create", "edge", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
   const convergeOn = options?.convergeOn;
+  const durableConvergence =
+    convergeOn !== undefined && registration.matchIdentity !== undefined;
   const schemaFenceInFirstWrite =
     ctx.schemaVersion !== undefined &&
     isSchemaFencedInsertEligible(backend) &&
     backend.capabilities.transactions &&
     !ctx.historyEnabled &&
     !ctx.revisionTrackingEnabled &&
-    convergeOn === undefined &&
+    (convergeOn === undefined || durableConvergence) &&
     edgeCardinality(ctx, kind) === "many";
   const autocommitBackend = "transaction" in backend ? backend : undefined;
   const autocommitSingleStatement =
@@ -604,12 +665,12 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         historyEnabled: ctx.historyEnabled,
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
         kindRegistered: true,
-        convergesOnMatchKey: convergeOn !== undefined,
+        convergesDynamically: convergeOn !== undefined && !durableConvergence,
         cardinality: edgeCardinality(ctx, kind),
       },
     });
   const plan = edgeWritePlan(
-    convergeOn === undefined ?
+    convergeOn === undefined || durableConvergence ?
       edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
     : "edgeMatchKeyConvergence",
   );
@@ -619,7 +680,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     target: WriteTarget,
     _overlaidSession: OverlaidSessionMint<"edge">,
     lock: GraphWriteLock,
-  ): Promise<Edge | undefined> => {
+  ): Promise<EdgeCreateInternalResult> => {
     // See node create's matching receiver check: a custom transaction
     // wrapper may replace the marked outer backend with an unmarked target.
     // Fall back to the ordinary fence before any row work in that case.
@@ -631,6 +692,24 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
+    const diagnoseFusedCreateNoRow = async (
+      validateCardinality: boolean,
+    ): Promise<EdgeCreatePrepared> => {
+      if (fuseSchemaFenceInFirstWrite) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+        if (autocommitSingleStatement && "transaction" in targetBackend) {
+          throw new AutocommitWriteRequiresTransaction();
+        }
+        // Endpoint predicates can reject the INSERT before PostgreSQL
+        // evaluates the nested locking subquery. Re-establish the portable
+        // fence before the ordered fallback probes or a later leased write.
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
+      return validateAndPrepareEdgeCreate(ctx, input, id, target, {
+        validateEndpoints: true,
+        validateCardinality,
+      });
+    };
 
     const declaredCardinality = edgeCardinality(ctx, kind);
     const usesGuardedCardinalityClaim =
@@ -652,33 +731,86 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     // guard.
     const canFuseEndpointCheck =
       declaredCardinality === "many" || usesGuardedCardinalityClaim;
+    const durableIdentityArbitratedCreate =
+      registration.matchIdentity !== undefined;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
       validateEndpoints: convergeOn === undefined && !canFuseEndpointCheck,
       validateCardinality:
-        !usesGuardedCardinalityClaim && !delaysCardinalityProbe,
+        !durableIdentityArbitratedCreate &&
+        !usesGuardedCardinalityClaim &&
+        !delaysCardinalityProbe,
     });
 
     // A converging create owns both the match-key read and the endpoint
-    // predicate in one semantic backend command. A matched row is returned
-    // through the command result and converted to the internal raced signal;
-    // throwing here keeps the create transaction and its success hook from
-    // reporting a write that did not happen. The outer convergence loop then
-    // consumes that row directly, without a cache-backed root re-read.
+    // predicate in one semantic backend command. A matched row becomes the
+    // explicit `found` result consumed by the hook/revision decision and the
+    // outer convergence loop. No caller re-derives that decision, and no
+    // expected found result travels through error hooks or a cache-backed root
+    // re-read.
     //
-    // Keep the old fenced lookup as an explicit fallback for a backend that
-    // does not implement this command yet. This is intentionally structural:
-    // the command is the preferred path, while unsupported dimensions retain
-    // the existing correctness behavior during backend rollout.
-    if (convergeOn !== undefined) {
+    // Keep the old fenced lookup as an explicit fallback for dynamic matching
+    // on a backend that does not implement this command yet. Durable identity
+    // cannot take that fallback: its write plan delegates arbitration to the
+    // database key and therefore owns no graph lock. A port that declares the
+    // durable capability but refuses its command must fail closed instead of
+    // racing a lookup with an uncoordinated insert.
+    // A durable identity is the database's arbiter for every create shape,
+    // including constrained kinds. Cardinality claims are a separate
+    // application-owned axis; the graph fence already held by this plan
+    // makes the probe and the durable command one serialized decision. Do not
+    // skip the identity command merely because this row also owes a claim:
+    // doing so lets a missing identity index turn a constrained create into a
+    // successful duplicate.
+    if (convergeOn !== undefined || durableIdentityArbitratedCreate) {
+      if (
+        durableIdentityArbitratedCreate &&
+        convergeOn !== undefined &&
+        declaredCardinality !== "many"
+      ) {
+        // A get-or-create that already has its endpoint/match winner must
+        // resolve that winner before the cardinality probe: cardinality is a
+        // create-only decision, and rejecting the found leg would regress
+        // resurrection/found semantics. The graph fence makes this lookup and
+        // the following durable command one serialized decision.
+        const matchedRow = await findConvergenceMatch(
+          target,
+          ctx.graphId,
+          kind,
+          input,
+          convergeOn,
+        );
+        if (matchedRow !== undefined) {
+          return foundEdgeResult(matchedRow);
+        }
+        prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+          validateEndpoints: !canFuseEndpointCheck,
+          validateCardinality: true,
+        });
+      }
       const work = edgeInsertWork(prepared);
-      if (work.claim === undefined) {
+      const durableMatchIdentity = work.params.matchIdentity;
+      if (work.claim === undefined || durableMatchIdentity !== undefined) {
         const command: EdgeConvergeCreateCommand = {
           kind: "edge.converge-create",
-          plan: { entity: "edge", params: work.params },
-          match: convergeOn,
+          plan: {
+            entity: "edge",
+            params: work.params,
+            ...(fuseSchemaFenceInFirstWrite ?
+              {
+                schemaFence: {
+                  graphId: ctx.graphId,
+                  expectedVersion: requireDefined(ctx.schemaVersion),
+                },
+              }
+            : {}),
+          },
+          match:
+            durableMatchIdentity === undefined ?
+              { kind: "dynamic", ...requireDefined(convergeOn) }
+            : { kind: "durable", identity: durableMatchIdentity },
         };
         const result =
-          lock.coordination === undefined ?
+          lock.coordination === undefined && command.match.kind === "dynamic" ?
             {
               outcome: "unsupported" as const,
               entity: "edge" as const,
@@ -688,37 +820,121 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               executeAuthoritativeGraphCommand(
                 target.commands,
                 command,
-                lock.coordination,
+                lock.coordination ?? "none",
               ),
             );
         assertCommandResultMatchesCommand(command, result);
         if (result.outcome === "created") {
-          return rowToEdge(result.row);
+          // Durable identity and cardinality are separate authorities. The
+          // converge command owns the former; retain the latter's claim row
+          // in the same transaction after the edge exists. If claiming
+          // refuses, the surrounding write frame rolls the command back.
+          if (durableMatchIdentity !== undefined && work.claim !== undefined) {
+            await claimEdgeCardinality(target, ctx.claimsVerdict(), work.claim);
+          }
+          return createdEdgeResult(rowToEdge(result.row));
         }
         if (result.outcome === "found") {
-          assertEdgeMatchKey(result.row, convergeOn.matchOn, convergeOn.props);
-          throw new EdgeConvergenceRaced(kind, result.row);
+          if (command.match.kind === "dynamic") {
+            assertEdgeMatchKey(
+              result.row,
+              command.match.matchOn,
+              command.match.props,
+            );
+          } else if (
+            result.row.match_identity_name !== command.match.identity.name ||
+            result.row.match_identity_key !== command.match.identity.key
+          ) {
+            throw new CompilerInvariantError(
+              "A durable edge convergence command returned a different match identity.",
+              { kind, id, identity: command.match.identity },
+            );
+          }
+          if (convergeOn === undefined) {
+            if (command.match.kind !== "durable") {
+              throw new CompilerInvariantError(
+                "A direct durable edge create constructed a dynamic convergence command.",
+                { kind, id },
+              );
+            }
+            throw new EdgeMatchIdentityConflictError({
+              attempted: [
+                {
+                  id,
+                  identityName: command.match.identity.name,
+                  kind,
+                },
+              ],
+            });
+          }
+          return foundEdgeResult(result.row);
         }
         if (result.outcome === "unsupported") {
-          await throwIfConvergenceMatch(
+          if (command.match.kind === "durable") {
+            throw new ConfigurationError(
+              "Backend declares durable edge match identity support but refuses the convergence command.",
+              {
+                code: "DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED",
+                capability: "durableEdgeMatchIdentity",
+                graphId: ctx.graphId,
+                edgeKind: kind,
+              },
+              {
+                suggestion:
+                  "Implement edge.converge-create atomically or declare durableEdgeMatchIdentity as unsupported.",
+              },
+            );
+          }
+          const matchedRow = await findConvergenceMatch(
             target,
             ctx.graphId,
             kind,
             input,
-            convergeOn,
+            requireDefined(convergeOn),
           );
+          if (matchedRow !== undefined) {
+            return foundEdgeResult(matchedRow);
+          }
         }
-      } else {
+        if (
+          result.outcome === "rejected" &&
+          command.match.kind === "durable" &&
+          convergeOn === undefined
+        ) {
+          const identityConflict = await durableIdentityIdConflict(
+            target,
+            ctx.graphId,
+            id,
+            command.match.identity,
+            kind,
+          );
+          if (identityConflict !== undefined) {
+            // The command's empty result can also mean a stale schema fence
+            // or a dead endpoint. Preserve those established diagnostics
+            // before translating the same-id durable-arbiter refusal.
+            await diagnoseFusedCreateNoRow(false);
+            throw identityConflict;
+          }
+        }
+        // A rejected fused statement returned no row because an endpoint
+        // predicate or schema fence did not hold. This is deliberately not a
+        // create refusal by itself: the ordinary fused write/diagnostic path
+        // below owns the typed errors and permits a concurrently revived
+        // endpoint.
+      } else if (convergeOn !== undefined) {
         // The current one-statement convergence builder does not own a
         // cardinality claim. Do the portable lookup before its cardinality
         // verdict instead of issuing a command known to return unsupported.
-        await throwIfConvergenceMatch(
+        const matchedRow = await findConvergenceMatch(
           target,
           ctx.graphId,
           kind,
           input,
           convergeOn,
         );
+        if (matchedRow !== undefined) {
+          return foundEdgeResult(matchedRow);
+        }
       }
 
       if (delaysCardinalityProbe) {
@@ -765,25 +981,12 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         if (fuseSchemaFenceInFirstWrite) {
           memoizeLeasedSchemaFence(ctx, targetBackend);
         }
-        return rowToEdge(fusedResult.row);
+        return createdEdgeResult(rowToEdge(fusedResult.row));
       }
 
-      if (fuseSchemaFenceInFirstWrite) {
-        await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
-        if (autocommitSingleStatement && "transaction" in targetBackend) {
-          throw new AutocommitWriteRequiresTransaction();
-        }
-        // Endpoint predicates can reject the INSERT before PostgreSQL
-        // evaluates the nested locking subquery. Re-establish the portable
-        // fence before the ordered fallback probes or a later leased write.
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
-      }
-
-      prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-        // A fused refusal has no row, so the ordered fallback owns the full
-        // portable cardinality diagnostic regardless of claim mode.
-        validateCardinality: true,
-      });
+      // A fused refusal has no row, so the ordered fallback owns the full
+      // portable cardinality diagnostic regardless of claim mode.
+      prepared = await diagnoseFusedCreateNoRow(true);
     }
 
     // An edge create has no existence probe at all — its id is either
@@ -806,7 +1009,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       return;
     });
 
-    return row === undefined ? undefined : rowToEdge(row);
+    return createdEdgeResult(row === undefined ? undefined : rowToEdge(row));
   };
 
   if (autocommitSingleStatement) {
@@ -816,11 +1019,21 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       plan,
       autocommitBackend,
       rowWork,
-      { schemaFenceInFirstWrite },
+      {
+        schemaFenceInFirstWrite,
+        didWrite: edgeCreateDidWrite,
+      },
     );
+  }
+  if (options?.skipHooks === true) {
+    return runWritePlan(ctx, plan, backend, rowWork, {
+      schemaFenceInFirstWrite,
+      didWrite: edgeCreateDidWrite,
+    });
   }
   return runHookedWritePlan(ctx, opContext, plan, backend, rowWork, {
     schemaFenceInFirstWrite,
+    didWrite: edgeCreateDidWrite,
   });
 }
 
@@ -832,16 +1045,22 @@ export async function executeEdgeCreate<G extends GraphDef>(
   input: CreateEdgeInput,
   backend: GraphBackend | TransactionBackend,
 ): Promise<Edge> {
-  const edge = await executeEdgeCreateInternal(ctx, input, backend, {
+  const result = await executeEdgeCreateInternal(ctx, input, backend, {
     returnRow: true,
   });
-  if (!edge) {
+  if (result.outcome !== "created") {
+    throw new CompilerInvariantError(
+      "A direct edge create unexpectedly returned a convergence incumbent.",
+      { kind: input.kind, id: input.id },
+    );
+  }
+  if (result.edge === undefined) {
     throw new DatabaseOperationError(
       "Edge create failed: expected created edge row",
       { operation: "insert", entity: "edge" },
     );
   }
-  return edge;
+  return result.edge;
 }
 
 /**
@@ -952,6 +1171,32 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
   return { preparedCreates, batchInsertWork };
 }
 
+/** Identity-conflicted rows are omitted by the authoritative batch RETURNING. */
+function assertDurableBatchRows(
+  work: readonly EdgeInsertWork[],
+  rows: readonly BackendEdgeRow[],
+): void {
+  const outcomes = classifyDurableEdgeBatchOutcomes(
+    work.map((item) => item.params),
+    rows,
+  );
+  const attempted = work.flatMap((item, index) => {
+    if (requireDefined(outcomes[index]) === "conflict") {
+      return [
+        {
+          id: item.params.id,
+          identityName: requireDefined(item.params.matchIdentity).name,
+          kind: item.params.kind,
+        },
+      ];
+    }
+    return [];
+  });
+  if (attempted.length > 0) {
+    throw new EdgeMatchIdentityConflictError({ attempted });
+  }
+}
+
 /**
  * Executes batched edge creates without returning inserted edge payloads.
  *
@@ -966,7 +1211,6 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   if (inputs.length === 0) {
     return;
   }
-
   await runWritePlan(
     ctx,
     edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
@@ -977,6 +1221,33 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
         inputs,
         target,
       );
+      const durableWork = batchInsertWork.filter(
+        (item) => item.params.matchIdentity !== undefined,
+      );
+      if (durableWork.length > 0) {
+        if (
+          durableWork.length !== batchInsertWork.length ||
+          target.insertEdgesDurableBatchReturning === undefined
+        ) {
+          for (const input of inputs) {
+            await executeEdgeCreateInternal(
+              ctx,
+              input,
+              nestedManagedWriteTarget(target),
+              {
+                returnRow: false,
+                skipHooks: true,
+              },
+            );
+          }
+          return;
+        }
+        const rows = await withAlreadyExistsTranslation("edge", () =>
+          requireDefined(session.createEdgesDurable)(batchInsertWork),
+        );
+        assertDurableBatchRows(batchInsertWork, rows);
+        return;
+      }
       await withAlreadyExistsTranslation("edge", () =>
         session.createEdgesNoReturn(batchInsertWork),
       );
@@ -1001,7 +1272,6 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) {
     return [];
   }
-
   return runWritePlan(
     ctx,
     edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
@@ -1012,6 +1282,45 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
         inputs,
         target,
       );
+
+      const durableWork = batchInsertWork.filter(
+        (item) => item.params.matchIdentity !== undefined,
+      );
+      if (durableWork.length > 0) {
+        if (
+          durableWork.length !== batchInsertWork.length ||
+          target.insertEdgesDurableBatchReturning === undefined
+        ) {
+          const fallbackRows: Edge[] = [];
+          for (const input of inputs) {
+            const result = await executeEdgeCreateInternal(
+              ctx,
+              input,
+              nestedManagedWriteTarget(target),
+              { returnRow: true, skipHooks: true },
+            );
+            if (result.outcome !== "created") {
+              throw new CompilerInvariantError(
+                "A bulk direct edge create unexpectedly returned a convergence incumbent.",
+                { kind: input.kind, id: input.id },
+              );
+            }
+            if (result.edge === undefined) {
+              throw new DatabaseOperationError(
+                "Edge create failed: expected created edge row",
+                { operation: "insert", entity: "edge" },
+              );
+            }
+            fallbackRows.push(result.edge);
+          }
+          return fallbackRows;
+        }
+        const rows = await withAlreadyExistsTranslation("edge", () =>
+          requireDefined(session.createEdgesDurable)(batchInsertWork),
+        );
+        assertDurableBatchRows(batchInsertWork, rows);
+        return rows.map((row) => rowToEdge(row));
+      }
 
       const rows = await withAlreadyExistsTranslation("edge", () =>
         session.createEdges(batchInsertWork),
@@ -1056,11 +1365,20 @@ function computeEdgeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ): Record<string, unknown> {
   const registration = getEdgeRegistration(ctx.graph, kind);
-  return validateEdgeProps(
+  const validatedProps = validateEdgeProps(
     registration.type.schema,
     { ...existingProps, ...inputProps },
     { kind, operation: "update", id },
   );
+  const identityRefusal = edgeMatchIdentityUpdateRefusal({
+    identity: registration.matchIdentity,
+    kind,
+    id,
+    beforeProps: existingProps,
+    afterProps: validatedProps,
+  });
+  if (identityRefusal !== undefined) throw identityRefusal;
+  return validatedProps;
 }
 
 /**
@@ -1416,6 +1734,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     backend,
     (session, target) =>
       performEdgeUpdateConverging(ctx, input, session, target),
+    { didWrite: writeResultAlwaysChanges },
   );
 }
 
@@ -1671,8 +1990,6 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
 // Get-Or-Create Operations
 // ============================================================
 
-const UNDEFINED_SENTINEL = "\u001D";
-
 /**
  * Validates that all `matchOn` fields exist in the edge schema shape.
  * Throws a ValidationError for invalid fields.
@@ -1714,62 +2031,25 @@ function validateMatchOnFields(
   }
 }
 
-/**
- * Serializes a value for composite key construction.
- * Sorts object keys for deterministic ordering of nested values.
- */
-function stableStringify(value: unknown): string {
-  if (value === undefined) return UNDEFINED_SENTINEL;
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+/** Resolves the one match-field set an edge kind is allowed to converge on. */
+function resolveEdgeMatchFields(
+  edgeKind: string,
+  declared: readonly string[] | undefined,
+  requested: readonly string[] | undefined,
+): readonly string[] {
+  if (declared === undefined) return requested ?? [];
+  if (requested === undefined) return declared;
+  const canonicalRequested = [...requested].toSorted();
+  if (
+    canonicalRequested.length === declared.length &&
+    canonicalRequested.every((field, index) => field === declared[index])
+  ) {
+    return declared;
   }
-  const sorted = Object.keys(value).toSorted();
-  const entries = sorted.map(
-    (key) =>
-      `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`,
+  throw new ConfigurationError(
+    `Edge kind "${edgeKind}" declares match identity fields [${declared.join(", ")}], but getOrCreateByEndpoints requested [${canonicalRequested.join(", ")}].`,
+    { edgeKind, declared, requested: canonicalRequested },
   );
-  return `{${entries.join(",")}}`;
-}
-
-/**
- * Converts validated edge properties to the representation the JSON column
- * will retain. Match decisions use this value on every backend, so values
- * transformed by JSON serialization (such as dates and nested `undefined`)
- * cannot make the portable matcher disagree with a database JSON predicate.
- */
-function persistedEdgeMatchProps(
-  props: Record<string, unknown>,
-): Record<string, unknown> {
-  const json = JSON.stringify(props);
-  return JSON.parse(json) as Record<string, unknown>;
-}
-
-/**
- * Builds a deterministic composite key for edge matching.
- *
- * Endpoints and sorted property-name/value pairs are encoded as one injective
- * string tuple, so legal control characters cannot collapse distinct edges.
- */
-function buildEdgeCompositeKey(
-  fromKind: string,
-  fromId: string,
-  toKind: string,
-  toId: string,
-  props: Record<string, unknown>,
-  matchOn: readonly string[],
-): string {
-  const sortedFields = [...matchOn].toSorted();
-  return encodeTupleKey([
-    fromKind,
-    fromId,
-    toKind,
-    toId,
-    ...sortedFields.flatMap((field) => [
-      field,
-      stableStringify(readOwnProperty(props, field)),
-    ]),
-  ]);
 }
 
 /**
@@ -1806,8 +2086,8 @@ function findMatchingEdge(
       const rowProps = rowPropsToObject(row.props);
       const matches = matchOn.every(
         (field) =>
-          stableStringify(readOwnProperty(rowProps, field)) ===
-          stableStringify(readOwnProperty(inputProps, field)),
+          canonicalPersistedJsonValue(readOwnProperty(rowProps, field)) ===
+          canonicalPersistedJsonValue(readOwnProperty(inputProps, field)),
       );
       if (!matches) continue;
     }
@@ -1862,7 +2142,7 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
   }>,
 ): Promise<Edge | undefined> {
   const matchOn = options?.matchOn ?? [];
-  const matchProps = persistedEdgeMatchProps(options?.props ?? {});
+  const matchProps = normalizePersistedEdgeMatchProps(options?.props ?? {});
 
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
@@ -1941,10 +2221,14 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
   const ifExists = options?.ifExists ?? "return";
-  const matchOn = options?.matchOn ?? [];
 
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
+  const matchOn = resolveEdgeMatchFields(
+    kind,
+    registration.matchIdentity?.fields,
+    options?.matchOn,
+  );
 
   assertValidityEndMutation(options ?? {}, { entityType: "edge", kind });
   if (options?.clearValidTo === true) {
@@ -1956,7 +2240,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     kind,
     operation: "create",
   });
-  const matchProps = persistedEdgeMatchProps(validatedProps);
+  const matchProps = normalizePersistedEdgeMatchProps(validatedProps);
 
   // Validate matchOn fields
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
@@ -2017,7 +2301,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // A root read is only a dispatcher hint. Confirm a positive result through
   // the transaction target before returning it; a cache may replay a stale
   // positive just as it may replay a stale empty result.
-  if (ifExists === "return") {
+  if (ifExists === "return" && registration.matchIdentity === undefined) {
     const probeRows = await findCandidates(backend);
     const { liveRow: probedLiveRow, deletedRow: probedDeletedRow } =
       findMatchingEdge(probeRows, matchOn, matchProps);
@@ -2128,6 +2412,40 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   async function attempt(
     forceTransactionRead: boolean,
   ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
+    if (registration.matchIdentity !== undefined && !forceTransactionRead) {
+      const createResult = await executeEdgeCreateInternal(
+        ctx,
+        {
+          kind,
+          fromKind,
+          fromId,
+          toKind,
+          toId,
+          props: validatedProps,
+          ...(validFrom !== undefined && { validFrom }),
+          ...(validTo !== undefined && { validTo }),
+        },
+        backend,
+        {
+          returnRow: true,
+          convergeOn: { matchOn, props: matchProps },
+        },
+      );
+      if (createResult.outcome === "found") {
+        return resolveMatchedRow(
+          createResult.row,
+          createResult.row.deleted_at !== undefined,
+        );
+      }
+      if (createResult.edge === undefined) {
+        throw new DatabaseOperationError(
+          "Durable edge convergence returned no row.",
+          { operation: "insert", entity: "edge" },
+        );
+      }
+      return { edge: createResult.edge, action: "created" };
+    }
+
     const retainedRead = initialCandidateRead;
     initialCandidateRead = undefined;
     const candidateRead =
@@ -2175,17 +2493,28 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
       };
-      const created = await executeEdgeCreateInternal(ctx, input, backend, {
-        returnRow: true,
-        convergeOn: { matchOn, props: matchProps },
-      });
-      if (created === undefined) {
+      const createResult = await executeEdgeCreateInternal(
+        ctx,
+        input,
+        backend,
+        {
+          returnRow: true,
+          convergeOn: { matchOn, props: matchProps },
+        },
+      );
+      if (createResult.outcome === "found") {
+        return resolveMatchedRow(
+          createResult.row,
+          createResult.row.deleted_at !== undefined,
+        );
+      }
+      if (createResult.edge === undefined) {
         throw new DatabaseOperationError(
           "Edge create failed: expected created edge row",
           { operation: "insert", entity: "edge" },
         );
       }
-      return { edge: created, action: "created" };
+      return { edge: createResult.edge, action: "created" };
     }
 
     if (liveRow !== undefined) return resolveMatchedRow(liveRow, false);
@@ -2196,10 +2525,9 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   }
 
   // Convergence loop. Under the fence a losing writer learns about the winner
-  // from its own in-transaction convergence command ({@link EdgeConvergenceRaced}) rather
-  // than from a constraint violation, so the ordinary path is one re-dispatch
-  // that uses the row the transaction just observed. The `CardinalityError`
-  // arm remains the
+  // from its own in-transaction convergence command rather than from a
+  // constraint violation, so the ordinary path uses the row the transaction
+  // just observed. The `CardinalityError` arm remains the
   // backstop for the paths the fence cannot cover — a competitor whose write is
   // not a `getOrCreateByEndpoints` at all.
   //
@@ -2209,20 +2537,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   let forceTransactionRead = false;
   for (let remaining = ATTEMPT_LIMIT; remaining > 0; remaining -= 1) {
     try {
-      try {
-        return await attempt(forceTransactionRead);
-      } catch (error) {
-        if (!(error instanceof EdgeConvergenceRaced)) throw error;
-
-        // The create command found this row through the transaction target. Do
-        // not re-dispatch through a caching root handle. Keep this recovery
-        // inside the outer attempt catch so a match key that moves before the
-        // update re-read consumes the same bounded retry budget.
-        return await resolveMatchedRow(
-          error.row,
-          error.row.deleted_at !== undefined,
-        );
-      }
+      return await attempt(forceTransactionRead);
     } catch (error) {
       if (
         error instanceof EdgeMatchKeyMoved ||
@@ -2234,6 +2549,19 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
               `and ${toKind} "${toId}" could not resolve a stable matching edge ` +
               `after ${String(ATTEMPT_LIMIT)} attempts; a concurrent writer ` +
               "keeps changing or deleting it. Retry the operation.",
+            { operation: "insert", entity: "edge" },
+            { cause: error },
+          );
+        }
+        forceTransactionRead = true;
+        continue;
+      }
+      if (error instanceof EdgeMatchIdentityConflictError) {
+        if (remaining === 1) {
+          throw new DatabaseOperationError(
+            `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
+              `and ${toKind} "${toId}" could not resolve the durable identity ` +
+              `owner after ${String(ATTEMPT_LIMIT)} attempts. Retry the operation.`,
             { operation: "insert", entity: "edge" },
             { cause: error },
           );
@@ -2278,10 +2606,14 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
   if (items.length === 0) return [];
 
   const ifExists = options?.ifExists ?? "return";
-  const matchOn = options?.matchOn ?? [];
 
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
+  const matchOn = resolveEdgeMatchFields(
+    kind,
+    registration.matchIdentity?.fields,
+    options?.matchOn,
+  );
 
   // Validate matchOn fields once
   validateMatchOnFields(edgeKind.schema, matchOn, kind);
@@ -2311,7 +2643,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       kind,
       operation: "create",
     });
-    const matchProps = persistedEdgeMatchProps(validatedProps);
+    const matchProps = normalizePersistedEdgeMatchProps(validatedProps);
     const validFrom = validateOptionalCanonicalIsoDate(
       item.validFrom,
       "validFrom",
@@ -2327,14 +2659,14 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       );
     }
 
-    const compositeKey = buildEdgeCompositeKey(
-      item.fromKind,
-      item.fromId,
-      item.toKind,
-      item.toId,
-      matchProps,
+    const compositeKey = buildEdgeMatchKey({
+      fromKind: item.fromKind,
+      fromId: item.fromId,
+      toKind: item.toKind,
+      toId: item.toId,
+      props: matchProps,
       matchOn,
-    );
+    });
     const endpointKey = buildEndpointPairKey(
       item.fromKind,
       item.fromId,
@@ -2383,6 +2715,60 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     reader: GraphReadBackend,
   ): Promise<ReadonlyMap<string, readonly BackendEdgeRow[]>> {
     const rowsByEndpoint = new Map<string, readonly BackendEdgeRow[]>();
+    const setRead = reader.findEdgesByHeterogeneousEndpointSet;
+    if (setRead !== undefined) {
+      for (const endpointKey of uniqueEndpoints.keys()) {
+        rowsByEndpoint.set(endpointKey, []);
+      }
+      const sourceEndpoints = new Map<
+        string,
+        Readonly<{
+          kind: string;
+          id: string;
+          opposite: Readonly<{ kind: string; id: string }>;
+        }>
+      >();
+      for (const endpoint of uniqueEndpoints.values()) {
+        sourceEndpoints.set(
+          buildEndpointPairKey(
+            endpoint.fromKind,
+            endpoint.fromId,
+            endpoint.toKind,
+            endpoint.toId,
+          ),
+          {
+            kind: endpoint.fromKind,
+            id: endpoint.fromId,
+            opposite: { kind: endpoint.toKind, id: endpoint.toId },
+          },
+        );
+      }
+      const rows = await setRead({
+        graphId: ctx.graphId,
+        side: "from",
+        endpoints: [...sourceEndpoints.values()],
+        edgeKinds: [kind],
+        excludeDeleted: false,
+        temporalMode: "includeTombstones",
+      });
+      const mutableRows = new Map<string, BackendEdgeRow[]>();
+      for (const row of rows) {
+        const endpointKey = buildEndpointPairKey(
+          row.from_kind,
+          row.from_id,
+          row.to_kind,
+          row.to_id,
+        );
+        if (!uniqueEndpoints.has(endpointKey)) continue;
+        const bucket = mutableRows.get(endpointKey) ?? [];
+        bucket.push(row);
+        mutableRows.set(endpointKey, bucket);
+      }
+      for (const [endpointKey, endpointRows] of mutableRows) {
+        rowsByEndpoint.set(endpointKey, endpointRows);
+      }
+      return rowsByEndpoint;
+    }
     for (const [endpointKey, endpoint] of uniqueEndpoints) {
       const rows = await reader.findEdgesByKind({
         graphId: ctx.graphId,
@@ -2572,7 +2958,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
         // emitted statements and revision numbers, which the no-behavior-change
         // invariant forbids. Every other escape is gone; this one is the
         // ratchet's stated floor, not migration debt.
-        const rawTarget = unfencedTarget(target);
+        const rawTarget = nestedManagedWriteTarget(target);
         const { toCreate, toFetch, duplicateOf } = partitionEntries(
           await fetchRowsByEndpoint(target),
         );

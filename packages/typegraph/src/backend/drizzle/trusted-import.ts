@@ -235,8 +235,8 @@ export function createSqliteTrustedImportSession(
     (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)
     VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)`;
   const edgeSql = `INSERT INTO ${quoteSqlIdentifier(tableNames.edges)}
-    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, match_identity_name, match_identity_key, valid_from, valid_to, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
   return {
     async insertNodes(params: readonly InsertNodeParams[]): Promise<void> {
@@ -271,6 +271,8 @@ export function createSqliteTrustedImportSession(
           item.toKind,
           item.toId,
           JSON.stringify(item.props),
+          item.matchIdentity?.name ?? DATABASE_NULL,
+          item.matchIdentity?.key ?? DATABASE_NULL,
           resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
             DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
@@ -295,16 +297,16 @@ export function createPostgresTrustedImportSession(
         $5::timestamptz[], $6::timestamptz[], $7::timestamptz[]
       ) AS imported(graph_id, kind, id, props, valid_from, valid_to, created_at)`;
   const edgeSql = `INSERT INTO ${quoteSqlIdentifier(tableNames.edges)}
-    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at)
+    (graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, match_identity_name, match_identity_key, valid_from, valid_to, created_at, updated_at)
     SELECT graph_id, id, kind, from_kind, from_id, to_kind, to_id, props::jsonb,
-           valid_from, valid_to, created_at, created_at
+           match_identity_name, match_identity_key, valid_from, valid_to, created_at, created_at
       FROM UNNEST(
         $1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
-        $6::text[], $7::text[], $8::text[], $9::timestamptz[],
-        $10::timestamptz[], $11::timestamptz[]
+        $6::text[], $7::text[], $8::text[], $9::text[], $10::text[],
+        $11::timestamptz[], $12::timestamptz[], $13::timestamptz[]
       ) AS imported(
         graph_id, id, kind, from_kind, from_id, to_kind, to_id, props,
-        valid_from, valid_to, created_at
+        match_identity_name, match_identity_key, valid_from, valid_to, created_at
       )`;
 
   return {
@@ -339,6 +341,12 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.toKind)),
         postgresArray(params.map((item) => item.toId)),
         postgresArray(params.map((item) => JSON.stringify(item.props))),
+        postgresArray(
+          params.map((item) => item.matchIdentity?.name ?? DATABASE_NULL),
+        ),
+        postgresArray(
+          params.map((item) => item.matchIdentity?.key ?? DATABASE_NULL),
+        ),
         postgresArray(
           params.map(
             (item) =>

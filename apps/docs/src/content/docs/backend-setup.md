@@ -81,13 +81,20 @@ const [store] = await createStoreWithSchema(graph, backend);
 process.on("exit", () => sqlite.close());
 ```
 
-If you need to run DDL yourself (e.g. via a migration tool), use
+For a fresh database whose DDL is managed externally, use
 `generateSqliteMigrationSQL()` with `createStore()` instead:
 
 ```typescript
 sqlite.exec(generateSqliteMigrationSQL());
 const store = createStore(graph, backend);
 ```
+
+The generated script is complete installation DDL, not an incremental upgrade
+planner. Existing databases must apply release-specific additive migrations
+through their migration tool. In particular, durable edge match identity adds
+two nullable edge columns, their pair check, and a unique index; the privileged
+`createStoreWithSchema()` path adopts that storage automatically before it
+publishes a schema declaration.
 
 ### SQLite with Vector Search
 
@@ -267,7 +274,7 @@ const backend = createPostgresBackend(db);
 const [store] = await createStoreWithSchema(graph, backend);
 ```
 
-If you manage DDL externally, use `generatePostgresMigrationSQL()` with `createStore()`:
+For a fresh database managed externally, use `generatePostgresMigrationSQL()` with `createStore()`:
 
 ```typescript
 import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
@@ -275,6 +282,12 @@ import { generatePostgresMigrationSQL } from "@nicia-ai/typegraph/adapters/drizz
 await pool.query(generatePostgresMigrationSQL());
 const store = createStore(graph, backend);
 ```
+
+As with SQLite, this is complete installation DDL rather than an incremental
+upgrade plan. Apply release-specific `ALTER TABLE` and index changes to an
+existing database, or let a privileged `createStoreWithSchema()` preparation
+adopt the durable edge match identity storage before runtime workers use
+`createStore()`.
 
 ### postgres-js
 
@@ -1170,7 +1183,7 @@ class needed the fence, because the way forward differs per class:
 | `details.constraint` | The write that needs the fence | Way forward without a transactional backend |
 | --- | --- | --- |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive` | Declare the edge `cardinality: "many"` and enforce the limit in application code |
-| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` (single or bulk) taking its create leg — the match key is backed by no database key | Use `create` with a caller-chosen id, whose uniqueness the edges primary key enforces |
+| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key | Declare the edge registration's durable `matchIdentity`, or use `create` with a caller-chosen id |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom | Drop the axiom and keep ids distinct across those kinds yourself |
 | `nodeUniquenessClaim` | **Updating or resurrecting** a node whose kind declares any unique constraint, of any scope — a transition reserves the new key *before* the row write it gates, and only a transaction can undo the pair together | Drop the constraint, or run updates on a transactional backend. Plain **creates** under a `scope: "kind"` unique are unaffected: their claim follows the row |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind | Scope the constraint to `"kind"`, which the uniques primary key enforces on its own |
@@ -1189,7 +1202,7 @@ Unconstrained writes on those backends are untouched and keep working exactly as
 before: a `cardinality: "many"` edge created, updated and deleted; any node
 delete, including one whose kind participates in a disjointness axiom (a delete
 re-derives no cross-kind verdict); a node whose uniques are all `scope: "kind"`;
-and a `getOrCreateByEndpoints` that *finds* an existing edge in the default
+and an undeclared `getOrCreateByEndpoints` that *finds* an existing edge in the default
 `ifExists: "return"` mode, or resurrects a `many` one — that resurrection is an
 id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
 enabled, confirming that a single `ifExists: "update"` endpoint replay is

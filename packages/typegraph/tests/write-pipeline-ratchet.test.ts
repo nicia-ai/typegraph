@@ -76,11 +76,11 @@ const RATCHET = {
    */
   managedWriteEntryPoints: 2,
   /**
-   * `unfencedTarget()` escapes — the typed hole that hands row work the full
-   * backend union back. Each remaining escape has a distinct contract owner in
-   * `UNFENCED_TARGET_ESCAPE_INVENTORY`; a fifth has no owner and fails here.
+   * Calls through either widening seam (`unfencedTarget` or the deliberately
+   * narrower `nestedManagedWriteTarget`). Each remaining escape has a contract
+   * owner in `UNFENCED_TARGET_ESCAPE_INVENTORY`.
    */
-  unfencedTargetEscapes: 4,
+  unfencedTargetEscapes: 7,
 } as const;
 
 /**
@@ -95,9 +95,9 @@ const RATCHET = {
 const UNFENCED_TARGET_ESCAPE_INVENTORY = [
   {
     file: "store/operations/edge-operations.ts",
-    count: 2,
+    count: 4,
     reason:
-      "the schema-fenced receiver check and bulk convergence executor re-entry",
+      "the schema-fenced receiver check and three nested managed-write re-entries",
   },
   {
     file: "store/operations/node-operations.ts",
@@ -106,8 +106,9 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
   },
   {
     file: "store/operations/write-session.ts",
-    count: 1,
-    reason: "the portable projection fallback's transaction check",
+    count: 2,
+    reason:
+      "the portable projection fallback's transaction check and the single nested managed-write re-entry owner",
   },
 ] as const;
 
@@ -116,7 +117,7 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * visible. Adding a member moves this number and forces the new member into a
  * class — which is the point: whoever adds it decides whether it is a write.
  */
-const MEMBER_COUNT = 121;
+const MEMBER_COUNT = 123;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 
@@ -266,10 +267,10 @@ function countManagedWriteEntryPoints(): number {
   return count;
 }
 
-function countUnfencedTargetCalls(file: string): number {
+function countWriteTargetWideningCallsInText(sourceText: string): number {
   const source = ts.createSourceFile(
-    file,
-    fs.readFileSync(file, "utf8"),
+    "source.ts",
+    sourceText,
     ts.ScriptTarget.ESNext,
     true,
   );
@@ -278,7 +279,8 @@ function countUnfencedTargetCalls(file: string): number {
     if (
       ts.isCallExpression(node) &&
       ts.isIdentifier(node.expression) &&
-      node.expression.text === "unfencedTarget"
+      (node.expression.text === "unfencedTarget" ||
+        node.expression.text === "nestedManagedWriteTarget")
     ) {
       count += 1;
     }
@@ -288,9 +290,13 @@ function countUnfencedTargetCalls(file: string): number {
   return count;
 }
 
-function countUnfencedTargetCallsInSourceTree(): number {
+function countWriteTargetWideningCalls(file: string): number {
+  return countWriteTargetWideningCallsInText(fs.readFileSync(file, "utf8"));
+}
+
+function countWriteTargetWideningCallsInSourceTree(): number {
   return collectTypeScriptFiles(SOURCE_ROOT)
-    .map((file) => countUnfencedTargetCalls(file))
+    .map((file) => countWriteTargetWideningCalls(file))
     .reduce((total, count) => total + count, 0);
 }
 
@@ -414,9 +420,9 @@ describe("write-pipeline ratchet", () => {
     );
   });
 
-  it("does not grow the counted `unfencedTarget` widening escapes", () => {
+  it("does not grow the counted write-target widening escapes", () => {
     // Definition and re-export excluded: only CALLS are escapes.
-    expect(countUnfencedTargetCallsInSourceTree()).toBeLessThanOrEqual(
+    expect(countWriteTargetWideningCallsInSourceTree()).toBeLessThanOrEqual(
       RATCHET.unfencedTargetEscapes,
     );
     expect(
@@ -426,10 +432,18 @@ describe("write-pipeline ratchet", () => {
       ),
     ).toBe(RATCHET.unfencedTargetEscapes);
     for (const entry of UNFENCED_TARGET_ESCAPE_INVENTORY) {
-      expect(countUnfencedTargetCalls(path.join(SOURCE_ROOT, entry.file))).toBe(
-        entry.count,
-      );
+      expect(
+        countWriteTargetWideningCalls(path.join(SOURCE_ROOT, entry.file)),
+      ).toBe(entry.count);
     }
+  });
+
+  it("counts both sanctioned widening seam names", () => {
+    expect(
+      countWriteTargetWideningCallsInText(
+        "unfencedTarget(target); nestedManagedWriteTarget(target);",
+      ),
+    ).toBe(2);
   });
 
   it("catches a violation the exemption list does not cover", () => {

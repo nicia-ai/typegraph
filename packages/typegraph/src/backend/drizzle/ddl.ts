@@ -18,6 +18,7 @@ import {
   type SQLiteTableWithColumns,
 } from "drizzle-orm/sqlite-core";
 
+import { systemIndexName } from "../../indexes/system";
 import {
   fts5Strategy,
   type FulltextStrategy,
@@ -42,6 +43,72 @@ type TimestampColumnConfig = Readonly<{
 type CustomColumnType = Readonly<{
   getSQLType?: () => string;
 }>;
+
+const EDGE_MATCH_IDENTITY_NAME_COLUMN = "match_identity_name";
+const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
+
+function quoteDdlIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+/** Identifier-preserving text accepted by PostgreSQL's `regclass` input. */
+export function postgresIdentifierRegclassName(identifier: string): string {
+  return quoteDdlIdentifier(identifier);
+}
+
+/** Names shared by schema DDL and the additive bootstrap upgrade. */
+export function edgeMatchIdentityUniqueIndexName(tableName: string): string {
+  return systemIndexName(tableName, "match_identity_uq");
+}
+
+export function edgeMatchIdentityPairCheckName(tableName: string): string {
+  return systemIndexName(tableName, "match_identity_pair_check");
+}
+
+/** Generates idempotent PostgreSQL DDL for adopting an existing edge table. */
+export function generatePostgresEdgeMatchIdentityUpgradeDDL(
+  tableName: string,
+): readonly string[] {
+  const table = quoteDdlIdentifier(tableName);
+  const nameColumn = quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN);
+  const keyColumn = quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN);
+  const checkName = edgeMatchIdentityPairCheckName(tableName);
+  const indexName = edgeMatchIdentityUniqueIndexName(tableName);
+  const escapedTableName = postgresIdentifierRegclassName(tableName).replaceAll(
+    "'",
+    "''",
+  );
+  return [
+    `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${nameColumn} TEXT;`,
+    `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${keyColumn} TEXT;`,
+    `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass('${escapedTableName}') AND conname = '${checkName.replaceAll("'", "''")}') THEN ALTER TABLE ${table} ADD CONSTRAINT ${quoteDdlIdentifier(checkName)} CHECK ((${nameColumn} IS NULL) = (${keyColumn} IS NULL)); END IF; END $$;`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(indexName)} ON ${table} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${nameColumn}, ${keyColumn});`,
+  ];
+}
+
+/**
+ * SQLite has no `ADD COLUMN IF NOT EXISTS`; the adapter checks PRAGMA
+ * table_info before running this statement. The pair check is placed on the
+ * second added column so old edge tables receive the invariant without a
+ * destructive table rebuild.
+ */
+export function generateSqliteEdgeMatchIdentityColumnDDL(
+  tableName: string,
+  column: "match_identity_name" | "match_identity_key",
+  withPairCheck = false,
+): string {
+  const pairCheck =
+    withPairCheck ?
+      ` CHECK ((${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)} IS NULL) = (${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)} IS NULL))`
+    : "";
+  return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
+}
+
+export function generateSqliteEdgeMatchIdentityIndexDDL(
+  tableName: string,
+): string {
+  return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
+}
 
 // ============================================================
 // SQLite DDL Generation
@@ -343,8 +410,8 @@ export function generateSqliteDDL(
 }
 
 /**
- * Generates a single SQL string for SQLite migrations.
- * Convenience function that joins all DDL statements.
+ * Generates complete SQLite installation DDL for a fresh database.
+ * This is not an incremental upgrade planner.
  */
 export function generateSqliteMigrationSQL(
   tables: SqliteTables = sqliteTables,
@@ -558,8 +625,8 @@ export function generatePostgresDDL(
 }
 
 /**
- * Generates a single SQL string for PostgreSQL migrations.
- * Convenience function that joins all DDL statements.
+ * Generates complete PostgreSQL installation DDL for a fresh database.
+ * This is not an incremental upgrade planner.
  *
  * Includes CREATE EXTENSION for pgvector since the per-`(kind, field)`
  * embedding tables `pgvectorStrategy` materializes at runtime use the

@@ -89,7 +89,11 @@ const EDGE_COMMAND: EdgeCreateCommand = {
 const EDGE_CONVERGE_COMMAND: EdgeConvergeCreateCommand = {
   kind: "edge.converge-create",
   plan: EDGE_COMMAND.plan,
-  match: { matchOn: ["label"], props: { label: "friend" } },
+  match: {
+    kind: "dynamic",
+    matchOn: ["label"],
+    props: { label: "friend" },
+  },
 };
 
 describe("command result correlation", () => {

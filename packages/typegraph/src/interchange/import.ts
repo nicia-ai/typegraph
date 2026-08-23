@@ -47,14 +47,19 @@
 import type { z } from "zod";
 
 import { bindExtraIfReachable } from "../backend/capabilities/bind";
-import type { UNIQUE_SIDECAR_BATCH } from "../backend/capabilities/bundle-registry";
+import type {
+  STATEMENT_EXECUTION,
+  UNIQUE_SIDECAR_BATCH,
+} from "../backend/capabilities/bundle-registry";
 import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
 import {
   batchPointReadVerdict,
   type BundleVerdictOf,
   createClaimsVerdictThunk,
+  statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
+import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import {
   acquireSerializedStreamLease,
   type SerializedStreamKind,
@@ -62,6 +67,7 @@ import {
   snapshotExportContention,
 } from "../backend/transaction-resource";
 import {
+  type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
   isLiveNodeRow,
@@ -85,6 +91,7 @@ import {
   ConfigurationError,
   DatabaseOperationError,
   DisjointError,
+  EdgeMatchIdentityConflictError,
   IdentityContradictionError,
   IMMUTABLE_VALIDITY_LOWER_BOUND_CODE,
   INVERTED_VALIDITY_WINDOW_CODE,
@@ -109,6 +116,11 @@ import {
   checkDisjointnessConstraint,
   graphOwesClaims,
 } from "../store/constraints";
+import { classifyDurableEdgeBatchOutcomes } from "../store/durable-edge-batch";
+import {
+  edgeMatchIdentityUpdateRefusal,
+  resolveEdgeMatchIdentityStorage,
+} from "../store/edge-match-key";
 import { createEdgeBatchValidationBackend } from "../store/operations/edge-batch-validation";
 import {
   createNodeBatchValidationSeams,
@@ -126,7 +138,11 @@ import {
   type WriteSession,
   type WriteTarget,
 } from "../store/operations/write-session";
-import { constraintFenceRefusal } from "../store/operations/write-transaction";
+import {
+  constraintFenceRefusal,
+  type WriteTransactionMode,
+} from "../store/operations/write-transaction";
+import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import {
@@ -136,6 +152,7 @@ import {
   type ValidityLowerBoundFence,
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
+import { requireDefined } from "../utils/presence";
 import { encodeTupleKey } from "../utils/tuple-key";
 import {
   type IngestionImportTarget,
@@ -283,11 +300,15 @@ export async function withImportStreamLease<G extends GraphDef, T>(
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
   target: WriteTarget;
+  allocateEdgeSavepoint: () => string;
+  transactionMode: WriteTransactionMode;
   overlaidSession: OverlaidSessionMint<"mixed">;
   /** Threaded `batchPointRead` verdict — resolved once, from `backend`. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /** Threaded `uniqueSidecarBatch` verdict — resolved once, from `backend`. */
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /** Threaded `statementExecution` verdict — resolved once, from `backend`. */
+  statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
 }>;
 
 async function importGraphData<G extends GraphDef>(
@@ -309,11 +330,14 @@ async function importGraphData<G extends GraphDef>(
   const backend = storeBackend(store);
   const runtime = storeRuntime(store);
   const registry = store.registry;
-  // Resolved ONCE, here, and threaded into the write-plan context and the
-  // frame every leg reads (ruling B8 spec item 2): no pilot bundle below has
-  // a `crossCheck`, so eager resolution cannot throw.
+  // Resolved ONCE against the caller-visible ROOT backend, then threaded into
+  // the write-plan context and every transaction frame (ruling B8 spec item
+  // 2). Never re-resolve against a transaction target: the verdict answers
+  // what the backend promises, while the binder separately proves that the
+  // actual port can serve that promise and fails loud on a mismatch.
   const batchPointRead = batchPointReadVerdict(backend);
   const uniqueSidecarBatch = uniqueSidecarBatchVerdict(backend);
+  const statementExecution = statementExecutionVerdict(backend);
 
   // Fenced or refused, before any write. An import writes claim rows like every
   // other writer, but it takes no per-graph lock and it is not covered by
@@ -334,6 +358,13 @@ async function importGraphData<G extends GraphDef>(
   // Build lookup maps for schema validation
   const nodeSchemas = buildNodeSchemaMap(graph);
   const edgeSchemas = buildEdgeSchemaMap(graph);
+  for (const [kind, entry] of edgeSchemas) {
+    assertEdgeMatchIdentityBackendSupport(
+      entry.registration.matchIdentity,
+      backend.capabilities,
+      kind,
+    );
+  }
 
   // Track imported node IDs for reference validation
   const importedNodeIds = new Set<string>();
@@ -366,13 +397,18 @@ async function importGraphData<G extends GraphDef>(
     // mixed family explicitly instead of receiving either narrower session.
     mixedWritePlan(undefined, true),
     backend,
-    async (session, target, overlaidSession) => {
+    async (session, target, overlaidSession, _lock, transactionMode) => {
+      let nextEdgeSavepointId = 0;
       const frame: ImportWriteFrame = {
         session,
         target,
+        allocateEdgeSavepoint: () =>
+          `typegraph_import_edge_row_${++nextEdgeSavepointId}`,
+        transactionMode,
         overlaidSession,
         batchPointRead,
         uniqueSidecarBatch,
+        statementExecution,
       };
       await processNodes(
         frame,
@@ -1596,7 +1632,8 @@ type PerRowGuardResult<T> =
  * propagates.
  *
  * The subject is the family of refusals a declared constraint produces —
- * uniqueness, disjointness and edge cardinality — rather than one class of it.
+ * uniqueness, disjointness, edge cardinality and durable edge identity —
+ * rather than one class of it.
  * A guard named for a single class is an invitation to forget the next family
  * that arrives, which is exactly how the disjointness gap this closes came
  * about: import gained a claim that could refuse a disjoint row and no per-row
@@ -1604,20 +1641,123 @@ type PerRowGuardResult<T> =
  * whole batch where the contract promises a refused ROW.
  */
 async function catchDeclaredConstraintRefusal<T>(
-  fn: () => Promise<T>,
+  fn: () => T | Promise<T>,
 ): Promise<PerRowGuardResult<T>> {
   try {
     return { ok: true, value: await fn() };
   } catch (error) {
-    if (
-      error instanceof UniquenessError ||
-      error instanceof DisjointError ||
-      error instanceof CardinalityError
-    ) {
+    if (isDeclaredConstraintRefusal(error)) {
       return { ok: false, error: error.message };
     }
     throw error;
   }
+}
+
+function isDeclaredConstraintRefusal(
+  error: unknown,
+): error is
+  | UniquenessError
+  | DisjointError
+  | CardinalityError
+  | EdgeMatchIdentityConflictError {
+  return (
+    error instanceof UniquenessError ||
+    error instanceof DisjointError ||
+    error instanceof CardinalityError ||
+    error instanceof EdgeMatchIdentityConflictError
+  );
+}
+
+function isEdgeMatchIdentityValueRefusal(
+  error: unknown,
+): error is ConfigurationError {
+  if (!(error instanceof ConfigurationError)) return false;
+  const code = error.details["code"];
+  return (
+    code === "EDGE_MATCH_IDENTITY_KEY_TOO_LARGE" ||
+    code === "EDGE_MATCH_IDENTITY_VALUE_NOT_SCALAR"
+  );
+}
+
+type EdgeCreateGuardResult<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; error: string; cause: Error }>;
+
+type EdgeCreateGuardAttempt<T> = Readonly<{
+  result: EdgeCreateGuardResult<T>;
+  rollbackProtection: "savepoint" | "none";
+}>;
+
+/** Converts one row's durable-identity refusal into an import result. */
+async function catchEdgeCreateRefusal<T>(
+  fn: () => T | Promise<T>,
+): Promise<EdgeCreateGuardResult<T>> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (error) {
+    if (
+      isDeclaredConstraintRefusal(error) ||
+      isEdgeMatchIdentityValueRefusal(error)
+    ) {
+      return { ok: false, error: error.message, cause: error };
+    }
+    throw error;
+  }
+}
+
+/**
+ * Runs the one edge statement whose database refusal is a per-row outcome.
+ * PostgreSQL marks the surrounding transaction failed after its unique-index
+ * error, so the failed statement must be isolated behind a savepoint. Pure
+ * preparation and validation stay outside this helper: they cannot poison the
+ * transaction and need no extra round trips.
+ */
+async function catchEdgeCreateRefusalWithSavepoint<T>(
+  frame: Pick<
+    ImportWriteFrame,
+    | "target"
+    | "allocateEdgeSavepoint"
+    | "transactionMode"
+    | "statementExecution"
+  >,
+  fn: () => T | Promise<T>,
+): Promise<EdgeCreateGuardAttempt<T>> {
+  const { target } = frame;
+  if (frame.transactionMode === "none") {
+    return {
+      result: await catchEdgeCreateRefusal(fn),
+      rollbackProtection: "none",
+    };
+  }
+  if (!frame.statementExecution.supported) {
+    // Preserve compatibility for transactional custom backends that expose no
+    // raw statement member. A successful row remains successful; a refusal
+    // that may have poisoned the transaction is deliberately propagated.
+    try {
+      return {
+        result: { ok: true, value: await fn() },
+        rollbackProtection: "none",
+      };
+    } catch (error) {
+      if (isEdgeMatchIdentityValueRefusal(error)) {
+        return {
+          result: { ok: false, error: error.message, cause: error },
+          rollbackProtection: "none",
+        };
+      }
+      throw error;
+    }
+  }
+  const statementExecution = frame.statementExecution;
+  const result = await runRecordedTransactionSavepoint<
+    EdgeCreateGuardResult<T>
+  >(target, statementExecution, frame.allocateEdgeSavepoint(), async () => {
+    const guarded = await catchEdgeCreateRefusal(fn);
+    return guarded.ok ?
+        { action: "release", value: guarded }
+      : { action: "rollback", value: guarded, cause: guarded.cause };
+  });
+  return { result, rollbackProtection: "savepoint" };
 }
 
 /**
@@ -1894,6 +2034,27 @@ async function updateImportedEdge(
       "retry."
     );
   }
+}
+
+/**
+ * Applies the shared durable-identity update decision to interchange's
+ * per-row result contract. Import validates props before reaching this seam,
+ * so the before/after comparison is exactly the comparison a collection
+ * update makes immediately before its write.
+ */
+function importedEdgeIdentityUpdateError(
+  registration: EdgeRegistration,
+  edge: InterchangeEdge,
+  existing: NonNullable<Awaited<ReturnType<GraphBackend["getEdge"]>>>,
+  props: Readonly<Record<string, unknown>>,
+): string | undefined {
+  return edgeMatchIdentityUpdateRefusal({
+    identity: registration.matchIdentity,
+    kind: edge.kind,
+    id: edge.id,
+    beforeProps: rowPropsToObject(existing.props),
+    afterProps: props,
+  })?.message;
 }
 
 /**
@@ -2178,6 +2339,11 @@ async function processEdges(
   importedNodeIds: Set<string>,
 ): Promise<void> {
   const batchSize = options.batchSize;
+  // A slice flush makes its accepted keys visible to later database reads, but
+  // candidates in the same slice have not been written yet. Keep the durable
+  // owner keys accepted by this import so two rows in one payload receive the
+  // same first-wins, per-row disposition as two rows in separate imports.
+  const pendingMatchIdentityOwners = new Set<string>();
 
   for (let index = 0; index < edges.length; index += batchSize) {
     const batch = edges.slice(index, index + batchSize);
@@ -2192,6 +2358,7 @@ async function processEdges(
       result,
       errors,
       importedNodeIds,
+      pendingMatchIdentityOwners,
     );
   }
 }
@@ -2232,6 +2399,12 @@ type EdgeImportCandidate = Readonly<{
   props: Record<string, unknown>;
 }>;
 
+type PreparedEdgeImportCreate = Readonly<{
+  candidate: EdgeImportCandidate;
+  params: InsertEdgeParams;
+  cardinality: Cardinality;
+}>;
+
 /**
  * THE insert params one accepted edge candidate carries, built once and read by
  * three consumers: the in-slice cardinality registration, the claim, and the
@@ -2239,12 +2412,24 @@ type EdgeImportCandidate = Readonly<{
  * lets an in-slice collision refuse the ROW — so they cannot be materialized
  * only at the flush the way the pre-fence path did.
  */
-function edgeInsertParamsOf(
+function prepareEdgeImportCreate(
   graphId: string,
   candidate: EdgeImportCandidate,
-): InsertEdgeParams {
+  registration: EdgeRegistration,
+): PreparedEdgeImportCreate {
   const { edge, props } = candidate;
-  return {
+  const matchIdentity = resolveEdgeMatchIdentityStorage(
+    registration.matchIdentity,
+    {
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props,
+    },
+    { graphId, edgeKind: edge.kind },
+  );
+  const params: InsertEdgeParams = {
     graphId,
     id: edge.id,
     kind: edge.kind,
@@ -2253,17 +2438,163 @@ function edgeInsertParamsOf(
     toKind: edge.to.kind,
     toId: edge.to.id,
     props,
+    ...(matchIdentity === undefined ? {} : { matchIdentity }),
     ...(edge.validFrom !== undefined && { validFrom: edge.validFrom }),
     ...(edge.validTo !== undefined && { validTo: edge.validTo }),
   };
+  return {
+    candidate,
+    params,
+    cardinality: registration.cardinality ?? "many",
+  };
+}
+
+function pendingEdgeMatchIdentityOwnerKey(
+  params: InsertEdgeParams,
+): string | undefined {
+  const identity = params.matchIdentity;
+  return identity === undefined ? undefined : (
+      edgeMatchIdentityOwnerKey(
+        params.graphId,
+        params.kind,
+        identity.name,
+        identity.key,
+      )
+    );
+}
+
+function edgeMatchIdentityOwnerKey(
+  graphId: string,
+  kind: string,
+  identityName: string,
+  identityKey: string,
+): string {
+  return encodeTupleKey([graphId, kind, identityName, identityKey]);
+}
+
+/**
+ * Reads the durable identity owners that can conflict with this slice through
+ * the import transaction itself. Bundled backends answer in one set-oriented
+ * read; a custom backend without that optional member keeps correctness through
+ * exact endpoint-pair reads instead of letting a unique-index error abort the
+ * complete slice.
+ */
+async function readEdgeMatchIdentityOwnerKeys(
+  target: WriteTarget,
+  preparedCreates: readonly PreparedEdgeImportCreate[],
+): Promise<ReadonlySet<string>> {
+  const durableCandidates = preparedCreates.filter(
+    (prepared) => prepared.params.matchIdentity !== undefined,
+  );
+  if (durableCandidates.length === 0) return new Set<string>();
+  const graphId = requireDefined(durableCandidates[0]).params.graphId;
+
+  const rows: EdgeRow[] = [];
+  const setRead = target.findEdgesByHeterogeneousEndpointSet;
+  if (setRead === undefined) {
+    const exactPairs = new Map<
+      string,
+      Readonly<{
+        kind: string;
+        fromKind: string;
+        fromId: string;
+        toKind: string;
+        toId: string;
+      }>
+    >();
+    for (const { candidate } of durableCandidates) {
+      const { edge } = candidate;
+      exactPairs.set(
+        encodeTupleKey([
+          edge.kind,
+          edge.from.kind,
+          edge.from.id,
+          edge.to.kind,
+          edge.to.id,
+        ]),
+        {
+          kind: edge.kind,
+          fromKind: edge.from.kind,
+          fromId: edge.from.id,
+          toKind: edge.to.kind,
+          toId: edge.to.id,
+        },
+      );
+    }
+    for (const pair of exactPairs.values()) {
+      rows.push(
+        ...(await target.findEdgesByKind({
+          graphId,
+          ...pair,
+          excludeDeleted: false,
+          temporalMode: "includeTombstones",
+        })),
+      );
+    }
+  } else {
+    const endpointPairs = new Map<
+      string,
+      Readonly<{
+        kind: string;
+        id: string;
+        opposite: Readonly<{ kind: string; id: string }>;
+      }>
+    >();
+    const edgeKinds = new Set<string>();
+    for (const { candidate } of durableCandidates) {
+      endpointPairs.set(
+        encodeTupleKey([
+          candidate.edge.from.kind,
+          candidate.edge.from.id,
+          candidate.edge.to.kind,
+          candidate.edge.to.id,
+        ]),
+        {
+          kind: candidate.edge.from.kind,
+          id: candidate.edge.from.id,
+          opposite: candidate.edge.to,
+        },
+      );
+      edgeKinds.add(candidate.edge.kind);
+    }
+    rows.push(
+      ...(await setRead({
+        graphId,
+        side: "from",
+        endpoints: [...endpointPairs.values()],
+        edgeKinds: [...edgeKinds],
+        excludeDeleted: false,
+        temporalMode: "includeTombstones",
+      })),
+    );
+  }
+
+  const ownerKeys = new Set<string>();
+  for (const row of rows) {
+    if (
+      row.match_identity_name === undefined ||
+      row.match_identity_key === undefined
+    ) {
+      continue;
+    }
+    ownerKeys.add(
+      edgeMatchIdentityOwnerKey(
+        graphId,
+        row.kind,
+        row.match_identity_name,
+        row.match_identity_key,
+      ),
+    );
+  }
+  return ownerKeys;
 }
 
 /**
  * Processes one batchSize slice of edges with batched round trips: one
  * `getNodes` per endpoint kind for reference liveness, one `getEdges` for
- * existence, and one multi-row insert for the accepted creates. Per-row
- * semantics are unchanged; duplicate ids within a slice defer to the
- * per-row path after the flush.
+ * existence, one durable-owner endpoint read when needed, and one multi-row
+ * insert for the accepted creates. Per-row semantics are unchanged; duplicate
+ * ids within a slice defer to the per-row path after the flush.
  */
 async function processEdgeSlice(
   frame: ImportWriteFrame,
@@ -2276,6 +2607,7 @@ async function processEdgeSlice(
   result: ImportResult,
   errors: ImportError[],
   importedNodeIds: Set<string>,
+  pendingMatchIdentityOwners: Set<string>,
 ): Promise<void> {
   const record = (edge: InterchangeEdge, outcome: ProcessResult): void => {
     recordEdgeOutcome(edge, outcome, result, errors);
@@ -2422,7 +2754,7 @@ async function processEdgeSlice(
     }
   }
 
-  const accepted: EdgeImportCandidate[] = [];
+  const preparedCreates: PreparedEdgeImportCreate[] = [];
   for (const candidate of candidates) {
     const { edge, props } = candidate;
 
@@ -2477,6 +2809,16 @@ async function processEdgeSlice(
             record(edge, { status: "skipped", liveTarget: false });
             break;
           }
+          const identityUpdateError = importedEdgeIdentityUpdateError(
+            requireDefined(edgeSchemas.get(edge.kind)).registration,
+            edge,
+            existing,
+            props,
+          );
+          if (identityUpdateError !== undefined) {
+            record(edge, { status: "error", error: identityUpdateError });
+            break;
+          }
           const updateWindow = validateUpdateValidityWindow(
             edge,
             existing.valid_from,
@@ -2502,13 +2844,36 @@ async function processEdgeSlice(
       continue;
     }
 
+    const preparation = await catchEdgeCreateRefusal(() =>
+      prepareEdgeImportCreate(
+        graphId,
+        candidate,
+        requireDefined(edgeSchemas.get(edge.kind)).registration,
+      ),
+    );
+    if (!preparation.ok) {
+      record(edge, { status: "error", error: preparation.error });
+      continue;
+    }
+    preparedCreates.push(preparation.value);
+  }
+
+  for (const ownerKey of await readEdgeMatchIdentityOwnerKeys(
+    frame.target,
+    preparedCreates,
+  )) {
+    pendingMatchIdentityOwners.add(ownerKey);
+  }
+
+  const accepted: PreparedEdgeImportCreate[] = [];
+  for (const prepared of preparedCreates) {
+    const { candidate, params, cardinality } = prepared;
+    const { edge } = candidate;
+
     // The cardinality probe, per row and against the pending-aware overlay, so
     // two `cardinality: "one"` edges from one source IN ONE SLICE refuse the
     // second row instead of both passing and colliding at the batch claim —
     // which runs once for the whole slice, outside every per-row recovery.
-    const insertParams = edgeInsertParamsOf(graphId, candidate);
-    const cardinality =
-      edgeSchemas.get(edge.kind)?.registration.cardinality ?? "many";
     const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
       checkCardinalityConstraint(
         { graphId, registry, backend: cardinalityValidationBackend },
@@ -2525,9 +2890,32 @@ async function processEdgeSlice(
       record(edge, { status: "error", error: cardinalityResult.error });
       continue;
     }
-    registerPendingEdgeForCardinality(insertParams, cardinality);
 
-    accepted.push(candidate);
+    const pendingIdentityKey = pendingEdgeMatchIdentityOwnerKey(params);
+    if (
+      pendingIdentityKey !== undefined &&
+      pendingMatchIdentityOwners.has(pendingIdentityKey)
+    ) {
+      record(edge, {
+        status: "error",
+        error: new EdgeMatchIdentityConflictError({
+          attempted: [
+            {
+              id: edge.id,
+              identityName: requireDefined(params.matchIdentity).name,
+              kind: edge.kind,
+            },
+          ],
+        }).message,
+      });
+      continue;
+    }
+    registerPendingEdgeForCardinality(params, cardinality);
+    if (pendingIdentityKey !== undefined) {
+      pendingMatchIdentityOwners.add(pendingIdentityKey);
+    }
+
+    accepted.push(prepared);
   }
 
   if (accepted.length > 0) {
@@ -2540,18 +2928,100 @@ async function processEdgeSlice(
     // there aborts the import, which is the honest outcome when the graph
     // changed under a bulk load and is why the per-row probe above exists for
     // everything that is not concurrent.
-    await frame.session.createEdgesNoReturn(
-      accepted.map((candidate) =>
-        importEdgeInsertWork(
-          graphId,
-          candidate,
-          edgeSchemas.get(candidate.edge.kind)?.registration.cardinality ??
-            "many",
-        ),
-      ),
+    const acceptedWork = accepted.map((prepared) =>
+      importEdgeInsertWork(prepared.params, prepared.cardinality),
     );
-    for (const candidate of accepted) {
-      record(candidate.edge, { status: "created" });
+    const retryAcceptedIndividually = async (): Promise<void> => {
+      for (const prepared of accepted) {
+        const { result: rowResult } = await catchEdgeCreateRefusalWithSavepoint(
+          frame,
+          () =>
+            frame.session.createEdge(
+              importEdgeInsertWork(prepared.params, prepared.cardinality),
+            ),
+        );
+        if (rowResult.ok) {
+          record(prepared.candidate.edge, { status: "created" });
+        } else {
+          record(prepared.candidate.edge, {
+            status: "error",
+            error: rowResult.error,
+          });
+        }
+      }
+    };
+    const durableIdentityCount = accepted.filter(
+      ({ params }) => params.matchIdentity !== undefined,
+    ).length;
+    const hasDurableIdentity = durableIdentityCount > 0;
+    const hasClaims = acceptedWork.some(({ claim }) => claim !== undefined);
+    if (
+      hasDurableIdentity &&
+      durableIdentityCount === accepted.length &&
+      !hasClaims &&
+      frame.target.insertEdgesDurableBatchReturning !== undefined
+    ) {
+      const rows = await requireDefined(frame.session.createEdgesDurable)(
+        acceptedWork,
+      );
+      const outcomes = classifyDurableEdgeBatchOutcomes(
+        accepted.map((prepared) => prepared.params),
+        rows,
+      );
+      for (const [index, prepared] of accepted.entries()) {
+        if (requireDefined(outcomes[index]) === "conflict") {
+          record(prepared.candidate.edge, {
+            status: "error",
+            error: new EdgeMatchIdentityConflictError({
+              attempted: [
+                {
+                  id: prepared.params.id,
+                  identityName: requireDefined(prepared.params.matchIdentity)
+                    .name,
+                  kind: prepared.params.kind,
+                },
+              ],
+            }).message,
+          });
+        } else {
+          record(prepared.candidate.edge, { status: "created" });
+        }
+      }
+    } else if (hasDurableIdentity) {
+      const batchAttempt = await catchEdgeCreateRefusalWithSavepoint(
+        frame,
+        async () => frame.session.createEdgesNoReturn(acceptedWork),
+      );
+      const batchResult = batchAttempt.result;
+      if (batchResult.ok) {
+        for (const { candidate } of accepted) {
+          record(candidate.edge, { status: "created" });
+        }
+      } else {
+        if (batchAttempt.rollbackProtection !== "savepoint") {
+          throw new ConfigurationError(
+            "An imported durable edge batch cannot be retried row by row without savepoint rollback protection.",
+            {
+              code: "IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT",
+              graphId,
+            },
+            {
+              suggestion:
+                "Use a transactional backend whose root capability verdict and transaction port both provide statement execution, so TypeGraph can roll back the refused batch before attributing its rows individually.",
+            },
+          );
+        }
+        // A database-arbitrated refusal can identify only the batch, not the
+        // losing row. The slice savepoint has restored every row and claim, so
+        // retry one at a time and let each row's savepoint produce honest
+        // created/error accounting.
+        await retryAcceptedIndividually();
+      }
+    } else {
+      await frame.session.createEdgesNoReturn(acceptedWork);
+      for (const { candidate } of accepted) {
+        record(candidate.edge, { status: "created" });
+      }
     }
   }
 
@@ -2572,6 +3042,11 @@ async function processEdgeSlice(
   }
 }
 
+/**
+ * Processes rows deferred from the set-oriented slice (currently duplicate
+ * ids). The savepoint cost below is therefore paid only on this exceptional
+ * path, or during the rare per-row retry after a durable batch refusal.
+ */
 async function processEdge(
   frame: ImportWriteFrame,
   graphId: string,
@@ -2694,6 +3169,15 @@ async function processEdge(
         if (existing.deleted_at !== undefined) {
           return { status: "skipped", liveTarget: false };
         }
+        const identityUpdateError = importedEdgeIdentityUpdateError(
+          schemaEntry.registration,
+          edge,
+          existing,
+          propsResult.data,
+        );
+        if (identityUpdateError !== undefined) {
+          return { status: "error", error: identityUpdateError };
+        }
         const updateWindow = validateUpdateValidityWindow(
           edge,
           existing.valid_from,
@@ -2715,12 +3199,22 @@ async function processEdge(
     }
   }
 
-  // Create new edge. Probe first (for the error text), then create through the
-  // session, which claims before it writes — the same order the collection
-  // create uses. No pending state is needed: this path writes each edge as it
-  // goes, so the next row's `countEdgesFrom` reads the previous one from the
-  // same transaction.
-  const cardinality = schemaEntry.registration.cardinality ?? "many";
+  const preparation = await catchEdgeCreateRefusal(() =>
+    prepareEdgeImportCreate(
+      graphId,
+      { edge, props: propsResult.data },
+      schemaEntry.registration,
+    ),
+  );
+  if (!preparation.ok) {
+    return { status: "error", error: preparation.error };
+  }
+
+  // Probe first (for the error text), then create through the session, which
+  // claims before it writes — the same order the collection create uses. No
+  // pending state is needed: this path writes each edge as it goes, so the next
+  // row's probe reads the previous one from the same transaction.
+  const { cardinality, params } = preparation.value;
   const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
     checkCardinalityConstraint(
       { graphId, registry, backend: frame.target },
@@ -2737,13 +3231,13 @@ async function processEdge(
     return { status: "error", error: cardinalityResult.error };
   }
 
-  await frame.session.createEdge(
-    importEdgeInsertWork(
-      graphId,
-      { edge, props: propsResult.data },
-      cardinality,
-    ),
+  const { result: createResult } = await catchEdgeCreateRefusalWithSavepoint(
+    frame,
+    () => frame.session.createEdge(importEdgeInsertWork(params, cardinality)),
   );
+  if (!createResult.ok) {
+    return { status: "error", error: createResult.error };
+  }
 
   return { status: "created" };
 }
@@ -2758,14 +3252,9 @@ async function processEdge(
  * session, which is the only handle in this module that reaches a write member.
  */
 function importEdgeInsertWork(
-  graphId: string,
-  candidate: Readonly<{
-    edge: InterchangeEdge;
-    props: Record<string, unknown>;
-  }>,
+  params: InsertEdgeParams,
   cardinality: Cardinality,
 ): EdgeInsertWork {
-  const params = edgeInsertParamsOf(graphId, candidate);
   const claim = edgeCardinalityClaim(cardinality, params);
   return { params, claim };
 }

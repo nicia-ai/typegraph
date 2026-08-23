@@ -224,6 +224,7 @@ export type {
   DeleteUniqueParams,
   DisjointOverlapRow,
   DropVectorIndexParams,
+  DurableEdgeBatchMembers,
   EdgeCardinalityDeclaration,
   EdgeClaimOutcome,
   EdgeConvergeCreateCommand,

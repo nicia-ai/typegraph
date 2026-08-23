@@ -55,13 +55,18 @@ export function assertCommandResultMatchesCommand(
     }
     const { row } = result;
     const { params } = command.plan;
+    const matchIdentityMatches =
+      command.match.kind === "dynamic" ||
+      (row.match_identity_name === command.match.identity.name &&
+        row.match_identity_key === command.match.identity.key);
     if (
       row.graph_id === params.graphId &&
       row.kind === params.kind &&
       row.from_kind === params.fromKind &&
       row.from_id === params.fromId &&
       row.to_kind === params.toKind &&
-      row.to_id === params.toId
+      row.to_id === params.toId &&
+      matchIdentityMatches
     ) {
       return;
     }
@@ -89,10 +94,17 @@ export function assertCommandResultMatchesCommand(
   }
   const plan = command.plan;
   if (result.outcome !== "created") return;
+  const durableIdentityMatches =
+    plan.entity === "node" ||
+    plan.params.matchIdentity === undefined ||
+    (result.entity === "edge" &&
+      result.row.match_identity_name === plan.params.matchIdentity.name &&
+      result.row.match_identity_key === plan.params.matchIdentity.key);
   if (
     result.row.graph_id === plan.params.graphId &&
     result.row.kind === plan.params.kind &&
-    result.row.id === plan.params.id
+    result.row.id === plan.params.id &&
+    durableIdentityMatches
   ) {
     return;
   }

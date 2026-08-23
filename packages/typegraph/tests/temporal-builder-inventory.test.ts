@@ -62,7 +62,7 @@ const COLUMN_MENTION = /validFrom|valid_from/;
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 8, stated: 0 },
   "drizzle/operations/node-projections.ts": { stamping: 1, stated: 0 },
-  "drizzle/operations/edges.ts": { stamping: 7, stated: 1 },
+  "drizzle/operations/edges.ts": { stamping: 6, stated: 1 },
   "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
 } as const satisfies Readonly<
@@ -102,10 +102,12 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     // Column lists and projections in the two dialects' INSERT text. They name
     // the column positionally; the VALUES bound into it are the owner calls.
     "(graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at)",
-    "(graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, valid_from, valid_to, created_at, updated_at)",
+    "(graph_id, id, kind, from_kind, from_id, to_kind, to_id, props, match_identity_name, match_identity_key, valid_from, valid_to, created_at, updated_at)",
     "SELECT graph_id, kind, id, props::jsonb, 1, valid_from, valid_to, created_at, created_at",
     ") AS imported(graph_id, kind, id, props, valid_from, valid_to, created_at)`;",
     "SELECT graph_id, id, kind, from_kind, from_id, to_kind, to_id, props::jsonb,",
+    "match_identity_name, match_identity_key, valid_from, valid_to, created_at, created_at",
+    "match_identity_name, match_identity_key, valid_from, valid_to, created_at",
     "valid_from, valid_to, created_at, created_at",
     "valid_from, valid_to, created_at",
   ],

@@ -53,7 +53,7 @@ function convergenceCommand(
         props,
       },
     },
-    match: { matchOn, props },
+    match: { kind: "dynamic", matchOn, props },
   };
 }
 
@@ -238,8 +238,11 @@ describe("PostgreSQL edge convergence command", () => {
     const query = requireDefined(strategy.buildConvergeEdgeCreate)({
       params: convergenceCommand("edge-a", { label: "friend" }, ["label"]).plan
         .params,
-      matchOn: ["label"],
-      matchProps: { label: "friend" },
+      match: {
+        kind: "dynamic",
+        matchOn: ["label"],
+        props: { label: "friend" },
+      },
       timestamp: "2026-08-23T00:00:00.000Z",
     });
     const compiled = new PgDialect().sqlToQuery(query);

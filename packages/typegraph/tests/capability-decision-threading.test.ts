@@ -104,6 +104,7 @@ const ONE_OWNER_MINTING_ALLOWLIST = new Map<string, number>([
   ["store/recorded-capture/guards.ts#recordedRevisionOriginsVerdict", 1],
   ["store/recorded-capture.ts#batchPointReadVerdict", 1],
   ["interchange/import.ts#batchPointReadVerdict", 1],
+  ["interchange/import.ts#statementExecutionVerdict", 1],
   ["interchange/import.ts#uniqueSidecarBatchVerdict", 1],
 ]);
 

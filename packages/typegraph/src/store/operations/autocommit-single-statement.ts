@@ -41,7 +41,7 @@ export type EdgeAutocommitSingleStatementCandidate = Readonly<{
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   kindRegistered: boolean;
-  convergesOnMatchKey: boolean;
+  convergesDynamically: boolean;
   cardinality: "many" | "one" | "unique" | "oneActive";
 }>;
 
@@ -101,7 +101,7 @@ export function isAutocommitSingleStatementWrite(
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
-        !candidate.convergesOnMatchKey &&
+        !candidate.convergesDynamically &&
         candidate.cardinality === "many"
       );
     }

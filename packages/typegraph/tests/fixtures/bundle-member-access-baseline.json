@@ -1,5 +1,4 @@
 {
-  "commit": "b688c48cd5e2a40931dac1b67ff6b7363edfe7c4",
   "command": "cd packages/typegraph; awk \"NR>=863{print} NR>=863 && /^}>;/{exit}\" etc/typegraph-backend.api.md > /tmp/gb.txt; grep -oE \"^    [A-Za-z_$][A-Za-z0-9_$]*\\?\" /tmp/gb.txt | tr -d \" ?\" | sort > /tmp/optional.txt; NAMES=$(paste -sd\"|\" /tmp/optional.txt); grep -rnE \".($NAMES)\\b\" src --include=*.ts | grep -vE \"^src/backend/drizzle/|^src/backend/types\\.ts|^src/backend/graph-backend-keys\\.ts|^src/backend/member-classes\\.ts|^src/store/history-store-backend\\.ts\" | grep -vE \"^[^:]+:[0-9]+: *(\\*|//|/\\*)\" | grep -E \"(backend|Backend|target|Target|tx|port|source)[A-Za-z0-9_]*\\??\\.($NAMES)\\b\" | grep -E \".(claimEdgeCardinality|claimEdgeCardinalityBatch|purgeEdgeClaims|hardDeleteUniquesByConcreteKind|insertUniqueBatch|checkUniqueBatch|hardDeleteUniquesByNodeIds|getNodes|getEdges|executeStatement|verifyContributions|repairContributions|rebuildContribution|probeContributions|ensureRevisionOriginsTable)\\b\" — the §Baselines pipeline, restricted to the 15 pilot members.",
   "rows": [
     {

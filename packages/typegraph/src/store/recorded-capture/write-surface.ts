@@ -52,6 +52,7 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
+  "insertEdgesDurableBatchReturning",
   "deleteEdgesBatch",
   "hardDeleteEdgesBatch",
 ] as const satisfies readonly (keyof GraphBackend)[];

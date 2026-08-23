@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 89 optional
- * `GraphBackend` members are bundled here; the other 74 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 91 optional
+ * `GraphBackend` members are bundled here; the other 76 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -46,7 +46,7 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 /**
- * Every optional `GraphBackend` member — 89 of them, verified equal to the
+ * Every optional `GraphBackend` member — 91 of them, verified equal to the
  * names parsed from `etc/typegraph-backend.api.md` (§Baselines). Derived,
  * never hand-written: a member added or removed from `GraphBackend` changes
  * this type automatically, and the totality proof below fails loudly if the
@@ -763,7 +763,7 @@ export const RECORDED_REVISION_ORIGINS = {
   ],
 } as const satisfies CapabilityBundleDefinition;
 
-/** The pilot registry: six bundles, 15 members, 29 operation rows. */
+/** The pilot registry: six bundles, 15 members, 30 operation rows. */
 export const CAPABILITY_BUNDLES = [
   CLAIMS,
   UNIQUE_SIDECAR_BATCH,
@@ -776,7 +776,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 74, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 76, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -818,12 +818,18 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 26 `reasoned` + 48 `deferred` members
+ * The 27 `reasoned` + 49 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 74 = 89 members total.
+ * access), 15 + 76 = 91 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  ensureEdgeMatchIdentityStorage: {
+    kind: "reasoned",
+    reason:
+      "Focused privileged schema-adoption hook. A changed graph declaration gates its single store-preparation call; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.",
+    accesses: 1,
+  },
   claimEdgeCardinalityGuarded: {
     kind: "reasoned",
     reason:
@@ -861,13 +867,13 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.",
-    accesses: 1,
+    accesses: 2,
   },
   commitSchemaVersionWithPreflight: {
     kind: "reasoned",
     reason:
       "Same schema-version write-fence family as commitSchemaVersionIfKindsEmpty.",
-    accesses: 2,
+    accesses: 3,
   },
   lockSchemaVersionForWrite: {
     kind: "reasoned",
@@ -1132,7 +1138,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "heterogeneousEndpointSetRead",
-    ceiling: 1,
+    ceiling: 3,
   },
   fulltextSearch: {
     kind: "deferred",
@@ -1187,6 +1193,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     workstream: "WS5b",
     bundle: "batchEntityWrite",
     ceiling: 4,
+  },
+  insertEdgesDurableBatchReturning: {
+    kind: "deferred",
+    workstream: "WS5b",
+    bundle: "batchEntityWrite",
+    ceiling: 8,
   },
   insertNodeNoReturn: {
     kind: "deferred",
@@ -1286,6 +1298,7 @@ export const WS5B_SEED_BUNDLES = {
     "insertNodesBatchReturning",
     "insertEdgesBatch",
     "insertEdgesBatchReturning",
+    "insertEdgesDurableBatchReturning",
     "deleteEdgesBatch",
     "hardDeleteEdgesBatch",
     "insertNodeNoReturn",
@@ -1355,7 +1368,7 @@ export const WS5B_SEED_BUNDLES = {
 // infers `MCore` correctly but, for a gated bundle with no `extras` field
 // (`CLAIMS`), leaves `MExtra` with NO inference candidate — and TypeScript's
 // fallback for an unmatched `infer` is the type parameter's CONSTRAINT
-// (`OptionalGraphBackendMember`, the full 89), not `never`, silently widening
+// (`OptionalGraphBackendMember`, the full 91), not `never`, silently widening
 // `MCore | MExtra` to every optional member. The structural form below has no
 // such unmatched parameter: `extras` is read only when the field is actually
 // present, so a bundle without one contributes no `ExtrasMembersOf` members
@@ -1399,7 +1412,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 89 optional members.
+// (i) Totality: the three-way partition covers exactly the 91 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

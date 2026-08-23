@@ -895,6 +895,23 @@ function diffEdgeDef(
     });
   }
 
+  if (!matchIdentitiesEqual(before.matchIdentity, after.matchIdentity)) {
+    const details =
+      before.matchIdentity === undefined ?
+        `Match identity added to "${name}"; existing edge data must be rekeyed`
+      : after.matchIdentity === undefined ?
+        `Match identity removed from "${name}"; existing edge data must be rekeyed`
+      : `Match identity changed for "${name}"; existing edge data must be rekeyed`;
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "breaking",
+      details,
+      before,
+      after,
+    });
+  }
+
   // Check properties
   if (!propertySchemasEqual(before.properties, after.properties)) {
     const { severity, details } = classifyPropertyChanges(
@@ -924,6 +941,35 @@ function diffEdgeDef(
   }
 
   return changes;
+}
+
+export function matchIdentitiesEqual(
+  before: SerializedEdgeDef["matchIdentity"],
+  after: SerializedEdgeDef["matchIdentity"],
+): boolean {
+  if (before === undefined || after === undefined) return before === after;
+  if (
+    before.name !== after.name ||
+    before.fields.length !== after.fields.length
+  ) {
+    return false;
+  }
+  const beforeFields = before.fields.toSorted();
+  const afterFields = after.fields.toSorted();
+  return beforeFields.every((field, index) => field === afterFields[index]);
+}
+
+function isMatchIdentityChange(change: EdgeChange): boolean {
+  return (
+    change.type === "modified" &&
+    change.severity === "breaking" &&
+    change.before !== undefined &&
+    change.after !== undefined &&
+    !matchIdentitiesEqual(
+      change.before.matchIdentity,
+      change.after.matchIdentity,
+    )
+  );
 }
 
 function annotationsChanged(before: unknown, after: unknown): boolean {
@@ -1308,6 +1354,9 @@ export function getMigrationActions(diff: SchemaDiff): readonly string[] {
   for (const change of diff.edges) {
     if (change.type === "removed") {
       actions.push(`DELETE data for removed edge kind "${change.kind}"`);
+    }
+    if (isMatchIdentityChange(change)) {
+      actions.push(`REKEY edge data for "${change.kind}": ${change.details}`);
     }
   }
 

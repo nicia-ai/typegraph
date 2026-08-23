@@ -1,5 +1,5 @@
 /**
- * T11b — expands every operation row's `sites` against the COMMITTED
+ * T11b — expands every operation row's `sites` against the CHECKED-IN
  * baseline fixture (never the live scan — that is B9's), and checks the
  * cover of the fixture's 58 `pilot` keys: each covered exactly once, no
  * stale `(file, member)` attribution, and the 2 `statically-required` keys
@@ -21,7 +21,6 @@ type BaselineRow = Readonly<{
 }>;
 
 type BaselineFixture = Readonly<{
-  commit: string;
   command: string;
   rows: readonly BaselineRow[];
 }>;
@@ -94,7 +93,7 @@ function expandCover(baseline: BaselineFixture): Readonly<{
   return { coveredKeys, staleAttributions };
 }
 
-describe("capability operation cover against the committed baseline (T11b)", () => {
+describe("capability operation cover against the checked-in baseline (T11b)", () => {
   it("covers every one of the 58 `pilot` keys exactly once", () => {
     const baseline = loadBaseline();
     const pilotRows = baseline.rows.filter((row) => row.class === "pilot");

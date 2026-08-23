@@ -343,6 +343,8 @@ export type BackendCapabilities = Readonly<{
    * store retains the standalone claim fallback.
    */
   readonly atomicNodeInsertClaims?: boolean;
+  /** Whether edge writes atomically persist and arbitrate `matchIdentity`. */
+  readonly durableEdgeMatchIdentity?: boolean;
   /** Vector search capabilities (undefined if not configured) */
   vector?: VectorCapabilities | undefined;
   /** Fulltext search capabilities (undefined if not configured) */
@@ -499,6 +501,7 @@ export type GraphReadBackend = Pick<
   | "getEdge"
   | "findNodesByKind"
   | "findEdgesByKind"
+  | "findEdgesByHeterogeneousEndpointSet"
   | "findEdgesConnectedTo"
 >;
 
@@ -514,11 +517,19 @@ export type EdgeRow = Readonly<{
   to_kind: string;
   to_id: string;
   props: RowProps;
+  match_identity_name?: string;
+  match_identity_key?: string;
   valid_from: string | undefined;
   valid_to: string | undefined;
   created_at: string;
   updated_at: string;
   deleted_at: string | undefined;
+}>;
+
+/** The schema-declared identity persisted with an edge row. */
+export type EdgeMatchIdentityStorage = Readonly<{
+  name: string;
+  key: string;
 }>;
 
 /**
@@ -697,6 +708,11 @@ export type InsertEdgeParams = Readonly<{
   toKind: string;
   toId: string;
   props: Readonly<Record<string, unknown>>;
+  /**
+   * Durable schema-declared match identity. Both values are written with the
+   * edge row and arbitrated by the database's edge-identity unique key.
+   */
+  matchIdentity?: EdgeMatchIdentityStorage;
   /**
    * Omitted (`undefined`): the insert stamps its own creation timestamp —
    * UNLESS a stated `validTo` at or before that instant would make the stored
@@ -966,10 +982,16 @@ export type EdgeCreateCommand = Readonly<{
 }>;
 
 /** The authoritative match-key read paired with a convergent edge create. */
-export type EdgeConvergenceMatch = Readonly<{
-  matchOn: readonly string[];
-  props: Record<string, unknown>;
-}>;
+export type EdgeConvergenceMatch =
+  | Readonly<{
+      kind: "dynamic";
+      matchOn: readonly string[];
+      props: Record<string, unknown>;
+    }>
+  | Readonly<{
+      kind: "durable";
+      identity: EdgeMatchIdentityStorage;
+    }>;
 
 /** An edge create command that atomically returns an existing match or inserts. */
 export type EdgeConvergeCreateCommand = Readonly<{
@@ -1997,6 +2019,17 @@ export const DATABASE_EXTENSION_NAMES = ["pg_trgm", "vector"] as const;
 export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
 
 /**
+ * Optional durable-identity batch write seam. Every input must carry
+ * `matchIdentity`; identity conflicts are omitted from the returned rows.
+ */
+export type DurableEdgeBatchMembers = Readonly<{
+  insertEdgesDurableBatchReturning?: (
+    this: void,
+    params: readonly InsertEdgeParams[],
+  ) => Promise<readonly EdgeRow[]>;
+}>;
+
+/**
  * The GraphBackend interface abstracts database operations.
  *
  * Implementations should provide:
@@ -2363,21 +2396,8 @@ export type GraphBackend = Readonly<{
   commitSchemaVersionIfKindsEmpty?: (
     this: void,
     params: CommitSchemaVersionParams,
-    probes: readonly Readonly<{
-      entity: "node" | "edge";
-      kind: string;
-    }>[],
-  ) => Promise<
-    | Readonly<{ status: "committed"; row: SchemaVersionRow }>
-    | Readonly<{
-        status: "populated";
-        kinds: readonly Readonly<{
-          entity: "node" | "edge";
-          kind: string;
-          count: number;
-        }>[];
-      }>
-  >;
+    probes: readonly SchemaKindEmptinessProbe[],
+  ) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
   /**
    * Acquire the transaction-scoped shared fence for a schema-managed graph
    * write, then verify that the active schema still matches the Store that is
@@ -2635,6 +2655,20 @@ export type GraphBackend = Readonly<{
    * without replaying all base-table DDL during a merge read.
    */
   ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+
+  /**
+   * Idempotently add the durable edge-match identity columns, pair constraint,
+   * and unique index to the configured edge relation.
+   *
+   * This focused adoption hook lets an already-initialized database activate a
+   * graph-local `matchIdentity` without replaying the complete base-table DDL
+   * set. Privileged schema preparation calls it before publishing a schema
+   * that declares durable identity; ordinary runtime store construction never
+   * performs DDL.
+   *
+   * @internal
+   */
+  ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
 
   /**
    * Idempotently ensure ONLY the three Operational Identity relations exist —
@@ -3247,7 +3281,8 @@ export type GraphBackend = Readonly<{
 
   // === Lifecycle ===
   close: (this: void) => Promise<void>;
-}>;
+}> &
+  DurableEdgeBatchMembers;
 
 /**
  * Adapter-native transaction interoperability layered on top of the portable
@@ -3324,6 +3359,7 @@ export type EdgeEntityWriteBackend = Pick<
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
+  | "insertEdgesDurableBatchReturning"
   | "updateEdge"
   | "deleteEdge"
   | "deleteEdgesBatch"
@@ -3909,6 +3945,8 @@ export type CommitSchemaVersionParams = Readonly<{
 export type SchemaKindEmptinessProbe = Readonly<{
   entity: "node" | "edge";
   kind: string;
+  /** Which rows make this schema transition unsafe. Must be chosen explicitly. */
+  rows: "nonDeleted" | "all";
 }>;
 
 export type PopulatedSchemaKind = SchemaKindEmptinessProbe &
@@ -4139,7 +4177,17 @@ export type FindEdgesByEndpointSetParams = Readonly<{
 export type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
   graphId: string;
   side: EdgeEndpointSide;
-  endpoints: readonly Readonly<{ kind: string; id: string }>[];
+  endpoints: readonly Readonly<{
+    kind: string;
+    id: string;
+    /**
+     * Optional endpoint on the opposite side of the edge. When present, the
+     * set read performs an exact directed-pair seek instead of materializing
+     * every edge incident to `kind` / `id` and leaving the caller to filter.
+     * This is particularly important for hub nodes.
+     */
+    opposite?: Readonly<{ kind: string; id: string }>;
+  }>[];
   edgeKinds: readonly string[];
   limitPerEndpoint?: number;
   /** If true, exclude deleted edges. Default true. */
@@ -4220,6 +4268,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   // The bundled schema ships both claim relations and the shared operation
   // backend implements every claim member.
   constraintClaims: true,
+  durableEdgeMatchIdentity: true,
   maxBindParameters: SQLITE_MAX_BIND_PARAMETERS,
   // Generic SQLite builds do not guarantee ENABLE_MATH_FUNCTIONS. The local
   // better-sqlite3 factory overrides this flag for its bundled build contract.
@@ -4243,6 +4292,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   // The bundled schema ships both claim relations and the shared operation
   // backend implements every claim member.
   constraintClaims: true,
+  durableEdgeMatchIdentity: true,
   atomicNodeInsertClaims: true,
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),

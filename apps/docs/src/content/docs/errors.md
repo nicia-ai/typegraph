@@ -489,6 +489,12 @@ try {
 }
 ```
 
+### `EdgeMatchIdentityConflictError`
+
+Thrown when a direct edge create collides with the edge kind's declared
+`matchIdentity`. Use `getOrCreateByEndpoints()` when the intended behavior is
+to return the existing identity owner.
+
 ## Not Found Errors
 
 ### `NodeNotFoundError`
@@ -679,7 +685,7 @@ cannot fence constrained writes" is unusable advice while "your
 | `details.constraint` | The write it describes |
 | --- | --- |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`. |
-| `edgeMatchKeyConvergence` | `getOrCreateByEndpoints` taking its create leg — the match key is backed by no database key. The bulk form fences its whole batch, so it refuses whatever the outcome would have been. |
+| `edgeMatchKeyConvergence` | Single-item `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key, plus the bulk method while its batch arbitration remains transaction-scoped. A schema-declared `matchIdentity` removes this fence from the single-item create/found path. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
 
@@ -754,6 +760,34 @@ no `approximate` is not refused on the query builder either; `store.search.vecto
 and `store.search.hybrid` refuse every mismatched override on their own broader
 rule. See
 [Approximate retrieval](/semantic-search#approximate-retrieval-for-similarto-opt-in).
+
+#### Durable edge match identity guard codes
+
+Durable edge match identity uses stable `ConfigurationError` detail codes:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `EDGE_MATCH_IDENTITY_VALUE_NOT_SCALAR` | A declared identity field cannot be represented as a portable JSON scalar, or an untyped runtime value violated that declaration. |
+| `EDGE_MATCH_IDENTITY_KEY_TOO_LARGE` | One complete durable identity tuple exceeds the portable 2,000-byte index budget. Normal import records this against the individual edge; trusted import is atomic and refuses the whole stream. |
+| `EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE` | The adapter declares durable identity support, but the database is missing its columns or unique arbiter. Initialize or migrate the schema before serving writes. |
+| `EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND` | Initial adoption needs an atomic empty-kind fence or materialization preflight that the custom backend does not implement. |
+| `DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED` | A custom backend declares durable identity support but refuses the authoritative convergence command. TypeGraph fails closed because the portable read-then-write fallback has no equivalent database arbiter. |
+| `IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT` | A durable import batch was refused without savepoint rollback protection, either because the backend is non-transactional or because its root/transaction statement-execution contract cannot serve savepoints. TypeGraph will not retry rows individually because that could double-attribute an already-written prefix. |
+
+The last refusal deliberately differs from optional fused-command fallback:
+the durable identity declaration delegates correctness to a database key, so a
+backend that claims the feature but refuses its command cannot safely re-enter
+the dynamic portable path.
+
+#### Heterogeneous edge-read guard codes
+
+`findEdgesByHeterogeneousEndpointSet` refuses mixed endpoint modes instead of
+guessing how incident and exact-pair rows should be interpreted:
+
+| `details.code` | Meaning |
+| --- | --- |
+| `EDGE_HETEROGENEOUS_READ_MIXED_ENDPOINT_MODES` | The request contains both incident-endpoint rows (without an opposite endpoint) and exact directed-pair rows. Supply an opposite endpoint for every row to request exact-pair matching. |
+| `EDGE_HETEROGENEOUS_READ_BIND_BUDGET_EXCEEDED` | The endpoint set cannot fit within the backend's bind-parameter budget. Split the request into smaller calls. |
 
 #### Operational Identity guard codes
 
@@ -989,6 +1023,12 @@ try {
 ### `MigrationError`
 
 Thrown when schema migration fails due to breaking changes that require manual intervention.
+
+The `details.reason` value `"edge-match-identity-rekey"` means a populated edge kind
+changed or newly adopted its durable match identity. Existing rows cannot be assigned
+new identity keys without choosing how conflicts converge. Export the affected edges,
+hard-delete them, apply the schema migration, then reimport them so TypeGraph
+materializes and arbitrates the new durable keys.
 
 ```typescript
 try {
@@ -1232,6 +1272,7 @@ try {
 | `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
+| `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |
 | `EDGE_NOT_FOUND` | `EdgeNotFoundError` | user | Referenced edge doesn't exist |
 | `KIND_NOT_FOUND` | `KindNotFoundError` | user | Unknown node/edge type |

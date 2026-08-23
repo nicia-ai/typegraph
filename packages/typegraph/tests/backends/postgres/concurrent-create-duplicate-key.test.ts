@@ -47,7 +47,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import type { GraphBackend, TransactionBackend } from "../../../src";
+import type { GraphBackend } from "../../../src";
 import {
   asEdgeId,
   asNodeId,
@@ -224,7 +224,7 @@ function gatedAtFirstInsert(base: GraphBackend, gate: Gate): GraphBackend {
               return method.apply(source, args);
             };
           },
-        }) as TransactionBackend;
+        });
         return fn(gatedTarget);
       }, options),
   });
