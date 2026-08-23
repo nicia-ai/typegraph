@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  DisjointError,
+  ENTITY_ALREADY_EXISTS_CODE,
   defineGraph,
   defineNode,
   disjointWith,
   searchable,
   subClassOf,
+  UniquenessError,
+  ValidationError,
 } from "../src";
 import { supportsNodeInsertPlan } from "../src/backend/capabilities/node-insert-projections";
 import {
@@ -88,6 +92,26 @@ function hasUniqueClaim(statement: LoggedStatement): boolean {
   return /insert\s+into\s+"typegraph_node_uniques"/iu.test(statement.query);
 }
 
+function hasUniqueProbe(statement: LoggedStatement): boolean {
+  return /select\s+\*\s+from\s+"typegraph_node_uniques"/iu.test(
+    statement.query,
+  );
+}
+
+function hasNodeProbe(statement: LoggedStatement): boolean {
+  return /select\s+\*\s+from\s+"typegraph_nodes"/iu.test(statement.query);
+}
+
+function uniqueProbes(
+  statements: readonly LoggedStatement[],
+): LoggedStatement[] {
+  return statements.filter((statement) => hasUniqueProbe(statement));
+}
+
+function nodeProbes(statements: readonly LoggedStatement[]): LoggedStatement[] {
+  return statements.filter((statement) => hasNodeProbe(statement));
+}
+
 function nodeWrite(statements: readonly LoggedStatement[]): LoggedStatement {
   return requireDefined(
     statements.find((statement) => hasNodeInsert(statement)),
@@ -121,6 +145,11 @@ describe("node claim write fusion", () => {
           constraintName: SAME_KIND_UNIQUE.name,
           key: "root@example.com",
           placement: "post-insert" as const,
+          verdict: {
+            kind: "uniqueness" as const,
+            probeAxes: ["UniqueNode"],
+            fields: ["email"],
+          },
         },
       ],
       projections: [],
@@ -170,6 +199,11 @@ describe("node claim write fusion", () => {
                 constraintName: SAME_KIND_UNIQUE.name,
                 key: "schema@example.com",
                 placement: "post-insert",
+                verdict: {
+                  kind: "uniqueness",
+                  probeAxes: ["UniqueNode"],
+                  fields: ["email"],
+                },
               },
             ],
             projections: [],
@@ -202,6 +236,11 @@ describe("node claim write fusion", () => {
     expect(statement.query.indexOf('"node_inserted"')).toBeLessThan(
       statement.query.indexOf('"node_post_claimed"'),
     );
+    // The atomic claim verdict is authoritative for a fresh generated row:
+    // the old checkUnique read is folded into the same statement as the claim,
+    // so this write is exactly one database round trip.
+    expect(uniqueProbes(fixture.statements)).toHaveLength(0);
+    expect(fixture.statements).toHaveLength(1);
   });
 
   it("fuses a shared-scope unique claim before the generated node insert", async () => {
@@ -221,6 +260,11 @@ describe("node claim write fusion", () => {
     expect(claimNames(statement, [SHARED_UNIQUE.name])).toEqual([
       SHARED_UNIQUE.name,
     ]);
+    // The shared-scope probe used to read both the axis and the legacy kind.
+    // The lock remains a separate statement; both reads must disappear while
+    // the claim/node CTE remains the sole write statement.
+    expect(uniqueProbes(fixture.statements)).toHaveLength(0);
+    expect(fixture.statements).toHaveLength(2);
   });
 
   it("fuses a disjointness claim before a generated node insert", async () => {
@@ -233,6 +277,29 @@ describe("node claim write fusion", () => {
     expectFusedClaimAndNode(statement);
     expect(statement.query).toMatch(/node_pre_claimed/iu);
     expect(statement.query).not.toMatch(/node_post_claimed/iu);
+    // Generated ids cannot collide with an existing disjoint-kind row, so the
+    // successful path has no node probe to defer. This assertion protects the
+    // exact one-lock/one-write shape instead of merely checking the CTE text.
+    expect(nodeProbes(fixture.statements)).toHaveLength(0);
+    expect(fixture.statements).toHaveLength(2);
+  });
+
+  it("defers a caller-id disjoint probe but retains same-kind existence classification", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+
+    fixture.reset();
+    await fixture.store.nodes.ClaimPerson.create(
+      { name: "person" },
+      { id: "caller-disjoint-id" },
+    );
+
+    const probes = nodeProbes(fixture.statements);
+    expect(probes).toHaveLength(1);
+    expect(probes[0]?.params).toContain("ClaimPerson");
+    expect(probes[0]?.params).not.toContain("ClaimCompany");
+    expect(uniqueProbes(fixture.statements)).toHaveLength(0);
+    // lock + same-kind existence read + the authoritative claim/node CTE.
+    expect(fixture.statements).toHaveLength(3);
   });
 
   it("keeps multiple mixed claims in their canonical pre/post phases", async () => {
@@ -286,6 +353,45 @@ describe("node claim write fusion", () => {
         (statement) => hasNodeInsert(statement) && hasUniqueClaim(statement),
       ),
     ).toBe(false);
+    // A projected-away executor is not authoritative. The fallback must retain
+    // its preflight and emit the claim and node as separate statements.
+    expect(uniqueProbes(fixture.statements)).toHaveLength(1);
+    expect(fixture.statements).toHaveLength(3);
+  });
+
+  it("falls back when atomic claim capability is explicitly refused", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const capabilityDisabled: GraphBackend = deriveBackend(fixture.backend, {
+      async transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
+      ): Promise<T> {
+        return fixture.backend.transaction(
+          (tx) =>
+            fn(
+              deriveBackend(tx, {
+                capabilities: {
+                  ...tx.capabilities,
+                  atomicNodeInsertClaims: false,
+                },
+              }),
+            ),
+          options,
+        );
+      },
+    });
+    const store = createStore(graph, capabilityDisabled);
+
+    fixture.reset();
+    await store.nodes.UniqueNode.create({ email: "capability-fallback" });
+
+    expect(uniqueProbes(fixture.statements)).toHaveLength(1);
+    expect(
+      fixture.statements.filter(
+        (statement) => hasNodeInsert(statement) && hasUniqueClaim(statement),
+      ),
+    ).toHaveLength(0);
+    expect(fixture.statements).toHaveLength(3);
   });
 
   it("fuses claims and fulltext projection side effects in one statement", async () => {
@@ -328,13 +434,18 @@ describe("node claim write fusion", () => {
                 constraintName: SAME_KIND_UNIQUE.name,
                 key: "post-conflict@example.com",
                 placement: "post-insert",
+                verdict: {
+                  kind: "uniqueness",
+                  probeAxes: ["UniqueNode"],
+                  fields: ["email"],
+                },
               },
             ],
             projections: [],
           },
         ),
       ),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(UniquenessError);
 
     expect(
       await fixture.store.nodes.UniqueNode.getById("post-loser" as never),
@@ -373,13 +484,18 @@ describe("node claim write fusion", () => {
                 constraintName: SHARED_UNIQUE.name,
                 key: "pre-conflict@example.com",
                 placement: "pre-insert",
+                verdict: {
+                  kind: "uniqueness",
+                  probeAxes: ["SharedLeaf", "SharedRoot"],
+                  fields: ["email"],
+                },
               },
             ],
             projections: [],
           },
         ),
       ),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(UniquenessError);
 
     expect(
       await fixture.store.nodes.SharedLeaf.getById("pre-loser" as never),
@@ -392,5 +508,105 @@ describe("node claim write fusion", () => {
         key: "pre-conflict@example.com",
       }),
     ).toMatchObject({ node_id: holder.id, concrete_kind: "SharedRoot" });
+  });
+
+  it("maps an atomic disjoint claim conflict to DisjointError and rolls back the node", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    await fixture.store.nodes.ClaimCompany.create(
+      { name: "holder" },
+      { id: "disjoint-conflict" },
+    );
+
+    await expect(
+      fixture.store.nodes.ClaimPerson.create(
+        { name: "loser" },
+        { id: "disjoint-conflict" },
+      ),
+    ).rejects.toBeInstanceOf(DisjointError);
+
+    expect(
+      await fixture.store.nodes.ClaimPerson.getById(
+        "disjoint-conflict" as never,
+      ),
+    ).toBeUndefined();
+  });
+
+  it("keeps caller-id duplicate errors stable when uniqueness probes are deferred", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const holder = await fixture.store.nodes.UniqueNode.create(
+      { email: "caller-id-duplicate" },
+      { id: "caller-id-duplicate" },
+    );
+
+    fixture.reset();
+    const error = await fixture.store.nodes.UniqueNode.create(
+      { email: "different-email" },
+      { id: holder.id },
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ValidationError);
+    expect((error as ValidationError).details.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: ENTITY_ALREADY_EXISTS_CODE }),
+      ]),
+    );
+    expect((error as ValidationError).details.id).toBe(holder.id);
+    // The same-kind existence read is still the caller-ID diagnostic; no
+    // claim/node write should have been attempted after it refused.
+    expect(
+      fixture.statements.some((statement) => hasNodeInsert(statement)),
+    ).toBe(false);
+  });
+
+  it("keeps tombstone resurrection on the probe-bearing path", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const original = await fixture.store.nodes.UniqueNode.create(
+      { email: "before-tombstone" },
+      { id: "tombstone-id" },
+    );
+    await fixture.store.nodes.UniqueNode.delete(original.id);
+
+    fixture.reset();
+    const revived = await fixture.store.nodes.UniqueNode.create(
+      { email: "after-tombstone" },
+      { id: original.id },
+    );
+
+    expect(revived.email).toBe("after-tombstone");
+    // A tombstone is an UPDATE/resurrection, not a fresh atomic insert. Its
+    // claim transition must still read the live ownership verdict before it
+    // rewrites the node and reservation.
+    expect(uniqueProbes(fixture.statements).length).toBeGreaterThan(0);
+  });
+
+  it("rejects a legacy-axis claim even when the modern fused plan is available", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    await fixture.backend.insertNode({
+      graphId: graph.id,
+      kind: "SharedRoot",
+      id: "legacy-holder",
+      props: { email: "legacy-axis@example.com" },
+    });
+    await fixture.backend.insertUnique({
+      graphId: graph.id,
+      nodeKind: "SharedRoot",
+      constraintName: SHARED_UNIQUE.name,
+      key: "legacy-axis@example.com",
+      nodeId: "legacy-holder",
+      concreteKind: "SharedRoot",
+    });
+
+    fixture.reset();
+    const error = await fixture.store.nodes.SharedLeaf.create({
+      email: "legacy-axis@example.com",
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(UniquenessError);
+    expect((error as UniquenessError).details.existingId).toBe("legacy-holder");
+    expect(
+      (await fixture.store.nodes.SharedLeaf.find()).filter(
+        (node) => node.email === "legacy-axis@example.com",
+      ),
+    ).toHaveLength(0);
   });
 });
