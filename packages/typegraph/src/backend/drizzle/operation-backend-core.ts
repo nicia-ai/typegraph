@@ -860,12 +860,29 @@ export function createCommonOperationBackend(
               },
             );
           }
+          const conflictingClaim = plannedClaims.find((claim) => {
+            if (
+              claim.constraintName !== constraintName ||
+              claim.key !== row["claim_key"]
+            ) {
+              return false;
+            }
+            if (claim.verdict.kind === "disjointness") {
+              return claim.axis === axis;
+            }
+            return claim.verdict.kind === "uniqueness" &&
+              claim.verdict.probeAxes.includes(axis);
+          });
+          const fields =
+            conflictingClaim?.verdict.kind === "uniqueness" ?
+              conflictingClaim.verdict.fields
+            : [];
           throw new UniquenessError({
             constraintName,
             kind: holderKind,
             existingId: holderId,
             newId: params.id,
-            fields: [],
+            fields,
             axis,
           });
         }

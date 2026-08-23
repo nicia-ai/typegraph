@@ -1,4 +1,4 @@
-import { type SQL, sql } from "drizzle-orm";
+import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
@@ -11,7 +11,13 @@ import type {
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
 import { buildInsertNode, buildInsertNodeWithSchemaFence } from "./nodes";
-import { nodeColumnList, sqlNull, type Tables } from "./shared";
+import {
+  nodeColumnList,
+  quotedColumn,
+  quotedTableName,
+  sqlNull,
+  type Tables,
+} from "./shared";
 import { buildInsertUniqueFromSource } from "./uniques";
 
 /** The fixed alias shared by the node CTE and all projection strategies. */
@@ -119,6 +125,137 @@ function claimVerdictCte(
   `;
 }
 
+const CLAIM_PROBE_COLUMNS = [
+  "ordinal",
+  "probe_ordinal",
+  "axis",
+  "constraint_name",
+  "key",
+  "node_id",
+  "concrete_kind",
+] as const;
+
+/**
+ * Reads live uniqueness claims that predate the canonical shared-scope axis.
+ *
+ * The canonical upsert remains the write fence. These rows are read-only
+ * compatibility evidence: the axis fold intentionally required no migration,
+ * so a current writer must still see a live foreign owner under every covered
+ * concrete kind. The store computes and carries `probeAxes`; this SQL layer
+ * must not reconstruct hierarchy membership independently.
+ */
+function legacyUniqueProbeCte(
+  tables: Tables,
+  alias: string,
+  claims: readonly NodeInsertClaim[],
+  params: InsertNodeParams,
+): SQL | undefined {
+  const values = claims.flatMap((claim, ordinal) => {
+    if (claim.verdict.kind !== "uniqueness") return [];
+    return claim.verdict.probeAxes.flatMap((probeAxis, probeOrdinal) => {
+      if (probeAxis === claim.axis) return [];
+      return [
+        sql`(${ordinal}, ${probeOrdinal}, ${probeAxis}, ${claim.constraintName}, ${claim.key}, ${params.id}, ${params.kind})`,
+      ];
+    });
+  });
+  if (values.length === 0) return;
+
+  const columns = sql.join(
+    CLAIM_PROBE_COLUMNS.map((column) => sql.identifier(column)),
+    sql`, `,
+  );
+  const probe = sql.identifier(alias);
+  const uniques = sql.identifier("legacy_unique_rows");
+  const tableName = getTableName(tables.uniques);
+  const qualified = (column: Readonly<{ name: string }>): SQL =>
+    sql`${uniques}.${quotedColumn(column)}`;
+
+  return sql`
+    ${probe} (${columns}) AS (
+      SELECT
+        ${probe}.${sql.identifier("ordinal")}::integer,
+        ${probe}.${sql.identifier("probe_ordinal")}::integer,
+        ${probe}.${sql.identifier("axis")},
+        ${probe}.${sql.identifier("constraint_name")},
+        ${probe}.${sql.identifier("key")},
+        ${qualified(tables.uniques.nodeId)} AS node_id,
+        ${qualified(tables.uniques.concreteKind)} AS concrete_kind
+      FROM (VALUES ${sql.join(values, sql`, `)}) AS ${probe} (${columns})
+      JOIN ${quotedTableName(tableName)} AS ${uniques}
+        ON ${qualified(tables.uniques.graphId)} = ${params.graphId}
+       AND ${qualified(tables.uniques.nodeKind)} = ${probe}.${sql.identifier("axis")}
+       AND ${qualified(tables.uniques.constraintName)} = ${probe}.${sql.identifier("constraint_name")}
+       AND ${qualified(tables.uniques.key)} = ${probe}.${sql.identifier("key")}
+       AND ${qualified(tables.uniques.deletedAt)} IS NULL
+    )
+  `;
+}
+
+const DISJOINT_PROBE_COLUMNS = [
+  "ordinal",
+  "probe_ordinal",
+  "axis",
+  "constraint_name",
+  "key",
+  "node_id",
+  "concrete_kind",
+  "conflicting_kind",
+] as const;
+
+/**
+ * Reads live node rows for disjoint claims. This is deliberately separate
+ * from the claim relation: pre-upgrade databases can contain a live overlap
+ * without a disjointness claim row. The graph write lock is acquired before
+ * this statement for disjoint claims, so this read and the canonical claim
+ * upsert retain the same cross-kind race protection as the old probe.
+ */
+function disjointNodeProbeCte(
+  tables: Tables,
+  alias: string,
+  claims: readonly NodeInsertClaim[],
+  params: InsertNodeParams,
+): SQL | undefined {
+  const values = claims.flatMap((claim, ordinal) => {
+    if (claim.verdict.kind !== "disjointness") return [];
+    return claim.verdict.conflictingKinds.map(
+      (conflictingKind, probeOrdinal) =>
+        sql`(${ordinal}, ${probeOrdinal}, ${claim.axis}, ${claim.constraintName}, ${claim.key}, ${params.id}, ${params.kind}, ${conflictingKind})`,
+    );
+  });
+  if (values.length === 0) return;
+
+  const columns = sql.join(
+    DISJOINT_PROBE_COLUMNS.map((column) => sql.identifier(column)),
+    sql`, `,
+  );
+  const probe = sql.identifier(alias);
+  const nodes = sql.identifier("legacy_disjoint_nodes");
+  const tableName = getTableName(tables.nodes);
+  const qualified = (column: Readonly<{ name: string }>): SQL =>
+    sql`${nodes}.${quotedColumn(column)}`;
+
+  return sql`
+    ${probe} (${columns}) AS (
+      SELECT
+        ${probe}.${sql.identifier("ordinal")}::integer,
+        ${probe}.${sql.identifier("probe_ordinal")}::integer,
+        ${probe}.${sql.identifier("axis")},
+        ${probe}.${sql.identifier("constraint_name")},
+        ${probe}.${sql.identifier("key")},
+        ${qualified(tables.nodes.id)} AS node_id,
+        ${qualified(tables.nodes.kind)} AS concrete_kind,
+        ${probe}.${sql.identifier("conflicting_kind")}
+      FROM (VALUES ${sql.join(values, sql`, `)}) AS ${probe} (${columns})
+      JOIN ${quotedTableName(tableName)} AS ${nodes}
+        ON ${qualified(tables.nodes.graphId)} = ${params.graphId}
+       AND ${qualified(tables.nodes.kind)} = ${probe}.${sql.identifier("conflicting_kind")}
+       AND ${qualified(tables.nodes.id)} = ${probe}.${sql.identifier("key")}
+       AND ${qualified(tables.nodes.deletedAt)} IS NULL
+    )
+  `;
+}
+
 function buildGatedNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
@@ -199,6 +336,20 @@ function buildNodeClaimsAndProjections(
       sql`${sql.identifier(preClaimedAlias)} AS (${buildInsertUniqueFromSource(tables, dialect, preInputAlias)})`,
       claimVerdictCte(preVerdictAlias, preInputAlias, preClaimedAlias),
     );
+    const legacyProbe = legacyUniqueProbeCte(
+      tables,
+      "node_pre_legacy_unique_probe",
+      preClaims,
+      params,
+    );
+    if (legacyProbe !== undefined) ctes.push(legacyProbe);
+    const disjointProbe = disjointNodeProbeCte(
+      tables,
+      "node_pre_disjoint_node_probe",
+      preClaims,
+      params,
+    );
+    if (disjointProbe !== undefined) ctes.push(disjointProbe);
   }
 
   const preGateAlias = "node_pre_gate";
@@ -260,6 +411,20 @@ function buildNodeClaimsAndProjections(
       sql`${sql.identifier(postClaimedAlias)} AS (${buildInsertUniqueFromSource(tables, dialect, postInputAlias)})`,
       claimVerdictCte(postVerdictAlias, postInputAlias, postClaimedAlias),
     );
+    const legacyProbe = legacyUniqueProbeCte(
+      tables,
+      "node_post_legacy_unique_probe",
+      postClaims,
+      params,
+    );
+    if (legacyProbe !== undefined) ctes.push(legacyProbe);
+    const disjointProbe = disjointNodeProbeCte(
+      tables,
+      "node_post_disjoint_node_probe",
+      postClaims,
+      params,
+    );
+    if (disjointProbe !== undefined) ctes.push(disjointProbe);
   }
 
   const insertedNodeAlias = INSERTED_NODE_PROJECTION_CTE_ALIAS;
@@ -297,18 +462,62 @@ function buildNodeClaimsAndProjections(
   const conflictQueries: SQL[] = [];
   if (preClaims.length > 0) {
     conflictQueries.push(
-      sql`SELECT ordinal, 0 AS phase, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(preVerdictAlias)} WHERE accepted = FALSE`,
+      sql`SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(preVerdictAlias)} WHERE accepted = FALSE`,
     );
+    if (
+      preClaims.some(
+        (claim) =>
+          claim.verdict.kind === "uniqueness" &&
+          claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
+      )
+    ) {
+      conflictQueries.push(
+        sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_legacy_unique_probe"`,
+      );
+    }
+    if (
+      preClaims.some(
+        (claim) =>
+          claim.verdict.kind === "disjointness" &&
+          claim.verdict.conflictingKinds.length > 0,
+      )
+    ) {
+      conflictQueries.push(
+        sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe"`,
+      );
+    }
   }
   if (postClaims.length > 0) {
     conflictQueries.push(
-      sql`SELECT ordinal, 1 AS phase, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(postVerdictAlias)} WHERE accepted = FALSE`,
+      sql`SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(postVerdictAlias)} WHERE accepted = FALSE`,
     );
+    if (
+      postClaims.some(
+        (claim) =>
+          claim.verdict.kind === "uniqueness" &&
+          claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
+      )
+    ) {
+      conflictQueries.push(
+        sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_post_legacy_unique_probe"`,
+      );
+    }
+    if (
+      postClaims.some(
+        (claim) =>
+          claim.verdict.kind === "disjointness" &&
+          claim.verdict.conflictingKinds.length > 0,
+      )
+    ) {
+      conflictQueries.push(
+        sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_post_disjoint_node_probe"`,
+      );
+    }
   }
   const conflictAlias = "node_claim_conflicts";
   if (conflictQueries.length === 0) {
     ctes.push(
-      sql`${sql.identifier(conflictAlias)} AS (SELECT NULL::integer AS ordinal, NULL::integer AS phase, NULL::text AS axis, NULL::text AS constraint_name, NULL::text AS key, NULL::text AS holder_id, NULL::text AS holder_kind WHERE FALSE)`,
+      sql`${sql.identifier(conflictAlias)} AS (SELECT NULL::integer AS ordinal, NULL::integer AS phase, NULL::integer AS probe_ordinal, NULL::text AS axis, NULL::text AS constraint_name, NULL::text AS key, NULL::text AS holder_id, NULL::text AS holder_kind WHERE FALSE)`,
     );
   } else {
     ctes.push(
@@ -332,7 +541,7 @@ function buildNodeClaimsAndProjections(
       LEFT JOIN LATERAL (
         SELECT *
         FROM ${conflicts}
-        ORDER BY phase, ordinal
+        ORDER BY phase, ordinal, probe_ordinal
         LIMIT 1
       ) AS ${firstConflict} ON TRUE
     )

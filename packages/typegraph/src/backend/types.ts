@@ -892,11 +892,30 @@ export type NodeInsertProjection =
  * Placement is decided by the store's claim-site owner and preserved by the
  * SQL compiler as an explicit dependency around the node insert.
  */
+export type NodeInsertClaimVerdict =
+  | Readonly<{
+      kind: "uniqueness";
+      probeAxes: readonly string[];
+      fields: readonly string[];
+    }>
+  | Readonly<{
+      kind: "disjointness";
+      conflictingKinds: readonly string[];
+    }>;
+
 export type NodeInsertClaim = Readonly<{
   axis: string;
   constraintName: string;
   key: string;
   placement: "pre-insert" | "post-insert";
+  /**
+   * The complete read set for this claim. A canonical claim upsert only sees
+   * the folded axis; the additional uniqueness axes preserve compatibility
+   * with rows written before that fold. Disjoint claims name their live-node
+   * fallback population instead, because old databases can have no claim row
+   * for an existing disjoint overlap.
+   */
+  verdict: NodeInsertClaimVerdict;
 }>;
 
 /** The two atomic node-insert shapes supported by a planned-write backend. */
