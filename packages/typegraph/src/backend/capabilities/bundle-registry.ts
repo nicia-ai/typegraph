@@ -842,17 +842,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
     accesses: 7,
   },
-  executeNodeCreatePlan: {
+  executeManagedCreate: {
     kind: "reasoned",
     reason:
-      "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.",
-    accesses: 6,
-  },
-  executeEdgeCreatePlan: {
-    kind: "reasoned",
-    reason:
-      "A first-party edge planned-write entrypoint. It applies every requested schema-fence and cardinality dimension or refuses the plan; custom and legacy backends retain the portable read-then-write protocol.",
-    accesses: 9,
+      "A first-party managed-create entrypoint. It applies every requested node or edge write dimension in one statement or returns an explicit unsupported verdict; custom and legacy backends retain the portable read-then-write protocol.",
+    accesses: 15,
   },
   bootstrapTables: {
     kind: "reasoned",

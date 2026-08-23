@@ -6,7 +6,7 @@ import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   InsertNodeParams,
-  NodeCreatePlan,
+  ManagedNodeCreatePlan,
   NodeInsertClaim,
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
@@ -26,7 +26,7 @@ export const INSERTED_NODE_PROJECTION_CTE_ALIAS = "inserted_node";
 function buildNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeCreatePlan,
+  plan: ManagedNodeCreatePlan,
   timestamp: string,
   schemaLockClause: SQL | undefined,
 ): SQL | undefined {
@@ -259,7 +259,7 @@ function disjointNodeProbeCte(
 function buildGatedNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeCreatePlan,
+  plan: ManagedNodeCreatePlan,
   timestamp: string,
   gateAlias: string,
   schemaLockClause: SQL | undefined,
@@ -310,7 +310,7 @@ function buildGatedNodeInsert(
 function buildNodeClaimsAndProjections(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeCreatePlan,
+  plan: ManagedNodeCreatePlan,
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
@@ -319,9 +319,7 @@ function buildNodeClaimsAndProjections(
   schemaLockClause: SQL | undefined,
 ): SQL | undefined {
   const claims = plan.claims;
-  const preClaims = claims.filter(
-    (claim) => claim.placement === "pre-insert",
-  );
+  const preClaims = claims.filter((claim) => claim.placement === "pre-insert");
   const postClaims = claims.filter(
     (claim) => claim.placement === "post-insert",
   );
@@ -509,9 +507,12 @@ function buildNodeClaimsAndProjections(
     vectorStrategy,
   );
   if (projectionSql === undefined) return;
-  ctes.push(...projectionSql.map((projection, index) =>
-    sql`${sql.identifier(`node_projection_${index}`)} AS (${projection})`,
-  ));
+  ctes.push(
+    ...projectionSql.map(
+      (projection, index) =>
+        sql`${sql.identifier(`node_projection_${index}`)} AS (${projection})`,
+    ),
+  );
 
   const conflictQueries: SQL[] = [];
   if (preClaims.length > 0) {
@@ -593,7 +594,7 @@ function buildNodeClaimsAndProjections(
 
 function buildProjectionSql(
   params: InsertNodeParams,
-  plan: NodeCreatePlan,
+  plan: ManagedNodeCreatePlan,
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
@@ -659,7 +660,7 @@ function buildProjectionSql(
 export function buildInsertNodeWithProjections(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeCreatePlan,
+  plan: ManagedNodeCreatePlan,
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
@@ -699,5 +700,7 @@ export function buildInsertNodeWithProjections(
     timestamp,
     schemaLockClause,
   );
-  return nodeInsert === undefined ? undefined : buildNodeAndProjections(nodeInsert, projectionSql);
+  return nodeInsert === undefined ? undefined : (
+      buildNodeAndProjections(nodeInsert, projectionSql)
+    );
 }

@@ -337,10 +337,10 @@ export type BackendCapabilities = Readonly<{
    */
   readonly constraintClaims?: boolean;
   /**
-   * Whether `executeNodeCreatePlan` can atomically apply the claim portion
-   * of a {@link NodeCreatePlan}. Absent means projection-only: method presence
-   * alone is not evidence that a custom backend understands the newer plan
-   * field, so the store retains the standalone claim fallback.
+   * Whether `executeManagedCreate` can atomically apply the claim portion of
+   * a node create. Absent means projection-only: method presence alone is not
+   * evidence that a custom backend understands the newer plan field, so the
+   * store retains the standalone claim fallback.
    */
   readonly atomicNodeInsertClaims?: boolean;
   /** Vector search capabilities (undefined if not configured) */
@@ -520,21 +520,6 @@ export type EdgeRow = Readonly<{
   updated_at: string;
   deleted_at: string | undefined;
 }>;
-
-/** Dimensions selected by the edge-write planner. */
-export type EdgeCreatePlan = Readonly<{
-  schemaFence?: SchemaWriteFenceParams;
-  cardinalityClaim?: ClaimEdgeCardinalityParams;
-}>;
-
-/** Result of executing an edge create plan. */
-export type EdgeCreateResult =
-  | Readonly<{ outcome: "created"; row: EdgeRow }>
-  | Readonly<{ outcome: "rejected"; reason: "unknown" }>
-  | Readonly<{
-      outcome: "unsupported";
-      dimensions: readonly ("schemaFence" | "cardinalityClaim")[];
-    }>;
 
 /**
  * A row from the typegraph_node_uniques table.
@@ -934,23 +919,57 @@ export type NodeInsertClaim = Readonly<{
 }>;
 
 /** The two atomic node-insert shapes supported by a planned-write backend. */
-export type NodeInsertMode =
+export type ManagedNodeCreateMode =
   | Readonly<{ kind: "ordinary" }>
   | Readonly<{
       kind: "schema-fenced";
       schemaFence: SchemaWriteFenceParams;
     }>;
 
-/**
- * Complete plan for an atomic node create. The insert params carry row
- * identity; this plan carries its constraint claims, generated projections,
- * and whether the statement must acquire the active-schema fence.
- */
-export type NodeCreatePlan = Readonly<{
-  mode: NodeInsertMode;
+/** A complete managed node create, including its row and atomic write plan. */
+export type ManagedNodeCreatePlan = Readonly<{
+  entity: "node";
+  params: InsertNodeParams;
+  mode: ManagedNodeCreateMode;
   claims: readonly NodeInsertClaim[];
   projections: readonly NodeInsertProjection[];
 }>;
+
+/** A complete managed edge create, including its row and atomic write plan. */
+export type ManagedEdgeCreatePlan = Readonly<{
+  entity: "edge";
+  params: InsertEdgeParams;
+  schemaFence?: SchemaWriteFenceParams;
+  cardinalityClaim?: ClaimEdgeCardinalityParams;
+}>;
+
+/** The single planned-write contract shared by node and edge creates. */
+export type ManagedCreatePlan = ManagedNodeCreatePlan | ManagedEdgeCreatePlan;
+
+export type ManagedCreateResult =
+  | Readonly<{ outcome: "created"; entity: "node"; row: NodeRow }>
+  | Readonly<{ outcome: "created"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{
+      outcome: "rejected";
+      entity: "node" | "edge";
+      reason: "unknown";
+    }>
+  | Readonly<{
+      outcome: "unsupported";
+      entity: "node";
+      dimensions: readonly [
+        "schemaFence" | "claims" | "projections",
+        ...(readonly ("schemaFence" | "claims" | "projections")[]),
+      ];
+    }>
+  | Readonly<{
+      outcome: "unsupported";
+      entity: "edge";
+      dimensions: readonly [
+        "schemaFence" | "cardinalityClaim",
+        ...(readonly ("schemaFence" | "cardinalityClaim")[]),
+      ];
+    }>;
 
 /**
  * One row of a batched embedding upsert.
@@ -1949,16 +1968,6 @@ export type GraphBackend = Readonly<{
     params: InsertNodeParams,
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
-  /**
-   * Optional atomic planned create. The backend must apply every requested
-   * claim and projection in the same statement as the node insert, or refuse
-   * the plan; the store never partially fuses one.
-   */
-  executeNodeCreatePlan?: (
-    this: void,
-    params: InsertNodeParams,
-    plan: NodeCreatePlan,
-  ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
   insertNodesBatch?: (
     this: void,
@@ -1990,17 +1999,11 @@ export type GraphBackend = Readonly<{
 
   // === Edge Operations ===
   insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
-  /**
-   * Executes every dimension selected by the edge-write planner, or refuses
-   * the plan. A rejected result is deliberately ambiguous: SQLite's
-   * INSERT ... RETURNING cannot emit a diagnostic row when its source
-   * predicate produces no rows, so the store owns portable diagnostics.
-   */
-  executeEdgeCreatePlan?: (
+  /** Executes every requested managed-create dimension or refuses the plan. */
+  executeManagedCreate?: (
     this: void,
-    params: InsertEdgeParams,
-    plan: EdgeCreatePlan,
-  ) => Promise<EdgeCreateResult>;
+    plan: ManagedCreatePlan,
+  ) => Promise<ManagedCreateResult>;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
     this: void,
@@ -3171,7 +3174,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
-  | "executeNodeCreatePlan"
+  | "executeManagedCreate"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -3197,7 +3200,7 @@ export type EdgeEntityReadBackend = Pick<
 export type EdgeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertEdge"
-  | "executeEdgeCreatePlan"
+  | "executeManagedCreate"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"

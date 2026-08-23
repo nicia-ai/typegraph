@@ -37,7 +37,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
-  NodeCreatePlan,
+  ManagedNodeCreatePlan,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   SchemaWriteFenceParams,
@@ -94,9 +94,7 @@ import {
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
-import {
-  buildInsertNodeWithProjections,
-} from "./node-projections";
+import { buildInsertNodeWithProjections } from "./node-projections";
 import {
   buildDeleteNode,
   buildGetNode,
@@ -190,10 +188,7 @@ export type CommonOperationStrategy = Readonly<{
     vectorScoreDescending: boolean,
   ) => SQL;
   buildInsertNode: (params: InsertNodeParams, timestamp: string) => SQL;
-  buildInsertNodeIfAbsent: (
-    params: InsertNodeParams,
-    timestamp: string,
-  ) => SQL;
+  buildInsertNodeIfAbsent: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodeIfAbsentWithSchemaFence: (
     params: InsertNodeParams,
     timestamp: string,
@@ -208,7 +203,7 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildInsertNodeWithProjections?: (
     params: InsertNodeParams,
-    plan: NodeCreatePlan,
+    plan: ManagedNodeCreatePlan,
     timestamp: string,
     schemaLockClause?: SQL,
   ) => SQL | undefined;
@@ -836,18 +831,10 @@ function createPostgresNodeProjectionBuilders(
   dialect: SqlDialect,
   fulltextStrategy: FulltextStrategy,
   vectorStrategy: VectorStrategy | undefined,
-): Pick<
-  CommonOperationStrategy,
-  "buildInsertNodeWithProjections"
-> {
+): Pick<CommonOperationStrategy, "buildInsertNodeWithProjections"> {
   const fulltextTable = tables.fulltextTableName;
   return {
-    buildInsertNodeWithProjections(
-      params,
-      plan,
-      timestamp,
-      schemaLockClause,
-    ) {
+    buildInsertNodeWithProjections(params, plan, timestamp, schemaLockClause) {
       return buildInsertNodeWithProjections(
         tables,
         params,

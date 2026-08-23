@@ -133,7 +133,7 @@ import {
   type InternalTransactionOptions,
   type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
-  type NodeCreatePlan,
+  type ManagedNodeCreatePlan,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
@@ -347,9 +347,9 @@ type PostgresBatchChunkSizes = Readonly<{
   uniqueInsertBatchSize: number;
 }>;
 
-function vectorSlotsFromNodeCreatePlan(
+function vectorSlotsFromManagedNodeCreatePlan(
   params: InsertNodeParams,
-  plan: NodeCreatePlan,
+  plan: ManagedNodeCreatePlan,
 ): readonly VectorSlot[] {
   return plan.projections.flatMap((projection) =>
     projection.kind === "embedding" ?
@@ -2390,7 +2390,7 @@ function createPostgresOperationBackend(
     schemaFenceLockClause: sql.raw("FOR SHARE"),
     nodeProjectionInsertFusion: true,
     async beforeNodeProjectionInsert(params, plan): Promise<void> {
-      const vectorSlots = vectorSlotsFromNodeCreatePlan(params, plan);
+      const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(params, plan);
       await contributionMaterializer.assertNodeInsertProjections(
         params.graphId,
         {
@@ -2425,7 +2425,7 @@ function createPostgresOperationBackend(
           fulltext: plan.projections.some(
             (projection) => projection.kind === "fulltext",
           ),
-          vectorSlots: vectorSlotsFromNodeCreatePlan(params, plan),
+          vectorSlots: vectorSlotsFromManagedNodeCreatePlan(params, plan),
         },
         error,
       );
