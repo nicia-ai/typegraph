@@ -387,12 +387,11 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(await setup.revisionNow()).toBe(afterCompetitor);
   });
 
-  it("reports a terminal error when the match key never settles", async () => {
-    // The convergence loop is bounded: a competitor that keeps claiming and
-    // releasing the same match key would otherwise spin forever. Injected here
-    // by making the create leg's in-transaction guard ALWAYS see a competitor
-    // while the dispatcher's own lookup sees none — a permanent version of the
-    // real interleaving.
+  it("uses the transaction-carried row instead of a false competing-writer error", async () => {
+    // The root dispatcher is allowed to be stale, but the transaction read is
+    // authoritative. A row found there is carried with the convergence signal
+    // and returned directly; re-dispatching through the stale root would turn
+    // an honest found result into a false terminal competing-writer error.
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
     const bob = await setup.nodes.Person.create({ name: "Bob" });
@@ -413,31 +412,34 @@ describe("getOrCreateByEndpoints convergence", () => {
     const store = createStore(
       graph,
       deriveBackend(raw, {
-        // The dispatcher reads through the top level and must see NOTHING, so it
-        // keeps electing to create.
+        // The dispatcher reads through the top level and must see NOTHING.
         findEdgesByKind: () => Promise.resolve([]),
         transaction: (fn, options) =>
           raw.transaction(
             (target) =>
-              fn({
-                ...target,
-                // The guard reads through the transaction and always sees a
-                // competitor, so every attempt aborts.
-                findEdgesByKind: () => {
-                  attempts += 1;
-                  return Promise.resolve([phantom]);
-                },
-              }),
+              fn(
+                deriveBackend(target, {
+                  // The guard reads through the transaction and sees the
+                  // authoritative row, so the create attempt carries it back.
+                  findEdgesByKind: () => {
+                    attempts += 1;
+                    return Promise.resolve([phantom]);
+                  },
+                }),
+              ),
             options,
           ),
       }),
     );
 
-    await expect(
-      store.edges.knows.getOrCreateByEndpoints(alice, bob, { since: "x" }),
-    ).rejects.toThrow(/lost its match key/u);
-    // Bounded, and it really did use every attempt before giving up.
-    expect(attempts).toBe(3);
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "x",
+    });
+    expect(result.action).toBe("found");
+    expect(result.edge.id).toBe(phantom.id);
+    // One authoritative transaction read settled the operation; no retry loop
+    // or root-cache re-dispatch was needed.
+    expect(attempts).toBe(1);
   });
 
   it("resolves a stale root read from the transaction match-key read", async () => {
