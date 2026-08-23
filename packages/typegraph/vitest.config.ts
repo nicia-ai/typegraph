@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 
 import { configDefaults, defineConfig } from "vitest/config";
 
+import { PGLITE_GLOBS } from "./vitest.pglite-project";
+
 /**
  * Test globs for the graph-merge subsystem. These suites exercise an in-process
  * PGlite (WASM Postgres) backend and run on BOTH backends, so they get their own
@@ -24,21 +26,6 @@ const GRAPH_MERGE_GLOBS = [
  * load reported as a failed assertion about statements that were in fact
  * issued.
  */
-const PGLITE_GLOBS = [
-  "tests/backends/postgres/pglite-*.test.ts",
-  "tests/constraint-claim-inventory.test.ts",
-  "tests/constraint-write-fence.test.ts",
-  "tests/contribution-rebuild-lock.test.ts",
-  "tests/materialize-trigram-extension.test.ts",
-  "tests/node-claim-write-fusion.test.ts",
-  // T15/T16 (B10): each posture in `tests/lock-fence-test-utils.ts`'s
-  // `createLoggedPostgresBackend` boots its own in-process PGlite instance —
-  // several per file — so these belong here for the same reason the
-  // recorder suites do, not on the default five-second budget.
-  "tests/lock-fence-plan.test.ts",
-  "tests/lock-fence-refusal.test.ts",
-];
-
 const SHARED_EXCLUDE = [
   ...configDefaults.exclude,
   // #140: workerd-only do-sqlite suite — runs via `test:do`
