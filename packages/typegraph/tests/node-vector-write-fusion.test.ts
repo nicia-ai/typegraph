@@ -18,6 +18,8 @@ import { createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestDatabase } from "./test-utils";
 
+const INTEGRATION_TEST_TIMEOUT_MS = 15_000;
+
 const SingleVectorDocument = defineNode("SingleVectorDocument", {
   schema: z.object({
     title: z.string(),
@@ -178,27 +180,31 @@ function hasFulltextWrite(statement: string): boolean {
 }
 
 describe("fresh node + vector write fusion", () => {
-  it("maps a missing warmed vector table and leaves no node row", async () => {
-    const fixture = await createRecordedVectorPostgres();
-    const [store] = await createStoreWithSchema(singleGraph, fixture.backend);
-    const strategy = requireDefined(fixture.backend.vectorStrategy);
-    const physicalName = strategy.tableName(
-      singleGraph.id,
-      "SingleVectorDocument",
-      "embedding",
-    );
-    await fixture.client.exec(`DROP TABLE "${physicalName}"`);
+  it(
+    "maps a missing warmed vector table and leaves no node row",
+    async () => {
+      const fixture = await createRecordedVectorPostgres();
+      const [store] = await createStoreWithSchema(singleGraph, fixture.backend);
+      const strategy = requireDefined(fixture.backend.vectorStrategy);
+      const physicalName = strategy.tableName(
+        singleGraph.id,
+        "SingleVectorDocument",
+        "embedding",
+      );
+      await fixture.client.exec(`DROP TABLE "${physicalName}"`);
 
-    await expect(
-      store.nodes.SingleVectorDocument.create({
-        title: "missing vector storage",
-        embedding: [1, 0, 0],
-      }),
-    ).rejects.toBeInstanceOf(ContributionUnavailableError);
-    await expect(store.nodes.SingleVectorDocument.find()).resolves.toHaveLength(
-      0,
-    );
-  });
+      await expect(
+        store.nodes.SingleVectorDocument.create({
+          title: "missing vector storage",
+          embedding: [1, 0, 0],
+        }),
+      ).rejects.toBeInstanceOf(ContributionUnavailableError);
+      await expect(
+        store.nodes.SingleVectorDocument.find(),
+      ).resolves.toHaveLength(0);
+    },
+    INTEGRATION_TEST_TIMEOUT_MS,
+  );
 
   it("maps a missing vector table in a mixed projection and leaves no node row", async () => {
     const fixture = await createRecordedVectorPostgres();
