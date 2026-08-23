@@ -129,6 +129,22 @@ function assertMatchingFusedEdgeClaim(
   );
 }
 
+function assertMatchingNodeSchemaFence(
+  params: InsertNodeParams,
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (schemaFence.graphId === params.graphId) return;
+
+  throw new CompilerInvariantError(
+    "A node schema fence must match its node graph.",
+    {
+      nodeGraphId: params.graphId,
+      fenceGraphId: schemaFence.graphId,
+      id: params.id,
+    },
+  );
+}
+
 /**
  * The owner a claim write proposes. Reading it off the params in one place is
  * what keeps the accept/refuse test comparing the same pair the SQL arms do.
@@ -629,6 +645,7 @@ export function createCommonOperationBackend(
           params: InsertNodeParams,
           schemaFence: SchemaWriteFenceParams,
         ): Promise<NodeRow | undefined> {
+          assertMatchingNodeSchemaFence(params, schemaFence);
           const query =
             operationStrategy.buildInsertNodeIfAbsentWithSchemaFence(
               params,
@@ -644,6 +661,7 @@ export function createCommonOperationBackend(
           params: InsertNodeParams,
           schemaFence: SchemaWriteFenceParams,
         ): Promise<NodeRow | undefined> {
+          assertMatchingNodeSchemaFence(params, schemaFence);
           const query = operationStrategy.buildInsertNodeWithSchemaFence(
             params,
             nowIso(),
@@ -732,6 +750,9 @@ export function createCommonOperationBackend(
   async function executeNodeManagedCreate(
     plan: ManagedNodeCreatePlan,
   ): Promise<ManagedCreateResult> {
+    if (plan.mode.kind === "schema-fenced") {
+      assertMatchingNodeSchemaFence(plan.params, plan.mode.schemaFence);
+    }
     if (plan.claims.length > 0 && plan.mode.kind === "schema-fenced") {
       return {
         outcome: "unsupported",
@@ -782,7 +803,10 @@ export function createCommonOperationBackend(
       return {
         outcome: "unsupported",
         entity: "node",
-        dimensions: ["claims", "projections"],
+        dimensions:
+          plannedClaims.length === 0 ? ["projections"]
+          : executablePlan.projections.length === 0 ? ["claims"]
+          : ["claims", "projections"],
       };
     }
 
@@ -817,18 +841,6 @@ export function createCommonOperationBackend(
       throw new CompilerInvariantError(
         "The backend accepted a managed node plan it cannot compile.",
         { graphId: params.graphId, kind: params.kind, id: params.id },
-      );
-    }
-    if (
-      executablePlan.mode.kind === "schema-fenced" &&
-      executablePlan.mode.schemaFence.graphId !== params.graphId
-    ) {
-      throw new CompilerInvariantError(
-        "A node projection plan's schema fence must match its node graph.",
-        {
-          nodeGraphId: params.graphId,
-          fenceGraphId: executablePlan.mode.schemaFence.graphId,
-        },
       );
     }
     const query = buildInsertNodeWithProjections(
@@ -1042,7 +1054,11 @@ export function createCommonOperationBackend(
         return executeEdgeManagedCreate(plan);
       }
       default: {
-        return plan satisfies never;
+        plan satisfies never;
+        throw new CompilerInvariantError(
+          "The managed create plan names an unknown entity.",
+          { capability: "executeManagedCreate" },
+        );
       }
     }
   }

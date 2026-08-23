@@ -380,6 +380,67 @@ describe("fresh node + fulltext write fusion", () => {
     ).toHaveLength(0);
   });
 
+  it("refuses a projection-free schema fence for another graph before SQL", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const params: InsertNodeParams = {
+      graphId: graph.id,
+      kind: "Document",
+      id: "cross-graph-fast-path",
+      props: { title: "must not land" },
+    };
+
+    fixture.reset();
+    await fixture.backend.transaction(async (tx) => {
+      await expect(
+        requireDefined(tx.executeManagedCreate)({
+          entity: "node",
+          params,
+          idGenerated: false,
+          mode: {
+            kind: "schema-fenced",
+            schemaFence: {
+              graphId: "different-graph",
+              expectedVersion: 1,
+            },
+          },
+          claims: [],
+          projections: [],
+        }),
+      ).rejects.toMatchObject({ code: "COMPILER_INVARIANT_ERROR" });
+    });
+
+    expect(fixture.statements).toEqual([]);
+  });
+
+  it("refuses cross-graph fences through the legacy node members before SQL", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const params: InsertNodeParams = {
+      graphId: graph.id,
+      kind: "Document",
+      id: "cross-graph-legacy",
+      props: { title: "must not land" },
+    };
+    const schemaFence = {
+      graphId: "different-graph",
+      expectedVersion: 1,
+    };
+
+    fixture.reset();
+    await fixture.backend.transaction(async (tx) => {
+      await expect(
+        requireDefined(tx.insertNodeWithSchemaFence)(params, schemaFence),
+      ).rejects.toMatchObject({ code: "COMPILER_INVARIANT_ERROR" });
+      await expect(
+        requireDefined(tx.insertNodeIfAbsentWithSchemaFence)(
+          params,
+          schemaFence,
+        ),
+      ).rejects.toMatchObject({ code: "COMPILER_INVARIANT_ERROR" });
+    });
+
+    expect(fixture.statements).toEqual([]);
+  });
+
   it("captures the fused node row under recorded history", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const [schemaStore] = await createStoreWithSchema(graph, fixture.backend);

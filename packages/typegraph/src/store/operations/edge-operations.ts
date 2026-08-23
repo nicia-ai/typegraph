@@ -165,6 +165,7 @@ import {
 } from "./edge-write-fences";
 import { type EdgeUpdateWork } from "./edge-write-pipeline";
 import {
+  AutocommitWriteRequiresTransaction,
   runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
@@ -663,7 +664,13 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
 
       if (fuseSchemaFenceInFirstWrite) {
         await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
-        memoizeLeasedSchemaFence(ctx, targetBackend);
+        if (autocommitSingleStatement && "transaction" in targetBackend) {
+          throw new AutocommitWriteRequiresTransaction();
+        }
+        // Endpoint predicates can reject the INSERT before PostgreSQL
+        // evaluates the nested locking subquery. Re-establish the portable
+        // fence before the ordered fallback probes or a later leased write.
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
       }
 
       prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
@@ -702,6 +709,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       plan,
       autocommitBackend,
       rowWork,
+      { schemaFenceInFirstWrite },
     );
   }
   return runHookedWritePlan(ctx, opContext, plan, backend, rowWork, {
@@ -1874,10 +1882,16 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     );
   }
 
-  // The return-mode probe is also the dispatcher read for a create. Retain a
-  // negative result so a no-match call does not pay for the same root lookup
-  // twice before the create transaction performs its authoritative check.
-  let initialNegativeRootCandidates: readonly BackendEdgeRow[] | undefined;
+  // The return-mode probe is also the dispatcher read for a create. Retain its
+  // result, including whether it came from a transaction, so a stale positive
+  // disproved by the authoritative read does not repeat either lookup before
+  // the create transaction performs its own convergence check.
+  let initialCandidateRead:
+    | Readonly<{
+        rows: readonly BackendEdgeRow[];
+        authoritative: boolean;
+      }>
+    | undefined;
 
   // A root read is only a dispatcher hint. Confirm a positive result through
   // the transaction target before returning it; a cache may replay a stale
@@ -1897,8 +1911,15 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
         return { edge: rowToEdge(currentLiveRow), action: "found" };
       }
+      initialCandidateRead = {
+        rows: currentRows,
+        authoritative: true,
+      };
     } else if (probedDeletedRow === undefined) {
-      initialNegativeRootCandidates = probeRows;
+      initialCandidateRead = {
+        rows: probeRows,
+        authoritative: false,
+      };
     }
   }
 
@@ -1986,14 +2007,22 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   async function attempt(
     forceTransactionRead: boolean,
   ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
-    const candidateRows =
-      forceTransactionRead ?
-        await findCandidatesInTransaction()
-      : (initialNegativeRootCandidates ?? (await findCandidates(backend)));
-    initialNegativeRootCandidates = undefined;
+    const retainedRead = initialCandidateRead;
+    initialCandidateRead = undefined;
+    const candidateRead =
+      retainedRead ??
+      (forceTransactionRead ?
+        {
+          rows: await findCandidatesInTransaction(),
+          authoritative: true,
+        }
+      : {
+          rows: await findCandidates(backend),
+          authoritative: false,
+        });
 
     let { liveRow, deletedRow } = findMatchingEdge(
-      candidateRows,
+      candidateRead.rows,
       matchOn,
       validatedProps,
     );
@@ -2002,7 +2031,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     // before selecting an update/resurrection id, since cached root reads may
     // be stale in either direction.
     if (
-      !forceTransactionRead &&
+      !candidateRead.authoritative &&
       (liveRow !== undefined || deletedRow !== undefined)
     ) {
       const currentRows = await findCandidatesInTransaction();
@@ -2059,20 +2088,31 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   let forceTransactionRead = false;
   for (let remaining = ATTEMPT_LIMIT; remaining > 0; remaining -= 1) {
     try {
-      return await attempt(forceTransactionRead);
-    } catch (error) {
-      if (error instanceof EdgeConvergenceRaced) {
+      try {
+        return await attempt(forceTransactionRead);
+      } catch (error) {
+        if (!(error instanceof EdgeConvergenceRaced)) throw error;
+
         // The create guard found this row through the transaction target. Do
-        // not re-dispatch through a caching root handle.
-        return resolveMatchedRow(error.row, error.row.deleted_at !== undefined);
+        // not re-dispatch through a caching root handle. Keep this recovery
+        // inside the outer attempt catch so a match key that moves before the
+        // update re-read consumes the same bounded retry budget.
+        return await resolveMatchedRow(
+          error.row,
+          error.row.deleted_at !== undefined,
+        );
       }
-      if (error instanceof EdgeMatchKeyMoved) {
+    } catch (error) {
+      if (
+        error instanceof EdgeMatchKeyMoved ||
+        error instanceof EdgeNotFoundError
+      ) {
         if (remaining === 1) {
           throw new DatabaseOperationError(
             `getOrCreateByEndpoints for ${kind} between ${fromKind} "${fromId}" ` +
-              `and ${toKind} "${toId}" could not resolve a stable match key ` +
+              `and ${toKind} "${toId}" could not resolve a stable matching edge ` +
               `after ${String(ATTEMPT_LIMIT)} attempts; a concurrent writer ` +
-              "keeps changing the matching properties. Retry the operation.",
+              "keeps changing or deleting it. Retry the operation.",
             { operation: "insert", entity: "edge" },
             { cause: error },
           );

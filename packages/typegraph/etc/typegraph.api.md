@@ -4482,21 +4482,6 @@ export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | 
 export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeManagedCreate" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
-export type NodeFulltextSync = Readonly<{
-    graphId: string;
-    nodeKind: string;
-    nodeId: string;
-    action: "upsert";
-    content: string;
-    language: string;
-}> | Readonly<{
-    graphId: string;
-    nodeKind: string;
-    nodeId: string;
-    action: "delete";
-}>;
-
-// @public
 export type NodeGetOrCreateByConstraintOptions = Readonly<{
     ifExists?: IfExistsMode;
 }>;

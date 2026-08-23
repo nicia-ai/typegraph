@@ -219,6 +219,14 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
   );
 }
 
+/** Internal signal that a zero-row autocommit attempt needs portable recovery. */
+export class AutocommitWriteRequiresTransaction extends Error {
+  constructor() {
+    super("The managed autocommit attempt requires transactional recovery.");
+    this.name = "AutocommitWriteRequiresTransaction";
+  }
+}
+
 /**
  * Runs a proven single-statement write directly on a bundled root backend.
  *
@@ -235,8 +243,18 @@ export function runAutocommitSingleStatementWritePlan<K extends RowWorkKind, T>(
   plan: WritePlan<K>,
   backend: GraphBackend,
   rowWork: WriteRowWork<K, T>,
+  fallbackOptions?: WritePlanOptions<T>,
 ): Promise<T> {
-  return ctx.withOperationHooks(opContext, () =>
-    planFrame(ctx, plan, rowWork)(backend, uncapturedGraphWriteLock()),
-  );
+  return ctx.withOperationHooks(opContext, async () => {
+    try {
+      return await planFrame(
+        ctx,
+        plan,
+        rowWork,
+      )(backend, uncapturedGraphWriteLock());
+    } catch (error) {
+      if (!(error instanceof AutocommitWriteRequiresTransaction)) throw error;
+      return runWritePlan(ctx, plan, backend, rowWork, fallbackOptions);
+    }
+  });
 }

@@ -15,8 +15,9 @@
  * `resolveWriteFencePlan`'s dialect-derivation arm at one call site and
  * `unfenced` at another for the same underlying backend.
  *
- * This is the only module that imports {@link carryBackendResourceAudit} and
- * {@link carryFirstPartyFactoryMark}.
+ * This is the only module that imports {@link carryBackendResourceAudit},
+ * {@link carryFirstPartyFactoryMark}, and
+ * {@link carrySchemaFencedInsertEligibility}.
  *
  * Naming convention this module's ratchet depends on: an identifier ending in
  * `Backend` denotes a whole backend object; a members fragment is named

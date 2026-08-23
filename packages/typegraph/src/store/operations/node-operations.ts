@@ -1961,7 +1961,13 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // ordinary active-schema diagnostic preserves the settled version in
       // StaleVersionError.details.actual without a second PostgreSQL lock.
       await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
-      memoizeLeasedSchemaFence(ctx, targetBackend);
+      // An empty INSERT result does not prove PostgreSQL evaluated the nested
+      // locking subquery: an ON CONFLICT or other zero-row branch can make the
+      // executor skip it. Acquire the portable fence before any fallback read
+      // or later write relies on this transaction's lease.
+      if (!autocommitSingleStatement) {
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
       if (!prepared.insertIfAbsent) {
         throw new DatabaseOperationError(
           `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,

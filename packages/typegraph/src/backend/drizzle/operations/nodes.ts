@@ -67,6 +67,12 @@ export function buildInsertNodeIfAbsent(
   const { nodes } = tables;
   const propsJson = JSON.stringify(params.props);
   const columns = nodeColumnList(nodes);
+  const conflictColumns = sql.join(
+    [nodes.graphId, nodes.kind, nodes.id].map((column) =>
+      sql.identifier(column.name),
+    ),
+    sql`, `,
+  );
 
   return sql`
     INSERT INTO ${nodes} (${columns})
@@ -75,7 +81,7 @@ export function buildInsertNodeIfAbsent(
       1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
       ${timestamp}, ${timestamp}
     )
-    ON CONFLICT (graph_id, kind, id) DO NOTHING
+    ON CONFLICT (${conflictColumns}) DO NOTHING
     RETURNING *
   `;
 }
@@ -95,6 +101,12 @@ export function buildInsertNodeIfAbsentWithSchemaFence(
   const { nodes, schemaVersions } = tables;
   const propsJson = JSON.stringify(params.props);
   const columns = nodeColumnList(nodes);
+  const conflictColumns = sql.join(
+    [nodes.graphId, nodes.kind, nodes.id].map((column) =>
+      sql.identifier(column.name),
+    ),
+    sql`, `,
+  );
 
   return sql`
     INSERT INTO ${nodes} (${columns})
@@ -111,7 +123,7 @@ export function buildInsertNodeIfAbsentWithSchemaFence(
       ${schemaLockClause}
     ) AS "schema_fence"
     WHERE TRUE
-    ON CONFLICT (graph_id, kind, id) DO NOTHING
+    ON CONFLICT (${conflictColumns}) DO NOTHING
     RETURNING *
   `;
 }

@@ -188,7 +188,6 @@ export type {
   ManagedNodeCreatePlan,
   NodeEntityReadBackend,
   NodeEntityWriteBackend,
-  NodeFulltextSync,
   NodeInsertClaim,
   NodeInsertClaimVerdict,
   NodeInsertProjection,

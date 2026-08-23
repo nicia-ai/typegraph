@@ -85,6 +85,7 @@ import {
 import {
   type NodeClaimItem,
   type NodeCreateClaimPlan,
+  planNodeCreateClaims,
   refuseNodeCreateClaimError,
   withNodeCreateClaims,
   withNodeCreateClaimsBatch,
@@ -189,15 +190,15 @@ export type WriteTarget = Readonly<
  * the ratchet drove the count down as those signatures were re-typed. An `as`
  * cast at each site would have been the same unsoundness with no counter.
  *
- * **Exactly one caller remains, and it is structural, not debt.**
- * `executeEdgeBulkGetOrCreateByEndpoints` runs nested managed writes inside its
+ * **Exactly three callers remain, and they are structural, not debt.** The
+ * planned node and edge create paths inspect the exact row-work receiver before
+ * allowing it to carry a schema fence. The third caller,
+ * `executeEdgeBulkGetOrCreateByEndpoints`, runs nested managed writes inside its
  * own frame: each nested leg re-enters the executor against THIS transaction
- * target, and re-entry needs the full union by construction — it mints a
- * session, which writes. Inlining those legs' row work would drop the nested
- * frames' schema fence and revision-clock advance, i.e. change behavior. The
- * ratchet therefore records ONE as a reasoned floor, the same way it records
- * two permanently allowlisted managed-write entry points, rather than pretending
- * a zero it would have to buy with a statement change.
+ * target, and re-entry needs the full union by construction because it mints a
+ * session that writes. The ratchet records these three reasoned escapes rather
+ * than pretending a zero that would weaken receiver validation or change the
+ * nested write's fence and revision-clock behavior.
  */
 export function unfencedTarget(
   target: WriteTarget,
@@ -253,6 +254,32 @@ export type NodeCreateWork = Readonly<{
   sideEffects: NodeInsertSideEffects;
   projections: readonly NodeInsertProjection[];
 }>;
+
+/** Refuses an insert-if-absent unit that would silently drop a node claim. */
+function assertClaimFreeInsertIfAbsentWork(
+  ctx: Pick<WriteSessionContext, "graphId" | "registry">,
+  work: NodeCreateWork,
+): void {
+  const derivedPlan = planNodeCreateClaims(ctx, work.claim);
+  if (
+    derivedPlan.claims.length === 0 &&
+    work.claimPlan.entries.length === 0 &&
+    work.claimPlan.claims.length === 0 &&
+    work.claimPlan.verdicts.length === 0
+  ) {
+    return;
+  }
+  throw new CompilerInvariantError(
+    "A node insert-if-absent unit cannot carry claims.",
+    {
+      graphId: work.params.graphId,
+      kind: work.params.kind,
+      id: work.params.id,
+      derivedClaimCount: derivedPlan.claims.length,
+      plannedClaimCount: work.claimPlan.claims.length,
+    },
+  );
+}
 
 /**
  * One node update. The validity lower-bound predicate is NOT here: it is the
@@ -468,6 +495,9 @@ export function createWriteSession(
                 graphId: work.params.graphId,
                 kind: work.params.kind,
                 id: work.params.id,
+                ...(result.outcome === "unsupported" ?
+                  { dimensions: result.dimensions }
+                : {}),
               },
             );
           }
@@ -491,6 +521,7 @@ export function createWriteSession(
     },
 
     createNodeIfAbsent: async (work) => {
+      assertClaimFreeInsertIfAbsentWork(ctx, work);
       const row = await runInsertIfAbsent(dispatch, work.params);
       if (row === undefined) return;
       await applyNodeInsertSyncFans(writeContext, work.sideEffects, target);
@@ -498,6 +529,7 @@ export function createWriteSession(
     },
 
     createNodeIfAbsentWithSchemaFence: async (work, schemaFence) => {
+      assertClaimFreeInsertIfAbsentWork(ctx, work);
       const insert = target.insertNodeIfAbsentWithSchemaFence;
       if (insert === undefined) return;
       const row = await insert(work.params, schemaFence);
@@ -550,6 +582,9 @@ export function createWriteSession(
                     graphId: work.params.graphId,
                     kind: work.params.kind,
                     id: work.params.id,
+                    ...(result.outcome === "unsupported" ?
+                      { dimensions: result.dimensions }
+                    : {}),
                   },
                 );
               }
@@ -676,7 +711,13 @@ export function createWriteSession(
             ctx.claimsVerdict(),
             plan.cardinalityClaim,
           );
-          return execute({ entity: "edge", params: plan.params });
+          const retryPlan: ManagedEdgeCreatePlan = {
+            entity: "edge",
+            params: plan.params,
+          };
+          const retryResult = await execute(retryPlan);
+          assertManagedCreateResultMatchesPlan(retryPlan, retryResult);
+          return retryResult;
         }
         return result;
       }

@@ -19,8 +19,8 @@
  *      WITHOUT calling an owner, which is precisely how the duplicate resolver
  *      in `trusted-import.ts` survived the last two rounds of review.
  *  (c) FILE SET — the set of files under `src/backend/**` that name the column at
- *      all equals the fourteen declared here, each with the role that earns it. (a)
- *      and (b) only see four files; a NEW file that binds `valid_from` would be
+ *      all equals the fifteen declared here, each with the role that earns it. (a)
+ *      and (b) only see five files; a NEW file that binds `valid_from` would be
  *      invisible to them, and I5 is quantified over the whole directory.
  *
  * The rule this defends is A2': a write that stamps a lower bound its caller did
@@ -61,7 +61,7 @@ const COLUMN_MENTION = /validFrom|valid_from/;
  */
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 8, stated: 0 },
-  "drizzle/operations/node-projections.ts": { stamping: 2, stated: 0 },
+  "drizzle/operations/node-projections.ts": { stamping: 1, stated: 0 },
   "drizzle/operations/edges.ts": { stamping: 6, stated: 1 },
   "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
@@ -118,11 +118,11 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
 const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/operations/edge-claims.ts":
     "writer — fused cardinality claim and edge insert",
-  "drizzle/operations/nodes.ts": "writer — five stamping sites",
+  "drizzle/operations/nodes.ts": "writer — eight stamping sites",
   "drizzle/operations/node-projections.ts":
-    "writer — planned node insert in ordinary and schema-fenced modes",
+    "writer — one planned node insert after unified admission gating",
   "drizzle/operations/edges.ts":
-    "writer — four stamping sites, one pass-through",
+    "writer — six stamping sites, one pass-through",
   "drizzle/trusted-import.ts":
     "writer — four stamping sites (native per-dialect INSERT)",
   "drizzle/operations/shared.ts":

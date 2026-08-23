@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import {
+  CompilerInvariantError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../src";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -194,6 +199,67 @@ describe("guarded edge cardinality claim", () => {
       ),
     ).rejects.toThrow("schema fence must match its edge graph");
     expect(fixture.statements).toEqual([]);
+  });
+
+  it("validates the result returned by the cardinality fallback retry", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    const to = await fixture.store.nodes.Person.create({ name: "to" });
+    const backend = deriveBackend(fixture.backend, {
+      async transaction<T>(
+        fn: (transaction: TransactionBackend) => Promise<T>,
+        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
+      ): Promise<T> {
+        return fixture.backend.transaction(
+          (transaction) =>
+            fn(
+              deriveBackend(transaction, {
+                executeManagedCreate(plan) {
+                  if (
+                    plan.entity === "edge" &&
+                    plan.cardinalityClaim !== undefined
+                  ) {
+                    return Promise.resolve({
+                      outcome: "unsupported" as const,
+                      entity: "edge" as const,
+                      dimensions: ["cardinalityClaim"] as const,
+                    });
+                  }
+                  return Promise.resolve({
+                    outcome: "created" as const,
+                    entity: "edge" as const,
+                    row: {
+                      graph_id: plan.params.graphId,
+                      id: "foreign-edge",
+                      kind: plan.params.kind,
+                      from_kind: "Person",
+                      from_id: from.id,
+                      to_kind: "Person",
+                      to_id: to.id,
+                      props: {},
+                      valid_from: undefined,
+                      valid_to: undefined,
+                      created_at: "2026-08-22T00:00:00.000Z",
+                      updated_at: "2026-08-22T00:00:00.000Z",
+                      deleted_at: undefined,
+                    },
+                  });
+                },
+              }),
+            ),
+          options,
+        );
+      },
+    });
+    const store = createStore(graph, backend);
+
+    await expect(
+      store.edges.one.create(from, to, {}, { id: "expected-edge" }),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
+    expect(await readClaimRows(fixture.backend)).toEqual([]);
+    expect(await fixture.backend.getEdge(graph.id, "expected-edge")).toBe(
+      undefined,
+    );
   });
 
   it("returns created and rejected outcomes from the planned edge executor", async () => {

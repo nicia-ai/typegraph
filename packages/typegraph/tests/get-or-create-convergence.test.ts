@@ -20,10 +20,17 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, UniquenessError } from "../src";
+import {
+  DatabaseOperationError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  UniquenessError,
+} from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
+  type EdgeRow,
   type FindEdgesByKindParams,
   type GraphBackend,
 } from "../src/backend/types";
@@ -134,6 +141,73 @@ function staleRootReadBackend(
               findEdgesByKind: async (params) => {
                 onTransactionRead();
                 return target.findEdgesByKind(params);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
+/**
+ * Carries a transaction-discovered match back from the create guard, then
+ * makes the selected row's match key move during its update re-read.
+ * `movesBeforeStable` controls whether a later retry can settle.
+ */
+function movingMatchKeyBackend(
+  base: GraphBackend,
+  matchedRow: EdgeRow,
+  movesBeforeStable: number,
+  onMovedRead: () => void,
+): GraphBackend {
+  let movedReads = 0;
+  return deriveBackend(base, {
+    findEdgesByKind: () => Promise.resolve([]),
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              findEdgesByKind: () => Promise.resolve([matchedRow]),
+              getEdge: async (graphId, id) => {
+                const row = await target.getEdge(graphId, id);
+                if (row === undefined || movedReads >= movesBeforeStable) {
+                  return row;
+                }
+                movedReads += 1;
+                onMovedRead();
+                return { ...row, props: { since: "moved" } };
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
+/** Makes a transaction-carried match disappear from its recovery read. */
+function disappearingMatchBackend(
+  base: GraphBackend,
+  matchedRow: EdgeRow,
+  disappearancesBeforeStable: number,
+  onDisappearedRead: () => void,
+): GraphBackend {
+  let disappearedReads = 0;
+  return deriveBackend(base, {
+    findEdgesByKind: () => Promise.resolve([]),
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              findEdgesByKind: () => Promise.resolve([matchedRow]),
+              getEdge: (graphId, id) => {
+                if (disappearedReads >= disappearancesBeforeStable) {
+                  return target.getEdge(graphId, id);
+                }
+                disappearedReads += 1;
+                onDisappearedRead();
+                return Promise.resolve(undefined);
               },
             }),
           ),
@@ -479,6 +553,121 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(attempts).toBe(1);
   });
 
+  it("retries when a transaction-carried match key moves before update", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const matchedRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "moving-once",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    let movedReads = 0;
+    const store = createStore(
+      graph,
+      movingMatchKeyBackend(raw, matchedRow, 1, () => {
+        movedReads += 1;
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "requested" },
+      { ifExists: "update", matchOn: ["since"] },
+    );
+
+    expect(result.action).toBe("updated");
+    expect(result.edge.id).toBe(matchedRow.id);
+    expect(movedReads).toBe(1);
+  });
+
+  it("retries when a transaction-carried match disappears before recovery", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const matchedRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "disappearing-once",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    let disappearedReads = 0;
+    const store = createStore(
+      graph,
+      disappearingMatchBackend(raw, matchedRow, 1, () => {
+        disappearedReads += 1;
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "requested" },
+      { ifExists: "update", matchOn: ["since"] },
+    );
+
+    expect(result.action).toBe("updated");
+    expect(result.edge.id).toBe(matchedRow.id);
+    expect(disappearedReads).toBe(1);
+  });
+
+  it("reports an unstable match key after exhausting the retry budget", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const matchedRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "always-moving",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    let movedReads = 0;
+    const store = createStore(
+      graph,
+      movingMatchKeyBackend(raw, matchedRow, Number.POSITIVE_INFINITY, () => {
+        movedReads += 1;
+      }),
+    );
+
+    const attempt = store.edges.knows.getOrCreateByEndpoints(
+      alice,
+      bob,
+      { since: "requested" },
+      { ifExists: "update", matchOn: ["since"] },
+    );
+
+    const error: unknown = await attempt.catch((error_: unknown) => error_);
+    expect(error).toBeInstanceOf(DatabaseOperationError);
+    if (!(error instanceof DatabaseOperationError)) {
+      throw new Error("Expected DatabaseOperationError");
+    }
+    expect(error.code).toBe("DATABASE_OPERATION_ERROR");
+    expect(error.message).toContain(
+      "could not resolve a stable matching edge after 3 attempts",
+    );
+    expect(movedReads).toBe(3);
+  });
+
   it("resolves a stale root read from the transaction match-key read", async () => {
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
@@ -505,6 +694,61 @@ describe("getOrCreateByEndpoints convergence", () => {
     // The stale root never supplied the match; the transaction-scoped read
     // did. A retry-loop "competing writer" diagnostic would be false here.
     await expect(setup.edges.knows.findFrom(alice)).resolves.toHaveLength(1);
+  });
+
+  it("retains an authoritative stale-positive disproof without repeating reads", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const staleRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "stale-positive",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    await raw.hardDeleteEdge({ graphId: graph.id, id: staleRow.id });
+
+    let rootReads = 0;
+    let transactionReads = 0;
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        findEdgesByKind: () => {
+          rootReads += 1;
+          return Promise.resolve([staleRow]);
+        },
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  findEdgesByKind: async (params) => {
+                    transactionReads += 1;
+                    return target.findEdgesByKind(params);
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "requested",
+    });
+
+    expect(result.action).toBe("created");
+    expect(result.edge.id).not.toBe(staleRow.id);
+    // One root hint, one transaction disproof, then the create transaction's
+    // convergence read. Repeating the dispatcher would make these 2 and 3.
+    expect(rootReads).toBe(1);
+    expect(transactionReads).toBe(2);
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CompilerInvariantError,
   defineGraph,
   defineNode,
   DisjointError,
@@ -37,6 +38,13 @@ const SAME_KIND_UNIQUE = {
   collation: "binary",
 } as const;
 
+const SECOND_SAME_KIND_UNIQUE = {
+  name: "same_kind_handle",
+  fields: ["handle"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
 const SHARED_UNIQUE = {
   name: "shared_email",
   fields: ["email"],
@@ -68,6 +76,9 @@ const SearchableUnique = defineNode("SearchableUnique", {
     title: searchable({ language: "english" }),
   }),
 });
+const DoubleUnique = defineNode("DoubleUnique", {
+  schema: z.object({ email: z.string(), handle: z.string() }),
+});
 const graph = defineGraph({
   id: "node_claim_write_fusion",
   nodes: {
@@ -83,6 +94,10 @@ const graph = defineGraph({
     SearchableUnique: {
       type: SearchableUnique,
       unique: [SAME_KIND_UNIQUE],
+    },
+    DoubleUnique: {
+      type: DoubleUnique,
+      unique: [SAME_KIND_UNIQUE, SECOND_SAME_KIND_UNIQUE],
     },
   },
   edges: {},
@@ -300,6 +315,42 @@ describe("node claim write fusion", () => {
       details: { code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED" },
     });
     expect(plans).toHaveLength(0);
+
+    plans.splice(0);
+    fixture.reset();
+    await store.nodes.DoubleUnique.create({
+      email: "nontransactional-double",
+      handle: "nontransactional-double",
+    });
+    // Multiple claims keep the complete write on the compensating portable
+    // path; no root managed plan may observe or retain a partial claim set.
+    expect(plans).toHaveLength(0);
+  });
+
+  it("releases an earlier claim when a later non-transactional claim conflicts", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const store = createStore(graph, disableTransactions(fixture.backend));
+
+    await store.nodes.DoubleUnique.create({
+      email: "holder@example.com",
+      handle: "occupied-handle",
+    });
+    await expect(
+      store.nodes.DoubleUnique.create({
+        email: "must-be-released@example.com",
+        handle: "occupied-handle",
+      }),
+    ).rejects.toBeInstanceOf(UniquenessError);
+
+    await expect(
+      store.nodes.DoubleUnique.create({
+        email: "must-be-released@example.com",
+        handle: "available-handle",
+      }),
+    ).resolves.toMatchObject({
+      email: "must-be-released@example.com",
+      handle: "available-handle",
+    });
   });
 
   it("falls back when the root backend cannot lower claim SQL", async () => {
@@ -311,6 +362,63 @@ describe("node claim write fusion", () => {
       store.nodes.UniqueNode.create({ email: "unsupported-sqlite-claim" }),
     ).rejects.toBeInstanceOf(UniquenessError);
     expect(await store.nodes.UniqueNode.find()).toHaveLength(1);
+  });
+
+  it("reports only the unsupported node-plan dimensions the plan carries", async () => {
+    const backend = disableTransactions(createTestBackend());
+
+    await expect(
+      requireDefined(backend.executeManagedCreate)({
+        entity: "node",
+        params: {
+          graphId: graph.id,
+          kind: "UniqueNode",
+          id: "claims-only-unsupported",
+          props: { email: "claims-only@example.com" },
+        },
+        idGenerated: true,
+        mode: { kind: "ordinary" },
+        claims: [
+          {
+            axis: "UniqueNode",
+            constraintName: SAME_KIND_UNIQUE.name,
+            key: "claims-only@example.com",
+            placement: "post-insert",
+            verdict: {
+              kind: "uniqueness",
+              probeAxes: ["UniqueNode"],
+              fields: ["email"],
+            },
+          },
+        ],
+        projections: [],
+      }),
+    ).resolves.toEqual({
+      outcome: "unsupported",
+      entity: "node",
+      dimensions: ["claims"],
+    });
+  });
+
+  it("retains unsupported dimensions in the node consumer invariant", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const nonTransactional = disableTransactions(fixture.backend);
+    const backend = deriveBackend(nonTransactional, {
+      executeManagedCreate: () =>
+        Promise.resolve({
+          outcome: "unsupported" as const,
+          entity: "node" as const,
+          dimensions: ["claims"] as const,
+        }),
+    });
+    const store = createStore(graph, backend);
+
+    await expect(
+      store.nodes.UniqueNode.create({ email: "unsupported-consumer" }),
+    ).rejects.toMatchObject({
+      name: CompilerInvariantError.name,
+      details: { dimensions: ["claims"] },
+    });
   });
 
   it("fuses a shared-scope unique claim before the generated node insert", async () => {

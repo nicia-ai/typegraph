@@ -2412,21 +2412,6 @@ export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | 
 // @public (undocumented)
 export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeManagedCreate" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
-// @public
-export type NodeFulltextSync = Readonly<{
-    graphId: string;
-    nodeKind: string;
-    nodeId: string;
-    action: "upsert";
-    content: string;
-    language: string;
-}> | Readonly<{
-    graphId: string;
-    nodeKind: string;
-    nodeId: string;
-    action: "delete";
-}>;
-
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";

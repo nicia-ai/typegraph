@@ -84,7 +84,7 @@ function supportsNonTransactionalNodeClaimPlan(
     plan.idGenerated &&
     plan.mode.kind === "ordinary" &&
     plan.projections.length === 0 &&
-    plan.claims.length > 0 &&
+    plan.claims.length === 1 &&
     plan.claims.every(
       (claim) =>
         claim.verdict.kind === "uniqueness" &&

@@ -46,6 +46,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CompilerInvariantError,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
@@ -294,6 +295,16 @@ function createWork(id: string): NodeCreateWork {
   };
 }
 
+function claimFreeCreateWork(id: string): NodeCreateWork {
+  const work = createWork(id);
+  const claim = { ...work.claim, constraints: [] };
+  return {
+    ...work,
+    claim,
+    claimPlan: planNodeCreateClaims({ graphId: GRAPH_ID, registry }, claim),
+  };
+}
+
 function edgeInsertWork(
   id: string,
   fromId: string,
@@ -430,7 +441,9 @@ const CASES: Record<keyof WriteSession, Case> = {
   },
   createNodeIfAbsent: {
     run: () =>
-      Promise.resolve((session) => session.createNodeIfAbsent(createWork("a"))),
+      Promise.resolve((session) =>
+        session.createNodeIfAbsent(claimFreeCreateWork("a")),
+      ),
     sidecars: ["upsertFulltext", "upsertEmbedding"],
     row: "insertNodeIfAbsent",
     postRowFans: ["upsertFulltext", "upsertEmbedding"],
@@ -439,10 +452,13 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodeIfAbsentWithSchemaFence: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodeIfAbsentWithSchemaFence(createWork("schema-a"), {
-          expectedVersion: 1,
-          graphId: GRAPH_ID,
-        }),
+        session.createNodeIfAbsentWithSchemaFence(
+          claimFreeCreateWork("schema-a"),
+          {
+            expectedVersion: 1,
+            graphId: GRAPH_ID,
+          },
+        ),
       ),
     sidecars: ["upsertFulltext", "upsertEmbedding"],
     row: "insertNodeIfAbsentWithSchemaFence",
@@ -737,6 +753,32 @@ const CASES: Record<keyof WriteSession, Case> = {
 };
 
 describe("write session sidecar completeness", () => {
+  it.each(["ordinary", "schema-fenced"] as const)(
+    "refuses a %s insert-if-absent unit that carries claims",
+    async (mode) => {
+      const { backend: raw } = createLocalSqliteBackend();
+      try {
+        await createStoreWithSchema(graph, raw);
+        const { backend, counts } = withCallCounts(raw);
+
+        await expect(
+          runWritePlan(writeContext(backend), NODE_PLAN, backend, (session) =>
+            mode === "ordinary" ?
+              session.createNodeIfAbsent(createWork(`claimed-${mode}`))
+            : session.createNodeIfAbsentWithSchemaFence(
+                createWork(`claimed-${mode}`),
+                { expectedVersion: 1, graphId: GRAPH_ID },
+              ),
+          ),
+        ).rejects.toBeInstanceOf(CompilerInvariantError);
+        expect(counts.insertNodeIfAbsent).toBe(0);
+        expect(counts.insertNodeIfAbsentWithSchemaFence).toBe(0);
+      } finally {
+        await raw.close();
+      }
+    },
+  );
+
   for (const [method, testCase] of Object.entries(CASES)) {
     it(`${method} applies every sidecar its row work obliges`, async () => {
       const { backend: raw } = createLocalSqliteBackend();

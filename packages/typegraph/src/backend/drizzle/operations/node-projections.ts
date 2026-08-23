@@ -1,5 +1,6 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import { CompilerInvariantError } from "../../../errors";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
@@ -23,6 +24,13 @@ import { buildInsertUniqueFromSource } from "./uniques";
 /** The fixed alias shared by the node CTE and all projection strategies. */
 export const INSERTED_NODE_PROJECTION_CTE_ALIAS = "inserted_node";
 
+function refuseUnknownManagedNodeMode(mode: never): never {
+  throw new CompilerInvariantError(
+    "A managed node create plan names an unknown mode.",
+    { capability: "executeManagedCreate", mode },
+  );
+}
+
 function buildNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
@@ -45,7 +53,7 @@ function buildNodeInsert(
       );
     }
     default: {
-      return plan.mode satisfies never;
+      return refuseUnknownManagedNodeMode(plan.mode);
     }
   }
 }
@@ -259,52 +267,23 @@ function disjointNodeProbeCte(
 function buildGatedNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
-  plan: ManagedNodeCreatePlan,
   timestamp: string,
   gateAlias: string,
-  schemaLockClause: SQL | undefined,
-): SQL | undefined {
-  const { nodes, schemaVersions } = tables;
+): SQL {
+  const { nodes } = tables;
   const propsJson = JSON.stringify(params.props);
   const columns = nodeColumnList(nodes);
   const gate = sql.identifier(gateAlias);
 
-  switch (plan.mode.kind) {
-    case "ordinary": {
-      return sql`
-        INSERT INTO ${nodes} (${columns})
-        SELECT
-          ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
-          1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
-          ${timestamp}, ${timestamp}
-        FROM ${gate}
-        RETURNING *
-      `;
-    }
-    case "schema-fenced": {
-      if (schemaLockClause === undefined) return;
-      return sql`
-        INSERT INTO ${nodes} (${columns})
-        SELECT
-          ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
-          1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
-          ${timestamp}, ${timestamp}
-        FROM (
-          SELECT ${schemaVersions.version}
-          FROM ${schemaVersions}
-          WHERE ${schemaVersions.graphId} = ${plan.mode.schemaFence.graphId}
-            AND ${schemaVersions.version} = ${plan.mode.schemaFence.expectedVersion}
-            AND ${schemaVersions.isActive} = TRUE
-          ${schemaLockClause}
-        ) AS "schema_fence"
-        CROSS JOIN ${gate}
-        RETURNING *
-      `;
-    }
-    default: {
-      return plan.mode satisfies never;
-    }
-  }
+  return sql`
+    INSERT INTO ${nodes} (${columns})
+    SELECT
+      ${params.graphId}, ${params.kind}, ${params.id}, ${propsJson},
+      1, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+      ${timestamp}, ${timestamp}
+    FROM ${gate}
+    RETURNING *
+  `;
 }
 
 function buildNodeClaimsAndProjections(
@@ -316,7 +295,6 @@ function buildNodeClaimsAndProjections(
   fulltextTableName: string,
   fulltextStrategy: FulltextStrategy,
   vectorStrategy: VectorStrategy | undefined,
-  schemaLockClause: SQL | undefined,
 ): SQL | undefined {
   const claims = plan.claims;
   const preClaims = claims.filter((claim) => claim.placement === "pre-insert");
@@ -396,12 +374,9 @@ function buildNodeClaimsAndProjections(
   const nodeInsert = buildGatedNodeInsert(
     tables,
     params,
-    plan,
     timestamp,
     preGateAlias,
-    schemaLockClause,
   );
-  if (nodeInsert === undefined) return;
   const nodeInsertedAlias = "node_inserted";
   ctes.push(
     sql`${sql.identifier(nodeInsertedAlias)} AS MATERIALIZED (${nodeInsert})`,
@@ -678,7 +653,6 @@ export function buildInsertNodeWithProjections(
       fulltextTableName,
       fulltextStrategy,
       vectorStrategy,
-      schemaLockClause,
     );
   }
 
