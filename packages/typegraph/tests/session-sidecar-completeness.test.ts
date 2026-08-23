@@ -62,9 +62,11 @@ import {
 } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
+  type EdgeCreateCommand,
   type GraphBackend,
+  type GraphCommand,
+  type GraphCommandExecutionContext,
   type LiveNodeRow,
-  type ManagedCreatePlan,
   type NodeRow,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -109,8 +111,11 @@ function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
     },
     claim: undefined,
   };
-  const plan: ManagedCreatePlan = { entity: "edge", params: work.params };
-  return session.createEdgeWithPlan(plan);
+  const command: EdgeCreateCommand = {
+    kind: "edge.create",
+    plan: { entity: "edge", params: work.params },
+  };
+  return session.createEdgeWithPlan(command);
 }
 
 const Document = defineNode("Doc", {
@@ -177,7 +182,7 @@ const WATCHED_MEMBERS = [
   "upsertEmbeddingBatch",
   "deleteEmbedding",
   "insertEdge",
-  "executeManagedCreate",
+  "commands",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -235,6 +240,14 @@ function withCallCounts(backend: GraphBackend): Readonly<{
         return (original as (...a: unknown[]) => unknown).apply(target, args);
       };
     }
+    overlay["commands"] = {
+      session: target.commands.session,
+      execute(command: GraphCommand, context: GraphCommandExecutionContext) {
+        counts.commands += 1;
+        sequence.push("commands");
+        return target.commands.execute(command, context);
+      },
+    };
     // Derived, never spread: a fixture built by copying a backend is the #435
     // defect written into the double the store under test then runs against.
     // The cast states what a keyed loop cannot show the compiler — every overlay
@@ -653,7 +666,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       return createEdgeWithPlan;
     },
     sidecars: [],
-    row: "executeManagedCreate",
+    row: "commands",
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {

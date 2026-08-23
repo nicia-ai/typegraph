@@ -6,7 +6,11 @@ import {
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
-import { type GraphBackend } from "../../backend/types";
+import { mintGraphCommandCoordination } from "../../backend/command-contract";
+import type {
+  GraphBackend,
+  GraphCommandCoordination,
+} from "../../backend/types";
 import {
   createRecordedInstant,
   parseRecordedInstant,
@@ -81,8 +85,6 @@ export function recordedGraphWriteAdvisoryLockSql(
   );
 }
 
-declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
-
 /**
  * Compile-time evidence that the per-graph write-lock discipline was
  * satisfied BEFORE any row work in the current transaction — either the
@@ -93,14 +95,12 @@ declare const GRAPH_WRITE_LOCK_BRAND: unique symbol;
  * "sidecar write before lock" is a compile error rather than a lock-order
  * inversion found in review.
  */
-export type GraphWriteLock = Readonly<{
-  [GRAPH_WRITE_LOCK_BRAND]: true;
-}>;
+export type GraphWriteLock = GraphCommandCoordination;
 
 // The brand is compile-time only (a `unique symbol` with no runtime value —
 // see the `declare const` above), so the token carries no actual per-call
 // data and every acquisition can share this one frozen empty instance.
-const GRAPH_WRITE_LOCK_EVIDENCE = Object.freeze({}) as GraphWriteLock;
+const GRAPH_WRITE_LOCK_EVIDENCE = mintGraphCommandCoordination();
 
 function graphWriteLockEvidence(): GraphWriteLock {
   return GRAPH_WRITE_LOCK_EVIDENCE;

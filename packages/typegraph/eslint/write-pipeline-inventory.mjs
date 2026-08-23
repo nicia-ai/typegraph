@@ -23,7 +23,7 @@ export const WRITE_MEMBER_NAMES = [
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",
   "insertNodeWithSchemaFence",
-  "executeManagedCreate",
+  "commands",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -89,25 +89,53 @@ export const WRITE_PIPELINE_MESSAGE =
  */
 export function writePipelineMemberRestrictions(memberNames) {
   if (memberNames.length === 0) return [];
-  const memberPattern = memberNames.join("|");
-  return [
-    {
-      // 1. direct call: target.insertNode(params)
-      selector: `CallExpression > MemberExpression.callee[property.name=/^(${memberPattern})$/]`,
-      message: WRITE_PIPELINE_MESSAGE,
-    },
-    {
-      // 2. hoist to local: const updateNodeSet = target.updateNodeSet;
-      //    (forced by TypeScript's narrowing of optional members)
-      selector: `VariableDeclarator > MemberExpression.init[property.name=/^(${memberPattern})$/]`,
-      message: WRITE_PIPELINE_MESSAGE,
-    },
-    {
-      // 3. requireDefined wrap: requireDefined(backend.insertNodesBatch)(params)
-      selector: `CallExpression[callee.name="requireDefined"] > MemberExpression[property.name=/^(${memberPattern})$/]`,
-      message: WRITE_PIPELINE_MESSAGE,
-    },
-  ];
+  const directMembers = memberNames.filter((member) => member !== "commands");
+  const memberPattern = directMembers.join("|");
+  const directRestrictions =
+    directMembers.length === 0 ?
+      []
+    : [
+        {
+          // 1. direct call: target.insertNode(params)
+          selector: `CallExpression > MemberExpression.callee[property.name=/^(${memberPattern})$/]`,
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+        {
+          // 2. hoist to local: const updateNodeSet = target.updateNodeSet;
+          //    (forced by TypeScript's narrowing of optional members)
+          selector: `VariableDeclarator > MemberExpression.init[property.name=/^(${memberPattern})$/]`,
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+        {
+          // 3. requireDefined wrap: requireDefined(backend.insertNodesBatch)(params)
+          selector: `CallExpression[callee.name="requireDefined"] > MemberExpression[property.name=/^(${memberPattern})$/]`,
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+      ];
+  const commandRestrictions =
+    memberNames.includes("commands") ?
+      [
+        {
+          // Semantic command call: target.commands.execute(command)
+          selector:
+            'CallExpression > MemberExpression.callee > MemberExpression.object[property.name="commands"]',
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+        {
+          // Hoist the command port: const commands = target.commands;
+          selector:
+            'VariableDeclarator > MemberExpression.init[property.name="commands"]',
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+        {
+          // requireDefined(target.commands).execute(command)
+          selector:
+            'CallExpression[callee.name="requireDefined"] > MemberExpression[property.name="commands"]',
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+      ]
+    : [];
+  return [...directRestrictions, ...commandRestrictions];
 }
 
 export const WRITE_PIPELINE_RESTRICTIONS =
@@ -253,7 +281,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "insertNodeIfAbsent",
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",
-      "executeManagedCreate",
+      "commands",
       "updateNode",
       "updateNodeSet",
       "deleteNode",
@@ -319,7 +347,6 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "The fused session is the sole ordinary owner of insert-dispatch and row-step mutation helpers.",
     permanent: true,
     allowedMembers: [
-      "executeManagedCreate",
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",
     ],

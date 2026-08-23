@@ -14,13 +14,11 @@ import {
   ValidationError,
 } from "../src";
 import { supportsNodeCreatePlan } from "../src/backend/capabilities/node-insert-projections";
-import {
-  deriveBackend,
-  projectBackendWithout,
-} from "../src/backend/derive-backend";
+import { graphCommandExecutionContext } from "../src/backend/command-contract";
+import { deriveBackend } from "../src/backend/derive-backend";
 import type {
   GraphBackend,
-  ManagedCreatePlan,
+  GraphCommand,
   TransactionBackend,
 } from "../src/backend/types";
 import { createStore, createStoreWithSchema } from "../src/store";
@@ -178,21 +176,24 @@ describe("node claim write fusion", () => {
     expect(supportsNodeCreatePlan(fixture.backend, claimPlan)).toBe(false);
 
     await expect(
-      requireDefined(
-        fixture.backend.executeManagedCreate,
-        "planned node insert",
-      )({
-        entity: "node",
-        params: {
-          graphId: graph.id,
-          kind: "UniqueNode",
-          id: "root-claim-plan",
-          props: { email: "root@example.com" },
+      requireDefined(fixture.backend.commands.execute, "planned node insert")(
+        {
+          kind: "node.create",
+          plan: {
+            entity: "node",
+            params: {
+              graphId: graph.id,
+              kind: "UniqueNode",
+              id: "root-claim-plan",
+              props: { email: "root@example.com" },
+            },
+            idGenerated: false,
+            mode: { kind: "ordinary" },
+            ...claimPlan,
+          },
         },
-        idGenerated: false,
-        mode: { kind: "ordinary" },
-        ...claimPlan,
-      }),
+        graphCommandExecutionContext("root"),
+      ),
     ).resolves.toEqual({
       outcome: "unsupported",
       entity: "node",
@@ -205,34 +206,40 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeManagedCreate)({
-          entity: "node",
-          params: {
-            graphId: graph.id,
-            kind: "UniqueNode",
-            id: "schema-claim-plan",
-            props: { email: "schema@example.com" },
-          },
-          idGenerated: false,
-          mode: {
-            kind: "schema-fenced",
-            schemaFence: { graphId: graph.id, expectedVersion: 1 },
-          },
-          claims: [
-            {
-              axis: "UniqueNode",
-              constraintName: SAME_KIND_UNIQUE.name,
-              key: "schema@example.com",
-              placement: "post-insert",
-              verdict: {
-                kind: "uniqueness",
-                probeAxes: ["UniqueNode"],
-                fields: ["email"],
+        tx.commands.execute(
+          {
+            kind: "node.create",
+            plan: {
+              entity: "node",
+              params: {
+                graphId: graph.id,
+                kind: "UniqueNode",
+                id: "schema-claim-plan",
+                props: { email: "schema@example.com" },
               },
+              idGenerated: false,
+              mode: {
+                kind: "schema-fenced",
+                schemaFence: { graphId: graph.id, expectedVersion: 1 },
+              },
+              claims: [
+                {
+                  axis: "UniqueNode",
+                  constraintName: SAME_KIND_UNIQUE.name,
+                  key: "schema@example.com",
+                  placement: "post-insert",
+                  verdict: {
+                    kind: "uniqueness",
+                    probeAxes: ["UniqueNode"],
+                    fields: ["email"],
+                  },
+                },
+              ],
+              projections: [],
             },
-          ],
-          projections: [],
-        }),
+          },
+          graphCommandExecutionContext("transaction"),
+        ),
       ),
     ).resolves.toEqual({
       outcome: "unsupported",
@@ -274,11 +281,17 @@ describe("node claim write fusion", () => {
   it("uses one managed statement for same-kind claims without transactions", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const nonTransactional = disableTransactions(fixture.backend);
-    const plans: ManagedCreatePlan[] = [];
+    const plans: GraphCommand[] = [];
     const observed = deriveBackend(nonTransactional, {
-      executeManagedCreate(plan) {
-        plans.push(plan);
-        return requireDefined(nonTransactional.executeManagedCreate)(plan);
+      commands: {
+        session: nonTransactional.commands.session,
+        execute(plan) {
+          plans.push(plan);
+          return nonTransactional.commands.execute(
+            plan,
+            graphCommandExecutionContext("root"),
+          );
+        },
       },
     });
     const store = createStore(graph, observed);
@@ -290,13 +303,16 @@ describe("node claim write fusion", () => {
 
     expect(plans).toHaveLength(1);
     expect(plans[0]).toMatchObject({
-      entity: "node",
-      claims: [
-        expect.objectContaining({
-          axis: "UniqueNode",
-          constraintName: SAME_KIND_UNIQUE.name,
-        }),
-      ],
+      kind: "node.create",
+      plan: {
+        entity: "node",
+        claims: [
+          expect.objectContaining({
+            axis: "UniqueNode",
+            constraintName: SAME_KIND_UNIQUE.name,
+          }),
+        ],
+      },
     });
     plans.splice(0);
     fixture.reset();
@@ -368,31 +384,37 @@ describe("node claim write fusion", () => {
     const backend = disableTransactions(createTestBackend());
 
     await expect(
-      requireDefined(backend.executeManagedCreate)({
-        entity: "node",
-        params: {
-          graphId: graph.id,
-          kind: "UniqueNode",
-          id: "claims-only-unsupported",
-          props: { email: "claims-only@example.com" },
-        },
-        idGenerated: true,
-        mode: { kind: "ordinary" },
-        claims: [
-          {
-            axis: "UniqueNode",
-            constraintName: SAME_KIND_UNIQUE.name,
-            key: "claims-only@example.com",
-            placement: "post-insert",
-            verdict: {
-              kind: "uniqueness",
-              probeAxes: ["UniqueNode"],
-              fields: ["email"],
+      backend.commands.execute(
+        {
+          kind: "node.create",
+          plan: {
+            entity: "node",
+            params: {
+              graphId: graph.id,
+              kind: "UniqueNode",
+              id: "claims-only-unsupported",
+              props: { email: "claims-only@example.com" },
             },
+            idGenerated: true,
+            mode: { kind: "ordinary" },
+            claims: [
+              {
+                axis: "UniqueNode",
+                constraintName: SAME_KIND_UNIQUE.name,
+                key: "claims-only@example.com",
+                placement: "post-insert",
+                verdict: {
+                  kind: "uniqueness",
+                  probeAxes: ["UniqueNode"],
+                  fields: ["email"],
+                },
+              },
+            ],
+            projections: [],
           },
-        ],
-        projections: [],
-      }),
+        },
+        graphCommandExecutionContext("root"),
+      ),
     ).resolves.toEqual({
       outcome: "unsupported",
       entity: "node",
@@ -404,12 +426,15 @@ describe("node claim write fusion", () => {
     const fixture = await createRecordedPostgresStore(graph);
     const nonTransactional = disableTransactions(fixture.backend);
     const backend = deriveBackend(nonTransactional, {
-      executeManagedCreate: () =>
-        Promise.resolve({
-          outcome: "unsupported" as const,
-          entity: "node" as const,
-          dimensions: ["claims"] as const,
-        }),
+      commands: {
+        session: nonTransactional.commands.session,
+        execute: () =>
+          Promise.resolve({
+            outcome: "unsupported" as const,
+            entity: "node" as const,
+            dimensions: ["claims"] as const,
+          }),
+      },
     });
     const store = createStore(graph, backend);
 
@@ -505,41 +530,6 @@ describe("node claim write fusion", () => {
     ).toEqual([SAME_KIND_UNIQUE.name, SHARED_UNIQUE.name]);
   });
 
-  it("falls back to separate claim and node statements when the member is projected away", async () => {
-    const fixture = await createRecordedPostgresStore(graph);
-    const projected: GraphBackend = deriveBackend(fixture.backend, {
-      async transaction<T>(
-        fn: (tx: TransactionBackend) => Promise<T>,
-        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
-      ): Promise<T> {
-        return fixture.backend.transaction(
-          (tx) => fn(projectBackendWithout(tx, ["executeManagedCreate"])),
-          options,
-        );
-      },
-    });
-    const store = createStore(graph, projected);
-
-    fixture.reset();
-    await store.nodes.UniqueNode.create({ email: "fallback@example.com" });
-
-    const entityStatements = fixture.statements.filter(
-      (statement) => hasNodeInsert(statement) || hasUniqueClaim(statement),
-    );
-    expect(entityStatements.some((statement) => hasNodeInsert(statement))).toBe(
-      true,
-    );
-    expect(
-      entityStatements.some(
-        (statement) => hasNodeInsert(statement) && hasUniqueClaim(statement),
-      ),
-    ).toBe(false);
-    // A projected-away executor is not authoritative. The fallback must retain
-    // its preflight and emit the claim and node as separate statements.
-    expect(uniqueProbes(fixture.statements)).toHaveLength(1);
-    expect(fixture.statements).toHaveLength(3);
-  });
-
   it("falls back when atomic claim capability is explicitly refused", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const capabilityDisabled: GraphBackend = deriveBackend(fixture.backend, {
@@ -600,31 +590,37 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeManagedCreate)({
-          entity: "node",
-          params: {
-            graphId: graph.id,
-            kind: "UniqueNode",
-            id: "post-loser",
-            props: { email: "post-conflict@example.com" },
-          },
-          idGenerated: false,
-          mode: { kind: "ordinary" },
-          claims: [
-            {
-              axis: "UniqueNode",
-              constraintName: SAME_KIND_UNIQUE.name,
-              key: "post-conflict@example.com",
-              placement: "post-insert",
-              verdict: {
-                kind: "uniqueness",
-                probeAxes: ["UniqueNode"],
-                fields: ["email"],
+        tx.commands.execute(
+          {
+            kind: "node.create",
+            plan: {
+              entity: "node",
+              params: {
+                graphId: graph.id,
+                kind: "UniqueNode",
+                id: "post-loser",
+                props: { email: "post-conflict@example.com" },
               },
+              idGenerated: false,
+              mode: { kind: "ordinary" },
+              claims: [
+                {
+                  axis: "UniqueNode",
+                  constraintName: SAME_KIND_UNIQUE.name,
+                  key: "post-conflict@example.com",
+                  placement: "post-insert",
+                  verdict: {
+                    kind: "uniqueness",
+                    probeAxes: ["UniqueNode"],
+                    fields: ["email"],
+                  },
+                },
+              ],
+              projections: [],
             },
-          ],
-          projections: [],
-        }),
+          },
+          graphCommandExecutionContext("transaction"),
+        ),
       ),
     ).rejects.toBeInstanceOf(UniquenessError);
 
@@ -650,31 +646,37 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeManagedCreate)({
-          entity: "node",
-          params: {
-            graphId: graph.id,
-            kind: "SharedLeaf",
-            id: "pre-loser",
-            props: { email: "pre-conflict@example.com" },
-          },
-          idGenerated: false,
-          mode: { kind: "ordinary" },
-          claims: [
-            {
-              axis: "SharedLeaf",
-              constraintName: SHARED_UNIQUE.name,
-              key: "pre-conflict@example.com",
-              placement: "pre-insert",
-              verdict: {
-                kind: "uniqueness",
-                probeAxes: ["SharedLeaf", "SharedRoot"],
-                fields: ["email"],
+        tx.commands.execute(
+          {
+            kind: "node.create",
+            plan: {
+              entity: "node",
+              params: {
+                graphId: graph.id,
+                kind: "SharedLeaf",
+                id: "pre-loser",
+                props: { email: "pre-conflict@example.com" },
               },
+              idGenerated: false,
+              mode: { kind: "ordinary" },
+              claims: [
+                {
+                  axis: "SharedLeaf",
+                  constraintName: SHARED_UNIQUE.name,
+                  key: "pre-conflict@example.com",
+                  placement: "pre-insert",
+                  verdict: {
+                    kind: "uniqueness",
+                    probeAxes: ["SharedLeaf", "SharedRoot"],
+                    fields: ["email"],
+                  },
+                },
+              ],
+              projections: [],
             },
-          ],
-          projections: [],
-        }),
+          },
+          graphCommandExecutionContext("transaction"),
+        ),
       ),
     ).rejects.toBeInstanceOf(UniquenessError);
 

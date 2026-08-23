@@ -23,6 +23,9 @@ export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower",
 export function assertFiniteEmbedding(embedding: readonly number[], name: string): void;
 
 // @public
+export function assertGraphCommandExecutionContext(context: unknown): asserts context is GraphCommandExecutionContext;
+
+// @public
 export function assertRecursiveTraversal(verdict: RecursiveTraversalVerdict, operation: string): asserts verdict is Extract<RecursiveTraversalVerdict, {
     supported: true;
 }>;
@@ -1411,13 +1414,69 @@ export type EdgeClaimOutcome = Readonly<{
 }>;
 
 // @public
+export type EdgeConvergeCreateCommand = Readonly<{
+    kind: "edge.converge-create";
+    plan: ManagedEdgeCreatePlan;
+    match: EdgeConvergenceMatch;
+}>;
+
+// @public (undocumented)
+export type EdgeConvergeCreateCommandResult = Readonly<{
+    outcome: "created";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "found";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "edge";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "edge";
+    dimensions: readonly ["convergence"];
+}>;
+
+// @public
+export type EdgeConvergenceMatch = Readonly<{
+    matchOn: readonly string[];
+    props: Record<string, unknown>;
+}>;
+
+// @public
+export type EdgeCreateCommand = Readonly<{
+    kind: "edge.create";
+    plan: ManagedEdgeCreatePlan;
+}>;
+
+// @public (undocumented)
+export type EdgeCreateCommandResult = Readonly<{
+    outcome: "created";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "edge";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "edge";
+    dimensions: readonly [
+    "schemaFence" | "cardinalityClaim",
+    ...(readonly ("schemaFence" | "cardinalityClaim")[])
+    ];
+}>;
+
+// @public
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
 export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "executeManagedCreate" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 export type EdgeExistsBetweenParams = Readonly<{
@@ -1461,6 +1520,9 @@ export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: GraphCommand, coordination?: "none" | GraphCommandCoordination): Promise<GraphCommandResult>;
 
 // @public
 export type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
@@ -1803,6 +1865,9 @@ export type GraduatedBundleVerdict<X extends CapabilityExtraSpec> = Readonly<{
     missingExtras: readonly (keyof X)[];
 }>;
 
+// @public (undocumented)
+const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
+
 // @public
 export type GraphAnalyticsCapabilities = Readonly<{
     supported: boolean;
@@ -1830,7 +1895,7 @@ export type GraphBackend = Readonly<{
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
-    executeManagedCreate?: (this: void, plan: ManagedCreatePlan) => Promise<ManagedCreateResult>;
+    commands: GraphCommandPort;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
@@ -1986,6 +2051,52 @@ export type GraphBackend = Readonly<{
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
 }>;
+
+// @public
+export type GraphCommand = NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
+
+// @public
+export type GraphCommandAuthority = "authoritative";
+
+// @public
+export type GraphCommandCoordination = Readonly<{
+    [GRAPH_COMMAND_COORDINATION_BRAND]: true;
+}>;
+
+// @public (undocumented)
+export type GraphCommandExecutionContext = (GraphCommandExecutionFacts & Readonly<{
+    session: "root";
+    atomicity: "single-statement";
+    coordination: "none";
+}>) | (GraphCommandExecutionFacts & Readonly<{
+    session: "transaction";
+    atomicity: "transaction";
+    coordination: "none" | GraphCommandCoordination;
+}>);
+
+// @public
+export function graphCommandExecutionContext(session: GraphCommandSession, coordination?: "none" | GraphCommandCoordination): GraphCommandExecutionContext;
+
+// @public
+export type GraphCommandExecutionFacts = Readonly<{
+    authority: GraphCommandAuthority;
+    resultCache: GraphCommandResultCache;
+}>;
+
+// @public
+export type GraphCommandPort = Readonly<{
+    session: GraphCommandSession;
+    execute: (this: void, command: GraphCommand, context: GraphCommandExecutionContext) => Promise<GraphCommandResult>;
+}>;
+
+// @public
+export type GraphCommandResult = NodeCreateCommandResult | EdgeCreateCommandResult | EdgeConvergeCreateCommandResult;
+
+// @public
+export type GraphCommandResultCache = "bypass";
+
+// @public
+export type GraphCommandSession = "root" | "transaction";
 
 // @public (undocumented)
 export type GraphEntityReadBackend = NodeEntityReadBackend & EdgeEntityReadBackend;
@@ -2334,38 +2445,6 @@ export type LockSchemaVersionForWriteParams = Readonly<{
 }>;
 
 // @public
-export type ManagedCreatePlan = ManagedNodeCreatePlan | ManagedEdgeCreatePlan;
-
-// @public (undocumented)
-export type ManagedCreateResult = Readonly<{
-    outcome: "created";
-    entity: "node";
-    row: NodeRow;
-}> | Readonly<{
-    outcome: "created";
-    entity: "edge";
-    row: EdgeRow;
-}> | Readonly<{
-    outcome: "rejected";
-    entity: "node" | "edge";
-    reason: "unknown";
-}> | Readonly<{
-    outcome: "unsupported";
-    entity: "node";
-    dimensions: readonly [
-    "schemaFence" | "claims" | "projections",
-    ...(readonly ("schemaFence" | "claims" | "projections")[])
-    ];
-}> | Readonly<{
-    outcome: "unsupported";
-    entity: "edge";
-    dimensions: readonly [
-    "schemaFence" | "cardinalityClaim",
-    ...(readonly ("schemaFence" | "cardinalityClaim")[])
-    ];
-}>;
-
-// @public
 export type ManagedEdgeCreatePlan = Readonly<{
     entity: "edge";
     params: InsertEdgeParams;
@@ -2430,11 +2509,35 @@ export function missingRequiredExtras<const D extends CapabilityBundleDefinition
 // @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
+// @public
+export type NodeCreateCommand = Readonly<{
+    kind: "node.create";
+    plan: ManagedNodeCreatePlan;
+}>;
+
+// @public (undocumented)
+export type NodeCreateCommandResult = Readonly<{
+    outcome: "created";
+    entity: "node";
+    row: NodeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "node";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "node";
+    dimensions: readonly [
+    "schemaFence" | "claims" | "projections",
+    ...(readonly ("schemaFence" | "claims" | "projections")[])
+    ];
+}>;
+
 // @public (undocumented)
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeManagedCreate" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3261,11 +3364,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "reasoned";
         readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
         readonly accesses: 7;
-    };
-    readonly executeManagedCreate: {
-        readonly kind: "reasoned";
-        readonly reason: "A first-party managed-create entrypoint. It applies every requested node or edge write dimension in one statement or returns an explicit unsupported verdict; custom and legacy backends retain the portable read-then-write protocol.";
-        readonly accesses: 11;
     };
     readonly bootstrapTables: {
         readonly kind: "reasoned";

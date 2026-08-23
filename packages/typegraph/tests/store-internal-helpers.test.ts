@@ -225,6 +225,16 @@ class ClosureGraphBackend {
     return createSqlSchema().tables;
   }
 
+  readonly commands: GraphBackend["commands"] = {
+    session: "root",
+    execute: () =>
+      Promise.resolve({
+        outcome: "rejected",
+        entity: "node",
+        reason: "unknown",
+      }),
+  };
+
   readonly execute = <T>(_query: CompiledRowsSql): Promise<readonly T[]> => {
     this.calls.push(`execute:${this.#marker}`);
     return Promise.resolve([]);

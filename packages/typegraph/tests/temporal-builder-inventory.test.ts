@@ -62,7 +62,7 @@ const COLUMN_MENTION = /validFrom|valid_from/;
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 8, stated: 0 },
   "drizzle/operations/node-projections.ts": { stamping: 1, stated: 0 },
-  "drizzle/operations/edges.ts": { stamping: 6, stated: 1 },
+  "drizzle/operations/edges.ts": { stamping: 7, stated: 1 },
   "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
 } as const satisfies Readonly<

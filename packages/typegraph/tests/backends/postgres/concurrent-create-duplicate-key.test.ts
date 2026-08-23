@@ -167,7 +167,7 @@ beforeEach(async () => {
 const GATED_INSERT_METHODS = new Set([
   "insertNode",
   "insertNodeNoReturn",
-  "executeManagedCreate",
+  "commands",
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "insertEdge",
@@ -193,6 +193,21 @@ function gatedAtFirstInsert(base: GraphBackend, gate: Gate): GraphBackend {
         const gatedTarget = new Proxy(transactionTarget, {
           get(source, property, receiver) {
             const value: unknown = Reflect.get(source, property, receiver);
+            if (property === "commands") {
+              const commands = source.commands;
+              return {
+                session: commands.session,
+                execute: async (
+                  ...args: Parameters<typeof commands.execute>
+                ) => {
+                  if (!held) {
+                    held = true;
+                    await gate.opened;
+                  }
+                  return commands.execute(...args);
+                },
+              };
+            }
             if (
               typeof property !== "string" ||
               typeof value !== "function" ||

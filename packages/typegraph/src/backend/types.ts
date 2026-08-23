@@ -337,7 +337,7 @@ export type BackendCapabilities = Readonly<{
    */
   readonly constraintClaims?: boolean;
   /**
-   * Whether `executeManagedCreate` can atomically apply the claim portion of
+   * Whether the command port can atomically apply the claim portion of
    * a node create. Absent means projection-only: method presence alone is not
    * evidence that a custom backend understands the newer plan field, so the
    * store retains the standalone claim fallback.
@@ -953,17 +953,38 @@ export type ManagedEdgeCreatePlan = Readonly<{
   cardinalityClaim?: ClaimEdgeCardinalityParams;
 }>;
 
-/** The single planned-write contract shared by node and edge creates. */
-export type ManagedCreatePlan = ManagedNodeCreatePlan | ManagedEdgeCreatePlan;
+/** A node create command accepted by the authoritative command port. */
+export type NodeCreateCommand = Readonly<{
+  kind: "node.create";
+  plan: ManagedNodeCreatePlan;
+}>;
 
-export type ManagedCreateResult =
+/** An edge create command accepted by the authoritative command port. */
+export type EdgeCreateCommand = Readonly<{
+  kind: "edge.create";
+  plan: ManagedEdgeCreatePlan;
+}>;
+
+/** The authoritative match-key read paired with a convergent edge create. */
+export type EdgeConvergenceMatch = Readonly<{
+  matchOn: readonly string[];
+  props: Record<string, unknown>;
+}>;
+
+/** An edge create command that atomically returns an existing match or inserts. */
+export type EdgeConvergeCreateCommand = Readonly<{
+  kind: "edge.converge-create";
+  plan: ManagedEdgeCreatePlan;
+  match: EdgeConvergenceMatch;
+}>;
+
+/** The semantic commands currently supported by the authoritative port. */
+export type GraphCommand =
+  NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
+
+export type NodeCreateCommandResult =
   | Readonly<{ outcome: "created"; entity: "node"; row: NodeRow }>
-  | Readonly<{ outcome: "created"; entity: "edge"; row: EdgeRow }>
-  | Readonly<{
-      outcome: "rejected";
-      entity: "node" | "edge";
-      reason: "unknown";
-    }>
+  | Readonly<{ outcome: "rejected"; entity: "node"; reason: "unknown" }>
   | Readonly<{
       outcome: "unsupported";
       entity: "node";
@@ -971,7 +992,11 @@ export type ManagedCreateResult =
         "schemaFence" | "claims" | "projections",
         ...(readonly ("schemaFence" | "claims" | "projections")[]),
       ];
-    }>
+    }>;
+
+export type EdgeCreateCommandResult =
+  | Readonly<{ outcome: "created"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{ outcome: "rejected"; entity: "edge"; reason: "unknown" }>
   | Readonly<{
       outcome: "unsupported";
       entity: "edge";
@@ -980,6 +1005,80 @@ export type ManagedCreateResult =
         ...(readonly ("schemaFence" | "cardinalityClaim")[]),
       ];
     }>;
+
+export type EdgeConvergeCreateCommandResult =
+  | Readonly<{ outcome: "created"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{ outcome: "found"; entity: "edge"; row: EdgeRow }>
+  | Readonly<{ outcome: "rejected"; entity: "edge"; reason: "unknown" }>
+  | Readonly<{
+      outcome: "unsupported";
+      entity: "edge";
+      dimensions: readonly ["convergence"];
+    }>;
+
+/** The session boundary on which an authoritative command executes. */
+export type GraphCommandSession = "root" | "transaction";
+
+/** The only consistency level an authoritative command may claim. */
+export type GraphCommandAuthority = "authoritative";
+
+/** Result-cache policy for a decision-driving command. */
+export type GraphCommandResultCache = "bypass";
+
+declare const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
+
+/** Compile-time evidence that graph-write coordination is already established. */
+export type GraphCommandCoordination = Readonly<{
+  [GRAPH_COMMAND_COORDINATION_BRAND]: true;
+}>;
+
+/**
+ * Explicit authority and atomicity facts carried to a command port.
+ *
+ * `resultCache` is independent of prepared-statement policy: bypassing a
+ * result cache does not require an unnamed SQL statement, and choosing an
+ * unnamed statement does not prove a fresh result.
+ */
+export type GraphCommandExecutionFacts = Readonly<{
+  authority: GraphCommandAuthority;
+  resultCache: GraphCommandResultCache;
+}>;
+
+export type GraphCommandExecutionContext =
+  | (GraphCommandExecutionFacts &
+      Readonly<{
+        session: "root";
+        atomicity: "single-statement";
+        coordination: "none";
+      }>)
+  | (GraphCommandExecutionFacts &
+      Readonly<{
+        session: "transaction";
+        atomicity: "transaction";
+        coordination: "none" | GraphCommandCoordination;
+      }>);
+
+/** The result union returned by the authoritative command port. */
+export type GraphCommandResult =
+  | NodeCreateCommandResult
+  | EdgeCreateCommandResult
+  | EdgeConvergeCreateCommandResult;
+
+/** The single extensible authority boundary for semantic backend commands. */
+export type GraphCommandPort = Readonly<{
+  /** The database session this port is structurally bound to. */
+  session: GraphCommandSession;
+  /**
+   * Execute an authoritative command. First-party Store paths pass an
+   * explicit execution context through
+   * `executeAuthoritativeGraphCommand`.
+   */
+  execute: (
+    this: void,
+    command: GraphCommand,
+    context: GraphCommandExecutionContext,
+  ) => Promise<GraphCommandResult>;
+}>;
 
 /**
  * One row of a batched embedding upsert.
@@ -2009,11 +2108,8 @@ export type GraphBackend = Readonly<{
 
   // === Edge Operations ===
   insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
-  /** Executes every requested managed-create dimension or refuses the plan. */
-  executeManagedCreate?: (
-    this: void,
-    plan: ManagedCreatePlan,
-  ) => Promise<ManagedCreateResult>;
+  /** Executes semantic authoritative graph commands. */
+  commands: GraphCommandPort;
   insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
   insertEdgesBatch?: (
     this: void,
@@ -3211,7 +3307,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
-  | "executeManagedCreate"
+  | "commands"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
@@ -3237,7 +3333,7 @@ export type EdgeEntityReadBackend = Pick<
 export type EdgeEntityWriteBackend = Pick<
   GraphBackend,
   | "insertEdge"
-  | "executeManagedCreate"
+  | "commands"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"

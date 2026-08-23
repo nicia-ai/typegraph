@@ -94,8 +94,7 @@ export function isAutocommitSingleStatementWrite(
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
         !candidate.convergesOnMatchKey &&
-        candidate.cardinality === "many" &&
-        candidate.backend.executeManagedCreate !== undefined
+        candidate.cardinality === "many"
       );
     }
   }

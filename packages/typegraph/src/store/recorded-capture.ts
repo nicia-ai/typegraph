@@ -3,17 +3,18 @@ import {
   batchPointReadVerdict,
   type BundleVerdictOf,
 } from "../backend/capabilities/resolve";
+import { assertCommandResultMatchesCommand } from "../backend/command";
+import { type GraphCommandExecutionContext } from "../backend/command-contract";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
-import { assertManagedCreateResultMatchesPlan } from "../backend/managed-create";
 import {
   type DeleteEdgesBatchParams,
   type EdgeRow,
   type GraphBackend,
+  type GraphCommand,
+  type GraphCommandResult,
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
-  type ManagedCreatePlan,
-  type ManagedCreateResult,
   type NodeRow,
   type SchemaWriteFenceParams,
   type TransactionBackend,
@@ -496,37 +497,35 @@ function createRecordedTransactionBackend(
         },
       }),
 
-    ...(target.executeManagedCreate === undefined ?
-      {}
-    : {
-        async executeManagedCreate(
-          plan: ManagedCreatePlan,
-        ): Promise<ManagedCreateResult> {
-          session.assertOpen();
-          await lockGraph(plan.params.graphId);
-          const result = await requireDefined(target.executeManagedCreate)(
-            plan,
-          );
-          assertManagedCreateResultMatchesPlan(plan, result);
-          if (result.outcome === "created") {
-            if (result.entity === "node") {
-              session.touchNode(
-                plan.params.graphId,
-                plan.params.kind,
-                plan.params.id,
-                result.row,
-              );
-            } else {
-              session.touchEdge(
-                plan.params.graphId,
-                plan.params.id,
-                result.row,
-              );
-            }
+    commands: {
+      session: target.commands.session,
+      execute: async (
+        command: GraphCommand,
+        context: GraphCommandExecutionContext,
+      ): Promise<GraphCommandResult> => {
+        session.assertOpen();
+        await lockGraph(command.plan.params.graphId);
+        const result = await target.commands.execute(command, context);
+        assertCommandResultMatchesCommand(command, result);
+        if (result.outcome === "created") {
+          if (result.entity === "node") {
+            session.touchNode(
+              command.plan.params.graphId,
+              command.plan.params.kind,
+              command.plan.params.id,
+              result.row,
+            );
+          } else {
+            session.touchEdge(
+              command.plan.params.graphId,
+              command.plan.params.id,
+              result.row,
+            );
           }
-          return result;
-        },
-      }),
+        }
+        return result;
+      },
+    },
 
     ...(target.insertNodeNoReturn === undefined ?
       {}
@@ -863,19 +862,19 @@ export function createRecordedBackend(
         },
       }),
 
-    ...(backend.executeManagedCreate === undefined ?
-      {}
-    : {
-        async executeManagedCreate(
-          plan: ManagedCreatePlan,
-        ): Promise<ManagedCreateResult> {
-          const result = await capture((target) =>
-            requireDefined(target.executeManagedCreate)(plan),
-          );
-          assertManagedCreateResultMatchesPlan(plan, result);
-          return result;
-        },
-      }),
+    commands: {
+      session: "transaction",
+      execute: async (
+        command: GraphCommand,
+        context: GraphCommandExecutionContext,
+      ): Promise<GraphCommandResult> => {
+        const result = await capture((target) =>
+          target.commands.execute(command, context),
+        );
+        assertCommandResultMatchesCommand(command, result);
+        return result;
+      },
+    },
 
     ...(backend.insertNodeNoReturn === undefined ?
       {}

@@ -46,12 +46,19 @@ const knows = defineEdge("knows", {
   schema: z.object({ since: z.string().default("2024") }),
 });
 
+const annotated = defineEdge("annotated", {
+  schema: z.object({ label: z.object({ value: z.string().optional() }) }),
+});
+
 const reportsTo = defineEdge("reportsTo", { schema: z.object({}) });
 
 const graph = defineGraph({
   id: "get_or_create_convergence",
   nodes: { Person: { type: Person } },
-  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  edges: {
+    knows: { type: knows, from: [Person], to: [Person] },
+    annotated: { type: annotated, from: [Person], to: [Person] },
+  },
 });
 
 const Account = defineNode("Account", {
@@ -266,10 +273,14 @@ describe("getOrCreateByEndpoints convergence", () => {
     const bob = await setup.nodes.Person.create({ name: "Bob" });
 
     const competitor = createStore(graph, raw);
+    let competitorEdgeId: string | undefined;
     const store = createStore(
       graph,
       racingBackend(raw, 1, async () => {
-        await competitor.edges.knows.create(alice, bob, { since: "winner" });
+        const competitorEdge = await competitor.edges.knows.create(alice, bob, {
+          since: "winner",
+        });
+        competitorEdgeId = competitorEdge.id;
       }),
     );
 
@@ -279,6 +290,10 @@ describe("getOrCreateByEndpoints convergence", () => {
 
     expect(result.action).toBe("found");
     expect(result.edge.since).toBe("winner");
+    // The winner has a different generated id. A found convergence result is
+    // authoritative even though its row identity cannot equal the losing
+    // create plan's generated id.
+    expect(result.edge.id).toBe(competitorEdgeId);
     // The contract, stated as the observable it protects: ONE edge per match
     // key. Before the guard this read returned two.
     expect(await setup.edges.knows.findFrom(alice)).toHaveLength(1);
@@ -775,5 +790,29 @@ describe("getOrCreateByEndpoints convergence", () => {
     );
     expect(resurrected.action).toBe("resurrected");
     expect(resurrected.edge.id).toBe(created.edge.id);
+  });
+
+  it("matches the JSON-persisted form of validated properties", async () => {
+    const store = createStore(graph, raw);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const bob = await store.nodes.Person.create({ name: "Bob" });
+    const props = { label: { value: undefined } };
+
+    const created = await store.edges.annotated.getOrCreateByEndpoints(
+      alice,
+      bob,
+      props,
+      { matchOn: ["label"] },
+    );
+    const found = await store.edges.annotated.getOrCreateByEndpoints(
+      alice,
+      bob,
+      props,
+      { matchOn: ["label"] },
+    );
+
+    expect(created.action).toBe("created");
+    expect(found.action).toBe("found");
+    expect(found.edge.id).toBe(created.edge.id);
   });
 });

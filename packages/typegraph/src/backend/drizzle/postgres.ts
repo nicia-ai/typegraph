@@ -2427,6 +2427,7 @@ function createPostgresOperationBackend(
 
   const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
+    commandSession: transactionScoped ? "transaction" : "root",
     execution: {
       execAll,
       execGet,

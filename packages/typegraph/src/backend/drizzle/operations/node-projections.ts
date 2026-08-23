@@ -27,7 +27,7 @@ export const INSERTED_NODE_PROJECTION_CTE_ALIAS = "inserted_node";
 function refuseUnknownManagedNodeMode(mode: never): never {
   throw new CompilerInvariantError(
     "A managed node create plan names an unknown mode.",
-    { capability: "executeManagedCreate", mode },
+    { capability: "commands", command: "node.create", mode },
   );
 }
 

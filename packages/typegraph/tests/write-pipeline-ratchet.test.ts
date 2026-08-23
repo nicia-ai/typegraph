@@ -158,6 +158,16 @@ function scanFile(file: string, banned: ReadonlySet<string>): Violation[] {
     ) {
       record(node, node.expression.name.text);
     }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "execute" &&
+      ts.isPropertyAccessExpression(node.expression.expression) &&
+      node.expression.expression.name.text === "commands" &&
+      banned.has("commands")
+    ) {
+      record(node, "commands");
+    }
     // 2. hoist to local: const updateNodeSet = target.updateNodeSet;
     if (
       ts.isVariableDeclaration(node) &&
@@ -472,10 +482,10 @@ describe("write-pipeline lint blocks", () => {
     expect(inScheme).toHaveLength(2);
     expect(exempt).toHaveLength(2);
     for (const block of inScheme) {
-      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 3 + 1);
+      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 6 + 1);
     }
     for (const block of exempt) {
-      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 3 + 1);
+      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 6 + 1);
     }
   });
 

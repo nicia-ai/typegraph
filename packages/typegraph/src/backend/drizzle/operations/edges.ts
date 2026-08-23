@@ -25,6 +25,49 @@ import {
 } from "./shared";
 
 /**
+ * Inputs for the PostgreSQL edge convergence statement.
+ *
+ * `matchOn` is deliberately a call-level key: it is validated against the
+ * edge schema by the store before it reaches this backend seam. The statement
+ * still treats absent properties distinctly from JSON `null`, matching the
+ * store's own-property comparison.
+ */
+export type ConvergeEdgeCreateParams = Readonly<{
+  params: InsertEdgeParams;
+  matchOn: readonly string[];
+  matchProps: Record<string, unknown>;
+  timestamp: string;
+}>;
+
+function qualifiedColumn(
+  alias: string,
+  column: Readonly<{ name: string }>,
+): SQL {
+  return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
+}
+
+function buildMatchKeyPredicate(
+  propsColumn: SQL,
+  matchOn: readonly string[],
+  matchProps: Record<string, unknown>,
+): SQL {
+  if (matchOn.length === 0) return sql`TRUE`;
+
+  return sql.join(
+    matchOn.map((field) => {
+      const value = Object.prototype.hasOwnProperty.call(matchProps, field) ?
+        matchProps[field]
+      : undefined;
+      if (value === undefined) {
+        return sql`NOT (${propsColumn} ? ${field})`;
+      }
+      return sql`(${propsColumn} -> ${field}) = ${JSON.stringify(value)}::jsonb`;
+    }),
+    sql` AND `,
+  );
+}
+
+/**
  * Builds an INSERT query for an edge.
  * Uses raw column names in the column list (required by SQL syntax).
  *
@@ -97,6 +140,86 @@ export function buildInsertEdgeIfEndpointsLive(
       AND ${to(nodes.id)} = ${params.toId}
       AND ${to(nodes.deletedAt)} IS NULL
     RETURNING *
+  `;
+}
+
+/**
+ * Atomically converges an edge create on its endpoint/match-key identity.
+ *
+ * The existing-row CTE is materialized so it chooses a live row before a
+ * tombstone and is evaluated from the same statement snapshot as the insert.
+ * When it is empty, the INSERT ... SELECT validates both endpoints and writes
+ * the edge. The discriminator is intentionally returned as an extra column;
+ * row mappers ignore it while the command executor can distinguish `found`
+ * from `created` without a second round trip.
+ *
+ * This builder is PostgreSQL-specific because SQLite stores `props` as text.
+ * It is not included in the common strategy, so a caller must explicitly
+ * select the portable transaction fallback when this member is absent.
+ */
+export function buildConvergeEdgeCreate(
+  tables: Tables,
+  input: ConvergeEdgeCreateParams,
+): SQL {
+  const { edges, nodes } = tables;
+  const { params, matchOn, matchProps, timestamp } = input;
+  const propsJson = JSON.stringify(params.props);
+  const columns = edgeColumnList(edges);
+  const edgeTable = quotedTableName(getTableName(edges));
+  const nodeTable = quotedTableName(getTableName(nodes));
+  const edgeGraphId = qualifiedColumn("candidate", edges.graphId);
+  const edgeKind = qualifiedColumn("candidate", edges.kind);
+  const edgeFromKind = qualifiedColumn("candidate", edges.fromKind);
+  const edgeFromId = qualifiedColumn("candidate", edges.fromId);
+  const edgeToKind = qualifiedColumn("candidate", edges.toKind);
+  const edgeToId = qualifiedColumn("candidate", edges.toId);
+  const edgeProps = qualifiedColumn("candidate", edges.props);
+  const edgeDeletedAt = qualifiedColumn("candidate", edges.deletedAt);
+  const edgeCreatedAt = qualifiedColumn("candidate", edges.createdAt);
+  const edgeId = qualifiedColumn("candidate", edges.id);
+  const from = (column: { name: string }): SQL =>
+    qualifiedColumn("from_node", column);
+  const to = (column: { name: string }): SQL =>
+    qualifiedColumn("to_node", column);
+
+  return sql`
+    WITH existing AS MATERIALIZED (
+      SELECT "candidate".*, 0::integer AS write_discriminator
+      FROM ${edgeTable} AS "candidate"
+      WHERE ${edgeGraphId} = ${params.graphId}
+        AND ${edgeKind} = ${params.kind}
+        AND ${edgeFromKind} = ${params.fromKind}
+        AND ${edgeFromId} = ${params.fromId}
+        AND ${edgeToKind} = ${params.toKind}
+        AND ${edgeToId} = ${params.toId}
+        AND ${buildMatchKeyPredicate(edgeProps, matchOn, matchProps)}
+      ORDER BY ${edgeDeletedAt} IS NULL DESC, ${edgeCreatedAt} DESC, ${edgeId} DESC
+      LIMIT 1
+    ),
+    inserted AS (
+      INSERT INTO ${edges} (${columns})
+      SELECT
+        ${params.graphId}, ${params.id}, ${params.kind},
+        ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId},
+        ${propsJson}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)},
+        ${timestamp}, ${timestamp}
+      FROM ${nodeTable} AS "from_node"
+      CROSS JOIN ${nodeTable} AS "to_node"
+      WHERE NOT EXISTS (SELECT 1 FROM existing)
+        AND ${from(nodes.graphId)} = ${params.graphId}
+        AND ${from(nodes.kind)} = ${params.fromKind}
+        AND ${from(nodes.id)} = ${params.fromId}
+        AND ${from(nodes.deletedAt)} IS NULL
+        AND ${to(nodes.graphId)} = ${params.graphId}
+        AND ${to(nodes.kind)} = ${params.toKind}
+        AND ${to(nodes.id)} = ${params.toId}
+        AND ${to(nodes.deletedAt)} IS NULL
+      RETURNING *, 1::integer AS write_discriminator
+    )
+    SELECT * FROM existing
+    UNION ALL
+    SELECT * FROM inserted
+    LIMIT 1
   `;
 }
 

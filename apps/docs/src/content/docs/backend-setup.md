@@ -549,6 +549,24 @@ its original SQL. Therefore this setting does not bound server-side prepared
 statement memory. For a high-cardinality stream of SQL text, use
 `prepareStatements: false` instead.
 
+### Authoritative command sessions
+
+Store create paths use the backend's `commands` port for writes whose
+decision and mutation must share one authority boundary. First-party paths
+pass an explicit command context: root execution is limited to a
+single-statement command, while a transaction-scoped backend uses the active
+transaction. Both require authoritative reads and bypass result caches for
+decision-driving data such as schema fences, claims, duplicate identities, and
+edge endpoints.
+
+The result-cache policy is independent of PostgreSQL prepared statements.
+Using an unnamed statement controls server-side plan reuse; it does not prove
+that a read bypassed an application or transport cache. Conversely, a named
+prepared statement is compatible with an authoritative read when it runs on
+the correct pinned session. Every command port caller must provide the
+explicit context; TypeGraph-owned write paths use the command helper so the
+authority and cache policy cannot be omitted at a call site.
+
 ### Connection Pooling
 
 For production, always use connection pooling:

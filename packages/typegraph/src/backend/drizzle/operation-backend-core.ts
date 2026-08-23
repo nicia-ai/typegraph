@@ -29,6 +29,10 @@ import {
 } from "../../utils/sql-errors";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
+  assertGraphCommandExecutionContext,
+  type GraphCommandExecutionContext,
+} from "../command-contract";
+import {
   resolveEdgeEndpointIds,
   resolveHeterogeneousEdgeRead,
 } from "../edge-endpoint-sets";
@@ -50,6 +54,9 @@ import type {
   DeleteUniqueParams,
   DisjointOverlapRow,
   EdgeClaimOutcome,
+  EdgeConvergeCreateCommand,
+  EdgeConvergeCreateCommandResult,
+  EdgeCreateCommandResult,
   EdgeExistsBetweenParams,
   EdgeRow,
   FindEdgesByEndpointSetParams,
@@ -58,6 +65,9 @@ import type {
   FindEdgesConnectedToParams,
   FindNodesByKindParams,
   GraphBackend,
+  GraphCommand,
+  GraphCommandResult,
+  GraphCommandSession,
   HardDeleteEdgeParams,
   HardDeleteNodeParams,
   HardDeleteUniquesByConcreteKindParams,
@@ -65,9 +75,9 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
-  ManagedCreatePlan,
-  ManagedCreateResult,
+  ManagedEdgeCreatePlan,
   ManagedNodeCreatePlan,
+  NodeCreateCommandResult,
   NodeRow,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
@@ -195,7 +205,7 @@ export type CommonOperationBackend = Pick<
   | "hardDeleteUniquesByConcreteKind"
   | "hardDeleteUniquesByNodeIds"
   | "insertEdge"
-  | "executeManagedCreate"
+  | "commands"
   | "insertEdgeNoReturn"
   | "insertEdgesBatch"
   | "insertEdgesBatchReturning"
@@ -299,6 +309,7 @@ type OperationBackendRowMappers = Readonly<{
 
 type CreateCommonOperationBackendOptions = Readonly<{
   batchConfig: OperationBackendBatchConfig;
+  commandSession: GraphCommandSession;
   execution: OperationBackendExecution;
   maxBindParameters: number;
   nowIso?: (() => string) | undefined;
@@ -473,6 +484,7 @@ export function createCommonOperationBackend(
 ): CommonOperationBackend {
   const {
     batchConfig,
+    commandSession,
     execution,
     maxBindParameters,
     operationStrategy,
@@ -749,7 +761,7 @@ export function createCommonOperationBackend(
 
   async function executeNodeManagedCreate(
     plan: ManagedNodeCreatePlan,
-  ): Promise<ManagedCreateResult> {
+  ): Promise<NodeCreateCommandResult> {
     if (plan.mode.kind === "schema-fenced") {
       assertMatchingNodeSchemaFence(plan.params, plan.mode.schemaFence);
     }
@@ -956,7 +968,7 @@ export function createCommonOperationBackend(
     if (schemaLockClause === undefined) {
       throw new ConfigurationError(
         "This backend cannot execute a managed edge create with a schema fence.",
-        { capability: "executeManagedCreate", dimension: "schemaFence" },
+        { capability: "commands", command: "edge.create", dimension: "schemaFence" },
       );
     }
     const query =
@@ -978,8 +990,8 @@ export function createCommonOperationBackend(
   }
 
   async function executeEdgeManagedCreate(
-    plan: Extract<ManagedCreatePlan, { entity: "edge" }>,
-  ): Promise<ManagedCreateResult> {
+    plan: ManagedEdgeCreatePlan,
+  ): Promise<EdgeCreateCommandResult> {
     const { params } = plan;
     if (
       plan.schemaFence !== undefined &&
@@ -1032,7 +1044,7 @@ export function createCommonOperationBackend(
       if (executeEdgeCardinalityInsert === undefined) {
         throw new CompilerInvariantError(
           "Edge create plan support changed between preflight and execution.",
-          { capability: "executeManagedCreate", dimension: "cardinalityClaim" },
+          { capability: "commands", command: "edge.create", dimension: "cardinalityClaim" },
         );
       }
       row = await executeEdgeCardinalityInsert(params, plan.cardinalityClaim);
@@ -1043,21 +1055,102 @@ export function createCommonOperationBackend(
       : { outcome: "created", entity: "edge", row };
   }
 
-  async function executeManagedCreate(
-    plan: ManagedCreatePlan,
-  ): Promise<ManagedCreateResult> {
-    switch (plan.entity) {
-      case "node": {
-        return executeNodeManagedCreate(plan);
+  async function executeEdgeConvergeCreate(
+    command: EdgeConvergeCreateCommand,
+    context: GraphCommandExecutionContext,
+  ): Promise<EdgeConvergeCreateCommandResult> {
+    const { plan } = command;
+    const { params } = plan;
+    if (
+      plan.schemaFence !== undefined &&
+      plan.schemaFence.graphId !== params.graphId
+    ) {
+      throw new CompilerInvariantError(
+        "A convergent edge create's schema fence must match its edge graph.",
+        {
+          edgeGraphId: params.graphId,
+          fenceGraphId: plan.schemaFence.graphId,
+          id: params.id,
+        },
+      );
+    }
+    // The one-statement builder currently owns neither the schema-version
+    // fence nor cardinality sidecar claims. Returning unsupported lets the
+    // store select its existing fenced transaction fallback without issuing
+    // an unsafe partially-convergent write.
+    if (
+      plan.schemaFence !== undefined ||
+      plan.cardinalityClaim !== undefined ||
+      operationStrategy.buildConvergeEdgeCreate === undefined ||
+      context.coordination === "none"
+    ) {
+      return {
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["convergence"],
+      };
+    }
+
+    const query = operationStrategy.buildConvergeEdgeCreate({
+      params,
+      matchOn: command.match.matchOn,
+      matchProps: command.match.props,
+      timestamp: nowIso(),
+    });
+    const row = await withDuplicateKeyClassification(
+      () => execution.execGet<Record<string, unknown>>(query),
+      {
+        entity: "edge",
+        relation: operationStrategy.primaryKeyConstraints.edges,
+        attempted: attemptedInserts([params]),
+      },
+    );
+    if (row === undefined) {
+      return { outcome: "rejected", entity: "edge", reason: "unknown" };
+    }
+    const discriminator = row["write_discriminator"];
+    if (discriminator === 0) {
+      return { outcome: "found", entity: "edge", row: rowMappers.toEdgeRow(row) };
+    }
+    if (discriminator === 1) {
+      return {
+        outcome: "created",
+        entity: "edge",
+        row: rowMappers.toEdgeRow(row),
+      };
+    }
+    throw new CompilerInvariantError(
+      "A convergent edge create returned an unknown write discriminator.",
+      { graphId: params.graphId, kind: params.kind, id: params.id },
+    );
+  }
+
+  async function executeCommand(
+    command: GraphCommand,
+    context: GraphCommandExecutionContext,
+  ): Promise<GraphCommandResult> {
+    assertGraphCommandExecutionContext(context);
+    if (context.session !== commandSession) {
+      throw new CompilerInvariantError(
+        "An authoritative graph command context does not match its bound command port.",
+        { boundSession: commandSession, contextSession: context.session },
+      );
+    }
+    switch (command.kind) {
+      case "node.create": {
+        return executeNodeManagedCreate(command.plan);
       }
-      case "edge": {
-        return executeEdgeManagedCreate(plan);
+      case "edge.create": {
+        return executeEdgeManagedCreate(command.plan);
+      }
+      case "edge.converge-create": {
+        return executeEdgeConvergeCreate(command, context);
       }
       default: {
-        plan satisfies never;
+        command satisfies never;
         throw new CompilerInvariantError(
-          "The managed create plan names an unknown entity.",
-          { capability: "executeManagedCreate" },
+          "The command port received an unknown command.",
+          { capability: "commands" },
         );
       }
     }
@@ -1068,7 +1161,7 @@ export function createCommonOperationBackend(
 
     ...schemaFenceMembers,
     ...schemaGraphWriteFenceMembers,
-    executeManagedCreate,
+    commands: { session: commandSession, execute: executeCommand },
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

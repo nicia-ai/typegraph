@@ -7,15 +7,13 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
-import {
-  deriveBackend,
-  projectBackendWithout,
-} from "../src/backend/derive-backend";
+import { graphCommandExecutionContext } from "../src/backend/command-contract";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
+  type GraphCommand,
   type InsertEdgeParams,
-  type ManagedCreatePlan,
   type TransactionBackend,
 } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
@@ -62,11 +60,14 @@ function edgeEntityStatements(queries: readonly string[]): readonly string[] {
 function ordinaryEdgeCreatePlan(
   params: InsertEdgeParams,
   claim: Parameters<NonNullable<GraphBackend["claimEdgeCardinality"]>>[0],
-): ManagedCreatePlan {
+): GraphCommand {
   return {
-    entity: "edge",
-    params,
-    cardinalityClaim: claim,
+    kind: "edge.create",
+    plan: {
+      entity: "edge",
+      params,
+      cardinalityClaim: claim,
+    },
   };
 }
 
@@ -161,12 +162,18 @@ describe("guarded edge cardinality claim", () => {
     } as const;
 
     const result = await fixture.backend.transaction(async (transaction) =>
-      requireDefined(transaction.executeManagedCreate)({
-        entity: "edge",
-        params,
-        schemaFence: { graphId: graph.id, expectedVersion: 1 },
-        cardinalityClaim: claim,
-      }),
+      transaction.commands.execute(
+        {
+          kind: "edge.create",
+          plan: {
+            entity: "edge",
+            params,
+            schemaFence: { graphId: graph.id, expectedVersion: 1 },
+            cardinalityClaim: claim,
+          },
+        },
+        graphCommandExecutionContext("transaction"),
+      ),
     );
     expect(result).toEqual({
       outcome: "unsupported",
@@ -182,20 +189,26 @@ describe("guarded edge cardinality claim", () => {
     fixture.reset();
     await expect(
       fixture.backend.transaction((transaction) =>
-        requireDefined(transaction.executeManagedCreate)({
-          entity: "edge",
-          params: {
-            graphId: graph.id,
-            id: "cross-graph-fence",
-            kind: "one",
-            fromKind: "Person",
-            fromId: "from",
-            toKind: "Person",
-            toId: "to",
-            props: {},
+        transaction.commands.execute(
+          {
+            kind: "edge.create",
+            plan: {
+              entity: "edge",
+              params: {
+                graphId: graph.id,
+                id: "cross-graph-fence",
+                kind: "one",
+                fromKind: "Person",
+                fromId: "from",
+                toKind: "Person",
+                toId: "to",
+                props: {},
+              },
+              schemaFence: { graphId: "different-graph", expectedVersion: 1 },
+            },
           },
-          schemaFence: { graphId: "different-graph", expectedVersion: 1 },
-        }),
+          graphCommandExecutionContext("transaction"),
+        ),
       ),
     ).rejects.toThrow("schema fence must match its edge graph");
     expect(fixture.statements).toEqual([]);
@@ -214,36 +227,39 @@ describe("guarded edge cardinality claim", () => {
           (transaction) =>
             fn(
               deriveBackend(transaction, {
-                executeManagedCreate(plan) {
-                  if (
-                    plan.entity === "edge" &&
-                    plan.cardinalityClaim !== undefined
-                  ) {
+                commands: {
+                  session: transaction.commands.session,
+                  execute(plan) {
+                    if (
+                      plan.kind === "edge.create" &&
+                      plan.plan.cardinalityClaim !== undefined
+                    ) {
+                      return Promise.resolve({
+                        outcome: "unsupported" as const,
+                        entity: "edge" as const,
+                        dimensions: ["cardinalityClaim"] as const,
+                      });
+                    }
                     return Promise.resolve({
-                      outcome: "unsupported" as const,
+                      outcome: "created" as const,
                       entity: "edge" as const,
-                      dimensions: ["cardinalityClaim"] as const,
+                      row: {
+                        graph_id: plan.plan.params.graphId,
+                        id: "foreign-edge",
+                        kind: plan.plan.params.kind,
+                        from_kind: "Person",
+                        from_id: from.id,
+                        to_kind: "Person",
+                        to_id: to.id,
+                        props: {},
+                        valid_from: undefined,
+                        valid_to: undefined,
+                        created_at: "2026-08-22T00:00:00.000Z",
+                        updated_at: "2026-08-22T00:00:00.000Z",
+                        deleted_at: undefined,
+                      },
                     });
-                  }
-                  return Promise.resolve({
-                    outcome: "created" as const,
-                    entity: "edge" as const,
-                    row: {
-                      graph_id: plan.params.graphId,
-                      id: "foreign-edge",
-                      kind: plan.params.kind,
-                      from_kind: "Person",
-                      from_id: from.id,
-                      to_kind: "Person",
-                      to_id: to.id,
-                      props: {},
-                      valid_from: undefined,
-                      valid_to: undefined,
-                      created_at: "2026-08-22T00:00:00.000Z",
-                      updated_at: "2026-08-22T00:00:00.000Z",
-                      deleted_at: undefined,
-                    },
-                  });
+                  },
                 },
               }),
             ),
@@ -288,8 +304,9 @@ describe("guarded edge cardinality claim", () => {
       props: {},
     } as const;
     const created = await fixture.backend.transaction(async (transaction) =>
-      requireDefined(transaction.executeManagedCreate)(
+      requireDefined(transaction.commands.execute)(
         ordinaryEdgeCreatePlan(createdParams, claim),
+        graphCommandExecutionContext("transaction"),
       ),
     );
     expect(created).toMatchObject({
@@ -304,12 +321,13 @@ describe("guarded edge cardinality claim", () => {
       fromId: "missing-from",
     } as const;
     const rejected = await fixture.backend.transaction(async (transaction) =>
-      requireDefined(transaction.executeManagedCreate)(
+      requireDefined(transaction.commands.execute)(
         ordinaryEdgeCreatePlan(rejectedParams, {
           ...claim,
           edgeId: rejectedParams.id,
           fromId: rejectedParams.fromId,
         }),
+        graphCommandExecutionContext("transaction"),
       ),
     );
     expect(rejected).toEqual({
@@ -320,38 +338,6 @@ describe("guarded edge cardinality claim", () => {
     expect(
       await fixture.store.edges.one.getById("planned-rejected" as never),
     ).toBeUndefined();
-  });
-
-  it("retains the separate probe when the exact target lacks the strong member", async () => {
-    const fixture = await createRecordedPostgresStore(graph);
-    const legacyBackend: GraphBackend = deriveBackend(fixture.backend, {
-      async transaction<T>(
-        fn: (tx: TransactionBackend) => Promise<T>,
-        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
-      ): Promise<T> {
-        return fixture.backend.transaction(
-          (tx) => fn(projectBackendWithout(tx, ["executeManagedCreate"])),
-          options,
-        );
-      },
-    });
-    const store = createStore(graph, legacyBackend);
-    const from = await store.nodes.Person.create({ name: "from" });
-    const to = await store.nodes.Person.create({ name: "to" });
-
-    fixture.reset();
-    await store.edges.one.create(from, to, {});
-
-    const statements = edgeEntityStatements(
-      fixture.statements.map((statement) => statement.query),
-    );
-    // Removing the unified executor restores the portable path: two ordered
-    // endpoint reads, then the claim and row as separate statements.
-    expect(statements).toHaveLength(4);
-    expect(statements[0]).toMatch(/select .*from "typegraph_nodes"/isu);
-    expect(statements[1]).toMatch(/select .*from "typegraph_nodes"/isu);
-    expect(statements[2]).toMatch(/insert into "typegraph_edge_claims"/iu);
-    expect(statements[3]).toMatch(/insert into "typegraph_edges"/iu);
   });
 
   it("does not leave a claim when a fused endpoint check returns no row", async () => {
@@ -479,8 +465,7 @@ describe("guarded edge cardinality claim", () => {
       },
     );
     await fixture.backend.transaction(async (transaction) => {
-      const fused = transaction.executeManagedCreate;
-      if (fused === undefined) throw new Error("expected fused edge support");
+      const fused = transaction.commands.execute;
       await expect(
         fused(
           ordinaryEdgeCreatePlan(
@@ -505,6 +490,7 @@ describe("guarded edge cardinality claim", () => {
               toId: to.id,
             },
           ),
+          graphCommandExecutionContext("transaction"),
         ),
       ).rejects.toBeDefined();
       // The duplicate is caught inside the caller's transaction, which then
@@ -523,8 +509,7 @@ describe("guarded edge cardinality claim", () => {
     const to = await fixture.store.nodes.Person.create({ name: "to" });
 
     await fixture.backend.transaction(async (transaction) => {
-      const fused = transaction.executeManagedCreate;
-      if (fused === undefined) throw new Error("expected fused edge support");
+      const fused = transaction.commands.execute;
       await expect(
         fused(
           ordinaryEdgeCreatePlan(
@@ -549,6 +534,7 @@ describe("guarded edge cardinality claim", () => {
               toId: to.id,
             },
           ),
+          graphCommandExecutionContext("transaction"),
         ),
       ).rejects.toMatchObject({ code: "COMPILER_INVARIANT_ERROR" });
     });

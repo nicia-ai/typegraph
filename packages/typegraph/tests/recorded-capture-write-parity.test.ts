@@ -40,6 +40,11 @@ function isWrapped(
   base: MethodBag,
   method: string,
 ): boolean {
+  if (method === "commands") {
+    return (
+      typeof wrapper[method] === "object" && wrapper[method] !== base[method]
+    );
+  }
   return (
     typeof wrapper[method] === "function" && wrapper[method] !== base[method]
   );

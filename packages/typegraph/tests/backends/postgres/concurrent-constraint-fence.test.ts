@@ -63,13 +63,11 @@ import {
   subClassOf,
   UniquenessError,
 } from "../../../src";
+import { graphCommandExecutionContext } from "../../../src/backend/command-contract";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../../../src/backend/postgres";
-import type {
-  GraphBackend,
-  ManagedCreatePlan,
-} from "../../../src/backend/types";
+import type { GraphBackend, GraphCommand } from "../../../src/backend/types";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -241,7 +239,7 @@ function partitionSettled<T>(
 /** Records the transaction-scoped managed plans without changing capability truth. */
 function recordManagedPlans(
   backend: GraphBackend,
-  plans: ManagedCreatePlan[],
+  plans: GraphCommand[],
 ): GraphBackend {
   return deriveBackend(backend, {
     transaction: (run, options) =>
@@ -249,15 +247,15 @@ function recordManagedPlans(
         (target) =>
           run(
             deriveBackend(target, {
-              executeManagedCreate: async (plan) => {
-                const execute = target.executeManagedCreate;
-                if (execute === undefined) {
-                  throw new Error(
-                    "Expected the PostgreSQL transaction backend to support managed creates",
+              commands: {
+                session: target.commands.session,
+                execute: async (plan) => {
+                  plans.push(plan);
+                  return target.commands.execute(
+                    plan,
+                    graphCommandExecutionContext("transaction"),
                   );
-                }
-                plans.push(plan);
-                return execute(plan);
+                },
               },
             }),
           ),
@@ -358,8 +356,8 @@ describe.runIf(process.env["POSTGRES_URL"])(
       { timeout: CONTENTION_TIMEOUT_MS },
       async () => {
         const live = requirePostgres();
-        const plansA: ManagedCreatePlan[] = [];
-        const plansB: ManagedCreatePlan[] = [];
+        const plansA: GraphCommand[] = [];
+        const plansB: GraphCommand[] = [];
         const storeA = createStore(
           graph,
           recordManagedPlans(createPostgresBackend(live.first), plansA),
@@ -395,17 +393,16 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const employees = await storeA.nodes.Employee.find();
         const contractors = await storeA.nodes.Contractor.find();
         expect(employees.length + contractors.length).toBe(1);
-        expect([...plansA, ...plansB]).toHaveLength(2);
-        expect([...plansA, ...plansB]).toEqual([
-          expect.objectContaining({
-            entity: "node",
-            claims: [expect.anything()],
-          }),
-          expect.objectContaining({
-            entity: "node",
-            claims: [expect.anything()],
-          }),
-        ]);
+        const commands = [...plansA, ...plansB];
+        expect(commands).toHaveLength(2);
+        for (const command of commands) {
+          expect(command.kind).toBe("node.create");
+          if (command.kind !== "node.create") {
+            throw new Error("Expected a node.create command");
+          }
+          expect(command.plan.entity).toBe("node");
+          expect(command.plan.claims).toHaveLength(1);
+        }
       },
     );
 

@@ -119,6 +119,7 @@ export type WriteRowWork<K extends RowWorkKind, T> = (
   session: WriteSessionFor<K>,
   target: WriteTarget,
   overlaidSession: OverlaidSessionMint<K>,
+  lock: GraphWriteLock,
 ) => Promise<T>;
 
 /**
@@ -164,6 +165,7 @@ function planFrame<K extends RowWorkKind, T>(
       mintSessionOver(target) as WriteSessionFor<K>,
       target,
       mintOverlaidSession,
+      lock,
     );
   };
 }

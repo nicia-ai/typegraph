@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { assertManagedCreateResultMatchesPlan } from "../src/backend/managed-create";
+import { assertCommandResultMatchesCommand } from "../src/backend/command";
 import type {
+  EdgeConvergeCreateCommand,
+  EdgeConvergeCreateCommandResult,
+  EdgeCreateCommand,
+  EdgeCreateCommandResult,
   EdgeRow,
-  ManagedCreatePlan,
-  ManagedCreateResult,
+  NodeCreateCommand,
+  NodeCreateCommandResult,
   NodeRow,
 } from "../src/backend/types";
 import { CompilerInvariantError } from "../src/errors";
@@ -48,35 +52,47 @@ function edgeRow(
   };
 }
 
-const NODE_PLAN = {
-  entity: "node",
-  params: {
-    graphId: "expected-graph",
-    kind: "Person",
-    id: "expected-node",
-    props: {},
+const NODE_COMMAND: NodeCreateCommand = {
+  kind: "node.create",
+  plan: {
+    entity: "node",
+    params: {
+      graphId: "expected-graph",
+      kind: "Person",
+      id: "expected-node",
+      props: {},
+    },
+    idGenerated: true,
+    mode: { kind: "ordinary" },
+    claims: [],
+    projections: [],
   },
-  idGenerated: true,
-  mode: { kind: "ordinary" },
-  claims: [],
-  projections: [],
-} as const satisfies ManagedCreatePlan;
+};
 
-const EDGE_PLAN = {
-  entity: "edge",
-  params: {
-    graphId: "expected-graph",
-    kind: "knows",
-    id: "expected-edge",
-    fromKind: "Person",
-    fromId: "from",
-    toKind: "Person",
-    toId: "to",
-    props: {},
+const EDGE_COMMAND: EdgeCreateCommand = {
+  kind: "edge.create",
+  plan: {
+    entity: "edge",
+    params: {
+      graphId: "expected-graph",
+      kind: "knows",
+      id: "expected-edge",
+      fromKind: "Person",
+      fromId: "from",
+      toKind: "Person",
+      toId: "to",
+      props: {},
+    },
   },
-} as const satisfies ManagedCreatePlan;
+};
 
-describe("managed create result correlation", () => {
+const EDGE_CONVERGE_COMMAND: EdgeConvergeCreateCommand = {
+  kind: "edge.converge-create",
+  plan: EDGE_COMMAND.plan,
+  match: { matchOn: ["label"], props: { label: "friend" } },
+};
+
+describe("command result correlation", () => {
   it.each([
     { graphId: "foreign-graph", kind: "Person", id: "expected-node" },
     { graphId: "expected-graph", kind: "Company", id: "expected-node" },
@@ -84,14 +100,14 @@ describe("managed create result correlation", () => {
   ])(
     "refuses a node row at a foreign identity: $graphId/$kind/$id",
     (identity) => {
-      const result: ManagedCreateResult = {
+      const result: NodeCreateCommandResult = {
         outcome: "created",
         entity: "node",
         row: nodeRow(identity),
       };
 
       expect(() => {
-        assertManagedCreateResultMatchesPlan(NODE_PLAN, result);
+        assertCommandResultMatchesCommand(NODE_COMMAND, result);
       }).toThrow(CompilerInvariantError);
     },
   );
@@ -103,29 +119,80 @@ describe("managed create result correlation", () => {
   ])(
     "refuses an edge row at a foreign identity: $graphId/$kind/$id",
     (identity) => {
-      const result: ManagedCreateResult = {
+      const result: EdgeCreateCommandResult = {
         outcome: "created",
         entity: "edge",
         row: edgeRow(identity),
       };
 
       expect(() => {
-        assertManagedCreateResultMatchesPlan(EDGE_PLAN, result);
+        assertCommandResultMatchesCommand(EDGE_COMMAND, result);
       }).toThrow(CompilerInvariantError);
     },
   );
 
   it("accepts a created row at the submitted identity", () => {
     expect(() => {
-      assertManagedCreateResultMatchesPlan(NODE_PLAN, {
+      assertCommandResultMatchesCommand(NODE_COMMAND, {
         outcome: "created",
         entity: "node",
         row: nodeRow({
-          graphId: NODE_PLAN.params.graphId,
-          kind: NODE_PLAN.params.kind,
-          id: NODE_PLAN.params.id,
+          graphId: NODE_COMMAND.plan.params.graphId,
+          kind: NODE_COMMAND.plan.params.kind,
+          id: NODE_COMMAND.plan.params.id,
         }),
       });
     }).not.toThrow();
+  });
+
+  it("accepts a found convergence row with a different generated id", () => {
+    const result: EdgeConvergeCreateCommandResult = {
+      outcome: "found",
+      entity: "edge",
+      row: edgeRow({
+        graphId: EDGE_CONVERGE_COMMAND.plan.params.graphId,
+        kind: EDGE_CONVERGE_COMMAND.plan.params.kind,
+        id: "winner-generated-id",
+      }),
+    };
+
+    expect(() => {
+      assertCommandResultMatchesCommand(EDGE_CONVERGE_COMMAND, result);
+    }).not.toThrow();
+  });
+
+  it("rejects a found convergence row with different endpoints", () => {
+    const result: EdgeConvergeCreateCommandResult = {
+      outcome: "found",
+      entity: "edge",
+      row: {
+        ...edgeRow({
+          graphId: EDGE_CONVERGE_COMMAND.plan.params.graphId,
+          kind: EDGE_CONVERGE_COMMAND.plan.params.kind,
+          id: "winner-generated-id",
+        }),
+        to_id: "other",
+      },
+    };
+
+    expect(() => {
+      assertCommandResultMatchesCommand(EDGE_CONVERGE_COMMAND, result);
+    }).toThrow(CompilerInvariantError);
+  });
+
+  it("rejects a found result for a non-convergence edge command", () => {
+    const result: EdgeConvergeCreateCommandResult = {
+      outcome: "found",
+      entity: "edge",
+      row: edgeRow({
+        graphId: EDGE_COMMAND.plan.params.graphId,
+        kind: EDGE_COMMAND.plan.params.kind,
+        id: EDGE_COMMAND.plan.params.id,
+      }),
+    };
+
+    expect(() => {
+      assertCommandResultMatchesCommand(EDGE_COMMAND, result);
+    }).toThrow(CompilerInvariantError);
   });
 });

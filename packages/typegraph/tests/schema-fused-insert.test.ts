@@ -20,10 +20,8 @@ import {
   defineGraphExtension,
   defineNode,
 } from "../src";
-import {
-  deriveBackend,
-  projectBackendWithout,
-} from "../src/backend/derive-backend";
+import { graphCommandExecutionContext } from "../src/backend/command-contract";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
@@ -154,9 +152,15 @@ function countFusedStatements(backend: GraphBackend): {
         counts.node += 1;
         return requireDefined(target.insertNodeIfAbsent)(params);
       },
-      async executeManagedCreate(plan) {
-        counts.edge += 1;
-        return requireDefined(target.executeManagedCreate)(plan);
+      commands: {
+        session: target.commands.session,
+        async execute(plan) {
+          counts.edge += 1;
+          return target.commands.execute(
+            plan,
+            graphCommandExecutionContext("transaction"),
+          );
+        },
       },
     });
   }
@@ -260,25 +264,6 @@ async function assertFusedInsertBudget(
 
   await store.edges.knows.create(alice, bob, {});
   expect(observed.counts).toEqual({ edge: 1, fence: 0, node: 0 });
-}
-
-async function statementCountForGeneratedNodeCreate(
-  backend: GraphBackend,
-  graphId: string,
-  useFusedInsert: boolean,
-): Promise<number> {
-  const portableBackend =
-    useFusedInsert ? backend : (
-      projectBackendWithout(backend, [
-        "executeManagedCreate",
-        "insertNodeIfAbsentWithSchemaFence",
-        "insertNodeWithSchemaFence",
-      ])
-    );
-  const observed = countFusedStatements(portableBackend);
-  const [store] = await createStoreWithSchema(graph(graphId), observed.backend);
-  await store.nodes.Person.create({ name: "Alice" });
-  return observed.counts.fence + observed.counts.node + observed.counts.edge;
 }
 
 async function assertUnmarkedTransactionFallback(
@@ -409,27 +394,6 @@ describe("schema-fenced insert budget", () => {
       await assertFusedInsertBudget(backend, "schema_fused_postgres");
     } finally {
       await backend.close();
-    }
-  });
-
-  it("saves exactly one statement against the portable schema-fence fallback", async () => {
-    const fused = createLocalSqliteBackend();
-    const fallback = createLocalSqliteBackend();
-    try {
-      const fusedStatements = await statementCountForGeneratedNodeCreate(
-        fused.backend,
-        "schema_fused_budget_enabled",
-        true,
-      );
-      const fallbackStatements = await statementCountForGeneratedNodeCreate(
-        fallback.backend,
-        "schema_fused_budget_disabled",
-        false,
-      );
-      expect(fallbackStatements).toBe(fusedStatements + 1);
-    } finally {
-      await fused.backend.close();
-      await fallback.backend.close();
     }
   });
 
