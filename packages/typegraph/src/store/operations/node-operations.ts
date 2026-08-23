@@ -190,6 +190,7 @@ import {
 } from "./write-session";
 import {
   diagnoseFusedSchemaFenceNoRow,
+  hasTransactionSchemaFenceLease,
   lockSchemaVersionForStoreWrite,
 } from "./write-transaction";
 
@@ -1857,7 +1858,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     // ordinary diagnostic fence could silently write a verified store.
     const targetBackend = unfencedTarget(target);
     const fuseSchemaFenceInFirstWrite =
-      schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
+      schemaFenceInFirstWrite &&
+      isSchemaFencedInsertEligible(targetBackend) &&
+      !hasTransactionSchemaFenceLease(targetBackend);
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }

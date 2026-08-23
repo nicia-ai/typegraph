@@ -181,6 +181,7 @@ import {
 } from "./write-session";
 import {
   diagnoseFusedSchemaFenceNoRow,
+  hasTransactionSchemaFenceLease,
   lockSchemaVersionForStoreWrite,
 } from "./write-transaction";
 
@@ -579,7 +580,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     // Fall back to the ordinary fence before any row work in that case.
     const targetBackend = unfencedTarget(target);
     const fuseSchemaFenceInFirstWrite =
-      schemaFenceInFirstWrite && isSchemaFencedInsertEligible(targetBackend);
+      schemaFenceInFirstWrite &&
+      isSchemaFencedInsertEligible(targetBackend) &&
+      !hasTransactionSchemaFenceLease(targetBackend);
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }

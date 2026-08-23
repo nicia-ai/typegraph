@@ -63,6 +63,12 @@ const peopleGraph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {},
 });
+const knows = defineEdge("knows", { schema: z.object({}) });
+const connectedPeopleGraph = defineGraph({
+  id: "pglite_connected_people",
+  nodes: { Person: { type: Person } },
+  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+});
 const peopleImportGraph = defineGraph({
   id: "pglite_people_import",
   nodes: { Person: { type: Person } },
@@ -781,6 +787,30 @@ describe("PGlite backend", () => {
 
       // Replacing the leased-fence fast path with the ordinary per-write
       // fence makes this count 2.
+      expect(
+        statements.filter((statement) => /for share/i.test(statement)),
+      ).toHaveLength(1);
+
+      const [connectedStore] = await createStoreWithSchema(
+        connectedPeopleGraph,
+        backend,
+      );
+      statements.length = 0;
+      await connectedStore.transaction(async (tx) => {
+        const alice = await tx.nodes.Person.create(
+          { name: "Alice" },
+          { id: "connected-alice" },
+        );
+        const bob = await tx.nodes.Person.create(
+          { name: "Bob" },
+          { id: "connected-bob" },
+        );
+        await tx.edges.knows.create(alice, bob, {});
+      });
+
+      // The edge create is independently eligible for a fused schema fence.
+      // A leased transaction must make it reuse the lock acquired by the
+      // first node create instead of embedding a second fence in its INSERT.
       expect(
         statements.filter((statement) => /for share/i.test(statement)),
       ).toHaveLength(1);

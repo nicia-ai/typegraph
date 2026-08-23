@@ -113,6 +113,11 @@ const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
  */
 const leasedSchemaFences = new WeakMap<object, Map<string, Promise<void>>>();
 
+/** Whether managed writes on this exact transaction target share a fence. */
+export function hasTransactionSchemaFenceLease(target: object): boolean {
+  return leasedSchemaFences.has(target);
+}
+
 function schemaFenceLeaseKey(graphId: string, expectedVersion: number): string {
   return `${graphId}\u0000${expectedVersion}`;
 }
