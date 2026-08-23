@@ -13,7 +13,7 @@
  */
 
 /**
- * The 42 backend members no module outside the seam may call: the three WRITE
+ * The 40 backend members no module outside the seam may call: the three WRITE
  * classes of `src/backend/member-classes.ts` — graph-entity writes, their
  * sidecars (both claim relations included), and backend-owned bulk ingestion.
  */
@@ -32,9 +32,7 @@ export const WRITE_MEMBER_NAMES = [
   "deleteNode",
   "hardDeleteNode",
   "insertEdge",
-  "insertEdgeIfEndpointsLive",
-  "insertEdgeIfEndpointsLiveWithCardinalityClaim",
-  "insertEdgeIfEndpointsLiveWithSchemaFence",
+  "executeEdgeCreatePlan",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -262,9 +260,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "deleteNode",
       "hardDeleteNode",
       "insertEdge",
-      "insertEdgeIfEndpointsLive",
-      "insertEdgeIfEndpointsLiveWithCardinalityClaim",
-      "insertEdgeIfEndpointsLiveWithSchemaFence",
+      "executeEdgeCreatePlan",
       "updateEdge",
       "deleteEdge",
       "deleteEdgesBatch",
@@ -325,9 +321,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
       "The fused session is the sole ordinary owner of insert-dispatch and row-step mutation helpers.",
     permanent: true,
     allowedMembers: [
-      "insertEdgeIfEndpointsLive",
-      "insertEdgeIfEndpointsLiveWithCardinalityClaim",
-      "insertEdgeIfEndpointsLiveWithSchemaFence",
+      "executeEdgeCreatePlan",
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",
       "executeNodeCreatePlan",

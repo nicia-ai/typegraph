@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 76 unbundled = 91, with no member counted twice", () => {
+  it("15 pilot + 74 unbundled = 89, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(76);
+    expect(unbundledNames.length).toBe(74);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(91);
+    expect(bundledSet.size + unbundledNames.length).toBe(89);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("28 reasoned entries sum to 102 accesses; 48 deferred entries sum to 197", () => {
+  it("26 reasoned entries sum to 91 accesses; 48 deferred entries sum to 197", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(28);
+    expect(reasoned.length).toBe(26);
     expect(deferred.length).toBe(48);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -123,7 +123,10 @@ describe("capability bundle totality (T9)", () => {
     // node/fulltext members (14 accesses together) with one projection-plan
     // member (6 accesses), reducing the measured reasoned total by eight. The
     // registry remains the source of truth; this test is its visible sum.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(102);
+    // The edge-create planner then replaced three specialized hooks (20
+    // accesses together) with one plan executor (9 accesses), reducing the
+    // member count by two and the measured reasoned total by eleven.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(91);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(197);
   });
 });

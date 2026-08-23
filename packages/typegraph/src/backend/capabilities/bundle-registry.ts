@@ -852,7 +852,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "A first-party edge planned-write entrypoint. It applies every requested schema-fence and cardinality dimension or refuses the plan; custom and legacy backends retain the portable read-then-write protocol.",
-    accesses: 6,
+    accesses: 9,
   },
   bootstrapTables: {
     kind: "reasoned",
