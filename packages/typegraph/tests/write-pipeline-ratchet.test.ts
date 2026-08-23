@@ -109,7 +109,7 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * visible. Adding a member moves this number and forces the new member into a
  * class — which is the point: whoever adds it decides whether it is a write.
  */
-const MEMBER_COUNT = 119;
+const MEMBER_COUNT = 121;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

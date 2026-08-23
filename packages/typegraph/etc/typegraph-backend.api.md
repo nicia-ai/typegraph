@@ -1886,6 +1886,22 @@ export type GraphBackend = Readonly<{
     lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<void>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
+    registerGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        schemaHash: string;
+        schemaDoc: SerializedSchema;
+    }>) => Promise<GraphTemplateRow>;
+    instantiateGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        templateSchemaHash: string;
+        graphId: string;
+        schemaHash: string;
+    }>) => Promise<Readonly<{
+        status: "ready";
+        row: SchemaVersionRow;
+    }> | Readonly<{
+        status: "refused";
+    }>>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
         tableExists: (this: void, tableName: string) => Promise<boolean>;
@@ -1999,6 +2015,14 @@ export type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrap
 
 // @public
 export type GraphReadBackend = Pick<GraphBackend, "dialect" | "getNode" | "getEdge" | "findNodesByKind" | "findEdgesByKind" | "findEdgesConnectedTo">;
+
+// @public
+type GraphTemplateRow = Readonly<{
+    template_id: string;
+    schema_hash: string;
+    schema_doc: string;
+    created_at: string;
+}>;
 
 // @public
 export type HardDeleteEdgeParams = Readonly<{
@@ -3277,6 +3301,16 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "reasoned";
         readonly reason: "Same family — and it returns a narrowed transaction backend, so it is a port constructor rather than an operation.";
         readonly accesses: 4;
+    };
+    readonly registerGraphTemplate: {
+        readonly kind: "reasoned";
+        readonly reason: "Administrative template registration is gated by the graph-template facade, which refuses absent backends rather than treating a missing registry as an empty template set.";
+        readonly accesses: 1;
+    };
+    readonly instantiateGraphTemplate: {
+        readonly kind: "reasoned";
+        readonly reason: "Administrative schema bootstrap operation, gated by the graph-template facade; it is not a runtime feature family because absence is a typed refusal before any graph write.";
+        readonly accesses: 1;
     };
     readonly ensureIdentityTables: {
         readonly kind: "reasoned";

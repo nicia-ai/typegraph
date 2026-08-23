@@ -54,6 +54,7 @@ export type SqliteTableNames = Readonly<{
   uniques: string;
   edgeClaims: string;
   schemaVersions: string;
+  graphTemplates: string;
   fulltext: string;
   indexMaterializations: string;
   contributionMaterializations: string;
@@ -92,6 +93,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
   schemaVersions: "typegraph_schema_versions",
+  graphTemplates: "typegraph_graph_templates",
   fulltext: "typegraph_node_fulltext",
   indexMaterializations: "typegraph_index_materializations",
   contributionMaterializations: "typegraph_contribution_materializations",
@@ -438,6 +440,17 @@ export function createSqliteTables(
     ],
   );
 
+  const graphTemplates = sqliteTable(
+    n.graphTemplates,
+    {
+      templateId: text("template_id").notNull(),
+      schemaHash: text("schema_hash").notNull(),
+      schemaDoc: text("schema_doc").notNull(),
+      createdAt: text("created_at").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.templateId] })],
+  );
+
   /**
    * Per-deployment record of which declared indexes have been
    * materialized against this database. Owned and written by
@@ -552,6 +565,7 @@ export function createSqliteTables(
     uniques,
     edgeClaims,
     schemaVersions,
+    graphTemplates,
     indexMaterializations,
     contributionMaterializations,
     kindRemovals,

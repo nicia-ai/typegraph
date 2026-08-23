@@ -68,6 +68,8 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "readConstraintFenceViolations",
   "getActiveSchema",
   "getSchemaVersion",
+  "registerGraphTemplate",
+  "instantiateGraphTemplate",
   "commitSchemaVersion",
   "commitSchemaVersionIfKindsEmpty",
   "lockSchemaVersionForWrite",

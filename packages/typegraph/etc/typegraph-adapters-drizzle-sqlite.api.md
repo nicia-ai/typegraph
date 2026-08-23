@@ -2740,6 +2740,89 @@ export function createSqliteTables(names?: Partial<SqliteTableNames>, options?: 
         };
         dialect: "sqlite";
     }>;
+    readonly graphTemplates: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            templateId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "template_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaHash: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_hash";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaDoc: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_doc";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
     readonly indexMaterializations: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
         name: string;
         schema: undefined;
@@ -4148,6 +4231,22 @@ type GraphBackend = Readonly<{
     lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<void>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
+    registerGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        schemaHash: string;
+        schemaDoc: SerializedSchema;
+    }>) => Promise<GraphTemplateRow>;
+    instantiateGraphTemplate?: (this: void, params: Readonly<{
+        templateId: string;
+        templateSchemaHash: string;
+        graphId: string;
+        schemaHash: string;
+    }>) => Promise<Readonly<{
+        status: "ready";
+        row: SchemaVersionRow;
+    }> | Readonly<{
+        status: "refused";
+    }>>;
     schemaWriteTransaction?: <T>(this: void, graphId: string, fn: (tx: TransactionBackend & Readonly<{
         executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
         tableExists: (this: void, tableName: string) => Promise<boolean>;
@@ -4258,6 +4357,14 @@ export type GraphIdentityConfig = Readonly<{
 
 // @public (undocumented)
 type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
+
+// @public
+type GraphTemplateRow = Readonly<{
+    template_id: string;
+    schema_hash: string;
+    schema_doc: string;
+    created_at: string;
+}>;
 
 // @public
 type HardDeleteEdgeParams = Readonly<{
@@ -6057,6 +6164,7 @@ export type SqliteTableNames = Readonly<{
     uniques: string;
     edgeClaims: string;
     schemaVersions: string;
+    graphTemplates: string;
     fulltext: string;
     indexMaterializations: string;
     contributionMaterializations: string;
@@ -8577,6 +8685,89 @@ export const tables: {
                 identity: undefined;
                 generated: undefined;
             }, {}, {}>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly graphTemplates: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            templateId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "template_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaHash: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_hash";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaDoc: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_doc";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
         };
         dialect: "sqlite";
     }>;

@@ -124,6 +124,7 @@ import {
   type DropVectorIndexParams,
   type FulltextSearchParams,
   type FulltextSearchResult,
+  type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
   type IdentityTableNames,
@@ -188,6 +189,7 @@ import {
 } from "./execution/postgres-execution";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
+import { instantiateGraphTemplateSql } from "./graph-template-sql";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -1277,6 +1279,59 @@ export function createPostgresBackend(
         // documents.
         await executeConcurrentCreateDdl(statement);
       }
+    },
+
+    async registerGraphTemplate(params): Promise<GraphTemplateRow> {
+      await executeConcurrentCreateDdl(
+        generatePgCreateTableSQL(tables.graphTemplates),
+      );
+      const t = tables.graphTemplates;
+      await db
+        .insert(t)
+        .values({
+          templateId: params.templateId,
+          schemaHash: params.schemaHash,
+          schemaDoc: params.schemaDoc,
+          createdAt: new Date(),
+        })
+        .onConflictDoNothing();
+      const templateRows = await db
+        .select()
+        .from(t)
+        .where(eq(t.templateId, params.templateId));
+      const row = templateRows.at(0);
+      if (row?.schemaHash !== params.schemaHash) {
+        throw new ConfigurationError(
+          `Graph template "${params.templateId}" already exists with different schema content.`,
+          {
+            code: "GRAPH_TEMPLATE_CONTENT_CONFLICT",
+            templateId: params.templateId,
+          },
+        );
+      }
+      return {
+        template_id: row.templateId,
+        schema_hash: row.schemaHash,
+        schema_doc: JSON.stringify(row.schemaDoc),
+        created_at: row.createdAt.toISOString(),
+      };
+    },
+
+    async instantiateGraphTemplate(params) {
+      const rows = await operations.execute<Record<string, unknown>>(
+        instantiateGraphTemplateSql({
+          dialect: "postgres",
+          graphId: params.graphId,
+          schemaHash: params.schemaHash,
+          schemaVersionsTableName: getTableName(tables.schemaVersions),
+          templatesTableName: getTableName(tables.graphTemplates),
+          templateId: params.templateId,
+          templateSchemaHash: params.templateSchemaHash,
+        }),
+      );
+      const row = rows[0];
+      if (row === undefined) return { status: "refused" } as const;
+      return { status: "ready", row: toSchemaVersionRow(row) } as const;
     },
 
     async ensureRevisionOriginsTable(): Promise<void> {

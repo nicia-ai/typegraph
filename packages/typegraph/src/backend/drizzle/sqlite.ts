@@ -85,6 +85,7 @@ import {
   type FulltextSearchResult,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
+  type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
   type IdentityTableNames,
@@ -127,6 +128,7 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
+import { instantiateGraphTemplateSql } from "./graph-template-sql";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
@@ -1837,6 +1839,59 @@ export function createSqliteBackend(
       }
     },
 
+    async registerGraphTemplate(params): Promise<GraphTemplateRow> {
+      await db.run(
+        sql.raw(generateSqliteCreateTableSQL(tables.graphTemplates)),
+      );
+      const t = tables.graphTemplates;
+      await db
+        .insert(t)
+        .values({
+          templateId: params.templateId,
+          schemaHash: params.schemaHash,
+          schemaDoc: JSON.stringify(params.schemaDoc),
+          createdAt: nowIso(),
+        })
+        .onConflictDoNothing();
+      const templateRows = await db
+        .select()
+        .from(t)
+        .where(eq(t.templateId, params.templateId));
+      const row = templateRows.at(0);
+      if (row?.schemaHash !== params.schemaHash) {
+        throw new ConfigurationError(
+          `Graph template "${params.templateId}" already exists with different schema content.`,
+          {
+            code: "GRAPH_TEMPLATE_CONTENT_CONFLICT",
+            templateId: params.templateId,
+          },
+        );
+      }
+      return {
+        template_id: row.templateId,
+        schema_hash: row.schemaHash,
+        schema_doc: row.schemaDoc,
+        created_at: row.createdAt,
+      };
+    },
+
+    async instantiateGraphTemplate(params) {
+      const rows = await operations.execute<Record<string, unknown>>(
+        instantiateGraphTemplateSql({
+          dialect: "sqlite",
+          graphId: params.graphId,
+          schemaHash: params.schemaHash,
+          schemaVersionsTableName: getTableName(tables.schemaVersions),
+          templatesTableName: getTableName(tables.graphTemplates),
+          templateId: params.templateId,
+          templateSchemaHash: params.templateSchemaHash,
+        }),
+      );
+      const row = rows[0];
+      if (row === undefined) return { status: "refused" } as const;
+      return { status: "ready", row: toSchemaVersionRow(row) } as const;
+    },
+
     async ensureRevisionOriginsTable(): Promise<void> {
       await db.run(
         sql.raw(generateSqliteCreateTableSQL(tables.revisionOrigins)),
@@ -1885,7 +1940,9 @@ export function createSqliteBackend(
       recordedTableNames,
     ): Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>> {
       const contributions = recordedContributionsFor(recordedTableNames);
-      function ddlFor(logicalName: keyof RecordedTableNames): RecordedRelationDdl {
+      function ddlFor(
+        logicalName: keyof RecordedTableNames,
+      ): RecordedRelationDdl {
         const contribution = requireDefined(
           contributions.find((entry) => entry.logicalName === logicalName),
           `recordedTableDdl: no contribution for ${logicalName}.`,

@@ -185,6 +185,8 @@ const SCHEMA_MEMBERS = [
   "commitSchemaVersion",
   "commitSchemaVersionIfKindsEmpty",
   "commitSchemaVersionWithPreflight",
+  "instantiateGraphTemplate",
+  "registerGraphTemplate",
   "setActiveVersion",
   "lockSchemaVersionForWrite",
   "lockSchemaVersionAndGraphWrite",

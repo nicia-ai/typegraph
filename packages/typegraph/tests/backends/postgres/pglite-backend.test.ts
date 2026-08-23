@@ -43,6 +43,11 @@ import {
   ImportOptionsSchema,
 } from "../../../src/interchange";
 import {
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../../../src/schema/graph-templates";
+import {
+  createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
   type Store,
@@ -114,6 +119,7 @@ const CLONE_TABLE_NAMES = {
   contributionMaterializations: "clone_contribution_materializations",
   kindRemovals: "clone_kind_removals",
   reconciliationMarkers: "clone_reconciliation_markers",
+  graphTemplates: "clone_graph_templates",
 } as const satisfies PostgresTableNames;
 
 /**
@@ -308,6 +314,33 @@ describe("PGlite backend", () => {
 
   afterEach(async () => {
     for (const cleanup of cleanups.splice(0)) await cleanup();
+  });
+
+  it("instantiates a durable graph template through the PostgreSQL dialect", async () => {
+    const { backend } = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(() => backend.close());
+    const [source] = await createAdapterStoreWithSchema(peopleGraph, backend);
+    const template = await registerGraphTemplate(backend, {
+      templateId: "pglite-people-v1",
+      reconciled: source.reconciledSchema,
+    });
+
+    const first = await instantiateGraphTemplate(backend, {
+      template,
+      graphId: "pglite-template-target",
+    });
+    const retry = await instantiateGraphTemplate(backend, {
+      template,
+      graphId: "pglite-template-target",
+    });
+
+    expect(first.status).toBe("ready");
+    expect(retry.schema).toStrictEqual(first.schema);
+    expect(first.reconciled).toMatchObject({
+      graph: { id: "pglite-template-target" },
+      version: 1,
+      hash: first.schema.schema_hash,
+    });
   });
 
   describe("serialized transaction resource ownership", () => {
