@@ -217,7 +217,7 @@ function edgeClaimRefusal(
  * relation existed reaches it here, on the first constrained edge write, with
  * an error that says what to run instead of an opaque driver failure.
  */
-export async function withEdgeClaimRelationPrecondition<T>(
+async function withEdgeClaimRelationPrecondition<T>(
   graphId: string,
   issue: () => Promise<T>,
 ): Promise<T> {
