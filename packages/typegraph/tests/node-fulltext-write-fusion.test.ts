@@ -20,7 +20,11 @@ import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import { createRecordedPostgresStore } from "./statement-recorder";
-import { createTestDatabase, revisionsAdvanced } from "./test-utils";
+import {
+  createTestDatabase,
+  disableTransactions,
+  revisionsAdvanced,
+} from "./test-utils";
 
 const Document = defineNode("Document", {
   schema: z.object({
@@ -139,6 +143,66 @@ describe("fresh node + fulltext write fusion", () => {
     transactionSpy.mockRestore();
   });
 
+  it("replans a root projection refusal inside a transaction before any portable SQL", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    let refusedRootCommands = 0;
+    const execute = fixture.backend.commands.execute;
+    const commandSpy = vi
+      .spyOn(fixture.backend.commands, "execute")
+      .mockImplementation((command, context) => {
+        if (command.kind === "node.create") {
+          refusedRootCommands += 1;
+          return Promise.resolve({
+            outcome: "unsupported" as const,
+            entity: "node" as const,
+            dimensions: ["projections"] as const,
+          });
+        }
+        return execute(command, context);
+      });
+    const [store] = await createStoreWithSchema(graph, fixture.backend);
+
+    fixture.reset();
+    await store.nodes.Document.create({
+      title: "replanned after root refusal",
+    });
+    commandSpy.mockRestore();
+
+    expect(refusedRootCommands).toBe(1);
+    const entityStatements = fixture.statements.filter(
+      (statement) =>
+        hasNodeInsert(statement.query) || hasFulltextWrite(statement.query),
+    );
+    expect(entityStatements).toHaveLength(1);
+    expect(hasNodeInsert(entityStatements[0]?.query ?? "")).toBe(true);
+    expect(hasFulltextWrite(entityStatements[0]?.query ?? "")).toBe(true);
+  });
+
+  it("refuses a root projection fallback when transactions are unavailable", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const backend = deriveBackend(disableTransactions(fixture.backend), {
+      commands: {
+        session: "root",
+        execute: () =>
+          Promise.resolve({
+            outcome: "unsupported" as const,
+            entity: "node" as const,
+            dimensions: ["projections"] as const,
+          }),
+      },
+    });
+    const store = createStore(graph, backend);
+
+    await expect(
+      store.nodes.Document.create({ title: "must remain atomic" }),
+    ).rejects.toMatchObject({
+      details: { code: "NODE_PROJECTION_TRANSACTION_REQUIRED" },
+    });
+    expect(
+      fixture.statements.some((statement) => hasNodeInsert(statement.query)),
+    ).toBe(false);
+  });
+
   it("combines the ordinary backend member into one statement", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     await createStoreWithSchema(graph, fixture.backend);
@@ -230,6 +294,46 @@ describe("fresh node + fulltext write fusion", () => {
     await store.nodes.Document.create({ title: "schema member independently" });
 
     expect(fusedCallCount).toBe(1);
+  });
+
+  it("falls back to the portable schema-fenced write when a command port refuses projections", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const refusingBackend: GraphBackend = deriveBackend(fixture.backend, {
+      async transaction<T>(
+        fn: (tx: TransactionBackend) => Promise<T>,
+        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
+      ): Promise<T> {
+        return fixture.backend.transaction(
+          (tx) =>
+            fn(
+              deriveBackend(tx, {
+                commands: {
+                  session: tx.commands.session,
+                  execute: () =>
+                    Promise.resolve({
+                      outcome: "unsupported" as const,
+                      entity: "node" as const,
+                      dimensions: ["projections"] as const,
+                    }),
+                },
+              }),
+            ),
+          options,
+        );
+      },
+    });
+    const [store] = await createStoreWithSchema(graph, refusingBackend);
+
+    await store.transaction(async (tx) =>
+      tx.nodes.Document.create({
+        title: "portable projection fallback",
+        body: "the sidecar still runs",
+      }),
+    );
+
+    await expect(
+      store.search.fulltext("Document", { query: "sidecar", limit: 10 }),
+    ).resolves.toHaveLength(1);
   });
 
   it("makes non-empty content searchable after the fused write", async () => {

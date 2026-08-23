@@ -71,8 +71,8 @@ export const WRITE_PIPELINE_MESSAGE =
   "belong in a step or sidecar module, which the session composes.";
 
 /**
- * Three selectors, because the repo writes an optional backend member call in
- * three ways and a syntactic rule must cover all three.
+ * Four selectors, because the repo writes an optional backend member call in
+ * four ways and a syntactic rule must cover all four.
  *
  * Capability PROBES (`x.member === undefined`) are deliberately out of scope:
  * asking whether a backend has a member is not writing through it, and the
@@ -131,6 +131,12 @@ export function writePipelineMemberRestrictions(memberNames) {
           // requireDefined(target.commands).execute(command)
           selector:
             'CallExpression[callee.name="requireDefined"] > MemberExpression[property.name="commands"]',
+          message: WRITE_PIPELINE_MESSAGE,
+        },
+        {
+          // executeAuthoritativeGraphCommand(target.commands, command)
+          selector:
+            'CallExpression[callee.name="executeAuthoritativeGraphCommand"] > MemberExpression[property.name="commands"]:first-child',
           message: WRITE_PIPELINE_MESSAGE,
         },
       ]
@@ -335,6 +341,13 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     allowedMembers: ["trustedImport"],
   },
   {
+    path: "src/store/operations/edge-operations.ts",
+    reason:
+      "The edge operation owns convergence command dispatch and passes graph-lock evidence to the authoritative port before the session executes row work.",
+    permanent: true,
+    allowedMembers: ["commands"],
+  },
+  {
     path: "src/store/operations/edge-write-pipeline.ts",
     reason:
       "The edge step bodies themselves (updateEdge, deleteEdge, hardDeleteEdge), reachable only through the session.",
@@ -349,6 +362,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     allowedMembers: [
       "insertNodeIfAbsentWithSchemaFence",
       "insertNodeWithSchemaFence",
+      "commands",
     ],
     allowedImports: WRITE_PIPELINE_INTERNAL_IMPORT_NAMES,
   },

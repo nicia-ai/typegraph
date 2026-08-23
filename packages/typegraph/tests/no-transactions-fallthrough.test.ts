@@ -131,6 +131,27 @@ describe("backends with transactions: false fall through to sequential execution
     expect(company?.name).toBe("Acme");
   });
 
+  it("refuses convergent edge creation without a transaction fence", async () => {
+    const store = await createRawInitializedStore(graph, backend);
+    const person = await store.nodes.Person.create({ name: "Alice" });
+    const company = await store.nodes.Company.create({ name: "Acme" });
+
+    await expect(
+      store.edges.worksAt.getOrCreateByEndpoints(
+        person,
+        company,
+        { role: "Engineer" },
+        { matchOn: ["role"] },
+      ),
+    ).rejects.toMatchObject({
+      details: {
+        code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+        graphId: graph.id,
+      },
+    });
+    await expect(store.edges.worksAt.find()).resolves.toEqual([]);
+  });
+
   it("store.transaction errors propagate without rollback", async () => {
     const store = await createRawInitializedStore(graph, backend);
     const persisted = await store.nodes.Person.create({ name: "Persisted" });

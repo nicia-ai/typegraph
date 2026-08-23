@@ -29,6 +29,7 @@ import {
 } from "../../utils/sql-errors";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
+  assertGraphCommandCoordination,
   assertGraphCommandExecutionContext,
   type GraphCommandExecutionContext,
 } from "../command-contract";
@@ -968,7 +969,11 @@ export function createCommonOperationBackend(
     if (schemaLockClause === undefined) {
       throw new ConfigurationError(
         "This backend cannot execute a managed edge create with a schema fence.",
-        { capability: "commands", command: "edge.create", dimension: "schemaFence" },
+        {
+          capability: "commands",
+          command: "edge.create",
+          dimension: "schemaFence",
+        },
       );
     }
     const query =
@@ -1044,7 +1049,11 @@ export function createCommonOperationBackend(
       if (executeEdgeCardinalityInsert === undefined) {
         throw new CompilerInvariantError(
           "Edge create plan support changed between preflight and execution.",
-          { capability: "commands", command: "edge.create", dimension: "cardinalityClaim" },
+          {
+            capability: "commands",
+            command: "edge.create",
+            dimension: "cardinalityClaim",
+          },
         );
       }
       row = await executeEdgeCardinalityInsert(params, plan.cardinalityClaim);
@@ -1108,21 +1117,28 @@ export function createCommonOperationBackend(
     if (row === undefined) {
       return { outcome: "rejected", entity: "edge", reason: "unknown" };
     }
-    const discriminator = row["write_discriminator"];
-    if (discriminator === 0) {
-      return { outcome: "found", entity: "edge", row: rowMappers.toEdgeRow(row) };
+    switch (Number(row["write_discriminator"])) {
+      case 0: {
+        return {
+          outcome: "found",
+          entity: "edge",
+          row: rowMappers.toEdgeRow(row),
+        };
+      }
+      case 1: {
+        return {
+          outcome: "created",
+          entity: "edge",
+          row: rowMappers.toEdgeRow(row),
+        };
+      }
+      default: {
+        throw new CompilerInvariantError(
+          "A convergent edge create returned an unknown write discriminator.",
+          { graphId: params.graphId, kind: params.kind, id: params.id },
+        );
+      }
     }
-    if (discriminator === 1) {
-      return {
-        outcome: "created",
-        entity: "edge",
-        row: rowMappers.toEdgeRow(row),
-      };
-    }
-    throw new CompilerInvariantError(
-      "A convergent edge create returned an unknown write discriminator.",
-      { graphId: params.graphId, kind: params.kind, id: params.id },
-    );
   }
 
   async function executeCommand(
@@ -1134,6 +1150,13 @@ export function createCommonOperationBackend(
       throw new CompilerInvariantError(
         "An authoritative graph command context does not match its bound command port.",
         { boundSession: commandSession, contextSession: context.session },
+      );
+    }
+    if (context.coordination !== "none") {
+      assertGraphCommandCoordination(
+        commandsPort,
+        command,
+        context.coordination,
       );
     }
     switch (command.kind) {
@@ -1156,12 +1179,14 @@ export function createCommonOperationBackend(
     }
   }
 
+  const commandsPort = { session: commandSession, execute: executeCommand };
+
   return {
     tableExists,
 
     ...schemaFenceMembers,
     ...schemaGraphWriteFenceMembers,
-    commands: { session: commandSession, execute: executeCommand },
+    commands: commandsPort,
 
     async executeSchemaDdl(ddl: string): Promise<void> {
       await execution.execRun(asCompiledStatementSql(sql.raw(ddl)));

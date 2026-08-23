@@ -73,6 +73,7 @@ import {
   lockRecordedGraphWrite,
 } from "../recorded-capture";
 import {
+  acquiredGraphWriteLockFromCombinedFence,
   type GraphWriteLock,
   memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
@@ -530,10 +531,9 @@ export function runInWriteTransaction<T>(
         // graph lock must never suppress the per-write schema fence.
         await combinedSchemaGraphFence.acquire(combinedSchemaGraphFence.params);
         memoizeAcquiredRecordedGraphWriteLock(target, ctx.graphId);
-        // The statement above acquired the real lock. This constructor is the
-        // existing evidence token used when an enclosing frame already holds
-        // it; runtime evidence carries no payload.
-        lock = uncapturedGraphWriteLock();
+        // The combined statement acquired the real advisory lock, so mint
+        // graph/port-bound command coordination only after it returns.
+        lock = acquiredGraphWriteLockFromCombinedFence(target, ctx.graphId);
       }
     } catch (error) {
       if (acquiresLock) held.delete(ctx.graphId);

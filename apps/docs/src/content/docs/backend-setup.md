@@ -552,20 +552,56 @@ statement memory. For a high-cardinality stream of SQL text, use
 ### Authoritative command sessions
 
 Store create paths use the backend's `commands` port for writes whose
-decision and mutation must share one authority boundary. First-party paths
-pass an explicit command context: root execution is limited to a
-single-statement command, while a transaction-scoped backend uses the active
-transaction. Both require authoritative reads and bypass result caches for
-decision-driving data such as schema fences, claims, duplicate identities, and
-edge endpoints.
+decision and mutation must share one command boundary. First-party paths pass
+an explicit command context: root execution is limited to a single-statement
+command, while a transaction-scoped backend uses the active transaction. A
+transaction command may additionally carry a coordination token only after it
+has acquired the graph's advisory lock; the token is bound to that graph and
+transaction session and cannot authorize work on another connection.
 
-The result-cache policy is independent of PostgreSQL prepared statements.
-Using an unnamed statement controls server-side plan reuse; it does not prove
-that a read bypassed an application or transport cache. Conversely, a named
-prepared statement is compatible with an authoritative read when it runs on
-the correct pinned session. Every command port caller must provide the
-explicit context; TypeGraph-owned write paths use the command helper so the
-authority and cache policy cannot be omitted at a call site.
+`GraphBackend.commands` is a required member as of the authoritative command
+port release. Custom backends must expose `{ session, execute }` and implement
+the `node.create`, `edge.create`, and `edge.converge-create` commands, or return
+a typed `unsupported` result for dimensions they do not provide. The former
+optional managed-create and specialized edge-insert hooks are no longer a
+complete backend implementation; migrate those branches into the command
+port before upgrading.
+
+For a custom backend, the migration shape is:
+
+```typescript
+const commands: GraphCommandPort = {
+  session: "transaction", // use "root" for a single-statement backend
+  execute(command, context) {
+    // Apply every requested dimension, or explicitly refuse the command.
+    switch (command.kind) {
+      case "node.create": {
+        return { outcome: "unsupported", entity: "node", dimensions: ["claims"] };
+      }
+      case "edge.create": {
+        return {
+          outcome: "unsupported",
+          entity: "edge",
+          dimensions: ["endpointPredicate"],
+        };
+      }
+      case "edge.converge-create": {
+        return { outcome: "unsupported", entity: "edge", dimensions: ["convergence"] };
+      }
+    }
+  },
+};
+const backend: GraphBackend = { ...members, commands };
+```
+
+Every command port caller must provide the explicit context. TypeGraph-owned
+write paths use the command helper, which verifies that any coordination token
+belongs to the active graph and transaction session before executing the
+command. When decorating a first-party backend with `deriveBackend`, a
+same-session `commands` override automatically retains that session identity
+and its effective isolation level. A wrapper that changes session or forwards
+to a different connection is a new command boundary and cannot reuse a lock
+token from the original port.
 
 ### Connection Pooling
 

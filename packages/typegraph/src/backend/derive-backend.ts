@@ -25,12 +25,17 @@
  */
 import { carrySchemaFencedInsertEligibility } from "./capabilities/schema-fenced-insert";
 import { carryFirstPartyFactoryMark } from "./capabilities/write-fence";
+import { carryGraphCommandPortSessionMetadata } from "./command-contract";
 import {
   GRAPH_BACKEND_PROJECTION_KEYS,
   type ProjectedGraphBackendKey,
 } from "./graph-backend-keys";
 import { carryBackendResourceAudit } from "./transaction-resource";
-import { type AdapterBackend, type GraphBackend } from "./types";
+import {
+  type AdapterBackend,
+  type GraphBackend,
+  type GraphCommandPort,
+} from "./types";
 
 /**
  * Rejects overlay members that are not members of the decorated backend, so a
@@ -40,6 +45,38 @@ import { type AdapterBackend, type GraphBackend } from "./types";
  */
 export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
   Readonly<Record<Exclude<keyof O, keyof T>, never>>;
+
+function isGraphCommandPort(value: unknown): value is GraphCommandPort {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  return (
+    (candidate["session"] === "root" ||
+      candidate["session"] === "transaction") &&
+    typeof candidate["execute"] === "function"
+  );
+}
+
+/**
+ * A same-session command-port wrapper preserves the underlying transaction's
+ * coordination and isolation evidence. A root-to-transaction override is a
+ * deliberate session boundary (recorded capture opens that transaction), so
+ * it starts with fresh evidence that the transaction factory must bind.
+ */
+function carryDerivedCommandPortMetadata(
+  base: object,
+  overrides: object,
+): void {
+  if (!Object.hasOwn(overrides, "commands")) return;
+  const baseCommands: unknown = Reflect.get(base, "commands");
+  const overrideCommands: unknown = Reflect.get(overrides, "commands");
+  if (
+    isGraphCommandPort(baseCommands) &&
+    isGraphCommandPort(overrideCommands) &&
+    baseCommands.session === overrideCommands.session
+  ) {
+    carryGraphCommandPortSessionMetadata(baseCommands, overrideCommands);
+  }
+}
 
 /**
  * Decorates a backend with overlay members without copying it.
@@ -127,6 +164,7 @@ export function deriveBackend<
   carryBackendResourceAudit(decoratedBackend, base);
   carryFirstPartyFactoryMark(decoratedBackend, base);
   carrySchemaFencedInsertEligibility(decoratedBackend, base);
+  carryDerivedCommandPortMetadata(base, overrides);
   return decoratedBackend;
 }
 

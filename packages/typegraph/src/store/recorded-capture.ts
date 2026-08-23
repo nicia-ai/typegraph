@@ -11,6 +11,7 @@ import {
   type EdgeRow,
   type GraphBackend,
   type GraphCommand,
+  type GraphCommandPort,
   type GraphCommandResult,
   type InsertEdgeParams,
   type InsertNodeParams,
@@ -431,6 +432,36 @@ function createRecordedTransactionBackend(
     }
   }
 
+  const commands = {
+    session: target.commands.session,
+    execute: async (
+      command: GraphCommand,
+      context: GraphCommandExecutionContext,
+    ): Promise<GraphCommandResult> => {
+      session.assertOpen();
+      await lockGraph(command.plan.params.graphId);
+      const result = await target.commands.execute(command, context);
+      assertCommandResultMatchesCommand(command, result);
+      if (result.outcome === "created") {
+        if (result.entity === "node") {
+          session.touchNode(
+            command.plan.params.graphId,
+            command.plan.params.kind,
+            command.plan.params.id,
+            result.row,
+          );
+        } else {
+          session.touchEdge(
+            command.plan.params.graphId,
+            command.plan.params.id,
+            result.row,
+          );
+        }
+      }
+      return result;
+    },
+  } satisfies GraphCommandPort;
+
   const overlay = deriveBackend(target, {
     ...rawWriteGuards(target, "tx.backend"),
 
@@ -497,35 +528,7 @@ function createRecordedTransactionBackend(
         },
       }),
 
-    commands: {
-      session: target.commands.session,
-      execute: async (
-        command: GraphCommand,
-        context: GraphCommandExecutionContext,
-      ): Promise<GraphCommandResult> => {
-        session.assertOpen();
-        await lockGraph(command.plan.params.graphId);
-        const result = await target.commands.execute(command, context);
-        assertCommandResultMatchesCommand(command, result);
-        if (result.outcome === "created") {
-          if (result.entity === "node") {
-            session.touchNode(
-              command.plan.params.graphId,
-              command.plan.params.kind,
-              command.plan.params.id,
-              result.row,
-            );
-          } else {
-            session.touchEdge(
-              command.plan.params.graphId,
-              command.plan.params.id,
-              result.row,
-            );
-          }
-        }
-        return result;
-      },
-    },
+    commands,
 
     ...(target.insertNodeNoReturn === undefined ?
       {}

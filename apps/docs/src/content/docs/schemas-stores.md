@@ -663,21 +663,37 @@ operation's existence/endpoint/constraint probes, and the row plus its claim
 and sidecar writes. The exact count depends on the graph declaration and
 backend capabilities.
 
-The schema fence is rechecked for every managed write, including writes made
-through one `store.transaction(...)` callback. Do not cache that probe in an
-adapter: PostgreSQL releases row locks acquired after a savepoint when the
-transaction rolls back to that savepoint, so a cached verdict could let a
-later write run without a live schema fence. The per-graph write lock is
-already reused for nested operation frames on the same transaction target;
-there is no equivalent cache for the schema fence.
+Outside an explicit Store transaction, the schema fence is rechecked for every
+managed write. Inside one `store.transaction(...)` callback, TypeGraph acquires
+the fence on the pinned transaction target and leases that held fence to later
+writes in the callback. Adapters must not introduce a broader cache: PostgreSQL
+releases row locks acquired after a savepoint when the transaction rolls back
+to that savepoint, and a backend-instance cache could therefore outlive the
+database protection it claims. The per-graph write lock follows the same
+transaction-scoped ownership rule.
 
-Likewise, endpoint and duplicate-id checks are not folded into a blind write.
-Node creates must distinguish a live duplicate from a tombstone to preserve
-resurrection behavior and typed errors. Edge writes must validate both
-endpoints and preserve the claim/row/sidecar ordering. `getOrCreateByEndpoints`
+Endpoint, duplicate-id, claim, and projection work is folded only through the
+backend's semantic command port, never into a blind write. A command either
+applies every requested dimension atomically or returns `unsupported` before
+issuing SQL, after which the Store re-enters the portable validation path.
+That fallback is available only when the backend can preserve the requested
+atomicity; a root backend that cannot keep a row and its projection sidecars
+together refuses the write with a typed transaction-required error.
+Node creates still distinguish live duplicates from tombstones, and edge
+writes still preserve endpoint and claim ordering. `getOrCreateByEndpoints`
 uses an outside read only for its no-write found fast path; every create,
-resurrection, or update re-reads inside its fenced write transaction so the
-match-key decision and the write share one exclusion.
+resurrection, or update makes its decision on the fenced transaction target.
+
+The remaining transactionless convergence floor is structural rather than a
+missing cache. A dynamic `matchOn` list has no database uniqueness object that
+can arbitrate two independent Neon HTTP statements. The intended next step is
+a schema-declared edge match identity: a named, canonical set of persisted JSON
+fields backed by a unique database arbiter. The existing
+`edge.converge-create` command is the Store-facing seam for that work, so an
+adapter can later lower a declared identity to one conflict-arbitrated root
+statement without changing collection control flow. Until such an identity is
+declared and materialized, transactionless constrained convergence continues
+to fail closed.
 
 For networked deployments, amortize the safe costs at the call boundary:
 

@@ -21,7 +21,10 @@ import {
   defineNode,
 } from "../src";
 import { graphCommandExecutionContext } from "../src/backend/command-contract";
-import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
@@ -266,6 +269,27 @@ async function assertFusedInsertBudget(
   expect(observed.counts).toEqual({ edge: 1, fence: 0, node: 0 });
 }
 
+async function statementCountForGeneratedNodeCreate(
+  backend: GraphBackend,
+  graphId: string,
+  useFusedInsert: boolean,
+): Promise<number> {
+  // The command port is required. The schema-fenced insert members remain
+  // optional, so omit only those members to force the ordinary fence-plus-row
+  // fallback while retaining the current backend contract.
+  const target =
+    useFusedInsert ? backend : (
+      projectBackendWithout(backend, [
+        "insertNodeIfAbsentWithSchemaFence",
+        "insertNodeWithSchemaFence",
+      ])
+    );
+  const observed = countFusedStatements(target);
+  const [store] = await createStoreWithSchema(graph(graphId), observed.backend);
+  await store.nodes.Person.create({ name: "Alice" });
+  return observed.counts.fence + observed.counts.node + observed.counts.edge;
+}
+
 async function assertUnmarkedTransactionFallback(
   backend: GraphBackend,
   graphId: string,
@@ -394,6 +418,27 @@ describe("schema-fenced insert budget", () => {
       await assertFusedInsertBudget(backend, "schema_fused_postgres");
     } finally {
       await backend.close();
+    }
+  });
+
+  it("saves exactly one statement against the portable schema-fence fallback", async () => {
+    const fused = createLocalSqliteBackend();
+    const fallback = createLocalSqliteBackend();
+    try {
+      const fusedStatements = await statementCountForGeneratedNodeCreate(
+        fused.backend,
+        "schema_fused_budget_enabled",
+        true,
+      );
+      const fallbackStatements = await statementCountForGeneratedNodeCreate(
+        fallback.backend,
+        "schema_fused_budget_disabled",
+        false,
+      );
+      expect(fallbackStatements).toBe(fusedStatements + 1);
+    } finally {
+      await fused.backend.close();
+      await fallback.backend.close();
     }
   });
 

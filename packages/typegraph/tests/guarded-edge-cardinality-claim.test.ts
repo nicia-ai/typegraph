@@ -278,6 +278,54 @@ describe("guarded edge cardinality claim", () => {
     );
   });
 
+  it("falls back to separate claim and edge statements when fusion is unsupported", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const from = await fixture.store.nodes.Person.create({ name: "from" });
+    const to = await fixture.store.nodes.Person.create({ name: "to" });
+    const backend = deriveBackend(fixture.backend, {
+      async transaction<T>(
+        fn: (transaction: TransactionBackend) => Promise<T>,
+        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
+      ): Promise<T> {
+        return fixture.backend.transaction(
+          (transaction) =>
+            fn(
+              deriveBackend(transaction, {
+                commands: {
+                  session: transaction.commands.session,
+                  execute(command, context) {
+                    if (
+                      command.kind === "edge.create" &&
+                      command.plan.cardinalityClaim !== undefined
+                    ) {
+                      return Promise.resolve({
+                        outcome: "unsupported" as const,
+                        entity: "edge" as const,
+                        dimensions: ["cardinalityClaim"] as const,
+                      });
+                    }
+                    return transaction.commands.execute(command, context);
+                  },
+                },
+              }),
+            ),
+          options,
+        );
+      },
+    });
+    const store = createStore(graph, backend);
+
+    fixture.reset();
+    await store.edges.one.create(from, to, {});
+
+    const statements = edgeEntityStatements(
+      fixture.statements.map((statement) => statement.query),
+    );
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toMatch(/insert into "typegraph_edge_claims"/iu);
+    expect(statements[1]).toMatch(/insert into "typegraph_edges"/iu);
+  });
+
   it("returns created and rejected outcomes from the planned edge executor", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const from = await fixture.store.nodes.Person.create({ name: "from" });

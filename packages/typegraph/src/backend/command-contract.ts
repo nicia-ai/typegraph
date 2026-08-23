@@ -1,4 +1,4 @@
-import { CompilerInvariantError } from "../errors";
+import { CompilerInvariantError, ConfigurationError } from "../errors";
 import type {
   GraphCommand,
   GraphCommandCoordination,
@@ -8,21 +8,62 @@ import type {
   GraphCommandSession,
 } from "./types";
 
-const graphCommandCoordinations = new WeakSet<object>();
+const graphCommandCoordinationBindings = new WeakMap<
+  object,
+  Readonly<{ graphId: string; sessionIdentity: object }>
+>();
+const graphCommandPortIsolations = new WeakMap<
+  object,
+  "read_committed" | "repeatable_read" | "serializable" | "unknown"
+>();
+const graphCommandPortSessionIdentities = new WeakMap<object, object>();
 
 export type {
-  GraphCommandAuthority,
   GraphCommandCoordination,
   GraphCommandExecutionContext,
-  GraphCommandExecutionFacts,
-  GraphCommandResultCache,
   GraphCommandSession,
 } from "./types";
 
-/** Internal evidence mint used only by the graph-write lock owner. */
-export function mintGraphCommandCoordination(): GraphCommandCoordination {
+/**
+ * Retains a transaction command session's identity across a transparent port
+ * wrapper. Coordination and isolation attach to the session identity, not the
+ * wrapper object, so an observing/decorating backend cannot make a proven
+ * advisory lock look like it belongs to another connection.
+ */
+export function carryGraphCommandPortSessionMetadata(
+  base: GraphCommandPort,
+  derived: GraphCommandPort,
+): void {
+  if (base.session !== derived.session) {
+    throw new CompilerInvariantError(
+      "A derived graph command port must retain its base command session.",
+      { baseSession: base.session, derivedSession: derived.session },
+    );
+  }
+  graphCommandPortSessionIdentities.set(
+    derived,
+    graphCommandPortSessionIdentity(base),
+  );
+}
+
+function graphCommandPortSessionIdentity(port: GraphCommandPort): object {
+  return graphCommandPortSessionIdentities.get(port) ?? port;
+}
+
+/**
+ * Internal evidence mint used only after a graph's advisory lock has been
+ * acquired on the command port's transaction. The binding prevents a real
+ * lock from transaction A (or graph A) authorizing a command on B.
+ */
+export function mintGraphCommandCoordination(
+  port: GraphCommandPort,
+  graphId: string,
+): GraphCommandCoordination {
   const coordination = Object.freeze({}) as GraphCommandCoordination;
-  graphCommandCoordinations.add(coordination);
+  graphCommandCoordinationBindings.set(coordination, {
+    graphId,
+    sessionIdentity: graphCommandPortSessionIdentity(port),
+  });
   return coordination;
 }
 
@@ -30,7 +71,64 @@ function isGraphCommandCoordination(
   value: unknown,
 ): value is GraphCommandCoordination {
   if (typeof value !== "object" || value === null) return false;
-  return graphCommandCoordinations.has(value);
+  return graphCommandCoordinationBindings.has(value);
+}
+
+/** Bind the effective isolation level to a transaction-scoped first-party port. */
+export function bindGraphCommandPortIsolation(
+  port: GraphCommandPort,
+  isolation: "read_committed" | "repeatable_read" | "serializable" | "unknown",
+): void {
+  graphCommandPortIsolations.set(
+    graphCommandPortSessionIdentity(port),
+    isolation,
+  );
+}
+
+/**
+ * A match-key convergence must observe the winner after waiting for its graph
+ * lock. Repeatable-read snapshots cannot do that; serializable can instead
+ * force a database serialization retry. Adopted/custom transaction ports
+ * without an audited isolation level fail closed for the same reason.
+ */
+export function assertGraphCommandConvergenceIsolation(
+  port: GraphCommandPort,
+): void {
+  if (port.session === "root") return;
+  const isolation =
+    graphCommandPortIsolations.get(graphCommandPortSessionIdentity(port)) ??
+    "unknown";
+  if (isolation === "read_committed" || isolation === "serializable") return;
+  throw new ConfigurationError(
+    "Match-key convergence requires read-committed or serializable transaction isolation.",
+    {
+      code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+      isolation,
+    },
+    {
+      suggestion:
+        "Use read_committed, retry a serializable transaction as a whole, or avoid getOrCreateByEndpoints in an adopted transaction whose isolation TypeGraph cannot inspect.",
+    },
+  );
+}
+
+/** Assert that a coordination token belongs to this port and command graph. */
+export function assertGraphCommandCoordination(
+  port: GraphCommandPort,
+  command: GraphCommand,
+  coordination: GraphCommandCoordination,
+): void {
+  const binding = graphCommandCoordinationBindings.get(coordination);
+  if (
+    binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
+    binding.graphId === command.plan.params.graphId
+  ) {
+    return;
+  }
+  throw new CompilerInvariantError(
+    "Graph command coordination does not belong to this transaction port and graph.",
+    { graphId: command.plan.params.graphId },
+  );
 }
 
 /** Build the non-negotiable context for one command session. */
@@ -45,50 +143,34 @@ export function graphCommandExecutionContext(
         { coordination, session },
       );
     }
-    return {
-      session,
-      atomicity: "single-statement",
-      authority: "authoritative",
-      resultCache: "bypass",
-      coordination,
-    };
+    return { session, coordination: "none" };
   }
-  return {
-    session,
-    atomicity: "transaction",
-    authority: "authoritative",
-    resultCache: "bypass",
-    coordination,
-  };
+  return { session, coordination };
 }
 
 /**
  * Validate a context before it reaches a first-party executor. The helper
  * below always creates a valid value, while direct port callers use this same
- * assertion to keep the authority contract single-owned.
+ * assertion to keep session/coordination shape single-owned.
  */
 export function assertGraphCommandExecutionContext(
   context: unknown,
 ): asserts context is GraphCommandExecutionContext {
   const facts =
-    typeof context === "object" ?
+    typeof context === "object" && context !== null ?
       (context as Readonly<Record<string, unknown>>)
     : undefined;
   if (
-    facts?.["authority"] !== "authoritative" ||
-    facts["resultCache"] !== "bypass" ||
+    facts === undefined ||
     (facts["coordination"] !== "none" &&
       !isGraphCommandCoordination(facts["coordination"])) ||
     !(
-      (facts["session"] === "root" &&
-        facts["atomicity"] === "single-statement" &&
-        facts["coordination"] === "none") ||
-      (facts["session"] === "transaction" &&
-        facts["atomicity"] === "transaction")
+      (facts["session"] === "root" && facts["coordination"] === "none") ||
+      facts["session"] === "transaction"
     )
   ) {
     throw new CompilerInvariantError(
-      "An authoritative graph command received an invalid execution context.",
+      "A graph command received an invalid execution context.",
       { context: facts },
     );
   }
@@ -97,8 +179,8 @@ export function assertGraphCommandExecutionContext(
 /**
  * Execute a command through the explicit authoritative seam.
  *
- * Store write paths must use this helper; it is the ratchet that makes the
- * authority and cache policy visible at every first-party call site.
+ * Store write paths must use this helper so session and coordination evidence
+ * are explicit at every first-party call site.
  */
 export function executeAuthoritativeGraphCommand(
   port: GraphCommandPort,
@@ -107,5 +189,8 @@ export function executeAuthoritativeGraphCommand(
 ): Promise<GraphCommandResult> {
   const context = graphCommandExecutionContext(port.session, coordination);
   assertGraphCommandExecutionContext(context);
+  if (coordination !== "none") {
+    assertGraphCommandCoordination(port, command, coordination);
+  }
   return port.execute(command, context);
 }

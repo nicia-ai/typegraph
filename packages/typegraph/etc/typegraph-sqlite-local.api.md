@@ -1139,7 +1139,10 @@ type EdgeConvergeCreateCommandResult = Readonly<{
 }> | Readonly<{
     outcome: "unsupported";
     entity: "edge";
-    dimensions: readonly ["convergence"];
+    dimensions: readonly [
+    "convergence" | "endpointPredicate",
+    ...(readonly ("convergence" | "endpointPredicate")[])
+    ];
 }>;
 
 // @public
@@ -1173,8 +1176,8 @@ type EdgeCreateCommandResult = Readonly<{
     outcome: "unsupported";
     entity: "edge";
     dimensions: readonly [
-    "schemaFence" | "cardinalityClaim",
-    ...(readonly ("schemaFence" | "cardinalityClaim")[])
+    "schemaFence" | "cardinalityClaim" | "endpointPredicate",
+    ...(readonly ("schemaFence" | "cardinalityClaim" | "endpointPredicate")[])
     ];
 }>;
 
@@ -2022,28 +2025,17 @@ type GraphBackend = Readonly<{
 type GraphCommand = NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
 
 // @public
-type GraphCommandAuthority = "authoritative";
-
-// @public
 type GraphCommandCoordination = Readonly<{
     [GRAPH_COMMAND_COORDINATION_BRAND]: true;
 }>;
 
 // @public (undocumented)
-type GraphCommandExecutionContext = (GraphCommandExecutionFacts & Readonly<{
+type GraphCommandExecutionContext = Readonly<{
     session: "root";
-    atomicity: "single-statement";
     coordination: "none";
-}>) | (GraphCommandExecutionFacts & Readonly<{
+}> | Readonly<{
     session: "transaction";
-    atomicity: "transaction";
     coordination: "none" | GraphCommandCoordination;
-}>);
-
-// @public
-type GraphCommandExecutionFacts = Readonly<{
-    authority: GraphCommandAuthority;
-    resultCache: GraphCommandResultCache;
 }>;
 
 // @public
@@ -2054,9 +2046,6 @@ type GraphCommandPort = Readonly<{
 
 // @public
 type GraphCommandResult = NodeCreateCommandResult | EdgeCreateCommandResult | EdgeConvergeCreateCommandResult;
-
-// @public
-type GraphCommandResultCache = "bypass";
 
 // @public
 type GraphCommandSession = "root" | "transaction";

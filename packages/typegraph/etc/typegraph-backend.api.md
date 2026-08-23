@@ -23,6 +23,9 @@ export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower",
 export function assertFiniteEmbedding(embedding: readonly number[], name: string): void;
 
 // @public
+export function assertGraphCommandConvergenceIsolation(port: GraphCommandPort): void;
+
+// @public
 export function assertGraphCommandExecutionContext(context: unknown): asserts context is GraphCommandExecutionContext;
 
 // @public
@@ -1436,7 +1439,10 @@ export type EdgeConvergeCreateCommandResult = Readonly<{
 }> | Readonly<{
     outcome: "unsupported";
     entity: "edge";
-    dimensions: readonly ["convergence"];
+    dimensions: readonly [
+    "convergence" | "endpointPredicate",
+    ...(readonly ("convergence" | "endpointPredicate")[])
+    ];
 }>;
 
 // @public
@@ -1464,8 +1470,8 @@ export type EdgeCreateCommandResult = Readonly<{
     outcome: "unsupported";
     entity: "edge";
     dimensions: readonly [
-    "schemaFence" | "cardinalityClaim",
-    ...(readonly ("schemaFence" | "cardinalityClaim")[])
+    "schemaFence" | "cardinalityClaim" | "endpointPredicate",
+    ...(readonly ("schemaFence" | "cardinalityClaim" | "endpointPredicate")[])
     ];
 }>;
 
@@ -2056,32 +2062,21 @@ export type GraphBackend = Readonly<{
 export type GraphCommand = NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
 
 // @public
-export type GraphCommandAuthority = "authoritative";
-
-// @public
 export type GraphCommandCoordination = Readonly<{
     [GRAPH_COMMAND_COORDINATION_BRAND]: true;
 }>;
 
 // @public (undocumented)
-export type GraphCommandExecutionContext = (GraphCommandExecutionFacts & Readonly<{
+export type GraphCommandExecutionContext = Readonly<{
     session: "root";
-    atomicity: "single-statement";
     coordination: "none";
-}>) | (GraphCommandExecutionFacts & Readonly<{
+}> | Readonly<{
     session: "transaction";
-    atomicity: "transaction";
     coordination: "none" | GraphCommandCoordination;
-}>);
+}>;
 
 // @public
 export function graphCommandExecutionContext(session: GraphCommandSession, coordination?: "none" | GraphCommandCoordination): GraphCommandExecutionContext;
-
-// @public
-export type GraphCommandExecutionFacts = Readonly<{
-    authority: GraphCommandAuthority;
-    resultCache: GraphCommandResultCache;
-}>;
 
 // @public
 export type GraphCommandPort = Readonly<{
@@ -2091,9 +2086,6 @@ export type GraphCommandPort = Readonly<{
 
 // @public
 export type GraphCommandResult = NodeCreateCommandResult | EdgeCreateCommandResult | EdgeConvergeCreateCommandResult;
-
-// @public
-export type GraphCommandResultCache = "bypass";
 
 // @public
 export type GraphCommandSession = "root" | "transaction";

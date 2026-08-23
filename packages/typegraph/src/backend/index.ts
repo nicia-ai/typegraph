@@ -141,14 +141,12 @@ export {
   resolveRecursiveTraversal,
 } from "./capabilities/recursive-traversal";
 export type {
-  GraphCommandAuthority,
   GraphCommandCoordination,
   GraphCommandExecutionContext,
-  GraphCommandExecutionFacts,
-  GraphCommandResultCache,
   GraphCommandSession,
 } from "./command-contract";
 export {
+  assertGraphCommandConvergenceIsolation,
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   graphCommandExecutionContext,

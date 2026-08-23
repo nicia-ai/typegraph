@@ -66,14 +66,6 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -83,22 +75,6 @@
     "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -274,14 +250,6 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -291,22 +259,6 @@
     "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -482,14 +434,6 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -499,22 +443,6 @@
     "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -690,14 +618,6 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -707,22 +627,6 @@
     "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -898,14 +802,6 @@
   {
     "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -915,22 +811,6 @@
     "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -1146,14 +1026,6 @@
   {
     "entrypoint": "typegraph-backend.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -1163,22 +1035,6 @@
     "entrypoint": "typegraph-backend.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -1410,14 +1266,6 @@
   {
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -1427,22 +1275,6 @@
     "entrypoint": "typegraph-graph-merge.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -1690,14 +1522,6 @@
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -1707,22 +1531,6 @@
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -1970,14 +1778,6 @@
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -1987,22 +1787,6 @@
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -2250,14 +2034,6 @@
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -2267,22 +2043,6 @@
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -2530,14 +2290,6 @@
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -2547,22 +2299,6 @@
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -2810,14 +2546,6 @@
   {
     "entrypoint": "typegraph-schema.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -2827,22 +2555,6 @@
     "entrypoint": "typegraph-schema.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -3090,14 +2802,6 @@
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -3107,22 +2811,6 @@
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"
@@ -3370,14 +3058,6 @@
   {
     "entrypoint": "typegraph.api.md",
     "declaration": "GraphCommandExecutionContext",
-    "member": "atomicity",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "GraphCommandExecutionContext",
     "member": "coordination",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
@@ -3387,22 +3067,6 @@
     "entrypoint": "typegraph.api.md",
     "declaration": "GraphCommandExecutionContext",
     "member": "session",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "authority",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "GraphCommandExecutionFacts",
-    "member": "resultCache",
     "kind": "required-member-added",
     "reason": "Pre-1.0 authoritative command-port break makes backend execution contracts explicit.",
     "issue": "#533"

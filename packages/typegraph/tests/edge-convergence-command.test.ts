@@ -4,7 +4,12 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  EndpointNotFoundError,
+} from "../src";
 import { assertCommandResultMatchesCommand } from "../src/backend/command";
 import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import { deriveBackend } from "../src/backend/derive-backend";
@@ -17,6 +22,7 @@ import type {
   EdgeConvergeCreateCommandResult,
   GraphBackend,
   GraphCommand,
+  GraphCommandPort,
 } from "../src/backend/types";
 import { tsvectorStrategy } from "../src/query/dialect/fulltext-strategy";
 import { createStore } from "../src/store";
@@ -70,7 +76,10 @@ async function executeConvergence(
     );
     const result = await transaction.commands.execute(
       command,
-      graphCommandExecutionContext("transaction", coordination),
+      graphCommandExecutionContext(
+        "transaction",
+        coordination.coordination ?? "none",
+      ),
     );
     assertCommandResultMatchesCommand(command, result);
     return result;
@@ -78,6 +87,26 @@ async function executeConvergence(
 }
 
 describe("PostgreSQL edge convergence command", () => {
+  it("refuses a PostgreSQL override that falsely claims serialized writers", async () => {
+    const client = await PGlite.create();
+    try {
+      expect(() =>
+        createPostgresBackend(drizzlePglite(client), {
+          capabilities: {
+            pessimisticLocks: {
+              advisoryLocks: false,
+              tableLocks: false,
+              serializedWriters: true,
+            },
+          },
+          vector: false,
+        }),
+      ).toThrow("cannot claim serialized writers");
+    } finally {
+      await client.close();
+    }
+  });
+
   it("uses exact match-key equality and deterministic winner ordering", () => {
     const strategy = createPostgresOperationStrategy(
       postgresTables,
@@ -249,7 +278,7 @@ describe("PostgreSQL edge convergence command", () => {
                       observed.push(command);
                       return transaction.commands.execute(command, context);
                     },
-                  },
+                  } satisfies GraphCommandPort,
                 }),
               ),
             options,
@@ -270,6 +299,185 @@ describe("PostgreSQL edge convergence command", () => {
       expect(
         observed.filter((command) => command.kind === "edge.converge-create"),
       ).toHaveLength(1);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("preserves advisory-lock command binding through recorded capture", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+      });
+      const store = createStore(graph, backend, { history: true });
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { label: "recorded" },
+          { matchOn: ["label"] },
+        ),
+      ).resolves.toMatchObject({ action: "created" });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("refuses repeatable-read convergence before its first match lookup", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+      });
+      let matchLookups = 0;
+      const counted = deriveBackend(backend, {
+        transaction: (run, options) =>
+          backend.transaction(
+            (transaction) =>
+              run(
+                deriveBackend(transaction, {
+                  findEdgesByKind(params) {
+                    matchLookups += 1;
+                    return transaction.findEdgesByKind(params);
+                  },
+                }),
+              ),
+            options,
+          ),
+      });
+      const store = createStore(graph, counted);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      matchLookups = 0;
+      await expect(
+        store.transaction(
+          (transaction) =>
+            transaction.edges.knows.getOrCreateByEndpoints(
+              alice,
+              bob,
+              { label: "repeatable" },
+              { matchOn: ["label"] },
+            ),
+          { isolationLevel: "repeatable_read" },
+        ),
+      ).rejects.toMatchObject({
+        details: { code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT" },
+      });
+      expect(matchLookups).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("checks the actual transaction target when a root backend wraps an unsafe port", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+      });
+      let matchLookups = 0;
+      const unsafe = deriveBackend(backend, {
+        transaction: (run, options) =>
+          backend.transaction((transaction) => {
+            const opaqueCommands = {
+              session: "transaction" as const,
+              execute(command, context) {
+                return transaction.commands.execute(command, context);
+              },
+            } satisfies GraphCommandPort;
+            // This deliberately models a third-party transaction wrapper that
+            // does not derive its command port, so its isolation is unknown.
+            const unsafeTransaction = new Proxy(transaction, {
+              get(target, property, receiver) {
+                if (property === "commands") return opaqueCommands;
+                if (property === "findEdgesByKind") {
+                  return (
+                    params: Parameters<typeof target.findEdgesByKind>[0],
+                  ) => {
+                    matchLookups += 1;
+                    return target.findEdgesByKind(params);
+                  };
+                }
+                return Reflect.get(target, property, receiver) as unknown;
+              },
+            });
+            return run(unsafeTransaction);
+          }, options),
+      });
+      const store = createStore(graph, unsafe);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      matchLookups = 0;
+      await expect(
+        store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { label: "unsafe" },
+          { matchOn: ["label"] },
+        ),
+      ).rejects.toMatchObject({
+        details: { code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT" },
+      });
+      expect(matchLookups).toBe(0);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("uses portable endpoint validation when a custom port refuses its predicate", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+      });
+      let refusedEndpointCommands = 0;
+      const refusingBackend = deriveBackend(backend, {
+        transaction: (run, options) =>
+          backend.transaction(
+            (transaction) =>
+              run(
+                deriveBackend(transaction, {
+                  commands: {
+                    session: transaction.commands.session,
+                    execute(command, context) {
+                      if (command.kind === "edge.create") {
+                        refusedEndpointCommands += 1;
+                        return Promise.resolve({
+                          outcome: "unsupported" as const,
+                          entity: "edge" as const,
+                          dimensions: ["endpointPredicate"] as const,
+                        });
+                      }
+                      return transaction.commands.execute(command, context);
+                    },
+                  },
+                }),
+              ),
+            options,
+          ),
+      });
+      const store = createStore(graph, refusingBackend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+
+      await expect(
+        store.edges.knows.create(
+          alice,
+          { kind: "Person", id: "missing" },
+          { label: "portable" },
+        ),
+      ).rejects.toBeInstanceOf(EndpointNotFoundError);
+      expect(refusedEndpointCommands).toBe(1);
+      expect(await store.edges.knows.find()).toHaveLength(0);
     } finally {
       await client.close();
     }

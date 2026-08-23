@@ -76,7 +76,7 @@ import {
   type VectorOperationBackend,
 } from "../../backend/types";
 import { type DeleteBehavior, type UniqueConstraint } from "../../core/types";
-import { CompilerInvariantError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { type Assert, type Equal } from "../../utils/type-assert";
 import {
@@ -100,6 +100,7 @@ import {
   runInsertNoReturn,
 } from "../insert-dispatch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
 import {
   applyEdgeHardDelete,
   applyEdgeSoftDelete,
@@ -205,6 +206,27 @@ export function unfencedTarget(
   target: WriteTarget,
 ): GraphBackend | TransactionBackend {
   return target as GraphBackend | TransactionBackend;
+}
+
+/** Refuses a root fallback that would split a fused row and projection write. */
+function assertPortableNodeFallbackCanRun(
+  target: WriteTarget,
+  params: InsertNodeParams,
+  projections: readonly NodeInsertProjection[],
+): void {
+  if (projections.length === 0 || !("transaction" in unfencedTarget(target)))
+    return;
+  if (target.capabilities.transactions) {
+    throw new AutocommitWriteRequiresTransaction();
+  }
+  throw new ConfigurationError(
+    "This backend cannot fall back from a fused node projection command without a transaction.",
+    {
+      code: "NODE_PROJECTION_TRANSACTION_REQUIRED",
+      graphId: params.graphId,
+      kind: params.kind,
+    },
+  );
 }
 
 /** The graph-scoped state every session method's step modules need. */
@@ -394,9 +416,8 @@ export type EdgeWriteSession = Readonly<{
   // ---- B2: delegates to edge-write-pipeline.ts + insert-dispatch.ts
   createEdge: (work: EdgeInsertWork) => Promise<EdgeRow>;
   /**
-   * Executes one prepared endpoint-checked create through the complete plan
-   * when the target exposes it. An absent executor is an explicit signal for
-   * the caller to run the portable diagnostic/fallback path.
+   * Executes one prepared endpoint-checked create command. An unsupported
+   * result is an explicit signal for the caller to run the portable fallback.
    */
   createEdgeWithPlan: (
     command: EdgeCreateCommand,
@@ -471,11 +492,15 @@ export function createWriteSession(
         projections: work.projections,
         allowNonTransactionalClaims: work.allowNonTransactionalClaims,
       });
-      const insertPlannedNode = async (): Promise<NodeRow> => {
+      const insertPortableNode = (): Promise<NodeRow> =>
+        withNodeCreateClaims(writeContext, work.claim, target, () =>
+          dispatch.one(work.params),
+        );
+      const insertPlannedNode = async (): Promise<
+        Readonly<{ row: NodeRow; projectionsFused: boolean }>
+      > => {
         if (!insertPlanFused) {
-          return withNodeCreateClaims(writeContext, work.claim, target, () =>
-            dispatch.one(work.params),
-          );
+          return { row: await insertPortableNode(), projectionsFused: false };
         }
         try {
           const command: NodeCreateCommand = {
@@ -494,6 +519,17 @@ export function createWriteSession(
             command,
           );
           assertCommandResultMatchesCommand(command, result);
+          if (result.outcome === "unsupported") {
+            assertPortableNodeFallbackCanRun(
+              target,
+              work.params,
+              work.projections,
+            );
+            return {
+              row: await insertPortableNode(),
+              projectionsFused: false,
+            };
+          }
           if (result.outcome !== "created") {
             throw new CompilerInvariantError(
               "An ordinary planned node insert did not return a node row.",
@@ -501,23 +537,20 @@ export function createWriteSession(
                 graphId: work.params.graphId,
                 kind: work.params.kind,
                 id: work.params.id,
-                ...(result.outcome === "unsupported" ?
-                  { dimensions: result.dimensions }
-                : {}),
               },
             );
           }
-          return result.row;
+          return { row: result.row, projectionsFused: true };
         } catch (error) {
           refuseNodeCreateClaimError(error, claimPlan);
         }
       };
-      const row = await insertPlannedNode();
+      const { row, projectionsFused } = await insertPlannedNode();
       await applyNodeInsertSyncFans(
         writeContext,
         {
           ...work.sideEffects,
-          ...(insertPlanFused && work.projections.length > 0 ?
+          ...(projectionsFused && work.projections.length > 0 ?
             { projectionsFused: true }
           : {}),
         },
@@ -545,22 +578,19 @@ export function createWriteSession(
     },
 
     createNodeWithSchemaFence: async (work, schemaFence) => {
-      const projectionsFused = supportsNodeInsertProjections(
+      const projectionFusionEligible = supportsNodeInsertProjections(
         target,
         work.projections,
       );
-      if (work.projections.length > 0 && !projectionsFused) {
-        throw new CompilerInvariantError(
-          "Schema-fenced node work carrying projections requires the fused backend member.",
-          {
-            graphId: work.params.graphId,
-            kind: work.params.kind,
-            id: work.params.id,
-          },
-        );
-      }
-      const row = await (async () => {
-        if (projectionsFused) {
+      const inserted = await (async (): Promise<
+        Readonly<{ row: NodeRow | undefined; projectionsFused: boolean }>
+      > => {
+        const insertPortableNode = async (): Promise<NodeRow | undefined> => {
+          const insert = target.insertNodeWithSchemaFence;
+          if (insert === undefined) return;
+          return insert(work.params, schemaFence);
+        };
+        if (projectionFusionEligible) {
           const command: NodeCreateCommand = {
             kind: "node.create",
             plan: {
@@ -583,27 +613,26 @@ export function createWriteSession(
               );
               assertCommandResultMatchesCommand(command, result);
               if (result.outcome === "rejected") {
-                return;
+                return { row: undefined, projectionsFused: false };
               }
-              if (result.outcome !== "created") {
-                throw new CompilerInvariantError(
-                  "A schema-fenced planned node insert did not return a node row.",
-                  {
-                    graphId: work.params.graphId,
-                    kind: work.params.kind,
-                    id: work.params.id,
-                    dimensions: result.dimensions,
-                  },
+              if (result.outcome === "unsupported") {
+                assertPortableNodeFallbackCanRun(
+                  target,
+                  work.params,
+                  work.projections,
                 );
+                return {
+                  row: await insertPortableNode(),
+                  projectionsFused: false,
+                };
               }
-              return result.row;
+              return { row: result.row, projectionsFused: true };
             },
           );
         }
-        const insert = target.insertNodeWithSchemaFence;
-        if (insert === undefined) return;
-        return insert(work.params, schemaFence);
+        return { row: await insertPortableNode(), projectionsFused: false };
       })();
+      const { row, projectionsFused } = inserted;
       if (row === undefined) return;
       await applyNodeInsertSyncFans(
         writeContext,

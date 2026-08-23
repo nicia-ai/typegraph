@@ -46,6 +46,32 @@ function qualifiedColumn(
   return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
 }
 
+/**
+ * Requires the exact source and target nodes to be live. All endpoint-guarded
+ * edge insert statements use this one predicate so their liveness semantics
+ * cannot diverge.
+ */
+function buildLiveEndpointPredicate(
+  nodes: Tables["nodes"],
+  params: InsertEdgeParams,
+): SQL {
+  const from = (column: Readonly<{ name: string }>): SQL =>
+    qualifiedColumn("from_node", column);
+  const to = (column: Readonly<{ name: string }>): SQL =>
+    qualifiedColumn("to_node", column);
+
+  return sql`
+    ${from(nodes.graphId)} = ${params.graphId}
+    AND ${from(nodes.kind)} = ${params.fromKind}
+    AND ${from(nodes.id)} = ${params.fromId}
+    AND ${from(nodes.deletedAt)} IS NULL
+    AND ${to(nodes.graphId)} = ${params.graphId}
+    AND ${to(nodes.kind)} = ${params.toKind}
+    AND ${to(nodes.id)} = ${params.toId}
+    AND ${to(nodes.deletedAt)} IS NULL
+  `;
+}
+
 function buildMatchKeyPredicate(
   propsColumn: SQL,
   matchOn: readonly string[],
@@ -55,9 +81,10 @@ function buildMatchKeyPredicate(
 
   return sql.join(
     matchOn.map((field) => {
-      const value = Object.prototype.hasOwnProperty.call(matchProps, field) ?
-        matchProps[field]
-      : undefined;
+      const value =
+        Object.prototype.hasOwnProperty.call(matchProps, field) ?
+          matchProps[field]
+        : undefined;
       if (value === undefined) {
         return sql`NOT (${propsColumn} ? ${field})`;
       }
@@ -117,10 +144,6 @@ export function buildInsertEdgeIfEndpointsLive(
   const propsJson = JSON.stringify(params.props);
   const columns = edgeColumnList(edges);
   const nodeTable = quotedTableName(getTableName(nodes));
-  const from = (column: { name: string }): SQL =>
-    sql.raw(`"from_node"."${column.name.replaceAll('"', '""')}"`);
-  const to = (column: { name: string }): SQL =>
-    sql.raw(`"to_node"."${column.name.replaceAll('"', '""')}"`);
 
   return sql`
     INSERT INTO ${edges} (${columns})
@@ -131,14 +154,7 @@ export function buildInsertEdgeIfEndpointsLive(
       ${timestamp}, ${timestamp}
     FROM ${nodeTable} AS "from_node"
     CROSS JOIN ${nodeTable} AS "to_node"
-    WHERE ${from(nodes.graphId)} = ${params.graphId}
-      AND ${from(nodes.kind)} = ${params.fromKind}
-      AND ${from(nodes.id)} = ${params.fromId}
-      AND ${from(nodes.deletedAt)} IS NULL
-      AND ${to(nodes.graphId)} = ${params.graphId}
-      AND ${to(nodes.kind)} = ${params.toKind}
-      AND ${to(nodes.id)} = ${params.toId}
-      AND ${to(nodes.deletedAt)} IS NULL
+    WHERE ${buildLiveEndpointPredicate(nodes, params)}
     RETURNING *
   `;
 }
@@ -177,10 +193,6 @@ export function buildConvergeEdgeCreate(
   const edgeDeletedAt = qualifiedColumn("candidate", edges.deletedAt);
   const edgeCreatedAt = qualifiedColumn("candidate", edges.createdAt);
   const edgeId = qualifiedColumn("candidate", edges.id);
-  const from = (column: { name: string }): SQL =>
-    qualifiedColumn("from_node", column);
-  const to = (column: { name: string }): SQL =>
-    qualifiedColumn("to_node", column);
 
   return sql`
     WITH existing AS MATERIALIZED (
@@ -206,14 +218,7 @@ export function buildConvergeEdgeCreate(
       FROM ${nodeTable} AS "from_node"
       CROSS JOIN ${nodeTable} AS "to_node"
       WHERE NOT EXISTS (SELECT 1 FROM existing)
-        AND ${from(nodes.graphId)} = ${params.graphId}
-        AND ${from(nodes.kind)} = ${params.fromKind}
-        AND ${from(nodes.id)} = ${params.fromId}
-        AND ${from(nodes.deletedAt)} IS NULL
-        AND ${to(nodes.graphId)} = ${params.graphId}
-        AND ${to(nodes.kind)} = ${params.toKind}
-        AND ${to(nodes.id)} = ${params.toId}
-        AND ${to(nodes.deletedAt)} IS NULL
+        AND ${buildLiveEndpointPredicate(nodes, params)}
       RETURNING *, 1::integer AS write_discriminator
     )
     SELECT * FROM existing
@@ -239,10 +244,6 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
   const propsJson = JSON.stringify(params.props);
   const columns = edgeColumnList(edges);
   const nodeTable = quotedTableName(getTableName(nodes));
-  const from = (column: { name: string }): SQL =>
-    sql.raw(`"from_node"."${column.name.replaceAll('"', '""')}"`);
-  const to = (column: { name: string }): SQL =>
-    sql.raw(`"to_node"."${column.name.replaceAll('"', '""')}"`);
 
   return sql`
     INSERT INTO ${edges} (${columns})
@@ -261,14 +262,7 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
         AND ${schemaVersions.isActive} = TRUE
       ${schemaLockClause}
     ) AS "schema_fence"
-    WHERE ${from(nodes.graphId)} = ${params.graphId}
-      AND ${from(nodes.kind)} = ${params.fromKind}
-      AND ${from(nodes.id)} = ${params.fromId}
-      AND ${from(nodes.deletedAt)} IS NULL
-      AND ${to(nodes.graphId)} = ${params.graphId}
-      AND ${to(nodes.kind)} = ${params.toKind}
-      AND ${to(nodes.id)} = ${params.toId}
-      AND ${to(nodes.deletedAt)} IS NULL
+    WHERE ${buildLiveEndpointPredicate(nodes, params)}
     RETURNING *
   `;
 }

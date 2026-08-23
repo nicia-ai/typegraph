@@ -78,17 +78,19 @@ const RATCHET = {
   /**
    * `unfencedTarget()` escapes — the typed hole that hands row work the full
    * backend union back. Each remaining escape has a distinct contract owner in
-   * `UNFENCED_TARGET_ESCAPE_INVENTORY`; a fourth has no owner and fails here.
+   * `UNFENCED_TARGET_ESCAPE_INVENTORY`; a fifth has no owner and fails here.
    */
-  unfencedTargetEscapes: 3,
+  unfencedTargetEscapes: 4,
 } as const;
 
 /**
  * The permanent widening sites. The bulk convergence leg re-enters the
- * executor; the two fused-create receiver checks must inspect the exact
- * row-work backend before allowing it to carry the schema fence. Narrowing
- * either check to `WriteTarget` would make an adopted or custom transaction
- * wrapper able to bypass the verified-store fallback it owns.
+ * executor; the fused-create receiver checks must inspect the exact row-work
+ * backend before allowing it to carry the schema fence; and the portable
+ * projection fallback checks whether that same receiver exposes a transaction
+ * before it splits the row and projection writes. Narrowing any check to
+ * `WriteTarget` would make an adopted or custom transaction wrapper bypass the
+ * fallback it owns.
  */
 const UNFENCED_TARGET_ESCAPE_INVENTORY = [
   {
@@ -101,6 +103,11 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
     file: "store/operations/node-operations.ts",
     count: 1,
     reason: "the schema-fenced receiver check",
+  },
+  {
+    file: "store/operations/write-session.ts",
+    count: 1,
+    reason: "the portable projection fallback's transaction check",
   },
 ] as const;
 
@@ -131,7 +138,7 @@ function relativeToPackage(file: string): string {
   return path.relative(PACKAGE_ROOT, file).replaceAll(path.sep, "/");
 }
 
-/** The rule's three selectors, as an AST walk. */
+/** The rule's four selectors, as an AST walk. */
 function scanFile(file: string, banned: ReadonlySet<string>): Violation[] {
   const source = ts.createSourceFile(
     file,
@@ -150,6 +157,8 @@ function scanFile(file: string, banned: ReadonlySet<string>): Violation[] {
   };
 
   const visit = (node: ts.Node): void => {
+    const firstArgument =
+      ts.isCallExpression(node) ? node.arguments[0] : undefined;
     // 1. direct call: target.insertNode(params)
     if (
       ts.isCallExpression(node) &&
@@ -164,6 +173,17 @@ function scanFile(file: string, banned: ReadonlySet<string>): Violation[] {
       node.expression.name.text === "execute" &&
       ts.isPropertyAccessExpression(node.expression.expression) &&
       node.expression.expression.name.text === "commands" &&
+      banned.has("commands")
+    ) {
+      record(node, "commands");
+    }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "executeAuthoritativeGraphCommand" &&
+      firstArgument !== undefined &&
+      ts.isPropertyAccessExpression(firstArgument) &&
+      firstArgument.name.text === "commands" &&
       banned.has("commands")
     ) {
       record(node, "commands");
@@ -246,17 +266,32 @@ function countManagedWriteEntryPoints(): number {
   return count;
 }
 
-function countOccurrences(pattern: RegExp): number {
-  return collectTypeScriptFiles(SOURCE_ROOT)
-    .map((file) => fs.readFileSync(file, "utf8").match(pattern)?.length ?? 0)
-    .reduce((total, count) => total + count, 0);
+function countUnfencedTargetCalls(file: string): number {
+  const source = ts.createSourceFile(
+    file,
+    fs.readFileSync(file, "utf8"),
+    ts.ScriptTarget.ESNext,
+    true,
+  );
+  let count = 0;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "unfencedTarget"
+    ) {
+      count += 1;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return count;
 }
 
-function countFileOccurrences(file: string, pattern: RegExp): number {
-  return (
-    fs.readFileSync(path.join(SOURCE_ROOT, file), "utf8").match(pattern)
-      ?.length ?? 0
-  );
+function countUnfencedTargetCallsInSourceTree(): number {
+  return collectTypeScriptFiles(SOURCE_ROOT)
+    .map((file) => countUnfencedTargetCalls(file))
+    .reduce((total, count) => total + count, 0);
 }
 
 const bannedMembers = new Set(WRITE_MEMBER_NAMES);
@@ -381,7 +416,7 @@ describe("write-pipeline ratchet", () => {
 
   it("does not grow the counted `unfencedTarget` widening escapes", () => {
     // Definition and re-export excluded: only CALLS are escapes.
-    expect(countOccurrences(/\bunfencedTarget\(/g) - 1).toBeLessThanOrEqual(
+    expect(countUnfencedTargetCallsInSourceTree()).toBeLessThanOrEqual(
       RATCHET.unfencedTargetEscapes,
     );
     expect(
@@ -391,7 +426,7 @@ describe("write-pipeline ratchet", () => {
       ),
     ).toBe(RATCHET.unfencedTargetEscapes);
     for (const entry of UNFENCED_TARGET_ESCAPE_INVENTORY) {
-      expect(countFileOccurrences(entry.file, /\bunfencedTarget\(/g)).toBe(
+      expect(countUnfencedTargetCalls(path.join(SOURCE_ROOT, entry.file))).toBe(
         entry.count,
       );
     }
@@ -399,7 +434,7 @@ describe("write-pipeline ratchet", () => {
 
   it("catches a violation the exemption list does not cover", () => {
     // The scanner is itself load-bearing: one that matched nothing would pass
-    // every assertion above. Each of the rule's three spellings is exercised
+    // every assertion above. Each of the rule's four spellings is exercised
     // against source text, in a file path no exemption covers.
     const probe = path.join(SOURCE_ROOT, "store", "ratchet-probe.ts");
     const write = (body: string): readonly Violation[] => {
@@ -418,6 +453,16 @@ describe("write-pipeline ratchet", () => {
     expect(
       write("export const go = () => requireDefined(b.insertNodesBatch)(p);\n"),
     ).toHaveLength(1);
+    expect(
+      write(
+        "export const go = () => executeAuthoritativeGraphCommand(b.commands, c);\n",
+      ),
+    ).toHaveLength(1);
+    expect(
+      write(
+        "export const go = () => executeAuthoritativeGraphCommand(c, b.commands);\n",
+      ),
+    ).toEqual([]);
 
     // …and the shapes it must NOT flag: capability probes and unrelated names.
     expect(
@@ -482,10 +527,10 @@ describe("write-pipeline lint blocks", () => {
     expect(inScheme).toHaveLength(2);
     expect(exempt).toHaveLength(2);
     for (const block of inScheme) {
-      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 6 + 1);
+      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 7 + 1);
     }
     for (const block of exempt) {
-      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 6 + 1);
+      expect(block.rules["no-restricted-syntax"].length).toBe(1 + 1 + 7 + 1);
     }
   });
 

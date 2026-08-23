@@ -84,6 +84,7 @@ import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-si
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
+import { bindGraphCommandPortIsolation } from "../command-contract";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -730,11 +731,31 @@ export function createPostgresBackend(
         ),
       }
     : {};
+  const requestedPessimisticLocks = options.capabilities?.pessimisticLocks;
+  if (requestedPessimisticLocks?.serializedWriters === true) {
+    throw new ConfigurationError(
+      "PostgreSQL backend capability overrides cannot claim serialized writers.",
+      { requestedPessimisticLocks },
+      {
+        suggestion:
+          "Keep serializedWriters: false. A PostgreSQL pool requires its advisory-lock fence; use a custom backend only when the underlying engine really provides a single writer slot.",
+      },
+    );
+  }
+  const pessimisticLocks =
+    requestedPessimisticLocks === undefined ?
+      POSTGRES_CAPABILITIES.pessimisticLocks
+    : {
+        advisoryLocks: requestedPessimisticLocks.advisoryLocks,
+        tableLocks: requestedPessimisticLocks.tableLocks,
+        serializedWriters: false,
+      };
   const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
     ...baseCapabilities,
     ...httpOnlyOverrides,
     ...options.capabilities,
     ...driverBindParameterOverrides,
+    pessimisticLocks,
   });
   // Derived last and not overridable: how far up the contribution health
   // ladder this backend goes is a structural fact about the wiring below
@@ -1189,7 +1210,10 @@ export function createPostgresBackend(
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
   // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
+  function bindTransactionBackend(
+    tx: AnyPgTransaction,
+    isolation: "read_committed" | "repeatable_read" | "serializable" | "unknown",
+  ): Readonly<{
     backend: TransactionBackend;
     drainAndClose: () => Promise<void>;
   }> {
@@ -1205,12 +1229,14 @@ export function createPostgresBackend(
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
     });
+    const gatedBackend = gateFulltext(
+      backend,
+      contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
+    );
+    bindGraphCommandPortIsolation(gatedBackend.commands, isolation);
     return {
-      backend: gateFulltext(
-        backend,
-        contributionMaterializer.assertInitialized,
-        contributionMaterializer.refuseUnavailableFulltext,
-      ),
+      backend: gatedBackend,
       drainAndClose,
     };
   }
@@ -1847,7 +1873,14 @@ export function createPostgresBackend(
 
       return db.transaction(async (tx) => {
         const { backend: txBackend, drainAndClose } =
-          bindTransactionBackend(tx);
+          bindTransactionBackend(
+            tx,
+            options?.isolationLevel === "repeatable_read" ?
+              "repeatable_read"
+            : options?.isolationLevel === "serializable" ?
+              "serializable"
+            : "read_committed",
+          );
         try {
           return await fn(markSchemaFencedInsertEligible(txBackend), tx);
         } finally {
@@ -1896,7 +1929,7 @@ export function createPostgresBackend(
       // Statements still serialize onto the pinned connection, but the queue
       // is never closed: only the caller knows when their transaction ends,
       // so it is on them to await every graph write before committing.
-      return bindTransactionBackend(externalTx).backend;
+      return bindTransactionBackend(externalTx, "unknown").backend;
     },
 
     async close(): Promise<void> {

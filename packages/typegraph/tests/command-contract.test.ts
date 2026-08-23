@@ -4,6 +4,7 @@ import {
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   graphCommandExecutionContext,
+  mintGraphCommandCoordination,
 } from "../src/backend/command-contract";
 import type {
   GraphCommand,
@@ -35,17 +36,11 @@ const RESULT = {
 };
 
 describe("authoritative graph command contract", () => {
-  it.each([
-    ["root", "single-statement"],
-    ["transaction", "transaction"],
-  ] as const)(
-    "binds %s commands to the matching atomicity boundary",
-    (session, atomicity) => {
+  it.each(["root", "transaction"] as const)(
+    "binds %s commands to the matching session boundary",
+    (session) => {
       expect(graphCommandExecutionContext(session)).toEqual({
         session,
-        atomicity,
-        authority: "authoritative",
-        resultCache: "bypass",
         coordination: "none",
       });
     },
@@ -67,34 +62,45 @@ describe("authoritative graph command contract", () => {
     expect(contexts).toEqual([
       {
         session: "transaction",
-        atomicity: "transaction",
-        authority: "authoritative",
-        resultCache: "bypass",
         coordination: "none",
       },
     ]);
-  });
-
-  it("rejects a context that claims the wrong atomicity boundary", () => {
-    expect(() => {
-      assertGraphCommandExecutionContext({
-        session: "root",
-        atomicity: "transaction",
-        authority: "authoritative",
-        resultCache: "bypass",
-      });
-    }).toThrow();
   });
 
   it("rejects forged graph-write coordination evidence", () => {
     expect(() => {
       assertGraphCommandExecutionContext({
         session: "transaction",
-        atomicity: "transaction",
-        authority: "authoritative",
-        resultCache: "bypass",
         coordination: {},
       });
     }).toThrow();
+  });
+
+  it.each([undefined, false, {}])(
+    "rejects an invalid context value",
+    (context) => {
+      expect(() => {
+        assertGraphCommandExecutionContext(context);
+      }).toThrow();
+    },
+  );
+
+  it("refuses coordination minted for another port or graph", () => {
+    const portA: GraphCommandPort = {
+      session: "transaction",
+      execute: () => Promise.resolve(RESULT),
+    };
+    const portB: GraphCommandPort = {
+      session: "transaction",
+      execute: () => Promise.resolve(RESULT),
+    };
+    const coordination = mintGraphCommandCoordination(portA, "other-graph");
+
+    expect(() =>
+      executeAuthoritativeGraphCommand(portA, COMMAND, coordination),
+    ).toThrow("does not belong");
+    expect(() =>
+      executeAuthoritativeGraphCommand(portB, COMMAND, coordination),
+    ).toThrow("does not belong");
   });
 });

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  CompilerInvariantError,
   defineGraph,
   defineNode,
   DisjointError,
@@ -422,28 +421,39 @@ describe("node claim write fusion", () => {
     });
   });
 
-  it("retains unsupported dimensions in the node consumer invariant", async () => {
+  it("falls back when a custom command port refuses a claim plan", async () => {
     const fixture = await createRecordedPostgresStore(graph);
-    const nonTransactional = disableTransactions(fixture.backend);
-    const backend = deriveBackend(nonTransactional, {
-      commands: {
-        session: nonTransactional.commands.session,
-        execute: () =>
-          Promise.resolve({
-            outcome: "unsupported" as const,
-            entity: "node" as const,
-            dimensions: ["claims"] as const,
-          }),
+    const backend = deriveBackend(fixture.backend, {
+      async transaction<T>(
+        fn: (transaction: TransactionBackend) => Promise<T>,
+        options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
+      ): Promise<T> {
+        return fixture.backend.transaction(
+          (transaction) =>
+            fn(
+              deriveBackend(transaction, {
+                commands: {
+                  session: transaction.commands.session,
+                  execute: () =>
+                    Promise.resolve({
+                      outcome: "unsupported" as const,
+                      entity: "node" as const,
+                      dimensions: ["claims"] as const,
+                    }),
+                },
+              }),
+            ),
+          options,
+        );
       },
     });
     const store = createStore(graph, backend);
 
+    await store.nodes.UniqueNode.create({ email: "unsupported-consumer" });
     await expect(
       store.nodes.UniqueNode.create({ email: "unsupported-consumer" }),
-    ).rejects.toMatchObject({
-      name: CompilerInvariantError.name,
-      details: { dimensions: ["claims"] },
-    });
+    ).rejects.toBeInstanceOf(UniquenessError);
+    expect(await store.nodes.UniqueNode.find()).toHaveLength(1);
   });
 
   it("fuses a shared-scope unique claim before the generated node insert", async () => {

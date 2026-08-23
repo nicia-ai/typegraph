@@ -1001,8 +1001,10 @@ export type EdgeCreateCommandResult =
       outcome: "unsupported";
       entity: "edge";
       dimensions: readonly [
-        "schemaFence" | "cardinalityClaim",
-        ...(readonly ("schemaFence" | "cardinalityClaim")[]),
+        "schemaFence" | "cardinalityClaim" | "endpointPredicate",
+        ...(readonly (
+          "schemaFence" | "cardinalityClaim" | "endpointPredicate"
+        )[]),
       ];
     }>;
 
@@ -1013,17 +1015,14 @@ export type EdgeConvergeCreateCommandResult =
   | Readonly<{
       outcome: "unsupported";
       entity: "edge";
-      dimensions: readonly ["convergence"];
+      dimensions: readonly [
+        "convergence" | "endpointPredicate",
+        ...(readonly ("convergence" | "endpointPredicate")[]),
+      ];
     }>;
 
 /** The session boundary on which an authoritative command executes. */
 export type GraphCommandSession = "root" | "transaction";
-
-/** The only consistency level an authoritative command may claim. */
-export type GraphCommandAuthority = "authoritative";
-
-/** Result-cache policy for a decision-driving command. */
-export type GraphCommandResultCache = "bypass";
 
 declare const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
 
@@ -1032,31 +1031,15 @@ export type GraphCommandCoordination = Readonly<{
   [GRAPH_COMMAND_COORDINATION_BRAND]: true;
 }>;
 
-/**
- * Explicit authority and atomicity facts carried to a command port.
- *
- * `resultCache` is independent of prepared-statement policy: bypassing a
- * result cache does not require an unnamed SQL statement, and choosing an
- * unnamed statement does not prove a fresh result.
- */
-export type GraphCommandExecutionFacts = Readonly<{
-  authority: GraphCommandAuthority;
-  resultCache: GraphCommandResultCache;
-}>;
-
 export type GraphCommandExecutionContext =
-  | (GraphCommandExecutionFacts &
-      Readonly<{
-        session: "root";
-        atomicity: "single-statement";
-        coordination: "none";
-      }>)
-  | (GraphCommandExecutionFacts &
-      Readonly<{
-        session: "transaction";
-        atomicity: "transaction";
-        coordination: "none" | GraphCommandCoordination;
-      }>);
+  | Readonly<{
+      session: "root";
+      coordination: "none";
+    }>
+  | Readonly<{
+      session: "transaction";
+      coordination: "none" | GraphCommandCoordination;
+    }>;
 
 /** The result union returned by the authoritative command port. */
 export type GraphCommandResult =
