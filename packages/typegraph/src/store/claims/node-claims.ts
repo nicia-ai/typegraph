@@ -240,7 +240,9 @@ function mapClaimRefusal(
       (candidate.refusal.kind === "uniqueness" ||
         candidate.claim.key === error.details.newId) &&
       (error.details.axis === undefined ||
-        candidate.claim.axis === error.details.axis),
+        candidate.claim.axis === error.details.axis ||
+        (candidate.claim.verdict.kind === "uniqueness" &&
+          candidate.claim.verdict.probeAxes.includes(error.details.axis))),
   );
   const uniquenessVerdict =
     verdict !== undefined && isNodeCreateUniquenessVerdict(verdict) ?

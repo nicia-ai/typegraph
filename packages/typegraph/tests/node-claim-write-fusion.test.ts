@@ -257,7 +257,10 @@ describe("node claim write fusion", () => {
     expect(statement.query.indexOf('"node_pre_claimed"')).toBeLessThan(
       statement.query.indexOf('"node_inserted"'),
     );
+    // Once for the authoritative legacy-axis read and once for the canonical
+    // claim upsert; both remain inside this one statement.
     expect(claimNames(statement, [SHARED_UNIQUE.name])).toEqual([
+      SHARED_UNIQUE.name,
       SHARED_UNIQUE.name,
     ]);
     // The shared-scope probe used to read both the axis and the legacy kind.
@@ -603,6 +606,7 @@ describe("node claim write fusion", () => {
 
     expect(error).toBeInstanceOf(UniquenessError);
     expect((error as UniquenessError).details.existingId).toBe("legacy-holder");
+    expect((error as UniquenessError).details.fields).toEqual(["email"]);
     expect(
       (await fixture.store.nodes.SharedLeaf.find()).filter(
         (node) => node.email === "legacy-axis@example.com",

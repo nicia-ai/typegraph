@@ -686,12 +686,14 @@ describe("a create issues each claim on the side of the row its placement names"
     expect(statement?.query.indexOf('"node_pre_claimed"')).toBeLessThan(
       statement?.query.indexOf('"node_inserted"') ?? -1,
     );
-    expect(
-      statement?.params.filter(
-        (parameter): parameter is string =>
-          parameter === "placement_alias" || parameter === "placement_email",
+    expect([
+      ...new Set(
+        statement?.params.filter(
+          (parameter): parameter is string =>
+            parameter === "placement_alias" || parameter === "placement_email",
+        ),
       ),
-    ).toEqual(["placement_alias", "placement_email"]);
+    ]).toEqual(["placement_alias", "placement_email"]);
   });
 
   it("keeps claims on both sides of the row within one statement", async () => {
@@ -717,12 +719,14 @@ describe("a create issues each claim on the side of the row its placement names"
       statement?.query.indexOf('"node_post_claimed"') ?? -1,
     );
 
-    expect(
-      statement?.params.filter(
-        (parameter): parameter is string =>
-          parameter === "placement_email" || parameter === "placement_handle",
+    expect([
+      ...new Set(
+        statement?.params.filter(
+          (parameter): parameter is string =>
+            parameter === "placement_email" || parameter === "placement_handle",
+        ),
       ),
-    ).toEqual(["placement_email", "placement_handle"]);
+    ]).toEqual(["placement_email", "placement_handle"]);
   });
 
   it("sorts one batch statement's claims canonically, whatever order the rows arrive in", async () => {

@@ -933,8 +933,7 @@ export type NodeInsertMode =
  */
 export type NodeInsertPlan = Readonly<{
   mode: NodeInsertMode;
-  /** Omitted by projection-only callers written before claim planning. */
-  claims?: readonly NodeInsertClaim[];
+  claims: readonly NodeInsertClaim[];
   projections: readonly NodeInsertProjection[];
 }>;
 

@@ -318,7 +318,7 @@ function buildNodeClaimsAndProjections(
   vectorStrategy: VectorStrategy | undefined,
   schemaLockClause: SQL | undefined,
 ): SQL | undefined {
-  const claims = plan.claims ?? [];
+  const claims = plan.claims;
   const preClaims = claims.filter(
     (claim) => claim.placement === "pre-insert",
   );
@@ -329,6 +329,18 @@ function buildNodeClaimsAndProjections(
   const preInputAlias = "node_pre_claim_input";
   const preClaimedAlias = "node_pre_claimed";
   const preVerdictAlias = "node_pre_claim_verdict";
+  const preLegacyProbeAlias = "node_pre_legacy_unique_probe";
+  const preDisjointProbeAlias = "node_pre_disjoint_node_probe";
+  const preHasLegacyProbe = preClaims.some(
+    (claim) =>
+      claim.verdict.kind === "uniqueness" &&
+      claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
+  );
+  const preHasDisjointProbe = preClaims.some(
+    (claim) =>
+      claim.verdict.kind === "disjointness" &&
+      claim.verdict.conflictingKinds.length > 0,
+  );
 
   if (preClaims.length > 0) {
     ctes.push(
@@ -338,14 +350,14 @@ function buildNodeClaimsAndProjections(
     );
     const legacyProbe = legacyUniqueProbeCte(
       tables,
-      "node_pre_legacy_unique_probe",
+      preLegacyProbeAlias,
       preClaims,
       params,
     );
     if (legacyProbe !== undefined) ctes.push(legacyProbe);
     const disjointProbe = disjointNodeProbeCte(
       tables,
-      "node_pre_disjoint_node_probe",
+      preDisjointProbeAlias,
       preClaims,
       params,
     );
@@ -353,17 +365,30 @@ function buildNodeClaimsAndProjections(
   }
 
   const preGateAlias = "node_pre_gate";
+  const preGateChecks: SQL[] = [
+    sql`NOT EXISTS (
+      SELECT 1
+      FROM ${sql.identifier(preVerdictAlias)}
+      WHERE accepted = FALSE
+    )`,
+  ];
+  if (preHasLegacyProbe) {
+    preGateChecks.push(
+      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(preLegacyProbeAlias)})`,
+    );
+  }
+  if (preHasDisjointProbe) {
+    preGateChecks.push(
+      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(preDisjointProbeAlias)})`,
+    );
+  }
   ctes.push(
     preClaims.length === 0 ?
       sql`${sql.identifier(preGateAlias)} AS (SELECT 1 AS gate)`
     : sql`
       ${sql.identifier(preGateAlias)} AS (
         SELECT 1 AS gate
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM ${sql.identifier(preVerdictAlias)}
-          WHERE accepted = FALSE
-        )
+        WHERE ${sql.join(preGateChecks, sql` AND `)}
       )
     `,
   );
@@ -385,6 +410,18 @@ function buildNodeClaimsAndProjections(
   const postInputAlias = "node_post_claim_input";
   const postClaimedAlias = "node_post_claimed";
   const postVerdictAlias = "node_post_claim_verdict";
+  const postLegacyProbeAlias = "node_post_legacy_unique_probe";
+  const postDisjointProbeAlias = "node_post_disjoint_node_probe";
+  const postHasLegacyProbe = postClaims.some(
+    (claim) =>
+      claim.verdict.kind === "uniqueness" &&
+      claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
+  );
+  const postHasDisjointProbe = postClaims.some(
+    (claim) =>
+      claim.verdict.kind === "disjointness" &&
+      claim.verdict.conflictingKinds.length > 0,
+  );
   if (postClaims.length > 0) {
     const postValuesAlias = "node_post_claim_values";
     ctes.push(claimInputCte(postValuesAlias, postClaims, params));
@@ -413,14 +450,14 @@ function buildNodeClaimsAndProjections(
     );
     const legacyProbe = legacyUniqueProbeCte(
       tables,
-      "node_post_legacy_unique_probe",
+      postLegacyProbeAlias,
       postClaims,
       params,
     );
     if (legacyProbe !== undefined) ctes.push(legacyProbe);
     const disjointProbe = disjointNodeProbeCte(
       tables,
-      "node_post_disjoint_node_probe",
+      postDisjointProbeAlias,
       postClaims,
       params,
     );
@@ -429,6 +466,23 @@ function buildNodeClaimsAndProjections(
 
   const insertedNodeAlias = INSERTED_NODE_PROJECTION_CTE_ALIAS;
   const nodeInserted = sql.identifier(nodeInsertedAlias);
+  const postGateChecks: SQL[] = [
+    sql`NOT EXISTS (
+      SELECT 1
+      FROM ${sql.identifier(postVerdictAlias)}
+      WHERE accepted = FALSE
+    )`,
+  ];
+  if (postHasLegacyProbe) {
+    postGateChecks.push(
+      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(postLegacyProbeAlias)})`,
+    );
+  }
+  if (postHasDisjointProbe) {
+    postGateChecks.push(
+      sql`NOT EXISTS (SELECT 1 FROM ${sql.identifier(postDisjointProbeAlias)})`,
+    );
+  }
   ctes.push(
     postClaims.length === 0 ?
       sql`${sql.identifier(insertedNodeAlias)} AS MATERIALIZED (SELECT * FROM ${nodeInserted})`
@@ -436,11 +490,7 @@ function buildNodeClaimsAndProjections(
       ${sql.identifier(insertedNodeAlias)} AS MATERIALIZED (
         SELECT *
         FROM ${nodeInserted}
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM ${sql.identifier(postVerdictAlias)}
-          WHERE accepted = FALSE
-        )
+        WHERE ${sql.join(postGateChecks, sql` AND `)}
       )
     `,
   );
@@ -464,26 +514,14 @@ function buildNodeClaimsAndProjections(
     conflictQueries.push(
       sql`SELECT ordinal::integer, 0 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(preVerdictAlias)} WHERE accepted = FALSE`,
     );
-    if (
-      preClaims.some(
-        (claim) =>
-          claim.verdict.kind === "uniqueness" &&
-          claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
-      )
-    ) {
+    if (preHasLegacyProbe) {
       conflictQueries.push(
-        sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_legacy_unique_probe"`,
+        sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(preLegacyProbeAlias)}`,
       );
     }
-    if (
-      preClaims.some(
-        (claim) =>
-          claim.verdict.kind === "disjointness" &&
-          claim.verdict.conflictingKinds.length > 0,
-      )
-    ) {
+    if (preHasDisjointProbe) {
       conflictQueries.push(
-        sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_pre_disjoint_node_probe"`,
+        sql`SELECT ordinal, 0 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(preDisjointProbeAlias)}`,
       );
     }
   }
@@ -491,26 +529,14 @@ function buildNodeClaimsAndProjections(
     conflictQueries.push(
       sql`SELECT ordinal::integer, 1 AS phase, 0 AS probe_ordinal, axis, constraint_name, key, holder_id, holder_kind FROM ${sql.identifier(postVerdictAlias)} WHERE accepted = FALSE`,
     );
-    if (
-      postClaims.some(
-        (claim) =>
-          claim.verdict.kind === "uniqueness" &&
-          claim.verdict.probeAxes.some((axis) => axis !== claim.axis),
-      )
-    ) {
+    if (postHasLegacyProbe) {
       conflictQueries.push(
-        sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_post_legacy_unique_probe"`,
+        sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(postLegacyProbeAlias)}`,
       );
     }
-    if (
-      postClaims.some(
-        (claim) =>
-          claim.verdict.kind === "disjointness" &&
-          claim.verdict.conflictingKinds.length > 0,
-      )
-    ) {
+    if (postHasDisjointProbe) {
       conflictQueries.push(
-        sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM "node_post_disjoint_node_probe"`,
+        sql`SELECT ordinal, 1 AS phase, probe_ordinal, axis, constraint_name, key, node_id AS holder_id, concrete_kind AS holder_kind FROM ${sql.identifier(postDisjointProbeAlias)}`,
       );
     }
   }
@@ -637,7 +663,7 @@ export function buildInsertNodeWithProjections(
   vectorStrategy: VectorStrategy | undefined,
   schemaLockClause?: SQL,
 ): SQL | undefined {
-  if ((plan.claims?.length ?? 0) > 0) {
+  if (plan.claims.length > 0) {
     return buildNodeClaimsAndProjections(
       tables,
       params,

@@ -1513,12 +1513,23 @@ type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     keySystemColumns?: readonly SystemColumnName[];
 }>;
 
-// @public
+// @public (undocumented)
 type NodeInsertClaim = Readonly<{
     axis: string;
     constraintName: string;
     key: string;
     placement: "pre-insert" | "post-insert";
+    verdict: NodeInsertClaimVerdict;
+}>;
+
+// @public
+type NodeInsertClaimVerdict = Readonly<{
+    kind: "uniqueness";
+    probeAxes: readonly string[];
+    fields: readonly string[];
+}> | Readonly<{
+    kind: "disjointness";
+    conflictingKinds: readonly string[];
 }>;
 
 // @public
@@ -1532,7 +1543,7 @@ type NodeInsertMode = Readonly<{
 // @public
 type NodeInsertPlan = Readonly<{
     mode: NodeInsertMode;
-    claims?: readonly NodeInsertClaim[];
+    claims: readonly NodeInsertClaim[];
     projections: readonly NodeInsertProjection[];
 }>;
 

@@ -53,6 +53,7 @@ import {
 } from "../../backend/capabilities/bundle-registry";
 import {
   supportsNodeInsertClaims,
+  supportsNodeInsertPlan,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
 import {
@@ -894,12 +895,15 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   backend: WriteTarget,
   allowInsertIfAbsent = true,
   mode: NodeCreatePreparationMode = "probe",
+  preparedClaimPlan?: NodeCreateClaimPlan,
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
-  const claimPlan = planNodeCreateClaims(
-    { graphId: ctx.graphId, registry: ctx.registry },
-    { kind, id, props: validatedProps, constraints: uniqueConstraints },
-  );
+  const claimPlan =
+    preparedClaimPlan ??
+    planNodeCreateClaims(
+      { graphId: ctx.graphId, registry: ctx.registry },
+      { kind, id, props: validatedProps, constraints: uniqueConstraints },
+    );
 
   // Claim-free caller ids are the one safe shape for an insert-first path. A
   // pre-insert claim would have to be compensated when `DO NOTHING` reports an
@@ -985,23 +989,6 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
       draft.validTo,
     ),
   };
-}
-
-async function validateAndPrepareNodeCreate<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  input: CreateNodeInput,
-  id: string,
-  backend: WriteTarget,
-  options?: NodeCreateInternalOptions,
-  mode: NodeCreatePreparationMode = "probe",
-): Promise<NodeCreatePrepared> {
-  return finishNodeCreatePreparation(
-    ctx,
-    draftNodeCreate(ctx, input, id, options),
-    backend,
-    true,
-    mode,
-  );
 }
 
 /** What a prepared create hands the claim seam and the sync fans. */
@@ -1875,20 +1862,39 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
     const identity = ctx.identity;
-    const preparationMode: NodeCreatePreparationMode =
-      shouldReturnRow && supportsNodeInsertClaims(target) ? "authoritative-plan"
-      : "probe";
-    const prepared = await validateAndPrepareNodeCreate(
-      ctx,
-      input,
-      id,
-      target,
-      options,
-      preparationMode,
+    const draft = draftNodeCreate(ctx, input, id, options);
+    const claimPlan = planNodeCreateClaims(
+      { graphId: ctx.graphId, registry: ctx.registry },
+      {
+        kind: draft.kind,
+        id: draft.id,
+        props: draft.validatedProps,
+        constraints: draft.uniqueConstraints,
+      },
     );
     const projections = resolveNodeInsertProjections(
-      prepared.nodeKind.schema,
-      prepared.validatedProps,
+      draft.nodeKind.schema,
+      draft.validatedProps,
+    );
+    const preparationMode: NodeCreatePreparationMode =
+      (
+        shouldReturnRow &&
+        !fuseSchemaFenceInFirstWrite &&
+        supportsNodeInsertClaims(target) &&
+        supportsNodeInsertPlan(target, {
+          claims: claimPlan.claims,
+          projections,
+        })
+      ) ?
+        "authoritative-plan"
+      : "probe";
+    const prepared = await finishNodeCreatePreparation(
+      ctx,
+      draft,
+      target,
+      true,
+      preparationMode,
+      claimPlan,
     );
     const projectionFusionEligible =
       shouldReturnRow && !prepared.idProvided && projections.length > 0;

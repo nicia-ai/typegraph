@@ -767,7 +767,7 @@ export function createCommonOperationBackend(
         params: InsertNodeParams,
         plan: NodeInsertPlan,
       ): Promise<NodeRow | undefined> {
-        const plannedClaims = plan.claims ?? [];
+        const plannedClaims = plan.claims;
         if (plannedClaims.length > 0 && options.nodeClaimInsertFusion !== true) {
           throw new ConfigurationError(
             "A node insert plan carrying uniqueness claims requires a transaction-scoped backend.",
