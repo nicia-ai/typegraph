@@ -45,7 +45,7 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",
   "insertNodeWithSchemaFence",
-  "insertNodeWithProjections",
+  "executeNodeCreatePlan",
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNodeSet",

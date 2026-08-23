@@ -230,7 +230,7 @@ describe("fresh node + vector write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.insertNodeWithProjections)(
+        requireDefined(tx.executeNodeCreatePlan)(
           {
             graphId: singleGraph.id,
             kind: "SingleVectorDocument",

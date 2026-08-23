@@ -37,7 +37,7 @@ import type {
   InsertNodeParams,
   InsertSchemaParams,
   InsertUniqueParams,
-  NodeInsertPlan,
+  NodeCreatePlan,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   SchemaWriteFenceParams,
@@ -208,7 +208,7 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildInsertNodeWithProjections?: (
     params: InsertNodeParams,
-    plan: NodeInsertPlan,
+    plan: NodeCreatePlan,
     timestamp: string,
     schemaLockClause?: SQL,
   ) => SQL | undefined;

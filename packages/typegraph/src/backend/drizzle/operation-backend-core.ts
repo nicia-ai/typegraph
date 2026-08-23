@@ -64,7 +64,7 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
-  NodeInsertPlan,
+  NodeCreatePlan,
   NodeRow,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
@@ -186,7 +186,7 @@ export type CommonOperationBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
-  | "insertNodeWithProjections"
+  | "executeNodeCreatePlan"
   | "lockSchemaVersionAndGraphWrite"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
@@ -300,13 +300,13 @@ type CreateCommonOperationBackendOptions = Readonly<{
   nodeClaimInsertFusion?: boolean | undefined;
   /** Read-only prerequisite gate run before a fused projection statement. */
   beforeNodeProjectionInsert?:
-    | ((params: InsertNodeParams, plan: NodeInsertPlan) => Promise<void>)
+    | ((params: InsertNodeParams, plan: NodeCreatePlan) => Promise<void>)
     | undefined;
   /** Error-path projection storage classifier; must rethrow or return never. */
   refuseNodeProjectionError?:
     | ((
         params: InsertNodeParams,
-        plan: NodeInsertPlan,
+        plan: NodeCreatePlan,
         error: unknown,
       ) => Promise<never>)
     | undefined;
@@ -763,16 +763,16 @@ export function createCommonOperationBackend(
       return {};
     }
     return {
-      async insertNodeWithProjections(
+  async executeNodeCreatePlan(
         params: InsertNodeParams,
-        plan: NodeInsertPlan,
+        plan: NodeCreatePlan,
       ): Promise<NodeRow | undefined> {
         const plannedClaims = plan.claims;
         if (plannedClaims.length > 0 && options.nodeClaimInsertFusion !== true) {
           throw new ConfigurationError(
             "A node insert plan carrying uniqueness claims requires a transaction-scoped backend.",
             {
-              capability: "insertNodeWithProjections",
+              capability: "executeNodeCreatePlan",
               graphId: params.graphId,
               kind: params.kind,
               id: params.id,
@@ -786,7 +786,7 @@ export function createCommonOperationBackend(
           throw new ConfigurationError(
             "A schema-fenced node insert plan cannot carry uniqueness claims.",
             {
-              capability: "insertNodeWithProjections",
+              capability: "executeNodeCreatePlan",
               graphId: params.graphId,
               kind: params.kind,
               id: params.id,

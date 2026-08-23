@@ -100,7 +100,7 @@ export const ENTITY_WRITE_MEMBERS = [
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",
   "insertNodeWithSchemaFence",
-  "insertNodeWithProjections",
+  "executeNodeCreatePlan",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",

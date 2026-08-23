@@ -258,7 +258,7 @@ export type {
   NodeInsertClaim,
   NodeInsertClaimVerdict,
   NodeInsertMode,
-  NodeInsertPlan,
+  NodeCreatePlan,
   NodeInsertProjection,
   NodeRow,
   PessimisticLockCapabilities,

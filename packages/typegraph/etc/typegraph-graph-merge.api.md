@@ -2007,7 +2007,7 @@ type GraphBackend = Readonly<{
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
-    insertNodeWithProjections?: (this: void, params: InsertNodeParams, plan: NodeInsertPlan) => Promise<NodeRow | undefined>;
+    executeNodeCreatePlan?: (this: void, params: InsertNodeParams, plan: NodeCreatePlan) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -3728,13 +3728,20 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
 }>;
 
 // @public
+type NodeCreatePlan = Readonly<{
+    mode: NodeInsertMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+}>;
+
+// @public
 type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
 // @public (undocumented)
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeWithProjections" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeNodeCreatePlan" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 type NodeGetOrCreateByConstraintOptions = Readonly<{
@@ -3789,13 +3796,6 @@ type NodeInsertMode = Readonly<{
 }> | Readonly<{
     kind: "schema-fenced";
     schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-type NodeInsertPlan = Readonly<{
-    mode: NodeInsertMode;
-    claims: readonly NodeInsertClaim[];
-    projections: readonly NodeInsertProjection[];
 }>;
 
 // @public

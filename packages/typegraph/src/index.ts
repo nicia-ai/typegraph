@@ -187,7 +187,7 @@ export type {
   NodeInsertClaim,
   NodeInsertClaimVerdict,
   NodeInsertMode,
-  NodeInsertPlan,
+  NodeCreatePlan,
   NodeInsertProjection,
   PopulatedSchemaKind,
   QueryExecutionBackend,

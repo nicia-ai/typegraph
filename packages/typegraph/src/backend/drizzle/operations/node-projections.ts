@@ -7,7 +7,7 @@ import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   InsertNodeParams,
   NodeInsertClaim,
-  NodeInsertPlan,
+  NodeCreatePlan,
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
 import { buildInsertNode, buildInsertNodeWithSchemaFence } from "./nodes";
@@ -26,7 +26,7 @@ export const INSERTED_NODE_PROJECTION_CTE_ALIAS = "inserted_node";
 function buildNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeInsertPlan,
+  plan: NodeCreatePlan,
   timestamp: string,
   schemaLockClause: SQL | undefined,
 ): SQL | undefined {
@@ -259,7 +259,7 @@ function disjointNodeProbeCte(
 function buildGatedNodeInsert(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeInsertPlan,
+  plan: NodeCreatePlan,
   timestamp: string,
   gateAlias: string,
   schemaLockClause: SQL | undefined,
@@ -310,7 +310,7 @@ function buildGatedNodeInsert(
 function buildNodeClaimsAndProjections(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeInsertPlan,
+  plan: NodeCreatePlan,
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
@@ -589,7 +589,7 @@ function buildNodeClaimsAndProjections(
 
 function buildProjectionSql(
   params: InsertNodeParams,
-  plan: NodeInsertPlan,
+  plan: NodeCreatePlan,
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
@@ -655,7 +655,7 @@ function buildProjectionSql(
 export function buildInsertNodeWithProjections(
   tables: Tables,
   params: InsertNodeParams,
-  plan: NodeInsertPlan,
+  plan: NodeCreatePlan,
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,

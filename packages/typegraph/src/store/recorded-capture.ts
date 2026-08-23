@@ -12,7 +12,7 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
-  type NodeInsertPlan,
+  type NodeCreatePlan,
   type NodeRow,
   type SchemaWriteFenceParams,
   type TransactionBackend,
@@ -495,16 +495,16 @@ function createRecordedTransactionBackend(
         },
       }),
 
-    ...(target.insertNodeWithProjections === undefined ?
+    ...(target.executeNodeCreatePlan === undefined ?
       {}
     : {
-        async insertNodeWithProjections(
+        async executeNodeCreatePlan(
           params: InsertNodeParams,
-          plan: NodeInsertPlan,
+          plan: NodeCreatePlan,
         ): Promise<NodeRow | undefined> {
           session.assertOpen();
           await lockGraph(params.graphId);
-          const row = await requireDefined(target.insertNodeWithProjections)(
+          const row = await requireDefined(target.executeNodeCreatePlan)(
             params,
             plan,
           );
@@ -906,15 +906,15 @@ export function createRecordedBackend(
         },
       }),
 
-    ...(backend.insertNodeWithProjections === undefined ?
+    ...(backend.executeNodeCreatePlan === undefined ?
       {}
     : {
-        async insertNodeWithProjections(
+        async executeNodeCreatePlan(
           params: InsertNodeParams,
-          plan: NodeInsertPlan,
+          plan: NodeCreatePlan,
         ): Promise<NodeRow | undefined> {
           return capture((target) =>
-            requireDefined(target.insertNodeWithProjections)(params, plan),
+            requireDefined(target.executeNodeCreatePlan)(params, plan),
           );
         },
       }),

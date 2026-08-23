@@ -40,7 +40,7 @@ import { type z } from "zod";
 
 import { type UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
 import {
-  supportsNodeInsertPlan,
+  supportsNodeCreatePlan,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
 import {
@@ -57,7 +57,7 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
-  type NodeInsertPlan,
+  type NodeCreatePlan,
   type NodeInsertProjection,
   type NodeRow,
   type QueryExecutionBackend,
@@ -161,7 +161,7 @@ export type WriteTarget = Readonly<
       | "insertNodeIfAbsent"
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
-      | "insertNodeWithProjections"
+      | "executeNodeCreatePlan"
     > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
@@ -433,19 +433,19 @@ export function createWriteSession(
     createNode: async (work) => {
       const claimPlan =
         work.claimPlan ?? planNodeCreateClaims(writeContext, work.claim);
-      const insertPlanFused = supportsNodeInsertPlan(target, {
+      const insertPlanFused = supportsNodeCreatePlan(target, {
         claims: claimPlan.claims,
         projections: work.projections,
       });
       const insertPlannedNode = async (): Promise<NodeRow> => {
-        const insert = target.insertNodeWithProjections;
+        const insert = target.executeNodeCreatePlan;
         if (!insertPlanFused || insert === undefined) {
           return withNodeCreateClaims(writeContext, work.claim, target, () =>
             dispatch.one(work.params),
           );
         }
         try {
-          const plan: NodeInsertPlan = {
+          const plan: NodeCreatePlan = {
             mode: { kind: "ordinary" },
             claims: claimPlan.claims,
             projections: work.projections,
@@ -513,9 +513,9 @@ export function createWriteSession(
       }
       const row = await (async () => {
         if (projectionsFused) {
-          const insert = target.insertNodeWithProjections;
+          const insert = target.executeNodeCreatePlan;
           if (insert === undefined) return;
-          const plan: NodeInsertPlan = {
+          const plan: NodeCreatePlan = {
             mode: { kind: "schema-fenced", schemaFence },
             claims: [],
             projections: work.projections,

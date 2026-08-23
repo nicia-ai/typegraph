@@ -53,7 +53,7 @@ import {
 } from "../../backend/capabilities/bundle-registry";
 import {
   supportsNodeInsertClaims,
-  supportsNodeInsertPlan,
+  supportsNodeCreatePlan,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
 import {
@@ -1881,7 +1881,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         shouldReturnRow &&
         !fuseSchemaFenceInFirstWrite &&
         supportsNodeInsertClaims(target) &&
-        supportsNodeInsertPlan(target, {
+        supportsNodeCreatePlan(target, {
           claims: claimPlan.claims,
           projections,
         })

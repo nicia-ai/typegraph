@@ -842,7 +842,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
       "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
     accesses: 7,
   },
-  insertNodeWithProjections: {
+  executeNodeCreatePlan: {
     kind: "reasoned",
     reason:
       "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.",

@@ -3718,7 +3718,7 @@ type GraphBackend = Readonly<{
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
-    insertNodeWithProjections?: (this: void, params: InsertNodeParams, plan: NodeInsertPlan) => Promise<NodeRow | undefined>;
+    executeNodeCreatePlan?: (this: void, params: InsertNodeParams, plan: NodeCreatePlan) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -4189,11 +4189,18 @@ type LockSchemaVersionForWriteParams = Readonly<{
 // @public (undocumented)
 type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
+// @public
+type NodeCreatePlan = Readonly<{
+    mode: NodeInsertMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+}>;
+
 // @public (undocumented)
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeWithProjections" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeNodeCreatePlan" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -4227,13 +4234,6 @@ type NodeInsertMode = Readonly<{
 }> | Readonly<{
     kind: "schema-fenced";
     schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-type NodeInsertPlan = Readonly<{
-    mode: NodeInsertMode;
-    claims: readonly NodeInsertClaim[];
-    projections: readonly NodeInsertProjection[];
 }>;
 
 // @public

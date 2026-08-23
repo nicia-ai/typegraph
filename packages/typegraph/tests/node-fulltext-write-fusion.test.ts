@@ -11,7 +11,7 @@ import {
   type GraphBackend,
   type InsertNodeParams,
   type NodeFulltextSync,
-  type NodeInsertPlan,
+  type NodeCreatePlan,
   type NodeInsertProjection,
   type SchemaWriteFenceParams,
   type TransactionBackend,
@@ -62,7 +62,7 @@ function fulltextProjection(fulltext: NodeFulltextSync): NodeInsertProjection {
     : { kind: "fulltext", action: "delete" };
 }
 
-function ordinaryPlan(fulltext: NodeFulltextSync): NodeInsertPlan {
+function ordinaryPlan(fulltext: NodeFulltextSync): NodeCreatePlan {
   return {
     mode: { kind: "ordinary" },
     claims: [],
@@ -73,7 +73,7 @@ function ordinaryPlan(fulltext: NodeFulltextSync): NodeInsertPlan {
 function schemaFencedPlan(
   fulltext: NodeFulltextSync,
   schemaFence: SchemaWriteFenceParams,
-): NodeInsertPlan {
+): NodeCreatePlan {
   return {
     mode: { kind: "schema-fenced", schemaFence },
     claims: [],
@@ -109,10 +109,10 @@ describe("fresh node + fulltext write fusion", () => {
     const fixture = await createRecordedPostgresStore(graph);
     const [store] = await createStoreWithSchema(graph, fixture.backend);
     requireDefined(
-      fixture.backend.insertNodeWithProjections,
+      fixture.backend.executeNodeCreatePlan,
       "projection member",
     );
-    const spy = vi.spyOn(fixture.backend, "insertNodeWithProjections");
+    const spy = vi.spyOn(fixture.backend, "executeNodeCreatePlan");
     const transactionSpy = vi.spyOn(fixture.backend, "transaction");
 
     await store.nodes.Document.create({ title: "root dispatch" });
@@ -145,7 +145,7 @@ describe("fresh node + fulltext write fusion", () => {
 
     fixture.reset();
     await fixture.backend.transaction(async (tx) => {
-      await requireDefined(tx.insertNodeWithProjections)(
+      await requireDefined(tx.executeNodeCreatePlan)(
         params,
         ordinaryPlan(fulltext),
       );
@@ -190,12 +190,12 @@ describe("fresh node + fulltext write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction((tx) => {
-          const insert = requireDefined(tx.insertNodeWithProjections);
+          const insert = requireDefined(tx.executeNodeCreatePlan);
           return fn(
             deriveBackend(tx, {
-              async insertNodeWithProjections(
+              async executeNodeCreatePlan(
                 params: InsertNodeParams,
-                plan: NodeInsertPlan,
+                plan: NodeCreatePlan,
               ) {
                 fusedCallCount += 1;
                 expect(plan.mode.kind).toBe("schema-fenced");
@@ -275,7 +275,7 @@ describe("fresh node + fulltext write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) => {
-        await requireDefined(tx.insertNodeWithProjections)(
+        await requireDefined(tx.executeNodeCreatePlan)(
           params,
           ordinaryPlan(fulltext),
         );
@@ -316,7 +316,7 @@ describe("fresh node + fulltext write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) => {
-        await requireDefined(tx.insertNodeWithProjections)(
+        await requireDefined(tx.executeNodeCreatePlan)(
           params,
           ordinaryPlan(fulltext),
         );
@@ -354,7 +354,7 @@ describe("fresh node + fulltext write fusion", () => {
 
     await fixture.backend.transaction(async (tx) => {
       await expect(
-        requireDefined(tx.insertNodeWithProjections)(
+        requireDefined(tx.executeNodeCreatePlan)(
           params,
           schemaFencedPlan(projection, {
             graphId: "different-graph",
@@ -431,7 +431,7 @@ describe("fresh node + fulltext write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction(
-          (tx) => fn(projectBackendWithout(tx, ["insertNodeWithProjections"])),
+          (tx) => fn(projectBackendWithout(tx, ["executeNodeCreatePlan"])),
           options,
         );
       },
@@ -452,7 +452,7 @@ describe("fresh node + fulltext write fusion", () => {
   it("keeps SQLite on its ordinary sidecar path", async () => {
     const database = createTestDatabase();
     const backend = createSqliteBackend(database);
-    expect(backend.insertNodeWithProjections).toBeUndefined();
+    expect(backend.executeNodeCreatePlan).toBeUndefined();
 
     const [store] = await createStoreWithSchema(graph, backend);
     const node = await store.nodes.Document.create({ title: "sqlite" });

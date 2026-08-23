@@ -2712,7 +2712,7 @@ export type GraphBackend = Readonly<{
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
-    insertNodeWithProjections?: (this: void, params: InsertNodeParams, plan: NodeInsertPlan) => Promise<NodeRow | undefined>;
+    executeNodeCreatePlan?: (this: void, params: InsertNodeParams, plan: NodeCreatePlan) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -3078,7 +3078,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "insertEdgeIfEndpointsLive", "insertEdgeIfEndpointsLiveWithSchemaFence", "insertEdgeIfEndpointsLiveWithCardinalityClaim", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeWithProjections", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "insertEdgeIfEndpointsLive", "insertEdgeIfEndpointsLiveWithSchemaFence", "insertEdgeIfEndpointsLiveWithCardinalityClaim", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "executeNodeCreatePlan", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -4418,13 +4418,20 @@ export type NodeConstraintNotFoundErrorDetails = Readonly<{
 }>;
 
 // @public
+export type NodeCreatePlan = Readonly<{
+    mode: NodeInsertMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+}>;
+
+// @public
 export type NodeCurrentReads<N extends NodeType, CN extends string = string> = Pick<NodeCollection<N, CN>, (typeof CURRENT_ONLY_READ_NAMES)[number]>;
 
 // @public (undocumented)
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeWithProjections" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeNodeCreatePlan" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 export type NodeFulltextSync = Readonly<{
@@ -4536,13 +4543,6 @@ export type NodeInsertMode = Readonly<{
 }> | Readonly<{
     kind: "schema-fenced";
     schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-export type NodeInsertPlan = Readonly<{
-    mode: NodeInsertMode;
-    claims: readonly NodeInsertClaim[];
-    projections: readonly NodeInsertProjection[];
 }>;
 
 // @public

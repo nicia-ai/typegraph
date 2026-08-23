@@ -160,8 +160,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * entrypoints which render that facet.
  *
  * Generated-node projection fusion (#533): replacing the two fulltext-only
- * members with the generic `insertNodeWithProjections` contract makes
- * `NodeInsertMode`, `NodeInsertPlan`, and `NodeInsertProjection` reachable
+ * members with the generic `executeNodeCreatePlan` contract makes
+ * `NodeInsertMode`, `NodeCreatePlan`, and `NodeInsertProjection` reachable
  * through the 12 entrypoints which render `GraphBackend` without exporting
  * those backend-authoring types directly (+3 each). `.` and `./backend`
  * export all three names, so their forgotten-export debt is unchanged.
@@ -182,23 +182,23 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   "./adapters/drizzle/postgres": {
     count: 213,
-    sha256: "a1dbf7ad9fb49e912b3e83265d24219611ecb36384e729b7c6fdc523c38042e5",
+    sha256: "0eaa9d7ec0eca847125361067f6757fe9f34f8370984589f7c671f3b6b6f2f33",
   },
   "./adapters/drizzle/postgres/pglite": {
     count: 217,
-    sha256: "3661e5d5c0754ce53e4da68322198db513e867a4f07e0f859ac10de3c5387a18",
+    sha256: "c6390a58601f908e95abad0cce783c873bcd2ef51a574ab12ec9395dc5d5220f",
   },
   "./adapters/drizzle/sqlite": {
     count: 214,
-    sha256: "12ccdafbb2e81e0a907cd92e3c8d928b1c142822d1a0ddfc01fec2df998cf511",
+    sha256: "0423cb85dbcf2cc83f7be1742bea8ccfc65c3c921eead941921c2b6bfd348a04",
   },
   "./adapters/drizzle/sqlite/libsql": {
     count: 217,
-    sha256: "fbb9ea0bab26a81014b45dbce00e20a5b532d256382a73c3305f9db5c67a9a30",
+    sha256: "07e96825f6b3492c85639b8a5ae95dc75c3722808d9a8593aaae1f0cc98139f2",
   },
   "./adapters/drizzle/sqlite/local": {
     count: 217,
-    sha256: "fbb9ea0bab26a81014b45dbce00e20a5b532d256382a73c3305f9db5c67a9a30",
+    sha256: "07e96825f6b3492c85639b8a5ae95dc75c3722808d9a8593aaae1f0cc98139f2",
   },
   "./backend": {
     count: 12,
@@ -214,7 +214,7 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   "./graph-merge": {
     count: 629,
-    sha256: "72e4c7a562398da3c5b02932600c74976ee6de5e3c810eb49029e55e4f8a950b",
+    sha256: "83ef62a22d3756a089289a4ac9a6d33e3fb42a1843e7e9eab7696428ee946a8e",
   },
   "./indexes": {
     count: 43,
@@ -222,27 +222,27 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   "./interchange": {
     count: 615,
-    sha256: "4d5e4329fcb2ca066c6e28179e6c33bd0e6987e1bb3bdcd0f3859c8f5d3631da",
+    sha256: "8d2f31b84dfe620c398b57bf8ca202550d5c38f0285f388a52b71996ee5cd219",
   },
   "./postgres/pglite": {
     count: 619,
-    sha256: "27784754b42972425e5b187afc92192128185c8765479342a5ffc37e8590464c",
+    sha256: "afb7a2805d61a63012269f04a162951b0a9a162acd17da891a7ee82476a464cf",
   },
   "./profiler": {
     count: 617,
-    sha256: "bc84c88ba98b7da838ee8018000b4f5b460601f514d7d519aefdda41b4adaecf",
+    sha256: "2e8ac833b66aafd7d71d713998d40f53ff057e0c705c01f1b2fad75b1efdafb5",
   },
   "./provenance": {
     count: 623,
-    sha256: "579cad3d627c42e7364973b3c99e604a3d3d1600f4e830bc9f90f7ac50be6e46",
+    sha256: "176fb45fd8e82d7852217459d447ca95cb287a478fedf8a67cdf7f79ee4741a2",
   },
   "./schema": {
     count: 234,
-    sha256: "274737be2b4c3c733ceb2b05966d141c71799966fe55745b03ef73a19906a940",
+    sha256: "dd2fc606465d25d5dc272a55a53423e995f70f72d69a1cdb2989534bd073b67d",
   },
   "./sqlite/local": {
     count: 619,
-    sha256: "27784754b42972425e5b187afc92192128185c8765479342a5ffc37e8590464c",
+    sha256: "afb7a2805d61a63012269f04a162951b0a9a162acd17da891a7ee82476a464cf",
   },
 };
 

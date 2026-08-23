@@ -1820,7 +1820,7 @@ export type GraphBackend = Readonly<{
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
-    insertNodeWithProjections?: (this: void, params: InsertNodeParams, plan: NodeInsertPlan) => Promise<NodeRow | undefined>;
+    executeNodeCreatePlan?: (this: void, params: InsertNodeParams, plan: NodeCreatePlan) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -2351,11 +2351,18 @@ export function missingRequiredExtras<const D extends CapabilityBundleDefinition
 // @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
+// @public
+export type NodeCreatePlan = Readonly<{
+    mode: NodeInsertMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+}>;
+
 // @public (undocumented)
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "insertNodeWithProjections" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeNodeCreatePlan" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 export type NodeFulltextSync = Readonly<{
@@ -2404,13 +2411,6 @@ export type NodeInsertMode = Readonly<{
 }> | Readonly<{
     kind: "schema-fenced";
     schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-export type NodeInsertPlan = Readonly<{
-    mode: NodeInsertMode;
-    claims: readonly NodeInsertClaim[];
-    projections: readonly NodeInsertProjection[];
 }>;
 
 // @public
@@ -3213,7 +3213,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
         readonly accesses: 7;
     };
-    readonly insertNodeWithProjections: {
+    readonly executeNodeCreatePlan: {
         readonly kind: "reasoned";
         readonly reason: "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.";
         readonly accesses: 6;

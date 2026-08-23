@@ -12,7 +12,7 @@ import {
   UniquenessError,
   ValidationError,
 } from "../src";
-import { supportsNodeInsertPlan } from "../src/backend/capabilities/node-insert-projections";
+import { supportsNodeCreatePlan } from "../src/backend/capabilities/node-insert-projections";
 import {
   deriveBackend,
   projectBackendWithout,
@@ -155,11 +155,11 @@ describe("node claim write fusion", () => {
       projections: [],
     };
 
-    expect(supportsNodeInsertPlan(fixture.backend, claimPlan)).toBe(false);
+    expect(supportsNodeCreatePlan(fixture.backend, claimPlan)).toBe(false);
 
     await expect(
       requireDefined(
-        fixture.backend.insertNodeWithProjections,
+        fixture.backend.executeNodeCreatePlan,
         "planned node insert",
       )(
         {
@@ -181,7 +181,7 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.insertNodeWithProjections)(
+        requireDefined(tx.executeNodeCreatePlan)(
           {
             graphId: graph.id,
             kind: "UniqueNode",
@@ -335,7 +335,7 @@ describe("node claim write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction(
-          (tx) => fn(projectBackendWithout(tx, ["insertNodeWithProjections"])),
+          (tx) => fn(projectBackendWithout(tx, ["executeNodeCreatePlan"])),
           options,
         );
       },
@@ -422,7 +422,7 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.insertNodeWithProjections)(
+        requireDefined(tx.executeNodeCreatePlan)(
           {
             graphId: graph.id,
             kind: "UniqueNode",
@@ -472,7 +472,7 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.insertNodeWithProjections)(
+        requireDefined(tx.executeNodeCreatePlan)(
           {
             graphId: graph.id,
             kind: "SharedLeaf",

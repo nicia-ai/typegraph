@@ -337,8 +337,8 @@ export type BackendCapabilities = Readonly<{
    */
   readonly constraintClaims?: boolean;
   /**
-   * Whether `insertNodeWithProjections` can atomically apply the claim portion
-   * of a {@link NodeInsertPlan}. Absent means projection-only: method presence
+   * Whether `executeNodeCreatePlan` can atomically apply the claim portion
+   * of a {@link NodeCreatePlan}. Absent means projection-only: method presence
    * alone is not evidence that a custom backend understands the newer plan
    * field, so the store retains the standalone claim fallback.
    */
@@ -927,11 +927,11 @@ export type NodeInsertMode =
     }>;
 
 /**
- * Complete plan for an atomic node insert. The insert params carry row
+ * Complete plan for an atomic node create. The insert params carry row
  * identity; this plan carries its constraint claims, generated projections,
  * and whether the statement must acquire the active-schema fence.
  */
-export type NodeInsertPlan = Readonly<{
+export type NodeCreatePlan = Readonly<{
   mode: NodeInsertMode;
   claims: readonly NodeInsertClaim[];
   projections: readonly NodeInsertProjection[];
@@ -1935,14 +1935,14 @@ export type GraphBackend = Readonly<{
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
   /**
-   * Optional atomic planned insert. The backend must apply every requested
+   * Optional atomic planned create. The backend must apply every requested
    * claim and projection in the same statement as the node insert, or refuse
    * the plan; the store never partially fuses one.
    */
-  insertNodeWithProjections?: (
+  executeNodeCreatePlan?: (
     this: void,
     params: InsertNodeParams,
-    plan: NodeInsertPlan,
+    plan: NodeCreatePlan,
   ) => Promise<NodeRow | undefined>;
   insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
   insertNodesBatch?: (
@@ -3178,7 +3178,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodeIfAbsent"
   | "insertNodeIfAbsentWithSchemaFence"
   | "insertNodeWithSchemaFence"
-  | "insertNodeWithProjections"
+  | "executeNodeCreatePlan"
   | "insertNodeNoReturn"
   | "insertNodesBatch"
   | "insertNodesBatchReturning"

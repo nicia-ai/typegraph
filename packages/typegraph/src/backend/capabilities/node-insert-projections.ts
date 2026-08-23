@@ -6,7 +6,7 @@ import type {
 } from "../types";
 
 export type NodeProjectionInsertTarget = BackendIdentity &
-  Pick<GraphBackend, "insertNodeWithProjections">;
+  Pick<GraphBackend, "executeNodeCreatePlan">;
 
 export type NodeInsertProjectionRequirements = Readonly<{
   fulltext: boolean;
@@ -18,7 +18,7 @@ export function supportsNodeInsertProjectionRequirements(
   requirements: NodeInsertProjectionRequirements,
 ): boolean {
   return (
-    target.insertNodeWithProjections !== undefined &&
+    target.executeNodeCreatePlan !== undefined &&
     (!requirements.fulltext ||
       target.fulltextStrategy?.buildSyncFromInsertedNode !== undefined) &&
     (!requirements.embedding ||
@@ -54,7 +54,7 @@ export function supportsNodeInsertProjections(
  * Claims are reported by the statement as a verdict, so the caller must have a
  * transaction boundary around the statement before it can safely defer the
  * application probes. A root backend is deliberately excluded: its
- * `insertNodeWithProjections` member is also used for projection-only
+ * `executeNodeCreatePlan` member is also used for projection-only
  * autocommit writes, but a claim refusal must roll back the node and any
  * claims it touched together.
  */
@@ -62,14 +62,14 @@ export function supportsNodeInsertClaims(
   target: NodeProjectionInsertTarget,
 ): boolean {
   return (
-    target.insertNodeWithProjections !== undefined &&
+    target.executeNodeCreatePlan !== undefined &&
     !("transaction" in target) &&
     target.capabilities.atomicNodeInsertClaims === true
   );
 }
 
 /** Whether the receiver can lower this complete insert plan atomically. */
-export function supportsNodeInsertPlan(
+export function supportsNodeCreatePlan(
   target: NodeProjectionInsertTarget,
   input: Readonly<{
     claims: readonly NodeInsertClaim[];

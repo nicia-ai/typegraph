@@ -107,7 +107,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",
   "insertNodeWithSchemaFence",
-  "insertNodeWithProjections",
+  "executeNodeCreatePlan",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
