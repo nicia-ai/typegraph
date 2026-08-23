@@ -44,21 +44,29 @@
  *    resurrect" — both the single and bulk paths read that from the node row
  *    they are about to write, because one decision with two owners drifts.
  */
+import { type z } from "zod";
+
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
 import {
+  supportsNodeCreatePlan,
+  supportsNodeInsertProjections,
+} from "../../backend/capabilities/node-insert-projections";
+import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
   missingRequiredExtras,
 } from "../../backend/capabilities/resolve";
+import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import { deriveBackend } from "../../backend/derive-backend";
 import {
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
+  type NodeInsertProjection,
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
   type TransactionBackend,
@@ -124,6 +132,8 @@ import {
   createUniquenessContext,
   nodeClaimEntries,
   type NodeClaimItem,
+  type NodeCreateClaimPlan,
+  planNodeCreateClaims,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
@@ -133,8 +143,14 @@ import {
   type ConstraintFenceReason,
   nodeWriteNeedsConstraintFence,
 } from "../constraints";
-import { getEmbeddingFields } from "../embedding-sync";
-import { getSearchableFields } from "../fulltext-sync";
+import {
+  getEmbeddingFields,
+  resolveNodeEmbeddingProjections,
+} from "../embedding-sync";
+import {
+  getSearchableFields,
+  resolveNodeFulltextProjection,
+} from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
@@ -155,19 +171,28 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
+import { isAutocommitSingleStatementWrite } from "./autocommit-single-statement";
 import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
   type HookedWritePlanContext,
+  runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
 } from "./write-executor";
 import { type NodeUpdateFences } from "./write-fences";
 import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
 import {
-  type NodeInsertWork,
+  type NodeCreateWork,
   type NodeWriteSession,
+  unfencedTarget,
   type WriteTarget,
 } from "./write-session";
+import {
+  diagnoseFusedSchemaFenceNoRow,
+  hasLeasedSchemaFence,
+  lockSchemaVersionForStoreWrite,
+  memoizeLeasedSchemaFence,
+} from "./write-transaction";
 
 // ============================================================
 // Types
@@ -243,6 +268,7 @@ type NodeCreatePrepared = Readonly<{
   nodeKind: NodeType;
   validatedProps: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
+  claimPlan: NodeCreateClaimPlan;
   insertParams: InsertNodeParams;
   /**
    * `true` when the caller supplied `input.id`. A generated id cannot
@@ -259,6 +285,11 @@ type NodeCreatePrepared = Readonly<{
    * insert-vs-resurrect without re-reading the same (graph, kind, id).
    */
   tombstone: BackendNodeRow | undefined;
+  /**
+   * This caller-supplied id has no pre/post claims, so a first-party backend
+   * can learn whether the primary-key slot is free from the INSERT itself.
+   */
+  insertIfAbsent: boolean;
 }>;
 
 type CachedNodeRow = Awaited<ReturnType<GraphBackend["getNode"]>>;
@@ -349,6 +380,63 @@ function nodeRequiresIdentityLock<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
 ): boolean {
   return ctx.identity !== undefined;
+}
+
+/**
+ * A generated id cannot already belong to another node, so it cannot take
+ * part in identity folding. Keep the identity advisory lock for caller-
+ * supplied ids, whose cross-kind collision probe and fold do need it.
+ */
+function nodeCreateRequiresIdentityLock<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: Readonly<{ id?: string }>,
+): boolean {
+  return input.id !== undefined && nodeRequiresIdentityLock(ctx);
+}
+
+/**
+ * A schema fence can move into the first INSERT only when it remains the first
+ * lock-bearing operation. Claims, identity, recorded capture and revision
+ * tracking all acquire a lock before row work, so they deliberately retain the
+ * ordinary explicit fence.
+ */
+function canFuseNodeCreateSchemaFence<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  input: CreateNodeInput,
+  backend: GraphBackend | TransactionBackend,
+): boolean {
+  if (
+    ctx.schemaVersion === undefined ||
+    !isSchemaFencedInsertEligible(backend) ||
+    !backend.capabilities.transactions ||
+    ctx.historyEnabled ||
+    ctx.revisionTrackingEnabled ||
+    (input.id !== undefined && ctx.identity !== undefined) ||
+    !hasOwnKey(ctx.graph.nodes, input.kind)
+  ) {
+    return false;
+  }
+  const registration = getNodeRegistration(ctx.graph, input.kind);
+  if (
+    (registration.unique?.length ?? 0) !== 0 ||
+    ctx.registry.getDisjointKinds(input.kind).length > 0
+  ) {
+    return false;
+  }
+  return input.id === undefined ?
+      backend.insertNodeWithSchemaFence !== undefined
+    : backend.insertNodeIfAbsentWithSchemaFence !== undefined;
+}
+
+/** Whether any member of a node-create batch can participate in identity. */
+function nodeBatchCreateRequiresIdentityLock<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  inputs: readonly Readonly<{ id?: string }>[],
+): boolean {
+  return (
+    nodeRequiresIdentityLock(ctx) &&
+    inputs.some((input) => input.id !== undefined)
+  );
 }
 
 function buildNodeCacheKey(graphId: string, kind: string, id: string): string {
@@ -731,6 +819,10 @@ type NodeCreateInternalOptions = Readonly<{
   propsPreValidated?: boolean;
 }>;
 
+/** Whether create preparation retains application probes or defers them to
+ * the authoritative verdict returned by the planned insert statement. */
+type NodeCreatePreparationMode = "probe" | "authoritative-plan";
+
 export type NodeCreateDraft = Readonly<{
   kind: string;
   id: string;
@@ -802,41 +894,90 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   draft: NodeCreateDraft,
   backend: WriteTarget,
+  allowInsertIfAbsent = true,
+  mode: NodeCreatePreparationMode = "probe",
+  preparedClaimPlan?: NodeCreateClaimPlan,
 ): Promise<NodeCreatePrepared> {
   const { kind, id, validatedProps, uniqueConstraints } = draft;
+  const claimPlan =
+    preparedClaimPlan ??
+    planNodeCreateClaims(
+      { graphId: ctx.graphId, registry: ctx.registry },
+      { kind, id, props: validatedProps, constraints: uniqueConstraints },
+    );
 
-  // This is the fast-path existence gate. Resurrection repeats it immediately
-  // before the update because the row can change while constraints are checked.
-  const existingNode = await backend.getNode(ctx.graphId, kind, id);
+  // Claim-free caller ids are the one safe shape for an insert-first path. A
+  // pre-insert claim would have to be compensated when `DO NOTHING` reports an
+  // occupied row; keep that larger transition out of this optimization until it
+  // has its own atomic claim outcome. `nodeClaimEntries` is the single owner of
+  // whether either uniqueness or disjointness applies, so this does not grow a
+  // second spelling of the constraint decision.
+  const insertIfAbsent =
+    allowInsertIfAbsent &&
+    draft.idProvided &&
+    backend.insertNodeIfAbsent !== undefined &&
+    nodeClaimEntries(
+      ctx.registry,
+      kind,
+      id,
+      validatedProps,
+      uniqueConstraints,
+      "create",
+    ).length === 0;
+
+  // A generated id is fresh by construction, so probing it for a duplicate or
+  // tombstone can only report absence. Caller-supplied ids retain the probe:
+  // they may name either a live duplicate or a tombstone to resurrect.
+  const existingNode =
+    draft.idProvided && !insertIfAbsent ?
+      await backend.getNode(ctx.graphId, kind, id)
+    : undefined;
   if (existingNode && !existingNode.deleted_at) {
     throw createAlreadyExistsError("node", kind, id);
   }
 
-  const constraintContext: ConstraintContext = {
-    graphId: ctx.graphId,
-    registry: ctx.registry,
-    backend,
-  };
-  await checkDisjointnessConstraint(constraintContext, kind, id);
-
-  await checkUniquenessConstraints(
-    createUniquenessContext(
-      ctx.graphId,
-      ctx.registry,
+  // A fresh row whose claims are going through the transaction-scoped
+  // planned insert gets its ownership verdict from that statement. Keep the
+  // same probes for fallback backends, no-return writes, and tombstones (the
+  // latter route through the resurrection transition rather than this plan).
+  const deferConstraintProbes =
+    mode === "authoritative-plan" &&
+    existingNode === undefined &&
+    claimPlan.claims.length > 0;
+  if (!deferConstraintProbes) {
+    const constraintContext: ConstraintContext = {
+      graphId: ctx.graphId,
+      registry: ctx.registry,
       backend,
-      ctx.uniqueSidecarBatch,
-    ),
-    kind,
-    id,
-    validatedProps,
-    uniqueConstraints,
-  );
+    };
+    // Disjointness is also keyed by the id. A generated id cannot already be
+    // present under a disjoint kind, so its cross-kind reads are the same pure
+    // cost as the same-kind existence probe above.
+    if (draft.idProvided && !insertIfAbsent) {
+      await checkDisjointnessConstraint(constraintContext, kind, id);
+    }
+
+    await checkUniquenessConstraints(
+      createUniquenessContext(
+        ctx.graphId,
+        ctx.registry,
+        backend,
+        ctx.uniqueSidecarBatch,
+      ),
+      kind,
+      id,
+      validatedProps,
+      uniqueConstraints,
+    );
+  }
 
   return {
     kind,
     id,
     idProvided: draft.idProvided,
+    claimPlan,
     tombstone: existingNode,
+    insertIfAbsent,
     nodeKind: draft.nodeKind,
     validatedProps,
     uniqueConstraints,
@@ -849,20 +990,6 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
       draft.validTo,
     ),
   };
-}
-
-async function validateAndPrepareNodeCreate<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  input: CreateNodeInput,
-  id: string,
-  backend: WriteTarget,
-  options?: NodeCreateInternalOptions,
-): Promise<NodeCreatePrepared> {
-  return finishNodeCreatePreparation(
-    ctx,
-    draftNodeCreate(ctx, input, id, options),
-    backend,
-  );
 }
 
 /** What a prepared create hands the claim seam and the sync fans. */
@@ -887,6 +1014,18 @@ function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
   };
 }
 
+/** Resolves every projection owed by a fresh generated-id node in one place. */
+function resolveNodeInsertProjections(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+): readonly NodeInsertProjection[] {
+  const fulltext = resolveNodeFulltextProjection(schema, props);
+  return [
+    ...(fulltext === undefined ? [] : [fulltext]),
+    ...resolveNodeEmbeddingProjections(schema, props),
+  ];
+}
+
 /**
  * One prepared create as the session's insert unit: the row params, the claims
  * the row owes, and the sidecar inputs, as ONE value.
@@ -897,11 +1036,19 @@ function nodeCreateClaimItem(prepared: NodeCreatePrepared): NodeClaimItem {
  * the whole unit and applies all three in the pinned order (pre-insert claims,
  * row, post-insert claims, sync fans).
  */
-function nodeInsertWork(prepared: NodeCreatePrepared): NodeInsertWork {
+function nodeCreateWork(
+  prepared: NodeCreatePrepared,
+  projections: readonly NodeInsertProjection[] = [],
+  allowNonTransactionalClaims = false,
+): NodeCreateWork {
   return {
     params: prepared.insertParams,
+    idGenerated: !prepared.idProvided,
+    allowNonTransactionalClaims,
     claim: nodeCreateClaimItem(prepared),
+    claimPlan: prepared.claimPlan,
     sideEffects: nodeCreateSideEffectItem(prepared),
+    projections,
   };
 }
 
@@ -1412,6 +1559,7 @@ async function prepareBatchCreates<G extends GraphDef>(
       ctx,
       draft,
       validationBackend,
+      false,
     );
     preparedCreates.push(prepared);
     registerPendingNode(prepared.insertParams);
@@ -1669,67 +1817,272 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const id = input.id ?? generateId();
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
-
-  return runHookedWritePlan(
-    nodeWritePlanContext(ctx),
-    opContext,
-    nodeWritePlan(
-      nodeFencesConstraintProbe(ctx, kind, "create"),
-      nodeRequiresIdentityLock(ctx),
-    ),
+  const schemaFenceInFirstWrite = canFuseNodeCreateSchemaFence(
+    ctx,
+    input,
     backend,
-    async (session, target) => {
-      const identity = ctx.identity;
-      const prepared = await validateAndPrepareNodeCreate(
+  );
+  const autocommitBackend = "transaction" in backend ? backend : undefined;
+  const registeredKind =
+    hasOwnKey(ctx.graph.nodes, kind) ?
+      getNodeRegistration(ctx.graph, kind)
+    : undefined;
+  const autocommitSingleStatement =
+    autocommitBackend !== undefined &&
+    registeredKind !== undefined &&
+    isAutocommitSingleStatementWrite({
+      kind: "node",
+      candidate: {
+        backend: autocommitBackend,
+        schemaVersion: ctx.schemaVersion,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+        identityEnabled: ctx.identity !== undefined,
+        idGenerated: input.id === undefined,
+        kindRegistered: true,
+        uniqueConstraintCount: registeredKind.unique?.length ?? 0,
+        disjointKindCount: ctx.registry.getDisjointKinds(kind).length,
+        schema: registeredKind.type.schema,
+      },
+    });
+  const plan = nodeWritePlan(
+    nodeFencesConstraintProbe(ctx, kind, "create"),
+    nodeCreateRequiresIdentityLock(ctx, input),
+  );
+
+  const rowWork = async (
+    session: NodeWriteSession,
+    target: WriteTarget,
+  ): Promise<Node | undefined> => {
+    // The outer backend's mark chooses the optimistic plan, but a custom
+    // transaction wrapper can replace its callback target. Re-check the
+    // factory-owned origin at the actual write receiver before letting that
+    // receiver carry the schema fence; otherwise a wrapper that dropped the
+    // ordinary diagnostic fence could silently write a verified store.
+    const targetBackend = unfencedTarget(target);
+    const fuseSchemaFenceInFirstWrite =
+      schemaFenceInFirstWrite &&
+      isSchemaFencedInsertEligible(targetBackend) &&
+      !hasLeasedSchemaFence(ctx, targetBackend);
+    if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
+      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+    }
+    const identity = ctx.identity;
+    const draft = draftNodeCreate(ctx, input, id, options);
+    const claimPlan = planNodeCreateClaims(
+      { graphId: ctx.graphId, registry: ctx.registry },
+      {
+        kind: draft.kind,
+        id: draft.id,
+        props: draft.validatedProps,
+        constraints: draft.uniqueConstraints,
+      },
+    );
+    const projections = resolveNodeInsertProjections(
+      draft.nodeKind.schema,
+      draft.validatedProps,
+    );
+    const preparationMode: NodeCreatePreparationMode =
+      (
+        shouldReturnRow &&
+        !fuseSchemaFenceInFirstWrite &&
+        supportsNodeCreatePlan(target, {
+          params: buildInsertNodeParams(
+            ctx.graphId,
+            draft.kind,
+            draft.id,
+            draft.validatedProps,
+            draft.validFrom,
+            draft.validTo,
+          ),
+          idGenerated: !draft.idProvided,
+          mode: { kind: "ordinary" },
+          claims: claimPlan.claims,
+          projections,
+          allowNonTransactionalClaims:
+            ctx.identity === undefined &&
+            !ctx.historyEnabled &&
+            !ctx.revisionTrackingEnabled,
+        })
+      ) ?
+        "authoritative-plan"
+      : "probe";
+    const prepared = await finishNodeCreatePreparation(
+      ctx,
+      draft,
+      target,
+      true,
+      preparationMode,
+      claimPlan,
+    );
+    const projectionFusionEligible =
+      shouldReturnRow && !prepared.idProvided && projections.length > 0;
+    const fuseProjections =
+      projectionFusionEligible &&
+      supportsNodeInsertProjections(target, projections);
+    const fuseSchemaFenceProjections =
+      fuseSchemaFenceInFirstWrite &&
+      projectionFusionEligible &&
+      supportsNodeInsertProjections(target, projections);
+
+    const existing = prepared.tombstone;
+    if (existing !== undefined) {
+      const resurrected = await resurrectPreparedNode(
         ctx,
-        input,
-        id,
+        session,
         target,
-        options,
+        prepared,
       );
-
-      const existing = prepared.tombstone;
-      if (existing !== undefined) {
-        const resurrected = await resurrectPreparedNode(
-          ctx,
-          session,
-          target,
-          prepared,
-        );
-        if (identity !== undefined) {
-          await identity.foldCreated(target, foldReferences([prepared]));
-        }
-        return shouldReturnRow ? rowToNode(resurrected) : undefined;
-      }
-
-      // The existence probe above is not the last word: on an engine that does
-      // not serialize the two writers, a concurrent create of the same new id
-      // can commit between the probe and this INSERT, and only the engine's
-      // refusal reports it. Both routes to that conclusion raise the same error.
-      //
-      // The claims are the session's, at their declared placements: the
-      // pre-insert group gates the row and is compensated away if it does not
-      // land, the post-insert group follows it. The translation spans the fused
-      // unit — claims, row AND sidecars — because the session applies them
-      // together. That widening is inert: `isDuplicateKeyInsertError` fires only
-      // on a classified node-INSERT duplicate, which no claim, fulltext or
-      // embedding write raises. The alternative — the session owning the
-      // translation — would change import's create-leg error type on a lost
-      // race, which it must not.
-      const row = await withAlreadyExistsTranslation("node", async () => {
-        const work = nodeInsertWork(prepared);
-        if (shouldReturnRow) return session.createNode(work);
-        await session.createNodeNoReturn(work);
-        return;
-      });
-
       if (identity !== undefined) {
         await identity.foldCreated(target, foldReferences([prepared]));
       }
+      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+    }
 
-      if (row === undefined) return;
+    if (fuseSchemaFenceInFirstWrite) {
+      const schemaFence = {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      };
+      const work =
+        fuseSchemaFenceProjections ?
+          nodeCreateWork(prepared, projections, false)
+        : nodeCreateWork(prepared, [], false);
+      const inserted =
+        prepared.insertIfAbsent ?
+          await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
+        : await session.createNodeWithSchemaFence(work, schemaFence);
+      if (inserted !== undefined) {
+        memoizeLeasedSchemaFence(ctx, targetBackend);
+        return shouldReturnRow ? rowToNode(inserted) : undefined;
+      }
+
+      // The fused statement's empty result is intentionally ambiguous. Its
+      // ordinary active-schema diagnostic preserves the settled version in
+      // StaleVersionError.details.actual without a second PostgreSQL lock.
+      await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+      // An empty INSERT result does not prove PostgreSQL evaluated the nested
+      // locking subquery: an ON CONFLICT or other zero-row branch can make the
+      // executor skip it. Acquire the portable fence before any fallback read
+      // or later write relies on this transaction's lease.
+      if (!autocommitSingleStatement) {
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
+      if (!prepared.insertIfAbsent) {
+        throw new DatabaseOperationError(
+          `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
+          { operation: "insert", entity: "node" },
+        );
+      }
+    }
+
+    if (fuseProjections && !fuseSchemaFenceProjections) {
+      const row = await withAlreadyExistsTranslation("node", () =>
+        session.createNode(
+          nodeCreateWork(
+            prepared,
+            projections,
+            ctx.identity === undefined &&
+              !ctx.historyEnabled &&
+              !ctx.revisionTrackingEnabled,
+          ),
+        ),
+      );
       return rowToNode(row);
-    },
+    }
+
+    if (prepared.insertIfAbsent) {
+      const inserted =
+        fuseSchemaFenceInFirstWrite ? undefined : (
+          await session.createNodeIfAbsent(nodeCreateWork(prepared))
+        );
+      if (inserted !== undefined) {
+        if (identity !== undefined) {
+          await identity.foldCreated(target, foldReferences([prepared]));
+        }
+        return shouldReturnRow ? rowToNode(inserted) : undefined;
+      }
+
+      // `ON CONFLICT DO NOTHING` leaves PostgreSQL's transaction usable. A
+      // single read now classifies the occupied slot, rather than paying it
+      // on every successful caller-supplied-id create.
+      const occupied = await target.getNode(
+        ctx.graphId,
+        prepared.kind,
+        prepared.id,
+      );
+      if (occupied === undefined) {
+        throw new DatabaseOperationError(
+          `Node disappeared after insert-if-absent conflict: ${prepared.kind} ${prepared.id}`,
+          { operation: "insert", entity: "node" },
+        );
+      }
+      if (occupied.deleted_at === undefined) {
+        throw createAlreadyExistsError("node", prepared.kind, prepared.id);
+      }
+      const resurrected = await resurrectPreparedNode(
+        ctx,
+        session,
+        target,
+        prepared,
+      );
+      if (identity !== undefined) {
+        await identity.foldCreated(target, foldReferences([prepared]));
+      }
+      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+    }
+
+    // The existence probe above is not the last word: on an engine that does
+    // not serialize the two writers, a concurrent create of the same new id
+    // can commit between the probe and this INSERT, and only the engine's
+    // refusal reports it. Both routes to that conclusion raise the same error.
+    //
+    // The claims are the session's, at their declared placements: the
+    // pre-insert group gates the row and is compensated away if it does not
+    // land, the post-insert group follows it. The translation spans the fused
+    // unit — claims, row AND sidecars — because the session applies them
+    // together. That widening is inert: `isDuplicateKeyInsertError` fires only
+    // on a classified node-INSERT duplicate, which no claim, fulltext or
+    // embedding write raises. The alternative — the session owning the
+    // translation — would change import's create-leg error type on a lost
+    // race, which it must not.
+    const row = await withAlreadyExistsTranslation("node", async () => {
+      const work = nodeCreateWork(
+        prepared,
+        [],
+        ctx.identity === undefined &&
+          !ctx.historyEnabled &&
+          !ctx.revisionTrackingEnabled,
+      );
+      if (shouldReturnRow) return session.createNode(work);
+      await session.createNodeNoReturn(work);
+      return;
+    });
+
+    if (identity !== undefined) {
+      await identity.foldCreated(target, foldReferences([prepared]));
+    }
+
+    if (row === undefined) return;
+    return rowToNode(row);
+  };
+
+  if (autocommitSingleStatement) {
+    return runAutocommitSingleStatementWritePlan(
+      nodeWritePlanContext(ctx),
+      opContext,
+      plan,
+      autocommitBackend,
+      rowWork,
+    );
+  }
+  return runHookedWritePlan(
+    nodeWritePlanContext(ctx),
+    opContext,
+    plan,
+    backend,
+    rowWork,
+    { schemaFenceInFirstWrite },
   );
 }
 
@@ -1777,7 +2130,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     nodeWritePlanContext(ctx),
     nodeBatchWritePlan(
       nodeBatchConstraintProbes(ctx, inputs, "create"),
-      nodeRequiresIdentityLock(ctx),
+      nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
     backend,
     async (session, target) => {
@@ -1800,7 +2153,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       // depends on which of the two groups writes first.
       await withAlreadyExistsTranslation("node", () =>
         session.createNodesNoReturn(
-          partition.inserts.map((prepared) => nodeInsertWork(prepared)),
+          partition.inserts.map((prepared) => nodeCreateWork(prepared)),
         ),
       );
       for (const prepared of partition.resurrections) {
@@ -1851,7 +2204,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
       const inserted = await withAlreadyExistsTranslation("node", () =>
         session.createNodes(
-          partition.inserts.map((prepared) => nodeInsertWork(prepared)),
+          partition.inserts.map((prepared) => nodeCreateWork(prepared)),
         ),
       );
       const resurrected: BackendNodeRow[] = [];

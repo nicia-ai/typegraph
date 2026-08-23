@@ -245,7 +245,9 @@ export function isNeonHttpClient(db: AnyPgDatabase): boolean {
  * variable-length IN-list expansions, generated aliases, custom
  * `backend.execute()` calls — would otherwise grow this map (and the
  * matching per-session prepared-statement memory inside PostgreSQL)
- * without bound.
+ * without bound. The LRU bounds only TypeGraph's in-process SQL-to-name
+ * lookup; safe names are never recycled, so it cannot bound prepared
+ * statements retained by a live PostgreSQL connection.
  */
 const DEFAULT_POSTGRES_STATEMENT_CACHE_MAX = 256;
 
@@ -543,12 +545,11 @@ function createPgPreparedStatement(
  *   `prepareStatements: false`. Named statements registered on one
  *   pooled backend connection aren't visible to the next, so the
  *   server-side prepared-statement cache must be off.
- * - **High-cardinality SQL text.** If the application emits many
- *   distinct compiled SQL strings (variable-length IN-list expansions,
- *   custom `backend.execute()` calls, generated aliases), tune
- *   `preparedStatementCacheMax` down to bound per-session memory more
- *   aggressively, or up if memory is plentiful and you want fewer
- *   re-PREPAREs.
+ * - **High-cardinality SQL text.** If the application emits many distinct
+ *   compiled SQL strings (variable-length IN-list expansions, custom
+ *   `backend.execute()` calls, generated aliases), set
+ *   `prepareStatements: false` to avoid retaining one prepared statement per
+ *   distinct SQL text on every live connection.
  */
 export type PostgresExecutionAdapterOptions = Readonly<{
   /**
@@ -560,9 +561,11 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    */
   prepareStatements?: boolean;
   /**
-   * Maximum number of distinct SQL strings tracked for prepared-
-   * statement naming. Defaults to `DEFAULT_POSTGRES_STATEMENT_CACHE_MAX`
-   * (256). Ignored when `prepareStatements` is `false`.
+   * Maximum number of distinct SQL strings retained in TypeGraph's in-process
+   * SQL-to-name lookup. Defaults to `DEFAULT_POSTGRES_STATEMENT_CACHE_MAX`
+   * (256). Eviction never reuses a name, so it does not deallocate or bound
+   * prepared statements retained by live PostgreSQL connections. Ignored when
+   * `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
   /**

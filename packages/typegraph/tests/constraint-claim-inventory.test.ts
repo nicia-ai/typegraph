@@ -161,7 +161,7 @@ const IMPORT_EDGES: GraphData["edges"] = [
 ];
 
 describe("every constrained edge write claims its axis", () => {
-  it("claims once on a single create, before the row it gates", async () => {
+  it("claims once on a single create in the statement that writes the row", async () => {
     const { store, statements, reset } =
       await createRecordedPostgresStore(inventoryGraph);
     const alice = await store.nodes.InventoryPerson.create({ name: "Alice" });
@@ -171,9 +171,7 @@ describe("every constrained edge write claims its axis", () => {
     await store.edges.inventoryReportsTo.create(alice, bob, {});
 
     expect(edgeClaimStatements(statements)).toHaveLength(1);
-    expect(edgeClaimIndex(statements)).toBeLessThan(
-      edgeInsertIndex(statements),
-    );
+    expect(edgeClaimIndex(statements)).toBe(edgeInsertIndex(statements));
   });
 
   it("claims nothing for an unconstrained edge create", async () => {

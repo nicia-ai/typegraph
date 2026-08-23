@@ -19,6 +19,7 @@ import {
   type FulltextBatchRow,
   type FulltextCapabilities,
   type FulltextQueryMode,
+  type NodeInsertProjection,
   type UpsertFulltextBatchParams,
   type UpsertFulltextParams,
 } from "../../backend/types";
@@ -177,6 +178,20 @@ export type FulltextStrategy = Readonly<{
     params: UpsertFulltextParams,
     timestamp: string,
   ) => readonly SqlFragment[];
+
+  /**
+   * Emits one atomic projection write sourced from an `inserted_node` CTE.
+   * Strategies that need more than one statement for a sync (SQLite FTS5 is
+   * the shipped example) omit this capability and use the ordinary sidecar
+   * path. The source alias is trusted backend-owned SQL, never caller input.
+   */
+  buildSyncFromInsertedNode?: (
+    this: void,
+    tableName: string,
+    sourceAlias: string,
+    projection: Extract<NodeInsertProjection, { kind: "fulltext" }>,
+    timestamp: string,
+  ) => SqlFragment;
 
   /**
    * Emits the statements that upsert many fulltext rows at once. Input
@@ -455,6 +470,40 @@ export const tsvectorStrategy: FulltextStrategy = {
           "updated_at" = EXCLUDED."updated_at"
       `,
     ];
+  },
+
+  buildSyncFromInsertedNode(tableName, sourceAlias, projection, timestamp) {
+    const table = sql.identifier(tableName);
+    const source = sql.identifier(sourceAlias);
+    const sourceColumn = (name: string): SqlFragment =>
+      sql`${source}.${sql.identifier(name)}`;
+
+    if (projection.action === "delete") {
+      return sql`
+        DELETE FROM ${table} AS "fulltext_target"
+        USING ${source}
+        WHERE "fulltext_target"."graph_id" = ${sourceColumn("graph_id")}
+          AND "fulltext_target"."node_kind" = ${sourceColumn("kind")}
+          AND "fulltext_target"."node_id" = ${sourceColumn("id")}
+        RETURNING 1
+      `;
+    }
+
+    return sql`
+      INSERT INTO ${table}
+        ("graph_id", "node_kind", "node_id", "content", "language", "updated_at")
+      SELECT
+        ${sourceColumn("graph_id")}, ${sourceColumn("kind")},
+        ${sourceColumn("id")}, ${projection.content}, ${projection.language}::regconfig,
+        ${timestamp}
+      FROM ${source}
+      ON CONFLICT ("graph_id", "node_kind", "node_id")
+      DO UPDATE SET
+        "content" = EXCLUDED."content",
+        "language" = EXCLUDED."language",
+        "updated_at" = EXCLUDED."updated_at"
+      RETURNING 1
+    `;
   },
 
   buildBatchUpsert(tableName, params, timestamp) {

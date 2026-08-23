@@ -26,8 +26,8 @@
  * and seeded for WS5b in the design document's appendix, beside their first
  * real consumers.
  *
- * This is the PILOT of a larger sweep (WS5b): 15 of the 84 optional
- * `GraphBackend` members are bundled here; the other 69 are classified in
+ * This is the PILOT of a larger sweep (WS5b): 15 of the 90 optional
+ * `GraphBackend` members are bundled here; the other 75 are classified in
  * {@link UNBUNDLED_OPTIONAL_MEMBERS} as either `reasoned` (no bundle should
  * ever own them) or `deferred` (WS5b's seed, with a measured ceiling).
  */
@@ -46,7 +46,7 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 /**
- * Every optional `GraphBackend` member — 84 of them, verified equal to the
+ * Every optional `GraphBackend` member — 90 of them, verified equal to the
  * names parsed from `etc/typegraph-backend.api.md` (§Baselines). Derived,
  * never hand-written: a member added or removed from `GraphBackend` changes
  * this type automatically, and the totality proof below fails loudly if the
@@ -763,7 +763,7 @@ export const RECORDED_REVISION_ORIGINS = {
   ],
 } as const satisfies CapabilityBundleDefinition;
 
-/** The pilot registry: six bundles, 15 members, 30 operation rows. */
+/** The pilot registry: six bundles, 15 members, 29 operation rows. */
 export const CAPABILITY_BUNDLES = [
   CLAIMS,
   UNIQUE_SIDECAR_BATCH,
@@ -776,7 +776,7 @@ export const CAPABILITY_BUNDLES = [
 export type CapabilityBundleId = (typeof CAPABILITY_BUNDLES)[number]["id"];
 
 // ---------------------------------------------------------------------------
-// UNBUNDLED_OPTIONAL_MEMBERS — the other 69, both kinds classified (I5, I6).
+// UNBUNDLED_OPTIONAL_MEMBERS — the other 75, both kinds classified (I5, I6).
 // ---------------------------------------------------------------------------
 
 /** No bundle should ever own this member; the reason is the fact to preserve. */
@@ -818,12 +818,36 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 22 `reasoned` + 47 `deferred` members — 63 + 190 = 253 accesses
+ * The 27 `reasoned` + 48 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 69 = 84 members total with the pilot's 15.
+ * access), 15 + 75 = 90 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
+  claimEdgeCardinalityGuarded: {
+    kind: "reasoned",
+    reason:
+      "A stronger first-party single-claim operation whose member presence explicitly permits the store to fold the legacy entity probe into the claim; custom and legacy claim backends keep probe-then-claim, so it is not part of the claims bundle's required portable surface.",
+    accesses: 1,
+  },
+  insertNodeIfAbsentWithSchemaFence: {
+    kind: "reasoned",
+    reason:
+      "First-party schema-managed insert fast path selected only by the node create session; a missing member retains the ordinary fence then insert path.",
+    accesses: 6,
+  },
+  insertNodeWithSchemaFence: {
+    kind: "reasoned",
+    reason:
+      "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.",
+    accesses: 7,
+  },
+  executeManagedCreate: {
+    kind: "reasoned",
+    reason:
+      "A first-party managed-create entrypoint. It applies every requested node or edge write dimension in one statement or returns an explicit unsupported verdict; custom and legacy backends retain the portable read-then-write protocol.",
+    accesses: 11,
+  },
   bootstrapTables: {
     kind: "reasoned",
     reason:
@@ -855,6 +879,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "Same family; also the one schema member on TransactionBackend, so bundling it would re-open the accessor's B-1 port-typing question for no pilot consumer.",
+    accesses: 1,
+  },
+  lockSchemaVersionAndGraphWrite: {
+    kind: "reasoned",
+    reason:
+      "PostgreSQL/PGlite transaction-only latency seam which preserves the existing schema-then-graph lock order in one dependent-CTE statement; SQLite and custom backends retain the two portable lock operations.",
     accesses: 1,
   },
   schemaWriteTransaction: {
@@ -1170,6 +1200,12 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "batchEntityWrite",
     ceiling: 4,
   },
+  insertNodeIfAbsent: {
+    kind: "deferred",
+    workstream: "WS5b",
+    bundle: "batchEntityWrite",
+    ceiling: 7,
+  },
   insertNodesBatch: {
     kind: "deferred",
     workstream: "WS5b",
@@ -1259,6 +1295,7 @@ export const WS5B_SEED_BUNDLES = {
     "deleteEdgesBatch",
     "hardDeleteEdgesBatch",
     "insertNodeNoReturn",
+    "insertNodeIfAbsent",
     "insertEdgeNoReturn",
     "updateNodeSet",
   ],
@@ -1324,7 +1361,7 @@ export const WS5B_SEED_BUNDLES = {
 // infers `MCore` correctly but, for a gated bundle with no `extras` field
 // (`CLAIMS`), leaves `MExtra` with NO inference candidate — and TypeScript's
 // fallback for an unmatched `infer` is the type parameter's CONSTRAINT
-// (`OptionalGraphBackendMember`, the full 84), not `never`, silently widening
+// (`OptionalGraphBackendMember`, the full 90), not `never`, silently widening
 // `MCore | MExtra` to every optional member. The structural form below has no
 // such unmatched parameter: `extras` is read only when the field is actually
 // present, so a bundle without one contributes no `ExtrasMembersOf` members
@@ -1368,7 +1405,7 @@ type Disjoint<A, B> =
 
 /* eslint-disable @typescript-eslint/no-unused-vars -- compile-time assertions */
 
-// (i) Totality: the three-way partition covers exactly the 84 optional members.
+// (i) Totality: the three-way partition covers exactly the 90 optional members.
 type _totality = Assert<
   Equal<
     BundledMember | ReasonedMember | DeferredMember,

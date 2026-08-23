@@ -49,7 +49,7 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
   {
     file: "apps/docs/src/content/docs/backend-setup.md",
-    line: 668,
+    line: 670,
     text: "## " + CLAIM_WORD + "-Free Entrypoints",
   },
   {
@@ -90,7 +90,7 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
   {
     file: "packages/typegraph/src/query/dialect/fulltext-strategy.ts",
-    line: 143,
+    line: 144,
     text:
       "* The tables this strategy owns, as " + CLAIM_WORD + "-free, already",
   },

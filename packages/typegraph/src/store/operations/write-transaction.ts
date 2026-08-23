@@ -34,6 +34,9 @@
  * {@link file://../recorded-capture/clock.ts} states the rule this order
  * exists to satisfy: a lock namespace belongs to ONE acquire-order position,
  * and sharing a key across two positions creates a circular wait.
+ * Bundled PostgreSQL transaction targets may acquire positions 1 and 2 with
+ * one optional strong member; its SQL preserves this same order inside the
+ * statement. Every other target retains the two portable acquisitions.
  *
  * Constrained writes (see `fencesConstraintProbe` below) therefore reuse the
  * EXISTING `typegraph:recorded-graph-write` key rather than introducing a
@@ -56,12 +59,13 @@
  * would make the claim above false wherever it matters most. Unconstrained
  * writes assert nothing and keep working on those backends.
  */
+import { isFirstPartyFactory } from "../../backend/capabilities/write-fence";
 import {
   type GraphBackend,
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError } from "../../errors";
+import { ConfigurationError, StaleVersionError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type ConstraintFenceReason } from "../constraints";
 import {
@@ -70,6 +74,7 @@ import {
 } from "../recorded-capture";
 import {
   type GraphWriteLock,
+  memoizeAcquiredRecordedGraphWriteLock,
   uncapturedGraphWriteLock,
 } from "../recorded-capture/clock";
 import { type OperationHookContext } from "../types";
@@ -93,6 +98,79 @@ interface WriteTransactionSession {
 }
 
 const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
+
+/**
+ * Schema fences deliberately do not normally memoize: PostgreSQL releases a
+ * lock acquired after a savepoint when a caller rolls back to that savepoint.
+ * The one safe exception is a TypeGraph-owned Store transaction whose public
+ * surface has no native SQL handle. Its first managed write therefore cannot
+ * follow a caller-controlled savepoint; once that write acquires the fence,
+ * subsequent managed writes can reuse it until the outer transaction ends.
+ *
+ * The key includes the expected version rather than only the graph id. A
+ * transaction target is also the cache owner, never the root backend, so a
+ * pooled connection cannot inherit a prior transaction's success.
+ */
+const leasedSchemaFences = new WeakMap<object, Map<string, Promise<void>>>();
+
+function schemaFenceLeaseKey(graphId: string, expectedVersion: number): string {
+  return `${graphId}\u0000${expectedVersion}`;
+}
+
+/** Whether this transaction has already acquired the exact schema fence. */
+export function hasLeasedSchemaFence(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  target: object,
+): boolean {
+  const expectedVersion = ctx.schemaVersion;
+  return (
+    expectedVersion !== undefined &&
+    leasedSchemaFences
+      .get(target)
+      ?.has(schemaFenceLeaseKey(ctx.graphId, expectedVersion)) === true
+  );
+}
+
+/** Records a schema fence acquired inside a successful fused write statement. */
+export function memoizeLeasedSchemaFence(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  target: object,
+): void {
+  const expectedVersion = ctx.schemaVersion;
+  const leases = leasedSchemaFences.get(target);
+  if (expectedVersion === undefined || leases === undefined) return;
+  leases.set(
+    schemaFenceLeaseKey(ctx.graphId, expectedVersion),
+    Promise.resolve(),
+  );
+}
+
+/**
+ * Marks a TypeGraph-owned transaction as eligible for lazy schema-fence
+ * leasing. The first managed write acquires the fence; read-only transactions
+ * pay nothing and retain their existing visibility/locking behavior.
+ *
+ * Custom transaction backends deliberately take the callback unchanged: their
+ * savepoint/connection lifetime has not been audited by TypeGraph, so their
+ * managed writes retain the conservative per-call fence behavior.
+ */
+export async function withTransactionSchemaFenceLease<T>(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  target: TransactionBackend,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined || !isFirstPartyFactory(target)) {
+    return fn();
+  }
+
+  leasedSchemaFences.set(target, new Map());
+  try {
+    return await fn();
+  } finally {
+    leasedSchemaFences.delete(target);
+  }
+}
 
 /** Forces the enclosing managed Store transaction to consume one revision. */
 export function forceWriteTransactionRevision(
@@ -162,6 +240,28 @@ export async function lockSchemaVersionForStoreWrite(
   const expectedVersion = ctx.schemaVersion;
   if (expectedVersion === undefined) return;
 
+  const leases = leasedSchemaFences.get(backend);
+  const leaseKey = schemaFenceLeaseKey(ctx.graphId, expectedVersion);
+  const existingLease = leases?.get(leaseKey);
+  if (existingLease !== undefined) return existingLease;
+
+  const acquisition = lockSchemaVersionForStoreWriteUncached(ctx, backend);
+  leases?.set(leaseKey, acquisition);
+  try {
+    await acquisition;
+  } catch (error) {
+    if (leases?.get(leaseKey) === acquisition) leases.delete(leaseKey);
+    throw error;
+  }
+}
+
+async function lockSchemaVersionForStoreWriteUncached(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined) return;
+
   if ("transaction" in backend && !backend.capabilities.transactions) {
     throw new ConfigurationError(
       "Schema-managed Store writes require a transactional backend so schema " +
@@ -192,6 +292,35 @@ export async function lockSchemaVersionForStoreWrite(
 }
 
 /**
+ * Interprets a no-row result from a schema-fenced INSERT without taking a
+ * second schema lock. PostgreSQL's first `FOR SHARE` may wake from a
+ * concurrent schema flip with no row in its statement snapshot; taking a
+ * second locking read can deadlock with the next flip. The ordinary active
+ * schema read observes the settled committed version and is sufficient here:
+ * the fused INSERT wrote nothing when its predicate failed.
+ *
+ * A matching version leaves the caller to diagnose its own ordinary no-row
+ * cause (such as an occupied `DO NOTHING` key or a missing edge endpoint).
+ */
+export async function diagnoseFusedSchemaFenceNoRow(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  backend: GraphBackend | TransactionBackend,
+): Promise<void> {
+  const expectedVersion = ctx.schemaVersion;
+  if (expectedVersion === undefined) return;
+
+  const active = await backend.getActiveSchema(ctx.graphId);
+  const actualVersion = active?.version ?? 0;
+  if (actualVersion !== expectedVersion) {
+    throw new StaleVersionError({
+      graphId: ctx.graphId,
+      expected: expectedVersion,
+      actual: actualVersion,
+    });
+  }
+}
+
+/**
  * How a write states whether it needs the per-graph write fence.
  *
  * `fencesConstraintProbe` is an assertion about THIS write's body: "it runs a
@@ -208,6 +337,13 @@ export async function lockSchemaVersionForStoreWrite(
 export type WriteTransactionOptions<T> = Readonly<{
   didWrite?: (result: T) => boolean;
   fencesConstraintProbe?: ConstraintFenceReason | undefined;
+  /**
+   * The row-work callback's first statement carries the schema fence itself.
+   * This is a narrowly-scoped first-party insert optimization: callers must
+   * take no graph or identity lock before that statement and must perform the
+   * ordinary fence diagnostic before handling a zero-row result.
+   */
+  schemaFenceInFirstWrite?: boolean | undefined;
 }>;
 
 /** What a caller must change to make each refused constraint class writable. */
@@ -335,7 +471,6 @@ export function runInWriteTransaction<T>(
     ctx.revisionTrackingEnabled ||
     fenceReason !== undefined;
   return runOptionallyInTransaction(backend, async (target) => {
-    await lockSchemaVersionForStoreWrite(ctx, target);
     const session =
       needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
     // Either constructor yields the same compile-time evidence token; which one
@@ -362,15 +497,48 @@ export function runInWriteTransaction<T>(
     // one connection either way, so observing an in-flight claim as held is
     // correct. A failed acquisition retracts the claim.
     if (acquiresLock) held.add(ctx.graphId);
-    const lock =
-      acquiresLock ?
-        await lockRecordedGraphWrite(target, ctx.graphId).catch(
-          (error: unknown) => {
-            held.delete(ctx.graphId);
-            throw error;
+    const expectedSchemaVersion = ctx.schemaVersion;
+    const combinedSchemaGraphFence =
+      (
+        !options?.schemaFenceInFirstWrite &&
+        expectedSchemaVersion !== undefined &&
+        acquiresLock &&
+        !("transaction" in target)
+      ) ?
+        {
+          acquire: target.lockSchemaVersionAndGraphWrite,
+          params: {
+            graphId: ctx.graphId,
+            expectedVersion: expectedSchemaVersion,
           },
-        )
-      : (session?.lock ?? uncapturedGraphWriteLock());
+        }
+      : undefined;
+    let lock: GraphWriteLock;
+    try {
+      if (combinedSchemaGraphFence?.acquire === undefined) {
+        if (!options?.schemaFenceInFirstWrite) {
+          await lockSchemaVersionForStoreWrite(ctx, target);
+        }
+        lock =
+          acquiresLock ?
+            await lockRecordedGraphWrite(target, ctx.graphId)
+          : (session?.lock ?? uncapturedGraphWriteLock());
+      } else {
+        // The optional strong member owns the same canonical order as the two
+        // portable calls: schema row first, graph advisory lock second. It is
+        // one statement only when THIS frame owes both acquisitions; a held
+        // graph lock must never suppress the per-write schema fence.
+        await combinedSchemaGraphFence.acquire(combinedSchemaGraphFence.params);
+        memoizeAcquiredRecordedGraphWriteLock(target, ctx.graphId);
+        // The statement above acquired the real lock. This constructor is the
+        // existing evidence token used when an enclosing frame already holds
+        // it; runtime evidence carries no payload.
+        lock = uncapturedGraphWriteLock();
+      }
+    } catch (error) {
+      if (acquiresLock) held.delete(ctx.graphId);
+      throw error;
+    }
     if (session !== undefined) session.lock = lock;
     const result = await (acquiresLock ?
       fn(target, lock).finally(() => held.delete(ctx.graphId))

@@ -13,13 +13,17 @@
  */
 
 /**
- * The 34 backend members no module outside the seam may call: the three WRITE
+ * The 39 backend members no module outside the seam may call: the three WRITE
  * classes of `src/backend/member-classes.ts` — graph-entity writes, their
  * sidecars (both claim relations included), and backend-owned bulk ingestion.
  */
 export const WRITE_MEMBER_NAMES = [
   // ENTITY_WRITE_MEMBERS
   "insertNode",
+  "insertNodeIfAbsent",
+  "insertNodeIfAbsentWithSchemaFence",
+  "insertNodeWithSchemaFence",
+  "executeManagedCreate",
   "insertNodeNoReturn",
   "insertNodesBatch",
   "insertNodesBatchReturning",
@@ -43,6 +47,7 @@ export const WRITE_MEMBER_NAMES = [
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",
+  "claimEdgeCardinalityGuarded",
   "claimEdgeCardinalityBatch",
   "purgeEdgeClaims",
   "upsertEmbedding",
@@ -182,6 +187,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
     allowedMembers: [
       "insertNode",
+      "insertNodeIfAbsent",
       "insertNodeNoReturn",
       "insertNodesBatch",
       "insertNodesBatchReturning",
@@ -210,6 +216,7 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
     allowedMembers: [
       "claimEdgeCardinality",
+      "claimEdgeCardinalityGuarded",
       "claimEdgeCardinalityBatch",
       "purgeEdgeClaims",
     ],
@@ -243,6 +250,10 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     permanent: true,
     allowedMembers: [
       "insertNode",
+      "insertNodeIfAbsent",
+      "insertNodeIfAbsentWithSchemaFence",
+      "insertNodeWithSchemaFence",
+      "executeManagedCreate",
       "updateNode",
       "updateNodeSet",
       "deleteNode",
@@ -307,7 +318,11 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
     reason:
       "The fused session is the sole ordinary owner of insert-dispatch and row-step mutation helpers.",
     permanent: true,
-    allowedMembers: [],
+    allowedMembers: [
+      "executeManagedCreate",
+      "insertNodeIfAbsentWithSchemaFence",
+      "insertNodeWithSchemaFence",
+    ],
     allowedImports: WRITE_PIPELINE_INTERNAL_IMPORT_NAMES,
   },
   {

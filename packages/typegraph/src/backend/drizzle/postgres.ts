@@ -79,7 +79,10 @@ import {
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
+import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
+import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -126,10 +129,12 @@ import {
   type HybridSearchRow,
   type IdentityTableNames,
   type IndexMaterializationRow,
+  type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
+  type ManagedNodeCreatePlan,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
@@ -297,15 +302,12 @@ export type PostgresBackendOptions = Readonly<{
    */
   prepareStatements?: boolean;
   /**
-   * Cap on the number of distinct SQL strings tracked for
-   * prepared-statement naming. Defaults to 256. The cache is LRU-
-   * bounded so high-cardinality SQL text (variable-length IN-lists,
-   * generated aliases, `backend.execute()` calls with one-off SQL)
-   * doesn't grow unbounded in either the Node process or in
-   * PostgreSQL's per-session prepared-statement memory. Worst-case
-   * server-side footprint is roughly `cap × pool size` statements
-   * across all pooled connections. Ignored when
-   * `prepareStatements` is `false`.
+   * Cap on the number of distinct SQL strings retained in TypeGraph's
+   * in-process SQL-to-statement-name lookup. Defaults to 256. Eviction never
+   * reuses a name, so this does not deallocate or bound prepared statements
+   * retained on live PostgreSQL connections. Set `prepareStatements: false`
+   * for high-cardinality SQL text when server-side statement retention is not
+   * acceptable. Ignored when `prepareStatements` is `false`.
    */
   preparedStatementCacheMax?: number;
   /**
@@ -346,6 +348,26 @@ type PostgresBatchChunkSizes = Readonly<{
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
+
+function vectorSlotsFromManagedNodeCreatePlan(
+  params: InsertNodeParams,
+  plan: ManagedNodeCreatePlan,
+): readonly VectorSlot[] {
+  return plan.projections.flatMap((projection) =>
+    projection.kind === "embedding" ?
+      [
+        {
+          graphId: params.graphId,
+          nodeKind: params.kind,
+          fieldPath: projection.fieldPath,
+          dimensions: projection.dimensions,
+          metric: projection.metric,
+          indexType: projection.indexType,
+        },
+      ]
+    : [],
+  );
+}
 
 function computePostgresBatchChunkSizes(
   maxBindParameters: number,
@@ -802,6 +824,7 @@ export function createPostgresBackend(
   const operationStrategy = createPostgresOperationStrategy(
     tables,
     fulltextStrategy,
+    vectorStrategy,
   );
 
   // Whether `tableName` currently exists, via the same catalog probe `clear()`
@@ -1826,7 +1849,7 @@ export function createPostgresBackend(
         const { backend: txBackend, drainAndClose } =
           bindTransactionBackend(tx);
         try {
-          return await fn(txBackend, tx);
+          return await fn(markSchemaFencedInsertEligible(txBackend), tx);
         } finally {
           // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
           // instant the callback settles, and those control statements do not
@@ -1892,6 +1915,8 @@ export function createPostgresBackend(
   // arm is reachable only from a test that builds a backend bypassing the
   // declared capabilities while still carrying this mark.
   markFirstPartyFactory(backend);
+  markSchemaFencedInsertEligible(backend);
+  markBundledRootAutocommitEligible(backend);
   return backend;
 }
 
@@ -2417,6 +2442,57 @@ function createPostgresOperationBackend(
       toSchemaVersionRow,
       toUniqueRow,
     },
+    schemaFenceLockClause: sql.raw("FOR SHARE"),
+    nodeProjectionInsertFusion: true,
+    async beforeNodeProjectionInsert(params, plan): Promise<void> {
+      const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(params, plan);
+      await contributionMaterializer.assertNodeInsertProjections(
+        params.graphId,
+        {
+          fulltext: plan.projections.some(
+            (projection) => projection.kind === "fulltext",
+          ),
+          vectorSlots,
+        },
+      );
+    },
+    async refuseNodeProjectionError(params, plan, error): Promise<never> {
+      const embeddingProjections = plan.projections.filter(
+        (projection) => projection.kind === "embedding",
+      );
+      const dimensionProjection =
+        embeddingProjections.find(
+          (projection) => projection.embedding.length !== projection.dimensions,
+        ) ??
+        (embeddingProjections.length === 1 ?
+          embeddingProjections[0]
+        : undefined);
+      if (dimensionProjection !== undefined) {
+        const mapped = mapVectorWriteError(error, {
+          nodeKind: params.kind,
+          fieldPath: dimensionProjection.fieldPath,
+        });
+        if (mapped !== error) throw mapped;
+      }
+      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
+        params.graphId,
+        {
+          fulltext: plan.projections.some(
+            (projection) => projection.kind === "fulltext",
+          ),
+          vectorSlots: vectorSlotsFromManagedNodeCreatePlan(params, plan),
+        },
+        error,
+      );
+    },
+    ...(transactionScoped ?
+      {
+        schemaGraphWriteLockNamespace:
+          RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+        edgeCardinalityInsertFusion: true,
+        nodeClaimInsertFusion: true,
+      }
+    : {}),
     tableExistenceCache: { cacheExisting: false },
   });
 
@@ -2983,22 +3059,24 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  const backend = createPostgresOperationBackend({
-    db: options.db,
-    executionAdapter: txExecutionAdapter,
-    adapterOptions: options.adapterOptions,
-    operationStrategy: options.operationStrategy,
-    tableNames: options.tableNames,
-    capabilities: options.capabilities,
-    fulltextStrategy: options.fulltextStrategy,
-    vectorStrategy: options.vectorStrategy,
-    contributionMaterializer: options.contributionMaterializer,
-    // The probe is process-wide truth, so the outer instance's is reused
-    // rather than a fresh one per transaction.
-    iterativeScanProbe: options.iterativeScanProbe,
-    schemaVersionsTable: options.schemaVersionsTable,
-    transactionScoped: true,
-  });
+  const backend = markFirstPartyFactory(
+    createPostgresOperationBackend({
+      db: options.db,
+      executionAdapter: txExecutionAdapter,
+      adapterOptions: options.adapterOptions,
+      operationStrategy: options.operationStrategy,
+      tableNames: options.tableNames,
+      capabilities: options.capabilities,
+      fulltextStrategy: options.fulltextStrategy,
+      vectorStrategy: options.vectorStrategy,
+      contributionMaterializer: options.contributionMaterializer,
+      // The probe is process-wide truth, so the outer instance's is reused
+      // rather than a fresh one per transaction.
+      iterativeScanProbe: options.iterativeScanProbe,
+      schemaVersionsTable: options.schemaVersionsTable,
+      transactionScoped: true,
+    }),
+  );
 
   return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
 }

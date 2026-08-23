@@ -81,6 +81,20 @@ export function markFirstPartyFactory<T extends object>(target: T): T {
 }
 
 /**
+ * Whether `target` came from one of TypeGraph's bundled backend factories.
+ *
+ * This stays an out-of-band, unforgeable fact for the same reason as
+ * {@link markFirstPartyFactory}: an arbitrary backend that happens to report
+ * the same dialect cannot thereby opt into an optimization whose transaction
+ * lifetime TypeGraph has not audited.
+ *
+ * @internal
+ */
+export function isFirstPartyFactory(target: object): boolean {
+  return FIRST_PARTY_FACTORY_BACKENDS.has(target);
+}
+
+/**
  * Carries the first-party mark from a source object onto one derived from
  * it, so a factory backend projected or decorated for a transaction still
  * resolves the SAME plan its source would — a lost mark would otherwise

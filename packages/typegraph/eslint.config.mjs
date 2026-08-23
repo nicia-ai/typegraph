@@ -440,6 +440,10 @@ export const DRIZZLE_ZONE = [
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },
   {
+    file: "src/backend/drizzle/operations/node-projections.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
     file: "src/backend/drizzle/operations/schema.ts",
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },

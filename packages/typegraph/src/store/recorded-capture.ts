@@ -4,6 +4,7 @@ import {
   type BundleVerdictOf,
 } from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
+import { assertManagedCreateResultMatchesPlan } from "../backend/managed-create";
 import {
   type DeleteEdgesBatchParams,
   type EdgeRow,
@@ -11,7 +12,10 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
+  type ManagedCreatePlan,
+  type ManagedCreateResult,
   type NodeRow,
+  type SchemaWriteFenceParams,
   type TransactionBackend,
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
@@ -437,6 +441,93 @@ function createRecordedTransactionBackend(
       return row;
     },
 
+    ...(target.insertNodeIfAbsent === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsent(
+          params: InsertNodeParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(target.insertNodeIfAbsent)(params);
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
+    ...(target.insertNodeIfAbsentWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(
+            target.insertNodeIfAbsentWithSchemaFence,
+          )(params, schemaFence);
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
+    ...(target.insertNodeWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const row = await requireDefined(target.insertNodeWithSchemaFence)(
+            params,
+            schemaFence,
+          );
+          if (row !== undefined) {
+            session.touchNode(params.graphId, params.kind, params.id, row);
+          }
+          return row;
+        },
+      }),
+
+    ...(target.executeManagedCreate === undefined ?
+      {}
+    : {
+        async executeManagedCreate(
+          plan: ManagedCreatePlan,
+        ): Promise<ManagedCreateResult> {
+          session.assertOpen();
+          await lockGraph(plan.params.graphId);
+          const result = await requireDefined(target.executeManagedCreate)(
+            plan,
+          );
+          assertManagedCreateResultMatchesPlan(plan, result);
+          if (result.outcome === "created") {
+            if (result.entity === "node") {
+              session.touchNode(
+                plan.params.graphId,
+                plan.params.kind,
+                plan.params.id,
+                result.row,
+              );
+            } else {
+              session.touchEdge(
+                plan.params.graphId,
+                plan.params.id,
+                result.row,
+              );
+            }
+          }
+          return result;
+        },
+      }),
+
     ...(target.insertNodeNoReturn === undefined ?
       {}
     : {
@@ -727,6 +818,64 @@ export function createRecordedBackend(
     async insertNode(params) {
       return capture((target) => target.insertNode(params));
     },
+
+    ...(backend.insertNodeIfAbsent === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsent(
+          params: InsertNodeParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeIfAbsent)(params),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeIfAbsentWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeIfAbsentWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeIfAbsentWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
+    ...(backend.insertNodeWithSchemaFence === undefined ?
+      {}
+    : {
+        async insertNodeWithSchemaFence(
+          params: InsertNodeParams,
+          schemaFence: SchemaWriteFenceParams,
+        ): Promise<NodeRow | undefined> {
+          return capture((target) =>
+            requireDefined(target.insertNodeWithSchemaFence)(
+              params,
+              schemaFence,
+            ),
+          );
+        },
+      }),
+
+    ...(backend.executeManagedCreate === undefined ?
+      {}
+    : {
+        async executeManagedCreate(
+          plan: ManagedCreatePlan,
+        ): Promise<ManagedCreateResult> {
+          const result = await capture((target) =>
+            requireDefined(target.executeManagedCreate)(plan),
+          );
+          assertManagedCreateResultMatchesPlan(plan, result);
+          return result;
+        },
+      }),
 
     ...(backend.insertNodeNoReturn === undefined ?
       {}

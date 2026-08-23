@@ -23,10 +23,7 @@ import {
 } from "../../backend/capabilities/bind";
 import type { CLAIMS } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
-import {
-  type GraphBackend,
-  type TransactionBackend,
-} from "../../backend/types";
+import { type GraphBackend } from "../../backend/types";
 
 /**
  * The runtime extent of the fence classes. {@link ConstraintFenceReason} is
@@ -115,7 +112,9 @@ export type ClaimSupport =
  *   `target` is missing a member the verdict says is present.
  */
 export function claimSupport(
-  target: GraphBackend | TransactionBackend,
+  target: Readonly<
+    Partial<Pick<GraphBackend, (typeof CLAIMS)["core"][number]>>
+  >,
   verdict: BundleVerdictOf<typeof CLAIMS>,
 ): ClaimSupport {
   if (!verdict.supported) return { supported: false };

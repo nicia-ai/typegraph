@@ -83,12 +83,20 @@ function backendFailingOneInsert(backend: GraphBackend): GraphBackend {
   // frozen, and a decoration Proxy cannot shadow a non-configurable member.
   // `projectGraphBackend` is the audited way to get an unfrozen copy.
   return deriveBackend(projectGraphBackend(backend), {
+    capabilities: {
+      ...backend.capabilities,
+      atomicNodeInsertClaims: false,
+    },
     insertNode: failingInsertNode((params) => backend.insertNode(params)),
     transaction: (run, options) =>
       backend.transaction(
         (target) =>
           run(
             deriveBackend(target, {
+              capabilities: {
+                ...target.capabilities,
+                atomicNodeInsertClaims: false,
+              },
               insertNode: failingInsertNode((params) =>
                 target.insertNode(params),
               ),

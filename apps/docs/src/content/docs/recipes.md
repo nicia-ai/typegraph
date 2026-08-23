@@ -604,6 +604,17 @@ The caller owns the transaction boundary; TypeGraph adopts that exact
 connection, so a failure rolls back both layers — no stray relational row, no
 graph node with a dangling foreign reference.
 
+:::caution[Do not use the root store inside a caller-owned transaction]
+Inside `db.transaction(async (sqlTx) => ...)`, do not call a managed write on
+the root `store` (for example, `store.nodes.Document.create(...)`). On a
+single-connection PostgreSQL handle, Drizzle starts that root-store write with
+`BEGIN` and finishes it with `COMMIT`; PostgreSQL treats the nested `BEGIN` as
+a warning and the `COMMIT` ends the caller's transaction. Use
+`store.withTransaction(sqlTx)` and make every graph write through the returned
+transaction context instead. For a history-enabled store, use
+`store.withRecordedTransaction(sqlTx, async (tx) => ...)`.
+:::
+
 This is the explicit adapter surface: create the store with
 `createAdapterStore` or `createAdapterStoreWithSchema`. The portable
 `createStore` factories intentionally do not expose native handles or
