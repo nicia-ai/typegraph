@@ -7,6 +7,7 @@ import {
   type HardDeleteNodeParams,
   type InsertEdgeParams,
   type InsertNodeParams,
+  type ManagedCreatePlan,
   type TransactionBackend,
   type UpdateEdgeParams,
   type UpdateNodeParams,
@@ -45,11 +46,10 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodeIfAbsent",
   "insertNodeIfAbsentWithSchemaFence",
   "insertNodeWithSchemaFence",
-  "executeNodeCreatePlan",
+  "executeManagedCreate",
   "insertNodesBatch",
   "insertNodesBatchReturning",
   "updateNodeSet",
-  "executeEdgeCreatePlan",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -85,6 +85,7 @@ type GraphEntityWriteParam =
   | DeleteNodeParams
   | HardDeleteNodeParams
   | InsertEdgeParams
+  | ManagedCreatePlan
   | UpdateEdgeParams
   | DeleteEdgeParams
   | HardDeleteEdgeParams

@@ -61,9 +61,9 @@ import {
 } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
-  type EdgeCreatePlan,
   type GraphBackend,
   type LiveNodeRow,
+  type ManagedCreatePlan,
   type NodeRow,
   type TombstonedNodeRow,
   type TransactionBackend,
@@ -108,8 +108,8 @@ function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
     },
     claim: undefined,
   };
-  const plan: EdgeCreatePlan = {};
-  return session.createEdgeWithPlan(work, plan);
+  const plan: ManagedCreatePlan = { entity: "edge", params: work.params };
+  return session.createEdgeWithPlan(plan);
 }
 
 const Document = defineNode("Doc", {
@@ -176,7 +176,7 @@ const WATCHED_MEMBERS = [
   "upsertEmbeddingBatch",
   "deleteEmbedding",
   "insertEdge",
-  "executeEdgeCreatePlan",
+  "executeManagedCreate",
   "insertEdgeNoReturn",
   "insertEdgesBatch",
   "insertEdgesBatchReturning",
@@ -637,7 +637,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       return createEdgeWithPlan;
     },
     sidecars: [],
-    row: "executeEdgeCreatePlan",
+    row: "executeManagedCreate",
     plan: EDGE_PLAN,
   },
   createEdgeNoReturn: {

@@ -33,11 +33,11 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 91;
+const REASONED_FLOOR = 87;
 const DEFERRED_LIVE_TOTAL = 194;
 const DEFERRED_DECLARED_TOTAL = 197;
 const EXCLUDED_COUNT = 4;
-const TOTAL_ROW_COUNT = 298;
+const TOTAL_ROW_COUNT = 294;
 
 function rowKey(
   row: Readonly<{ file: string; line: number; member: string }>,

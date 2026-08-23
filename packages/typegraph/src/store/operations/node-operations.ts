@@ -53,7 +53,6 @@ import {
 } from "../../backend/capabilities/bundle-registry";
 import {
   supportsNodeCreatePlan,
-  supportsNodeInsertClaims,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
 import {
@@ -1040,9 +1039,12 @@ function resolveNodeInsertProjections(
 function nodeCreateWork(
   prepared: NodeCreatePrepared,
   projections: readonly NodeInsertProjection[] = [],
+  allowNonTransactionalClaims = false,
 ): NodeCreateWork {
   return {
     params: prepared.insertParams,
+    idGenerated: !prepared.idProvided,
+    allowNonTransactionalClaims,
     claim: nodeCreateClaimItem(prepared),
     claimPlan: prepared.claimPlan,
     sideEffects: nodeCreateSideEffectItem(prepared),
@@ -1884,10 +1886,23 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       (
         shouldReturnRow &&
         !fuseSchemaFenceInFirstWrite &&
-        supportsNodeInsertClaims(target) &&
         supportsNodeCreatePlan(target, {
+          params: buildInsertNodeParams(
+            ctx.graphId,
+            draft.kind,
+            draft.id,
+            draft.validatedProps,
+            draft.validFrom,
+            draft.validTo,
+          ),
+          idGenerated: !draft.idProvided,
+          mode: { kind: "ordinary" },
           claims: claimPlan.claims,
           projections,
+          allowNonTransactionalClaims:
+            ctx.identity === undefined &&
+            !ctx.historyEnabled &&
+            !ctx.revisionTrackingEnabled,
         })
       ) ?
         "authoritative-plan"
@@ -1931,8 +1946,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       };
       const work =
         fuseSchemaFenceProjections ?
-          nodeCreateWork(prepared, projections)
-        : nodeCreateWork(prepared);
+          nodeCreateWork(prepared, projections, false)
+        : nodeCreateWork(prepared, [], false);
       const inserted =
         prepared.insertIfAbsent ?
           await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
@@ -1957,7 +1972,15 @@ async function executeNodeCreateInternal<G extends GraphDef>(
 
     if (fuseProjections && !fuseSchemaFenceProjections) {
       const row = await withAlreadyExistsTranslation("node", () =>
-        session.createNode(nodeCreateWork(prepared, projections)),
+        session.createNode(
+          nodeCreateWork(
+            prepared,
+            projections,
+            ctx.identity === undefined &&
+              !ctx.historyEnabled &&
+              !ctx.revisionTrackingEnabled,
+          ),
+        ),
       );
       return rowToNode(row);
     }
@@ -2018,7 +2041,13 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     // translation — would change import's create-leg error type on a lost
     // race, which it must not.
     const row = await withAlreadyExistsTranslation("node", async () => {
-      const work = nodeCreateWork(prepared);
+      const work = nodeCreateWork(
+        prepared,
+        [],
+        ctx.identity === undefined &&
+          !ctx.historyEnabled &&
+          !ctx.revisionTrackingEnabled,
+      );
       if (shouldReturnRow) return session.createNode(work);
       await session.createNodeNoReturn(work);
       return;

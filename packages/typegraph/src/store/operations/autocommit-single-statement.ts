@@ -32,7 +32,6 @@ export type EdgeAutocommitSingleStatementCandidate = Readonly<{
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
-  idGenerated: boolean;
   kindRegistered: boolean;
   convergesOnMatchKey: boolean;
   cardinality: "many" | "one" | "unique" | "oneActive";
@@ -93,11 +92,10 @@ export function isAutocommitSingleStatementWrite(
         isBundledRootAutocommitEligible(candidate.backend) &&
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&
-        candidate.idGenerated &&
         candidate.kindRegistered &&
         !candidate.convergesOnMatchKey &&
         candidate.cardinality === "many" &&
-        candidate.backend.executeEdgeCreatePlan !== undefined
+        candidate.backend.executeManagedCreate !== undefined
       );
     }
   }

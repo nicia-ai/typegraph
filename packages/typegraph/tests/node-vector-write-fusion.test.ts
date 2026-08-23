@@ -230,28 +230,28 @@ describe("fresh node + vector write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeNodeCreatePlan)(
-          {
+        requireDefined(tx.executeManagedCreate)({
+          entity: "node",
+          params: {
             graphId: singleGraph.id,
             kind: "SingleVectorDocument",
             id: "malformed-vector-node",
             props: { title: "bad vector", embedding: [1, 0] },
           },
-          {
-            mode: { kind: "ordinary" },
-            claims: [],
-            projections: [
-              {
-                kind: "embedding",
-                fieldPath: "embedding",
-                embedding: [1, 0],
-                dimensions: 3,
-                metric: "cosine",
-                indexType: "hnsw",
-              },
-            ],
-          },
-        ),
+          idGenerated: false,
+          mode: { kind: "ordinary" },
+          claims: [],
+          projections: [
+            {
+              kind: "embedding",
+              fieldPath: "embedding",
+              embedding: [1, 0],
+              dimensions: 3,
+              metric: "cosine",
+              indexType: "hnsw",
+            },
+          ],
+        }),
       ),
     ).rejects.toBeInstanceOf(EmbeddingDimensionChangedError);
     await expect(

@@ -4,15 +4,16 @@ import {
   type BundleVerdictOf,
 } from "../backend/capabilities/resolve";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
+import { assertManagedCreateResultMatchesPlan } from "../backend/managed-create";
 import {
   type DeleteEdgesBatchParams,
-  type EdgeCreatePlan,
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
   type InsertNodeParams,
   type InternalTransactionOptions,
-  type NodeCreatePlan,
+  type ManagedCreatePlan,
+  type ManagedCreateResult,
   type NodeRow,
   type SchemaWriteFenceParams,
   type TransactionBackend,
@@ -495,23 +496,35 @@ function createRecordedTransactionBackend(
         },
       }),
 
-    ...(target.executeNodeCreatePlan === undefined ?
+    ...(target.executeManagedCreate === undefined ?
       {}
     : {
-        async executeNodeCreatePlan(
-          params: InsertNodeParams,
-          plan: NodeCreatePlan,
-        ): Promise<NodeRow | undefined> {
+        async executeManagedCreate(
+          plan: ManagedCreatePlan,
+        ): Promise<ManagedCreateResult> {
           session.assertOpen();
-          await lockGraph(params.graphId);
-          const row = await requireDefined(target.executeNodeCreatePlan)(
-            params,
+          await lockGraph(plan.params.graphId);
+          const result = await requireDefined(target.executeManagedCreate)(
             plan,
           );
-          if (row !== undefined) {
-            session.touchNode(params.graphId, params.kind, params.id, row);
+          assertManagedCreateResultMatchesPlan(plan, result);
+          if (result.outcome === "created") {
+            if (result.entity === "node") {
+              session.touchNode(
+                plan.params.graphId,
+                plan.params.kind,
+                plan.params.id,
+                result.row,
+              );
+            } else {
+              session.touchEdge(
+                plan.params.graphId,
+                plan.params.id,
+                result.row,
+              );
+            }
           }
-          return row;
+          return result;
         },
       }),
 
@@ -616,26 +629,6 @@ function createRecordedTransactionBackend(
       session.touchEdge(params.graphId, params.id, row);
       return row;
     },
-
-    ...(target.executeEdgeCreatePlan === undefined ?
-      {}
-    : {
-        async executeEdgeCreatePlan(
-          params: InsertEdgeParams,
-          plan: EdgeCreatePlan,
-        ) {
-          session.assertOpen();
-          await lockGraph(params.graphId);
-          const result = await requireDefined(target.executeEdgeCreatePlan)(
-            params,
-            plan,
-          );
-          if (result.outcome === "created") {
-            session.touchEdge(params.graphId, params.id, result.row);
-          }
-          return result;
-        },
-      }),
 
     ...(target.insertEdgeNoReturn === undefined ?
       {}
@@ -870,16 +863,17 @@ export function createRecordedBackend(
         },
       }),
 
-    ...(backend.executeNodeCreatePlan === undefined ?
+    ...(backend.executeManagedCreate === undefined ?
       {}
     : {
-        async executeNodeCreatePlan(
-          params: InsertNodeParams,
-          plan: NodeCreatePlan,
-        ): Promise<NodeRow | undefined> {
-          return capture((target) =>
-            requireDefined(target.executeNodeCreatePlan)(params, plan),
+        async executeManagedCreate(
+          plan: ManagedCreatePlan,
+        ): Promise<ManagedCreateResult> {
+          const result = await capture((target) =>
+            requireDefined(target.executeManagedCreate)(plan),
           );
+          assertManagedCreateResultMatchesPlan(plan, result);
+          return result;
         },
       }),
 
@@ -949,19 +943,6 @@ export function createRecordedBackend(
     async insertEdge(params) {
       return capture((target) => target.insertEdge(params));
     },
-
-    ...(backend.executeEdgeCreatePlan === undefined ?
-      {}
-    : {
-        async executeEdgeCreatePlan(
-          params: InsertEdgeParams,
-          plan: EdgeCreatePlan,
-        ) {
-          return capture((target) =>
-            requireDefined(target.executeEdgeCreatePlan)(params, plan),
-          );
-        },
-      }),
 
     ...(backend.insertEdgeNoReturn === undefined ?
       {}

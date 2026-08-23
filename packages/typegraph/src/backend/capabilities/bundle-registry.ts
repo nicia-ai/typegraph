@@ -818,10 +818,10 @@ export type UnbundledOptionalMember =
   ReasonedUnbundledMember | DeferredUnbundledMember;
 
 /**
- * The 28 `reasoned` + 48 `deferred` members
+ * The 25 `reasoned` + 48 `deferred` members
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
- * access), 15 + 76 = 91 members total with the pilot's 15.
+ * access), 15 + 73 = 88 members total with the pilot's 15.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   claimEdgeCardinalityGuarded: {
@@ -846,7 +846,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "reasoned",
     reason:
       "A first-party managed-create entrypoint. It applies every requested node or edge write dimension in one statement or returns an explicit unsupported verdict; custom and legacy backends retain the portable read-then-write protocol.",
-    accesses: 15,
+    accesses: 11,
   },
   bootstrapTables: {
     kind: "reasoned",

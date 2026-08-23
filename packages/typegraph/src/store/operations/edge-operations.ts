@@ -84,11 +84,11 @@ import {
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import {
   type ClaimEdgeCardinalityParams,
-  type EdgeCreatePlan,
   type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type GraphReadBackend,
   type InsertEdgeParams,
+  type ManagedEdgeCreatePlan,
   rowPropsToObject,
   runOptionallyInTransaction,
   type TransactionBackend,
@@ -546,10 +546,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     backend.capabilities.transactions &&
     !ctx.historyEnabled &&
     !ctx.revisionTrackingEnabled &&
-    input.id === undefined &&
     convergeOn === undefined &&
     edgeCardinality(ctx, kind) === "many" &&
-    backend.executeEdgeCreatePlan !== undefined;
+    backend.executeManagedCreate !== undefined;
   const autocommitBackend = "transaction" in backend ? backend : undefined;
   const autocommitSingleStatement =
     autocommitBackend !== undefined &&
@@ -561,7 +560,6 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         schemaVersion: ctx.schemaVersion,
         historyEnabled: ctx.historyEnabled,
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-        idGenerated: input.id === undefined,
         kindRegistered: true,
         convergesOnMatchKey: convergeOn !== undefined,
         cardinality: edgeCardinality(ctx, kind),
@@ -615,16 +613,15 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       declaredCardinality !== "many" &&
       edgeCardinalityClaimMode(target, ctx.claimsVerdict()).kind === "guarded";
     const usesFusedCardinalityInsert =
-      usesGuardedCardinalityClaim && target.executeEdgeCreatePlan !== undefined;
+      usesGuardedCardinalityClaim && target.executeManagedCreate !== undefined;
     // The match-key lookup above was derived from this transaction target
     // while the graph convergence fence is held. Once it reports no match,
     // endpoint existence is the only remaining pre-insert read, so let the
     // existing endpoint-predicate INSERT remove those two RTTs even though
     // this create leg carries a convergence guard.
     const canFuseEndpointCheck =
-      input.id === undefined &&
       (declaredCardinality === "many" || usesGuardedCardinalityClaim) &&
-      target.executeEdgeCreatePlan !== undefined;
+      target.executeManagedCreate !== undefined;
     let prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
       validateEndpoints: !canFuseEndpointCheck,
       validateCardinality: !usesGuardedCardinalityClaim,
@@ -639,7 +636,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     // a concurrent endpoint revival before we report anything.
     if (canFuseEndpointCheck) {
       const fusedWork = edgeInsertWork(prepared);
-      const fusedPlan: EdgeCreatePlan = {
+      const fusedPlan: ManagedEdgeCreatePlan = {
+        entity: "edge",
+        params: fusedWork.params,
         ...(fuseSchemaFenceInFirstWrite ?
           {
             schemaFence: {
@@ -653,9 +652,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         : {}),
       };
       const fusedResult = await withAlreadyExistsTranslation("edge", () =>
-        session.createEdgeWithPlan(fusedWork, fusedPlan),
+        session.createEdgeWithPlan(fusedPlan),
       );
-      if (fusedResult?.outcome === "created") {
+      if (fusedResult?.outcome === "created" && fusedResult.entity === "edge") {
         if (fuseSchemaFenceInFirstWrite) {
           memoizeLeasedSchemaFence(ctx, targetBackend);
         }

@@ -47,11 +47,10 @@ import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
+import { assertManagedCreateResultMatchesPlan } from "../../backend/managed-create";
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
-  type EdgeCreatePlan,
-  type EdgeCreateResult,
   type EdgeRow,
   type FulltextOperationBackend,
   type GraphBackend,
@@ -59,7 +58,9 @@ import {
   type InsertEdgeParams,
   type InsertNodeParams,
   type LiveNodeRow,
-  type NodeCreatePlan,
+  type ManagedCreateResult,
+  type ManagedEdgeCreatePlan,
+  type ManagedNodeCreatePlan,
   type NodeInsertProjection,
   type NodeRow,
   type QueryExecutionBackend,
@@ -161,12 +162,11 @@ export type WriteTarget = Readonly<
       | "insertNodeIfAbsent"
       | "insertNodeIfAbsentWithSchemaFence"
       | "insertNodeWithSchemaFence"
-      | "executeNodeCreatePlan"
+      | "executeManagedCreate"
     > &
     Pick<UniqueConstraintBackend, "checkUnique" | "checkUniqueBatch"> &
     Pick<
       GraphBackend,
-      | "executeEdgeCreatePlan"
       | "claimEdgeCardinality"
       | "claimEdgeCardinalityGuarded"
       | "claimEdgeCardinalityBatch"
@@ -245,6 +245,8 @@ type NodeInsertSideEffects = Readonly<{
  */
 export type NodeCreateWork = Readonly<{
   params: InsertNodeParams;
+  idGenerated?: boolean | undefined;
+  allowNonTransactionalClaims?: boolean;
   claim: NodeClaimItem;
   /** The preparation-time claim decision, shared by fused and fallback paths. */
   claimPlan: NodeCreateClaimPlan;
@@ -369,9 +371,8 @@ export type EdgeWriteSession = Readonly<{
    * the caller to run the portable diagnostic/fallback path.
    */
   createEdgeWithPlan: (
-    work: EdgeInsertWork,
-    plan: EdgeCreatePlan,
-  ) => Promise<EdgeCreateResult | undefined>;
+    plan: ManagedEdgeCreatePlan,
+  ) => Promise<ManagedCreateResult | undefined>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
   createEdgesNoReturn: (work: readonly EdgeInsertWork[]) => Promise<void>;
@@ -435,26 +436,34 @@ export function createWriteSession(
     createNode: async (work) => {
       const claimPlan = work.claimPlan;
       const insertPlanFused = supportsNodeCreatePlan(target, {
+        params: work.params,
+        idGenerated: work.idGenerated ?? false,
+        mode: { kind: "ordinary" },
         claims: claimPlan.claims,
         projections: work.projections,
+        allowNonTransactionalClaims: work.allowNonTransactionalClaims,
       });
       const insertPlannedNode = async (): Promise<NodeRow> => {
-        const insert = target.executeNodeCreatePlan;
+        const insert = target.executeManagedCreate;
         if (!insertPlanFused || insert === undefined) {
           return withNodeCreateClaims(writeContext, work.claim, target, () =>
             dispatch.one(work.params),
           );
         }
         try {
-          const plan: NodeCreatePlan = {
+          const plan: ManagedNodeCreatePlan = {
+            entity: "node",
+            params: work.params,
+            idGenerated: work.idGenerated ?? false,
             mode: { kind: "ordinary" },
             claims: claimPlan.claims,
             projections: work.projections,
           };
-          const row = await insert(work.params, plan);
-          if (row === undefined) {
+          const result = await insert(plan);
+          assertManagedCreateResultMatchesPlan(plan, result);
+          if (result.outcome !== "created" || result.entity !== "node") {
             throw new CompilerInvariantError(
-              "An ordinary planned node insert returned no row.",
+              "An ordinary planned node insert did not return a node row.",
               {
                 graphId: work.params.graphId,
                 kind: work.params.kind,
@@ -462,7 +471,7 @@ export function createWriteSession(
               },
             );
           }
-          return row;
+          return result.row;
         } catch (error) {
           refuseNodeCreateClaimError(error, claimPlan);
         }
@@ -514,15 +523,38 @@ export function createWriteSession(
       }
       const row = await (async () => {
         if (projectionsFused) {
-          const insert = target.executeNodeCreatePlan;
+          const insert = target.executeManagedCreate;
           if (insert === undefined) return;
-          const plan: NodeCreatePlan = {
+          const plan: ManagedNodeCreatePlan = {
+            entity: "node",
+            params: work.params,
+            idGenerated: work.idGenerated ?? false,
             mode: { kind: "schema-fenced", schemaFence },
             claims: [],
             projections: work.projections,
           };
-          return withNodeCreateClaims(writeContext, work.claim, target, () =>
-            insert(work.params, plan),
+          return withNodeCreateClaims(
+            writeContext,
+            work.claim,
+            target,
+            async () => {
+              const result = await insert(plan);
+              assertManagedCreateResultMatchesPlan(plan, result);
+              if (result.outcome === "rejected" && result.entity === "node") {
+                return;
+              }
+              if (result.outcome !== "created" || result.entity !== "node") {
+                throw new CompilerInvariantError(
+                  "A schema-fenced planned node insert did not return a node row.",
+                  {
+                    graphId: work.params.graphId,
+                    kind: work.params.kind,
+                    id: work.params.id,
+                  },
+                );
+              }
+              return result.row;
+            },
           );
         }
         const insert = target.insertNodeWithSchemaFence;
@@ -626,12 +658,14 @@ export function createWriteSession(
       return edgeDispatch.one(work.params);
     },
 
-    createEdgeWithPlan: async (work, plan) => {
-      const execute = target.executeEdgeCreatePlan;
+    createEdgeWithPlan: async (plan) => {
+      const execute = target.executeManagedCreate;
       if (execute !== undefined) {
-        const result = await execute(work.params, plan);
+        const result = await execute(plan);
+        assertManagedCreateResultMatchesPlan(plan, result);
         if (
           result.outcome === "unsupported" &&
+          result.entity === "edge" &&
           result.dimensions.length === 1 &&
           result.dimensions[0] === "cardinalityClaim" &&
           plan.schemaFence === undefined &&
@@ -642,7 +676,7 @@ export function createWriteSession(
             ctx.claimsVerdict(),
             plan.cardinalityClaim,
           );
-          return execute(work.params, {});
+          return execute({ entity: "edge", params: plan.params });
         }
         return result;
       }

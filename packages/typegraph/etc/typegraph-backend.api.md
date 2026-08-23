@@ -1411,31 +1411,13 @@ export type EdgeClaimOutcome = Readonly<{
 }>;
 
 // @public
-export type EdgeCreatePlan = Readonly<{
-    schemaFence?: SchemaWriteFenceParams;
-    cardinalityClaim?: ClaimEdgeCardinalityParams;
-}>;
-
-// @public
-export type EdgeCreateResult = Readonly<{
-    outcome: "created";
-    row: EdgeRow;
-}> | Readonly<{
-    outcome: "rejected";
-    reason: "unknown";
-}> | Readonly<{
-    outcome: "unsupported";
-    dimensions: readonly ("schemaFence" | "cardinalityClaim")[];
-}>;
-
-// @public
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
 export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "executeEdgeCreatePlan" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "executeManagedCreate" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 export type EdgeExistsBetweenParams = Readonly<{
@@ -1838,7 +1820,6 @@ export type GraphBackend = Readonly<{
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
     insertNodeWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
-    executeNodeCreatePlan?: (this: void, params: InsertNodeParams, plan: NodeCreatePlan) => Promise<NodeRow | undefined>;
     insertNodeNoReturn?: (this: void, params: InsertNodeParams) => Promise<void>;
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
@@ -1849,7 +1830,7 @@ export type GraphBackend = Readonly<{
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
     getNodes?: (this: void, graphId: string, kind: string, ids: readonly string[]) => Promise<readonly NodeRow[]>;
     insertEdge: (this: void, params: InsertEdgeParams) => Promise<EdgeRow>;
-    executeEdgeCreatePlan?: (this: void, params: InsertEdgeParams, plan: EdgeCreatePlan) => Promise<EdgeCreateResult>;
+    executeManagedCreate?: (this: void, plan: ManagedCreatePlan) => Promise<ManagedCreateResult>;
     insertEdgeNoReturn?: (this: void, params: InsertEdgeParams) => Promise<void>;
     insertEdgesBatch?: (this: void, params: readonly InsertEdgeParams[]) => Promise<void>;
     insertEdgesBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
@@ -2328,6 +2309,64 @@ export type LockSchemaVersionForWriteParams = Readonly<{
     expectedVersion: number;
 }>;
 
+// @public
+export type ManagedCreatePlan = ManagedNodeCreatePlan | ManagedEdgeCreatePlan;
+
+// @public (undocumented)
+export type ManagedCreateResult = Readonly<{
+    outcome: "created";
+    entity: "node";
+    row: NodeRow;
+}> | Readonly<{
+    outcome: "created";
+    entity: "edge";
+    row: EdgeRow;
+}> | Readonly<{
+    outcome: "rejected";
+    entity: "node" | "edge";
+    reason: "unknown";
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "node";
+    dimensions: readonly [
+    "schemaFence" | "claims" | "projections",
+    ...(readonly ("schemaFence" | "claims" | "projections")[])
+    ];
+}> | Readonly<{
+    outcome: "unsupported";
+    entity: "edge";
+    dimensions: readonly [
+    "schemaFence" | "cardinalityClaim",
+    ...(readonly ("schemaFence" | "cardinalityClaim")[])
+    ];
+}>;
+
+// @public
+export type ManagedEdgeCreatePlan = Readonly<{
+    entity: "edge";
+    params: InsertEdgeParams;
+    schemaFence?: SchemaWriteFenceParams;
+    cardinalityClaim?: ClaimEdgeCardinalityParams;
+}>;
+
+// @public
+export type ManagedNodeCreateMode = Readonly<{
+    kind: "ordinary";
+}> | Readonly<{
+    kind: "schema-fenced";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type ManagedNodeCreatePlan = Readonly<{
+    entity: "node";
+    params: InsertNodeParams;
+    idGenerated: boolean;
+    mode: ManagedNodeCreateMode;
+    claims: readonly NodeInsertClaim[];
+    projections: readonly NodeInsertProjection[];
+}>;
+
 // @public (undocumented)
 export type MetaEdgeName = (typeof ALL_META_EDGE_NAMES)[number];
 
@@ -2367,18 +2406,11 @@ export function missingRequiredExtras<const D extends CapabilityBundleDefinition
 // @public
 export const MODERN_SQLITE_MAX_BIND_PARAMETERS = 32766;
 
-// @public
-export type NodeCreatePlan = Readonly<{
-    mode: NodeInsertMode;
-    claims: readonly NodeInsertClaim[];
-    projections: readonly NodeInsertProjection[];
-}>;
-
 // @public (undocumented)
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeNodeCreatePlan" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "executeManagedCreate" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public
 export type NodeFulltextSync = Readonly<{
@@ -2419,14 +2451,6 @@ export type NodeInsertClaimVerdict = Readonly<{
 }> | Readonly<{
     kind: "disjointness";
     conflictingKinds: readonly string[];
-}>;
-
-// @public
-export type NodeInsertMode = Readonly<{
-    kind: "ordinary";
-}> | Readonly<{
-    kind: "schema-fenced";
-    schemaFence: SchemaWriteFenceParams;
 }>;
 
 // @public
@@ -3229,15 +3253,10 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "Same first-party schema-fenced node insert family; generated ids use it only when no earlier lock-bearing work is required.";
         readonly accesses: 7;
     };
-    readonly executeNodeCreatePlan: {
+    readonly executeManagedCreate: {
         readonly kind: "reasoned";
-        readonly reason: "A bundled PostgreSQL/PGlite planned node statement selected only when every requested claim/projection step proves one-statement support; other backends retain the ordinary node then sidecar path.";
-        readonly accesses: 6;
-    };
-    readonly executeEdgeCreatePlan: {
-        readonly kind: "reasoned";
-        readonly reason: "A first-party edge planned-write entrypoint. It applies every requested schema-fence and cardinality dimension or refuses the plan; custom and legacy backends retain the portable read-then-write protocol.";
-        readonly accesses: 6;
+        readonly reason: "A first-party managed-create entrypoint. It applies every requested node or edge write dimension in one statement or returns an explicit unsupported verdict; custom and legacy backends retain the portable read-then-write protocol.";
+        readonly accesses: 11;
     };
     readonly bootstrapTables: {
         readonly kind: "reasoned";

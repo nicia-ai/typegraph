@@ -17,13 +17,18 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../src/backend/derive-backend";
-import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import type {
+  GraphBackend,
+  ManagedCreatePlan,
+  TransactionBackend,
+} from "../src/backend/types";
 import { createStore, createStoreWithSchema } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 import {
   createRecordedPostgresStore,
   type LoggedStatement,
 } from "./statement-recorder";
+import { createTestBackend, disableTransactions } from "./test-utils";
 
 const SAME_KIND_UNIQUE = {
   name: "same_kind_email",
@@ -159,21 +164,25 @@ describe("node claim write fusion", () => {
 
     await expect(
       requireDefined(
-        fixture.backend.executeNodeCreatePlan,
+        fixture.backend.executeManagedCreate,
         "planned node insert",
-      )(
-        {
+      )({
+        entity: "node",
+        params: {
           graphId: graph.id,
           kind: "UniqueNode",
           id: "root-claim-plan",
           props: { email: "root@example.com" },
         },
-        {
-          mode: { kind: "ordinary" },
-          ...claimPlan,
-        },
-      ),
-    ).rejects.toThrow("requires a transaction-scoped backend");
+        idGenerated: false,
+        mode: { kind: "ordinary" },
+        ...claimPlan,
+      }),
+    ).resolves.toEqual({
+      outcome: "unsupported",
+      entity: "node",
+      dimensions: ["claims"],
+    });
   });
 
   it("refuses claims on schema-fenced plans before executing them", async () => {
@@ -181,36 +190,40 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeNodeCreatePlan)(
-          {
+        requireDefined(tx.executeManagedCreate)({
+          entity: "node",
+          params: {
             graphId: graph.id,
             kind: "UniqueNode",
             id: "schema-claim-plan",
             props: { email: "schema@example.com" },
           },
-          {
-            mode: {
-              kind: "schema-fenced",
-              schemaFence: { graphId: graph.id, expectedVersion: 1 },
-            },
-            claims: [
-              {
-                axis: "UniqueNode",
-                constraintName: SAME_KIND_UNIQUE.name,
-                key: "schema@example.com",
-                placement: "post-insert",
-                verdict: {
-                  kind: "uniqueness",
-                  probeAxes: ["UniqueNode"],
-                  fields: ["email"],
-                },
-              },
-            ],
-            projections: [],
+          idGenerated: false,
+          mode: {
+            kind: "schema-fenced",
+            schemaFence: { graphId: graph.id, expectedVersion: 1 },
           },
-        ),
+          claims: [
+            {
+              axis: "UniqueNode",
+              constraintName: SAME_KIND_UNIQUE.name,
+              key: "schema@example.com",
+              placement: "post-insert",
+              verdict: {
+                kind: "uniqueness",
+                probeAxes: ["UniqueNode"],
+                fields: ["email"],
+              },
+            },
+          ],
+          projections: [],
+        }),
       ),
-    ).rejects.toThrow("cannot carry uniqueness claims");
+    ).resolves.toEqual({
+      outcome: "unsupported",
+      entity: "node",
+      dimensions: ["schemaFence", "claims"],
+    });
     expect(
       await fixture.backend.checkUnique({
         graphId: graph.id,
@@ -241,6 +254,63 @@ describe("node claim write fusion", () => {
     // so this write is exactly one database round trip.
     expect(uniqueProbes(fixture.statements)).toHaveLength(0);
     expect(fixture.statements).toHaveLength(1);
+  });
+
+  it("uses one managed statement for same-kind claims without transactions", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const nonTransactional = disableTransactions(fixture.backend);
+    const plans: ManagedCreatePlan[] = [];
+    const observed = deriveBackend(nonTransactional, {
+      executeManagedCreate(plan) {
+        plans.push(plan);
+        return requireDefined(nonTransactional.executeManagedCreate)(plan);
+      },
+    });
+    const store = createStore(graph, observed);
+
+    fixture.reset();
+    await store.nodes.UniqueNode.create({
+      email: "nontransactional-same-kind",
+    });
+
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({
+      entity: "node",
+      claims: [
+        expect.objectContaining({
+          axis: "UniqueNode",
+          constraintName: SAME_KIND_UNIQUE.name,
+        }),
+      ],
+    });
+    plans.splice(0);
+    fixture.reset();
+    await expect(
+      store.nodes.SharedLeaf.create({ email: "nontransactional-shared-scope" }),
+    ).rejects.toMatchObject({
+      details: { code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED" },
+    });
+    expect(plans).toHaveLength(0);
+
+    plans.splice(0);
+    fixture.reset();
+    await expect(
+      store.nodes.ClaimPerson.create({ name: "nontransactional-disjoint" }),
+    ).rejects.toMatchObject({
+      details: { code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED" },
+    });
+    expect(plans).toHaveLength(0);
+  });
+
+  it("falls back when the root backend cannot lower claim SQL", async () => {
+    const backend = disableTransactions(createTestBackend());
+    const store = createStore(graph, backend);
+
+    await store.nodes.UniqueNode.create({ email: "unsupported-sqlite-claim" });
+    await expect(
+      store.nodes.UniqueNode.create({ email: "unsupported-sqlite-claim" }),
+    ).rejects.toBeInstanceOf(UniquenessError);
+    expect(await store.nodes.UniqueNode.find()).toHaveLength(1);
   });
 
   it("fuses a shared-scope unique claim before the generated node insert", async () => {
@@ -335,7 +405,7 @@ describe("node claim write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction(
-          (tx) => fn(projectBackendWithout(tx, ["executeNodeCreatePlan"])),
+          (tx) => fn(projectBackendWithout(tx, ["executeManagedCreate"])),
           options,
         );
       },
@@ -422,31 +492,31 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeNodeCreatePlan)(
-          {
+        requireDefined(tx.executeManagedCreate)({
+          entity: "node",
+          params: {
             graphId: graph.id,
             kind: "UniqueNode",
             id: "post-loser",
             props: { email: "post-conflict@example.com" },
           },
-          {
-            mode: { kind: "ordinary" },
-            claims: [
-              {
-                axis: "UniqueNode",
-                constraintName: SAME_KIND_UNIQUE.name,
-                key: "post-conflict@example.com",
-                placement: "post-insert",
-                verdict: {
-                  kind: "uniqueness",
-                  probeAxes: ["UniqueNode"],
-                  fields: ["email"],
-                },
+          idGenerated: false,
+          mode: { kind: "ordinary" },
+          claims: [
+            {
+              axis: "UniqueNode",
+              constraintName: SAME_KIND_UNIQUE.name,
+              key: "post-conflict@example.com",
+              placement: "post-insert",
+              verdict: {
+                kind: "uniqueness",
+                probeAxes: ["UniqueNode"],
+                fields: ["email"],
               },
-            ],
-            projections: [],
-          },
-        ),
+            },
+          ],
+          projections: [],
+        }),
       ),
     ).rejects.toBeInstanceOf(UniquenessError);
 
@@ -472,31 +542,31 @@ describe("node claim write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) =>
-        requireDefined(tx.executeNodeCreatePlan)(
-          {
+        requireDefined(tx.executeManagedCreate)({
+          entity: "node",
+          params: {
             graphId: graph.id,
             kind: "SharedLeaf",
             id: "pre-loser",
             props: { email: "pre-conflict@example.com" },
           },
-          {
-            mode: { kind: "ordinary" },
-            claims: [
-              {
-                axis: "SharedLeaf",
-                constraintName: SHARED_UNIQUE.name,
-                key: "pre-conflict@example.com",
-                placement: "pre-insert",
-                verdict: {
-                  kind: "uniqueness",
-                  probeAxes: ["SharedLeaf", "SharedRoot"],
-                  fields: ["email"],
-                },
+          idGenerated: false,
+          mode: { kind: "ordinary" },
+          claims: [
+            {
+              axis: "SharedLeaf",
+              constraintName: SHARED_UNIQUE.name,
+              key: "pre-conflict@example.com",
+              placement: "pre-insert",
+              verdict: {
+                kind: "uniqueness",
+                probeAxes: ["SharedLeaf", "SharedRoot"],
+                fields: ["email"],
               },
-            ],
-            projections: [],
-          },
-        ),
+            },
+          ],
+          projections: [],
+        }),
       ),
     ).rejects.toBeInstanceOf(UniquenessError);
 

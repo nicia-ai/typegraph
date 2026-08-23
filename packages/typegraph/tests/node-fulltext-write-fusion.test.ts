@@ -10,7 +10,7 @@ import { createSqliteBackend } from "../src/backend/sqlite";
 import {
   type GraphBackend,
   type InsertNodeParams,
-  type NodeCreatePlan,
+  type ManagedCreatePlan,
   type NodeFulltextSync,
   type NodeInsertProjection,
   type SchemaWriteFenceParams,
@@ -62,8 +62,14 @@ function fulltextProjection(fulltext: NodeFulltextSync): NodeInsertProjection {
     : { kind: "fulltext", action: "delete" };
 }
 
-function ordinaryPlan(fulltext: NodeFulltextSync): NodeCreatePlan {
+function ordinaryPlan(
+  params: InsertNodeParams,
+  fulltext: NodeFulltextSync,
+): ManagedCreatePlan {
   return {
+    entity: "node",
+    params,
+    idGenerated: false,
     mode: { kind: "ordinary" },
     claims: [],
     projections: [fulltextProjection(fulltext)],
@@ -71,10 +77,14 @@ function ordinaryPlan(fulltext: NodeFulltextSync): NodeCreatePlan {
 }
 
 function schemaFencedPlan(
+  params: InsertNodeParams,
   fulltext: NodeFulltextSync,
   schemaFence: SchemaWriteFenceParams,
-): NodeCreatePlan {
+): ManagedCreatePlan {
   return {
+    entity: "node",
+    params,
+    idGenerated: false,
     mode: { kind: "schema-fenced", schemaFence },
     claims: [],
     projections: [fulltextProjection(fulltext)],
@@ -108,15 +118,18 @@ describe("fresh node + fulltext write fusion", () => {
   it("dispatches the root generated-ID path through the fused member", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const [store] = await createStoreWithSchema(graph, fixture.backend);
-    requireDefined(fixture.backend.executeNodeCreatePlan, "projection member");
-    const spy = vi.spyOn(fixture.backend, "executeNodeCreatePlan");
+    requireDefined(fixture.backend.executeManagedCreate, "projection member");
+    const spy = vi.spyOn(fixture.backend, "executeManagedCreate");
     const transactionSpy = vi.spyOn(fixture.backend, "transaction");
 
     await store.nodes.Document.create({ title: "root dispatch" });
 
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.results[0]?.type).toBe("return");
-    expect(spy.mock.calls[0]?.[1].mode.kind).toBe("schema-fenced");
+    const plan = spy.mock.calls[0]?.[0];
+    expect(plan?.entity).toBe("node");
+    if (plan?.entity !== "node") throw new Error("expected a node plan");
+    expect(plan.mode.kind).toBe("schema-fenced");
     expect(transactionSpy).not.toHaveBeenCalled();
     spy.mockRestore();
     transactionSpy.mockRestore();
@@ -142,9 +155,8 @@ describe("fresh node + fulltext write fusion", () => {
 
     fixture.reset();
     await fixture.backend.transaction(async (tx) => {
-      await requireDefined(tx.executeNodeCreatePlan)(
-        params,
-        ordinaryPlan(fulltext),
+      await requireDefined(tx.executeManagedCreate)(
+        ordinaryPlan(params, fulltext),
       );
     });
 
@@ -187,16 +199,15 @@ describe("fresh node + fulltext write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction((tx) => {
-          const insert = requireDefined(tx.executeNodeCreatePlan);
+          const insert = requireDefined(tx.executeManagedCreate);
           return fn(
             deriveBackend(tx, {
-              async executeNodeCreatePlan(
-                params: InsertNodeParams,
-                plan: NodeCreatePlan,
-              ) {
+              async executeManagedCreate(plan: ManagedCreatePlan) {
                 fusedCallCount += 1;
+                if (plan.entity !== "node")
+                  throw new Error("expected a node plan");
                 expect(plan.mode.kind).toBe("schema-fenced");
-                return insert(params, plan);
+                return insert(plan);
               },
             }),
           );
@@ -272,9 +283,8 @@ describe("fresh node + fulltext write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) => {
-        await requireDefined(tx.executeNodeCreatePlan)(
-          params,
-          ordinaryPlan(fulltext),
+        await requireDefined(tx.executeManagedCreate)(
+          ordinaryPlan(params, fulltext),
         );
       }),
     ).rejects.toThrow();
@@ -313,9 +323,8 @@ describe("fresh node + fulltext write fusion", () => {
 
     await expect(
       fixture.backend.transaction(async (tx) => {
-        await requireDefined(tx.executeNodeCreatePlan)(
-          params,
-          ordinaryPlan(fulltext),
+        await requireDefined(tx.executeManagedCreate)(
+          ordinaryPlan(params, fulltext),
         );
       }),
     ).rejects.toThrow();
@@ -351,9 +360,8 @@ describe("fresh node + fulltext write fusion", () => {
 
     await fixture.backend.transaction(async (tx) => {
       await expect(
-        requireDefined(tx.executeNodeCreatePlan)(
-          params,
-          schemaFencedPlan(projection, {
+        requireDefined(tx.executeManagedCreate)(
+          schemaFencedPlan(params, projection, {
             graphId: "different-graph",
             expectedVersion: 1,
           }),
@@ -428,7 +436,7 @@ describe("fresh node + fulltext write fusion", () => {
         options?: Parameters<NonNullable<GraphBackend["transaction"]>>[1],
       ): Promise<T> {
         return fixture.backend.transaction(
-          (tx) => fn(projectBackendWithout(tx, ["executeNodeCreatePlan"])),
+          (tx) => fn(projectBackendWithout(tx, ["executeManagedCreate"])),
           options,
         );
       },
@@ -449,7 +457,6 @@ describe("fresh node + fulltext write fusion", () => {
   it("keeps SQLite on its ordinary sidecar path", async () => {
     const database = createTestDatabase();
     const backend = createSqliteBackend(database);
-    expect(backend.executeNodeCreatePlan).toBeUndefined();
 
     const [store] = await createStoreWithSchema(graph, backend);
     const node = await store.nodes.Document.create({ title: "sqlite" });

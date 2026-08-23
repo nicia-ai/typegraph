@@ -154,9 +154,9 @@ function countFusedStatements(backend: GraphBackend): {
         counts.node += 1;
         return requireDefined(target.insertNodeIfAbsent)(params);
       },
-      async executeEdgeCreatePlan(params, plan) {
+      async executeManagedCreate(plan) {
         counts.edge += 1;
-        return requireDefined(target.executeEdgeCreatePlan)(params, plan);
+        return requireDefined(target.executeManagedCreate)(plan);
       },
     });
   }
@@ -270,7 +270,7 @@ async function statementCountForGeneratedNodeCreate(
   const portableBackend =
     useFusedInsert ? backend : (
       projectBackendWithout(backend, [
-        "executeEdgeCreatePlan",
+        "executeManagedCreate",
         "insertNodeIfAbsentWithSchemaFence",
         "insertNodeWithSchemaFence",
       ])
@@ -601,7 +601,6 @@ describe("single-statement autocommit eligibility", () => {
       schemaVersion: 1,
       historyEnabled: false,
       revisionTrackingEnabled: false,
-      idGenerated: true,
       kindRegistered: true,
       convergesOnMatchKey: false,
       cardinality: "many" as const,
@@ -622,7 +621,6 @@ describe("single-statement autocommit eligibility", () => {
       expect(eligible({ schemaVersion: undefined })).toBe(false);
       expect(eligible({ historyEnabled: true })).toBe(false);
       expect(eligible({ revisionTrackingEnabled: true })).toBe(false);
-      expect(eligible({ idGenerated: false })).toBe(false);
       expect(eligible({ kindRegistered: false })).toBe(false);
       expect(eligible({ convergesOnMatchKey: true })).toBe(false);
       expect(eligible({ cardinality: "one" })).toBe(false);

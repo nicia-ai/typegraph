@@ -10,12 +10,22 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, ValidationError } from "../src";
+import {
+  CompilerInvariantError,
+  defineEdge,
+  defineGraph,
+  defineNode,
+  ValidationError,
+} from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import { type GraphBackend } from "../src/backend/types";
-import { createInitializedStore } from "./test-utils";
+import type { GraphBackend, ManagedCreatePlan } from "../src/backend/types";
+import { createStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
+import { createRecordedPostgresStore } from "./statement-recorder";
+import { createInitializedStore, disableTransactions } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const knows = defineEdge("knows", { schema: z.object({ note: z.string() }) });
@@ -132,4 +142,92 @@ describe("fused edge endpoint validation", () => {
       }
     });
   }
+});
+
+describe("caller-id unconstrained edge managed create", () => {
+  it("uses one managed plan and keeps source-before-target diagnostics", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const nonTransactional = disableTransactions(fixture.backend);
+    const plans: ManagedCreatePlan[] = [];
+    const backend = deriveBackend(nonTransactional, {
+      executeManagedCreate(plan) {
+        plans.push(plan);
+        return requireDefined(nonTransactional.executeManagedCreate)(plan);
+      },
+    });
+    const store = createStore(graph, backend);
+    const from = await store.nodes.Person.create({ name: "from" });
+    const to = await store.nodes.Person.create({ name: "to" });
+
+    fixture.reset();
+    const created = await store.edges.knows.create(
+      from,
+      to,
+      { note: "one planned caller-id edge" },
+      { id: "caller-id-one-plan" },
+    );
+    expect(created.id).toBe("caller-id-one-plan");
+    expect(plans).toHaveLength(1);
+
+    await expect(
+      store.edges.knows.create(
+        { kind: "Person", id: "missing-from-caller-id" },
+        to,
+        { note: "missing source" },
+        { id: "caller-id-missing-from" },
+      ),
+    ).rejects.toMatchObject({
+      details: { endpoint: "from", nodeId: "missing-from-caller-id" },
+    });
+
+    await expect(
+      store.edges.knows.create(
+        from,
+        { kind: "Person", id: "missing-to-caller-id" },
+        { note: "missing target" },
+        { id: "caller-id-missing-to" },
+      ),
+    ).rejects.toMatchObject({
+      details: { endpoint: "to", nodeId: "missing-to-caller-id" },
+    });
+
+    await expect(
+      store.edges.knows.create(
+        { kind: "Person", id: "missing-from-first" },
+        { kind: "Person", id: "missing-to-second" },
+        { note: "ordered endpoint diagnostics" },
+        { id: "caller-id-missing-both" },
+      ),
+    ).rejects.toMatchObject({
+      details: { endpoint: "from", nodeId: "missing-from-first" },
+    });
+  });
+
+  it("refuses a result for the wrong entity before falling back", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+    const nonTransactional = disableTransactions(fixture.backend);
+    const backend = deriveBackend(nonTransactional, {
+      executeManagedCreate: () =>
+        Promise.resolve({
+          outcome: "rejected" as const,
+          entity: "node" as const,
+          reason: "unknown" as const,
+        }),
+    });
+    const store = createStore(graph, backend);
+    const from = await store.nodes.Person.create({ name: "from" });
+    const to = await store.nodes.Person.create({ name: "to" });
+
+    await expect(
+      store.edges.knows.create(
+        from,
+        to,
+        { note: "malformed backend result" },
+        { id: "wrong-result-entity" },
+      ),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
+    expect(await fixture.backend.getEdge(graph.id, "wrong-result-entity")).toBe(
+      undefined,
+    );
+  });
 });
