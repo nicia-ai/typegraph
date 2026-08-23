@@ -52,8 +52,8 @@ import {
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
 import {
-  supportsNodeInsertClaims,
   supportsNodeCreatePlan,
+  supportsNodeInsertClaims,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
 import {
@@ -132,9 +132,9 @@ import {
   checkUniquenessConstraints,
   createUniquenessContext,
   nodeClaimEntries,
-  planNodeCreateClaims,
-  type NodeCreateClaimPlan,
   type NodeClaimItem,
+  type NodeCreateClaimPlan,
+  planNodeCreateClaims,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import { type UpsertUpdateNodeInput } from "../collections/node-collection";
@@ -183,7 +183,7 @@ import {
 import { type NodeUpdateFences } from "./write-fences";
 import { nodeBatchWritePlan, nodeWritePlan } from "./write-plan";
 import {
-  type NodeInsertWork,
+  type NodeCreateWork,
   type NodeWriteSession,
   unfencedTarget,
   type WriteTarget,
@@ -1035,10 +1035,10 @@ function resolveNodeInsertProjections(
  * the whole unit and applies all three in the pinned order (pre-insert claims,
  * row, post-insert claims, sync fans).
  */
-function nodeInsertWork(
+function nodeCreateWork(
   prepared: NodeCreatePrepared,
   projections: readonly NodeInsertProjection[] = [],
-): NodeInsertWork {
+): NodeCreateWork {
   return {
     params: prepared.insertParams,
     claim: nodeCreateClaimItem(prepared),
@@ -1927,8 +1927,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       };
       const work =
         fuseSchemaFenceProjections ?
-          nodeInsertWork(prepared, projections)
-        : nodeInsertWork(prepared);
+          nodeCreateWork(prepared, projections)
+        : nodeCreateWork(prepared);
       const inserted =
         prepared.insertIfAbsent ?
           await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
@@ -1951,7 +1951,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
 
     if (fuseProjections && !fuseSchemaFenceProjections) {
       const row = await withAlreadyExistsTranslation("node", () =>
-        session.createNode(nodeInsertWork(prepared, projections)),
+        session.createNode(nodeCreateWork(prepared, projections)),
       );
       return rowToNode(row);
     }
@@ -1959,7 +1959,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     if (prepared.insertIfAbsent) {
       const inserted =
         fuseSchemaFenceInFirstWrite ? undefined : (
-          await session.createNodeIfAbsent(nodeInsertWork(prepared))
+          await session.createNodeIfAbsent(nodeCreateWork(prepared))
         );
       if (inserted !== undefined) {
         if (identity !== undefined) {
@@ -2012,7 +2012,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     // translation — would change import's create-leg error type on a lost
     // race, which it must not.
     const row = await withAlreadyExistsTranslation("node", async () => {
-      const work = nodeInsertWork(prepared);
+      const work = nodeCreateWork(prepared);
       if (shouldReturnRow) return session.createNode(work);
       await session.createNodeNoReturn(work);
       return;
@@ -2112,7 +2112,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       // depends on which of the two groups writes first.
       await withAlreadyExistsTranslation("node", () =>
         session.createNodesNoReturn(
-          partition.inserts.map((prepared) => nodeInsertWork(prepared)),
+          partition.inserts.map((prepared) => nodeCreateWork(prepared)),
         ),
       );
       for (const prepared of partition.resurrections) {
@@ -2163,7 +2163,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       // whole unit — same reasoning as {@link executeNodeCreateNoReturnBatch}.
       const inserted = await withAlreadyExistsTranslation("node", () =>
         session.createNodes(
-          partition.inserts.map((prepared) => nodeInsertWork(prepared)),
+          partition.inserts.map((prepared) => nodeCreateWork(prepared)),
         ),
       );
       const resurrected: BackendNodeRow[] = [];

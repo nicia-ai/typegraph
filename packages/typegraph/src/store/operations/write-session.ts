@@ -83,7 +83,6 @@ import {
 import {
   type NodeClaimItem,
   type NodeCreateClaimPlan,
-  planNodeCreateClaims,
   refuseNodeCreateClaimError,
   withNodeCreateClaims,
   withNodeCreateClaimsBatch,
@@ -245,11 +244,11 @@ type NodeInsertSideEffects = Readonly<{
  * owe" and "when is each due", and a caller that could hand over a prepared
  * entry list could hand over a shorter one.
  */
-export type NodeInsertWork = Readonly<{
+export type NodeCreateWork = Readonly<{
   params: InsertNodeParams;
   claim: NodeClaimItem;
-  /** The preparation-time claim decision, when this is a single create. */
-  claimPlan?: NodeCreateClaimPlan;
+  /** The preparation-time claim decision, shared by fused and fallback paths. */
+  claimPlan: NodeCreateClaimPlan;
   sideEffects: NodeInsertSideEffects;
   projections: readonly NodeInsertProjection[];
 }>;
@@ -328,20 +327,20 @@ function edgeBatchClaims(
 
 export type NodeWriteSession = Readonly<{
   // ---- B0: delegates to node-write-pipeline.ts + insert-dispatch.ts
-  createNode: (work: NodeInsertWork) => Promise<NodeRow>;
+  createNode: (work: NodeCreateWork) => Promise<NodeRow>;
   /** A conflict-safe insert for a no-claim create; undefined means occupied. */
-  createNodeIfAbsent: (work: NodeInsertWork) => Promise<NodeRow | undefined>;
+  createNodeIfAbsent: (work: NodeCreateWork) => Promise<NodeRow | undefined>;
   createNodeIfAbsentWithSchemaFence: (
-    work: NodeInsertWork,
+    work: NodeCreateWork,
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
   createNodeWithSchemaFence: (
-    work: NodeInsertWork,
+    work: NodeCreateWork,
     schemaFence: SchemaWriteFenceParams,
   ) => Promise<NodeRow | undefined>;
-  createNodeNoReturn: (work: NodeInsertWork) => Promise<void>;
-  createNodes: (work: readonly NodeInsertWork[]) => Promise<readonly NodeRow[]>;
-  createNodesNoReturn: (work: readonly NodeInsertWork[]) => Promise<void>;
+  createNodeNoReturn: (work: NodeCreateWork) => Promise<void>;
+  createNodes: (work: readonly NodeCreateWork[]) => Promise<readonly NodeRow[]>;
+  createNodesNoReturn: (work: readonly NodeCreateWork[]) => Promise<void>;
   reviseNode: (
     work: NodeUpdateWork,
     fences: NodeUpdateFences,
@@ -431,8 +430,7 @@ export function createWriteSession(
     // seam owns the two groups and the compensation between them; this surface
     // owns only "the row write it gates is THIS one".
     createNode: async (work) => {
-      const claimPlan =
-        work.claimPlan ?? planNodeCreateClaims(writeContext, work.claim);
+      const claimPlan = work.claimPlan;
       const insertPlanFused = supportsNodeCreatePlan(target, {
         claims: claimPlan.claims,
         projections: work.projections,

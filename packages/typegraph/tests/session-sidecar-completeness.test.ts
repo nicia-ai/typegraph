@@ -74,6 +74,7 @@ import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
 import { edgeCardinalityClaim } from "../src/store/claims/edge-claims";
+import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import {
   runWritePlan,
   type WritePlanContext,
@@ -85,7 +86,7 @@ import {
 } from "../src/store/operations/write-plan";
 import {
   type EdgeInsertWork,
-  type NodeInsertWork,
+  type NodeCreateWork,
   type WriteSession,
 } from "../src/store/operations/write-session";
 import { requireDefined } from "../src/utils/presence";
@@ -281,15 +282,17 @@ function documentProps(id: string): Record<string, unknown> {
   };
 }
 
-function insertWork(id: string): NodeInsertWork {
+function createWork(id: string): NodeCreateWork {
+  const claim = {
+    kind: "Doc",
+    id,
+    props: documentProps(id),
+    constraints: uniqueConstraints,
+  } as const;
   return {
     params: { graphId: GRAPH_ID, kind: "Doc", id, props: documentProps(id) },
-    claim: {
-      kind: "Doc",
-      id,
-      props: documentProps(id),
-      constraints: uniqueConstraints,
-    },
+    claim,
+    claimPlan: planNodeCreateClaims({ graphId: GRAPH_ID, registry }, claim),
     sideEffects: {
       kind: "Doc",
       id,
@@ -424,7 +427,7 @@ let fusedSchemaEdgeCounter = 0;
 const CASES: Record<keyof WriteSession, Case> = {
   createNode: {
     run: () =>
-      Promise.resolve((session) => session.createNode(insertWork("a"))),
+      Promise.resolve((session) => session.createNode(createWork("a"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNode",
     // The fixture's constraint is `scope: "kind"`, whose own primary key IS the
@@ -438,7 +441,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   },
   createNodeIfAbsent: {
     run: () =>
-      Promise.resolve((session) => session.createNodeIfAbsent(insertWork("a"))),
+      Promise.resolve((session) => session.createNodeIfAbsent(createWork("a"))),
     sidecars: ["upsertFulltext", "upsertEmbedding"],
     row: "insertNodeIfAbsent",
     postRowFans: ["upsertFulltext", "upsertEmbedding"],
@@ -447,7 +450,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodeIfAbsentWithSchemaFence: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodeIfAbsentWithSchemaFence(insertWork("schema-a"), {
+        session.createNodeIfAbsentWithSchemaFence(createWork("schema-a"), {
           expectedVersion: 1,
           graphId: GRAPH_ID,
         }),
@@ -460,7 +463,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodeWithSchemaFence: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodeWithSchemaFence(insertWork("schema-b"), {
+        session.createNodeWithSchemaFence(createWork("schema-b"), {
           expectedVersion: 1,
           graphId: GRAPH_ID,
         }),
@@ -472,7 +475,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   },
   createNodeNoReturn: {
     run: () =>
-      Promise.resolve((session) => session.createNodeNoReturn(insertWork("b"))),
+      Promise.resolve((session) => session.createNodeNoReturn(createWork("b"))),
     sidecars: ["insertUnique", "upsertFulltext", "upsertEmbedding"],
     row: "insertNodeNoReturn",
     postRowClaims: ["insertUnique"],
@@ -482,7 +485,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodes: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodes([insertWork("c"), insertWork("d")]),
+        session.createNodes([createWork("c"), createWork("d")]),
       ),
     sidecars: [
       "insertUniqueBatch",
@@ -497,7 +500,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   createNodesNoReturn: {
     run: () =>
       Promise.resolve((session) =>
-        session.createNodesNoReturn([insertWork("e"), insertWork("f")]),
+        session.createNodesNoReturn([createWork("e"), createWork("f")]),
       ),
     sidecars: [
       "insertUniqueBatch",

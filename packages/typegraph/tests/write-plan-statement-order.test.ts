@@ -92,6 +92,7 @@ import {
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry";
 import { type Store } from "../src/store";
+import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import { runWritePlan } from "../src/store/operations/write-executor";
 import { nodeWritePlan } from "../src/store/operations/write-plan";
 
@@ -728,6 +729,15 @@ describe("the executor's own frame keeps that order", () => {
             props: { name: "executor" },
             constraints: [],
           },
+          claimPlan: planNodeCreateClaims(
+            { graphId: graph.id, registry: buildKindRegistry(graph) },
+            {
+              kind: "Plain",
+              id: "executor-node",
+              props: { name: "executor" },
+              constraints: [],
+            },
+          ),
           sideEffects: {
             kind: "Plain",
             id: "executor-node",
@@ -806,6 +816,15 @@ describe("the executor's own frame keeps that order", () => {
             props: { name: "executor fallback" },
             constraints: [],
           },
+          claimPlan: planNodeCreateClaims(
+            { graphId: graph.id, registry: buildKindRegistry(graph) },
+            {
+              kind: "Plain",
+              id: "executor-fallback-node",
+              props: { name: "executor fallback" },
+              constraints: [],
+            },
+          ),
           sideEffects: {
             kind: "Plain",
             id: "executor-fallback-node",
