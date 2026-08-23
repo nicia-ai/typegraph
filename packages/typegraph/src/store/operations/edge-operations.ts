@@ -181,8 +181,9 @@ import {
 } from "./write-session";
 import {
   diagnoseFusedSchemaFenceNoRow,
-  hasTransactionSchemaFenceLease,
+  hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
+  memoizeLeasedSchemaFence,
 } from "./write-transaction";
 
 // ============================================================
@@ -582,7 +583,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     const fuseSchemaFenceInFirstWrite =
       schemaFenceInFirstWrite &&
       isSchemaFencedInsertEligible(targetBackend) &&
-      !hasTransactionSchemaFenceLease(targetBackend);
+      !hasLeasedSchemaFence(ctx, targetBackend);
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
@@ -652,10 +653,16 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           )
         : session.createEdgeIfEndpointsLive(fusedWork),
       );
-      if (fusedRow !== undefined) return rowToEdge(fusedRow);
+      if (fusedRow !== undefined) {
+        if (fuseSchemaFenceInFirstWrite) {
+          memoizeLeasedSchemaFence(ctx, targetBackend);
+        }
+        return rowToEdge(fusedRow);
+      }
 
       if (fuseSchemaFenceInFirstWrite) {
         await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+        memoizeLeasedSchemaFence(ctx, targetBackend);
       }
 
       prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {

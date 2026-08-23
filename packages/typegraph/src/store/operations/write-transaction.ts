@@ -113,13 +113,36 @@ const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
  */
 const leasedSchemaFences = new WeakMap<object, Map<string, Promise<void>>>();
 
-/** Whether managed writes on this exact transaction target share a fence. */
-export function hasTransactionSchemaFenceLease(target: object): boolean {
-  return leasedSchemaFences.has(target);
-}
-
 function schemaFenceLeaseKey(graphId: string, expectedVersion: number): string {
   return `${graphId}\u0000${expectedVersion}`;
+}
+
+/** Whether this transaction has already acquired the exact schema fence. */
+export function hasLeasedSchemaFence(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  target: object,
+): boolean {
+  const expectedVersion = ctx.schemaVersion;
+  return (
+    expectedVersion !== undefined &&
+    leasedSchemaFences
+      .get(target)
+      ?.has(schemaFenceLeaseKey(ctx.graphId, expectedVersion)) === true
+  );
+}
+
+/** Records a schema fence acquired inside a successful fused write statement. */
+export function memoizeLeasedSchemaFence(
+  ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
+  target: object,
+): void {
+  const expectedVersion = ctx.schemaVersion;
+  const leases = leasedSchemaFences.get(target);
+  if (expectedVersion === undefined || leases === undefined) return;
+  leases.set(
+    schemaFenceLeaseKey(ctx.graphId, expectedVersion),
+    Promise.resolve(),
+  );
 }
 
 /**

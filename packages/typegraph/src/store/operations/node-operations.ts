@@ -190,8 +190,9 @@ import {
 } from "./write-session";
 import {
   diagnoseFusedSchemaFenceNoRow,
-  hasTransactionSchemaFenceLease,
+  hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
+  memoizeLeasedSchemaFence,
 } from "./write-transaction";
 
 // ============================================================
@@ -1860,7 +1861,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     const fuseSchemaFenceInFirstWrite =
       schemaFenceInFirstWrite &&
       isSchemaFencedInsertEligible(targetBackend) &&
-      !hasTransactionSchemaFenceLease(targetBackend);
+      !hasLeasedSchemaFence(ctx, targetBackend);
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
       await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
@@ -1937,6 +1938,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
         : await session.createNodeWithSchemaFence(work, schemaFence);
       if (inserted !== undefined) {
+        memoizeLeasedSchemaFence(ctx, targetBackend);
         return shouldReturnRow ? rowToNode(inserted) : undefined;
       }
 
@@ -1944,6 +1946,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // ordinary active-schema diagnostic preserves the settled version in
       // StaleVersionError.details.actual without a second PostgreSQL lock.
       await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+      memoizeLeasedSchemaFence(ctx, targetBackend);
       if (!prepared.insertIfAbsent) {
         throw new DatabaseOperationError(
           `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
