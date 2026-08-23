@@ -1024,6 +1024,10 @@ export type EdgeConvergeCreateCommandResult =
 /** The session boundary on which an authoritative command executes. */
 export type GraphCommandSession = "root" | "transaction";
 
+/** Effective transaction isolation observed on the command's physical session. */
+export type GraphCommandIsolation =
+  "read_committed" | "repeatable_read" | "serializable" | "unknown";
+
 declare const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
 
 /** Compile-time evidence that graph-write coordination is already established. */
@@ -2409,7 +2413,7 @@ export type GraphBackend = Readonly<{
   lockSchemaVersionAndGraphWrite?: (
     this: void,
     params: SchemaWriteFenceParams,
-  ) => Promise<void>;
+  ) => Promise<GraphCommandIsolation>;
   /**
    * Internal schema-lifecycle seam for features whose data preflight must
    * commit atomically with the schema CAS. The callback runs in the same

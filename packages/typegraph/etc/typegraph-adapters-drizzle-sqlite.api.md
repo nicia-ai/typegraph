@@ -4290,7 +4290,7 @@ type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<void>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     registerGraphTemplate?: (this: void, params: Readonly<{
@@ -4410,6 +4410,9 @@ type GraphCommandExecutionContext = Readonly<{
     session: "transaction";
     coordination: "none" | GraphCommandCoordination;
 }>;
+
+// @public
+type GraphCommandIsolation = "read_committed" | "repeatable_read" | "serializable" | "unknown";
 
 // @public
 type GraphCommandPort = Readonly<{

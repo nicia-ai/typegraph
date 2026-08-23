@@ -683,6 +683,10 @@ Node creates still distinguish live duplicates from tombstones, and edge
 writes still preserve endpoint and claim ordering. `getOrCreateByEndpoints`
 uses an outside read only for its no-write found fast path; every create,
 resurrection, or update makes its decision on the fenced transaction target.
+An adopted PostgreSQL transaction can therefore return an existing match at
+any isolation level. If the operation reaches the create leg, TypeGraph checks
+the effective isolation captured by the graph-lock statement and refuses
+repeatable read before issuing the convergent write.
 
 The remaining transactionless convergence floor is structural rather than a
 missing cache. A dynamic `matchOn` list has no database uniqueness object that

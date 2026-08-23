@@ -182,6 +182,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * and coordination evidence; removing the inert atomicity, authority, and
  * result-cache aliases reduces forgotten-export debt by three at each of the
  * 12 rendering entrypoints.
+ * Carrying the effective transaction isolation in the command coordination
+ * evidence adds `GraphCommandIsolation` to those same 12 rendering
+ * entrypoints (+1 each). The root and backend barrels export it directly.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -193,24 +196,24 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 228,
-    sha256: "94a0e2799ba492edda0ffbee2f81c24c7ae00c2899d2275bcbbbf72cf3a9244d",
+    count: 229,
+    sha256: "d1d547e1820cb130095c0e1aa962c91a1dd559731777b3b2950d608420ba49e9",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 232,
-    sha256: "16756f9eaa902fe4e8b3c943ab21ad39d2c21f731e6d176a09772d3cf7b7cb3d",
+    count: 233,
+    sha256: "522c96e5e8742db358264a65f75ea83dafcc161f5b37dd53056c584a4d35079d",
   },
   "./adapters/drizzle/sqlite": {
-    count: 229,
-    sha256: "a90bc6cf279bded852742ec8d5c4ee2755b1a046d4ac762f6f848b711a4169c1",
+    count: 230,
+    sha256: "21a3c5b6a74dcd43080b9e223ad18c2afdf8e2ba118cca0af6706a07926203f4",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 232,
-    sha256: "a0bb773fe726595ec9fc4b552a9b95dad49d08cd3095514562c8784f403b0ecf",
+    count: 233,
+    sha256: "e5f5780b500f988133e6de9bb02b293184ab06d8dba7ba754d93e545fdf9251f",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 232,
-    sha256: "a0bb773fe726595ec9fc4b552a9b95dad49d08cd3095514562c8784f403b0ecf",
+    count: 233,
+    sha256: "e5f5780b500f988133e6de9bb02b293184ab06d8dba7ba754d93e545fdf9251f",
   },
   "./backend": {
     count: 13,
@@ -225,36 +228,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "0f36d8f84e9a9d75255b39940c5308ae4df2c3dbe1e0cb2683b00ee8cb974f73",
   },
   "./graph-merge": {
-    count: 644,
-    sha256: "b93f20806ad76012355994569804b2aaba7b0b5e9ff5b002d153ab1d5a616462",
+    count: 645,
+    sha256: "201b1b1c319c747331fe6cb336d6052a3d68f5c3c404551bb58b33ef60710eaf",
   },
   "./indexes": {
     count: 43,
     sha256: "49144a0eeda76d83d8ebe63f533e25796e1b7d46fe521a4adc997fb58cb876bb",
   },
   "./interchange": {
-    count: 630,
-    sha256: "916aa45310083225f00b553711d28d5c92851f2daf3bee9343559b5960c2c7c4",
+    count: 631,
+    sha256: "001a13e60d445df10f723c4454677b8961ff86e2b677ecd29f3dcd009f1e9058",
   },
   "./postgres/pglite": {
-    count: 634,
-    sha256: "8111a4ae9c79edcab32fcf947effe978e5bc63b046f9a7c783ab05e6f807fef5",
+    count: 635,
+    sha256: "bbfcc265937e0f5fce1d6832093583c818d0a3d009a0e36ee4ebc381581a839a",
   },
   "./profiler": {
-    count: 632,
-    sha256: "42d882d06ddb328ddb173489ea4128173d7aff287e8de9063376387bc544a6e0",
+    count: 633,
+    sha256: "13e1723e3a5367871cb2879798f6532969e826b7f2035f30dd14e8416d9cbe2f",
   },
   "./provenance": {
-    count: 638,
-    sha256: "f1a551f00498919ccc5e50f0c2cd2904593d7a3f1de75a54e0c37b9046a106b9",
+    count: 639,
+    sha256: "9333b70e465af8b4a338f08dbe0a41cbef2371c38979470ceae7c545c4e2a2da",
   },
   "./schema": {
-    count: 250,
-    sha256: "6b680dc417d83dee8e8a65c17eb80b95a7a21a7f2709506943065ea400a2438a",
+    count: 251,
+    sha256: "eb5f5208ac85651ad8f2154695732a323424d9d724408c458a470dd7668d6700",
   },
   "./sqlite/local": {
-    count: 634,
-    sha256: "8111a4ae9c79edcab32fcf947effe978e5bc63b046f9a7c783ab05e6f807fef5",
+    count: 635,
+    sha256: "bbfcc265937e0f5fce1d6832093583c818d0a3d009a0e36ee4ebc381581a839a",
   },
 };
 

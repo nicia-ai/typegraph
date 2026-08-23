@@ -23,7 +23,7 @@ export const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower",
 export function assertFiniteEmbedding(embedding: readonly number[], name: string): void;
 
 // @public
-export function assertGraphCommandConvergenceIsolation(port: GraphCommandPort): void;
+export function assertGraphCommandConvergenceIsolation(port: GraphCommandPort, coordination: GraphCommandCoordination): void;
 
 // @public
 export function assertGraphCommandExecutionContext(context: unknown): asserts context is GraphCommandExecutionContext;
@@ -1954,7 +1954,7 @@ export type GraphBackend = Readonly<{
         graphId: string;
         expectedVersion: number;
     }>) => Promise<void>;
-    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<void>;
+    lockSchemaVersionAndGraphWrite?: (this: void, params: SchemaWriteFenceParams) => Promise<GraphCommandIsolation>;
     commitSchemaVersionWithPreflight?: (this: void, params: CommitSchemaVersionParams, preflight: (target: SchemaCommitPreflightBackend) => Promise<void>) => Promise<SchemaVersionRow>;
     setActiveVersion: (this: void, params: SetActiveVersionParams) => Promise<void>;
     registerGraphTemplate?: (this: void, params: Readonly<{
@@ -2077,6 +2077,9 @@ export type GraphCommandExecutionContext = Readonly<{
 
 // @public
 export function graphCommandExecutionContext(session: GraphCommandSession, coordination?: "none" | GraphCommandCoordination): GraphCommandExecutionContext;
+
+// @public
+export type GraphCommandIsolation = "read_committed" | "repeatable_read" | "serializable" | "unknown";
 
 // @public
 export type GraphCommandPort = Readonly<{
@@ -2591,6 +2594,9 @@ export type NodeRow = Readonly<{
 
 // @public
 export function normalizeGraphAnalyticsCapabilities(capabilities: BackendCapabilities): BackendCapabilities;
+
+// @public
+export function normalizeGraphCommandIsolation(value: unknown): GraphCommandIsolation;
 
 // @public
 export type NullCheckOp = "isNull" | "isNotNull";

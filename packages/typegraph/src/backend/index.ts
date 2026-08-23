@@ -143,6 +143,7 @@ export {
 export type {
   GraphCommandCoordination,
   GraphCommandExecutionContext,
+  GraphCommandIsolation,
   GraphCommandSession,
 } from "./command-contract";
 export {
@@ -150,6 +151,7 @@ export {
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   graphCommandExecutionContext,
+  normalizeGraphCommandIsolation,
 } from "./command-contract";
 export {
   deleteLegacyRecordedAnchorMap,

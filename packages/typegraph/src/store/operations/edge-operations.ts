@@ -624,13 +624,6 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     // wrapper may replace the marked outer backend with an unmarked target.
     // Fall back to the ordinary fence before any row work in that case.
     const targetBackend = unfencedTarget(target);
-    if (
-      convergeOn !== undefined &&
-      targetBackend.dialect === "postgres" &&
-      !("transaction" in targetBackend)
-    ) {
-      assertGraphCommandConvergenceIsolation(targetBackend.commands);
-    }
     const fuseSchemaFenceInFirstWrite =
       schemaFenceInFirstWrite &&
       isSchemaFencedInsertEligible(targetBackend) &&
@@ -787,8 +780,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       }
 
       prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
-        validateCardinality:
-          !usesGuardedCardinalityClaim || usesFusedCardinalityInsert,
+        // A fused refusal has no row, so the ordered fallback owns the full
+        // portable cardinality diagnostic regardless of claim mode.
+        validateCardinality: true,
       });
     }
 
@@ -1946,9 +1940,6 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     onImmutableLowerBound?: "preserve" | "refuse";
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
-  if (backend.dialect === "postgres" && !("transaction" in backend)) {
-    assertGraphCommandConvergenceIsolation(backend.commands);
-  }
   const ifExists = options?.ifExists ?? "return";
   const matchOn = options?.matchOn ?? [];
 
@@ -2286,10 +2277,6 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]> {
   if (items.length === 0) return [];
 
-  if (backend.dialect === "postgres" && !("transaction" in backend)) {
-    assertGraphCommandConvergenceIsolation(backend.commands);
-  }
-
   const ifExists = options?.ifExists ?? "return";
   const matchOn = options?.matchOn ?? [];
 
@@ -2573,7 +2560,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       // fences unconditionally.
       edgeWritePlan("edgeMatchKeyConvergence"),
       backend,
-      async (session, target) => {
+      async (session, target, _overlaidSession, lock) => {
         // ## The one widening the migration cannot remove
         //
         // The nested legs are whole managed writes of their own: each opens its
@@ -2594,6 +2581,17 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 
         // Step 4: Execute creates in batch
         if (toCreate.length > 0) {
+          // The batch insertion path deliberately remains one multi-row write,
+          // rather than expanding into one convergence command per item. It
+          // still derives create-vs-found from the fenced snapshot, so enforce
+          // the same freshness contract as the single-item command before the
+          // first create. Existing-only batches never reach this gate.
+          if (lock.coordination !== undefined) {
+            assertGraphCommandConvergenceIsolation(
+              target.commands,
+              lock.coordination,
+            );
+          }
           const createInputs = toCreate.map((entry) => entry.input);
           const createdEdges = await executeEdgeCreateBatch(
             ctx,

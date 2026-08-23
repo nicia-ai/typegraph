@@ -19,7 +19,7 @@
  * would be a violation a regex scan misses. Parsing removes both classes
  * instead of documenting them, and `typescript` is already a devDependency.
  *
- * The scan implements the rule's three selectors exactly — a call through a
+ * The scan implements the rule's selectors exactly — a call through a
  * member expression, a hoist of a member into a local, and a
  * `requireDefined(...)` wrap — and, like the rule, deliberately does NOT match
  * capability probes (`x.member === undefined`), which are legitimate.
@@ -169,8 +169,8 @@ function scanFile(file: string, banned: ReadonlySet<string>): Violation[] {
     }
     if (
       ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === "execute" &&
+      (ts.isPropertyAccessExpression(node.expression) ||
+        ts.isElementAccessExpression(node.expression)) &&
       ts.isPropertyAccessExpression(node.expression.expression) &&
       node.expression.expression.name.text === "commands" &&
       banned.has("commands")
@@ -463,6 +463,12 @@ describe("write-pipeline ratchet", () => {
         "export const go = () => executeAuthoritativeGraphCommand(c, b.commands);\n",
       ),
     ).toEqual([]);
+    expect(
+      write('export const go = () => b.commands["execute"](c);\n'),
+    ).toHaveLength(1);
+    expect(
+      write('export const go = () => b.commands["other"](c);\n'),
+    ).toHaveLength(1);
 
     // …and the shapes it must NOT flag: capability probes and unrelated names.
     expect(

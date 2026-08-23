@@ -301,6 +301,13 @@ These rules are each distilled from a recurring class of real defects:
   prefer returning the decision itself (the predicate, the fence, the plan)
   over a flag a caller re-derives it from — a consumer that cannot spell its
   own version cannot drift.
+- **Session facts come from the session that enforces them.** Transaction
+  isolation, locks, and similar execution facts must be observed on the pinned
+  database session and carried in the evidence minted by that observation.
+  Never infer an effective fact from a requested option or a server default;
+  configuration can rewrite either between environments. When an existing
+  fence statement can return the fact, fold it into that statement rather than
+  adding a probe round trip.
 - **A backend is derived through `src/backend/derive-backend.ts`, never
   copied.** `deriveBackend` to decorate, `projectBackend` /
   `projectBackendWithout` / `projectGraphBackend` to narrow. A spread,

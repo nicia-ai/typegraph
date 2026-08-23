@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStore,
   defineEdge,
   defineGraph,
   defineNode,
@@ -26,7 +27,10 @@ import type {
 } from "../src/backend/types";
 import { tsvectorStrategy } from "../src/query/dialect/fulltext-strategy";
 import { createStore } from "../src/store";
-import { lockRecordedGraphWrite } from "../src/store/recorded-capture";
+import {
+  createRecordedBackend,
+  lockRecordedGraphWrite,
+} from "../src/store/recorded-capture";
 import { requireDefined } from "../src/utils/presence";
 
 function convergenceCommand(
@@ -87,6 +91,125 @@ async function executeConvergence(
 }
 
 describe("PostgreSQL edge convergence command", () => {
+  it("refuses convergence under a repeatable-read server default", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      await client.exec(
+        "SET default_transaction_isolation = 'repeatable read'",
+      );
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+      });
+      const store = createAdapterStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        store.edges.knows.getOrCreateByEndpoints(
+          alice,
+          bob,
+          { label: "unsafe-default" },
+          { matchOn: ["label"] },
+        ),
+      ).rejects.toMatchObject({
+        details: {
+          code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("allows an adopted transaction to return an existing match", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const db = drizzlePglite(client);
+      const backend = createPostgresBackend(db, { vector: false });
+      const store = createAdapterStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      await store.edges.knows.getOrCreateByEndpoints(
+        alice,
+        bob,
+        { label: "existing" },
+        { matchOn: ["label"] },
+      );
+
+      const result = await db.transaction(
+        async (externalTransaction) => {
+          const transactionStore = store.withTransaction(externalTransaction);
+          const single =
+            await transactionStore.edges.knows.getOrCreateByEndpoints(
+              alice,
+              bob,
+              { label: "existing" },
+              { matchOn: ["label"] },
+            );
+          const bulk =
+            await transactionStore.edges.knows.bulkGetOrCreateByEndpoints(
+              [
+                {
+                  from: alice,
+                  to: bob,
+                  props: { label: "existing" },
+                },
+              ],
+              { matchOn: ["label"] },
+            );
+          return { bulk, single };
+        },
+        { isolationLevel: "repeatable read" },
+      );
+
+      expect(result.single.action).toBe("found");
+      expect(result.bulk).toMatchObject([{ action: "found" }]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("refuses an adopted repeatable-read bulk create", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const db = drizzlePglite(client);
+      const backend = createPostgresBackend(db, { vector: false });
+      const store = createAdapterStore(graph, backend);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+
+      await expect(
+        db.transaction(
+          async (externalTransaction) =>
+            store
+              .withTransaction(externalTransaction)
+              .edges.knows.bulkGetOrCreateByEndpoints(
+                [
+                  {
+                    from: alice,
+                    to: bob,
+                    props: { label: "unsafe-bulk-create" },
+                  },
+                ],
+                { matchOn: ["label"] },
+              ),
+          { isolationLevel: "repeatable read" },
+        ),
+      ).rejects.toMatchObject({
+        details: {
+          code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+          isolation: "repeatable_read",
+        },
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("refuses a PostgreSQL override that falsely claims serialized writers", async () => {
     const client = await PGlite.create();
     try {
@@ -311,6 +434,7 @@ describe("PostgreSQL edge convergence command", () => {
       const backend = createPostgresBackend(drizzlePglite(client), {
         vector: false,
       });
+      expect(createRecordedBackend(backend).commands.session).toBe("root");
       const store = createStore(graph, backend, { history: true });
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
@@ -328,7 +452,7 @@ describe("PostgreSQL edge convergence command", () => {
     }
   });
 
-  it("refuses repeatable-read convergence before its first match lookup", async () => {
+  it("refuses repeatable-read convergence after the existing-match lookup", async () => {
     const client = await PGlite.create();
     try {
       await client.exec(generatePostgresDDL().join("\n\n"));
@@ -370,7 +494,7 @@ describe("PostgreSQL edge convergence command", () => {
       ).rejects.toMatchObject({
         details: { code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT" },
       });
-      expect(matchLookups).toBe(0);
+      expect(matchLookups).toBe(1);
     } finally {
       await client.close();
     }
@@ -424,9 +548,7 @@ describe("PostgreSQL edge convergence command", () => {
           { label: "unsafe" },
           { matchOn: ["label"] },
         ),
-      ).rejects.toMatchObject({
-        details: { code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT" },
-      });
+      ).rejects.toThrow("coordination does not belong");
       expect(matchLookups).toBe(0);
     } finally {
       await client.close();

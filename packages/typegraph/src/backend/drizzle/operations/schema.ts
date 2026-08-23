@@ -116,7 +116,9 @@ export function buildLockSchemaVersionAndGraphWrite(
       ) AS "lock_token"
       FROM "schema_fence"
     )
-    SELECT TRUE AS "fence_acquired"
+    SELECT
+      TRUE AS "fence_acquired",
+      current_setting('transaction_isolation') AS "transaction_isolation"
     FROM "graph_write_lock"
   `;
 }

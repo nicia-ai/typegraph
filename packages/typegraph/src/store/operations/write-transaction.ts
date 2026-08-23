@@ -529,11 +529,17 @@ export function runInWriteTransaction<T>(
         // portable calls: schema row first, graph advisory lock second. It is
         // one statement only when THIS frame owes both acquisitions; a held
         // graph lock must never suppress the per-write schema fence.
-        await combinedSchemaGraphFence.acquire(combinedSchemaGraphFence.params);
-        memoizeAcquiredRecordedGraphWriteLock(target, ctx.graphId);
+        const isolation = await combinedSchemaGraphFence.acquire(
+          combinedSchemaGraphFence.params,
+        );
+        memoizeAcquiredRecordedGraphWriteLock(target, ctx.graphId, isolation);
         // The combined statement acquired the real advisory lock, so mint
         // graph/port-bound command coordination only after it returns.
-        lock = acquiredGraphWriteLockFromCombinedFence(target, ctx.graphId);
+        lock = acquiredGraphWriteLockFromCombinedFence(
+          target,
+          ctx.graphId,
+          isolation,
+        );
       }
     } catch (error) {
       if (acquiresLock) held.delete(ctx.graphId);

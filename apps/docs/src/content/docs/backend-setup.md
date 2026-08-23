@@ -553,11 +553,16 @@ statement memory. For a high-cardinality stream of SQL text, use
 
 Store create paths use the backend's `commands` port for writes whose
 decision and mutation must share one command boundary. First-party paths pass
-an explicit command context: root execution is limited to a single-statement
-command, while a transaction-scoped backend uses the active transaction. A
+an explicit command context: a root port owns any internal transaction it
+needs and cannot inherit caller coordination, while a transaction-scoped
+backend uses the active caller or Store transaction. A
 transaction command may additionally carry a coordination token only after it
 has acquired the graph's advisory lock; the token is bound to that graph and
 transaction session and cannot authorize work on another connection.
+On PostgreSQL, the lock statement also observes the effective transaction
+isolation and binds it to the same token. Match-key convergence therefore
+accepts only read committed or serializable based on database state, not the
+caller-requested option or the server's assumed default.
 
 `GraphBackend.commands` is a required member as of the authoritative command
 port release. Custom backends must expose `{ session, execute }` and implement
@@ -596,12 +601,15 @@ const backend: GraphBackend = { ...members, commands };
 
 Every command port caller must provide the explicit context. TypeGraph-owned
 write paths use the command helper, which verifies that any coordination token
-belongs to the active graph and transaction session before executing the
-command. When decorating a first-party backend with `deriveBackend`, a
-same-session `commands` override automatically retains that session identity
-and its effective isolation level. A wrapper that changes session or forwards
-to a different connection is a new command boundary and cannot reuse a lock
-token from the original port.
+belongs to the active graph and transaction session and carries a supported
+effective isolation before executing convergence. The portable PostgreSQL
+graph-lock path records that isolation automatically. A custom implementation
+of `lockSchemaVersionAndGraphWrite` must return the normalized
+`GraphCommandIsolation` observed by its combined lock statement. When
+decorating a first-party backend with `deriveBackend`, a same-session
+`commands` override retains the session identity. A wrapper that changes
+session or forwards to a different connection is a new command boundary and
+cannot reuse a token from the original port.
 
 ### Connection Pooling
 

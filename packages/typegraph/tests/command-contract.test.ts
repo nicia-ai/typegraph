@@ -67,6 +67,14 @@ describe("authoritative graph command contract", () => {
     ]);
   });
 
+  it("accepts the context constructed for a root command", () => {
+    const context = graphCommandExecutionContext("root");
+
+    expect(() => {
+      assertGraphCommandExecutionContext(context);
+    }).not.toThrow();
+  });
+
   it("rejects forged graph-write coordination evidence", () => {
     expect(() => {
       assertGraphCommandExecutionContext({
@@ -94,7 +102,11 @@ describe("authoritative graph command contract", () => {
       session: "transaction",
       execute: () => Promise.resolve(RESULT),
     };
-    const coordination = mintGraphCommandCoordination(portA, "other-graph");
+    const coordination = mintGraphCommandCoordination(
+      portA,
+      "other-graph",
+      "read_committed",
+    );
 
     expect(() =>
       executeAuthoritativeGraphCommand(portA, COMMAND, coordination),
@@ -102,5 +114,21 @@ describe("authoritative graph command contract", () => {
     expect(() =>
       executeAuthoritativeGraphCommand(portB, COMMAND, coordination),
     ).toThrow("does not belong");
+  });
+
+  it("refuses transaction coordination on a root context", () => {
+    const port: GraphCommandPort = {
+      session: "transaction",
+      execute: () => Promise.resolve(RESULT),
+    };
+    const coordination = mintGraphCommandCoordination(
+      port,
+      "graph",
+      "read_committed",
+    );
+
+    expect(() => graphCommandExecutionContext("root", coordination)).toThrow(
+      "root command",
+    );
   });
 });

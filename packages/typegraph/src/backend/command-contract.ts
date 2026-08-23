@@ -3,6 +3,7 @@ import type {
   GraphCommand,
   GraphCommandCoordination,
   GraphCommandExecutionContext,
+  GraphCommandIsolation,
   GraphCommandPort,
   GraphCommandResult,
   GraphCommandSession,
@@ -10,24 +11,25 @@ import type {
 
 const graphCommandCoordinationBindings = new WeakMap<
   object,
-  Readonly<{ graphId: string; sessionIdentity: object }>
->();
-const graphCommandPortIsolations = new WeakMap<
-  object,
-  "read_committed" | "repeatable_read" | "serializable" | "unknown"
+  Readonly<{
+    graphId: string;
+    isolation: GraphCommandIsolation;
+    sessionIdentity: object;
+  }>
 >();
 const graphCommandPortSessionIdentities = new WeakMap<object, object>();
 
 export type {
   GraphCommandCoordination,
   GraphCommandExecutionContext,
+  GraphCommandIsolation,
   GraphCommandSession,
 } from "./types";
 
 /**
  * Retains a transaction command session's identity across a transparent port
- * wrapper. Coordination and isolation attach to the session identity, not the
- * wrapper object, so an observing/decorating backend cannot make a proven
+ * wrapper. Coordination attaches to the session identity, not the wrapper
+ * object, so an observing/decorating backend cannot make a proven
  * advisory lock look like it belongs to another connection.
  */
 export function carryGraphCommandPortSessionMetadata(
@@ -58,10 +60,12 @@ function graphCommandPortSessionIdentity(port: GraphCommandPort): object {
 export function mintGraphCommandCoordination(
   port: GraphCommandPort,
   graphId: string,
+  isolation: GraphCommandIsolation,
 ): GraphCommandCoordination {
   const coordination = Object.freeze({}) as GraphCommandCoordination;
   graphCommandCoordinationBindings.set(coordination, {
     graphId,
+    isolation,
     sessionIdentity: graphCommandPortSessionIdentity(port),
   });
   return coordination;
@@ -74,15 +78,26 @@ function isGraphCommandCoordination(
   return graphCommandCoordinationBindings.has(value);
 }
 
-/** Bind the effective isolation level to a transaction-scoped first-party port. */
-export function bindGraphCommandPortIsolation(
-  port: GraphCommandPort,
-  isolation: "read_committed" | "repeatable_read" | "serializable" | "unknown",
-): void {
-  graphCommandPortIsolations.set(
-    graphCommandPortSessionIdentity(port),
-    isolation,
-  );
+/** Normalize a database isolation setting into command-contract vocabulary. */
+export function normalizeGraphCommandIsolation(
+  value: unknown,
+): GraphCommandIsolation {
+  if (typeof value !== "string") return "unknown";
+  switch (value.replaceAll(" ", "_").toLowerCase()) {
+    case "read_committed":
+    case "read_uncommitted": {
+      return "read_committed";
+    }
+    case "repeatable_read": {
+      return "repeatable_read";
+    }
+    case "serializable": {
+      return "serializable";
+    }
+    default: {
+      return "unknown";
+    }
+  }
 }
 
 /**
@@ -93,11 +108,13 @@ export function bindGraphCommandPortIsolation(
  */
 export function assertGraphCommandConvergenceIsolation(
   port: GraphCommandPort,
+  coordination: GraphCommandCoordination,
 ): void {
-  if (port.session === "root") return;
+  const binding = graphCommandCoordinationBindings.get(coordination);
   const isolation =
-    graphCommandPortIsolations.get(graphCommandPortSessionIdentity(port)) ??
-    "unknown";
+    binding?.sessionIdentity === graphCommandPortSessionIdentity(port) ?
+      binding.isolation
+    : "unknown";
   if (isolation === "read_committed" || isolation === "serializable") return;
   throw new ConfigurationError(
     "Match-key convergence requires read-committed or serializable transaction isolation.",
@@ -107,7 +124,7 @@ export function assertGraphCommandConvergenceIsolation(
     },
     {
       suggestion:
-        "Use read_committed, retry a serializable transaction as a whole, or avoid getOrCreateByEndpoints in an adopted transaction whose isolation TypeGraph cannot inspect.",
+        "Use read_committed, retry a serializable transaction as a whole, or configure a custom PostgreSQL graph-write fence to report the effective transaction isolation.",
     },
   );
 }
@@ -191,6 +208,11 @@ export function executeAuthoritativeGraphCommand(
   assertGraphCommandExecutionContext(context);
   if (coordination !== "none") {
     assertGraphCommandCoordination(port, command, coordination);
+    if (command.kind === "edge.converge-create") {
+      // Store and public helper callers are checked here before a custom port
+      // can execute the convergence command.
+      assertGraphCommandConvergenceIsolation(port, coordination);
+    }
   }
   return port.execute(command, context);
 }

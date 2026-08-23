@@ -4,7 +4,11 @@ import {
   type BundleVerdictOf,
 } from "../backend/capabilities/resolve";
 import { assertCommandResultMatchesCommand } from "../backend/command";
-import { type GraphCommandExecutionContext } from "../backend/command-contract";
+import {
+  assertGraphCommandExecutionContext,
+  executeAuthoritativeGraphCommand,
+  type GraphCommandExecutionContext,
+} from "../backend/command-contract";
 import { deriveBackend, projectGraphBackend } from "../backend/derive-backend";
 import {
   type DeleteEdgesBatchParams,
@@ -20,7 +24,7 @@ import {
   type SchemaWriteFenceParams,
   type TransactionBackend,
 } from "../backend/types";
-import { ConfigurationError } from "../errors";
+import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { type IdentityTarget } from "../identity/sql-target";
 import { type IdentityAssertionStorageRow } from "../identity/storage-types";
 import { type SqlSchema } from "../query/compiler/schema";
@@ -866,13 +870,20 @@ export function createRecordedBackend(
       }),
 
     commands: {
-      session: "transaction",
+      session: "root",
       execute: async (
         command: GraphCommand,
         context: GraphCommandExecutionContext,
       ): Promise<GraphCommandResult> => {
+        assertGraphCommandExecutionContext(context);
+        if (context.session !== "root") {
+          throw new CompilerInvariantError(
+            "A recorded root command received a transaction execution context.",
+            { contextSession: context.session },
+          );
+        }
         const result = await capture((target) =>
-          target.commands.execute(command, context),
+          executeAuthoritativeGraphCommand(target.commands, command),
         );
         assertCommandResultMatchesCommand(command, result);
         return result;

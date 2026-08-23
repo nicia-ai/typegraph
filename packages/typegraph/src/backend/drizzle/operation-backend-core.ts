@@ -29,9 +29,11 @@ import {
 } from "../../utils/sql-errors";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
+  assertGraphCommandConvergenceIsolation,
   assertGraphCommandCoordination,
   assertGraphCommandExecutionContext,
   type GraphCommandExecutionContext,
+  normalizeGraphCommandIsolation,
 } from "../command-contract";
 import {
   resolveEdgeEndpointIds,
@@ -705,14 +707,18 @@ export function createCommonOperationBackend(
     : {
         async lockSchemaVersionAndGraphWrite(
           params: SchemaWriteFenceParams,
-        ): Promise<void> {
+        ) {
           const row = await execution.execGet<Record<string, unknown>>(
             buildLockSchemaVersionAndGraphWrite(
               params,
               schemaGraphWriteLockNamespace,
             ),
           );
-          if (row !== undefined) return;
+          if (row !== undefined) {
+            return normalizeGraphCommandIsolation(
+              row["transaction_isolation"],
+            );
+          }
 
           // A blocked `FOR SHARE` can recheck the old active row out of its
           // statement snapshot without substituting the winner's new row. As
@@ -1117,15 +1123,17 @@ export function createCommonOperationBackend(
     if (row === undefined) {
       return { outcome: "rejected", entity: "edge", reason: "unknown" };
     }
-    switch (Number(row["write_discriminator"])) {
-      case 0: {
+    switch (row["write_discriminator"]) {
+      case 0:
+      case "0": {
         return {
           outcome: "found",
           entity: "edge",
           row: rowMappers.toEdgeRow(row),
         };
       }
-      case 1: {
+      case 1:
+      case "1": {
         return {
           outcome: "created",
           entity: "edge",
@@ -1167,6 +1175,14 @@ export function createCommonOperationBackend(
         return executeEdgeManagedCreate(command.plan);
       }
       case "edge.converge-create": {
+        if (context.coordination !== "none") {
+          // Keep the built-in port safe for direct callers that bypass the
+          // public authoritative-command helper.
+          assertGraphCommandConvergenceIsolation(
+            commandsPort,
+            context.coordination,
+          );
+        }
         return executeEdgeConvergeCreate(command, context);
       }
       default: {

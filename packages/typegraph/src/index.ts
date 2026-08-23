@@ -182,6 +182,7 @@ export type {
   GraphCommand,
   GraphCommandCoordination,
   GraphCommandExecutionContext,
+  GraphCommandIsolation,
   GraphCommandPort,
   GraphCommandResult,
   GraphCommandSession,

@@ -144,6 +144,33 @@ describe("PGlite persisted edge match keys", () => {
       row: { id: "string-discriminator" },
     });
   });
+
+  it("refuses a null convergent write discriminator", async () => {
+    const backend = createPostgresBackend(
+      drizzlePglite(
+        discriminatorClient(engine.client, () => JSON.parse("null") as unknown),
+      ),
+      { prepareStatements: false, vector: false },
+    );
+    for (const id of ["alice", "bob"]) {
+      await backend.insertNode({
+        graphId: graph.id,
+        kind: "Person",
+        id,
+        props: {},
+      });
+    }
+
+    await expect(
+      executeConvergence(
+        backend,
+        convergenceCommand("null-discriminator", {
+          at: new Date("2026-08-23T00:00:00.000Z"),
+          annotation: {},
+        }),
+      ),
+    ).rejects.toThrow("unknown write discriminator");
+  });
 });
 
 function convergenceCommand(
@@ -188,17 +215,24 @@ async function executeConvergence(
 }
 
 function stringDiscriminatorClient(client: PGlite): PGlite {
+  return discriminatorClient(client, String);
+}
+
+function discriminatorClient(
+  client: PGlite,
+  mapDiscriminator: (value: unknown) => unknown,
+): PGlite {
   return new Proxy(client, {
     get(target, property): unknown {
       if (property === "query")
-        return stringDiscriminatorQuery.bind(undefined, target);
+        return discriminatorQuery.bind(undefined, target, mapDiscriminator);
       if (property === "constructor") return target.constructor;
       if (property === "transaction") {
         return async <T>(
           run: (transaction: Transaction) => Promise<T>,
         ): Promise<T> =>
           target.transaction(async (transaction) =>
-            run(stringDiscriminatorTransaction(transaction)),
+            run(discriminatorTransaction(transaction, mapDiscriminator)),
           );
       }
       return undefined;
@@ -206,19 +240,23 @@ function stringDiscriminatorClient(client: PGlite): PGlite {
   });
 }
 
-function stringDiscriminatorTransaction(transaction: Transaction): Transaction {
+function discriminatorTransaction(
+  transaction: Transaction,
+  mapDiscriminator: (value: unknown) => unknown,
+): Transaction {
   return new Proxy(transaction, {
     get(target, property): unknown {
       if (property === "query") {
-        return stringDiscriminatorQuery.bind(undefined, target);
+        return discriminatorQuery.bind(undefined, target, mapDiscriminator);
       }
       return undefined;
     },
   });
 }
 
-async function stringDiscriminatorQuery(
+async function discriminatorQuery(
   client: PGlite | Transaction,
+  mapDiscriminator: (value: unknown) => unknown,
   query: string,
   params?: unknown[],
 ): Promise<unknown> {
@@ -229,7 +267,7 @@ async function stringDiscriminatorQuery(
       if (!("write_discriminator" in row)) return row;
       return {
         ...row,
-        write_discriminator: String(row["write_discriminator"]),
+        write_discriminator: mapDiscriminator(row["write_discriminator"]),
       };
     }),
   };
