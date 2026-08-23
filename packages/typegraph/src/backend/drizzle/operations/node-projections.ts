@@ -6,8 +6,8 @@ import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   InsertNodeParams,
-  NodeInsertClaim,
   NodeCreatePlan,
+  NodeInsertClaim,
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
 import { buildInsertNode, buildInsertNodeWithSchemaFence } from "./nodes";
@@ -366,11 +366,13 @@ function buildNodeClaimsAndProjections(
 
   const preGateAlias = "node_pre_gate";
   const preGateChecks: SQL[] = [
-    sql`NOT EXISTS (
-      SELECT 1
-      FROM ${sql.identifier(preVerdictAlias)}
-      WHERE accepted = FALSE
-    )`,
+    sql`
+      NOT EXISTS (
+            SELECT 1
+            FROM ${sql.identifier(preVerdictAlias)}
+            WHERE accepted = FALSE
+          )
+    `,
   ];
   if (preHasLegacyProbe) {
     preGateChecks.push(
@@ -467,11 +469,13 @@ function buildNodeClaimsAndProjections(
   const insertedNodeAlias = INSERTED_NODE_PROJECTION_CTE_ALIAS;
   const nodeInserted = sql.identifier(nodeInsertedAlias);
   const postGateChecks: SQL[] = [
-    sql`NOT EXISTS (
-      SELECT 1
-      FROM ${sql.identifier(postVerdictAlias)}
-      WHERE accepted = FALSE
-    )`,
+    sql`
+      NOT EXISTS (
+            SELECT 1
+            FROM ${sql.identifier(postVerdictAlias)}
+            WHERE accepted = FALSE
+          )
+    `,
   ];
   if (postHasLegacyProbe) {
     postGateChecks.push(

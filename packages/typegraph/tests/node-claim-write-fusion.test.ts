@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
-  DisjointError,
-  ENTITY_ALREADY_EXISTS_CODE,
   defineGraph,
   defineNode,
+  DisjointError,
   disjointWith,
+  ENTITY_ALREADY_EXISTS_CODE,
   searchable,
   subClassOf,
   UniquenessError,
@@ -545,7 +545,7 @@ describe("node claim write fusion", () => {
     const error = await fixture.store.nodes.UniqueNode.create(
       { email: "different-email" },
       { id: holder.id },
-    ).catch((caught: unknown) => caught);
+    ).catch((error_: unknown) => error_);
 
     expect(error).toBeInstanceOf(ValidationError);
     expect((error as ValidationError).details.issues).toEqual(
@@ -602,15 +602,14 @@ describe("node claim write fusion", () => {
     fixture.reset();
     const error = await fixture.store.nodes.SharedLeaf.create({
       email: "legacy-axis@example.com",
-    }).catch((caught: unknown) => caught);
+    }).catch((error_: unknown) => error_);
 
     expect(error).toBeInstanceOf(UniquenessError);
     expect((error as UniquenessError).details.existingId).toBe("legacy-holder");
     expect((error as UniquenessError).details.fields).toEqual(["email"]);
+    const remaining = await fixture.store.nodes.SharedLeaf.find();
     expect(
-      (await fixture.store.nodes.SharedLeaf.find()).filter(
-        (node) => node.email === "legacy-axis@example.com",
-      ),
+      remaining.filter((node) => node.email === "legacy-axis@example.com"),
     ).toHaveLength(0);
   });
 });

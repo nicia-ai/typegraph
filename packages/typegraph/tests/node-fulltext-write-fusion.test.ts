@@ -10,8 +10,8 @@ import { createSqliteBackend } from "../src/backend/sqlite";
 import {
   type GraphBackend,
   type InsertNodeParams,
-  type NodeFulltextSync,
   type NodeCreatePlan,
+  type NodeFulltextSync,
   type NodeInsertProjection,
   type SchemaWriteFenceParams,
   type TransactionBackend,

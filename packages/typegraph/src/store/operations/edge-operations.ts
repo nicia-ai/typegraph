@@ -89,8 +89,8 @@ import {
   type GraphReadBackend,
   type InsertEdgeParams,
   rowPropsToObject,
-  type TransactionBackend,
   runOptionallyInTransaction,
+  type TransactionBackend,
 } from "../../backend/types";
 import { validateEdgeEndpoints } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";

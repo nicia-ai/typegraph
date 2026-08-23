@@ -870,8 +870,7 @@ export function createCommonOperationBackend(
             if (claim.verdict.kind === "disjointness") {
               return claim.axis === axis;
             }
-            return claim.verdict.kind === "uniqueness" &&
-              claim.verdict.probeAxes.includes(axis);
+            return claim.verdict.probeAxes.includes(axis);
           });
           const fields =
             conflictingClaim?.verdict.kind === "uniqueness" ?
