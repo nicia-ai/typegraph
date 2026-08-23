@@ -113,6 +113,35 @@ function racingBackend(
   });
 }
 
+/**
+ * Models a cache-backed root handle such as Hyperdrive: root reads can lag a
+ * committed edge, while a transaction-scoped handle reads its own snapshot.
+ * The wrapper deliberately returns an empty root result, but delegates the
+ * transaction target to the real backend so a match-key read can observe the
+ * edge that is already committed (or was written earlier in that transaction).
+ */
+function staleRootReadBackend(
+  base: GraphBackend,
+  onTransactionRead: () => void,
+): GraphBackend {
+  return deriveBackend(base, {
+    findEdgesByKind: () => Promise.resolve([]),
+    transaction: (fn, options) =>
+      base.transaction(
+        (target) =>
+          fn(
+            deriveBackend(target, {
+              findEdgesByKind: async (params) => {
+                onTransactionRead();
+                return target.findEdgesByKind(params);
+              },
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
 describe("getOrCreateByEndpoints convergence", () => {
   let raw: GraphBackend;
 
@@ -409,6 +438,34 @@ describe("getOrCreateByEndpoints convergence", () => {
     ).rejects.toThrow(/lost its match key/u);
     // Bounded, and it really did use every attempt before giving up.
     expect(attempts).toBe(3);
+  });
+
+  it("resolves a stale root read from the transaction match-key read", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const winner = await setup.edges.knows.create(alice, bob, {
+      since: "winner",
+    });
+
+    let transactionReads = 0;
+    const store = createStore(
+      graph,
+      staleRootReadBackend(raw, () => {
+        transactionReads += 1;
+      }),
+    );
+
+    const result = await store.edges.knows.getOrCreateByEndpoints(alice, bob, {
+      since: "winner",
+    });
+
+    expect(result.action).toBe("found");
+    expect(result.edge.id).toBe(winner.id);
+    expect(transactionReads).toBeGreaterThan(0);
+    // The stale root never supplied the match; the transaction-scoped read
+    // did. A retry-loop "competing writer" diagnostic would be false here.
+    await expect(setup.edges.knows.findFrom(alice)).resolves.toHaveLength(1);
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {
