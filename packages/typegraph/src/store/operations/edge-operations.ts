@@ -1863,16 +1863,18 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     );
   }
 
+  // The return-mode probe is also the dispatcher read for a create. Retain a
+  // negative result so a no-match call does not pay for the same root lookup
+  // twice before the create transaction performs its authoritative check.
+  let initialNegativeRootCandidates: readonly BackendEdgeRow[] | undefined;
+
   // A root read is only a dispatcher hint. Confirm a positive result through
   // the transaction target before returning it; a cache may replay a stale
   // positive just as it may replay a stale empty result.
   if (ifExists === "return") {
     const probeRows = await findCandidates(backend);
-    const { liveRow: probedLiveRow } = findMatchingEdge(
-      probeRows,
-      matchOn,
-      validatedProps,
-    );
+    const { liveRow: probedLiveRow, deletedRow: probedDeletedRow } =
+      findMatchingEdge(probeRows, matchOn, validatedProps);
     if (probedLiveRow !== undefined) {
       const currentRows = await findCandidatesInTransaction();
       const { liveRow: currentLiveRow } = findMatchingEdge(
@@ -1884,6 +1886,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
         return { edge: rowToEdge(currentLiveRow), action: "found" };
       }
+    } else if (probedDeletedRow === undefined) {
+      initialNegativeRootCandidates = probeRows;
     }
   }
 
@@ -1974,7 +1978,8 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     const candidateRows =
       forceTransactionRead ?
         await findCandidatesInTransaction()
-      : await findCandidates(backend);
+      : (initialNegativeRootCandidates ?? (await findCandidates(backend)));
+    initialNegativeRootCandidates = undefined;
 
     let { liveRow, deletedRow } = findMatchingEdge(
       candidateRows,

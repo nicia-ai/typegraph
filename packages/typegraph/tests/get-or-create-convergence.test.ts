@@ -90,8 +90,8 @@ const cardinalGraph = defineGraph({
  * The interception is on the TOP-LEVEL backend, so the create leg's own
  * in-transaction lookup (the convergence guard) is not intercepted and sees the
  * competitor as ordinary committed state. `afterCall` selects which lookup to
- * follow: with `ifExists: "return"` the first is the found-fast-path probe and
- * the second is the dispatcher's, so racing the dispatcher means `afterCall: 2`.
+ * follow. In return mode the initial root probe is also the dispatcher read on
+ * a no-match path, so racing that decision uses `afterCall: 1`.
  */
 function racingBackend(
   base: GraphBackend,
@@ -149,6 +149,43 @@ describe("getOrCreateByEndpoints convergence", () => {
     ({ backend: raw } = createLocalSqliteBackend());
   });
 
+  it("reuses a negative root probe before the fenced create check", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    let endpointReads = 0;
+
+    const counted = deriveBackend(raw, {
+      findEdgesByKind: async (params) => {
+        endpointReads += 1;
+        return raw.findEdgesByKind(params);
+      },
+      transaction: (fn, options) =>
+        raw.transaction(
+          (target) =>
+            fn(
+              deriveBackend(target, {
+                findEdgesByKind: async (params) => {
+                  endpointReads += 1;
+                  return target.findEdgesByKind(params);
+                },
+              }),
+            ),
+          options,
+        ),
+    });
+
+    const result = await createStore(
+      graph,
+      counted,
+    ).edges.knows.getOrCreateByEndpoints(alice, bob, { since: "2024" });
+
+    expect(result.action).toBe("created");
+    // One root dispatcher read plus the create transaction's authoritative
+    // convergence read. Before the optimization this was three.
+    expect(endpointReads).toBe(2);
+  });
+
   it("resolves to the competitor's edge instead of inserting a second one", async () => {
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
@@ -157,7 +194,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "winner" });
       }),
     );
@@ -181,7 +218,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "2020" });
       }),
     );
@@ -206,7 +243,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "1999" });
       }),
     );
@@ -324,7 +361,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     const competitor = createStore(graph, raw);
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "winner" });
       }),
       {
@@ -371,7 +408,7 @@ describe("getOrCreateByEndpoints convergence", () => {
     let afterCompetitor: string | undefined;
     const store = createStore(
       graph,
-      racingBackend(raw, 2, async () => {
+      racingBackend(raw, 1, async () => {
         await competitor.edges.knows.create(alice, bob, { since: "winner" });
         afterCompetitor = await competitor.revisionNow();
       }),
