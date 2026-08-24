@@ -91,10 +91,11 @@ const store = createStore(graph, backend);
 
 The generated script is complete installation DDL, not an incremental upgrade
 planner. Existing databases must apply release-specific additive migrations
-through their migration tool. In particular, durable edge match identity adds
-two nullable edge columns, their pair check, and a unique index; the privileged
-`createStoreWithSchema()` path adopts that storage automatically before it
-publishes a schema declaration.
+through their migration tool. See
+[Upgrading an existing edge table for durable match identity](#upgrading-an-existing-edge-table-for-durable-match-identity)
+for the exact SQLite and PostgreSQL statements. The privileged
+`createStoreWithSchema()` path applies that storage upgrade automatically before
+it publishes a schema declaration.
 
 ### SQLite with Vector Search
 
@@ -284,10 +285,10 @@ const store = createStore(graph, backend);
 ```
 
 As with SQLite, this is complete installation DDL rather than an incremental
-upgrade plan. Apply release-specific `ALTER TABLE` and index changes to an
-existing database, or let a privileged `createStoreWithSchema()` preparation
-adopt the durable edge match identity storage before runtime workers use
-`createStore()`.
+upgrade plan. Apply the
+[durable match identity upgrade](#upgrading-an-existing-edge-table-for-durable-match-identity)
+to an existing database, or let a privileged `createStoreWithSchema()`
+preparation adopt the storage before runtime workers use `createStore()`.
 
 ### postgres-js
 
@@ -742,6 +743,73 @@ individually.
 function generatePostgresDDL(tables?: PostgresTables): string[];
 ```
 
+### Upgrading an existing edge table for durable match identity
+
+Skip this section when `createStoreWithSchema()` owns schema preparation: the
+bundled SQLite and PostgreSQL adapters perform this adoption idempotently before
+publishing a graph schema that declares `matchIdentity`.
+
+When database DDL is managed externally, apply the matching migration before a
+runtime worker opens the new graph schema. The examples use the default
+`typegraph_edges` relation and its derived constraint/index names. Replace every
+occurrence consistently when the adapter uses a custom edge-table name.
+
+For SQLite, run this migration exactly once. SQLite has no portable `ADD COLUMN
+IF NOT EXISTS`, so a migration tool must record whether it has already applied
+the two `ALTER TABLE` statements:
+
+```sql
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN "match_identity_name" TEXT;
+
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN "match_identity_key" TEXT
+  CHECK (("match_identity_name" IS NULL) = ("match_identity_key" IS NULL));
+
+CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq"
+  ON "typegraph_edges" (
+    "graph_id", "kind", "match_identity_name", "match_identity_key"
+  );
+```
+
+For PostgreSQL, the adoption statements are idempotent:
+
+```sql
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN IF NOT EXISTS "match_identity_name" TEXT;
+
+ALTER TABLE "typegraph_edges"
+  ADD COLUMN IF NOT EXISTS "match_identity_key" TEXT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = to_regclass('"typegraph_edges"')
+      AND conname = 'typegraph_edges_match_identity_pair_check'
+  ) THEN
+    ALTER TABLE "typegraph_edges"
+      ADD CONSTRAINT "typegraph_edges_match_identity_pair_check"
+      CHECK (
+        ("match_identity_name" IS NULL) = ("match_identity_key" IS NULL)
+      );
+  END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq"
+  ON "typegraph_edges" (
+    "graph_id", "kind", "match_identity_name", "match_identity_key"
+  );
+```
+
+Provisioning the columns does not authorize re-keying existing data. Adding,
+removing, renaming, or changing the fields of a declared `matchIdentity` remains
+a breaking graph-schema change while that edge kind has any physical rows,
+including tombstones. Export the affected edges, hard-delete them, publish the
+new schema, and import them again so every row receives a key under the new
+declaration.
+
 ## Drizzle-Free Entrypoints
 
 TypeGraph keeps its public core and backend contracts independent of Drizzle:
@@ -994,6 +1062,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `transactions`                                                             | Atomic transactions available (see note below)                                                      |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
+| `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
 | `graphAnalytics?.{supported,mathFunctions}`                                | Static support for whole-graph temporary-table iteration, plus availability of deferred transcendental-math algorithms |
 | `vector?.metrics` / `vector?.indexTypes` / `vector?.maxDimensions`         | Vector strategy capabilities (present once a vector strategy is configured)                         |
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
@@ -1008,6 +1077,38 @@ open: a standby refuses the read-write transaction itself, and a role without
 `TEMP` refuses the `CREATE TEMP TABLE` inside it. Both refusals reach the caller
 as `UnsupportedBackendCapabilityError`, with the PostgreSQL error retained as
 its `cause`.
+
+### Durable edge match identity capability
+
+`capabilities.durableEdgeMatchIdentity: true` is a correctness promise. A
+custom backend making it must provide all of these guarantees:
+
+- Every edge write carrying `InsertEdgeParams.matchIdentity` stores both the
+  name and key with the row. They are either both absent or both present.
+- A database constraint atomically owns uniqueness over `(graph_id, kind,
+  match_identity_name, match_identity_key)`. Soft deletion keeps the key;
+  physical hard deletion releases it.
+- `commands.execute()` handles a durable `edge.converge-create` as one database
+  decision and returns the authoritative `created` or `found` row. Returning
+  `unsupported` fails closed with
+  `DURABLE_EDGE_MATCH_IDENTITY_COMMAND_UNSUPPORTED`; TypeGraph does not fall
+  back to a read-then-write race.
+- Storage exists before runtime writes. Implement
+  `ensureEdgeMatchIdentityStorage` for privileged schema adoption, or provision
+  the columns, pair constraint, and unique arbiter independently before setting
+  the capability.
+
+`insertEdgesDurableBatchReturning` is an optional throughput member. When
+implemented, every input must carry a durable identity, conflicts are omitted
+from the returned rows, and returned rows identify exactly which inputs were
+created. Omitting it preserves correctness through per-row authoritative
+commands, but loses the set-oriented bulk/import fast path.
+
+`findEdgesByHeterogeneousEndpointSet` is likewise an optional set-read
+optimization. An input carrying `opposite` requests an exact directed endpoint
+pair, not every edge incident to the first endpoint. One call may contain only
+incident inputs or only exact-pair inputs; mixing the two modes is refused. A
+backend that omits the member retains the exact per-pair fallback.
 
 ### Validity-end clearing capability
 
@@ -1286,6 +1387,7 @@ TypeGraph choosing separate query semantics per backend:
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
 | TypeGraph Identity Profile                             | ✓ transactional drivers                           | ✓ transactional drivers                    | Enabled graphs fail fast on non-atomic drivers; identity-disabled graphs retain their ordinary path                      |
 | Constraint claim relations (`capabilities.constraintClaims`) | ✓                                           | ✓                                          | Identical relations and identical statements on both dialects. A third-party backend that omits them declares `constraintClaims` absent and keeps the per-graph lock as its only fence |
+| Durable edge match identity (`capabilities.durableEdgeMatchIdentity`) | ✓ bundled adapters | ✓ bundled adapters | Both dialects persist the same canonical key and use a unique database arbiter. A custom backend must satisfy the full capability contract above or leave the capability absent |
 | Managed node projection fusion                        | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite                        | SQLite writes the node and fulltext/vector sidecars through the portable transaction path. PostgreSQL can compile them into one managed statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |

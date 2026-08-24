@@ -292,12 +292,18 @@ CREATE TABLE typegraph_edges (
   to_kind     TEXT NOT NULL,
   to_id       TEXT NOT NULL,
   props       JSON NOT NULL,
+  match_identity_name TEXT,
+  match_identity_key  TEXT,
   version     INTEGER NOT NULL,
   valid_from  TEXT NOT NULL,
   valid_to    TEXT,
   created_at  TEXT NOT NULL,
   updated_at  TEXT NOT NULL,
   deleted_at  TEXT,
+  CHECK (
+    (match_identity_name IS NULL) = (match_identity_key IS NULL)
+  ),
+  UNIQUE (graph_id, kind, match_identity_name, match_identity_key),
   PRIMARY KEY (graph_id, kind, id, valid_from)
 );
 ```
@@ -329,6 +335,49 @@ filtering, consider:
 - SQLite: Expression indexes on `json_extract(...)` (or generated columns)
 
 See [Indexes](/performance/indexes) for TypeGraph utilities to define and create these indexes.
+
+### Durable edge match identity
+
+An edge registration can promote one endpoint/property comparison from a
+caller convention to a stored graph-schema contract:
+
+```text
+graph matchIdentity declaration
+            │
+            ▼
+canonical endpoint/property key
+            │
+            ▼
+authoritative edge command ──► database unique arbiter
+            │                         │
+            └──────── created ◄───────┤
+                      found   ◄───────┘
+```
+
+The database unique constraint is the concurrency authority. A cache, an
+outside read, or a process-local lock cannot replace it because serverless
+requests may use different processes and connections. Bundled root backends can
+therefore lower an eligible `getOrCreateByEndpoints()` call to one statement;
+paths with cardinality claims, history, revision tracking, or caller-owned work
+use the same arbiter inside their transaction.
+
+Each decision has one owner:
+
+| Decision | Owner |
+| --- | --- |
+| Which property fields form the identity | The graph registration's named `matchIdentity` |
+| Whether a schema can activate or re-key it | The schema manager's all-physical-row emptiness fence |
+| How endpoint/property values become a portable key | The shared canonical encoder |
+| Which concurrent writer owns the identity | The database unique constraint |
+| Whether a command created or found a row | The authoritative command result |
+| Whether a failed import batch may retry rows | The semantic savepoint result |
+
+The semantic savepoint is broader than raw SQL transaction control. Rolling it
+back restores the database savepoint and TypeGraph's pending capture touches,
+forced revisions, and graph-lock memo together. Consumers receive the resulting
+decision instead of re-deriving it from an exception, row count, or follow-up
+read. That is what keeps direct creates, convergence, bulk writes, import,
+history, and operation hooks aligned.
 
 ### Temporal Model
 
