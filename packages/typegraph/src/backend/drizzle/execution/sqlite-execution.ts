@@ -1,6 +1,7 @@
 import { type SQL as DrizzleSql, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
+import { ConfigurationError } from "../../../errors";
 import { isSqlFragment } from "../../../query/sql-fragment";
 import {
   D1_MAX_BIND_PARAMETERS,
@@ -8,6 +9,7 @@ import {
   MODERN_SQLITE_MAX_BIND_PARAMETERS,
   SQLITE_MAX_BIND_PARAMETERS,
 } from "../../types";
+import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
 import { getOrCreateLru } from "./lru";
 import {
   type CompiledSqlQuery,
@@ -41,6 +43,17 @@ type SqliteClientWithPrepare = Readonly<{
 }>;
 
 type SqliteClientCarrier = Readonly<{ $client?: unknown }>;
+
+type D1PreparedStatement = Readonly<{
+  bind: (...params: readonly unknown[]) => D1PreparedStatement;
+}>;
+
+type D1Client = Readonly<{
+  prepare: (sqlText: string) => D1PreparedStatement;
+  batch: (
+    statements: readonly D1PreparedStatement[],
+  ) => Promise<readonly unknown[]>;
+}>;
 
 type DurableObjectSqlApi = Readonly<{
   exec: (...args: readonly unknown[]) => unknown;
@@ -143,6 +156,59 @@ export type SqliteExecutionAdapter = Readonly<
     ) => Promise<void>;
   }
 >;
+
+function isD1Client(client: unknown): client is D1Client {
+  if (typeof client !== "object" || client === null) return false;
+  const candidate = client as Readonly<Record<string, unknown>>;
+  return (
+    typeof candidate["prepare"] === "function" &&
+    typeof candidate["batch"] === "function"
+  );
+}
+
+function rowsFromBatchResult(result: unknown): readonly unknown[] {
+  if (typeof result !== "object" || result === null) return [];
+  const candidate = result as Readonly<Record<string, unknown>>;
+  if (Array.isArray(candidate["results"])) return candidate["results"];
+  if (Array.isArray(candidate["rows"])) return candidate["rows"];
+  return [];
+}
+
+function assertBatchStatementWithinBindLimit(
+  statement: CompiledSqlQuery,
+  maxBindParameters: number,
+): void {
+  if (statement.params.length <= maxBindParameters) return;
+  throw new ConfigurationError(
+    `SQLite statement uses ${statement.params.length} bound parameters, exceeding ` +
+      `this backend's limit of ${maxBindParameters}.`,
+    {
+      capability: "maxBindParameters",
+      maxBindParameters,
+      parameterCount: statement.params.length,
+    },
+    {
+      suggestion:
+        "Split the operation into smaller batches or lower the batch size before retrying.",
+    },
+  );
+}
+
+type SqliteAtomicBatchClient =
+  | Readonly<{ kind: "d1"; client: D1Client }>
+  | Readonly<{ kind: "libsql"; client: LibsqlClient }>;
+
+function resolveAtomicBatchClient(
+  db: AnySqliteDatabase,
+  hostedPlatform: SqliteHostedPlatform | undefined,
+): SqliteAtomicBatchClient | undefined {
+  const client = (db as SqliteClientCarrier).$client;
+  if (hostedPlatform === "d1" && isD1Client(client)) {
+    return { kind: "d1", client };
+  }
+  if (isLibsqlClient(client)) return { kind: "libsql", client };
+  return undefined;
+}
 
 function getSessionName(db: AnySqliteDatabase): string | undefined {
   const databaseWithSession = db as DatabaseWithSession;
@@ -514,6 +580,7 @@ export function createSqliteExecutionAdapter(
     sqliteClient,
     hardMaxBindParameters,
   );
+  const atomicBatchClient = resolveAtomicBatchClient(db, hostedPlatform);
 
   const profile: SqliteExecutionProfile = {
     ...(hostedPlatform === undefined ? {} : { hostedPlatform }),
@@ -526,6 +593,37 @@ export function createSqliteExecutionAdapter(
 
   const compile = (query: ExecutableSql): CompiledSqlQuery =>
     compileQueryWithDialect(db, query, "SQLite");
+
+  const executeAtomicBatch =
+    atomicBatchClient === undefined ? undefined : (
+      async function executeSqliteAtomicBatch<TRow>(
+        statements: readonly CompiledSqlQuery[],
+      ): Promise<readonly (readonly TRow[])[]> {
+        for (const statement of statements) {
+          assertBatchStatementWithinBindLimit(statement, maxBindParameters);
+        }
+        if (statements.length === 0) return [];
+
+        const results =
+          atomicBatchClient.kind === "d1" ?
+            await atomicBatchClient.client.batch(
+              statements.map((statement) =>
+                atomicBatchClient.client
+                  .prepare(statement.sql)
+                  .bind(...statement.params),
+              ),
+            )
+          : await atomicBatchClient.client.batch(
+              statements.map((statement) => ({
+                sql: statement.sql,
+                args: [...statement.params],
+              })),
+            );
+        return results.map(
+          (result) => rowsFromBatchResult(result) as readonly TRow[],
+        );
+      }
+    );
 
   if (sqliteClient !== undefined) {
     const client = sqliteClient;
@@ -601,6 +699,7 @@ export function createSqliteExecutionAdapter(
       executeCompiled,
       executeCompiledRun,
       executePreparedRunBatch,
+      ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
       prepare(sqlText: string): PreparedSqlStatement {
         return createPreparedStatementExecutor(
           client,
@@ -624,6 +723,7 @@ export function createSqliteExecutionAdapter(
         isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
       );
     },
+    ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     profile,
   };
 }

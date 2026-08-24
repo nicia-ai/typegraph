@@ -360,8 +360,10 @@ For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
 to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
 to `false`. On a raw Store, `store.transaction(...)` falls through to sequential
-execution rather than throwing; on a schema-managed Store, read-only callbacks
-still run but the first write fails closed.
+execution rather than throwing. Eligible generated-id node creates and
+`cardinality: "many"` edge creates use the authoritative one-statement command
+even on a schema-managed Store; other managed writes fail closed when they
+need an interactive schema or constraint fence.
 
 Schema commits are the one exception: `commitSchemaVersion` and
 `setActiveVersion` require atomicity to eliminate the orphan-row crash window
@@ -624,6 +626,32 @@ decorating a first-party backend with `deriveBackend`, a same-session
 `commands` override retains the session identity. A wrapper that changes
 session or forwards to a different connection is a new command boundary and
 cannot reuse a token from the original port.
+
+These are three different execution guarantees; do not use “atomic” as a
+catch-all:
+
+- **Interactive transaction** (`store.transaction(...)`) pins one session and
+  can make several Store operations commit or roll back together. The
+  `runOptionallyInTransaction` callback receives
+  `{ mode: "interactive-transaction" }` when this boundary was opened, or
+  `{ mode: "sequential" }` on a backend without transaction support.
+- **Static internal adapter batch** is an adapter implementation detail (for
+  example, a D1 batch or a bind-budgeted multi-row insert). It may make one
+  precompiled set of statements atomic, but it is not a public Store
+  transaction and does not make an arbitrary sequence of Store calls atomic.
+- **Authoritative one-statement command** is the `commands.execute` port. A
+  command returns a created/found/rejected/unsupported result after the
+  database statement itself owns the decision and mutation. It is the
+  transactionless path for eligible durable edge `matchIdentity` convergence;
+  it is not a promise that every command or side effect can be fused.
+
+Operational Identity, claim/cardinality checks, and undeclared dynamic
+`matchOn` convergence remain interactive-transaction contracts. A custom or
+non-transactional backend must refuse those dimensions rather than silently
+falling through to a sequence of independent statements. A declared durable
+edge `matchIdentity` is different: its canonical key has a database arbiter,
+so the eligible root create/found command can be authoritative in one
+statement.
 
 ### Connection Pooling
 
@@ -939,9 +967,12 @@ import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/p
 TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.
 
 Cloudflare D1 has no interactive transaction primitive, so it cannot commit
-TypeGraph schema versions or run schema-managed Store writes. Apply the base DDL
-with Wrangler / drizzle-kit, then use a raw `createStore()` only when the
-application accepts unfenced writes:
+TypeGraph schema versions or run multi-statement schema-managed Store writes.
+Apply the base DDL with Wrangler / drizzle-kit. Eligible generated-id node
+creates and `cardinality: "many"` edge creates can still use the bundled
+authoritative one-statement command; other schema-managed writes require a
+transactional backend. Use a raw `createStore()` only when the application
+accepts unfenced writes for the remaining paths:
 
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
@@ -960,8 +991,9 @@ export default {
 ```
 
 This raw Store does not validate or fence a committed TypeGraph schema version.
-For schema-managed writes on Cloudflare, use **Durable Objects** (below), whose
-SQLite storage exposes an interactive transaction runner.
+For schema commits and multi-statement schema-managed writes on Cloudflare, use
+**Durable Objects** (below), whose SQLite storage exposes an interactive
+transaction runner.
 
 **Important:** D1 has no interactive transaction primitive
 (`D1Database.batch(...)` is transactional, but batch-only — not an
@@ -971,7 +1003,7 @@ SQLite store, use **Durable Objects** (below) instead.
 
 For the same reason, a write guarded by a **declared constraint** — edge
 cardinality other than `many`, a `disjointWith` axiom, a shared-scope unique, or
-`getOrCreateByEndpoints`'s create leg — is refused on D1 with
+dynamic `getOrCreateByEndpoints` convergence — is refused on D1 with
 `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than committed unfenced. See
 [Declared constraints require `transactions`](#declared-constraints-require-transactions).
 
@@ -1391,7 +1423,7 @@ TypeGraph choosing separate query semantics per backend:
 | Managed node projection fusion                        | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite                        | SQLite writes the node and fulltext/vector sidecars through the portable transaction path. PostgreSQL can compile them into one managed statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
-| Bundled-root managed autocommit                       | ✓ exact bundled root objects                         | ✓ exact bundled root objects               | Eligible projection-only nodes and unconstrained edges can skip explicit transaction framing when the whole logical write is one statement. Derived wrappers, adopted caller transactions, and custom backends are deliberately ineligible because method presence is not proof that autocommit is the intended boundary |
+| Eligible bundled-root managed autocommit              | ✓ bundled SQLite roots, including D1                | ✓ bundled PostgreSQL roots, including neon-http | Generated-id nodes and `cardinality: "many"` edges with no claims, sidecars, history, or revision work can use one authoritative statement. Derived wrappers, adopted caller transactions, and custom backends are ineligible; other managed writes still require an interactive transaction |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |

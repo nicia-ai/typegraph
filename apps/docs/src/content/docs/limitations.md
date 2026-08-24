@@ -31,9 +31,10 @@ kind: on PostgreSQL, `batch()`'s implicit transaction runs at the default
 read-committed isolation, so queries there can also observe interleaved commits.
 
 Write behavior depends on how the Store was constructed. A schema-managed Store
-fails closed before its first write because it cannot hold the
-transaction-scoped schema fence. A raw `createStore()` / `createAdapterStore()`
-without a reconciled snapshot still uses the older sequential fallback:
+fails closed for writes that need the transaction-scoped schema or constraint
+fence, but eligible generated-id nodes and `cardinality: "many"` edges can use
+the authoritative one-statement command. A raw `createStore()` /
+`createAdapterStore()` without a reconciled snapshot still uses the sequential fallback:
 `store.transaction(fn)` invokes `fn` against the same backend, writes are applied
 as they happen, and a thrown error does not roll back earlier writes. Direct
 backend writes are raw as well.
@@ -69,6 +70,25 @@ if (store.capabilities.transactions) {
 If you need atomic writes from an edge runtime, use
 `drizzle-orm/neon-serverless` (WebSocket-backed Pool) instead of
 `drizzle-orm/neon-http`.
+
+### Three kinds of write atomicity
+
+TypeGraph distinguishes an interactive transaction, a static adapter batch,
+and an authoritative one-statement command. `store.transaction(...)` is the
+interactive Store API: it pins a session and groups the callback's operations.
+A static batch is adapter-internal (such as D1 `batch()` or a multi-row
+insert); it is not a public Store transaction and cannot make arbitrary Store
+calls atomic. An authoritative command is a single `commands.execute` write
+whose database statement returns the decision it made. It can provide a safe
+transactionless create/found path only when the backend has a durable arbiter.
+
+Operational Identity, claim/cardinality enforcement, and undeclared dynamic
+`matchOn` convergence still require an interactive transaction and fail closed
+on a backend that cannot provide one. A declared edge `matchIdentity` persists
+a canonical endpoint/property key and has a unique database arbiter; eligible
+root `getOrCreateByEndpoints` calls can therefore use the authoritative
+one-statement command. The durable identity does not make unrelated Store
+operations, claims, or history/revision side effects transactionless.
 
 ## libsql Single-Connection Transactions
 

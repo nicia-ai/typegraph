@@ -7,25 +7,33 @@
  * below prove the engine actually receives that one fused SQL statement.
  */
 import { PGlite } from "@electric-sql/pglite";
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
+import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStore,
   createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineGraphExtension,
   defineNode,
+  type GraphDef,
 } from "../src";
 import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import {
   deriveBackend,
   projectBackendWithout,
 } from "../src/backend/derive-backend";
-import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
+import {
+  generatePostgresDDL,
+  generateSqliteDDL,
+} from "../src/backend/drizzle/ddl";
+import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -37,20 +45,40 @@ import type {
 import { embedding } from "../src/core/embedding";
 import { searchable } from "../src/core/searchable";
 import {
+  canFuseSchemaFenceInFirstWrite,
   type EdgeAutocommitSingleStatementCandidate,
   isAutocommitSingleStatementWrite,
   type NodeAutocommitSingleStatementCandidate,
 } from "../src/store/operations/autocommit-single-statement";
+import type { AdapterStore } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const knows = defineEdge("knows", { schema: z.object({}) });
+const durableKnows = defineEdge("durableKnows", {
+  schema: z.object({ label: z.string() }),
+});
 
 function graph(id: string) {
   return defineGraph({
     id,
     nodes: { Person: { type: Person } },
     edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  });
+}
+
+function durableGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Person: { type: Person } },
+    edges: {
+      durableKnows: {
+        type: durableKnows,
+        from: [Person],
+        to: [Person],
+        matchIdentity: { name: "durable-label", fields: ["label"] },
+      },
+    },
   });
 }
 
@@ -65,6 +93,12 @@ type RecordedSqlBackend = Readonly<{
   close: () => Promise<void>;
   reset: () => void;
   statements: readonly string[];
+}>;
+
+type NoninteractiveSqliteBackend<G extends GraphDef> = Readonly<{
+  backend: GraphBackend;
+  sqlite: Database.Database;
+  store: AdapterStore<G, AnySqliteDatabase>;
 }>;
 
 function schemaWriteStatements(
@@ -122,6 +156,28 @@ async function createRecordedPgliteBackend(): Promise<RecordedSqlBackend> {
     },
     statements,
   };
+}
+
+async function createNoninteractiveSqliteBackend<G extends GraphDef>(
+  graphDefinition: G,
+): Promise<NoninteractiveSqliteBackend<G>> {
+  const sqlite = new Database(":memory:");
+  sqlite.exec(generateSqliteDDL().join("\n\n"));
+  const db = drizzleSqlite(sqlite);
+  const transactionalBackend = createSqliteBackend(db, {
+    executionProfile: { isSync: true },
+  });
+  const [transactionalStore] = await createAdapterStoreWithSchema(
+    graphDefinition,
+    transactionalBackend,
+  );
+  const backend = createSqliteBackend(db, {
+    executionProfile: { transactionMode: "none", isSync: true },
+  });
+  const store = createAdapterStore(graphDefinition, backend, {
+    reconciled: transactionalStore.reconciledSchema,
+  });
+  return { backend, sqlite, store };
 }
 
 function countFusedStatements(backend: GraphBackend): {
@@ -345,6 +401,103 @@ async function assertZeroRowContinuation(
 }
 
 describe("schema-fenced insert budget", () => {
+  it("executes eligible node and many-edge creates on a bundled noninteractive SQLite root", async () => {
+    const graphDefinition = graph("schema_fused_sqlite_none");
+    const { sqlite, store } =
+      await createNoninteractiveSqliteBackend(graphDefinition);
+    const statements: string[] = [];
+    const prepare = sqlite.prepare.bind(sqlite);
+    const prepareSpy = vi
+      .spyOn(sqlite, "prepare")
+      .mockImplementation((query) => {
+        statements.push(query);
+        return prepare(query);
+      });
+    try {
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      expectFusedWriteExecution(statements, "typegraph_nodes");
+      expectOneAutocommitWriteCommand(statements);
+
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      statements.splice(0);
+      await store.edges.knows.create(alice, bob, {});
+      expectFusedWriteExecution(statements, "typegraph_edges");
+      expectOneAutocommitWriteCommand(statements);
+    } finally {
+      prepareSpy.mockRestore();
+      sqlite.close();
+    }
+  });
+
+  it("reports a missing endpoint from a rejected noninteractive fused edge", async () => {
+    const graphDefinition = graph("schema_fused_sqlite_none_missing_endpoint");
+    const { sqlite, store } =
+      await createNoninteractiveSqliteBackend(graphDefinition);
+    try {
+      const source = await store.nodes.Person.create({ name: "Source" });
+      await expect(
+        store.edges.knows.create(source, { kind: "Person", id: "missing" }, {}),
+      ).rejects.toMatchObject({
+        details: { endpoint: "to", nodeId: "missing" },
+      });
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("reports a generated node insert anomaly from a rejected noninteractive fused insert", async () => {
+    const graphDefinition = graph("schema_fused_sqlite_none_rejected_node");
+    const { backend, sqlite, store } =
+      await createNoninteractiveSqliteBackend(graphDefinition);
+    try {
+      const insert = vi
+        .spyOn(backend, "insertNodeWithSchemaFence")
+        .mockResolvedValue(undefined);
+
+      const creation = store.nodes.Person.create({ name: "Rejected" });
+      await expect(creation).rejects.toThrow(
+        "Fresh node insert returned no row",
+      );
+      await expect(creation).rejects.toMatchObject({
+        details: { entity: "node", operation: "insert" },
+      });
+      expect(await store.nodes.Person.find()).toEqual([]);
+      expect(insert).toHaveBeenCalledTimes(1);
+      insert.mockRestore();
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("fails closed after a forced rejected edge command and writes no row", async () => {
+    const graphDefinition = graph("schema_fused_sqlite_none_rejected_command");
+    const { backend, sqlite, store } =
+      await createNoninteractiveSqliteBackend(graphDefinition);
+    try {
+      const source = await store.nodes.Person.create({ name: "Source" });
+      const target = await store.nodes.Person.create({ name: "Target" });
+      const execute = vi.spyOn(backend.commands, "execute").mockResolvedValue({
+        outcome: "rejected",
+        entity: "edge",
+        reason: "unknown",
+      });
+
+      await expect(
+        store.edges.knows.create(source, target, {}),
+      ).rejects.toMatchObject({
+        details: {
+          code: "SCHEMA_WRITE_FENCE_UNSUPPORTED",
+          graphId: "schema_fused_sqlite_none_rejected_command",
+        },
+      });
+      expect(await store.edges.knows.find()).toEqual([]);
+      expect(execute).toHaveBeenCalledTimes(1);
+      execute.mockRestore();
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it("executes one schema-fenced SQLite INSERT for successful nodes and many edges", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const statements: string[] = [];
@@ -634,6 +787,140 @@ describe("single-statement autocommit eligibility", () => {
       expect(eligible({ convergesDynamically: true })).toBe(false);
       expect(eligible({ cardinality: "one" })).toBe(false);
       expect(eligible({ backend: deriveBackend(backend, {}) })).toBe(false);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("centralizes schema-fence eligibility independently of interactive transactions", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const plainSchema = z.object({ name: z.string() });
+    const derivedNoninteractive = deriveBackend(backend, {
+      capabilities: { ...backend.capabilities, transactions: false },
+    });
+    const nodeCandidate: NodeAutocommitSingleStatementCandidate = {
+      backend,
+      schemaVersion: 1,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+      identityEnabled: false,
+      idGenerated: true,
+      kindRegistered: true,
+      uniqueConstraintCount: 0,
+      disjointKindCount: 0,
+      schema: plainSchema,
+    };
+    const edgeCandidate: EdgeAutocommitSingleStatementCandidate = {
+      backend,
+      schemaVersion: 1,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+      kindRegistered: true,
+      convergesDynamically: false,
+      cardinality: "many",
+    };
+
+    try {
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "node",
+          candidate: nodeCandidate,
+        }),
+      ).toBe(true);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "node",
+          candidate: { ...nodeCandidate, backend: derivedNoninteractive },
+        }),
+      ).toBe(false);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "node",
+          candidate: { ...nodeCandidate, idGenerated: false },
+        }),
+      ).toBe(true);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "node",
+          candidate: { ...nodeCandidate, identityEnabled: true },
+        }),
+      ).toBe(true);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "node",
+          candidate: {
+            ...nodeCandidate,
+            idGenerated: false,
+            identityEnabled: true,
+          },
+        }),
+      ).toBe(false);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "edge",
+          candidate: edgeCandidate,
+        }),
+      ).toBe(true);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "edge",
+          candidate: { ...edgeCandidate, backend: derivedNoninteractive },
+        }),
+      ).toBe(false);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "edge",
+          candidate: { ...edgeCandidate, convergesDynamically: true },
+        }),
+      ).toBe(false);
+      expect(
+        canFuseSchemaFenceInFirstWrite({
+          kind: "edge",
+          candidate: { ...edgeCandidate, cardinality: "one" },
+        }),
+      ).toBe(false);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("keeps missing-endpoint precedence before a durable same-id conflict", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        durableGraph("schema_fused_durable_endpoint_precedence"),
+        backend,
+      );
+      const source = await store.nodes.Person.create({ name: "Source" });
+      const target = await store.nodes.Person.create({ name: "Target" });
+      await store.edges.durableKnows.create(
+        source,
+        target,
+        { label: "friend" },
+        { id: "durable-owner" },
+      );
+
+      await expect(
+        store.edges.durableKnows.create(
+          source,
+          { kind: "Person", id: "missing" },
+          { label: "friend" },
+          { id: "durable-owner" },
+        ),
+      ).rejects.toMatchObject({
+        details: { endpoint: "to", nodeId: "missing" },
+      });
+
+      await expect(
+        store.edges.durableKnows.create(
+          source,
+          target,
+          { label: "friend" },
+          { id: "durable-owner" },
+        ),
+      ).rejects.toMatchObject({
+        code: "EDGE_MATCH_IDENTITY_CONFLICT",
+      });
     } finally {
       await backend.close();
     }

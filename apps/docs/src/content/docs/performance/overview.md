@@ -114,8 +114,9 @@ await store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
 });
 ```
 
-On a schema-managed bundled SQLite or PostgreSQL root backend, with history and
-revision tracking disabled, the default `ifExists: "return"` path combines the
+On a schema-managed bundled root backend (including D1 and neon-http), with
+claims, sidecars, history, and revision work absent, the default
+`ifExists: "return"` path combines the
 schema fence, endpoint validation, unique arbitration, and created/found result
 into one statement. A typical Neon WebSocket miss therefore falls from roughly
 five sequential requests to one. The found path is also one request, but the
@@ -131,6 +132,16 @@ directed endpoint pairs in set-oriented bind-budget chunks instead of issuing a
 candidate read per item. See
 [`getOrCreateByEndpoints`](/schemas-stores#getorcreatebyendpointsfrom-to-props-options)
 for field restrictions, migration rules, and PostgreSQL retry guidance.
+
+The one-request path is an authoritative command, not a general Store batch:
+the backend statement owns endpoint validation, durable-key arbitration, and
+the created/found result. Static adapter batches (including multi-row inserts)
+are separate internal optimizations and do not turn a sequence of public Store
+calls into one atomic operation. Use `store.transaction(...)` when several
+operations—including claims, Operational Identity, history, or revision
+sidecars—must commit together. Undeclared dynamic `matchOn` convergence keeps
+that interactive-transaction requirement; only a schema-declared durable
+`matchIdentity` can qualify for the one-statement root command.
 
 ### Single vs bulk operations
 

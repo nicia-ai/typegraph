@@ -441,6 +441,22 @@ unfenced writes are an explicit application decision, construct the Store with
 `createStore()` / `createAdapterStore()` without `{ reconciled }` and quiesce
 writers yourself around schema changes.
 
+### A convergence or claim write refuses on a non-transactional backend
+
+This is expected when the operation needs an interactive transaction. Static
+adapter batches are not a public transaction, and a sequence of independent
+requests cannot safely implement Operational Identity, claim/cardinality
+checks, or undeclared dynamic `matchOn` convergence. Use a backend with
+`capabilities.transactions === true` and call `store.transaction(...)` for
+those operations.
+
+A declared edge `matchIdentity` is the exception for the eligible root
+`getOrCreateByEndpoints` path: its persisted canonical key is backed by a
+database unique arbiter, so the authoritative one-statement command can
+return `created` or `found` without an interactive transaction. This exception
+does not cover claims, history/revision sidecars, or other writes in the same
+application workflow.
+
 ### The store opens clean but a fulltext or vector read fails
 
 **Cause:** The durable contribution marker still says `initialized`

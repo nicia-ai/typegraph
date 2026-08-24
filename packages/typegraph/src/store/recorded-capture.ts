@@ -7,8 +7,8 @@ import {
   batchPointReadVerdict,
   type BundleVerdictOf,
 } from "../backend/capabilities/resolve";
-import { assertCommandResultMatchesCommand } from "../backend/command";
 import {
+  assertCommandResultMatchesCommand,
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
   type GraphCommandExecutionContext,
@@ -1021,7 +1021,6 @@ export function createRecordedBackend(
         const result = await capture((target) =>
           executeAuthoritativeGraphCommand(target.commands, command),
         );
-        assertCommandResultMatchesCommand(command, result);
         return result;
       },
     },

@@ -7,10 +7,15 @@ import {
   mintGraphCommandCoordination,
 } from "../src/backend/command-contract";
 import type {
+  EdgeConvergeCreateCommand,
+  EdgeRow,
   GraphCommand,
   GraphCommandPort,
   NodeCreateCommand,
+  NodeRow,
 } from "../src/backend/types";
+
+const TIMESTAMP = "2026-08-24T00:00:00.000Z";
 
 const COMMAND: NodeCreateCommand = {
   kind: "node.create",
@@ -34,6 +39,63 @@ const RESULT = {
   entity: "node" as const,
   reason: "unknown" as const,
 };
+
+function nodeRow(id: string): NodeRow {
+  return {
+    graph_id: "graph",
+    kind: "Person",
+    id,
+    props: {},
+    version: 1,
+    valid_from: undefined,
+    valid_to: undefined,
+    created_at: TIMESTAMP,
+    updated_at: TIMESTAMP,
+    deleted_at: undefined,
+  };
+}
+
+const EDGE_CONVERGE_COMMAND: EdgeConvergeCreateCommand = {
+  kind: "edge.converge-create",
+  plan: {
+    entity: "edge",
+    params: {
+      graphId: "graph",
+      kind: "knows",
+      id: "candidate",
+      fromKind: "Person",
+      fromId: "from",
+      toKind: "Person",
+      toId: "to",
+      props: {},
+      matchIdentity: { name: "knows-pair", key: "expected-key" },
+    },
+  },
+  match: {
+    kind: "durable",
+    identity: { name: "knows-pair", key: "expected-key" },
+  },
+};
+
+function edgeRow(matchIdentityKey: string): EdgeRow {
+  return {
+    graph_id: "graph",
+    kind: "knows",
+    id: "winner",
+    from_kind: "Person",
+    from_id: "from",
+    to_kind: "Person",
+    to_id: "to",
+    props: {},
+    match_identity_name: "knows-pair",
+    match_identity_key: matchIdentityKey,
+    valid_from: undefined,
+    valid_to: undefined,
+    created_at: TIMESTAMP,
+    updated_at: TIMESTAMP,
+    deleted_at: undefined,
+  };
+}
 
 describe("authoritative graph command contract", () => {
   it.each(["root", "transaction"] as const)(
@@ -65,6 +127,54 @@ describe("authoritative graph command contract", () => {
         coordination: "none",
       },
     ]);
+  });
+
+  it("validates command/result correlation inside the execution helper", async () => {
+    const port: GraphCommandPort = {
+      session: "root",
+      execute: () =>
+        Promise.resolve({
+          outcome: "rejected" as const,
+          entity: "edge" as const,
+          reason: "unknown" as const,
+        }),
+    };
+
+    await expect(
+      executeAuthoritativeGraphCommand(port, COMMAND),
+    ).rejects.toThrow("submitted command entity");
+  });
+
+  it("rejects a created row with a foreign identity inside the execution helper", async () => {
+    const port: GraphCommandPort = {
+      session: "root",
+      execute: () =>
+        Promise.resolve({
+          outcome: "created" as const,
+          entity: "node" as const,
+          row: nodeRow("foreign-node"),
+        }),
+    };
+
+    await expect(
+      executeAuthoritativeGraphCommand(port, COMMAND),
+    ).rejects.toThrow("submitted command identity");
+  });
+
+  it("rejects a found row with a foreign durable identity inside the execution helper", async () => {
+    const port: GraphCommandPort = {
+      session: "root",
+      execute: () =>
+        Promise.resolve({
+          outcome: "found" as const,
+          entity: "edge" as const,
+          row: edgeRow("foreign-key"),
+        }),
+    };
+
+    await expect(
+      executeAuthoritativeGraphCommand(port, EDGE_CONVERGE_COMMAND),
+    ).rejects.toThrow("submitted edge identity");
   });
 
   it("accepts the context constructed for a root command", () => {

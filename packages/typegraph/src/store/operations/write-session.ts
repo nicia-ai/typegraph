@@ -47,7 +47,6 @@ import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
-import { assertCommandResultMatchesCommand } from "../../backend/command";
 import { executeAuthoritativeGraphCommand } from "../../backend/command-contract";
 import {
   type BackendIdentity,
@@ -532,7 +531,6 @@ export function createWriteSession(
             target.commands,
             command,
           );
-          assertCommandResultMatchesCommand(command, result);
           if (result.outcome === "unsupported") {
             assertPortableNodeFallbackCanRun(
               target,
@@ -625,7 +623,6 @@ export function createWriteSession(
                 target.commands,
                 command,
               );
-              assertCommandResultMatchesCommand(command, result);
               if (result.outcome === "rejected") {
                 return { row: undefined, projectionsFused: false };
               }
@@ -749,7 +746,6 @@ export function createWriteSession(
         target.commands,
         command,
       );
-      assertCommandResultMatchesCommand(command, result);
       if (
         result.outcome === "unsupported" &&
         result.dimensions.length === 1 &&
@@ -773,7 +769,6 @@ export function createWriteSession(
           target.commands,
           retryCommand,
         );
-        assertCommandResultMatchesCommand(retryCommand, retryResult);
         return retryResult;
       }
       return result;

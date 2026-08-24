@@ -16,6 +16,20 @@ export type CompiledSqlQuery = Readonly<{
   sql: string;
 }>;
 
+/**
+ * A driver-native, all-or-nothing group of compiled statements.
+ *
+ * This is intentionally an optional execution surface. Most SQL drivers only
+ * expose one-statement execution through Drizzle; drivers with a native batch
+ * primitive can provide it without making callers guess whether a sequence is
+ * actually transactional. The static name is deliberate: this hook submits a
+ * complete batch to a native primitive and is not an interactive transaction
+ * runner.
+ */
+type StaticAtomicBatchExecutor = <TRow>(
+  statements: readonly CompiledSqlQuery[],
+) => Promise<readonly (readonly TRow[])[]>;
+
 export type PreparedSqlStatement = Readonly<{
   execute: <TRow>(params: readonly unknown[]) => Promise<readonly TRow[]>;
 }>;
@@ -26,6 +40,8 @@ export type SqlExecutionAdapter = Readonly<{
   executeCompiled?: <TRow>(
     compiledQuery: CompiledSqlQuery,
   ) => Promise<readonly TRow[]>;
+  /** Executes all statements atomically when the native driver supports it. */
+  executeAtomicBatch?: StaticAtomicBatchExecutor;
   prepare?: (sqlText: string) => PreparedSqlStatement;
   /**
    * Runs `critical` with exclusive use of the connection: no statement from

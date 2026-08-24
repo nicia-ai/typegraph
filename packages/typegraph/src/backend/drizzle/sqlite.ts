@@ -129,6 +129,7 @@ import {
 } from "./execution/sqlite-execution";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import { instantiateGraphTemplateSql } from "./graph-template-sql";
+import { isLocalLibsqlClient } from "./libsql-client";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
@@ -1215,16 +1216,7 @@ function createSqliteOperationBackend(
  * per-stream `db.transaction()`) by asking here, so the framing and the
  * serialized-resource mark cannot drift apart.
  */
-export function isLocalLibsqlClient(client: unknown): boolean {
-  if (typeof client !== "object" || client === null) return false;
-  const candidate = client as Readonly<Record<string, unknown>>;
-  return (
-    candidate["protocol"] === "file" &&
-    typeof candidate["execute"] === "function" &&
-    typeof candidate["batch"] === "function" &&
-    typeof candidate["executeMultiple"] === "function"
-  );
-}
+export { isLocalLibsqlClient } from "./libsql-client";
 
 /**
  * Returns the single connection a Drizzle database serializes every statement

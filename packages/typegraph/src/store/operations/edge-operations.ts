@@ -72,6 +72,7 @@
  *    `oneActive` population — asserted only for that decision; other
  *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
+import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
@@ -82,7 +83,6 @@ import {
   type ClaimsVerdictThunk,
 } from "../../backend/capabilities/resolve";
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
-import { assertCommandResultMatchesCommand } from "../../backend/command";
 import {
   assertGraphCommandConvergenceIsolation,
   executeAuthoritativeGraphCommand,
@@ -173,6 +173,7 @@ import {
 import { withAlreadyExistsTranslation } from "./already-exists";
 import {
   AutocommitWriteRequiresTransaction,
+  canFuseSchemaFenceInFirstWrite,
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
 import { createEdgeBatchValidationBackend } from "./edge-batch-validation";
@@ -210,6 +211,7 @@ import {
   hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
   memoizeLeasedSchemaFence,
+  type WriteTransactionMode,
 } from "./write-transaction";
 
 // ============================================================
@@ -645,30 +647,27 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
   const convergeOn = options?.convergeOn;
   const durableConvergence =
     convergeOn !== undefined && registration.matchIdentity !== undefined;
-  const schemaFenceInFirstWrite =
-    ctx.schemaVersion !== undefined &&
-    isSchemaFencedInsertEligible(backend) &&
-    backend.capabilities.transactions &&
-    !ctx.historyEnabled &&
-    !ctx.revisionTrackingEnabled &&
-    (convergeOn === undefined || durableConvergence) &&
-    edgeCardinality(ctx, kind) === "many";
-  const autocommitBackend = "transaction" in backend ? backend : undefined;
-  const autocommitSingleStatement =
-    autocommitBackend !== undefined &&
-    hasOwnKey(ctx.graph.edges, kind) &&
-    isAutocommitSingleStatementWrite({
-      kind: "edge",
-      candidate: {
-        backend: autocommitBackend,
+  const autocommitBackend =
+    isBundledRootAutocommitEligible(backend) ? backend : undefined;
+  const candidate =
+    hasOwnKey(ctx.graph.edges, kind) ?
+      ({
+        backend,
         schemaVersion: ctx.schemaVersion,
         historyEnabled: ctx.historyEnabled,
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
         kindRegistered: true,
         convergesDynamically: convergeOn !== undefined && !durableConvergence,
         cardinality: edgeCardinality(ctx, kind),
-      },
-    });
+      } as const)
+    : undefined;
+  const schemaFenceInFirstWrite =
+    candidate !== undefined &&
+    canFuseSchemaFenceInFirstWrite({ kind: "edge", candidate });
+  const autocommitSingleStatement =
+    autocommitBackend !== undefined &&
+    candidate !== undefined &&
+    isAutocommitSingleStatementWrite({ kind: "edge", candidate });
   const plan = edgeWritePlan(
     convergeOn === undefined || durableConvergence ?
       edgeWriteNeedsConstraintFence(edgeCardinality(ctx, kind))
@@ -680,6 +679,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     target: WriteTarget,
     _overlaidSession: OverlaidSessionMint<"edge">,
     lock: GraphWriteLock,
+    transactionMode: WriteTransactionMode,
   ): Promise<EdgeCreateInternalResult> => {
     // See node create's matching receiver check: a custom transaction
     // wrapper may replace the marked outer backend with an unmarked target.
@@ -697,13 +697,32 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     ): Promise<EdgeCreatePrepared> => {
       if (fuseSchemaFenceInFirstWrite) {
         await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
-        if (autocommitSingleStatement && "transaction" in targetBackend) {
+        const directInteractiveAutocommit =
+          autocommitSingleStatement &&
+          transactionMode === "none" &&
+          targetBackend.capabilities.transactions;
+        if (directInteractiveAutocommit) {
           throw new AutocommitWriteRequiresTransaction();
         }
-        // Endpoint predicates can reject the INSERT before PostgreSQL
-        // evaluates the nested locking subquery. Re-establish the portable
-        // fence before the ordered fallback probes or a later leased write.
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+        if (transactionMode !== "none") {
+          // Transaction-backed fallback probes need the portable schema fence;
+          // the transaction already supplies atomicity.
+          await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+        }
+        const prepared = await validateAndPrepareEdgeCreate(
+          ctx,
+          input,
+          id,
+          target,
+          { validateEndpoints: true, validateCardinality },
+        );
+        if (transactionMode === "none") {
+          // A noninteractive root has no safe plain-write fallback. Probe
+          // endpoints first for the typed missing-endpoint error, then fail
+          // closed at the schema fence before any unfenced INSERT.
+          await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+        }
+        return prepared;
       }
       return validateAndPrepareEdgeCreate(ctx, input, id, target, {
         validateEndpoints: true,
@@ -823,7 +842,6 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
                 lock.coordination ?? "none",
               ),
             );
-        assertCommandResultMatchesCommand(command, result);
         if (result.outcome === "created") {
           // Durable identity and cardinality are separate authorities. The
           // converge command owns the former; retain the latter's claim row
@@ -840,14 +858,6 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               result.row,
               command.match.matchOn,
               command.match.props,
-            );
-          } else if (
-            result.row.match_identity_name !== command.match.identity.name ||
-            result.row.match_identity_key !== command.match.identity.key
-          ) {
-            throw new CompilerInvariantError(
-              "A durable edge convergence command returned a different match identity.",
-              { kind, id, identity: command.match.identity },
             );
           }
           if (convergeOn === undefined) {
@@ -909,10 +919,15 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
             kind,
           );
           if (identityConflict !== undefined) {
-            // The command's empty result can also mean a stale schema fence
-            // or a dead endpoint. Preserve those established diagnostics
-            // before translating the same-id durable-arbiter refusal.
-            await diagnoseFusedCreateNoRow(false);
+            // The same-id incumbent probe has already established the
+            // durable-arbiter refusal. Preserve the established endpoint
+            // validation ordering, but do not enter the fallback path: once
+            // endpoints pass, the typed conflict is already authoritative.
+            await diagnoseFusedSchemaFenceNoRow(ctx, targetBackend);
+            await validateAndPrepareEdgeCreate(ctx, input, id, target, {
+              validateEndpoints: true,
+              validateCardinality: false,
+            });
             throw identityConflict;
           }
         }
