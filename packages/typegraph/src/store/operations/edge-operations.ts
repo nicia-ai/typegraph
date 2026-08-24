@@ -859,14 +859,6 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               command.match.matchOn,
               command.match.props,
             );
-          } else if (
-            result.row.match_identity_name !== command.match.identity.name ||
-            result.row.match_identity_key !== command.match.identity.key
-          ) {
-            throw new CompilerInvariantError(
-              "A durable edge convergence command returned a different match identity.",
-              { kind, id, identity: command.match.identity },
-            );
           }
           if (convergeOn === undefined) {
             if (command.match.kind !== "durable") {

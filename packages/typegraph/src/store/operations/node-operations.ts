@@ -153,6 +153,7 @@ import {
   resolveNodeFulltextProjection,
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
+import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
@@ -181,6 +182,7 @@ import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
   booleanWriteResultChanges,
   type HookedWritePlanContext,
+  type OverlaidSessionMint,
   runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
@@ -1834,8 +1836,8 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const rowWork = async (
     session: NodeWriteSession,
     target: WriteTarget,
-    _overlaidSession: unknown,
-    _lock: unknown,
+    _overlaidSession: OverlaidSessionMint<"node">,
+    _lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
   ): Promise<Node | undefined> => {
     // The outer backend's mark chooses the optimistic plan, but a custom
@@ -1956,13 +1958,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       if (directInteractiveAutocommit) {
         throw new AutocommitWriteRequiresTransaction();
       }
-      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
       if (!prepared.insertIfAbsent) {
+        if (transactionMode !== "none") {
+          await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+        }
         throw new DatabaseOperationError(
           `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
           { operation: "insert", entity: "node" },
         );
       }
+      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
     }
 
     if (fuseProjections && !fuseSchemaFenceProjections) {

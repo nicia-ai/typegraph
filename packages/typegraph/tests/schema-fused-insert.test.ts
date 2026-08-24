@@ -445,6 +445,30 @@ describe("schema-fenced insert budget", () => {
     }
   });
 
+  it("reports a generated node insert anomaly from a rejected noninteractive fused insert", async () => {
+    const graphDefinition = graph("schema_fused_sqlite_none_rejected_node");
+    const { backend, sqlite, store } =
+      await createNoninteractiveSqliteBackend(graphDefinition);
+    try {
+      const insert = vi
+        .spyOn(backend, "insertNodeWithSchemaFence")
+        .mockResolvedValue(undefined);
+
+      const creation = store.nodes.Person.create({ name: "Rejected" });
+      await expect(creation).rejects.toThrow(
+        "Fresh node insert returned no row",
+      );
+      await expect(creation).rejects.toMatchObject({
+        details: { entity: "node", operation: "insert" },
+      });
+      expect(await store.nodes.Person.find()).toEqual([]);
+      expect(insert).toHaveBeenCalledTimes(1);
+      insert.mockRestore();
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it("fails closed after a forced rejected edge command and writes no row", async () => {
     const graphDefinition = graph("schema_fused_sqlite_none_rejected_command");
     const { backend, sqlite, store } =

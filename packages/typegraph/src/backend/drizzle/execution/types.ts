@@ -26,7 +26,7 @@ export type CompiledSqlQuery = Readonly<{
  * complete batch to a native primitive and is not an interactive transaction
  * runner.
  */
-export type StaticAtomicBatchExecutor = <TRow>(
+type StaticAtomicBatchExecutor = <TRow>(
   statements: readonly CompiledSqlQuery[],
 ) => Promise<readonly (readonly TRow[])[]>;
 
