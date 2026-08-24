@@ -1,5 +1,9 @@
 import { CompilerInvariantError, ConfigurationError } from "../errors";
 import type {
+  EdgeConvergeCreateCommand,
+  EdgeConvergeCreateCommandResult,
+  EdgeCreateCommand,
+  EdgeCreateCommandResult,
   GraphCommand,
   GraphCommandCoordination,
   GraphCommandExecutionContext,
@@ -7,6 +11,8 @@ import type {
   GraphCommandPort,
   GraphCommandResult,
   GraphCommandSession,
+  NodeCreateCommand,
+  NodeCreateCommandResult,
 } from "./types";
 
 const graphCommandCoordinationBindings = new WeakMap<
@@ -193,12 +199,150 @@ export function assertGraphCommandExecutionContext(
   }
 }
 
+/** Refuse a backend result that does not describe the submitted command. */
+export function assertCommandResultMatchesCommand(
+  command: NodeCreateCommand,
+  result: GraphCommandResult,
+): asserts result is NodeCreateCommandResult;
+export function assertCommandResultMatchesCommand(
+  command: EdgeCreateCommand,
+  result: GraphCommandResult,
+): asserts result is EdgeCreateCommandResult;
+export function assertCommandResultMatchesCommand(
+  command: EdgeConvergeCreateCommand,
+  result: GraphCommandResult,
+): asserts result is EdgeConvergeCreateCommandResult;
+export function assertCommandResultMatchesCommand(
+  command: GraphCommand,
+  result: GraphCommandResult,
+): void;
+export function assertCommandResultMatchesCommand(
+  command: GraphCommand,
+  result: GraphCommandResult,
+): void {
+  const planEntity = command.plan.entity;
+  const graphId = command.plan.params.graphId;
+  const commandId = command.plan.params.id;
+  const resultEntity = result.entity;
+  if (resultEntity !== planEntity) {
+    throw new CompilerInvariantError(
+      "A command result must describe the submitted command entity.",
+      {
+        planEntity,
+        resultEntity,
+        graphId,
+        id: commandId,
+      },
+    );
+  }
+  if (result.outcome === "found") {
+    if (command.kind !== "edge.converge-create") {
+      throw new CompilerInvariantError(
+        "Only an edge convergence command may return a found result.",
+        { commandKind: command.kind, graphId, id: commandId },
+      );
+    }
+    const row = result.row;
+    const params = command.plan.params;
+    const matchIdentityMatches =
+      command.match.kind === "dynamic" ||
+      (row.match_identity_name === command.match.identity.name &&
+        row.match_identity_key === command.match.identity.key);
+    if (
+      row.graph_id === params.graphId &&
+      row.kind === params.kind &&
+      row.from_kind === params.fromKind &&
+      row.from_id === params.fromId &&
+      row.to_kind === params.toKind &&
+      row.to_id === params.toId &&
+      matchIdentityMatches
+    ) {
+      return;
+    }
+    throw new CompilerInvariantError(
+      "A convergent edge result row must match the submitted edge identity.",
+      {
+        command: {
+          graphId: params.graphId,
+          kind: params.kind,
+          fromKind: params.fromKind,
+          fromId: params.fromId,
+          toKind: params.toKind,
+          toId: params.toId,
+        },
+        result: {
+          graphId: row.graph_id,
+          kind: row.kind,
+          fromKind: row.from_kind,
+          fromId: row.from_id,
+          toKind: row.to_kind,
+          toId: row.to_id,
+        },
+      },
+    );
+  }
+  const plan = command.plan;
+  if (result.outcome !== "created") return;
+  const durableIdentityMatches =
+    plan.entity === "node" ||
+    plan.params.matchIdentity === undefined ||
+    (result.entity === "edge" &&
+      result.row.match_identity_name === plan.params.matchIdentity.name &&
+      result.row.match_identity_key === plan.params.matchIdentity.key);
+  if (
+    result.row.graph_id === plan.params.graphId &&
+    result.row.kind === plan.params.kind &&
+    result.row.id === plan.params.id &&
+    durableIdentityMatches
+  ) {
+    return;
+  }
+  throw new CompilerInvariantError(
+    "A command result row must match the submitted command identity.",
+    {
+      command: {
+        graphId: plan.params.graphId,
+        kind: plan.params.kind,
+        id: plan.params.id,
+      },
+      result: {
+        graphId: result.row.graph_id,
+        kind: result.row.kind,
+        id: result.row.id,
+      },
+    },
+  );
+}
+
 /**
  * Execute a command through the explicit authoritative seam.
  *
  * Store write paths must use this helper so session and coordination evidence
  * are explicit at every first-party call site.
  */
+export function executeAuthoritativeGraphCommand(
+  port: GraphCommandPort,
+  command: NodeCreateCommand,
+  coordination?: "none" | GraphCommandCoordination,
+): Promise<NodeCreateCommandResult>;
+/** Execute an authoritative edge-create command and return its typed result. */
+export function executeAuthoritativeGraphCommand(
+  port: GraphCommandPort,
+  command: EdgeCreateCommand,
+  coordination?: "none" | GraphCommandCoordination,
+): Promise<EdgeCreateCommandResult>;
+/** Execute an authoritative convergent edge-create command and return its typed result. */
+export function executeAuthoritativeGraphCommand(
+  port: GraphCommandPort,
+  command: EdgeConvergeCreateCommand,
+  coordination?: "none" | GraphCommandCoordination,
+): Promise<EdgeConvergeCreateCommandResult>;
+/** Execute any graph command when its concrete kind is not statically known. */
+export function executeAuthoritativeGraphCommand(
+  port: GraphCommandPort,
+  command: GraphCommand,
+  coordination?: "none" | GraphCommandCoordination,
+): Promise<GraphCommandResult>;
 export function executeAuthoritativeGraphCommand(
   port: GraphCommandPort,
   command: GraphCommand,
@@ -214,5 +358,8 @@ export function executeAuthoritativeGraphCommand(
       assertGraphCommandConvergenceIsolation(port, coordination);
     }
   }
-  return port.execute(command, context);
+  return port.execute(command, context).then((result) => {
+    assertCommandResultMatchesCommand(command, result);
+    return result;
+  });
 }

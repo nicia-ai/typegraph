@@ -86,6 +86,16 @@ type PostgresJsClient = ((...args: readonly unknown[]) => unknown) &
     ) => PromiseLike<readonly unknown[]>;
   }>;
 
+type NeonHttpBatchClient = Readonly<{
+  query: (
+    sqlText: string,
+    params?: readonly unknown[],
+  ) => PromiseLike<readonly unknown[]>;
+  transaction: (
+    queries: readonly PromiseLike<readonly unknown[]>[],
+  ) => Promise<readonly unknown[]>;
+}>;
+
 type PgSessionCarrier = Readonly<{
   client?: unknown;
   constructor?: Readonly<{ name?: string }>;
@@ -236,6 +246,27 @@ export function isNeonHttpClient(db: AnyPgDatabase): boolean {
     hasFunctionProperty(candidate, "transaction") &&
     !hasFunctionProperty(candidate, "begin")
   );
+}
+
+/**
+ * Returns the Neon HTTP client only when its current query method is present.
+ * Older Neon HTTP releases expose `transaction()` but not `query()`; those
+ * clients remain correctly classified as Neon HTTP (and therefore avoid the
+ * node-postgres fast path), but cannot safely provide this batch surface.
+ */
+function resolveNeonHttpBatchClient(
+  db: AnyPgDatabase,
+): NeonHttpBatchClient | undefined {
+  if (!isNeonHttpClient(db)) return undefined;
+  const candidate = (db as PgClientCarrier).$client;
+  if (
+    typeof candidate !== "function" ||
+    !hasFunctionProperty(candidate, "query") ||
+    !hasFunctionProperty(candidate, "transaction")
+  ) {
+    return undefined;
+  }
+  return candidate as unknown as NeonHttpBatchClient;
 }
 
 /**
@@ -590,6 +621,7 @@ export function createPostgresExecutionAdapter(
   const cacheMax =
     options.preparedStatementCacheMax ?? DEFAULT_POSTGRES_STATEMENT_CACHE_MAX;
   const maxBindParameters = options.maxBindParameters;
+  const neonHttpClient = resolveNeonHttpBatchClient(db);
   const pgClient = resolvePgClient(
     db,
     prepareStatements,
@@ -610,6 +642,37 @@ export function createPostgresExecutionAdapter(
     );
   }
 
+  const executeAtomicBatch =
+    neonHttpClient === undefined ? undefined : (
+      async function executeNeonAtomicBatch<TRow>(
+        statements: readonly CompiledSqlQuery[],
+      ): Promise<readonly (readonly TRow[])[]> {
+        for (const statement of statements) {
+          assertCompiledWithinBindParameterLimit(statement);
+        }
+        if (statements.length === 0) return [];
+        const queries = statements.map((statement) =>
+          neonHttpClient.query(statement.sql, statement.params),
+        );
+        const results = await neonHttpClient.transaction(queries);
+        return results.map((result) => {
+          if (
+            typeof result === "object" &&
+            result !== null &&
+            "rows" in result &&
+            Array.isArray((result as { rows?: unknown }).rows)
+          ) {
+            return normalizeRows(
+              (result as { rows: readonly unknown[] }).rows,
+            ) as readonly TRow[];
+          }
+          return Array.isArray(result) ?
+              (normalizeRows(result) as readonly TRow[])
+            : [];
+        });
+      }
+    );
+
   if (pgClient === undefined) {
     return {
       compile,
@@ -620,6 +683,7 @@ export function createPostgresExecutionAdapter(
           isSqlFragment(query) ? toDrizzleSql(query, "postgres") : query,
         );
       },
+      ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     };
   }
 
@@ -657,6 +721,7 @@ export function createPostgresExecutionAdapter(
       return executeCompiled<TRow>(compiled);
     },
     executeCompiled,
+    ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     prepare(sqlText: string): PreparedSqlStatement {
       return createPgPreparedStatement(
         pgQueryClient,

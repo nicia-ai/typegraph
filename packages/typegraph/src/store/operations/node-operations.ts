@@ -46,6 +46,7 @@
  */
 import { type z } from "zod";
 
+import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
@@ -171,7 +172,11 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
-import { isAutocommitSingleStatementWrite } from "./autocommit-single-statement";
+import {
+  AutocommitWriteRequiresTransaction,
+  canFuseSchemaFenceInFirstWrite,
+  isAutocommitSingleStatementWrite,
+} from "./autocommit-single-statement";
 import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
   booleanWriteResultChanges,
@@ -194,6 +199,7 @@ import {
   hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
   memoizeLeasedSchemaFence,
+  type WriteTransactionMode,
 } from "./write-transaction";
 
 // ============================================================
@@ -403,34 +409,6 @@ function nodeCreateRequiresIdentityLock<G extends GraphDef>(
  * tracking all acquire a lock before row work, so they deliberately retain the
  * ordinary explicit fence.
  */
-function canFuseNodeCreateSchemaFence<G extends GraphDef>(
-  ctx: NodeOperationContext<G>,
-  input: CreateNodeInput,
-  backend: GraphBackend | TransactionBackend,
-): boolean {
-  if (
-    ctx.schemaVersion === undefined ||
-    !isSchemaFencedInsertEligible(backend) ||
-    !backend.capabilities.transactions ||
-    ctx.historyEnabled ||
-    ctx.revisionTrackingEnabled ||
-    (input.id !== undefined && ctx.identity !== undefined) ||
-    !hasOwnKey(ctx.graph.nodes, input.kind)
-  ) {
-    return false;
-  }
-  const registration = getNodeRegistration(ctx.graph, input.kind);
-  if (
-    (registration.unique?.length ?? 0) !== 0 ||
-    ctx.registry.getDisjointKinds(input.kind).length > 0
-  ) {
-    return false;
-  }
-  return input.id === undefined ?
-      backend.insertNodeWithSchemaFence !== undefined
-    : backend.insertNodeIfAbsentWithSchemaFence !== undefined;
-}
-
 /** Whether any member of a node-create batch can participate in identity. */
 function nodeBatchCreateRequiresIdentityLock<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -1820,23 +1798,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const id = input.id ?? generateId();
   const opContext = ctx.createOperationContext("create", "node", kind, id);
   const shouldReturnRow = options?.returnRow ?? true;
-  const schemaFenceInFirstWrite = canFuseNodeCreateSchemaFence(
-    ctx,
-    input,
-    backend,
-  );
-  const autocommitBackend = "transaction" in backend ? backend : undefined;
+  const autocommitBackend =
+    isBundledRootAutocommitEligible(backend) ? backend : undefined;
   const registeredKind =
     hasOwnKey(ctx.graph.nodes, kind) ?
       getNodeRegistration(ctx.graph, kind)
     : undefined;
-  const autocommitSingleStatement =
-    autocommitBackend !== undefined &&
-    registeredKind !== undefined &&
-    isAutocommitSingleStatementWrite({
-      kind: "node",
-      candidate: {
-        backend: autocommitBackend,
+  const candidate =
+    registeredKind === undefined ? undefined : (
+      ({
+        backend,
         schemaVersion: ctx.schemaVersion,
         historyEnabled: ctx.historyEnabled,
         revisionTrackingEnabled: ctx.revisionTrackingEnabled,
@@ -1846,8 +1817,15 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         uniqueConstraintCount: registeredKind.unique?.length ?? 0,
         disjointKindCount: ctx.registry.getDisjointKinds(kind).length,
         schema: registeredKind.type.schema,
-      },
-    });
+      } as const)
+    );
+  const schemaFenceInFirstWrite =
+    candidate !== undefined &&
+    canFuseSchemaFenceInFirstWrite({ kind: "node", candidate });
+  const autocommitSingleStatement =
+    autocommitBackend !== undefined &&
+    candidate !== undefined &&
+    isAutocommitSingleStatementWrite({ kind: "node", candidate });
   const plan = nodeWritePlan(
     nodeFencesConstraintProbe(ctx, kind, "create"),
     nodeCreateRequiresIdentityLock(ctx, input),
@@ -1856,6 +1834,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
   const rowWork = async (
     session: NodeWriteSession,
     target: WriteTarget,
+    _overlaidSession: unknown,
+    _lock: unknown,
+    transactionMode: WriteTransactionMode,
   ): Promise<Node | undefined> => {
     // The outer backend's mark chooses the optimistic plan, but a custom
     // transaction wrapper can replace its callback target. Re-check the
@@ -1968,9 +1949,14 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // locking subquery: an ON CONFLICT or other zero-row branch can make the
       // executor skip it. Acquire the portable fence before any fallback read
       // or later write relies on this transaction's lease.
-      if (!autocommitSingleStatement) {
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      const directInteractiveAutocommit =
+        autocommitSingleStatement &&
+        transactionMode === "none" &&
+        targetBackend.capabilities.transactions;
+      if (directInteractiveAutocommit) {
+        throw new AutocommitWriteRequiresTransaction();
       }
+      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
       if (!prepared.insertIfAbsent) {
         throw new DatabaseOperationError(
           `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,

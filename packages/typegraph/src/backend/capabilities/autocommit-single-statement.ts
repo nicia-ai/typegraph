@@ -9,6 +9,7 @@
  * carried through `deriveBackend`, an owned transaction, or adoption of a
  * caller-owned transaction.
  */
+import type { GraphBackend, TransactionBackend } from "../types";
 
 const BUNDLED_ROOT_AUTOCOMMIT_BACKENDS = new WeakSet<object>();
 
@@ -21,6 +22,8 @@ export function markBundledRootAutocommitEligible<T extends object>(
 }
 
 /** Whether this is the exact root backend a bundled factory created. */
-export function isBundledRootAutocommitEligible(target: object): boolean {
+export function isBundledRootAutocommitEligible(
+  target: GraphBackend | TransactionBackend,
+): target is GraphBackend {
   return BUNDLED_ROOT_AUTOCOMMIT_BACKENDS.has(target);
 }

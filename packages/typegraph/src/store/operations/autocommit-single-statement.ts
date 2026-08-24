@@ -10,7 +10,11 @@ import { type z } from "zod";
 
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { supportsNodeInsertProjectionRequirements } from "../../backend/capabilities/node-insert-projections";
-import { type GraphBackend } from "../../backend/types";
+import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
+import {
+  type GraphBackend,
+  type TransactionBackend,
+} from "../../backend/types";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 
@@ -23,7 +27,7 @@ export class AutocommitWriteRequiresTransaction extends Error {
 }
 
 export type NodeAutocommitSingleStatementCandidate = Readonly<{
-  backend: GraphBackend;
+  backend: GraphBackend | TransactionBackend;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -36,7 +40,7 @@ export type NodeAutocommitSingleStatementCandidate = Readonly<{
 }>;
 
 export type EdgeAutocommitSingleStatementCandidate = Readonly<{
-  backend: GraphBackend;
+  backend: GraphBackend | TransactionBackend;
   schemaVersion: number | undefined;
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
@@ -56,6 +60,69 @@ export type AutocommitSingleStatementCandidate =
     }>;
 
 /**
+ * Whether the selected execution boundary can safely carry a schema fence in
+ * the write statement. A root backend without interactive transactions may
+ * use this only when its bundled-factory provenance proves the whole path is
+ * the known one-statement implementation and this operation allows direct
+ * root autocommit; derived wrappers intentionally do not inherit that proof.
+ */
+function canUseSchemaFenceAtExecutionBoundary(
+  backend: GraphBackend | TransactionBackend,
+  rootAutocommitAllowed: boolean,
+): boolean {
+  if (backend.commands.session === "transaction") return true;
+  if (backend.capabilities.transactions) return true;
+  return rootAutocommitAllowed && isBundledRootAutocommitEligible(backend);
+}
+
+/**
+ * The operation-independent proof that the schema fence may be carried by
+ * the first INSERT. SQL statement atomicity is the relevant guarantee here;
+ * `capabilities.transactions` describes interactive transaction support and
+ * is one valid boundary, but is not required for a proven bundled-root write.
+ */
+export function canFuseSchemaFenceInFirstWrite(
+  input: AutocommitSingleStatementCandidate,
+): boolean {
+  switch (input.kind) {
+    case "node": {
+      const candidate = input.candidate;
+      return (
+        candidate.schemaVersion !== undefined &&
+        canUseSchemaFenceAtExecutionBoundary(
+          candidate.backend,
+          candidate.idGenerated,
+        ) &&
+        isSchemaFencedInsertEligible(candidate.backend) &&
+        !candidate.historyEnabled &&
+        !candidate.revisionTrackingEnabled &&
+        (!candidate.identityEnabled || candidate.idGenerated) &&
+        candidate.kindRegistered &&
+        candidate.uniqueConstraintCount === 0 &&
+        candidate.disjointKindCount === 0 &&
+        (candidate.idGenerated ?
+          candidate.backend.insertNodeWithSchemaFence !== undefined
+        : candidate.backend.insertNodeIfAbsentWithSchemaFence !== undefined)
+      );
+    }
+
+    case "edge": {
+      const candidate = input.candidate;
+      return (
+        candidate.schemaVersion !== undefined &&
+        canUseSchemaFenceAtExecutionBoundary(candidate.backend, true) &&
+        isSchemaFencedInsertEligible(candidate.backend) &&
+        !candidate.historyEnabled &&
+        !candidate.revisionTrackingEnabled &&
+        candidate.kindRegistered &&
+        !candidate.convergesDynamically &&
+        candidate.cardinality === "many"
+      );
+    }
+  }
+}
+
+/**
  * Returns true only for a bundled root's fully fused, one-statement write.
  *
  * This deliberately does not infer an opt-in from capability names or from a
@@ -71,7 +138,6 @@ export function isAutocommitSingleStatementWrite(
       const candidate = input.candidate;
       return (
         candidate.schemaVersion !== undefined &&
-        candidate.backend.capabilities.transactions &&
         isBundledRootAutocommitEligible(candidate.backend) &&
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&
@@ -96,7 +162,6 @@ export function isAutocommitSingleStatementWrite(
       const candidate = input.candidate;
       return (
         candidate.schemaVersion !== undefined &&
-        candidate.backend.capabilities.transactions &&
         isBundledRootAutocommitEligible(candidate.backend) &&
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&

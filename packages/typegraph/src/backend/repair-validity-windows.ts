@@ -489,7 +489,11 @@ export async function repairInvertedValidityWindows(
         relations: options.relations,
         counts: relationRecord(inverted),
         nonCanonical: relationRecord(nonCanonical),
-        atomic: execution.atomic,
+        // Keep the report's long-standing `atomic` compatibility field while
+        // consuming the richer execution-mode decision from the transaction
+        // seam. A sequential callback is not an interactive transaction even
+        // when an adapter happens to execute one statement atomically.
+        atomic: execution.mode === "interactive-transaction",
       };
     },
     transactionOptionsFor(options.mode),

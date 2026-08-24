@@ -1546,6 +1546,15 @@ export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 type ErrorCategory = "user" | "constraint" | "system";
 
 // @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: NodeCreateCommand, coordination?: "none" | GraphCommandCoordination): Promise<NodeCreateCommandResult>;
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: EdgeCreateCommand, coordination?: "none" | GraphCommandCoordination): Promise<EdgeCreateCommandResult>;
+
+// @public
+export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: EdgeConvergeCreateCommand, coordination?: "none" | GraphCommandCoordination): Promise<EdgeConvergeCreateCommandResult>;
+
+// @public
 export function executeAuthoritativeGraphCommand(port: GraphCommandPort, command: GraphCommand, coordination?: "none" | GraphCommandCoordination): Promise<GraphCommandResult>;
 
 // @public

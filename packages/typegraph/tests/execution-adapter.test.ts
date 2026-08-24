@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type AnyPgDatabase,
   createPostgresExecutionAdapter,
+  isNeonHttpClient,
   resetStatementNameCacheForTests,
 } from "../src/backend/drizzle/execution/postgres-execution";
 import {
@@ -358,6 +359,161 @@ function makeMockPgDb(): { db: AnyPgDatabase; query: MockPgQueryFunction } {
 }
 
 describe("postgres execution adapter", () => {
+  it("uses Neon HTTP transaction batches when the client exposes query", async () => {
+    type NeonQuery = Promise<readonly unknown[]>;
+    const query = vi.fn<
+      (sqlText: string, params: readonly unknown[]) => NeonQuery
+    >((sqlText, params) => Promise.resolve([{ sqlText, params }]));
+    const transaction = vi.fn(async (queries: readonly NeonQuery[]) =>
+      Promise.all(queries),
+    );
+    const neonClient = Object.assign(vi.fn(), { query, transaction });
+    const db = {
+      $client: neonClient,
+      dialect: {
+        sqlToQuery() {
+          return { params: [], sql: "unused" };
+        },
+      },
+      execute: vi.fn(),
+    } as unknown as AnyPgDatabase;
+
+    const adapter = createPostgresExecutionAdapter(db);
+    expect(isNeonHttpClient(db)).toBe(true);
+    expect(adapter.executeAtomicBatch).toBeDefined();
+
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected Neon HTTP atomic batch support");
+    }
+    await expect(
+      executeAtomicBatch<{ sqlText: string; params: readonly unknown[] }>([
+        { sql: "INSERT 1", params: [1] },
+        { sql: "INSERT 2", params: [2] },
+      ]),
+    ).resolves.toEqual([
+      [{ sqlText: "INSERT 1", params: [1] }],
+      [{ sqlText: "INSERT 2", params: [2] }],
+    ]);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(transaction.mock.calls[0]?.[0]).toHaveLength(2);
+  });
+
+  it("keeps detecting legacy Neon HTTP clients but does not advertise batches", () => {
+    const neonClient = Object.assign(vi.fn(), {
+      transaction: vi.fn(),
+    });
+    const db = {
+      $client: neonClient,
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+      execute: vi.fn(),
+    } as unknown as AnyPgDatabase;
+
+    const adapter = createPostgresExecutionAdapter(db);
+    expect(isNeonHttpClient(db)).toBe(true);
+    expect(adapter.executeAtomicBatch).toBeUndefined();
+  });
+
+  it("enforces each Neon batch statement's bind limit before dispatch", async () => {
+    const query = vi.fn<
+      (
+        sqlText: string,
+        params: readonly unknown[],
+      ) => Promise<readonly unknown[]>
+    >(() => Promise.resolve([]));
+    const transaction = vi.fn(
+      async (queries: readonly PromiseLike<readonly unknown[]>[]) =>
+        Promise.all(queries),
+    );
+    const neonClient = Object.assign(vi.fn(), { query, transaction });
+    const db = {
+      $client: neonClient,
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+      execute: vi.fn(),
+    } as unknown as AnyPgDatabase;
+    const adapter = createPostgresExecutionAdapter(db, {
+      maxBindParameters: 1,
+    });
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected Neon HTTP atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([
+        { sql: "SELECT $1", params: [1] },
+        { sql: "SELECT $1, $2", params: [1, 2] },
+      ]),
+    ).rejects.toMatchObject({
+      details: {
+        capability: "maxBindParameters",
+        maxBindParameters: 1,
+        parameterCount: 2,
+      },
+    });
+    expect(query).not.toHaveBeenCalled();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("propagates a Neon transaction rejection without Drizzle fallback", async () => {
+    const batchError = new Error("Neon transaction failed");
+    const query = vi.fn<
+      (
+        sqlText: string,
+        params: readonly unknown[],
+      ) => Promise<readonly unknown[]>
+    >(() => Promise.resolve([]));
+    const transaction = vi.fn(
+      async (queries: readonly PromiseLike<readonly unknown[]>[]) => {
+        await Promise.all(queries);
+        throw batchError;
+      },
+    );
+    const execute = vi.fn(() => Promise.resolve({ rows: [] }));
+    const neonClient = Object.assign(vi.fn(), { query, transaction });
+    const db = {
+      $client: neonClient,
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+      execute,
+    } as unknown as AnyPgDatabase;
+    const adapter = createPostgresExecutionAdapter(db);
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected Neon HTTP atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([{ sql: "INSERT", params: [1] }]),
+    ).rejects.toBe(batchError);
+    expect(query).toHaveBeenCalledOnce();
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("does not classify non-Neon callable clients as Neon HTTP batches", () => {
+    const callableWithBegin = Object.assign(vi.fn(), {
+      begin: vi.fn(),
+      query: vi.fn(),
+      transaction: vi.fn(),
+    });
+    const nonCallable = {
+      query: vi.fn(),
+      transaction: vi.fn(),
+    };
+    for (const client of [callableWithBegin, nonCallable]) {
+      const db = {
+        $client: client,
+        dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+        execute: vi.fn(),
+      } as unknown as AnyPgDatabase;
+
+      const adapter = createPostgresExecutionAdapter(db);
+      expect(isNeonHttpClient(db)).toBe(false);
+      expect(adapter.executeAtomicBatch).toBeUndefined();
+    }
+  });
+
   it("renders TypeGraph fragments with PostgreSQL placeholders", () => {
     const { db } = makeMockPgDb();
     const adapter = createPostgresExecutionAdapter(db);

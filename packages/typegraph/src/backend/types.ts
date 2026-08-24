@@ -287,7 +287,11 @@ export type { PessimisticLockCapabilities } from "./capabilities/write-fence";
  * Backend capabilities that vary by dialect.
  */
 export type BackendCapabilities = Readonly<{
-  /** Whether the backend supports atomic transactions (D1 does not) */
+  /**
+   * Whether the backend can hold an interactive callback/session transaction
+   * across awaited statements. This does not describe one-statement atomicity
+   * or a static native adapter batch (D1 does not provide this capability).
+   */
   transactions: boolean;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
@@ -3662,17 +3666,22 @@ export type RunOptionallyInTransactionOptions = Readonly<{
    * Scopes the transaction and nothing else, so it is not honored on the
    * fallthrough path: a backend reporting `transactions: false` opens no
    * transaction to configure. The callback receives an explicit execution
-   * context stating whether a transaction was opened, so callers never infer
-   * atomicity from backend object identity.
+   * mode (`interactive-transaction` or `sequential`), so callers never infer
+   * the execution boundary from backend object identity.
    */
   transaction?: TransactionOptions;
 }>;
 
 /** What {@link runOptionallyInTransaction} actually did for this invocation. */
-export type OptionalTransactionExecution = Readonly<{
-  /** True only when the helper opened a transaction around the callback. */
-  atomic: boolean;
-}>;
+export type OptionalTransactionExecution =
+  | Readonly<{
+      /** The callback runs on a transaction-scoped interactive session. */
+      mode: "interactive-transaction";
+    }>
+  | Readonly<{
+      /** The callback runs sequentially without an encompassing transaction. */
+      mode: "sequential";
+    }>;
 
 /**
  * Runs `fn` inside a transaction when given a top-level backend that supports
@@ -3694,11 +3703,11 @@ export async function runOptionallyInTransaction<T>(
 ): Promise<T> {
   if ("transaction" in backend && backend.capabilities.transactions) {
     return backend.transaction(
-      (tx) => fn(tx, { atomic: true }),
+      (tx) => fn(tx, { mode: "interactive-transaction" }),
       options?.transaction,
     );
   }
-  return fn(options?.fallback ?? backend, { atomic: false });
+  return fn(options?.fallback ?? backend, { mode: "sequential" });
 }
 
 // ============================================================

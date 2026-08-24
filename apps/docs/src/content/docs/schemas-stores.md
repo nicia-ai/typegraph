@@ -695,8 +695,10 @@ canonical endpoint/property key on every edge row and both bundled dialects
 enforce it with a unique database arbiter. PostgreSQL and SQLite then lower an
 eligible root, single-item `getOrCreateByEndpoints` create/found decision,
 endpoint validation, and schema fence to one conflict-arbitrated statement.
-Eligibility requires a bundled root backend, a schema-managed
-`cardinality: "many"` edge, and history and revision tracking to be disabled.
+Eligibility requires a bundled root backend (including D1/neon-http), a
+schema-managed generated-id node or `cardinality: "many"` edge, and no claims,
+sidecars, history, or revision work. Derived wrappers, adopted transactions,
+custom backends, and constrained edges remain on the interactive path.
 On a Neon WebSocket connection this removes the dispatcher read plus `BEGIN`,
 graph-lock, and `COMMIT` exchanges: the common eligible miss falls from roughly
 five sequential requests to one. Constrained cardinalities and
@@ -705,6 +707,27 @@ work, so they are not eligible for the one-request root path; declared
 identities are still arbitrated by the durable key inside that transaction.
 Undeclared dynamic matches retain the fenced portable path and fail closed when
 a backend cannot provide it.
+
+Keep these guarantees distinct:
+
+- An **interactive transaction** is the public `store.transaction(...)` API;
+  it pins a session and groups the callback's Store writes. Internally,
+  `runOptionallyInTransaction` reports this as
+  `{ mode: "interactive-transaction" }`, or `{ mode: "sequential" }` when it
+  cannot open one.
+- A **static internal adapter batch** is a backend implementation detail, such
+  as a D1 batch or a bind-budgeted multi-row insert. It is not a Store API and
+  does not make arbitrary Store calls atomic.
+- An **authoritative one-statement command** is the semantic `commands` port;
+  its statement returns the created/found decision it owns. Durable
+  `matchIdentity` convergence can qualify for this root path because the
+  schema-declared key has a database arbiter.
+
+Operational Identity, claim/cardinality checks, undeclared dynamic
+`matchOn`, and history/revision sidecars remain interactive-transaction
+contracts. A durable edge match identity only authorizes its own canonical
+edge create/found arbitration; it does not make those other responsibilities
+transactionless.
 
 For networked deployments, amortize the safe costs at the call boundary:
 
