@@ -192,7 +192,7 @@ function convergenceCommand(
         props,
       },
     },
-    match: { matchOn: ["at", "annotation"], props },
+    match: { kind: "dynamic", matchOn: ["at", "annotation"], props },
   };
 }
 

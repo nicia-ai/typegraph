@@ -688,16 +688,23 @@ any isolation level. If the operation reaches the create leg, TypeGraph checks
 the effective isolation captured by the graph-lock statement and refuses
 repeatable read before issuing the convergent write.
 
-The remaining transactionless convergence floor is structural rather than a
-missing cache. A dynamic `matchOn` list has no database uniqueness object that
-can arbitrate two independent Neon HTTP statements. The intended next step is
-a schema-declared edge match identity: a named, canonical set of persisted JSON
-fields backed by a unique database arbiter. The existing
-`edge.converge-create` command is the Store-facing seam for that work, so an
-adapter can later lower a declared identity to one conflict-arbitrated root
-statement without changing collection control flow. Until such an identity is
-declared and materialized, transactionless constrained convergence continues
-to fail closed.
+Dynamic `matchOn` remains transaction-scoped because a call-level field list
+has no database uniqueness object. For latency-sensitive paths, declare a
+graph-local `matchIdentity` on the edge registration. TypeGraph stores its
+canonical endpoint/property key on every edge row and both bundled dialects
+enforce it with a unique database arbiter. PostgreSQL and SQLite then lower an
+eligible root, single-item `getOrCreateByEndpoints` create/found decision,
+endpoint validation, and schema fence to one conflict-arbitrated statement.
+Eligibility requires a bundled root backend, a schema-managed
+`cardinality: "many"` edge, and history and revision tracking to be disabled.
+On a Neon WebSocket connection this removes the dispatcher read plus `BEGIN`,
+graph-lock, and `COMMIT` exchanges: the common eligible miss falls from roughly
+five sequential requests to one. Constrained cardinalities and
+history/revision stores retain a transaction and their required sidecar/fence
+work, so they are not eligible for the one-request root path; declared
+identities are still arbitrated by the durable key inside that transaction.
+Undeclared dynamic matches retain the fenced portable path and fail closed when
+a backend cannot provide it.
 
 For networked deployments, amortize the safe costs at the call boundary:
 
@@ -1632,6 +1639,43 @@ store.edges.worksAt.bulkUpsertById(
 Looks up an existing edge by endpoints (and optionally by property fields via `matchOn`).
 Returns the match if found, or creates a new edge if not.
 
+Declare the durable identity in the graph registration. An empty `fields`
+array means directed endpoints only; otherwise the named top-level persisted
+properties join the endpoint key.
+
+```typescript
+edges: {
+  worksAt: {
+    type: worksAt,
+    from: [Person],
+    to: [Company],
+    matchIdentity: { name: "employment", fields: ["role"] },
+  },
+}
+```
+
+When this declaration exists, omitting `matchOn` uses its fields. A supplied
+`matchOn` must name exactly the same field set or the call is refused; it can
+never silently select a different identity. The identity fields are immutable
+through ordinary updates, soft deletion retains the key for deterministic
+resurrection, and hard deletion releases it. Direct creates and import paths
+materialize the same key, so they cannot bypass endpoint convergence.
+The complete indexed identity tuple is limited to 2,000 UTF-8 bytes on every
+backend. Larger identities refuse with
+`EDGE_MATCH_IDENTITY_KEY_TOO_LARGE` before writing, rather than succeeding on
+SQLite and later exceeding PostgreSQL's btree tuple limit. Durable identities
+must use compact JSON-scalar fields: strings, finite numbers, booleans,
+literals, enums, and nullable/optional/readonly unions of those types. Schema
+defaults, prefaults, and catch values are accepted when their wrapped output
+type stays inside that grammar. Transforms, pipes, and codecs are refused
+because their runtime result cannot be proven portable. `z.date()`, objects,
+arrays, maps, and sets are refused for the same reason. Long scalar payloads refuse
+per row during import, so one malformed edge does not roll back unrelated rows.
+Adding, removing, or changing the declaration is a breaking schema change.
+The first release refuses that migration while the edge kind holds rows; export
+and hard-delete the rows, migrate, then import them to materialize the new key.
+It never activates a declaration over legacy rows with `NULL` keys.
+
 ```typescript
 store.edges.worksAt.getOrCreateByEndpoints(
   from: NodeRef<Person>,
@@ -1666,6 +1710,19 @@ effective start — see
 [Inverted validity windows](/errors/#inverted_validity_window). When `ifExists`
 is omitted or `"return"`, a live match produces the `"found"` action and neither
 temporal option changes the edge.
+The bundled one-statement arbiter implements a contended/found result through
+the database conflict target. PostgreSQL and SQLite consequently perform a
+no-op physical update on this path: it can acquire a row lock and produce
+write amplification even though the logical edge is unchanged. This is the
+trade-off that keeps a cache-safe create/found verdict to one database request;
+do not treat `getOrCreateByEndpoints` as a read primitive on a hot identity.
+Inside a caller-owned PostgreSQL `repeatable_read` or `serializable`
+transaction, contention can instead abort that whole transaction with SQLSTATE
+`40001`. Retry the complete caller transaction; TypeGraph cannot safely replay
+only a nested callback whose surrounding relational work it does not own.
+At any isolation level, two transactions converging on durable identities in
+opposite orders can deadlock on their incumbent row locks and PostgreSQL can
+abort one with SQLSTATE `40P01`. Apply the same whole-transaction retry policy.
 `clearValidTo` is the exception: a live match can apply it only under
 `ifExists: "update"`. Supplying it with the default/`"return"` mode refuses with
 `ConfigurationError` code `CLEAR_VALID_TO_REQUIRES_UPDATE` instead of silently
@@ -1684,6 +1741,13 @@ an unfenced read.
 #### `bulkGetOrCreateByEndpoints(items, options?)`
 
 Batch version of `getOrCreateByEndpoints`. Returns results in input order.
+The bundled backends read all candidate endpoint pairs with set-oriented
+statements rather than one lookup per item. These are exact directed-pair
+joins, so a high-fan-out source does not materialize all of its unrelated
+outgoing edges for client-side filtering. Bulk convergence still uses one
+transaction and an authoritative in-transaction set read in this release; the
+single-statement durable arbiter described above applies to the single-item
+method, not yet to this batch method.
 
 ```typescript
 store.edges.worksAt.bulkGetOrCreateByEndpoints(
@@ -2745,7 +2809,10 @@ type StoreHooks = Readonly<{
   onQueryStart?: (ctx: QueryHookContext) => void;
   onQueryEnd?: (ctx: QueryHookContext, result: { rowCount: number; durationMs: number }) => void;
   onOperationStart?: (ctx: OperationHookContext) => void;
-  onOperationEnd?: (ctx: OperationHookContext, result: { durationMs: number }) => void;
+  onOperationEnd?: (
+    ctx: OperationHookContext,
+    result: { durationMs: number; outcome: "written" | "unchanged" | "unknown" },
+  ) => void;
   onError?: (ctx: HookContext, error: Error) => void;
 }>;
 
@@ -2775,6 +2842,15 @@ operation hooks for throughput, and the set-based bulk hooks (`onBulkOperationSt
 stand in for them — those fire only for node `updateWhere`, so a batch method emits no hook events at all, neither
 per-item nor bulk. Call the single-item method to observe each write. Query hooks still fire normally.
 
+`onOperationEnd.result.outcome` is `"written"` when durable graph state
+changed. It is `"unchanged"` when an authoritative write attempt completed
+without a logical mutation—for example, when a one-statement durable edge
+get-or-create found the incumbent. Expected convergence is therefore a
+successful unchanged completion, never an `onError` event. This is the same
+decision TypeGraph uses to suppress revision/history churn. It is `"unknown"`
+when the backend command does not report an authoritative physical-write
+verdict; TypeGraph never guesses from a successful return alone.
+
 **Example:**
 
 ```typescript
@@ -2791,7 +2867,9 @@ const hooks: StoreHooks = {
     console.log(`[${ctx.operationId}] ${ctx.operation} ${ctx.entity}:${ctx.kind}`);
   },
   onOperationEnd: (ctx, result) => {
-    console.log(`[${ctx.operationId}] Completed in ${result.durationMs}ms`);
+    console.log(
+      `[${ctx.operationId}] ${result.outcome} in ${result.durationMs}ms`,
+    );
   },
   onError: (ctx, error) => {
     console.error(`[${ctx.operationId}] Error:`, error.message);

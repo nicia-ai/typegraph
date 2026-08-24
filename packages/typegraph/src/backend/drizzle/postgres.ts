@@ -172,7 +172,9 @@ import {
 import {
   generatePgCreateTableSQL,
   generatePostgresDDL,
+  generatePostgresEdgeMatchIdentityUpgradeDDL,
   postgresContributions,
+  postgresIdentifierRegclassName,
 } from "./ddl";
 import {
   type AnyPgDatabase,
@@ -1238,6 +1240,21 @@ export function createPostgresBackend(
     };
   }
 
+  async function ensureEdgeMatchIdentityStorage(): Promise<void> {
+    const edgeTableName = getTableName(tables.edges);
+    const existingEdgeRows = await executionAdapter.execute<{
+      table_name?: unknown;
+    }>(
+      portableSql`SELECT to_regclass(${postgresIdentifierRegclassName(edgeTableName)}) AS table_name`,
+    );
+    if (typeof existingEdgeRows.at(0)?.table_name !== "string") return;
+    for (const statement of generatePostgresEdgeMatchIdentityUpgradeDDL(
+      edgeTableName,
+    )) {
+      await executeConcurrentCreateDdl(statement);
+    }
+  }
+
   const backend: AdapterBackend<AnyPgTransaction> = {
     ...operations,
 
@@ -1293,6 +1310,8 @@ export function createPostgresBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
+      await ensureEdgeMatchIdentityStorage();
+
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         // Cold boot is the single most contended DDL path there is — two
@@ -1360,6 +1379,8 @@ export function createPostgresBackend(
     async ensureRevisionOriginsTable(): Promise<void> {
       await ensureTableWithConcurrentCreateRetry(tables.revisionOrigins);
     },
+
+    ensureEdgeMatchIdentityStorage,
 
     async ensureIdentityTables(
       identityTableNames,

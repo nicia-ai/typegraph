@@ -29,6 +29,7 @@ type BackendCapabilities = Readonly<{
     maxBindParameters?: number;
     readonly constraintClaims?: boolean;
     readonly atomicNodeInsertClaims?: boolean;
+    readonly durableEdgeMatchIdentity?: boolean;
     vector?: VectorCapabilities | undefined;
     fulltext?: FulltextCapabilities | undefined;
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
@@ -113,6 +114,15 @@ type CommitSchemaVersionExpected = Readonly<{
 }> | Readonly<{
     kind: "active";
     version: number;
+}>;
+
+// @public (undocumented)
+type CommitSchemaVersionIfKindsEmptyResult = Readonly<{
+    status: "committed";
+    row: SchemaVersionRow;
+}> | Readonly<{
+    status: "populated";
+    kinds: readonly PopulatedSchemaKind[];
 }>;
 
 // @public
@@ -424,6 +434,11 @@ type DropVectorIndexParams = Readonly<{
 }>;
 
 // @public
+type DurableEdgeBatchMembers = Readonly<{
+    insertEdgesDurableBatchReturning?: (this: void, params: readonly InsertEdgeParams[]) => Promise<readonly EdgeRow[]>;
+}>;
+
+// @public
 const EDGE_TYPE_BRAND: "__edgeType";
 
 // @public
@@ -481,8 +496,12 @@ type EdgeConvergeCreateCommandResult = Readonly<{
 
 // @public
 type EdgeConvergenceMatch = Readonly<{
+    kind: "dynamic";
     matchOn: readonly string[];
     props: Record<string, unknown>;
+}> | Readonly<{
+    kind: "durable";
+    identity: EdgeMatchIdentityStorage;
 }>;
 
 // @public
@@ -516,7 +535,7 @@ type EdgeEndpointSide = "from" | "to";
 type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
-type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
+type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
 
 // @public
 type EdgeExistsBetweenParams = Readonly<{
@@ -539,12 +558,25 @@ type EdgeIndexDeclaration = IndexDeclarationBase & Readonly<{
 type EdgeIndexDirection = "out" | "in" | "none";
 
 // @public
+type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
+    name: string;
+    fields: readonly (keyof z.infer<E["schema"]> & string)[];
+}>;
+
+// @public
+type EdgeMatchIdentityStorage = Readonly<{
+    name: string;
+    key: string;
+}>;
+
+// @public
 type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType> = Readonly<{
     type: E;
     from: readonly FromTypes[];
     to: readonly ToTypes[];
     cardinality?: Cardinality;
     endpointExistence?: EndpointExistence;
+    matchIdentity?: EdgeMatchIdentity<E>;
 }>;
 
 // @public
@@ -557,6 +589,8 @@ type EdgeRow = Readonly<{
     to_kind: string;
     to_id: string;
     props: RowProps;
+    match_identity_name?: string;
+    match_identity_key?: string;
     valid_from: string | undefined;
     valid_to: string | undefined;
     created_at: string;
@@ -771,6 +805,10 @@ type FindEdgesByHeterogeneousEndpointSetParams = Readonly<{
     endpoints: readonly Readonly<{
         kind: string;
         id: string;
+        opposite?: Readonly<{
+            kind: string;
+            id: string;
+        }>;
     }>[];
     edgeKinds: readonly string[];
     limitPerEndpoint?: number;
@@ -961,20 +999,7 @@ type GraphBackend = Readonly<{
     getActiveSchema: (this: void, graphId: string) => Promise<SchemaVersionRow | undefined>;
     getSchemaVersion: (this: void, graphId: string, version: number) => Promise<SchemaVersionRow | undefined>;
     commitSchemaVersion: (this: void, params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
-    commitSchemaVersionIfKindsEmpty?: (this: void, params: CommitSchemaVersionParams, probes: readonly Readonly<{
-        entity: "node" | "edge";
-        kind: string;
-    }>[]) => Promise<Readonly<{
-        status: "committed";
-        row: SchemaVersionRow;
-    }> | Readonly<{
-        status: "populated";
-        kinds: readonly Readonly<{
-            entity: "node" | "edge";
-            kind: string;
-            count: number;
-        }>[];
-    }>>;
+    commitSchemaVersionIfKindsEmpty?: (this: void, params: CommitSchemaVersionParams, probes: readonly SchemaKindEmptinessProbe[]) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
     lockSchemaVersionForWrite?: (this: void, params: Readonly<{
         graphId: string;
         expectedVersion: number;
@@ -1022,6 +1047,7 @@ type GraphBackend = Readonly<{
     ensureIndexMaterializationsTable?: (this: void) => Promise<void>;
     ensureTrigramExtension?: (this: void) => Promise<void>;
     ensureRevisionOriginsTable?: (this: void) => Promise<void>;
+    ensureEdgeMatchIdentityStorage?: (this: void) => Promise<void>;
     ensureIdentityTables?: (this: void, tableNames: IdentityTableNames, options: Readonly<{
         provisionMissing: boolean;
     }>) => Promise<readonly string[]>;
@@ -1081,7 +1107,7 @@ type GraphBackend = Readonly<{
     ensureExtension?: (this: void, name: DatabaseExtensionName) => Promise<void>;
     transaction: <T>(this: void, fn: (tx: TransactionBackend) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     close: (this: void) => Promise<void>;
-}>;
+}> & DurableEdgeBatchMembers;
 
 // @public
 type GraphCommand = NodeCreateCommand | EdgeCreateCommand | EdgeConvergeCreateCommand;
@@ -1386,6 +1412,7 @@ type InsertEdgeParams = Readonly<{
     toKind: string;
     toId: string;
     props: Readonly<Record<string, unknown>>;
+    matchIdentity?: EdgeMatchIdentityStorage;
     validFrom?: string | null;
     validTo?: string;
 }>;
@@ -1809,6 +1836,11 @@ class Placeholder {
     readonly name: string;
 }
 
+// @public (undocumented)
+type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
+    count: number;
+}>;
+
 // @public
 type PredicateBuilder = Readonly<Record<string, FieldPredicateBuilder>>;
 
@@ -1973,6 +2005,13 @@ export type SchemaDiff = Readonly<{
 // @public
 export type SchemaHash = string;
 
+// @public (undocumented)
+type SchemaKindEmptinessProbe = Readonly<{
+    entity: "node" | "edge";
+    kind: string;
+    rows: "nonDeleted" | "all";
+}>;
+
 // @public
 export type SchemaManagerOptions = Readonly<{
     autoMigrate?: boolean;
@@ -2050,6 +2089,10 @@ export type SerializedEdgeDef = Readonly<{
     properties: JsonSchema;
     cardinality: Cardinality;
     endpointExistence: EndpointExistence;
+    matchIdentity?: Readonly<{
+        name: string;
+        fields: readonly string[];
+    }>;
     description: string | undefined;
     annotations?: KindAnnotations;
 }>;

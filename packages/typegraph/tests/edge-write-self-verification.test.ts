@@ -28,10 +28,7 @@ import { z } from "zod";
 import { asEdgeId, defineEdge, defineGraph, defineNode } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import {
-  type GraphBackend,
-  type TransactionBackend,
-} from "../src/backend/types";
+import { type GraphBackend } from "../src/backend/types";
 import { createStore } from "../src/store";
 
 const Person = defineNode("Person", {
@@ -112,7 +109,7 @@ function substitutingBackend(
               return original.apply(source, args);
             };
           },
-        }) as TransactionBackend;
+        });
         return fn(proxied);
       }, options),
   });

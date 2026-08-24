@@ -335,7 +335,11 @@ export type StoreHooks = Readonly<{
    */
   onOperationEnd?: (
     ctx: OperationHookContext,
-    result: Readonly<{ durationMs: number }>,
+    result: Readonly<{
+      durationMs: number;
+      /** The authoritative effect, or `unknown` when the command reports none. */
+      outcome: "written" | "unchanged" | "unknown";
+    }>,
   ) => void;
   /**
    * Called after a set-based mutation durably commits. Inside

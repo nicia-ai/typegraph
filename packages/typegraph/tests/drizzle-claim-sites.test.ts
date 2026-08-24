@@ -35,13 +35,13 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
   {
     file: "apps/docs/src/content/docs/architecture.md",
-    line: 583,
+    line: 632,
     text:
       "graph DSL and its schema-derived types from the " + CLAIM_WORD + "-free",
   },
   {
     file: "apps/docs/src/content/docs/architecture.md",
-    line: 585,
+    line: 634,
     text:
       "import the full " +
       CLAIM_WORD +
@@ -49,7 +49,7 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
   {
     file: "apps/docs/src/content/docs/backend-setup.md",
-    line: 732,
+    line: 813,
     text: "## " + CLAIM_WORD + "-Free Entrypoints",
   },
   {

@@ -165,6 +165,8 @@ import {
 import {
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
+  generateSqliteEdgeMatchIdentityColumnDDL,
+  generateSqliteEdgeMatchIdentityIndexDDL,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1798,6 +1800,47 @@ export function createSqliteBackend(
     );
   }
 
+  async function ensureEdgeMatchIdentityStorage(): Promise<void> {
+    const edgeTableName = getTableName(tables.edges);
+    const columnRows = await executionAdapter.execute<{
+      name?: unknown;
+    }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
+    const columns = new Set(
+      columnRows.flatMap((row) =>
+        typeof row.name === "string" ? [row.name] : [],
+      ),
+    );
+    const nameMissing = !columns.has("match_identity_name");
+    const keyMissing = !columns.has("match_identity_key");
+    if (columnRows.length > 0 && nameMissing) {
+      await db.run(
+        sql.raw(
+          generateSqliteEdgeMatchIdentityColumnDDL(
+            edgeTableName,
+            "match_identity_name",
+            !keyMissing,
+          ),
+        ),
+      );
+    }
+    if (columnRows.length > 0 && keyMissing) {
+      await db.run(
+        sql.raw(
+          generateSqliteEdgeMatchIdentityColumnDDL(
+            edgeTableName,
+            "match_identity_key",
+            true,
+          ),
+        ),
+      );
+    }
+    if (columnRows.length > 0) {
+      await db.run(
+        sql.raw(generateSqliteEdgeMatchIdentityIndexDDL(edgeTableName)),
+      );
+    }
+  }
+
   const backend: AdapterBackend<AnySqliteDatabase> = {
     ...operations,
 
@@ -1834,6 +1877,8 @@ export function createSqliteBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
+      await ensureEdgeMatchIdentityStorage();
+
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));
@@ -1898,6 +1943,8 @@ export function createSqliteBackend(
         sql.raw(generateSqliteCreateTableSQL(tables.revisionOrigins)),
       );
     },
+
+    ensureEdgeMatchIdentityStorage,
 
     async ensureIdentityTables(
       identityTableNames,

@@ -22,6 +22,11 @@ function asString(value: unknown, field: string): string {
   return value;
 }
 
+function asOptionalString(value: unknown, field: string): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  return asString(value, field);
+}
+
 function asNumber(value: unknown, field: string): number {
   if (typeof value !== "number") {
     throw new DatabaseOperationError(
@@ -177,21 +182,43 @@ export function createNodeRowMapper(
 export function createEdgeRowMapper(
   config: DialectRowMapperConfig,
 ): (row: Record<string, unknown>) => EdgeRow {
-  return (row) => ({
-    graph_id: asString(row["graph_id"], "graph_id"),
-    id: asString(row["id"], "id"),
-    kind: asString(row["kind"], "kind"),
-    from_kind: asString(row["from_kind"], "from_kind"),
-    from_id: asString(row["from_id"], "from_id"),
-    to_kind: asString(row["to_kind"], "to_kind"),
-    to_id: asString(row["to_id"], "to_id"),
-    props: config.normalizeJson(row["props"]),
-    valid_from: normalizeRowTimestamp(row["valid_from"], "valid_from"),
-    valid_to: normalizeRowTimestamp(row["valid_to"], "valid_to"),
-    created_at: normalizeRequiredRowTimestamp(row["created_at"], "created_at"),
-    updated_at: normalizeRequiredRowTimestamp(row["updated_at"], "updated_at"),
-    deleted_at: normalizeRowTimestamp(row["deleted_at"], "deleted_at"),
-  });
+  return (row) => {
+    const matchIdentityName = asOptionalString(
+      row["match_identity_name"],
+      "match_identity_name",
+    );
+    const matchIdentityKey = asOptionalString(
+      row["match_identity_key"],
+      "match_identity_key",
+    );
+    return {
+      graph_id: asString(row["graph_id"], "graph_id"),
+      id: asString(row["id"], "id"),
+      kind: asString(row["kind"], "kind"),
+      from_kind: asString(row["from_kind"], "from_kind"),
+      from_id: asString(row["from_id"], "from_id"),
+      to_kind: asString(row["to_kind"], "to_kind"),
+      to_id: asString(row["to_id"], "to_id"),
+      props: config.normalizeJson(row["props"]),
+      ...(matchIdentityName === undefined ?
+        {}
+      : { match_identity_name: matchIdentityName }),
+      ...(matchIdentityKey === undefined ?
+        {}
+      : { match_identity_key: matchIdentityKey }),
+      valid_from: normalizeRowTimestamp(row["valid_from"], "valid_from"),
+      valid_to: normalizeRowTimestamp(row["valid_to"], "valid_to"),
+      created_at: normalizeRequiredRowTimestamp(
+        row["created_at"],
+        "created_at",
+      ),
+      updated_at: normalizeRequiredRowTimestamp(
+        row["updated_at"],
+        "updated_at",
+      ),
+      deleted_at: normalizeRowTimestamp(row["deleted_at"], "deleted_at"),
+    };
+  };
 }
 
 function mapUniqueRow(row: Record<string, unknown>): UniqueRow {

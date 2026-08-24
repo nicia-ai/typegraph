@@ -72,6 +72,7 @@ export {
   type Collation,
   type DeleteBehavior,
   type EdgeId,
+  type EdgeMatchIdentity,
   type EdgeProps,
   type EdgeRegistration,
   type EdgeType,

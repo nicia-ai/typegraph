@@ -88,6 +88,50 @@ the chunked collection reads described below instead of looping them or wrapping
 
 ## Batch Write Patterns
 
+### Remote edge convergence
+
+For a latency-sensitive `getOrCreateByEndpoints()` path, declare the canonical
+identity on the edge registration instead of supplying an ad hoc `matchOn` list
+at each call:
+
+```typescript
+const graph = defineGraph({
+  id: "work",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "many",
+      matchIdentity: { name: "employment", fields: ["role"] },
+    },
+  },
+});
+
+await store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+  role: "engineer",
+});
+```
+
+On a schema-managed bundled SQLite or PostgreSQL root backend, with history and
+revision tracking disabled, the default `ifExists: "return"` path combines the
+schema fence, endpoint validation, unique arbitration, and created/found result
+into one statement. A typical Neon WebSocket miss therefore falls from roughly
+five sequential requests to one. The found path is also one request, but the
+PostgreSQL implementation performs a no-op conflict update: it takes a row lock
+and can create write amplification, so it is not a substitute for a hot read
+cache.
+
+Dynamic call-level `matchOn`, constrained cardinalities, history/revision
+stores, caller-owned transactions, and custom backends retain the transactional
+path required by their additional contracts. Bulk endpoint convergence still
+uses one transaction in this release, but bundled backends discover exact
+directed endpoint pairs in set-oriented bind-budget chunks instead of issuing a
+candidate read per item. See
+[`getOrCreateByEndpoints`](/schemas-stores#getorcreatebyendpointsfrom-to-props-options)
+for field restrictions, migration rules, and PostgreSQL retry guidance.
+
 ### Single vs bulk operations
 
 For small numbers of writes, individual `create()` calls inside a transaction are fine. For larger

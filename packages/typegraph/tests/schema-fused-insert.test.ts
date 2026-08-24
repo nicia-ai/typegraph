@@ -611,7 +611,7 @@ describe("single-statement autocommit eligibility", () => {
       historyEnabled: false,
       revisionTrackingEnabled: false,
       kindRegistered: true,
-      convergesOnMatchKey: false,
+      convergesDynamically: false,
       cardinality: "many" as const,
     };
     const eligible = (
@@ -631,7 +631,7 @@ describe("single-statement autocommit eligibility", () => {
       expect(eligible({ historyEnabled: true })).toBe(false);
       expect(eligible({ revisionTrackingEnabled: true })).toBe(false);
       expect(eligible({ kindRegistered: false })).toBe(false);
-      expect(eligible({ convergesOnMatchKey: true })).toBe(false);
+      expect(eligible({ convergesDynamically: true })).toBe(false);
       expect(eligible({ cardinality: "one" })).toBe(false);
       expect(eligible({ backend: deriveBackend(backend, {}) })).toBe(false);
     } finally {

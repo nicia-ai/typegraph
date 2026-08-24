@@ -336,6 +336,31 @@ if (result.success) {
 }
 ```
 
+### Durable edge match identities during import
+
+The target graph declaration, not the interchange document, determines an
+edge's durable `matchIdentity`. After validating and normalizing an incoming
+edge's properties, normal import builds the same canonical endpoint/property
+key used by collection creates and writes it with the edge row. An import
+therefore cannot bypass convergence by choosing a new edge id.
+
+An incoming create whose durable identity is already owned by a different row,
+or was claimed by an earlier edge in the same import slice, is recorded as a
+per-edge error using `EdgeMatchIdentityConflictError`. This decision is
+separate from `onConflict`, which handles an existing row with the incoming
+edge's own id; `skip` and `update` do not authorize taking another row's durable
+identity.
+
+Bundled backends discover existing owners with set-oriented exact endpoint-pair
+reads and insert claimless durable slices with bind-budgeted,
+conflict-arbitrated batch statements. A slice that also needs cardinality
+claims remains atomic. If an exceptional batch refusal cannot identify the
+losing row, TypeGraph rolls the slice back to a savepoint and retries its rows
+individually so `result.edges.created` and `result.errors` remain honest. A
+custom or non-transactional backend that cannot prove that rollback refuses
+the import with `IMPORT_EDGE_BATCH_RETRY_REQUIRES_SAVEPOINT`; retrying a
+possibly committed prefix could otherwise double-count or misattribute rows.
+
 When the document carries an `identity` section, `result.identity` reports
 `{ created, skipped }` counts for imported assertions (skipped covers an
 exact re-import of an assertion that already exists under the same id).
@@ -396,18 +421,23 @@ The contract is deliberately narrow:
 - The TypeGraph node and edge tables must be globally empty. A different graph
   in the same database also makes the database non-empty.
 - The caller guarantees property shapes, endpoint existence, edge endpoint
-  types, cardinality, and duplicate-free IDs. Only stream ordering and known
-  kind names are checked.
+  types, cardinality, duplicate-free IDs, and duplicate-free durable edge match
+  identities. Only stream ordering and known kind names are checked. Trusted
+  import still derives each declared edge identity and stores it with the row,
+  so a collision reaches the database arbiter and rolls back the complete
+  trusted-import transaction.
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
-- Identity-enabled target stores are rejected with
+- Operational Identity-enabled target stores are rejected with
   `details.reason === "identity_unsupported"`; identity-bearing input is
   rejected with `details.reason === "invalid_stream"`. The trusted session
   writes only the node and edge relations, so it cannot persist assertions or
   materialize the derived closure — refusing both cases keeps identity truth
   from being silently dropped. Use `importGraphStream` for an export that
-  carries identity.
+  carries Operational Identity assertions. This restriction does not apply to
+  an edge registration's `matchIdentity`, which trusted import materializes in
+  the edge relation itself.
 - Nodes must precede edges. The `meta` timestamps and node version in an
   interchange row are not restored; the import creates new storage metadata.
 - The complete stream is one transaction. Data insertion, temporary secondary

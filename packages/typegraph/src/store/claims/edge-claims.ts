@@ -20,7 +20,6 @@ import {
   type ClaimEdgeCardinalityParams,
   type GraphBackend,
   type InsertEdgeParams,
-  type TransactionBackend,
 } from "../../backend/types";
 import { checkCardinality, checkUniqueEdge } from "../../constraints";
 import { type Cardinality } from "../../core/types";
@@ -243,8 +242,6 @@ async function withEdgeClaimRelationPrecondition<T>(
   }
 }
 
-/** The backend an edge claim is written to — the object inside the transaction. */
-type ClaimTargetBackend = GraphBackend | TransactionBackend;
 type ClaimModeTarget = Readonly<
   Partial<
     Pick<
@@ -253,6 +250,9 @@ type ClaimModeTarget = Readonly<
     >
   >
 >;
+
+/** The narrow backend facet an edge claim is written through. */
+type ClaimTargetMembers = ClaimModeTarget;
 
 /**
  * The one owner of whether a single write may replace its entity probe with a
@@ -290,7 +290,7 @@ export function edgeCardinalityClaimMode(
  * new refusal.
  */
 export async function claimEdgeCardinality(
-  backend: ClaimTargetBackend,
+  backend: ClaimTargetMembers,
   verdict: BundleVerdictOf<typeof CLAIMS>,
   claim: ClaimEdgeCardinalityParams,
 ): Promise<void> {
@@ -321,7 +321,7 @@ export async function claimEdgeCardinality(
  * the backend's duplicate-conflict-target guard stays a defensive invariant.
  */
 export async function claimEdgeCardinalityBatch(
-  backend: ClaimTargetBackend,
+  backend: ClaimTargetMembers,
   verdict: BundleVerdictOf<typeof CLAIMS>,
   claims: readonly ClaimEdgeCardinalityParams[],
 ): Promise<void> {
@@ -354,7 +354,7 @@ export async function claimEdgeCardinalityBatch(
  * behind forever. A backend without claim support has nothing to purge.
  */
 export async function purgeEdgeClaims(
-  backend: ClaimTargetBackend,
+  backend: ClaimTargetMembers,
   verdict: BundleVerdictOf<typeof CLAIMS>,
   graphId: string,
   edgeIds: readonly string[],

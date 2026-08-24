@@ -158,14 +158,11 @@ export function uncapturedGraphWriteLock(): GraphWriteLock {
  * delegate's own writes, `runInWriteTransaction`, provenance) then skips the
  * `SqlFragment` once the graph's lock is held.
  *
- * Keyed weakly by the backend object: the delegate is created per
- * transaction, so memo lifetime equals lock lifetime. NOT savepoint-aware —
- * a manual `SAVEPOINT` rolled back across the first acquisition releases the
- * lock but not the memo entry. That matches the capture session's touch
- * state (also not savepoint-scoped); manual savepoints inside a recorded
- * transaction are outside the capture contract.
- */
-/**
+ * Keyed weakly by the backend object: the delegate is created per transaction,
+ * so memo lifetime equals lock lifetime. The recorded savepoint coordinator
+ * checkpoints and restores this memo with captured touches; manual savepoints
+ * remain outside the capture contract.
+ *
  * Single-flight per graph: the memo stores the IN-FLIGHT acquisition
  * promise, not just completed acquisitions, so concurrent same-transaction
  * writers (`Promise.all` over captured writes) coalesce onto one advisory

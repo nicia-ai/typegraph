@@ -50,6 +50,7 @@ import {
   registerContributionDiagnosticIntegrationTests,
   registerCrossBackendConsistencyTests,
   registerCurrentIdentityTraversalTests,
+  registerDurableEdgeMatchIdentityIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
@@ -314,6 +315,7 @@ export function createIntegrationTestSuite<
     registerEdgeCaseIntegrationTests(context);
     registerEdgeClaimSelfHealIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
+    registerDurableEdgeMatchIdentityIntegrationTests(context);
     registerTrustedImportIntegrationTests(context);
   });
 }

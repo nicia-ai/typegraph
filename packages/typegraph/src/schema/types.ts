@@ -480,6 +480,10 @@ export type SerializedEdgeDef = Readonly<{
   properties: JsonSchema;
   cardinality: Cardinality;
   endpointExistence: EndpointExistence;
+  matchIdentity?: Readonly<{
+    name: string;
+    fields: readonly string[];
+  }>;
   description: string | undefined;
   annotations?: KindAnnotations;
 }>;
@@ -564,6 +568,13 @@ export const serializedSchemaZod = z.object({
           properties: z.record(z.string(), z.unknown()),
           cardinality: cardinalityZod,
           endpointExistence: endpointExistenceZod,
+          matchIdentity: z
+            .object({
+              name: z.string().min(1),
+              fields: z.array(z.string()),
+            })
+            .loose()
+            .optional(),
           description: z.string().optional(),
           annotations: z.record(z.string(), z.json()).optional(),
         })

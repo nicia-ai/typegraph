@@ -34,7 +34,10 @@ import {
   buildSqliteNodeIndexBuilders,
   buildSqliteSystemIndexBuilders,
 } from "../../../indexes/drizzle";
-import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
+import {
+  assertNoSystemIndexNameCollision,
+  systemIndexName,
+} from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
 
 /**
@@ -147,6 +150,8 @@ export function createSqliteTables(
       toKind: text("to_kind").notNull(),
       toId: text("to_id").notNull(),
       props: text("props").notNull(),
+      matchIdentityName: text("match_identity_name"),
+      matchIdentityKey: text("match_identity_key"),
       validFrom: text("valid_from"),
       validTo: text("valid_to"),
       createdAt: text("created_at").notNull(),
@@ -155,6 +160,16 @@ export function createSqliteTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
+      uniqueIndex(systemIndexName(n.edges, "match_identity_uq")).on(
+        t.graphId,
+        t.kind,
+        t.matchIdentityName,
+        t.matchIdentityKey,
+      ),
+      check(
+        systemIndexName(n.edges, "match_identity_pair_check"),
+        sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
+      ),
       ...buildSqliteSystemIndexBuilders("edges", n.edges, t),
       ...buildSqliteEdgeIndexBuilders(t, indexes),
     ],

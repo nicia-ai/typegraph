@@ -52,6 +52,7 @@ import {
   POSTGRES_ROW_MAPPER_CONFIG,
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../backend/row-mappers";
+import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -510,6 +511,7 @@ function asError(error: unknown): Error {
 type OperationHookRunner = <T>(
   ctx: OperationHookContext,
   fn: () => Promise<T>,
+  didWrite?: (result: T) => boolean,
 ) => Promise<T>;
 
 type BulkOperationHookRunner = <T extends Readonly<{ affectedCount: number }>>(
@@ -523,6 +525,7 @@ type PendingOperationOutcome =
       type: "operation";
       ctx: OperationHookContext;
       durationMs: number;
+      outcome: "written" | "unchanged" | "unknown";
     }>
   | Readonly<{
       type: "bulkOperation";
@@ -856,6 +859,7 @@ async function commitEvolvedSchemaWhenRequiredKindsAreEmpty<G extends GraphDef>(
     classification.requireEmpty.map((entry) => ({
       entity: entry.entity,
       kind: entry.kindName,
+      rows: "nonDeleted" as const,
     })),
   );
   if (result.status === "committed") return result.row;
@@ -893,10 +897,11 @@ async function assertEvolvedSchemaRequiredKindsEmpty(
   const counts = await Promise.all(
     classification.requireEmpty.map(async (entry) => ({
       entry,
-      count:
-        entry.entity === "node" ?
-          await backend.countNodesByKind({ graphId, kind: entry.kindName })
-        : await backend.countEdgesByKind({ graphId, kind: entry.kindName }),
+      count: await countSchemaKindRows(backend, graphId, {
+        entity: entry.entity,
+        kind: entry.kindName,
+        rows: "nonDeleted",
+      }),
     })),
   );
   const nonEmpty = new Set(
@@ -3136,6 +3141,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         } else {
           this.#hooks.onOperationEnd?.(outcome.ctx, {
             durationMs: outcome.durationMs,
+            outcome: outcome.outcome,
           });
         }
       }
@@ -5134,8 +5140,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   // === Internal: Operation Contexts ===
 
   #immediateHookRunner(): OperationHookRunner {
-    return <T>(ctx: OperationHookContext, fn: () => Promise<T>) =>
-      this.#withOperationHooks(ctx, fn);
+    return <T>(
+      ctx: OperationHookContext,
+      fn: () => Promise<T>,
+      didWrite?: (result: T) => boolean,
+    ) => this.#withOperationHooks(ctx, fn, didWrite);
   }
 
   #immediateBulkHookRunner(): BulkOperationHookRunner {
@@ -5356,6 +5365,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async #withOperationHooks<T>(
     ctx: OperationHookContext,
     fn: () => Promise<T>,
+    didWrite?: (result: T) => boolean,
   ): Promise<T> {
     this.#hooks.onOperationStart?.(ctx);
     const startTime = Date.now();
@@ -5363,6 +5373,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const result = await fn();
       this.#hooks.onOperationEnd?.(ctx, {
         durationMs: Date.now() - startTime,
+        outcome:
+          didWrite === undefined ? "unknown"
+          : didWrite(result) ? "written"
+          : "unchanged",
       });
       return result;
     } catch (error) {
@@ -5406,6 +5420,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return async <T>(
       ctx: OperationHookContext,
       fn: () => Promise<T>,
+      didWrite?: (result: T) => boolean,
     ): Promise<T> => {
       this.#hooks.onOperationStart?.(ctx);
       const startTime = Date.now();
@@ -5415,6 +5430,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           type: "operation",
           ctx,
           durationMs: Date.now() - startTime,
+          outcome:
+            didWrite === undefined ? "unknown"
+            : didWrite(result) ? "written"
+            : "unchanged",
         });
         return result;
       } catch (error) {

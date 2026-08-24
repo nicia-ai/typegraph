@@ -277,12 +277,12 @@ describe("commitSchemaVersion: successor commit (CAS guard)", () => {
         schemaHash: next.schemaHash,
         schemaDoc: next.schemaDoc,
       },
-      [{ entity: "node", kind: "Person" }],
+      [{ entity: "node", kind: "Person", rows: "nonDeleted" }],
     );
 
     expect(result).toEqual({
       status: "populated",
-      kinds: [{ entity: "node", kind: "Person", count: 1 }],
+      kinds: [{ entity: "node", kind: "Person", rows: "nonDeleted", count: 1 }],
     });
     expect(requireDefined(await backend.getActiveSchema("g")).version).toBe(1);
   });
@@ -313,7 +313,7 @@ describe("commitSchemaVersion: successor commit (CAS guard)", () => {
           schemaHash: stale.schemaHash,
           schemaDoc: stale.schemaDoc,
         },
-        [{ entity: "node", kind: "Person" }],
+        [{ entity: "node", kind: "Person", rows: "nonDeleted" }],
       ),
     ).rejects.toThrow(StaleVersionError);
   });

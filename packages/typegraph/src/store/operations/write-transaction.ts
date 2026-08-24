@@ -347,6 +347,23 @@ export type WriteTransactionOptions<T> = Readonly<{
   schemaFenceInFirstWrite?: boolean | undefined;
 }>;
 
+/**
+ * The transaction boundary the executor selected for one write frame.
+ *
+ * Callers consume this decision instead of re-deriving it from a decorated
+ * target's members or capability flags. Recorded capture and other backend
+ * derivations may deliberately replace members while preserving the boundary
+ * the executor opened, so the target object is not an honest second source.
+ */
+export type WriteTransactionMode = "opened" | "existing" | "none";
+
+function resolveWriteTransactionMode(
+  backend: GraphBackend | TransactionBackend,
+): WriteTransactionMode {
+  if (!("transaction" in backend)) return "existing";
+  return backend.capabilities.transactions ? "opened" : "none";
+}
+
 /** What a caller must change to make each refused constraint class writable. */
 const CONSTRAINT_FENCE_ADVICE = {
   edgeCardinality:
@@ -453,11 +470,12 @@ export function runInWriteTransaction<T>(
   fn: (
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
+    transactionMode: WriteTransactionMode,
   ) => Promise<T>,
   options?: WriteTransactionOptions<T>,
 ): Promise<T> {
-  const ownsWriteLock =
-    "transaction" in backend && backend.capabilities.transactions;
+  const transactionMode = resolveWriteTransactionMode(backend);
+  const ownsWriteLock = transactionMode === "opened";
   const fenceReason = options?.fencesConstraintProbe;
   // Rejected rather than thrown: this function is promise-returning, and a
   // synchronous throw from it would surface differently at a caller that
@@ -547,8 +565,8 @@ export function runInWriteTransaction<T>(
     }
     if (session !== undefined) session.lock = lock;
     const result = await (acquiresLock ?
-      fn(target, lock).finally(() => held.delete(ctx.graphId))
-    : fn(target, lock));
+      fn(target, lock, transactionMode).finally(() => held.delete(ctx.graphId))
+    : fn(target, lock, transactionMode));
     if (session !== undefined) {
       session.wrote ||= options?.didWrite?.(result) ?? true;
       return result;
@@ -582,6 +600,7 @@ export type HookedWriteOperationContext = WriteTransactionContext &
     withOperationHooks: <T>(
       ctx: OperationHookContext,
       fn: () => Promise<T>,
+      didWrite?: (result: T) => boolean,
     ) => Promise<T>;
   }>;
 
@@ -603,10 +622,13 @@ export function runHookedWriteOperation<T>(
   body: (
     target: GraphBackend | TransactionBackend,
     lock: GraphWriteLock,
+    transactionMode: WriteTransactionMode,
   ) => Promise<T>,
   options?: WriteTransactionOptions<T>,
 ): Promise<T> {
-  return ctx.withOperationHooks(opContext, () =>
-    runInWriteTransaction(ctx, backend, body, options),
+  return ctx.withOperationHooks(
+    opContext,
+    () => runInWriteTransaction(ctx, backend, body, options),
+    options?.didWrite,
   );
 }

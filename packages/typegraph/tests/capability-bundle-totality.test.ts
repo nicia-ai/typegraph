@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 74 unbundled = 89, with no member counted twice", () => {
+  it("15 pilot + 76 unbundled = 91, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(74);
+    expect(unbundledNames.length).toBe(76);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(89);
+    expect(bundledSet.size + unbundledNames.length).toBe(91);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,20 +108,21 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("26 reasoned entries sum to 78 accesses; 48 deferred entries sum to 197", () => {
+  it("27 reasoned entries sum to 81 accesses; 49 deferred entries sum to 207", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(26);
-    expect(deferred.length).toBe(48);
+    expect(reasoned.length).toBe(27);
+    expect(deferred.length).toBe(49);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
     // on one physical line) and `ensureIdentityTables` 3->4
     // (identity/schema-transition.ts:228 is a real access the grep
     // receiver-name filter never matched). 58 -> 60; #520 then added the
     // one live `recordedTableDdl` access. The required command port no longer
-    // belongs in this optional-member inventory.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(78);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(197);
+    // belongs in this optional-member inventory. Durable identity adoption
+    // adds one empty-kind fence and one optional preflight selection.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(81);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(207);
   });
 });

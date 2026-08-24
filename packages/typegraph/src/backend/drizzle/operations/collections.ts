@@ -305,7 +305,7 @@ export function buildFindEdgesByEndpointSet(
 export function buildFindEdgesByHeterogeneousEndpointSet(
   tables: Tables,
   params: FindEdgesByHeterogeneousEndpointSetParams,
-  endpoints: readonly Readonly<{ kind: string; id: string }>[],
+  endpoints: FindEdgesByHeterogeneousEndpointSetParams["endpoints"],
   edgeKinds: readonly string[],
 ): SQL {
   const { edges } = tables;
@@ -314,8 +314,19 @@ export function buildFindEdgesByHeterogeneousEndpointSet(
   const idColumn = fromSide ? edges.fromId : edges.toId;
   const requestedKind = sql.raw(`requested_endpoints."endpoint_kind"`);
   const requestedId = sql.raw(`requested_endpoints."endpoint_id"`);
+  const requestedOppositeKind = sql.raw(
+    `requested_endpoints."opposite_kind"`,
+  );
+  const requestedOppositeId = sql.raw(`requested_endpoints."opposite_id"`);
+  const oppositeKindColumn = fromSide ? edges.toKind : edges.fromKind;
+  const oppositeIdColumn = fromSide ? edges.toId : edges.fromId;
+  const readsExactPairs = endpoints[0]?.opposite !== undefined;
   const requestedRows = sql.join(
-    endpoints.map((endpoint) => sql`(${endpoint.kind}, ${endpoint.id})`),
+    endpoints.map((endpoint) =>
+      endpoint.opposite === undefined ?
+        sql`(${endpoint.kind}, ${endpoint.id}, NULL, NULL)`
+      : sql`(${endpoint.kind}, ${endpoint.id}, ${endpoint.opposite.kind}, ${endpoint.opposite.id})`,
+    ),
     sql`, `,
   );
   const whereClause = sql.join(
@@ -326,11 +337,19 @@ export function buildFindEdgesByHeterogeneousEndpointSet(
     ],
     sql` AND `,
   );
+  const oppositeJoinClause =
+    readsExactPairs ?
+      sql`
+        AND ${oppositeKindColumn} = ${requestedOppositeKind}
+        AND ${oppositeIdColumn} = ${requestedOppositeId}
+      `
+    : sql``;
   const joinClause = sql`
     FROM ${edges}
     INNER JOIN requested_endpoints
       ON ${kindColumn} = ${requestedKind}
      AND ${idColumn} = ${requestedId}
+     ${oppositeJoinClause}
     WHERE ${whereClause}
   `;
   const { qualified: orderByClause, bare: derivedOrderByClause } =
@@ -338,7 +357,7 @@ export function buildFindEdgesByHeterogeneousEndpointSet(
 
   if (params.limitPerEndpoint === undefined) {
     return sql`
-      WITH requested_endpoints(endpoint_kind, endpoint_id) AS (
+      WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS (
         VALUES ${requestedRows}
       )
       SELECT ${edges}.*
@@ -349,12 +368,13 @@ export function buildFindEdgesByHeterogeneousEndpointSet(
 
   const ranked = sql`
     SELECT ${edges}.*, ROW_NUMBER() OVER (
-      PARTITION BY ${kindColumn}, ${idColumn} ORDER BY ${orderByClause}
+      PARTITION BY ${requestedKind}, ${requestedId}, ${requestedOppositeKind}, ${requestedOppositeId}
+      ORDER BY ${orderByClause}
     ) AS endpoint_rank
     ${joinClause}
   `;
   return sql`
-    WITH requested_endpoints(endpoint_kind, endpoint_id) AS (
+    WITH requested_endpoints(endpoint_kind, endpoint_id, opposite_kind, opposite_id) AS (
       VALUES ${requestedRows}
     )
     SELECT * FROM (${ranked}) AS ranked_edges

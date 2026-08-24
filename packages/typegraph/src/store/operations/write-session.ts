@@ -52,6 +52,7 @@ import { executeAuthoritativeGraphCommand } from "../../backend/command-contract
 import {
   type BackendIdentity,
   type ClaimEdgeCardinalityParams,
+  type DurableEdgeBatchMembers,
   type EdgeCreateCommand,
   type EdgeCreateCommandResult,
   type EdgeRow,
@@ -160,6 +161,7 @@ export type WriteTarget = Readonly<
     SqlCompilationBackend &
     RawQueryExecutionBackend &
     RawStatementExecutionBackend &
+    DurableEdgeBatchMembers &
     Pick<
       GraphBackend,
       | "insertNodeIfAbsent"
@@ -192,20 +194,29 @@ export type WriteTarget = Readonly<
  * the ratchet drove the count down as those signatures were re-typed. An `as`
  * cast at each site would have been the same unsoundness with no counter.
  *
- * **Exactly three callers remain, and they are structural, not debt.** The
+ * Four call sites remain for three structural reasons, not migration debt. The
  * planned node and edge create paths inspect the exact row-work receiver before
- * allowing it to carry a schema fence. The third caller,
- * `executeEdgeBulkGetOrCreateByEndpoints`, runs nested managed writes inside its
- * own frame: each nested leg re-enters the executor against THIS transaction
- * target, and re-entry needs the full union by construction because it mints a
- * session that writes. The ratchet records these three reasoned escapes rather
- * than pretending a zero that would weaken receiver validation or change the
- * nested write's fence and revision-clock behavior.
+ * allowing it to carry a schema fence; the node projection fallback must retain
+ * the root-vs-transaction discriminator; and `nestedManagedWriteTarget` is the
+ * single owner of nested managed-write re-entry. The ratchet records these
+ * reasoned escapes rather than pretending a zero that would weaken receiver
+ * validation or change nested writes' fence and revision-clock behavior.
  */
 export function unfencedTarget(
   target: WriteTarget,
 ): GraphBackend | TransactionBackend {
   return target as GraphBackend | TransactionBackend;
+}
+
+/**
+ * Widens a row-work target only when a whole managed write must re-enter the
+ * executor against the current transaction receiver. Keeping this as one seam
+ * prevents each fallback consumer from minting its own widening escape.
+ */
+export function nestedManagedWriteTarget(
+  target: WriteTarget,
+): GraphBackend | TransactionBackend {
+  return unfencedTarget(target);
 }
 
 /** Refuses a root fallback that would split a fused row and projection write. */
@@ -424,6 +435,9 @@ export type EdgeWriteSession = Readonly<{
   ) => Promise<EdgeCreateCommandResult>;
   createEdgeNoReturn: (work: EdgeInsertWork) => Promise<void>;
   createEdges: (work: readonly EdgeInsertWork[]) => Promise<readonly EdgeRow[]>;
+  createEdgesDurable?: (
+    work: readonly EdgeInsertWork[],
+  ) => Promise<readonly EdgeRow[]>;
   createEdgesNoReturn: (work: readonly EdgeInsertWork[]) => Promise<void>;
   reviseEdge: (
     work: EdgeUpdateWork,
@@ -782,6 +796,25 @@ export function createWriteSession(
         edgeDispatch,
         work.map((item) => item.params),
       );
+    },
+
+    createEdgesDurable: async (work) => {
+      const insert = target.insertEdgesDurableBatchReturning;
+      if (insert === undefined) {
+        throw new ConfigurationError(
+          "This backend does not implement the durable edge identity batch command.",
+          {
+            capability: "durableEdgeMatchIdentity",
+            operation: "insertEdgesDurableBatchReturning",
+          },
+        );
+      }
+      await claimEdgeCardinalityBatch(
+        target,
+        ctx.claimsVerdict(),
+        edgeBatchClaims(work),
+      );
+      return insert(work.map((item) => item.params));
     },
 
     createEdgesNoReturn: async (work) => {

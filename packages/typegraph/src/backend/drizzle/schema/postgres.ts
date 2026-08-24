@@ -44,7 +44,10 @@ import {
   buildPostgresNodeIndexBuilders,
   buildPostgresSystemIndexBuilders,
 } from "../../../indexes/drizzle";
-import { assertNoSystemIndexNameCollision } from "../../../indexes/system";
+import {
+  assertNoSystemIndexNameCollision,
+  systemIndexName,
+} from "../../../indexes/system";
 import { type IndexDeclaration } from "../../../indexes/types";
 import { regconfig, tsvector } from "../columns/fulltext";
 
@@ -151,6 +154,8 @@ export function createPostgresTables(
       toKind: text("to_kind").notNull(),
       toId: text("to_id").notNull(),
       props: jsonb("props").notNull(),
+      matchIdentityName: text("match_identity_name"),
+      matchIdentityKey: text("match_identity_key"),
       validFrom: timestamp("valid_from", { withTimezone: true }),
       validTo: timestamp("valid_to", { withTimezone: true }),
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
@@ -159,6 +164,16 @@ export function createPostgresTables(
     },
     (t) => [
       primaryKey({ columns: [t.graphId, t.id] }),
+      uniqueIndex(systemIndexName(n.edges, "match_identity_uq")).on(
+        t.graphId,
+        t.kind,
+        t.matchIdentityName,
+        t.matchIdentityKey,
+      ),
+      check(
+        systemIndexName(n.edges, "match_identity_pair_check"),
+        sql`(${t.matchIdentityName} IS NULL) = (${t.matchIdentityKey} IS NULL)`,
+      ),
       ...buildPostgresSystemIndexBuilders("edges", n.edges, t),
       ...buildPostgresEdgeIndexBuilders(t, indexes),
     ],

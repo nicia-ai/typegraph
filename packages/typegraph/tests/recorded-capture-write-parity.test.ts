@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
 
-import { batchPointReadVerdict } from "../src/backend/capabilities/resolve";
+import {
+  batchPointReadVerdict,
+  statementExecutionVerdict,
+} from "../src/backend/capabilities/resolve";
+import { deriveBackend } from "../src/backend/derive-backend";
+import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   createRecordedBackend,
   createRecordedTransactionScope,
+  forceRecordedGraphRevision,
+  lockRecordedGraphWrite,
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,
+  runRecordedTransactionSavepoint,
 } from "../src/store/recorded-capture";
 import { createTestBackend } from "./test-utils";
 
@@ -59,6 +67,178 @@ function isWrapped(
  * wrap the identical set of write methods, so the drift fails loudly here.
  */
 describe("recorded-capture write-surface parity", () => {
+  it("restores pending capture when a TypeGraph savepoint rolls back", async () => {
+    const backend = createTestBackend();
+    const statementExecution = statementExecutionVerdict(backend);
+    expect(statementExecution.supported).toBe(true);
+    if (!statementExecution.supported) return;
+
+    await backend.transaction(async (target) => {
+      const scope = createRecordedTransactionScope(
+        target,
+        batchPointReadVerdict(backend),
+        createSqlSchema(backend.tableNames),
+      );
+      await runRecordedTransactionSavepoint(
+        scope.backend,
+        statementExecution,
+        "typegraph_capture_restore_test",
+        async () => {
+          await scope.backend.insertNode({
+            graphId: "capture_restore",
+            kind: "Person",
+            id: "rolled-back",
+            props: { name: "Rolled back" },
+          });
+          return {
+            action: "rollback",
+            value: undefined,
+            cause: new Error("expected test rollback"),
+          };
+        },
+      );
+      expect(await scope.flush()).toEqual(new Map());
+    });
+
+    await expect(
+      backend.getNode("capture_restore", "Person", "rolled-back"),
+    ).resolves.toBeUndefined();
+  });
+
+  it("restores touches and forced revisions when the savepoint callback throws", async () => {
+    const backend = createTestBackend();
+    const statementExecution = statementExecutionVerdict(backend);
+    expect(statementExecution.supported).toBe(true);
+    if (!statementExecution.supported) return;
+
+    await backend.transaction(async (target) => {
+      const scope = createRecordedTransactionScope(
+        target,
+        batchPointReadVerdict(backend),
+        createSqlSchema(backend.tableNames),
+      );
+      await expect(
+        runRecordedTransactionSavepoint(
+          scope.backend,
+          statementExecution,
+          "typegraph_capture_throw_test",
+          async () => {
+            await scope.backend.insertNode({
+              graphId: "capture_throw",
+              kind: "Person",
+              id: "rolled-back",
+              props: { name: "Rolled back" },
+            });
+            expect(
+              forceRecordedGraphRevision(scope.backend, "capture_throw"),
+            ).toBe(true);
+            throw new Error("expected callback failure");
+          },
+        ),
+      ).rejects.toThrow("expected callback failure");
+      expect(await scope.flush()).toEqual(new Map());
+    });
+  });
+
+  it("restores capture after rollback even when savepoint release fails", async () => {
+    const backend = createTestBackend();
+    const statementExecution = statementExecutionVerdict(backend);
+    expect(statementExecution.supported).toBe(true);
+    if (!statementExecution.supported) return;
+
+    await backend.transaction(async (target) => {
+      const executeStatement = target.executeStatement;
+      if (executeStatement === undefined) {
+        throw new Error("Expected statement execution on the test target");
+      }
+      const releaseFailureTarget = deriveBackend(target, {
+        async executeStatement(statement): Promise<void> {
+          const sql = statement.chunks
+            .filter((chunk) => chunk.kind === "text")
+            .map((chunk) => chunk.value)
+            .join("");
+          if (sql.startsWith("RELEASE SAVEPOINT")) {
+            throw new Error("injected release failure");
+          }
+          await executeStatement(statement);
+        },
+      });
+      const scope = createRecordedTransactionScope(
+        releaseFailureTarget,
+        batchPointReadVerdict(backend),
+        createSqlSchema(backend.tableNames),
+      );
+      await expect(
+        runRecordedTransactionSavepoint(
+          scope.backend,
+          statementExecution,
+          "typegraph_capture_release_test",
+          async () => {
+            await scope.backend.insertNode({
+              graphId: "capture_release",
+              kind: "Person",
+              id: "rolled-back",
+              props: { name: "Rolled back" },
+            });
+            return {
+              action: "rollback",
+              value: undefined,
+              cause: new Error("expected rollback"),
+            };
+          },
+        ),
+      ).rejects.toThrow("Failed to recover a TypeGraph recorded transaction");
+      expect(await scope.flush()).toEqual(new Map());
+    });
+  });
+
+  it("restores the PostgreSQL graph-lock memo after savepoint rollback", async () => {
+    const { backend } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    const statementExecution = statementExecutionVerdict(backend);
+    expect(statementExecution.supported).toBe(true);
+    if (!statementExecution.supported) return;
+    let lockQueryCount = 0;
+    try {
+      await backend.transaction(async (target) => {
+        const execute = target.execute;
+        const countedTarget = deriveBackend(target, {
+          execute: <T>(query: Parameters<typeof execute<T>>[0]) => {
+            const sql = query.chunks
+              .filter((chunk) => chunk.kind === "text")
+              .map((chunk) => chunk.value)
+              .join("");
+            if (sql.includes("pg_advisory_xact_lock")) lockQueryCount += 1;
+            return execute<T>(query);
+          },
+        });
+        const scope = createRecordedTransactionScope(
+          countedTarget,
+          batchPointReadVerdict(backend),
+          createSqlSchema(backend.tableNames),
+        );
+        await runRecordedTransactionSavepoint(
+          scope.backend,
+          statementExecution,
+          "typegraph_capture_lock_test",
+          async () => {
+            await lockRecordedGraphWrite(scope.backend, "capture_lock");
+            return {
+              action: "rollback",
+              value: undefined,
+              cause: new Error("expected rollback"),
+            };
+          },
+        );
+        await lockRecordedGraphWrite(scope.backend, "capture_lock");
+      });
+      expect(lockQueryCount).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("wraps every required write method in both capture factories", () => {
     const { base, autocommit, transactional } = buildWrappers();
     for (const method of RECORDED_REQUIRED_WRITE_METHODS) {

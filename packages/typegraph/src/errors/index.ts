@@ -594,6 +594,33 @@ export class UniquenessError extends TypeGraphError {
   }
 }
 
+/** A direct edge write collided with its schema-declared match identity. */
+export class EdgeMatchIdentityConflictError extends TypeGraphError {
+  constructor(
+    details: Readonly<{
+      attempted: readonly Readonly<{
+        id: string;
+        identityName: string;
+        kind: string;
+      }>[];
+    }>,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super(
+      "Edge write conflicts with an existing schema-declared match identity",
+      "EDGE_MATCH_IDENTITY_CONFLICT",
+      {
+        category: "constraint",
+        details,
+        suggestion:
+          "Use getOrCreateByEndpoints() to return the identity owner, or change the declared identity values.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "EdgeMatchIdentityConflictError";
+  }
+}
+
 /**
  * Details for CardinalityError.
  */
@@ -963,6 +990,8 @@ export const MIGRATION_FAILURE_REASONS = [
    * the intent.
    */
   "kind-removal",
+  /** A declared edge match identity changed while its edge kind held rows. */
+  "edge-match-identity-rekey",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -1013,6 +1042,13 @@ export type MigrationErrorDetails =
         nodes: readonly string[];
         edges: readonly string[];
       }>;
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "edge-match-identity-rekey";
+      edgeKinds: readonly string[];
     }>;
 
 /**

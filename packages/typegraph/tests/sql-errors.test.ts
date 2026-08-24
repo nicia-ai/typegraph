@@ -13,8 +13,10 @@
  * (and key on the locale-independent SQLSTATE) without ever swallowing a
  * genuine system fault as "missing table".
  */
+import { LibsqlError } from "@libsql/client";
 import { describe, expect, it } from "vitest";
 
+import { edgeMatchIdentityUniqueIndexName } from "../src/backend/drizzle/ddl";
 import {
   edgePrimaryKeyConstraint,
   nodePrimaryKeyConstraint,
@@ -22,6 +24,8 @@ import {
 import { tables as sqliteTables } from "../src/backend/drizzle/sqlite";
 import {
   isDuplicatePrimaryKeyError,
+  isDuplicateUniqueIndexError,
+  isEdgeMatchIdentityStorageUnavailableError,
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
   isSqliteNotAuthorizedError,
@@ -540,15 +544,16 @@ describe("isDuplicatePrimaryKeyError", () => {
       ),
     ).toBe(true);
 
-    // A remote libSQL connection surfaces only the generic symbolic code plus
-    // the numeric extended one, with no nested SqliteError to read.
+    // A remote libSQL HTTP connection surfaces only the generic symbolic code
+    // and a code-prefixed message; the SQL-over-HTTP protocol does not carry
+    // SQLite's extended result code.
     expect(
       isDuplicatePrimaryKeyError(
         drizzleQueryError(
           "INSERT INTO typegraph_edges ...",
-          Object.assign(
-            new Error("SQLITE_CONSTRAINT: UNIQUE constraint failed"),
-            { code: "SQLITE_CONSTRAINT", rawCode: 1555, extendedCode: 1555 },
+          new LibsqlError(
+            "UNIQUE constraint failed: typegraph_edges.graph_id, typegraph_edges.id",
+            "SQLITE_CONSTRAINT",
           ),
         ),
         edges,
@@ -595,5 +600,185 @@ describe("isDuplicatePrimaryKeyError", () => {
       isDuplicatePrimaryKeyError(new Error("connection reset"), nodes),
     ).toBe(false);
     expect(isDuplicatePrimaryKeyError(undefined, nodes)).toBe(false);
+  });
+});
+
+describe("isDuplicateUniqueIndexError", () => {
+  const identityIndex = {
+    table: "typegraph_edges",
+    indexName: edgeMatchIdentityUniqueIndexName("typegraph_edges"),
+    sqliteColumns: [
+      "graph_id",
+      "kind",
+      "match_identity_name",
+      "match_identity_key",
+    ],
+  } as const;
+
+  it("detects the named PostgreSQL identity arbiter", () => {
+    expect(
+      isDuplicateUniqueIndexError(
+        drizzleQueryError(
+          "INSERT INTO typegraph_edges ...",
+          pgDuplicate(identityIndex.indexName, identityIndex.table),
+        ),
+        identityIndex,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify a PostgreSQL violation from another relation or index", () => {
+    expect(
+      isDuplicateUniqueIndexError(
+        pgDuplicate(identityIndex.indexName, "other_edges"),
+        identityIndex,
+      ),
+    ).toBe(false);
+    expect(
+      isDuplicateUniqueIndexError(
+        pgDuplicate("other_identity_idx", identityIndex.table),
+        identityIndex,
+      ),
+    ).toBe(false);
+  });
+
+  it("detects the SQLite identity arbiter by its ordered columns", () => {
+    expect(
+      isDuplicateUniqueIndexError(
+        Object.assign(
+          new Error(
+            "UNIQUE constraint failed: typegraph_edges.graph_id, typegraph_edges.kind, typegraph_edges.match_identity_name, typegraph_edges.match_identity_key",
+          ),
+          { code: "SQLITE_CONSTRAINT_UNIQUE", rawCode: 2067 },
+        ),
+        identityIndex,
+      ),
+    ).toBe(true);
+
+    expect(
+      isDuplicateUniqueIndexError(
+        new LibsqlError(
+          "UNIQUE constraint failed: typegraph_edges.graph_id, typegraph_edges.kind, typegraph_edges.match_identity_name, typegraph_edges.match_identity_key",
+          "SQLITE_CONSTRAINT",
+        ),
+        identityIndex,
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify another SQLite unique index", () => {
+    expect(
+      isDuplicateUniqueIndexError(
+        Object.assign(
+          new Error("UNIQUE constraint failed: typegraph_edges.graph_id"),
+          { code: "SQLITE_CONSTRAINT_UNIQUE", rawCode: 2067 },
+        ),
+        identityIndex,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("isEdgeMatchIdentityStorageUnavailableError", () => {
+  it("recognizes a missing PostgreSQL conflict arbiter through a wrapper", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        drizzleQueryError(
+          "INSERT ... ON CONFLICT ...",
+          pgError("no unique or exclusion constraint", "42P10"),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("recognizes SQLite's missing conflict arbiter", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(
+          new Error(
+            "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint",
+          ),
+          { code: "SQLITE_ERROR" },
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("recognizes a cause-less remote libSQL missing conflict arbiter", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        new LibsqlError(
+          "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint",
+          "SQLITE_ERROR",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("recognizes PostgreSQL missing durable-identity columns", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(new Error('column "match_identity_key" does not exist'), {
+          code: "42703",
+          column: "match_identity_key",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("uses SQLSTATE plus the column token for localized PostgreSQL errors", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(new Error("la columna «match_identity_key» no existe"), {
+          code: "42703",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not classify an unrelated PostgreSQL missing column", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(new Error('column "props" does not exist'), {
+          code: "42703",
+          column: "props",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not classify unrelated SQLite syntax errors", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(new Error("near SELECT: syntax error"), {
+          code: "SQLITE_ERROR",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("recognizes only SQLite's anchored missing-identity-column forms", () => {
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(new Error("no such column: match_identity_name"), {
+          code: "SQLITE_ERROR",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        new LibsqlError("no such column: match_identity_key", "SQLITE_ERROR"),
+      ),
+    ).toBe(true);
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(
+          new Error(
+            "UNIQUE constraint failed: typegraph_edges.match_identity_name",
+          ),
+          { code: "SQLITE_ERROR" },
+        ),
+      ),
+    ).toBe(false);
   });
 });

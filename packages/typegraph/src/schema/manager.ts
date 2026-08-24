@@ -7,6 +7,8 @@
  * - Auto-migration for safe changes
  * - Error reporting for breaking changes
  */
+import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
+import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
 import {
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
@@ -51,6 +53,7 @@ import {
   computeSchemaDiff,
   getMigrationActions,
   isBackwardsCompatible,
+  matchIdentitiesEqual,
   type SchemaDiff,
 } from "./migration";
 import {
@@ -732,6 +735,40 @@ function requireCommitWithPreflight(
   return commitWithPreflight;
 }
 
+async function commitInitialEdgeIdentityOnEmptyKinds(
+  backend: GraphBackend,
+  graph: GraphDef,
+  commit: CommitSchemaVersionParams,
+  edgeKinds: readonly string[],
+): Promise<SchemaVersionRow> {
+  const commitIfKindsEmpty = backend.commitSchemaVersionIfKindsEmpty;
+  if (commitIfKindsEmpty === undefined) {
+    throw new ConfigurationError(
+      "This backend cannot atomically verify empty edge kinds while adopting durable edge match identity.",
+      {
+        code: "EDGE_MATCH_IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId: graph.id,
+        edgeKinds,
+      },
+    );
+  }
+  const result = await commitIfKindsEmpty(
+    commit,
+    edgeKinds.map((kind) => ({
+      entity: "edge" as const,
+      kind,
+      rows: "all" as const,
+    })),
+  );
+  if (result.status === "committed") return result.row;
+
+  throw edgeMatchIdentityRekeyPopulatedError(
+    graph.id,
+    0,
+    result.kinds.map((entry) => entry.kind),
+  );
+}
+
 /**
  * Initializes the schema for a new graph.
  *
@@ -765,6 +802,16 @@ export async function initializeSchema<G extends GraphDef>(
   // same ConfigurationError a Store construction would, just earlier.
   buildKindRegistry(graph);
 
+  await provisionEdgeMatchIdentityStorage(backend, graph);
+
+  const edgeIdentityKinds =
+    edgeKindsRequiringMatchIdentityMaterialization(graph);
+  const edgeMatchIdentityPreflight = prepareEdgeMatchIdentityCommitPreflight(
+    graph,
+    edgeIdentityKinds,
+    0,
+  );
+
   const schema = serializeSchema(graph, 1);
   const hash = await computeSchemaHash(schema);
   const commit = {
@@ -776,8 +823,21 @@ export async function initializeSchema<G extends GraphDef>(
   };
 
   if (graph.identity === undefined) {
-    return backend.commitSchemaVersion(commit);
+    if (edgeMatchIdentityPreflight === undefined) {
+      return backend.commitSchemaVersion(commit);
+    }
+    const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
+    return commitWithPreflight === undefined ?
+        commitInitialEdgeIdentityOnEmptyKinds(
+          backend,
+          graph,
+          commit,
+          edgeIdentityKinds,
+        )
+      : commitWithPreflight(commit, edgeMatchIdentityPreflight);
   }
+
+  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
 
   // An identity-enabled graph's FIRST schema commit is an enablement: a
   // legacy database populated through an unmanaged Store can already hold
@@ -792,7 +852,6 @@ export async function initializeSchema<G extends GraphDef>(
     enablement: true,
     ...(options?.schema === undefined ? {} : { schema: options.schema }),
   });
-  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
   // The preflight issues idempotent identity DDL INSIDE this transaction (see
   // `provisionDerivedRelationsInCommit`), so two replicas booting at once can
   // lose the catalog race here — and PostgreSQL will accept nothing but a
@@ -801,7 +860,12 @@ export async function initializeSchema<G extends GraphDef>(
   // precomputed and immutable, and the CAS still decides correctness — if a
   // writer really did commit in between, the retry surfaces `StaleVersionError`
   // instead of silently succeeding.
-  return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, preflight));
+  return withIdentityDdlRaceRetry(() =>
+    commitWithPreflight(commit, async (transactionBackend) => {
+      await edgeMatchIdentityPreflight?.(transactionBackend);
+      await preflight(transactionBackend);
+    }),
+  );
 }
 
 export type MigrateSchemaOptions = Readonly<{
@@ -892,6 +956,13 @@ export async function migrateSchema<G extends GraphDef>(
         ...droppedKinds(storedSchema.edges, getEdgeKinds(target), "edge"),
       ];
   const guardedDrops = options?.discardDroppedKindRows === true ? [] : dropped;
+  const rekeyedEdgeKinds = edgeKindsRequiringMatchIdentityMaterialization(
+    target,
+    storedSchema,
+  );
+  if (rekeyedEdgeKinds.length > 0) {
+    await provisionEdgeMatchIdentityStorage(backend, target);
+  }
   // No cleanup is queued here, deliberately, and redundancy is the whole
   // reason. `materializeRemovals` derives removals by walking schema-version
   // history (`reconcilePendingRemovals` diffs consecutive documents' kind
@@ -939,8 +1010,17 @@ export async function migrateSchema<G extends GraphDef>(
         ...(options?.schema === undefined ? {} : { schema: options.schema }),
       });
 
+  const edgeMatchIdentityPreflight = prepareEdgeMatchIdentityCommitPreflight(
+    target,
+    rekeyedEdgeKinds,
+    currentVersion,
+  );
+
   const committed =
-    identityPreflight === undefined ?
+    (
+      identityPreflight === undefined &&
+      edgeMatchIdentityPreflight === undefined
+    ) ?
       guardedDrops.length > 0 ?
         await commitDroppedKindsOnlyWhenEmpty(
           backend,
@@ -964,10 +1044,85 @@ export async function migrateSchema<G extends GraphDef>(
             currentVersion,
             guardedDrops,
           );
-          await identityPreflight(transactionBackend);
+          await edgeMatchIdentityPreflight?.(transactionBackend);
+          await identityPreflight?.(transactionBackend);
         },
       );
   return committed.version;
+}
+
+async function provisionEdgeMatchIdentityStorage(
+  backend: GraphBackend,
+  graph: GraphDef,
+): Promise<void> {
+  let declaresIdentity = false;
+  for (const [kind, registration] of Object.entries(graph.edges)) {
+    const identity = registration.matchIdentity;
+    if (identity === undefined) continue;
+    declaresIdentity = true;
+    assertEdgeMatchIdentityBackendSupport(identity, backend.capabilities, kind);
+  }
+  if (declaresIdentity) await backend.ensureEdgeMatchIdentityStorage?.();
+}
+
+/**
+ * Returns edge kinds whose target schema requires durable keys that existing
+ * rows do not carry. Removing a declaration is deliberately excluded: it
+ * materializes no keys, so populated rows do not need export/re-import.
+ */
+function edgeKindsRequiringMatchIdentityMaterialization(
+  target: GraphDef,
+  storedSchema?: SerializedSchema,
+): readonly string[] {
+  return getEdgeKinds(target).filter((kind) => {
+    const after = target.edges[kind]?.matchIdentity;
+    if (after === undefined) return false;
+    const before = storedSchema?.edges[kind]?.matchIdentity;
+    return !matchIdentitiesEqual(before, after);
+  });
+}
+
+/** Refuses identity activation/re-keying while rows still lack target keys. */
+function prepareEdgeMatchIdentityCommitPreflight(
+  target: GraphDef,
+  edgeKinds: readonly string[],
+  currentVersion: number,
+): ((backend: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
+  if (edgeKinds.length === 0) return undefined;
+  return async (backend): Promise<void> => {
+    const populated: string[] = [];
+    for (const kind of edgeKinds) {
+      const count = await countSchemaKindRows(backend, target.id, {
+        entity: "edge",
+        kind,
+        rows: "all",
+      });
+      if (count > 0) populated.push(kind);
+    }
+    if (populated.length === 0) return;
+    throw edgeMatchIdentityRekeyPopulatedError(
+      target.id,
+      currentVersion,
+      populated,
+    );
+  };
+}
+
+function edgeMatchIdentityRekeyPopulatedError(
+  graphId: string,
+  currentVersion: number,
+  edgeKinds: readonly string[],
+): MigrationError {
+  return new MigrationError(
+    `Refusing to activate or change match identity for populated edge kinds: ${edgeKinds.join(", ")}. Export and hard-delete those edges, migrate the schema, then import them so TypeGraph can materialize the new durable keys.`,
+    {
+      graphId,
+      fromVersion: currentVersion,
+      toVersion: currentVersion + 1,
+      reason: "edge-match-identity-rekey",
+      edgeKinds,
+    },
+  );
 }
 
 /**
@@ -1093,10 +1248,11 @@ async function assertDroppedKindsEmpty(
     dropped.map(async (entry) => ({
       entity: entry.entity,
       kind: entry.kind,
-      count:
-        entry.entity === "node" ?
-          await backend.countNodesByKind({ graphId, kind: entry.kind })
-        : await backend.countEdgesByKind({ graphId, kind: entry.kind }),
+      rows: "nonDeleted" as const,
+      count: await countSchemaKindRows(backend, graphId, {
+        ...entry,
+        rows: "nonDeleted",
+      }),
     })),
   );
   const populated = counts.filter((entry) => entry.count > 0);
@@ -1147,7 +1303,7 @@ async function commitDroppedKindsOnlyWhenEmpty<G extends GraphDef>(
     backend,
     graph,
     currentVersion,
-    dropped,
+    dropped.map((entry) => ({ ...entry, rows: "nonDeleted" as const })),
   );
   if (result.status === "committed") return result.row;
 

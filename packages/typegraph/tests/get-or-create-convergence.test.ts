@@ -483,13 +483,12 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(reported).toBe(true);
   });
 
-  it("reports the raced attempt as an error, never as a create that happened", async () => {
-    // A losing attempt writes NOTHING, so it must not be reported as a
-    // completed create. `onOperationEnd` means "this operation did what it
-    // said"; firing it for a generated id that no row carries makes every
-    // hook-based audit trail wrong, and the same "did it write" signal is what
-    // gates the revision clock. Both read the body's outcome, so the abort has
-    // to travel as a failure, not as a value.
+  it("reports a raced attempt as an unchanged completion, not an error", async () => {
+    // Finding the authoritative incumbent is an expected get-or-create result,
+    // not a failed operation. The hook result carries the same did-write
+    // decision that gates the revision clock, so telemetry can distinguish a
+    // completed no-op from a committed create without routing control flow
+    // through onError.
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
     const bob = await setup.nodes.Person.create({ name: "Bob" });
@@ -504,8 +503,10 @@ describe("getOrCreateByEndpoints convergence", () => {
       }),
       {
         hooks: {
-          onOperationEnd: (context) => {
-            ends.push(`${context.operation}:${context.kind}`);
+          onOperationEnd: (context, outcome) => {
+            ends.push(
+              `${context.operation}:${context.kind}:${outcome.outcome}`,
+            );
           },
           onError: (context) => {
             // `onError` is typed on the base HookContext; the operation fields
@@ -522,10 +523,8 @@ describe("getOrCreateByEndpoints convergence", () => {
     });
 
     expect(result.action).toBe("found");
-    // No create ever completed on this store: the only attempt aborted.
-    expect(ends.filter((entry) => entry === "create:knows")).toEqual([]);
-    // And the abort was reported, rather than silently swallowed.
-    expect(errors).toContain("create:knows");
+    expect(ends).toContain("create:knows:unchanged");
+    expect(errors).toEqual([]);
   });
 
   it("does not advance the revision clock for a raced no-op", async () => {

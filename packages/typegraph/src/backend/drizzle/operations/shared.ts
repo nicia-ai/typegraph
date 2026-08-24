@@ -51,13 +51,15 @@ export function nodePrimaryKeyConstraint(
   nodes: Tables["nodes"],
 ): PrimaryKeyRelation {
   const relation = getTableName(nodes);
+  const sqliteColumns = [
+    nodes.graphId.name,
+    nodes.kind.name,
+    nodes.id.name,
+  ];
   return {
     table: relation,
-    constraintNames: primaryKeyConstraintNames(relation, [
-      nodes.graphId.name,
-      nodes.kind.name,
-      nodes.id.name,
-    ]),
+    constraintNames: primaryKeyConstraintNames(relation, sqliteColumns),
+    sqliteColumns,
   };
 }
 
@@ -70,12 +72,11 @@ export function edgePrimaryKeyConstraint(
   edges: Tables["edges"],
 ): PrimaryKeyRelation {
   const relation = getTableName(edges);
+  const sqliteColumns = [edges.graphId.name, edges.id.name];
   return {
     table: relation,
-    constraintNames: primaryKeyConstraintNames(relation, [
-      edges.graphId.name,
-      edges.id.name,
-    ]),
+    constraintNames: primaryKeyConstraintNames(relation, sqliteColumns),
+    sqliteColumns,
   };
 }
 
@@ -183,6 +184,6 @@ export function nodeColumnList(nodes: Tables["nodes"]): SQL {
 
 export function edgeColumnList(edges: Tables["edges"]): SQL {
   return sql.raw(
-    `"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`,
+    `"${edges.graphId.name}", "${edges.id.name}", "${edges.kind.name}", "${edges.fromKind.name}", "${edges.fromId.name}", "${edges.toKind.name}", "${edges.toId.name}", "${edges.props.name}", "${edges.matchIdentityName.name}", "${edges.matchIdentityKey.name}", "${edges.validFrom.name}", "${edges.validTo.name}", "${edges.createdAt.name}", "${edges.updatedAt.name}"`,
   );
 }

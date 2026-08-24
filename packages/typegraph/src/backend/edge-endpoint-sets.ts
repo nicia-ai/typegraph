@@ -14,6 +14,7 @@
  * identically.
  */
 import { ConfigurationError } from "../errors";
+import { encodeTupleKey } from "../utils/tuple-key";
 import type {
   FindEdgesByEndpointSetParams,
   FindEdgesByHeterogeneousEndpointSetParams,
@@ -86,7 +87,15 @@ export function resolveEdgeEndpointIds(
 }
 
 function endpointKey(endpoint: EdgeEndpointReference): string {
-  return `${endpoint.kind}\0${endpoint.id}`;
+  return endpoint.opposite === undefined ?
+      encodeTupleKey(["incident", endpoint.kind, endpoint.id])
+    : encodeTupleKey([
+        "exact",
+        endpoint.kind,
+        endpoint.id,
+        endpoint.opposite.kind,
+        endpoint.opposite.id,
+      ]);
 }
 
 /**
@@ -113,6 +122,22 @@ export function resolveHeterogeneousEdgeRead(
       params.endpoints.map((endpoint) => [endpointKey(endpoint), endpoint]),
     ).values(),
   ];
+  const exactEndpointCount = endpoints.filter(
+    (endpoint) => endpoint.opposite !== undefined,
+  ).length;
+  if (exactEndpointCount > 0 && exactEndpointCount < endpoints.length) {
+    throw new ConfigurationError(
+      "findEdgesByHeterogeneousEndpointSet cannot mix incident-endpoint and exact-pair rows in one request.",
+      {
+        code: "EDGE_HETEROGENEOUS_READ_MIXED_ENDPOINT_MODES",
+        graphId: params.graphId,
+      },
+      {
+        suggestion:
+          "Supply an opposite endpoint for every row when exact directed-pair matching is required.",
+      },
+    );
+  }
   if (edgeKinds.length === 0 || endpoints.length === 0) {
     return { edgeKinds, endpoints, endpointChunkSize: 1 };
   }
@@ -121,7 +146,11 @@ export function resolveHeterogeneousEdgeRead(
     maxBindParameters -
     FIND_EDGES_HETEROGENEOUS_FIXED_PARAM_COUNT -
     edgeKinds.length;
-  const endpointChunkSize = Math.floor(endpointBindBudget / 2);
+  // Exact-pair rows bind the requested and opposite endpoint. Preserve the
+  // wider chunks of ordinary endpoint reads while using the worst-case width
+  // for a request that contains any exact pair.
+  const endpointBindWidth = exactEndpointCount > 0 ? 4 : 2;
+  const endpointChunkSize = Math.floor(endpointBindBudget / endpointBindWidth);
   if (endpointChunkSize >= 1) {
     return { edgeKinds, endpoints, endpointChunkSize };
   }

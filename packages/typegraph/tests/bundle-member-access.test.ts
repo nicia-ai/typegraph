@@ -1,7 +1,7 @@
 /**
  * THE LIVE ACCESS-INVENTORY RATCHET (I6, T21) — the live counterpart to
  * `tests/capability-operation-cover.test.ts` (T11b), which is pinned to the
- * COMMITTED baseline fixture at `b688c48` and never re-scans the tree. This
+ * CHECKED-IN baseline fixture and never re-scans the tree. This
  * suite calls `scanBundleMemberAccesses` directly and pins every one of the
  * six buckets it partitions `src/**`'s `OptionalGraphBackendMember` accesses
  * into, so a scattered read that regresses I6's "no new pilot residue"
@@ -33,11 +33,20 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 78;
-const DEFERRED_LIVE_TOTAL = 194;
-const DEFERRED_DECLARED_TOTAL = 197;
+const REASONED_FLOOR = 81;
+const DEFERRED_LIVE_TOTAL = 204;
+const DEFERRED_DECLARED_TOTAL = 207;
 const EXCLUDED_COUNT = 4;
-const TOTAL_ROW_COUNT = 285;
+const TOTAL_ROW_COUNT = 298;
+const ANNOTATED_RESIDUE_KEYS = [
+  "backend/migrate-recorded-time.ts:160#executeStatement",
+  "backend/migrate-recorded-time.ts:167#executeStatement",
+  "identity/sql-target.ts:101#executeStatement",
+  "identity/sql-target.ts:155#executeStatement",
+  "store/recorded-capture/guards.ts:67#executeStatement",
+  "store/recorded-capture/guards.ts:84#executeStatement",
+  "store/recorded-capture/guards.ts:219#executeStatement",
+] as const;
 
 function rowKey(
   row: Readonly<{ file: string; line: number; member: string }>,
@@ -88,6 +97,11 @@ describe("live bundle member access scan (I6, T21)", () => {
         "backend/migrate-recorded-time.ts#executeStatement",
       ].toSorted(),
     );
+    const liveKeys = new Set(annotatedRows.map((row) => rowKey(row)));
+    expect(
+      ANNOTATED_RESIDUE_KEYS.filter((key) => !liveKeys.has(key)),
+      "line-pinned annotated residue absent from the live scan",
+    ).toEqual([]);
   });
 
   it("a name match on a non-port receiver is not an access", () => {
@@ -170,7 +184,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 285)", () => {
+  it("the class partition covers every scanned row (total 298)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

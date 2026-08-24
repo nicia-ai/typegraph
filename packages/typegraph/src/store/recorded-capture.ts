@@ -1,4 +1,8 @@
-import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { statementExecutionMembers } from "../backend/capabilities/bind";
+import {
+  type BATCH_POINT_READ,
+  type STATEMENT_EXECUTION,
+} from "../backend/capabilities/bundle-registry";
 import {
   batchPointReadVerdict,
   type BundleVerdictOf,
@@ -28,6 +32,8 @@ import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { type IdentityTarget } from "../identity/sql-target";
 import { type IdentityAssertionStorageRow } from "../identity/storage-types";
 import { type SqlSchema } from "../query/compiler/schema";
+import { sql as portableSql } from "../query/sql-fragment";
+import { asCompiledStatementSql } from "../query/sql-intent";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import {
@@ -114,12 +120,19 @@ type RecordedCaptureSession = Readonly<{
     afterImage?: IdentityAssertionStorageRow,
   ) => void;
   forceGraphRevision: (graphId: string) => void;
+  checkpoint: () => RecordedCaptureCheckpoint;
+  restore: (checkpoint: RecordedCaptureCheckpoint) => void;
   flush: (
     target: TransactionBackend,
     batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
     schema: SqlSchema,
     ownsWriteLock: boolean,
   ) => Promise<RecordedFlushInstants>;
+}>;
+
+type RecordedCaptureCheckpoint = Readonly<{
+  touched: ReadonlyMap<string, TouchedEntity>;
+  forcedGraphRevisions: ReadonlySet<string>;
 }>;
 
 export type RecordedFlushInstants = ReadonlyMap<string, string>;
@@ -273,6 +286,24 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
       forcedGraphRevisions.add(graphId);
     },
 
+    checkpoint(): RecordedCaptureCheckpoint {
+      if (sealed) throw recordedCaptureSealedError({});
+      return {
+        touched: new Map(touched),
+        forcedGraphRevisions: new Set(forcedGraphRevisions),
+      };
+    },
+
+    restore(checkpoint: RecordedCaptureCheckpoint): void {
+      if (sealed) throw recordedCaptureSealedError({});
+      touched.clear();
+      for (const [key, entity] of checkpoint.touched) touched.set(key, entity);
+      forcedGraphRevisions.clear();
+      for (const graphId of checkpoint.forcedGraphRevisions) {
+        forcedGraphRevisions.add(graphId);
+      }
+    },
+
     async flush(
       target: TransactionBackend,
       batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
@@ -350,14 +381,101 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
   };
 }
 
-type RecordedIdentityBinding = Readonly<{
+type RecordedTransactionBinding = Readonly<{
   target: TransactionBackend;
   session: RecordedCaptureSession;
+  graphLocks: ReturnType<typeof createRecordedGraphLockMemo>;
 }>;
 
-const recordedIdentityBindings = new WeakMap<object, RecordedIdentityBinding>();
+type TransactionControlTarget = Readonly<
+  Pick<TransactionBackend, "executeStatement">
+>;
+
+type RecordedSavepointDecision<T> =
+  | Readonly<{ action: "release"; value: T }>
+  | Readonly<{ action: "rollback"; value: T; cause: unknown }>;
+
+const recordedTransactionBindings = new WeakMap<
+  object,
+  RecordedTransactionBinding
+>();
 
 const recordedRevisionBindings = new WeakMap<object, RecordedCaptureSession>();
+
+/**
+ * Runs one TypeGraph-owned savepoint without letting recorded state drift from
+ * live state. A rollback restores both pending capture and the transaction's
+ * graph-lock memo to their pre-savepoint snapshots. Callers never receive the
+ * raw transaction target, so they cannot roll back SQL while forgetting the
+ * TypeGraph sidecars that mirror it.
+ *
+ * This is deliberately the only supported savepoint seam for recorded writes.
+ * Savepoints issued directly through an adopted backend remain outside the
+ * capture contract because TypeGraph cannot observe their rollback boundary.
+ */
+export async function runRecordedTransactionSavepoint<T>(
+  target: TransactionControlTarget,
+  statementExecution: Extract<
+    BundleVerdictOf<typeof STATEMENT_EXECUTION>,
+    { supported: true }
+  >,
+  savepoint: string,
+  fn: () => Promise<RecordedSavepointDecision<T>>,
+): Promise<T> {
+  const binding = recordedTransactionBindings.get(target);
+  binding?.session.assertOpen();
+  const rawTarget = binding?.target ?? target;
+  const { executeStatement } = statementExecutionMembers(
+    rawTarget,
+    statementExecution,
+  );
+  const captureCheckpoint = binding?.session.checkpoint();
+  const graphLockCheckpoint =
+    binding === undefined ? undefined : new Map(binding.graphLocks);
+  const restoreCapture = (): void => {
+    if (
+      binding === undefined ||
+      captureCheckpoint === undefined ||
+      graphLockCheckpoint === undefined
+    )
+      return;
+    binding.session.restore(captureCheckpoint);
+    binding.graphLocks.clear();
+    for (const [graphId, lock] of graphLockCheckpoint) {
+      binding.graphLocks.set(graphId, lock);
+    }
+  };
+  const executeControl = (sql: string): Promise<unknown> =>
+    executeStatement(asCompiledStatementSql(portableSql.raw(sql)));
+  const rollback = async (cause: unknown): Promise<void> => {
+    try {
+      await executeControl(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      restoreCapture();
+      await executeControl(`RELEASE SAVEPOINT ${savepoint}`);
+    } catch (recoveryError) {
+      throw new AggregateError(
+        [cause],
+        "Failed to recover a TypeGraph recorded transaction savepoint.",
+        { cause: recoveryError },
+      );
+    }
+  };
+
+  await executeControl(`SAVEPOINT ${savepoint}`);
+  let result: RecordedSavepointDecision<T>;
+  try {
+    result = await fn();
+  } catch (error) {
+    await rollback(error);
+    throw error;
+  }
+  if (result.action === "rollback") {
+    await rollback(result.cause);
+  } else {
+    await executeControl(`RELEASE SAVEPOINT ${savepoint}`);
+  }
+  return result.value;
+}
 
 /** Forces one revision allocation when this capture transaction flushes. */
 export function forceRecordedGraphRevision(
@@ -392,7 +510,7 @@ export async function withRecordedIdentityMutationTarget<T>(
     ) => void,
   ) => Promise<T>,
 ): Promise<T> {
-  const binding = recordedIdentityBindings.get(target);
+  const binding = recordedTransactionBindings.get(target);
   if (binding === undefined) {
     return fn(target, ignoreIdentityTouch);
   }
@@ -685,6 +803,24 @@ function createRecordedTransactionBackend(
         },
       }),
 
+    ...(target.insertEdgesDurableBatchReturning === undefined ?
+      {}
+    : {
+        async insertEdgesDurableBatchReturning(
+          params: readonly InsertEdgeParams[],
+        ): Promise<readonly EdgeRow[]> {
+          session.assertOpen();
+          await lockGraphs(params);
+          const rows = await requireDefined(
+            target.insertEdgesDurableBatchReturning,
+          )(params);
+          for (const row of rows) {
+            session.touchEdge(row.graph_id, row.id, row);
+          }
+          return rows;
+        },
+      }),
+
     async updateEdge(params) {
       session.assertOpen();
       await lockGraph(params.graphId);
@@ -741,8 +877,8 @@ function createRecordedTransactionBackend(
   // then a nested coordinator (importIdentityAssertionsIntoTarget) re-wraps that
   // RAW target — without a raw-target binding the second lookup would miss and
   // silently drop every touch, losing the merge-created assertions from history.
-  recordedIdentityBindings.set(overlay, { target, session });
-  recordedIdentityBindings.set(target, { target, session });
+  recordedTransactionBindings.set(overlay, { target, session, graphLocks });
+  recordedTransactionBindings.set(target, { target, session, graphLocks });
   recordedRevisionBindings.set(overlay, session);
   return overlay;
 }
@@ -987,6 +1123,18 @@ export function createRecordedBackend(
         ): Promise<readonly EdgeRow[]> {
           return capture((target) =>
             runInsertBatchReturning(edgeInsertDispatch(target), params),
+          );
+        },
+      }),
+
+    ...(backend.insertEdgesDurableBatchReturning === undefined ?
+      {}
+    : {
+        async insertEdgesDurableBatchReturning(
+          params: readonly InsertEdgeParams[],
+        ): Promise<readonly EdgeRow[]> {
+          return capture((target) =>
+            requireDefined(target.insertEdgesDurableBatchReturning)(params),
           );
         },
       }),

@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { assertWhereFieldDeclared } from "../constraints";
 import { ConfigurationError } from "../errors/index";
 import { type GraphExtension } from "../graph-extension/extension-types";
@@ -8,7 +10,8 @@ import {
 import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
 import { assertClaimAxisSafe } from "../store/claims/axis";
-import { createDataKeyedBag } from "../utils/object";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
+import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   type AnyEdgeType,
   type DeleteBehavior,
@@ -135,7 +138,134 @@ function normalizeEdgeEntry(
     validateConstraintNarrowing(name, entry.type, entry);
   }
 
-  return entry;
+  return canonicalizeMatchIdentity(name, entry);
+}
+
+/**
+ * Validates and canonicalizes the optional graph-local edge identity.
+ *
+ * Identity fields are persisted as a set, so declaration order is not
+ * semantic. The copied registration also ensures defineGraph never mutates a
+ * caller-owned registration while establishing its canonical form.
+ */
+function canonicalizeMatchIdentity(
+  edgeName: string,
+  registration: EdgeRegistration,
+): EdgeRegistration {
+  const identity = registration.matchIdentity;
+  if (identity === undefined) return registration;
+
+  if (typeof identity.name !== "string" || identity.name.length === 0) {
+    throw new ConfigurationError(
+      `Edge "${edgeName}" match identity name must be a non-empty string.`,
+      { edgeName },
+    );
+  }
+  const identityFields: unknown = identity.fields;
+  if (!Array.isArray(identityFields)) {
+    throw new ConfigurationError(
+      `Edge "${edgeName}" match identity fields must be an array.`,
+      { edgeName, identityName: identity.name },
+    );
+  }
+
+  const rawShape = (registration.type.schema as { shape?: unknown }).shape;
+  const shape =
+    typeof rawShape === "object" && rawShape !== null ?
+      (rawShape as Readonly<Record<string, unknown>>)
+    : undefined;
+  if (shape === undefined) {
+    throw new ConfigurationError(
+      `Edge "${edgeName}" match identity cannot be validated because its schema is not an object schema.`,
+      { edgeName, identityName: identity.name },
+    );
+  }
+
+  const fields: string[] = [];
+  const seen = new Set<string>();
+  for (const field of identityFields) {
+    if (typeof field !== "string") {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity fields must be strings.`,
+        { edgeName, identityName: identity.name },
+      );
+    }
+    if (seen.has(field)) {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity repeats field "${field}".`,
+        { edgeName, identityName: identity.name, field },
+      );
+    }
+    seen.add(field);
+    fields.push(field);
+    if (!hasOwnKey(shape, field)) {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity references undeclared field "${field}".`,
+        { edgeName, identityName: identity.name, field },
+      );
+    }
+    if (!isPortableMatchIdentityFieldSchema(shape[field])) {
+      throw new ConfigurationError(
+        `Edge "${edgeName}" match identity field "${field}" must persist as a JSON scalar.`,
+        {
+          code: "EDGE_MATCH_IDENTITY_VALUE_NOT_SCALAR",
+          edgeName,
+          identityName: identity.name,
+          field,
+        },
+        {
+          suggestion:
+            "Use a string, finite number, boolean, portable literal or enum, or an optional/nullable/readonly/default/catch/prefault wrapper or union whose output stays inside those scalar types.",
+        },
+      );
+    }
+  }
+
+  return {
+    ...registration,
+    matchIdentity: {
+      name: identity.name,
+      fields: fields.toSorted(),
+    },
+  };
+}
+
+function isPortableMatchIdentityFieldSchema(fieldSchema: unknown): boolean {
+  if (!(fieldSchema instanceof z.ZodType)) return false;
+  if (
+    fieldSchema instanceof z.ZodString ||
+    fieldSchema instanceof z.ZodNumber ||
+    fieldSchema instanceof z.ZodBoolean ||
+    fieldSchema instanceof z.ZodNull
+  )
+    return true;
+  if (fieldSchema instanceof z.ZodLiteral) {
+    return [...fieldSchema.values].every((value) =>
+      isPortableEdgeMatchIdentityValue(value),
+    );
+  }
+  if (fieldSchema instanceof z.ZodEnum) {
+    return Object.values(fieldSchema.enum).every((value) =>
+      isPortableEdgeMatchIdentityValue(value),
+    );
+  }
+  if (fieldSchema instanceof z.ZodUnion) {
+    return fieldSchema.options.every((option) =>
+      isPortableMatchIdentityFieldSchema(option),
+    );
+  }
+  if (
+    fieldSchema instanceof z.ZodOptional ||
+    fieldSchema instanceof z.ZodNullable ||
+    fieldSchema instanceof z.ZodReadonly ||
+    fieldSchema instanceof z.ZodNonOptional ||
+    fieldSchema instanceof z.ZodDefault ||
+    fieldSchema instanceof z.ZodCatch ||
+    fieldSchema instanceof z.ZodPrefault
+  ) {
+    return isPortableMatchIdentityFieldSchema(fieldSchema.unwrap());
+  }
+  return false;
 }
 
 /**
