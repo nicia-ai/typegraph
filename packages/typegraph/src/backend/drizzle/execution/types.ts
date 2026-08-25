@@ -8,13 +8,14 @@ import {
   type SqlFragment,
   throwUnsupportedSqlChunk,
 } from "../../../query/sql-fragment";
+import type {
+  AtomicSqlBatchExecutor,
+  CompiledAtomicSqlStatement,
+} from "../../capabilities/atomic-sql-program";
 
 export type ExecutableSql = DrizzleSql | SqlFragment;
 
-export type CompiledSqlQuery = Readonly<{
-  params: readonly unknown[];
-  sql: string;
-}>;
+export type CompiledSqlQuery = CompiledAtomicSqlStatement;
 
 /**
  * A driver-native, all-or-nothing group of compiled statements.
@@ -26,10 +27,6 @@ export type CompiledSqlQuery = Readonly<{
  * complete batch to a native primitive and is not an interactive transaction
  * runner.
  */
-type StaticAtomicBatchExecutor = <TRow>(
-  statements: readonly CompiledSqlQuery[],
-) => Promise<readonly (readonly TRow[])[]>;
-
 export type PreparedSqlStatement = Readonly<{
   execute: <TRow>(params: readonly unknown[]) => Promise<readonly TRow[]>;
 }>;
@@ -41,7 +38,7 @@ export type SqlExecutionAdapter = Readonly<{
     compiledQuery: CompiledSqlQuery,
   ) => Promise<readonly TRow[]>;
   /** Executes all statements atomically when the native driver supports it. */
-  executeAtomicBatch?: StaticAtomicBatchExecutor;
+  executeAtomicBatch?: AtomicSqlBatchExecutor;
   prepare?: (sqlText: string) => PreparedSqlStatement;
   /**
    * Runs `critical` with exclusive use of the connection: no statement from

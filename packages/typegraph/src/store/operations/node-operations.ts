@@ -173,6 +173,7 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
+import { resolveAtomicGeneratedNodeBatchExecutor } from "./atomic-generated-node-batch";
 import {
   AutocommitWriteRequiresTransaction,
   canFuseSchemaFenceInFirstWrite,
@@ -1424,6 +1425,12 @@ export async function primeBatchValidationCaches(
   if (boundGetNodes !== undefined) {
     const idsByKind = new Map<string, Set<string>>();
     for (const draft of drafts) {
+      // Generated ids follow the same insert-first contract as the singleton
+      // create path: there is no existing row to classify or resurrect, and a
+      // vanishingly unlikely primary-key collision is authoritatively refused
+      // by the INSERT. Priming those ids performed a guaranteed-empty read and
+      // added one transport exchange to every generated-id bulk create.
+      if (!draft.idProvided) continue;
       const ids = idsByKind.get(draft.kind) ?? new Set<string>();
       ids.add(draft.id);
       idsByKind.set(draft.kind, ids);
@@ -1555,6 +1562,46 @@ async function prepareBatchCreates<G extends GraphDef>(
   }
 
   return preparedCreates;
+}
+
+/**
+ * Prepares the closed generated-id batch shape without any validation reads.
+ *
+ * The draft and claim planners remain the owners of validation and claim
+ * semantics. This path only reaches them after the batch eligibility owner
+ * proved that every generated row is unconstrained, so the authoritative
+ * preparation mode has no existence, uniqueness, or disjointness probe to
+ * perform.
+ */
+async function prepareGeneratedBatchCreates<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  inputs: readonly CreateNodeInput[],
+  backend: WriteTarget,
+): Promise<readonly NodeCreatePrepared[]> {
+  const drafts = inputs.map((input) =>
+    draftNodeCreate(ctx, input, input.id ?? generateId()),
+  );
+  return Promise.all(
+    drafts.map(async (draft) => {
+      const claimPlan = planNodeCreateClaims(
+        { graphId: ctx.graphId, registry: ctx.registry },
+        {
+          kind: draft.kind,
+          id: draft.id,
+          props: draft.validatedProps,
+          constraints: draft.uniqueConstraints,
+        },
+      );
+      return finishNodeCreatePreparation(
+        ctx,
+        draft,
+        backend,
+        false,
+        "authoritative-plan",
+        claimPlan,
+      );
+    }),
+  );
 }
 
 type CreatePartition = Readonly<{
@@ -2123,6 +2170,56 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
   if (inputs.length === 0) return;
+
+  const atomicExecutor = resolveAtomicGeneratedNodeBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    registry: ctx.registry,
+    inputs,
+    schemaVersion: ctx.schemaVersion,
+    identityEnabled: ctx.identity !== undefined,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+
+  if (atomicExecutor !== undefined) {
+    const preparedCreates = await prepareGeneratedBatchCreates(
+      ctx,
+      inputs,
+      backend,
+    );
+    const schemaFence = {
+      graphId: ctx.graphId,
+      expectedVersion: requireDefined(ctx.schemaVersion),
+    };
+    const insertedCount = await withAlreadyExistsTranslation("node", () =>
+      atomicExecutor({
+        params: preparedCreates.map((prepared) => prepared.insertParams),
+        schemaFence,
+      }),
+    );
+    if (insertedCount === 0) {
+      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    }
+    if (insertedCount !== inputs.length) {
+      throw new DatabaseOperationError(
+        "Generated node batch insert returned " +
+          String(insertedCount) +
+          " rows, expected " +
+          String(inputs.length),
+        {
+          operation: "insert",
+          entity: "node",
+          attempted: preparedCreates.map((prepared) => ({
+            kind: prepared.kind,
+            id: prepared.id,
+          })),
+        },
+      );
+    }
+    memoizeLeasedSchemaFence(ctx, backend);
+    return;
+  }
 
   await runWritePlan(
     nodeWritePlanContext(ctx),

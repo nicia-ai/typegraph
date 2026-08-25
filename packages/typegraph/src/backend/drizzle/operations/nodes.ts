@@ -224,6 +224,69 @@ export function buildInsertNodesBatchReturning(
 }
 
 /**
+ * Builds one schema-fenced multi-row node insert with one minimal result per
+ * inserted row. Callers need only the inserted count; returning node payloads
+ * would waste transport bandwidth for a no-return Store operation.
+ * The fence is a CTE so the same active schema row gates every VALUES member;
+ * the dialect supplies the lock clause (`FOR SHARE` on PostgreSQL and empty on
+ * SQLite, whose native writer boundary supplies the exclusion).
+ */
+export function buildInsertNodesBatchWithSchemaFence(
+  tables: Tables,
+  params: readonly InsertNodeParams[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  const columns = nodeColumnList(nodes);
+  const inputColumns = [
+    nodes.graphId,
+    nodes.kind,
+    nodes.id,
+    nodes.props,
+    nodes.version,
+    nodes.validFrom,
+    nodes.validTo,
+    nodes.createdAt,
+    nodes.updatedAt,
+  ];
+  const inputColumnList = sql.raw(
+    inputColumns
+      .map((column) => `"${column.name.replaceAll('"', '""')}"`)
+      .join(", "),
+  );
+  const inputSelect = sql.join(
+    inputColumns.map((column) =>
+      sql.raw(`"input_rows"."${column.name.replaceAll('"', '""')}"`),
+    ),
+    sql`, `,
+  );
+  const values = params.map((nodeParams) => {
+    const propsJson = JSON.stringify(nodeParams.props);
+    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+  });
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    ), "input_rows" (${inputColumnList}) AS (
+      VALUES ${sql.join(values, sql`, `)}
+    )
+    INSERT INTO ${nodes} (${columns})
+    SELECT ${inputSelect}
+    FROM "input_rows"
+    CROSS JOIN "schema_fence"
+    RETURNING 1 AS "inserted"
+  `;
+}
+
+/**
  * Builds a SELECT query to get a node by kind and id.
  * Returns the node regardless of deletion status (store layer handles filtering).
  */

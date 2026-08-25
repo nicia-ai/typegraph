@@ -1,8 +1,9 @@
 /**
  * bulkCreate round-trip batching.
  *
- * A batch create must not degenerate into per-row statements: existence
- * probes go through one getNodes per kind, uniqueness pre-checks through
+ * A batch create must not degenerate into per-row statements: caller-id
+ * existence probes go through one getNodes per kind while generated ids skip
+ * that guaranteed-empty read, uniqueness pre-checks through
  * one checkUniqueBatch per (constraint, kind), uniqueness entries through
  * one insertUniqueBatch, fulltext sync through one upsertFulltextBatch per
  * kind, and embedding sync through one upsertEmbeddingBatch per
@@ -115,8 +116,10 @@ function withCallCounts(backend: GraphBackend): {
   }
 
   const counted: GraphBackend = deriveBackend(wrapMethods(backend), {
-    transaction: (fn, options) =>
-      backend.transaction((target) => fn(wrapMethods(target)), options),
+    transaction: (fn, options) => {
+      counts["transaction"] = (counts["transaction"] ?? 0) + 1;
+      return backend.transaction((target) => fn(wrapMethods(target)), options);
+    },
   });
   return { backend: counted, counts };
 }
@@ -136,6 +139,7 @@ async function withCountedStore<T>(
     const [store] = await createStoreWithSchema(buildGraph(), backend);
     // Boot traffic is not under test — count only what `run` triggers.
     for (const name of COUNTED_METHODS) counts[name] = 0;
+    counts["transaction"] = 0;
     return await run(store, counts, raw);
   } finally {
     await raw.close();
@@ -154,9 +158,24 @@ function personInputs(offset = 0) {
 }
 
 describe("bulkCreate probe batching", () => {
-  it("replaces per-row existence probes with one getNodes per kind", async () => {
+  it("skips existence probes for generated ids", async () => {
     await withCountedStore(async (store, counts) => {
       const created = await store.nodes.Person.bulkCreate(personInputs());
+      expect(created).toHaveLength(BATCH_SIZE);
+
+      expect(counts["getNodes"]).toBe(0);
+      expect(counts["getNode"]).toBe(0);
+    });
+  });
+
+  it("batches caller-id existence probes once per kind", async () => {
+    await withCountedStore(async (store, counts) => {
+      const created = await store.nodes.Person.bulkCreate(
+        personInputs().map((input, index) => ({
+          ...input,
+          id: `person-${index}`,
+        })),
+      );
       expect(created).toHaveLength(BATCH_SIZE);
 
       expect(counts["getNodes"]).toBe(1);
@@ -214,6 +233,16 @@ describe("bulkCreate side-effect batching", () => {
 
       expect(counts["upsertEmbeddingBatch"]).toBe(1);
       expect(counts["upsertEmbedding"]).toBe(0);
+    });
+  });
+});
+
+describe("bulkInsert transaction ownership", () => {
+  it("lets the write executor own the ordinary transaction boundary", async () => {
+    await withCountedStore(async (store, counts) => {
+      await store.nodes.Person.bulkInsert(personInputs());
+
+      expect(counts["transaction"]).toBe(1);
     });
   });
 });

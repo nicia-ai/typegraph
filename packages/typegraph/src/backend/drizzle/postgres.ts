@@ -80,8 +80,14 @@ import {
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
+import {
+  type AtomicSqlProgramExecutor,
+  createAtomicSqlProgramExecutor,
+  markBundledRootAtomicSqlProgram,
+} from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import { markBundledRootGeneratedNodeBatch } from "../capabilities/generated-node-batch";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
@@ -328,6 +334,7 @@ export type PostgresBackendOptions = Readonly<{
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
+const SCHEMA_FENCE_PARAM_COUNT = 2;
 const EDGE_INSERT_PARAM_COUNT = 12;
 const GET_NODES_FIXED_PARAM_COUNT = 2;
 const GET_EDGES_FIXED_PARAM_COUNT = 1;
@@ -347,6 +354,7 @@ type PostgresBatchChunkSizes = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  nodeSchemaFencedInsertBatchSize: number;
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
@@ -410,6 +418,13 @@ function computePostgresBatchChunkSizes(
     nodeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+    nodeSchemaFencedInsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (maxBindParameters - SCHEMA_FENCE_PARAM_COUNT) /
+          NODE_INSERT_PARAM_COUNT,
+      ),
     ),
     uniqueDeleteChunkSize: Math.max(
       1,
@@ -790,6 +805,9 @@ export function createPostgresBackend(
       capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
+  const atomicSqlProgramExecutor = createAtomicSqlProgramExecutor(
+    executionAdapter,
+  );
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -1117,6 +1135,9 @@ export function createPostgresBackend(
   const operations = createPostgresOperationBackend({
     db,
     executionAdapter,
+    ...(atomicSqlProgramExecutor === undefined ?
+      {}
+    : { atomicSqlProgramExecutor }),
     adapterOptions,
     operationStrategy,
     tableNames,
@@ -1961,6 +1982,14 @@ export function createPostgresBackend(
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
+  markBundledRootAtomicSqlProgram(
+    backend,
+    atomicSqlProgramExecutor,
+  );
+  markBundledRootGeneratedNodeBatch(
+    backend,
+    operations.executeGeneratedNodeBatch,
+  );
   return backend;
 }
 
@@ -2212,6 +2241,7 @@ export function createIterativeScanProbe(): IterativeScanProbe {
 type CreatePostgresOperationBackendOptions = Readonly<{
   db: AnyPgDatabase;
   executionAdapter: PostgresExecutionAdapter;
+  atomicSqlProgramExecutor?: AtomicSqlProgramExecutor;
   /**
    * Adapter tuning (prepared-statement cache settings). Used to bind a
    * fresh, equivalently-configured adapter to a transaction client when
@@ -2268,6 +2298,7 @@ function createPostgresOperationBackend(
   const {
     db,
     executionAdapter,
+    atomicSqlProgramExecutor,
     adapterOptions,
     operationStrategy,
     tableNames,
@@ -2473,10 +2504,14 @@ function createPostgresOperationBackend(
     batchConfig,
     commandSession: transactionScoped ? "transaction" : "root",
     execution: {
+      compile: executionAdapter.compile,
       execAll,
       execGet,
       execRun,
     },
+    ...(transactionScoped || atomicSqlProgramExecutor === undefined ?
+      {}
+    : { atomicSqlProgramExecutor }),
     nowIso,
     maxBindParameters:
       capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,

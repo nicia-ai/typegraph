@@ -1003,14 +1003,6 @@ export function createNodeCollection<
     ): Promise<void> {
       const batchInputs = mapBulkNodeInputs(kind, items);
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => {
-          await executeNodeCreateNoReturnBatch(batchInputs, txBackend);
-        });
-        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
-        return;
-      }
-
       await executeNodeCreateNoReturnBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },
