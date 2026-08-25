@@ -143,6 +143,16 @@ sidecars—must commit together. Undeclared dynamic `matchOn` convergence keeps
 that interactive-transaction requirement; only a schema-declared durable
 `matchIdentity` can qualify for the one-statement root command.
 
+There is one narrower native write-program path for ingestion: on bundled Neon
+HTTP, Cloudflare D1, and libSQL roots, `nodes.bulkInsert(items)` can use one
+schema-fenced atomic exchange when every item has a generated ID and the node
+has no claims, Operational Identity, history, revision, or projections. This
+is an internal optimization, not a public Store batch API. `bulkCreate()` and
+unsupported `bulkInsert()` shapes retain their existing transaction or
+fallback behavior. Generated-ID node bulk operations also skip the
+guaranteed-empty existence-priming read; caller-supplied IDs still perform
+their existence checks.
+
 ### Single vs bulk operations
 
 For small numbers of writes, individual `create()` calls inside a transaction are fine. For larger
@@ -178,8 +188,15 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 
 ### Transaction wrapping
 
-Bulk operations are individually transactional (each chunk is atomic), but if you need the
-entire batch to be atomic, wrap it in a transaction:
+On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
+chunks. Eligible generated-ID `nodes.bulkInsert()` calls also provide whole-call atomicity on
+bundled transactionless roots through one native atomic exchange. Other bulk shapes on a
+transactionless root either refuse when their contract requires a fence or use sequential fallback,
+which can leave earlier chunks committed if a later one fails. `store.transaction()` cannot add
+atomicity to a backend that does not support transactions.
+
+To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
+transaction:
 
 ```typescript
 // Atomic: all-or-nothing for the entire import
@@ -190,7 +207,7 @@ await store.transaction(async (tx) => {
 });
 ```
 
-Without the wrapping transaction, a failure partway through would leave partial data.
+Without the wrapping transaction, a failure in a later bulk call leaves earlier calls committed.
 
 ### Choosing the right pattern
 

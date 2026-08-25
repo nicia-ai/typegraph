@@ -57,8 +57,14 @@ import {
   isMissingTableError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
+import {
+  type AtomicSqlProgramExecutor,
+  createAtomicSqlProgramExecutor,
+  markBundledRootAtomicSqlProgram,
+} from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import { markBundledRootGeneratedNodeBatch } from "../capabilities/generated-node-batch";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -266,6 +272,7 @@ export type SqliteBackendOptions = Readonly<{
 }>;
 
 const NODE_INSERT_PARAM_COUNT = 9;
+const SCHEMA_FENCE_PARAM_COUNT = 2;
 const EDGE_INSERT_PARAM_COUNT = 12;
 const GET_NODES_FIXED_PARAM_COUNT = 2;
 const GET_EDGES_FIXED_PARAM_COUNT = 1;
@@ -333,6 +340,8 @@ export type SqliteBatchChunkSizes = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  /** Rows per node insert after reserving the two schema-fence binds. */
+  nodeSchemaFencedInsertBatchSize: number;
   /** Node ids per uniqueness-sidecar hard delete. */
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
@@ -383,6 +392,13 @@ export function computeSqliteBatchChunkSizes(
     nodeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / NODE_INSERT_PARAM_COUNT),
+    ),
+    nodeSchemaFencedInsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (maxBindParameters - SCHEMA_FENCE_PARAM_COUNT) /
+          NODE_INSERT_PARAM_COUNT,
+      ),
     ),
     uniqueDeleteChunkSize: Math.max(
       1,
@@ -620,6 +636,7 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   capabilities: GraphBackend["capabilities"];
   db: AnySqliteDatabase;
   executionAdapter: SqliteExecutionAdapter;
+  atomicSqlProgramExecutor?: AtomicSqlProgramExecutor;
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   serializedQueue?: SerializedExecutionQueue;
   tableNames: ResolvedSqlTableNames;
@@ -664,6 +681,7 @@ function createSqliteOperationBackend(
     capabilities,
     db,
     executionAdapter,
+    atomicSqlProgramExecutor,
     operationStrategy,
     serializedQueue,
     tableNames,
@@ -727,10 +745,14 @@ function createSqliteOperationBackend(
     batchConfig,
     commandSession: transactionScoped ? "transaction" : "root",
     execution: {
+      compile: executionAdapter.compile,
       execAll,
       execGet,
       execRun,
     },
+    ...(transactionScoped || atomicSqlProgramExecutor === undefined ?
+      {}
+    : { atomicSqlProgramExecutor }),
     nowIso,
     maxBindParameters:
       capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
@@ -1301,6 +1323,9 @@ export function createSqliteBackend(
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
+  const atomicSqlProgramExecutor = createAtomicSqlProgramExecutor(
+    executionAdapter,
+  );
   const { isSync, transactionMode } = executionAdapter.profile;
   // The active vector strategy gates upsertEmbedding / deleteEmbedding /
   // vectorSearch and supplies the per-`(kind, field)` storage. Passed by
@@ -1580,6 +1605,9 @@ export function createSqliteBackend(
     capabilities,
     db,
     executionAdapter,
+    ...(atomicSqlProgramExecutor === undefined ?
+      {}
+    : { atomicSqlProgramExecutor }),
     operationStrategy,
     tableNames,
     fulltextStrategy,
@@ -2493,6 +2521,14 @@ export function createSqliteBackend(
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
+  markBundledRootAtomicSqlProgram(
+    backend,
+    atomicSqlProgramExecutor,
+  );
+  markBundledRootGeneratedNodeBatch(
+    backend,
+    operations.executeGeneratedNodeBatch,
+  );
 
   return backend;
 }

@@ -304,6 +304,17 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 }
 ```
 
+### Native `bulkInsert` eligibility
+
+Bundled Neon HTTP, Cloudflare D1, and libSQL roots can use one schema-fenced
+native atomic exchange for `nodes.bulkInsert()` only when every ID is
+generated and the node has no claims, Operational Identity, history, revision,
+or projections. This is an internal optimization, not a general Store batch
+API. Caller-supplied IDs and unsupported shapes retain the existing
+transaction or fallback behavior. Generated-ID node bulk operations also avoid
+the guaranteed-empty existence-priming read; caller-supplied IDs still perform
+their existence checks.
+
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 
 `bulkUpsertById` applies items in order for the purpose of deciding each row's

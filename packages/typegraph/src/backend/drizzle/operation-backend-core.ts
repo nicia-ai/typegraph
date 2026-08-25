@@ -31,6 +31,14 @@ import {
   isEdgeMatchIdentityStorageUnavailableError,
   type PrimaryKeyRelation,
 } from "../../utils/sql-errors";
+import type {
+  AtomicSqlProgram,
+  AtomicSqlProgramExecutor,
+} from "../capabilities/atomic-sql-program";
+import type {
+  GeneratedNodeBatchExecutor,
+  GeneratedNodeBatchInput,
+} from "../capabilities/generated-node-batch";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
   assertGraphCommandConvergenceIsolation,
@@ -103,7 +111,10 @@ import type {
   UpdateNodeSetResult,
 } from "../types";
 import { edgeMatchIdentityUniqueIndexName } from "./ddl";
-import { type ExecutableSql } from "./execution/types";
+import {
+  type CompiledSqlQuery,
+  type ExecutableSql,
+} from "./execution/types";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -163,6 +174,15 @@ function assertMatchingNodeSchemaFence(
       id: params.id,
     },
   );
+}
+
+function assertMatchingNodeSchemaFences(
+  params: readonly InsertNodeParams[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  for (const nodeParams of params) {
+    assertMatchingNodeSchemaFence(nodeParams, schemaFence);
+  }
 }
 
 /**
@@ -235,6 +255,7 @@ export type CommonOperationBackend = Pick<
   | "updateNodeSet"
 > &
   Readonly<{
+    executeGeneratedNodeBatch?: GeneratedNodeBatchExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
      * diagnostic the store runs at the top-level backend, and nothing inside a
@@ -294,6 +315,7 @@ export function assertAdoptedDialect<T>(
 }
 
 type OperationBackendExecution = Readonly<{
+  compile: (query: ExecutableSql) => CompiledSqlQuery;
   execAll: <TRow>(query: ExecutableSql) => Promise<readonly TRow[]>;
   execGet: <TRow>(query: ExecutableSql) => Promise<TRow | undefined>;
   execRun: (query: ExecutableSql) => Promise<void>;
@@ -306,6 +328,7 @@ type OperationBackendBatchConfig = Readonly<{
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
   nodeInsertBatchSize: number;
+  nodeSchemaFencedInsertBatchSize: number;
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
 }>;
@@ -318,6 +341,7 @@ type OperationBackendRowMappers = Readonly<{
 }>;
 
 type CreateCommonOperationBackendOptions = Readonly<{
+  atomicSqlProgramExecutor?: AtomicSqlProgramExecutor;
   batchConfig: OperationBackendBatchConfig;
   commandSession: GraphCommandSession;
   execution: OperationBackendExecution;
@@ -714,8 +738,9 @@ export function createCommonOperationBackend(
     return row === undefined ? 0 : rowMappers.toSchemaVersionRow(row).version;
   }
 
+  const schemaFenceLockClause = options.schemaFenceLockClause;
   const schemaFenceMembers =
-    options.schemaFenceLockClause === undefined ?
+    schemaFenceLockClause === undefined ?
       {}
     : {
         async insertNodeIfAbsentWithSchemaFence(
@@ -728,7 +753,7 @@ export function createCommonOperationBackend(
               params,
               nowIso(),
               schemaFence,
-              options.schemaFenceLockClause ?? drizzleSql.raw(""),
+              schemaFenceLockClause,
             );
           const row = await execution.execGet<Record<string, unknown>>(query);
           return row === undefined ? undefined : rowMappers.toNodeRow(row);
@@ -743,7 +768,7 @@ export function createCommonOperationBackend(
             params,
             nowIso(),
             schemaFence,
-            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+            schemaFenceLockClause,
           );
           const row = await withDuplicateKeyClassification(
             () => execution.execGet<Record<string, unknown>>(query),
@@ -756,6 +781,70 @@ export function createCommonOperationBackend(
           return row === undefined ? undefined : rowMappers.toNodeRow(row);
         },
       };
+
+  const atomicSqlProgramExecutor = options.atomicSqlProgramExecutor;
+  const generatedNodeBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : ({
+        async executeGeneratedNodeBatch(
+          input: GeneratedNodeBatchInput,
+        ): Promise<number> {
+          if (input.params.length === 0) return 0;
+          assertMatchingNodeSchemaFences(input.params, input.schemaFence);
+
+          const timestamp = nowIso();
+          const chunks = chunkArray(
+            input.params,
+            batchConfig.nodeSchemaFencedInsertBatchSize,
+          );
+          const program = {
+            slots: chunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildInsertNodesBatchWithSchemaFence(
+                  chunk,
+                  timestamp,
+                  input.schemaFence,
+                  schemaFenceLockClause,
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                rows.length,
+            })),
+            assemble(counts: readonly number[]): number {
+              if (counts.every((count) => count === 0)) return 0;
+              const mismatchedChunk = counts.findIndex(
+                (count, index) => count !== chunks[index]?.length,
+              );
+              if (mismatchedChunk !== -1) {
+                throw new CompilerInvariantError(
+                  "Atomic node batch returned a partial chunk result.",
+                  {
+                    slot: mismatchedChunk,
+                    expected: chunks[mismatchedChunk]?.length,
+                    actual: counts[mismatchedChunk],
+                  },
+                );
+              }
+              return input.params.length;
+            },
+          } satisfies AtomicSqlProgram<number, number>;
+          return withDuplicateKeyClassification(
+            () => atomicSqlProgramExecutor.execute(program),
+            {
+              entity: "node",
+              relation: operationStrategy.primaryKeyConstraints.nodes,
+              attempted: attemptedInserts(input.params),
+            },
+          );
+        },
+      } satisfies Readonly<{
+        executeGeneratedNodeBatch: GeneratedNodeBatchExecutor;
+      }>);
 
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
   const buildLockSchemaVersionAndGraphWrite =
@@ -1289,6 +1378,7 @@ export function createCommonOperationBackend(
     tableExists,
 
     ...schemaFenceMembers,
+    ...generatedNodeBatchMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,
 

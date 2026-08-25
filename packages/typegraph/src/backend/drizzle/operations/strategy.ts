@@ -109,6 +109,7 @@ import {
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
+  buildInsertNodesBatchWithSchemaFence,
   buildInsertNodeWithSchemaFence,
   buildUpdateNode,
   buildUpdateNodeSet,
@@ -218,6 +219,12 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertNodesBatchReturning: (
     params: readonly InsertNodeParams[],
     timestamp: string,
+  ) => SQL;
+  buildInsertNodesBatchWithSchemaFence: (
+    params: readonly InsertNodeParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
   ) => SQL;
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
@@ -434,6 +441,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNodeNoReturn,
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
+  buildInsertNodesBatchWithSchemaFence,
   buildGetNode,
   buildGetNodes,
   buildUpdateNode,
