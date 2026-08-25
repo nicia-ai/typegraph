@@ -781,14 +781,6 @@ export function createEdgeCollection<
       }>[],
     ): Promise<Edge<E>[]> {
       const batchInputs = mapBulkEdgeInputs(kind, items);
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        const results = await backend.transaction(async (txBackend) =>
-          executeEdgeCreateBatch(batchInputs, txBackend),
-        );
-        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
-        return narrowEdges<E>(results);
-      }
       const results = await executeEdgeCreateBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowEdges<E>(results);
@@ -1093,15 +1085,6 @@ export function createEdgeCollection<
       }>[],
     ): Promise<void> {
       const batchInputs = mapBulkEdgeInputs(kind, items);
-
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        await backend.transaction(async (txBackend) => {
-          await executeEdgeCreateNoReturnBatch(batchInputs, txBackend);
-        });
-        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
-        return;
-      }
-
       await executeEdgeCreateNoReturnBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
     },

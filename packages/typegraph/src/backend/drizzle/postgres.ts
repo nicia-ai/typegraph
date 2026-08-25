@@ -80,6 +80,7 @@ import {
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
+import { markBundledRootAtomicEdgeBatch } from "../capabilities/atomic-edge-batch";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -347,6 +348,7 @@ const UNIQUE_INSERT_PARAM_COUNT = 6;
 type PostgresBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  edgeSchemaFencedInsertBatchSize: number;
   embeddingUpsertBatchSize: number;
   findEdgesEndpointChunkSize: number;
   fulltextDeleteChunkSize: number;
@@ -390,6 +392,13 @@ function computePostgresBatchChunkSizes(
     edgeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    edgeSchemaFencedInsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (maxBindParameters - SCHEMA_FENCE_PARAM_COUNT) /
+          EDGE_INSERT_PARAM_COUNT,
+      ),
     ),
     embeddingUpsertBatchSize: Math.max(
       1,
@@ -805,9 +814,8 @@ export function createPostgresBackend(
       capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
-  const atomicSqlProgramExecutor = createAtomicSqlProgramExecutor(
-    executionAdapter,
-  );
+  const atomicSqlProgramExecutor =
+    createAtomicSqlProgramExecutor(executionAdapter);
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -1232,9 +1240,7 @@ export function createPostgresBackend(
   // `adoptTransaction()` (#134 — the caller already opened it): bind a
   // tx-scoped backend to the *literal* `tx` client and gate fulltext on
   // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(
-    tx: AnyPgTransaction,
-  ): Readonly<{
+  function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
     backend: TransactionBackend;
     drainAndClose: () => Promise<void>;
   }> {
@@ -1982,14 +1988,12 @@ export function createPostgresBackend(
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
-  markBundledRootAtomicSqlProgram(
-    backend,
-    atomicSqlProgramExecutor,
-  );
+  markBundledRootAtomicSqlProgram(backend, atomicSqlProgramExecutor);
   markBundledRootGeneratedNodeBatch(
     backend,
     operations.executeGeneratedNodeBatch,
   );
+  markBundledRootAtomicEdgeBatch(backend, operations.executeAtomicEdgeBatch);
   return backend;
 }
 

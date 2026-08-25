@@ -1,9 +1,4 @@
-import {
-  getTableName,
-  type SQL,
-  sql,
-  type SQLWrapper,
-} from "drizzle-orm";
+import { getTableName, type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type { SqlDialect } from "../../types";
@@ -51,11 +46,7 @@ export function nodePrimaryKeyConstraint(
   nodes: Tables["nodes"],
 ): PrimaryKeyRelation {
   const relation = getTableName(nodes);
-  const sqliteColumns = [
-    nodes.graphId.name,
-    nodes.kind.name,
-    nodes.id.name,
-  ];
+  const sqliteColumns = [nodes.graphId.name, nodes.kind.name, nodes.id.name];
   return {
     table: relation,
     constraintNames: primaryKeyConstraintNames(relation, sqliteColumns),
@@ -86,6 +77,20 @@ export function edgePrimaryKeyConstraint(
  */
 export function sqlNull(value: string | undefined): SQL | string {
   return value ?? sql.raw("NULL");
+}
+
+/**
+ * Gives a bound value the destination column's declared SQL type before it
+ * enters a CTE. PostgreSQL otherwise resolves JSON and timestamp parameters in
+ * a standalone `VALUES` relation as text, then refuses to assign them to their
+ * typed destination columns. SQLite's declared types make the same lowering a
+ * no-op in practice, so write programs keep one shared statement shape.
+ */
+export function castBoundValueForColumn(
+  column: Readonly<{ getSQLType: () => string }>,
+  value: unknown,
+): SQL {
+  return sql`CAST(${value} AS ${sql.raw(column.getSQLType())})`;
 }
 
 /**

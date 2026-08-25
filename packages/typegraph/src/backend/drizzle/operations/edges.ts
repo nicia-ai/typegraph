@@ -17,6 +17,7 @@ import type {
   UpdateEdgeParams,
 } from "../../types";
 import {
+  castBoundValueForColumn,
   edgeColumnList,
   expectedValidFromPredicate,
   quotedColumn,
@@ -201,17 +202,18 @@ export function buildConvergeEdgeCreate(
     const matchIdentityName = sql.identifier(edges.matchIdentityName.name);
     const matchIdentityKey = sql.identifier(edges.matchIdentityKey.name);
     const schemaFenceJoin =
-      input.schemaFence === undefined ? sql`` :
-        sql`
-          CROSS JOIN (
-            SELECT ${tables.schemaVersions.version}
-            FROM ${tables.schemaVersions}
-            WHERE ${tables.schemaVersions.graphId} = ${input.schemaFence.graphId}
-              AND ${tables.schemaVersions.version} = ${input.schemaFence.expectedVersion}
-              AND ${tables.schemaVersions.isActive} = TRUE
-            ${input.schemaLockClause ?? sql``}
-          ) AS "schema_fence"
-        `;
+      input.schemaFence === undefined ?
+        sql``
+      : sql`
+        CROSS JOIN (
+          SELECT ${tables.schemaVersions.version}
+          FROM ${tables.schemaVersions}
+          WHERE ${tables.schemaVersions.graphId} = ${input.schemaFence.graphId}
+            AND ${tables.schemaVersions.version} = ${input.schemaFence.expectedVersion}
+            AND ${tables.schemaVersions.isActive} = TRUE
+          ${input.schemaLockClause ?? sql``}
+        ) AS "schema_fence"
+      `;
     return sql`
       INSERT INTO ${edges} (${columns})
       SELECT
@@ -381,6 +383,167 @@ export function buildInsertEdgesBatchReturning(
     VALUES ${sql.join(values, sql`, `)}
     RETURNING *
   `;
+}
+
+function buildInsertEdgesBatchWithSchemaFenceStatement(
+  tables: Tables,
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+  returning: boolean,
+): SQL {
+  const { edges, nodes, schemaVersions } = tables;
+  const inputColumns = [
+    edges.graphId,
+    edges.id,
+    edges.kind,
+    edges.fromKind,
+    edges.fromId,
+    edges.toKind,
+    edges.toId,
+    edges.props,
+    edges.matchIdentityName,
+    edges.matchIdentityKey,
+    edges.validFrom,
+    edges.validTo,
+    edges.createdAt,
+    edges.updatedAt,
+  ];
+  const inputColumnList = sql.raw(
+    inputColumns
+      .map((column) => `"${column.name.replaceAll('"', '""')}"`)
+      .join(", "),
+  );
+  const inputSelect = sql.join(
+    inputColumns.map((column) =>
+      sql.raw(`"valid_rows"."${column.name.replaceAll('"', '""')}"`),
+    ),
+    sql`, `,
+  );
+  const sentinelSelect = sql.join(
+    inputColumns.map((column) =>
+      column === edges.id ?
+        castBoundValueForColumn(column, sql.raw("NULL"))
+      : sql.raw(`"input_rows"."${column.name.replaceAll('"', '""')}"`),
+    ),
+    sql`, `,
+  );
+  const values = params.map((edgeParams) => {
+    const propsJson = JSON.stringify(edgeParams.props);
+    return sql`
+      (
+            ${castBoundValueForColumn(edges.graphId, edgeParams.graphId)},
+            ${castBoundValueForColumn(edges.id, edgeParams.id)},
+            ${castBoundValueForColumn(edges.kind, edgeParams.kind)},
+            ${castBoundValueForColumn(edges.fromKind, edgeParams.fromKind)},
+            ${castBoundValueForColumn(edges.fromId, edgeParams.fromId)},
+            ${castBoundValueForColumn(edges.toKind, edgeParams.toKind)},
+            ${castBoundValueForColumn(edges.toId, edgeParams.toId)},
+            ${castBoundValueForColumn(edges.props, propsJson)},
+            ${castBoundValueForColumn(edges.matchIdentityName, sqlNull(edgeParams.matchIdentity?.name))},
+            ${castBoundValueForColumn(edges.matchIdentityKey, sqlNull(edgeParams.matchIdentity?.key))},
+            ${castBoundValueForColumn(edges.validFrom, sqlNull(resolveStampedValidityLowerBound(edgeParams.validFrom, edgeParams.validTo, timestamp)))},
+            ${castBoundValueForColumn(edges.validTo, sqlNull(edgeParams.validTo))},
+            ${castBoundValueForColumn(edges.createdAt, timestamp)},
+            ${castBoundValueForColumn(edges.updatedAt, timestamp)}
+          )
+    `;
+  });
+  const result = returning ? sql`RETURNING *` : sql`RETURNING 1 AS "inserted"`;
+
+  // The invalid-endpoint arm deliberately inserts a NULL primary-key id. It
+  // turns a missing endpoint into a statement error, so an atomic transport
+  // rolls back earlier chunks instead of committing the valid chunks while a
+  // later chunk quietly returns zero rows. A missing schema fence produces no
+  // guard row, preserving the all-zero stale-fence sentinel for the store.
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    ), "input_rows" (${inputColumnList}) AS (
+      VALUES ${sql.join(values, sql`, `)}
+    ), "valid_rows" AS (
+      SELECT "input_rows".*
+      FROM "input_rows"
+      CROSS JOIN "schema_fence"
+      WHERE EXISTS (
+        SELECT 1
+        FROM ${nodes} AS "from_node"
+        WHERE ${qualifiedColumn("from_node", nodes.graphId)} = ${qualifiedColumn("input_rows", edges.graphId)}
+          AND ${qualifiedColumn("from_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.fromKind)}
+          AND ${qualifiedColumn("from_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.fromId)}
+          AND ${qualifiedColumn("from_node", nodes.deletedAt)} IS NULL
+      )
+        AND EXISTS (
+          SELECT 1
+          FROM ${nodes} AS "to_node"
+          WHERE ${qualifiedColumn("to_node", nodes.graphId)} = ${qualifiedColumn("input_rows", edges.graphId)}
+            AND ${qualifiedColumn("to_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.toKind)}
+            AND ${qualifiedColumn("to_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.toId)}
+            AND ${qualifiedColumn("to_node", nodes.deletedAt)} IS NULL
+        )
+    ), "invalid_endpoint" AS (
+      SELECT 1 AS "present"
+      FROM "input_rows"
+      CROSS JOIN "schema_fence"
+      WHERE (SELECT COUNT(*) FROM "valid_rows") <> (SELECT COUNT(*) FROM "input_rows")
+      LIMIT 1
+    )
+    INSERT INTO ${edges} (${edgeColumnList(edges)})
+    SELECT ${inputSelect}
+    FROM "valid_rows"
+    UNION ALL
+    SELECT ${sentinelSelect}
+    FROM "input_rows"
+    CROSS JOIN "invalid_endpoint"
+    LIMIT (SELECT COUNT(*) FROM "valid_rows") + (SELECT COUNT(*) FROM "invalid_endpoint")
+    ${result}
+  `;
+}
+
+/**
+ * Builds one schema-fenced edge batch whose every input endpoint must be
+ * live. A missing endpoint is a SQL error rather than a zero-row member, so
+ * native multi-statement transports cannot commit earlier chunks partially.
+ */
+export function buildInsertEdgesBatchWithSchemaFence(
+  tables: Tables,
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  return buildInsertEdgesBatchWithSchemaFenceStatement(
+    tables,
+    params,
+    timestamp,
+    schemaFence,
+    schemaLockClause,
+    false,
+  );
+}
+
+/** Schema-fenced edge batch variant returning inserted edge rows. */
+export function buildInsertEdgesBatchReturningWithSchemaFence(
+  tables: Tables,
+  params: readonly InsertEdgeParams[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  return buildInsertEdgesBatchWithSchemaFenceStatement(
+    tables,
+    params,
+    timestamp,
+    schemaFence,
+    schemaLockClause,
+    true,
+  );
 }
 
 /**

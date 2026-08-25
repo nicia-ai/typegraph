@@ -27,6 +27,7 @@ import {
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
   isMissingTableError,
+  isNotNullColumnViolation,
   isPostgresConcurrentDdlRaceError,
   isSqliteNotAuthorizedError,
   isSqliteStaleSnapshotError,
@@ -266,6 +267,53 @@ describe("isMissingTableError", () => {
     (a as { cause?: unknown }).cause = b;
     (b as { cause?: unknown }).cause = a;
     expect(isMissingTableError(a)).toBe(false);
+  });
+});
+
+describe("isNotNullColumnViolation", () => {
+  const edgeId = { table: "typegraph_edges", column: "id" } as const;
+
+  it("matches only the PostgreSQL relation and column that own the sentinel", () => {
+    const sentinel = Object.assign(new Error("null value"), {
+      code: "23502",
+      table: "typegraph_edges",
+      column: "id",
+    });
+    expect(isNotNullColumnViolation(sentinel, edgeId)).toBe(true);
+    expect(
+      isNotNullColumnViolation(
+        Object.assign(new Error("null value"), {
+          code: "23502",
+          table: "typegraph_nodes",
+          column: "id",
+        }),
+        edgeId,
+      ),
+    ).toBe(false);
+    expect(
+      isNotNullColumnViolation(
+        Object.assign(new Error("null value"), {
+          code: "23502",
+          table: "typegraph_edges",
+          column: "kind",
+        }),
+        edgeId,
+      ),
+    ).toBe(false);
+  });
+
+  it("matches wrapped SQLite NOT NULL reports without accepting other failures", () => {
+    const sentinel = drizzleQueryError(
+      "insert into typegraph_edges",
+      Object.assign(
+        new Error("NOT NULL constraint failed: typegraph_edges.id"),
+        { code: "SQLITE_CONSTRAINT_NOTNULL", rawCode: 1299 },
+      ),
+    );
+    expect(isNotNullColumnViolation(sentinel, edgeId)).toBe(true);
+    expect(
+      isNotNullColumnViolation(new Error("connection closed"), edgeId),
+    ).toBe(false);
   });
 });
 

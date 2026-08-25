@@ -29,8 +29,15 @@ import {
   isDuplicatePrimaryKeyError,
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
+  isNotNullColumnViolation,
   type PrimaryKeyRelation,
 } from "../../utils/sql-errors";
+import {
+  type AtomicEdgeBatchCountInput,
+  AtomicEdgeBatchEndpointRefusalError,
+  type AtomicEdgeBatchExecutor,
+  type AtomicEdgeBatchRowsInput,
+} from "../capabilities/atomic-edge-batch";
 import type {
   AtomicSqlProgram,
   AtomicSqlProgramExecutor,
@@ -111,10 +118,7 @@ import type {
   UpdateNodeSetResult,
 } from "../types";
 import { edgeMatchIdentityUniqueIndexName } from "./ddl";
-import {
-  type CompiledSqlQuery,
-  type ExecutableSql,
-} from "./execution/types";
+import { type CompiledSqlQuery, type ExecutableSql } from "./execution/types";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -182,6 +186,31 @@ function assertMatchingNodeSchemaFences(
 ): void {
   for (const nodeParams of params) {
     assertMatchingNodeSchemaFence(nodeParams, schemaFence);
+  }
+}
+
+function assertMatchingEdgeSchemaFence(
+  params: InsertEdgeParams,
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  if (schemaFence.graphId === params.graphId) return;
+
+  throw new CompilerInvariantError(
+    "An edge schema fence must match its edge graph.",
+    {
+      edgeGraphId: params.graphId,
+      fenceGraphId: schemaFence.graphId,
+      id: params.id,
+    },
+  );
+}
+
+function assertMatchingEdgeSchemaFences(
+  params: readonly InsertEdgeParams[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  for (const edgeParams of params) {
+    assertMatchingEdgeSchemaFence(edgeParams, schemaFence);
   }
 }
 
@@ -256,6 +285,7 @@ export type CommonOperationBackend = Pick<
 > &
   Readonly<{
     executeGeneratedNodeBatch?: GeneratedNodeBatchExecutor;
+    executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
      * diagnostic the store runs at the top-level backend, and nothing inside a
@@ -271,7 +301,8 @@ export type CommonOperationBackend = Pick<
     setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
     executeSchemaDdl: (ddl: string) => Promise<void>;
     tableExists: (tableName: string) => Promise<boolean>;
-  }> & DurableEdgeBatchMembers;
+  }> &
+  DurableEdgeBatchMembers;
 
 /**
  * The full internal shape the dialect operation-backend factories
@@ -324,6 +355,7 @@ type OperationBackendExecution = Readonly<{
 type OperationBackendBatchConfig = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  edgeSchemaFencedInsertBatchSize: number;
   findEdgesEndpointChunkSize: number;
   getEdgesChunkSize: number;
   getNodesChunkSize: number;
@@ -446,11 +478,32 @@ async function withDuplicateKeyClassification<T>(
   }
 }
 
+async function withAtomicEdgeEndpointRefusalClassification<T>(
+  run: () => Promise<T>,
+  relation: PrimaryKeyRelation,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (
+      isNotNullColumnViolation(error, {
+        table: relation.table,
+        column: "id",
+      })
+    ) {
+      throw new AtomicEdgeBatchEndpointRefusalError(error);
+    }
+    throw error;
+  }
+}
+
 function attemptedEdgeMatchIdentities(
   params: readonly InsertEdgeParams[],
 ): readonly AttemptedEdgeMatchIdentity[] | undefined {
   const attempted = params.flatMap((item) =>
-    item.matchIdentity === undefined ? [] : [
+    item.matchIdentity === undefined ?
+      []
+    : [
         {
           id: item.id,
           identityName: item.matchIdentity.name,
@@ -846,6 +899,161 @@ export function createCommonOperationBackend(
         executeGeneratedNodeBatch: GeneratedNodeBatchExecutor;
       }>);
 
+  const atomicEdgeBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+
+        async function executeAtomicEdgeBatch(
+          input: AtomicEdgeBatchCountInput,
+        ): Promise<number>;
+        async function executeAtomicEdgeBatch(
+          input: AtomicEdgeBatchRowsInput,
+        ): Promise<readonly EdgeRow[]>;
+        async function executeAtomicEdgeBatch(
+          input: AtomicEdgeBatchCountInput | AtomicEdgeBatchRowsInput,
+        ): Promise<number | readonly EdgeRow[]> {
+          if (input.params.length === 0) {
+            return input.resultMode === "count" ? 0 : [];
+          }
+          assertMatchingEdgeSchemaFences(input.params, input.schemaFence);
+
+          const timestamp = nowIso();
+          const chunks = chunkArray(
+            input.params,
+            batchConfig.edgeSchemaFencedInsertBatchSize,
+          );
+          if (input.resultMode === "count") {
+            const program = {
+              slots: chunks.map((chunk) => ({
+                statement: execution.compile(
+                  operationStrategy.buildInsertEdgesBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                  rows.length,
+              })),
+              assemble(counts: readonly number[]): number {
+                if (counts.every((count) => count === 0)) return 0;
+                const mismatchedChunk = counts.findIndex(
+                  (count, index) => count !== chunks[index]?.length,
+                );
+                if (mismatchedChunk !== -1) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge batch returned a partial chunk result.",
+                    {
+                      slot: mismatchedChunk,
+                      expected: chunks[mismatchedChunk]?.length,
+                      actual: counts[mismatchedChunk],
+                    },
+                  );
+                }
+                return counts.reduce((total, count) => total + count, 0);
+              },
+            } satisfies AtomicSqlProgram<number, number>;
+            return withDuplicateKeyClassification(
+              () =>
+                withAtomicEdgeEndpointRefusalClassification(
+                  () => atomicExecutor.execute(program),
+                  operationStrategy.primaryKeyConstraints.edges,
+                ),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts(input.params),
+              },
+            );
+          }
+
+          const program = {
+            slots: chunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildInsertEdgesBatchReturningWithSchemaFence(
+                  chunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                rows.map((row) => rowMappers.toEdgeRow(row)),
+            })),
+            assemble(
+              rowChunks: readonly (readonly EdgeRow[])[],
+            ): readonly EdgeRow[] {
+              if (rowChunks.every((rows) => rows.length === 0)) return [];
+              const mismatchedChunk = rowChunks.findIndex(
+                (rows, index) => rows.length !== chunks[index]?.length,
+              );
+              if (mismatchedChunk !== -1) {
+                throw new CompilerInvariantError(
+                  "Atomic edge batch returned a partial chunk result.",
+                  {
+                    slot: mismatchedChunk,
+                    expected: chunks[mismatchedChunk]?.length,
+                    actual: rowChunks[mismatchedChunk]?.length,
+                  },
+                );
+              }
+              const inputOrder = new Map(
+                input.params.map((params, index) => [params.id, index]),
+              );
+              const rows = rowChunks.flat();
+              const seenIds = new Set<string>();
+              for (const row of rows) {
+                if (!inputOrder.has(row.id)) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge batch returned a row outside its input set.",
+                    { id: row.id },
+                  );
+                }
+                if (seenIds.has(row.id)) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge batch returned a duplicate result row.",
+                    { id: row.id },
+                  );
+                }
+                seenIds.add(row.id);
+              }
+              return rows.toSorted(
+                (left, right) =>
+                  (inputOrder.get(left.id) ?? 0) -
+                  (inputOrder.get(right.id) ?? 0),
+              );
+            },
+          } satisfies AtomicSqlProgram<readonly EdgeRow[], readonly EdgeRow[]>;
+          return withDuplicateKeyClassification(
+            () =>
+              withAtomicEdgeEndpointRefusalClassification(
+                () => atomicExecutor.execute(program),
+                operationStrategy.primaryKeyConstraints.edges,
+              ),
+            {
+              entity: "edge",
+              relation: operationStrategy.primaryKeyConstraints.edges,
+              attempted: attemptedInserts(input.params),
+            },
+          );
+        }
+
+        return { executeAtomicEdgeBatch } satisfies Readonly<{
+          executeAtomicEdgeBatch: AtomicEdgeBatchExecutor;
+        }>;
+      })();
+
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
   const buildLockSchemaVersionAndGraphWrite =
     operationStrategy.buildLockSchemaVersionAndGraphWrite;
@@ -856,9 +1064,7 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : {
-        async lockSchemaVersionAndGraphWrite(
-          params: SchemaWriteFenceParams,
-        ) {
+        async lockSchemaVersionAndGraphWrite(params: SchemaWriteFenceParams) {
           const row = await execution.execGet<Record<string, unknown>>(
             buildLockSchemaVersionAndGraphWrite(
               params,
@@ -866,9 +1072,7 @@ export function createCommonOperationBackend(
             ),
           );
           if (row !== undefined) {
-            return normalizeGraphCommandIsolation(
-              row["transaction_isolation"],
-            );
+            return normalizeGraphCommandIsolation(row["transaction_isolation"]);
           }
 
           // A blocked `FOR SHARE` can recheck the old active row out of its
@@ -1291,11 +1495,11 @@ export function createCommonOperationBackend(
       ) {
         throw error;
       }
-        throwDurableIdentityStorageUnavailable(
-          error,
-          params,
-          command.match.identity.name,
-        );
+      throwDurableIdentityStorageUnavailable(
+        error,
+        params,
+        command.match.identity.name,
+      );
     }
     if (row === undefined) {
       return { outcome: "rejected", entity: "edge", reason: "unknown" };
@@ -1379,6 +1583,7 @@ export function createCommonOperationBackend(
 
     ...schemaFenceMembers,
     ...generatedNodeBatchMembers,
+    ...atomicEdgeBatchMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,
 

@@ -92,6 +92,8 @@ import {
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
+  buildInsertEdgesBatchReturningWithSchemaFence,
+  buildInsertEdgesBatchWithSchemaFence,
   buildInsertEdgesDurableBatchReturning,
   buildUpdateEdge,
 } from "./edges";
@@ -261,6 +263,18 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertEdgesBatchReturning: (
     params: readonly InsertEdgeParams[],
     timestamp: string,
+  ) => SQL;
+  buildInsertEdgesBatchWithSchemaFence: (
+    params: readonly InsertEdgeParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildInsertEdgesBatchReturningWithSchemaFence: (
+    params: readonly InsertEdgeParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
   ) => SQL;
   buildInsertEdgesDurableBatchReturning: (
     params: readonly InsertEdgeParams[],
@@ -453,6 +467,8 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertEdgeNoReturn,
   buildInsertEdgesBatch,
   buildInsertEdgesBatchReturning,
+  buildInsertEdgesBatchWithSchemaFence,
+  buildInsertEdgesBatchReturningWithSchemaFence,
   buildGetEdge,
   buildGetEdges,
   buildUpdateEdge,

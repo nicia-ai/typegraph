@@ -5,6 +5,7 @@
  * pure-unit budget.
  */
 export const PGLITE_TEST_FILES = [
+  "tests/atomic-generated-edge-batch-pglite.test.ts",
   "tests/capability-bundle-dialect-honesty.test.ts",
   "tests/capability-declaration-validation.test.ts",
   "tests/constraint-claim-inventory.test.ts",
