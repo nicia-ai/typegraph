@@ -2203,10 +2203,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     }
     if (insertedCount !== inputs.length) {
       throw new DatabaseOperationError(
-        "Generated node batch insert returned " +
-          String(insertedCount) +
-          " rows, expected " +
-          String(inputs.length),
+        `Generated node batch insert returned ${insertedCount} rows, expected ${inputs.length}`,
         {
           operation: "insert",
           entity: "node",

@@ -188,9 +188,15 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 
 ### Transaction wrapping
 
-Each bulk method call is atomic across all of its bind-budget chunks. Eligible generated-ID
-`nodes.bulkInsert()` calls achieve that with one native atomic exchange; other bulk shapes use the
-transactional write path. To commit several bulk calls as one unit, wrap them in a transaction:
+On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
+chunks. Eligible generated-ID `nodes.bulkInsert()` calls also provide whole-call atomicity on
+bundled transactionless roots through one native atomic exchange. Other bulk shapes on a
+transactionless root either refuse when their contract requires a fence or use sequential fallback,
+which can leave earlier chunks committed if a later one fails. `store.transaction()` cannot add
+atomicity to a backend that does not support transactions.
+
+To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
+transaction:
 
 ```typescript
 // Atomic: all-or-nothing for the entire import

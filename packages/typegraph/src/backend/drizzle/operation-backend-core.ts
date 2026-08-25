@@ -738,8 +738,9 @@ export function createCommonOperationBackend(
     return row === undefined ? 0 : rowMappers.toSchemaVersionRow(row).version;
   }
 
+  const schemaFenceLockClause = options.schemaFenceLockClause;
   const schemaFenceMembers =
-    options.schemaFenceLockClause === undefined ?
+    schemaFenceLockClause === undefined ?
       {}
     : {
         async insertNodeIfAbsentWithSchemaFence(
@@ -752,7 +753,7 @@ export function createCommonOperationBackend(
               params,
               nowIso(),
               schemaFence,
-              options.schemaFenceLockClause ?? drizzleSql.raw(""),
+              schemaFenceLockClause,
             );
           const row = await execution.execGet<Record<string, unknown>>(query);
           return row === undefined ? undefined : rowMappers.toNodeRow(row);
@@ -767,7 +768,7 @@ export function createCommonOperationBackend(
             params,
             nowIso(),
             schemaFence,
-            options.schemaFenceLockClause ?? drizzleSql.raw(""),
+            schemaFenceLockClause,
           );
           const row = await withDuplicateKeyClassification(
             () => execution.execGet<Record<string, unknown>>(query),
@@ -785,7 +786,7 @@ export function createCommonOperationBackend(
   const generatedNodeBatchMembers =
     (
       atomicSqlProgramExecutor === undefined ||
-      options.schemaFenceLockClause === undefined
+      schemaFenceLockClause === undefined
     ) ?
       {}
     : ({
@@ -807,7 +808,7 @@ export function createCommonOperationBackend(
                   chunk,
                   timestamp,
                   input.schemaFence,
-                  options.schemaFenceLockClause ?? drizzleSql.raw(""),
+                  schemaFenceLockClause,
                 ),
               ),
               cardinality: "many" as const,
