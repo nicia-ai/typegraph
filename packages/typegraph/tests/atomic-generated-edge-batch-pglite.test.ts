@@ -4,12 +4,20 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  type AtomicEdgeBatchCountInput,
+  type AtomicEdgeBatchRowsInput,
+  markBundledRootAtomicEdgeBatch,
+  resolveBundledRootAtomicEdgeBatch,
+} from "../src/backend/capabilities/atomic-edge-batch";
+import {
   buildInsertEdgesBatchReturningWithSchemaFence,
   buildInsertEdgesBatchWithSchemaFence,
 } from "../src/backend/drizzle/operations/edges";
 import { buildInsertNodesBatchWithSchemaFence } from "../src/backend/drizzle/operations/nodes";
+import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
+import type { EdgeRow } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { createStoreWithSchema } from "../src/store";
 
@@ -34,8 +42,34 @@ function compile(query: SQL) {
 
 describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
   it("executes the Store bulk APIs through the native PostgreSQL program", async () => {
-    const { backend } = await createLocalPgliteBackend({ vector: false });
+    const { backend: managedBackend, db } = await createLocalPgliteBackend({
+      vector: false,
+    });
     try {
+      // The managed-close wrapper deliberately does not inherit exact-root
+      // capabilities. Build the Store over the marked Postgres root and retain
+      // the wrapper only as the owner of the PGlite client's lifecycle.
+      const backend = createPostgresBackend(db, { vector: false });
+      const nativeExecutor = resolveBundledRootAtomicEdgeBatch(backend);
+      if (nativeExecutor === undefined) {
+        throw new Error("Expected the bundled Postgres edge batch executor");
+      }
+      const observedResultModes: ("count" | "rows")[] = [];
+      function observedNativeExecutor(
+        input: AtomicEdgeBatchCountInput,
+      ): Promise<number>;
+      function observedNativeExecutor(
+        input: AtomicEdgeBatchRowsInput,
+      ): Promise<readonly EdgeRow[]>;
+      async function observedNativeExecutor(
+        input: AtomicEdgeBatchCountInput | AtomicEdgeBatchRowsInput,
+      ): Promise<number | readonly EdgeRow[]> {
+        observedResultModes.push(input.resultMode);
+        if (input.resultMode === "rows") return nativeExecutor(input);
+        return nativeExecutor(input);
+      }
+      markBundledRootAtomicEdgeBatch(backend, observedNativeExecutor);
+
       const [store] = await createStoreWithSchema(graph, backend);
       const from = await store.nodes.Person.create({ name: "Alice" });
       const to = await store.nodes.Company.create({ name: "Acme" });
@@ -57,9 +91,10 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
       ).rejects.toMatchObject({
         details: { endpoint: "to", nodeId: "missing-company" },
       });
+      expect(observedResultModes).toEqual(["rows", "count"]);
       await expect(store.edges.worksAt.count()).resolves.toBe(2);
     } finally {
-      await backend.close();
+      await managedBackend.close();
     }
   });
 
