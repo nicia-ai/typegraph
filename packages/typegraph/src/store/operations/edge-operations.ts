@@ -72,6 +72,7 @@
  *    `oneActive` population — asserted only for that decision; other
  *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
+import { AtomicEdgeBatchEndpointRefusalError } from "../../backend/capabilities/atomic-edge-batch";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
@@ -171,6 +172,10 @@ import {
   validityEndAfterMutation,
 } from "../validity-end";
 import { withAlreadyExistsTranslation } from "./already-exists";
+import {
+  type AtomicEdgeBatchExecutor,
+  resolveAtomicEdgeBatchExecutor,
+} from "./atomic-edge-batch";
 import {
   AutocommitWriteRequiresTransaction,
   canFuseSchemaFenceInFirstWrite,
@@ -1186,6 +1191,119 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
   return { preparedCreates, batchInsertWork };
 }
 
+/**
+ * Prepares the closed input to the native edge batch program without issuing
+ * reads. Eligibility has already proved that no cardinality or durable-match
+ * decision is required; the SQL program owns live-endpoint and schema-fence
+ * enforcement at the authoritative write boundary.
+ */
+async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: WriteTarget,
+): Promise<readonly EdgeCreatePrepared[]> {
+  const preparedCreates: EdgeCreatePrepared[] = [];
+  for (const input of inputs) {
+    preparedCreates.push(
+      await validateAndPrepareEdgeCreate(
+        ctx,
+        input,
+        input.id ?? generateId(),
+        backend,
+        { validateEndpoints: false, validateCardinality: false },
+      ),
+    );
+  }
+  return preparedCreates;
+}
+
+/**
+ * Diagnoses an atomic-program refusal in public input order. The native SQL
+ * deliberately turns a missing endpoint into a statement error so every
+ * chunk rolls back; these reads recover the precise source-before-target
+ * refusal only on that exceptional path.
+ */
+async function assertAtomicEdgeBatchEndpoints<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: WriteTarget,
+): Promise<void> {
+  for (const input of inputs) {
+    await assertLiveEdgeEndpoints(
+      ctx,
+      input.kind,
+      input.fromKind,
+      input.fromId,
+      input.toKind,
+      input.toId,
+      backend,
+    );
+  }
+}
+
+async function runAtomicEdgeBatchProgram<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  preparedCreates: readonly EdgeCreatePrepared[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicEdgeBatchExecutor,
+  resultMode: "count",
+): Promise<number>;
+async function runAtomicEdgeBatchProgram<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  preparedCreates: readonly EdgeCreatePrepared[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicEdgeBatchExecutor,
+  resultMode: "rows",
+): Promise<readonly BackendEdgeRow[]>;
+/** Owns native refusal diagnosis and result completeness for both batch APIs. */
+async function runAtomicEdgeBatchProgram<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  preparedCreates: readonly EdgeCreatePrepared[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicEdgeBatchExecutor,
+  resultMode: "count" | "rows",
+): Promise<number | readonly BackendEdgeRow[]> {
+  const params = preparedCreates.map((prepared) => prepared.insertParams);
+  const schemaFence = {
+    graphId: ctx.graphId,
+    expectedVersion: requireDefined(ctx.schemaVersion),
+  };
+  const result = await withAlreadyExistsTranslation("edge", async () => {
+    try {
+      if (resultMode === "count") {
+        return await atomicExecutor({ params, resultMode, schemaFence });
+      }
+      return await atomicExecutor({ params, resultMode, schemaFence });
+    } catch (error) {
+      if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
+        await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
+        throw error.cause;
+      }
+      throw error;
+    }
+  });
+  const insertedCount = typeof result === "number" ? result : result.length;
+  if (insertedCount === 0) {
+    await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
+  }
+  if (insertedCount !== inputs.length) {
+    throw new DatabaseOperationError(
+      `Atomic edge batch insert returned ${insertedCount} rows, expected ${inputs.length}`,
+      {
+        operation: "insert",
+        entity: "edge",
+        attempted: params.map((item) => ({ kind: item.kind, id: item.id })),
+      },
+    );
+  }
+  memoizeLeasedSchemaFence(ctx, backend);
+  return result;
+}
+
 /** Identity-conflicted rows are omitted by the authoritative batch RETURNING. */
 function assertDurableBatchRows(
   work: readonly EdgeInsertWork[],
@@ -1226,6 +1344,32 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   if (inputs.length === 0) {
     return;
   }
+
+  const atomicExecutor = resolveAtomicEdgeBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    inputs,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (atomicExecutor !== undefined) {
+    const preparedCreates = await prepareAtomicEdgeBatchCreates(
+      ctx,
+      inputs,
+      backend,
+    );
+    await runAtomicEdgeBatchProgram(
+      ctx,
+      inputs,
+      preparedCreates,
+      backend,
+      atomicExecutor,
+      "count",
+    );
+    return;
+  }
+
   await runWritePlan(
     ctx,
     edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),
@@ -1287,6 +1431,32 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
   if (inputs.length === 0) {
     return [];
   }
+
+  const atomicExecutor = resolveAtomicEdgeBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    inputs,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (atomicExecutor !== undefined) {
+    const preparedCreates = await prepareAtomicEdgeBatchCreates(
+      ctx,
+      inputs,
+      backend,
+    );
+    const rows = await runAtomicEdgeBatchProgram(
+      ctx,
+      inputs,
+      preparedCreates,
+      backend,
+      atomicExecutor,
+      "rows",
+    );
+    return rows.map((row) => rowToEdge(row));
+  }
+
   return runWritePlan(
     ctx,
     edgeWritePlan(batchFencesConstraintProbe(ctx, inputs)),

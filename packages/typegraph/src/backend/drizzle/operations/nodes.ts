@@ -13,6 +13,7 @@ import type {
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
 import {
+  castBoundValueForColumn,
   expectedValidFromPredicate,
   nodeColumnList,
   quotedColumn,
@@ -264,7 +265,19 @@ export function buildInsertNodesBatchWithSchemaFence(
   );
   const values = params.map((nodeParams) => {
     const propsJson = JSON.stringify(nodeParams.props);
-    return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
+    return sql`
+      (
+            ${castBoundValueForColumn(nodes.graphId, nodeParams.graphId)},
+            ${castBoundValueForColumn(nodes.kind, nodeParams.kind)},
+            ${castBoundValueForColumn(nodes.id, nodeParams.id)},
+            ${castBoundValueForColumn(nodes.props, propsJson)},
+            ${castBoundValueForColumn(nodes.version, 1)},
+            ${castBoundValueForColumn(nodes.validFrom, sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp)))},
+            ${castBoundValueForColumn(nodes.validTo, sqlNull(nodeParams.validTo))},
+            ${castBoundValueForColumn(nodes.createdAt, timestamp)},
+            ${castBoundValueForColumn(nodes.updatedAt, timestamp)}
+          )
+    `;
   });
 
   return sql`

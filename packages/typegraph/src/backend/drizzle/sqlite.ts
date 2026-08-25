@@ -57,6 +57,7 @@ import {
   isMissingTableError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
+import { markBundledRootAtomicEdgeBatch } from "../capabilities/atomic-edge-batch";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -329,6 +330,7 @@ const RECORDED_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
 export type SqliteBatchChunkSizes = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
+  edgeSchemaFencedInsertBatchSize: number;
   /** Rows per embedding batch upsert (5 binds per row). */
   embeddingUpsertBatchSize: number;
   /** Rows per fulltext batch upsert (6 binds per row on FTS5). */
@@ -376,6 +378,13 @@ export function computeSqliteBatchChunkSizes(
     edgeInsertBatchSize: Math.max(
       1,
       Math.floor(maxBindParameters / EDGE_INSERT_PARAM_COUNT),
+    ),
+    edgeSchemaFencedInsertBatchSize: Math.max(
+      1,
+      Math.floor(
+        (maxBindParameters - SCHEMA_FENCE_PARAM_COUNT) /
+          EDGE_INSERT_PARAM_COUNT,
+      ),
     ),
     findEdgesEndpointChunkSize: Math.max(
       1,
@@ -1323,9 +1332,8 @@ export function createSqliteBackend(
   const fulltextStrategy = options.fulltext ?? fts5Strategy;
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
-  const atomicSqlProgramExecutor = createAtomicSqlProgramExecutor(
-    executionAdapter,
-  );
+  const atomicSqlProgramExecutor =
+    createAtomicSqlProgramExecutor(executionAdapter);
   const { isSync, transactionMode } = executionAdapter.profile;
   // The active vector strategy gates upsertEmbedding / deleteEmbedding /
   // vectorSearch and supplies the per-`(kind, field)` storage. Passed by
@@ -2465,12 +2473,15 @@ export function createSqliteBackend(
         async () =>
           db.transaction(
             async (tx) =>
-              fn(markSchemaFencedInsertEligible(bindTransactionBackend(tx)), tx),
+              fn(
+                markSchemaFencedInsertEligible(bindTransactionBackend(tx)),
+                tx,
+              ),
             {
-            behavior:
-              options?.accessMode === "read_only" || temporaryWrites ?
-                "deferred"
-              : "immediate",
+              behavior:
+                options?.accessMode === "read_only" || temporaryWrites ?
+                  "deferred"
+                : "immediate",
             },
           ) as Promise<T>,
       );
@@ -2521,14 +2532,12 @@ export function createSqliteBackend(
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
-  markBundledRootAtomicSqlProgram(
-    backend,
-    atomicSqlProgramExecutor,
-  );
+  markBundledRootAtomicSqlProgram(backend, atomicSqlProgramExecutor);
   markBundledRootGeneratedNodeBatch(
     backend,
     operations.executeGeneratedNodeBatch,
   );
+  markBundledRootAtomicEdgeBatch(backend, operations.executeAtomicEdgeBatch);
 
   return backend;
 }

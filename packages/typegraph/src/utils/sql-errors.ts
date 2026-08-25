@@ -55,6 +55,7 @@ const POSTGRES_UNDEFINED_RELATION_PATTERN =
  */
 const POSTGRES_UNDEFINED_TABLE_CODE = "42P01";
 const POSTGRES_UNIQUE_VIOLATION_CODE = "23505";
+const POSTGRES_NOT_NULL_VIOLATION_CODE = "23502";
 
 /**
  * SQLSTATEs a racing IDEMPOTENT DDL statement loses with — the ones that mean
@@ -335,6 +336,7 @@ export function isPostgresConcurrentDdlRaceError(error: unknown): boolean {
  */
 const POSTGRES_CONSTRAINT_FIELDS = ["constraint", "constraint_name"] as const;
 const POSTGRES_RELATION_FIELDS = ["table", "table_name"] as const;
+const POSTGRES_COLUMN_FIELDS = ["column", "column_name"] as const;
 
 /**
  * SQLite's EXTENDED result code for a primary-key duplicate, in both spellings a
@@ -353,6 +355,8 @@ const SQLITE_PRIMARY_KEY_VIOLATION_CODE = "SQLITE_CONSTRAINT_PRIMARYKEY";
 const SQLITE_PRIMARY_KEY_VIOLATION_EXTENDED_CODE = 1555;
 const SQLITE_UNIQUE_VIOLATION_CODE = "SQLITE_CONSTRAINT_UNIQUE";
 const SQLITE_UNIQUE_VIOLATION_EXTENDED_CODE = 2067;
+const SQLITE_NOT_NULL_VIOLATION_CODE = "SQLITE_CONSTRAINT_NOTNULL";
+const SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE = 1299;
 const SQLITE_EXTENDED_CODE_FIELDS = ["rawCode", "extendedCode"] as const;
 
 /**
@@ -462,6 +466,45 @@ export function isDuplicatePrimaryKeyError(
     if (!canReadProperty(link)) continue;
     if (isPostgresPrimaryKeyViolation(link, relation)) return true;
     if (isSqlitePrimaryKeyViolation(link, relation)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the engine refused the exact NULL sentinel emitted by the closed
+ * edge-batch program. PostgreSQL supplies relation and column protocol fields;
+ * SQLite supplies a NOT NULL extended code and identifies the column in its
+ * stable constraint report. No other failure is allowed to trigger endpoint
+ * diagnostics.
+ */
+export function isNotNullColumnViolation(
+  error: unknown,
+  relation: Readonly<{ table: string; column: string }>,
+): boolean {
+  const expectedSqliteMessage = `NOT NULL constraint failed: ${relation.table}.${relation.column}`;
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    if (
+      Reflect.get(link, "code") === POSTGRES_NOT_NULL_VIOLATION_CODE &&
+      firstStringField(link, POSTGRES_RELATION_FIELDS) === relation.table &&
+      firstStringField(link, POSTGRES_COLUMN_FIELDS) === relation.column
+    ) {
+      return true;
+    }
+    const code: unknown = Reflect.get(link, "code");
+    const isSqliteNotNullViolation =
+      code === SQLITE_NOT_NULL_VIOLATION_CODE ||
+      code === "SQLITE_CONSTRAINT" ||
+      SQLITE_EXTENDED_CODE_FIELDS.some(
+        (field) =>
+          Reflect.get(link, field) === SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE,
+      );
+    if (
+      sqliteErrorMessage(link) === expectedSqliteMessage &&
+      (isSqliteNotNullViolation || code === undefined)
+    ) {
+      return true;
+    }
   }
   return false;
 }

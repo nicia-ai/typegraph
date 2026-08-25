@@ -143,15 +143,30 @@ sidecars—must commit together. Undeclared dynamic `matchOn` convergence keeps
 that interactive-transaction requirement; only a schema-declared durable
 `matchIdentity` can qualify for the one-statement root command.
 
-There is one narrower native write-program path for ingestion: on bundled Neon
-HTTP, Cloudflare D1, and libSQL roots, `nodes.bulkInsert(items)` can use one
+Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
+programs for eligible ingestion calls. `nodes.bulkInsert(items)` uses one
 schema-fenced atomic exchange when every item has a generated ID and the node
-has no claims, Operational Identity, history, revision, or projections. This
-is an internal optimization, not a public Store batch API. `bulkCreate()` and
-unsupported `bulkInsert()` shapes retain their existing transaction or
-fallback behavior. Generated-ID node bulk operations also skip the
-guaranteed-empty existence-priming read; caller-supplied IDs still perform
-their existence checks.
+has no claims, Operational Identity, history, revision, or projections.
+Generated-ID node batches also skip the guaranteed-empty existence-priming
+read; caller-supplied IDs retain their existence and resurrection checks.
+
+Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use one
+schema-fenced atomic exchange when every edge has unconstrained `many`
+cardinality, no durable `matchIdentity`, and the store has no history or
+revision capture. The program validates live endpoints at the write boundary,
+rolls back the whole call when any bind-budget chunk fails, and restores
+`bulkCreate()` results to input order. At the data-statement layer, its success
+path changes from one endpoint read per referenced node kind plus one insert
+per bind-budget chunk to one exchange for the entire call. For a one-chunk
+batch this is commonly 2 → 1 data exchanges when both endpoints share a kind
+or 3 → 1 when they use two kinds. The previous path can additionally pay a
+schema-fence statement and transaction framing, depending on the driver, so
+the full-call reduction may be larger.
+
+These are internal execution optimizations, not a public Store batch API.
+Constrained cardinality, durable identity, history/revision capture,
+caller-owned transactions, derived or custom backends, and other unsupported
+shapes retain their transaction or fallback behavior.
 
 ### Single vs bulk operations
 
@@ -189,11 +204,12 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 ### Transaction wrapping
 
 On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
-chunks. Eligible generated-ID `nodes.bulkInsert()` calls also provide whole-call atomicity on
-bundled transactionless roots through one native atomic exchange. Other bulk shapes on a
-transactionless root either refuse when their contract requires a fence or use sequential fallback,
-which can leave earlier chunks committed if a later one fails. `store.transaction()` cannot add
-atomicity to a backend that does not support transactions.
+chunks. Eligible generated-ID `nodes.bulkInsert()` and unconstrained `edges.bulkInsert()` /
+`edges.bulkCreate()` calls also provide whole-call atomicity on bundled transactionless roots through
+one native atomic exchange. Other bulk shapes on a transactionless root either refuse when their
+contract requires a fence or use sequential fallback, which can leave earlier chunks committed if a
+later one fails. `store.transaction()` cannot add atomicity to a backend that does not support
+transactions.
 
 To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
 transaction:
