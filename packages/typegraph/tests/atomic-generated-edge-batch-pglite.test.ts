@@ -33,6 +33,36 @@ function compile(query: SQL) {
 }
 
 describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
+  it("executes the Store bulk APIs through the native PostgreSQL program", async () => {
+    const { backend } = await createLocalPgliteBackend({ vector: false });
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const from = await store.nodes.Person.create({ name: "Alice" });
+      const to = await store.nodes.Company.create({ name: "Acme" });
+
+      const created = await store.edges.worksAt.bulkCreate([
+        { id: "edge-2", from, to, props: { role: "Designer" } },
+        { id: "edge-1", from, to, props: { role: "Engineer" } },
+      ]);
+      expect(created.map((edge) => edge.id)).toEqual(["edge-2", "edge-1"]);
+
+      await expect(
+        store.edges.worksAt.bulkInsert([
+          {
+            from,
+            to: { kind: "Company", id: "missing-company" },
+            props: { role: "Unknown" },
+          },
+        ]),
+      ).rejects.toMatchObject({
+        details: { endpoint: "to", nodeId: "missing-company" },
+      });
+      await expect(store.edges.worksAt.count()).resolves.toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("executes returning, stale-fence, and missing-endpoint statements", async () => {
     const { backend, client } = await createLocalPgliteBackend({
       vector: false,

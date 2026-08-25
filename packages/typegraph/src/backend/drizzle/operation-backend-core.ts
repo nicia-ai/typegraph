@@ -497,6 +497,40 @@ async function withAtomicEdgeEndpointRefusalClassification<T>(
   }
 }
 
+function assertCompleteAtomicEdgeChunks(
+  actualCounts: readonly number[],
+  expectedChunks: readonly (readonly unknown[])[],
+): void {
+  const mismatchedChunk = actualCounts.findIndex(
+    (count, index) => count !== expectedChunks[index]?.length,
+  );
+  if (mismatchedChunk === -1) return;
+  throw new CompilerInvariantError(
+    "Atomic edge batch returned a partial chunk result.",
+    {
+      slot: mismatchedChunk,
+      expected: expectedChunks[mismatchedChunk]?.length,
+      actual: actualCounts[mismatchedChunk],
+    },
+  );
+}
+
+async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
+  atomicExecutor: AtomicSqlProgramExecutor,
+  program: AtomicSqlProgram<TSlot, TResult>,
+  relation: PrimaryKeyRelation,
+  attempted: readonly AttemptedInsert[],
+): Promise<TResult> {
+  return withDuplicateKeyClassification(
+    () =>
+      withAtomicEdgeEndpointRefusalClassification(
+        () => atomicExecutor.execute(program),
+        relation,
+      ),
+    { entity: "edge", relation, attempted },
+  );
+}
+
 function attemptedEdgeMatchIdentities(
   params: readonly InsertEdgeParams[],
 ): readonly AttemptedEdgeMatchIdentity[] | undefined {
@@ -947,33 +981,15 @@ export function createCommonOperationBackend(
               })),
               assemble(counts: readonly number[]): number {
                 if (counts.every((count) => count === 0)) return 0;
-                const mismatchedChunk = counts.findIndex(
-                  (count, index) => count !== chunks[index]?.length,
-                );
-                if (mismatchedChunk !== -1) {
-                  throw new CompilerInvariantError(
-                    "Atomic edge batch returned a partial chunk result.",
-                    {
-                      slot: mismatchedChunk,
-                      expected: chunks[mismatchedChunk]?.length,
-                      actual: counts[mismatchedChunk],
-                    },
-                  );
-                }
+                assertCompleteAtomicEdgeChunks(counts, chunks);
                 return counts.reduce((total, count) => total + count, 0);
               },
             } satisfies AtomicSqlProgram<number, number>;
-            return withDuplicateKeyClassification(
-              () =>
-                withAtomicEdgeEndpointRefusalClassification(
-                  () => atomicExecutor.execute(program),
-                  operationStrategy.primaryKeyConstraints.edges,
-                ),
-              {
-                entity: "edge",
-                relation: operationStrategy.primaryKeyConstraints.edges,
-                attempted: attemptedInserts(input.params),
-              },
+            return executeClassifiedAtomicEdgeBatch(
+              atomicExecutor,
+              program,
+              operationStrategy.primaryKeyConstraints.edges,
+              attemptedInserts(input.params),
             );
           }
 
@@ -995,19 +1011,10 @@ export function createCommonOperationBackend(
               rowChunks: readonly (readonly EdgeRow[])[],
             ): readonly EdgeRow[] {
               if (rowChunks.every((rows) => rows.length === 0)) return [];
-              const mismatchedChunk = rowChunks.findIndex(
-                (rows, index) => rows.length !== chunks[index]?.length,
+              assertCompleteAtomicEdgeChunks(
+                rowChunks.map((rows) => rows.length),
+                chunks,
               );
-              if (mismatchedChunk !== -1) {
-                throw new CompilerInvariantError(
-                  "Atomic edge batch returned a partial chunk result.",
-                  {
-                    slot: mismatchedChunk,
-                    expected: chunks[mismatchedChunk]?.length,
-                    actual: rowChunks[mismatchedChunk]?.length,
-                  },
-                );
-              }
               const inputOrder = new Map(
                 input.params.map((params, index) => [params.id, index]),
               );
@@ -1035,17 +1042,11 @@ export function createCommonOperationBackend(
               );
             },
           } satisfies AtomicSqlProgram<readonly EdgeRow[], readonly EdgeRow[]>;
-          return withDuplicateKeyClassification(
-            () =>
-              withAtomicEdgeEndpointRefusalClassification(
-                () => atomicExecutor.execute(program),
-                operationStrategy.primaryKeyConstraints.edges,
-              ),
-            {
-              entity: "edge",
-              relation: operationStrategy.primaryKeyConstraints.edges,
-              attempted: attemptedInserts(input.params),
-            },
+          return executeClassifiedAtomicEdgeBatch(
+            atomicExecutor,
+            program,
+            operationStrategy.primaryKeyConstraints.edges,
+            attemptedInserts(input.params),
           );
         }
 

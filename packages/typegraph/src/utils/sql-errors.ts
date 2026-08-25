@@ -336,6 +336,7 @@ export function isPostgresConcurrentDdlRaceError(error: unknown): boolean {
  */
 const POSTGRES_CONSTRAINT_FIELDS = ["constraint", "constraint_name"] as const;
 const POSTGRES_RELATION_FIELDS = ["table", "table_name"] as const;
+const POSTGRES_COLUMN_FIELDS = ["column", "column_name"] as const;
 
 /**
  * SQLite's EXTENDED result code for a primary-key duplicate, in both spellings a
@@ -480,25 +481,27 @@ export function isNotNullColumnViolation(
   error: unknown,
   relation: Readonly<{ table: string; column: string }>,
 ): boolean {
+  const expectedSqliteMessage = `NOT NULL constraint failed: ${relation.table}.${relation.column}`;
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     if (
       Reflect.get(link, "code") === POSTGRES_NOT_NULL_VIOLATION_CODE &&
       firstStringField(link, POSTGRES_RELATION_FIELDS) === relation.table &&
-      firstStringField(link, ["column", "column_name"]) === relation.column
+      firstStringField(link, POSTGRES_COLUMN_FIELDS) === relation.column
     ) {
       return true;
     }
+    const code: unknown = Reflect.get(link, "code");
     const isSqliteNotNullViolation =
-      Reflect.get(link, "code") === SQLITE_NOT_NULL_VIOLATION_CODE ||
+      code === SQLITE_NOT_NULL_VIOLATION_CODE ||
+      code === "SQLITE_CONSTRAINT" ||
       SQLITE_EXTENDED_CODE_FIELDS.some(
         (field) =>
           Reflect.get(link, field) === SQLITE_NOT_NULL_VIOLATION_EXTENDED_CODE,
       );
     if (
-      isSqliteNotNullViolation &&
-      sqliteErrorMessage(link) ===
-        `NOT NULL constraint failed: ${relation.table}.${relation.column}`
+      sqliteErrorMessage(link) === expectedSqliteMessage &&
+      (isSqliteNotNullViolation || code === undefined)
     ) {
       return true;
     }

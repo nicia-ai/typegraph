@@ -315,6 +315,26 @@ describe("isNotNullColumnViolation", () => {
       isNotNullColumnViolation(new Error("connection closed"), edgeId),
     ).toBe(false);
   });
+
+  it("matches the code-less cause emitted by the D1 Workers binding", () => {
+    const detail = new Error("NOT NULL constraint failed: typegraph_edges.id");
+    const d1Error = new Error(`D1_ERROR: ${detail.message}`, { cause: detail });
+
+    expect(isNotNullColumnViolation(d1Error, edgeId)).toBe(true);
+    expect(
+      isNotNullColumnViolation(
+        new Error(
+          "D1_ERROR: NOT NULL constraint failed: typegraph_edges.kind",
+          {
+            cause: new Error(
+              "NOT NULL constraint failed: typegraph_edges.kind",
+            ),
+          },
+        ),
+        edgeId,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("isPostgresConcurrentDdlRaceError", () => {
