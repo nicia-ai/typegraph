@@ -1280,6 +1280,7 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
     } catch (error) {
       if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
         await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
+        throw error.cause;
       }
       throw error;
     }
