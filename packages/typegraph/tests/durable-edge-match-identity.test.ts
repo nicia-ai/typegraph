@@ -284,26 +284,14 @@ describe("durable edge match identity", () => {
     }
   });
 
-  it("provisions declarations and rechecks storage on privileged open", async () => {
+  it("keeps durable declarations usable across privileged reopens", async () => {
     const { backend } = createLocalSqliteBackend();
-    const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
-    if (ensureStorage === undefined) {
-      throw new Error("SQLite backend must expose identity storage adoption");
-    }
-    let ensureCalls = 0;
-    const tracked = deriveBackend(backend, {
-      async ensureEdgeMatchIdentityStorage(): Promise<void> {
-        ensureCalls += 1;
-        await ensureStorage();
-      },
-    });
     try {
       const graph = durableGraph("durable_identity_activation");
-      await initializeSchema(tracked, graph);
-      expect(ensureCalls).toBe(1);
-
-      await createStoreWithSchema(graph, tracked);
-      expect(ensureCalls).toBe(2);
+      await initializeSchema(backend, graph);
+      await expect(
+        createStoreWithSchema(graph, backend),
+      ).resolves.toBeDefined();
     } finally {
       await backend.close();
     }
@@ -332,7 +320,7 @@ describe("durable edge match identity", () => {
     try {
       await createStoreWithSchema(legacyGraph(graphId), backend);
       const failingBackend = deriveBackend(backend, {
-        ensureEdgeMatchIdentityStorage(): Promise<void> {
+        adoptBaseSchema(): Promise<void> {
           return Promise.reject(new Error("edge storage adoption failed"));
         },
       });
@@ -357,33 +345,21 @@ describe("durable edge match identity", () => {
 
   it("activates identity on an empty legacy kind and materializes its key", async () => {
     const { backend } = createLocalSqliteBackend();
-    const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
-    if (ensureStorage === undefined) {
-      throw new Error("SQLite backend must expose identity storage adoption");
-    }
-    let ensureCalls = 0;
-    const tracked = deriveBackend(backend, {
-      async ensureEdgeMatchIdentityStorage(): Promise<void> {
-        ensureCalls += 1;
-        await ensureStorage();
-      },
-    });
     try {
       const graphId = "durable_identity_empty_migration";
-      await createStoreWithSchema(legacyGraph(graphId), tracked);
-      const legacySchema = await tracked.getActiveSchema(graphId);
+      await createStoreWithSchema(legacyGraph(graphId), backend);
+      const legacySchema = await backend.getActiveSchema(graphId);
       expect(legacySchema?.version).toBe(1);
 
       await expect(
-        migrateSchema(tracked, durableGraph(graphId), 1),
+        migrateSchema(backend, durableGraph(graphId), 1),
       ).resolves.toBe(2);
-      const durableSchema = await tracked.getActiveSchema(graphId);
+      const durableSchema = await backend.getActiveSchema(graphId);
       expect(durableSchema?.version).toBe(2);
-      expect(ensureCalls).toBe(2);
 
       const [store] = await createStoreWithSchema(
         durableGraph(graphId),
-        tracked,
+        backend,
       );
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
@@ -392,7 +368,6 @@ describe("durable edge match identity", () => {
           label: "friend",
         }),
       ).resolves.toMatchObject({ action: "created" });
-      expect(ensureCalls).toBe(3);
     } finally {
       await backend.close();
     }

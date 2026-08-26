@@ -10,7 +10,6 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
-import { deriveBackend } from "../src/backend/derive-backend";
 import {
   edgeMatchIdentityPairCheckName,
   edgeMatchIdentityUniqueIndexName,
@@ -88,6 +87,33 @@ describe("durable edge-match identity DDL", () => {
     }
   });
 
+  it("adds the pair check when a legacy SQLite table has only the key column", async () => {
+    const tableName = "key_only_edges";
+    const { backend, db } = createLocalSqliteBackend({
+      tables: createSqliteTables({ edges: tableName }),
+    });
+    try {
+      db.run(sql.raw(`DROP TABLE "${tableName}"`));
+      db.run(
+        sql.raw(
+          `CREATE TABLE "${tableName}" ("graph_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "from_kind" TEXT NOT NULL, "from_id" TEXT NOT NULL, "to_kind" TEXT NOT NULL, "to_id" TEXT NOT NULL, "props" TEXT NOT NULL, "match_identity_key" TEXT, "created_at" TEXT NOT NULL, "updated_at" TEXT NOT NULL, PRIMARY KEY ("graph_id", "id"))`,
+        ),
+      );
+
+      await backend.ensureEdgeMatchIdentityStorage?.();
+
+      expect(() =>
+        db.run(
+          sql.raw(
+            `INSERT INTO "${tableName}" ("graph_id", "id", "kind", "from_kind", "from_id", "to_kind", "to_id", "props", "match_identity_name", "created_at", "updated_at") VALUES ('g', 'e1', 'knows', 'Person', 'a', 'Person', 'b', '{}', 'identity', '2026-01-01', '2026-01-01')`,
+          ),
+        ),
+      ).toThrow();
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("adopts a quoted mixed-case PostgreSQL edge table", async () => {
     const tableName = "App_Edges";
     const tables = createPostgresTables({ edges: tableName });
@@ -117,6 +143,7 @@ describe("durable edge-match identity DDL", () => {
 
   it("adopts a complete pre-match-identity PostgreSQL schema when reopening a legacy graph", async () => {
     const edgeTableName = "typegraph_edges";
+    const baseSchemaVersionsTableName = "typegraph_base_schema_versions";
     const graphTemplatesTableName = "typegraph_graph_templates";
     const tables = createPostgresTables({ edges: edgeTableName });
     const client = await PGlite.create();
@@ -125,19 +152,6 @@ describe("durable edge-match identity DDL", () => {
     const backend = createPostgresBackend(drizzlePglite(client), {
       tables,
       vector: false,
-    });
-    const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
-    if (ensureStorage === undefined) {
-      throw new Error(
-        "PostgreSQL backend must expose identity storage adoption",
-      );
-    }
-    let ensureCalls = 0;
-    const tracked = deriveBackend(backend, {
-      async ensureEdgeMatchIdentityStorage(): Promise<void> {
-        ensureCalls += 1;
-        await ensureStorage();
-      },
     });
 
     const Person = defineNode("Person", {
@@ -170,10 +184,11 @@ describe("durable edge-match identity DDL", () => {
           `ALTER TABLE "${edgeTableName}" DROP CONSTRAINT "${edgeMatchIdentityPairCheckName(edgeTableName)}"`,
           `ALTER TABLE "${edgeTableName}" DROP COLUMN "match_identity_key"`,
           `ALTER TABLE "${edgeTableName}" DROP COLUMN "match_identity_name"`,
+          `DROP TABLE "${baseSchemaVersionsTableName}"`,
         ].join(";\n"),
       );
 
-      const [store, result] = await createStoreWithSchema(graph, tracked);
+      const [store, result] = await createStoreWithSchema(graph, backend);
       expect(result.status).toBe("unchanged");
 
       const from = await store.nodes.Person.create({ name: "From" });
@@ -181,7 +196,6 @@ describe("durable edge-match identity DDL", () => {
       await expect(
         store.edges.knows.create(from, to, { label: "first" }),
       ).resolves.toMatchObject({ label: "first" });
-      expect(ensureCalls).toBe(1);
     } finally {
       await backend.close();
     }

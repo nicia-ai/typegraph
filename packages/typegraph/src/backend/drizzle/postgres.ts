@@ -166,6 +166,9 @@ import {
   type VectorSearchResult,
 } from "../types";
 import {
+  createBaseSchemaLifecycle,
+} from "./base-schema";
+import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
@@ -177,6 +180,8 @@ import {
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
+  edgeMatchIdentityPairCheckName,
+  edgeMatchIdentityUniqueIndexName,
   generatePgCreateTableSQL,
   generatePostgresDDL,
   generatePostgresEdgeMatchIdentityUpgradeDDL,
@@ -1272,21 +1277,102 @@ export function createPostgresBackend(
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
     const edgeTableName = getTableName(tables.edges);
-    const existingEdgeRows = await executionAdapter.execute<{
+    const [storage] = await executionAdapter.execute<{
+      has_check?: unknown;
+      has_index?: unknown;
+      has_key?: unknown;
+      has_name?: unknown;
       table_name?: unknown;
     }>(
-      portableSql`SELECT to_regclass(${postgresIdentifierRegclassName(edgeTableName)}) AS table_name`,
+      portableSql`SELECT
+        to_regclass(${postgresIdentifierRegclassName(edgeTableName)}) AS table_name,
+        EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass(${postgresIdentifierRegclassName(edgeTableName)})
+            AND attname = 'match_identity_name' AND NOT attisdropped
+        ) AS has_name,
+        EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass(${postgresIdentifierRegclassName(edgeTableName)})
+            AND attname = 'match_identity_key' AND NOT attisdropped
+        ) AS has_key,
+        EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = to_regclass(${postgresIdentifierRegclassName(edgeTableName)})
+            AND conname = ${edgeMatchIdentityPairCheckName(edgeTableName)}
+        ) AS has_check,
+        to_regclass(${postgresIdentifierRegclassName(edgeMatchIdentityUniqueIndexName(edgeTableName))}) IS NOT NULL AS has_index`,
     );
-    if (typeof existingEdgeRows.at(0)?.table_name !== "string") return;
-    for (const statement of generatePostgresEdgeMatchIdentityUpgradeDDL(
-      edgeTableName,
-    )) {
+    if (typeof storage?.table_name !== "string") return;
+    const statements = generatePostgresEdgeMatchIdentityUpgradeDDL(edgeTableName);
+    const missingStatements = [
+      storage.has_name === true ? undefined : statements[0],
+      storage.has_key === true ? undefined : statements[1],
+      storage.has_check === true ? undefined : statements[2],
+      storage.has_index === true ? undefined : statements[3],
+    ].filter((statement): statement is string => statement !== undefined);
+    for (const statement of missingStatements) {
       await executeConcurrentCreateDdl(statement);
     }
   }
 
+  async function readBaseSchemaVersion(): Promise<number | undefined> {
+    try {
+      const rows = await db
+        .select({ version: tables.baseSchemaVersions.version })
+        .from(tables.baseSchemaVersions)
+        .where(eq(tables.baseSchemaVersions.installation, 1));
+      return rows.at(0)?.version;
+    } catch (error) {
+      if (isMissingTableError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async function ensureBaseSchemaVersionTable(): Promise<void> {
+    await executeConcurrentCreateDdl(
+      generatePgCreateTableSQL(tables.baseSchemaVersions),
+    );
+  }
+
+  async function writeBaseSchemaVersion(version: number): Promise<void> {
+    const marker = tables.baseSchemaVersions;
+    await db
+      .insert(marker)
+      .values({ installation: 1, version, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: marker.installation,
+        set: { version, updatedAt: new Date() },
+      });
+  }
+
+  async function ensureGraphTemplatesTable(): Promise<void> {
+    await executeConcurrentCreateDdl(
+      generatePgCreateTableSQL(tables.graphTemplates),
+    );
+  }
+
+  const baseSchemaLifecycle = createBaseSchemaLifecycle({
+    readVersion: readBaseSchemaVersion,
+    ensureVersionTable: ensureBaseSchemaVersionTable,
+    writeVersion: writeBaseSchemaVersion,
+    steps: [
+      {
+        version: 1,
+        async adopt(): Promise<void> {
+          await ensureGraphTemplatesTable();
+          await ensureEdgeMatchIdentityStorage();
+        },
+        adoptAfterBootstrap: ensureEdgeMatchIdentityStorage,
+      },
+    ],
+  });
+
   const backend: AdapterBackend<AnyPgTransaction> = {
     ...operations,
+
+    adoptBaseSchema: baseSchemaLifecycle.adopt,
+    assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
 
     ...((
       capabilities.transactions &&
@@ -1340,8 +1426,6 @@ export function createPostgresBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
-      await ensureEdgeMatchIdentityStorage();
-
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         // Cold boot is the single most contended DDL path there is — two
@@ -1351,6 +1435,7 @@ export function createPostgresBackend(
         // documents.
         await executeConcurrentCreateDdl(statement);
       }
+      await baseSchemaLifecycle.adoptAfterBootstrap();
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {

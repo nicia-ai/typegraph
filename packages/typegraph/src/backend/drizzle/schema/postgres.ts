@@ -67,6 +67,7 @@ export type PostgresTableNames = Readonly<{
   identitySeparation: string;
   uniques: string;
   edgeClaims: string;
+  baseSchemaVersions: string;
   schemaVersions: string;
   graphTemplates: string;
   fulltext: string;
@@ -99,6 +100,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   identitySeparation: "typegraph_identity_separation",
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
+  baseSchemaVersions: "typegraph_base_schema_versions",
   schemaVersions: "typegraph_schema_versions",
   graphTemplates: "typegraph_graph_templates",
   fulltext: "typegraph_node_fulltext",
@@ -440,6 +442,22 @@ export function createPostgresTables(
     ],
   );
 
+  const baseSchemaVersions = pgTable(
+    n.baseSchemaVersions,
+    {
+      installation: integer("installation").notNull(),
+      version: integer("version").notNull(),
+      updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.installation] }),
+      check(
+        `${n.baseSchemaVersions}_singleton_check`,
+        sql`${t.installation} = 1`,
+      ),
+    ],
+  );
+
   const schemaVersions = pgTable(
     n.schemaVersions,
     {
@@ -647,6 +665,7 @@ export function createPostgresTables(
     identitySeparation,
     uniques,
     edgeClaims,
+    baseSchemaVersions,
     schemaVersions,
     graphTemplates,
     indexMaterializations,

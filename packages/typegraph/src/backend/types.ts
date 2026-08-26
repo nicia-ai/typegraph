@@ -3144,6 +3144,25 @@ export type GraphBackend = Readonly<{
 
   // === Graph Lifecycle ===
   /**
+   * Adopts deployment-wide base relations to the physical schema required by
+   * this library version and stamps the singleton installation marker.
+   * Privileged schema-management entry points call this; ordinary raw Store
+   * construction never does.
+   *
+   * @internal
+   */
+  adoptBaseSchema?: (this: void) => Promise<void>;
+
+  /**
+   * SELECT-only sibling of {@link GraphBackend.adoptBaseSchema}. Throws a
+   * typed base-schema migration error when privileged adoption has not run.
+   * Least-privilege verified/template entry points call this before DML.
+   *
+   * @internal
+   */
+  assertBaseSchemaCurrent?: (this: void) => Promise<void>;
+
+  /**
    * Hard-deletes all data for a graph (nodes, edges, uniques, embeddings, schema versions).
    * Intended for import-replacement workflows. No hooks, no per-row logic.
    */

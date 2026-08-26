@@ -343,16 +343,28 @@ sqlite.exec(generateSqliteMigrationSQL());
 
 ### "permission denied" / cannot create relation on boot
 
-**Cause:** `createStoreWithSchema()` runs DDL on every cold boot
-(bootstrap, safe auto-migrations, and the contribution-marker
-`CREATE TABLE IF NOT EXISTS`). If it runs under a least-privilege,
-DML-only database role, that DDL fails with a permission error.
+**Cause:** `createStoreWithSchema()` is a privileged entry point. Its warm
+base-schema check is one marker read with no base-adoption DDL, but bootstrap,
+pending base adoption, graph migrations, contribution preparation, or system
+index materialization can issue DDL. A DML-only role cannot safely own it.
 
 **Solution:** Run schema/DDL changes as a privileged one-time migration
 step, then attach at runtime with the zero-DDL
 `createVerifiedStore()` (or `createStore()`) under the least-privilege
 role. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege).
+
+### `BaseSchemaMigrationError` from a zero-DDL runtime path
+
+**Cause:** `createVerifiedStore`, `assertSchemaCurrent`, or graph-template
+registration/instantiation found a missing, stale, or newer deployment-wide
+base-schema marker. These paths deliberately do not repair physical storage.
+
+**Solution:** For a missing or stale marker, run
+`createStoreWithSchema(graph, adminBackend)` once under a DDL-capable role, or
+apply the published external base-schema migration and stamp its marker last.
+For a newer marker, deploy a TypeGraph release that supports that version.
+The error details include `installedVersion`, `requiredVersion`, and `reason`.
 
 ### `MigrationError` from `createVerifiedStore` / `assertSchemaCurrent`
 
@@ -425,6 +437,13 @@ contribution markers that `createStore` / `createVerifiedStore` only
 check), and prefer `createVerifiedStore()` over bare `createStore()` so
 drift fails fast. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege).
+
+A plain `createStore()` performs no reads and therefore cannot check the
+base-schema marker at attach. If an edge write reaches legacy storage without
+the match-identity columns, it throws `ConfigurationError` with
+`details.code === "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE"` instead of leaking
+the database driver's missing-column error. The remedy is the same privileged
+base-schema adoption.
 
 ### `SCHEMA_WRITE_FENCE_UNSUPPORTED` on the first managed write
 

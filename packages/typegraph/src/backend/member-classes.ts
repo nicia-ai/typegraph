@@ -203,6 +203,8 @@ const SCHEMA_MEMBERS = [
  * fence, and no `WritePlan` applies to it.
  */
 const PROVISIONING_MEMBERS = [
+  "adoptBaseSchema",
+  "assertBaseSchemaCurrent",
   "bootstrapTables",
   "ensureExtension",
   "ensureTrigramExtension",

@@ -29,6 +29,7 @@ export async function registerGraphTemplate<G extends GraphDef>(
 ): Promise<GraphTemplate<G>> {
   const register = backend.registerGraphTemplate;
   if (register === undefined) throw graphTemplatesUnsupportedError(backend);
+  await backend.assertBaseSchemaCurrent?.();
   const { reconciled } = params;
   if (reconciled.version === undefined || reconciled.hash === undefined) {
     throw new ConfigurationError(
@@ -83,6 +84,7 @@ export async function instantiateGraphTemplate<G extends GraphDef>(
 ): Promise<InstantiateGraphTemplateResult<G>> {
   const instantiate = backend.instantiateGraphTemplate;
   if (instantiate === undefined) throw graphTemplatesUnsupportedError(backend);
+  await backend.assertBaseSchemaCurrent?.();
   const sourceVersion = params.template.reconciled.version;
   const reconciledHash = params.template.reconciled.hash;
   if (sourceVersion === undefined || reconciledHash === undefined) {

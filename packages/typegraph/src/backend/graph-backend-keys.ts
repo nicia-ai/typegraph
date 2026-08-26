@@ -55,6 +55,8 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "findEdgesByEndpointSet",
   "findEdgesByHeterogeneousEndpointSet",
   "countEdgesByKind",
+  "adoptBaseSchema",
+  "assertBaseSchemaCurrent",
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",

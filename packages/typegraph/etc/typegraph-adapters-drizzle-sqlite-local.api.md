@@ -2672,6 +2672,66 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
         };
         dialect: "sqlite";
     }>;
+    readonly baseSchemaVersions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            installation: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "installation";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            version: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
     readonly schemaVersions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
         name: string;
         schema: undefined;
@@ -4066,6 +4126,8 @@ type GraphBackend = Readonly<{
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
+    adoptBaseSchema?: (this: void) => Promise<void>;
+    assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
@@ -4878,6 +4940,7 @@ type SqliteTableNames = Readonly<{
     identitySeparation: string;
     uniques: string;
     edgeClaims: string;
+    baseSchemaVersions: string;
     schemaVersions: string;
     graphTemplates: string;
     fulltext: string;

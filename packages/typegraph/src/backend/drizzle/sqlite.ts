@@ -163,6 +163,9 @@ import {
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
 import {
+  createBaseSchemaLifecycle,
+} from "./base-schema";
+import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
@@ -1846,6 +1849,39 @@ export function createSqliteBackend(
     );
     const nameMissing = !columns.has("match_identity_name");
     const keyMissing = !columns.has("match_identity_key");
+    const tableSqlRows = await executionAdapter.execute<{ sql?: unknown }>(
+      portableSql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ${edgeTableName}`,
+    );
+    const tableSql = tableSqlRows.at(0)?.sql;
+    const normalizedTableSql =
+      typeof tableSql === "string" ?
+        tableSql.toLowerCase().replaceAll('"', "").replaceAll(/\s+/g, " ")
+      : undefined;
+    const hasPairCheck =
+      normalizedTableSql?.includes(
+        "check ((match_identity_name is null) = (match_identity_key is null))",
+      ) === true ||
+      normalizedTableSql?.includes(
+        "check ((match_identity_key is null) = (match_identity_name is null))",
+      ) === true;
+    if (
+      columnRows.length > 0 &&
+      !nameMissing &&
+      !keyMissing &&
+      !hasPairCheck
+    ) {
+      throw new ConfigurationError(
+        `SQLite edge table "${edgeTableName}" has match-identity columns without the required nullable-pair CHECK constraint.`,
+        {
+          code: "EDGE_MATCH_IDENTITY_PAIR_CHECK_MISSING",
+          table: edgeTableName,
+        },
+        {
+          suggestion:
+            "Rebuild the edge table with TypeGraph's published schema DDL before retrying privileged base-schema adoption.",
+        },
+      );
+    }
     if (columnRows.length > 0 && nameMissing) {
       await db.run(
         sql.raw(
@@ -1875,8 +1911,61 @@ export function createSqliteBackend(
     }
   }
 
+  async function readBaseSchemaVersion(): Promise<number | undefined> {
+    try {
+      const rows = await db
+        .select({ version: tables.baseSchemaVersions.version })
+        .from(tables.baseSchemaVersions)
+        .where(eq(tables.baseSchemaVersions.installation, 1));
+      return rows.at(0)?.version;
+    } catch (error) {
+      if (isMissingTableError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async function ensureBaseSchemaVersionTable(): Promise<void> {
+    await db.run(
+      sql.raw(generateSqliteCreateTableSQL(tables.baseSchemaVersions)),
+    );
+  }
+
+  async function writeBaseSchemaVersion(version: number): Promise<void> {
+    const marker = tables.baseSchemaVersions;
+    await db
+      .insert(marker)
+      .values({ installation: 1, version, updatedAt: nowIso() })
+      .onConflictDoUpdate({
+        target: marker.installation,
+        set: { version, updatedAt: nowIso() },
+      });
+  }
+
+  async function ensureGraphTemplatesTable(): Promise<void> {
+    await db.run(sql.raw(generateSqliteCreateTableSQL(tables.graphTemplates)));
+  }
+
+  const baseSchemaLifecycle = createBaseSchemaLifecycle({
+    readVersion: readBaseSchemaVersion,
+    ensureVersionTable: ensureBaseSchemaVersionTable,
+    writeVersion: writeBaseSchemaVersion,
+    steps: [
+      {
+        version: 1,
+        async adopt(): Promise<void> {
+          await ensureGraphTemplatesTable();
+          await ensureEdgeMatchIdentityStorage();
+        },
+        adoptAfterBootstrap: ensureEdgeMatchIdentityStorage,
+      },
+    ],
+  });
+
   const backend: AdapterBackend<AnySqliteDatabase> = {
     ...operations,
+
+    adoptBaseSchema: baseSchemaLifecycle.adopt,
+    assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
 
     ...((
       isSync &&
@@ -1911,12 +2000,11 @@ export function createSqliteBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
-      await ensureEdgeMatchIdentityStorage();
-
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
+      await baseSchemaLifecycle.adoptAfterBootstrap();
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {

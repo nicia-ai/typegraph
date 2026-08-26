@@ -2054,6 +2054,8 @@ export type GraphBackend = Readonly<{
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
+    adoptBaseSchema?: (this: void) => Promise<void>;
+    assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
@@ -3373,9 +3375,19 @@ type TypeGraphErrorOptions = Readonly<{
 
 // @public
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
+    readonly adoptBaseSchema: {
+        readonly kind: "reasoned";
+        readonly reason: "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations.";
+        readonly accesses: 2;
+    };
+    readonly assertBaseSchemaCurrent: {
+        readonly kind: "reasoned";
+        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write.";
+        readonly accesses: 3;
+    };
     readonly ensureEdgeMatchIdentityStorage: {
         readonly kind: "reasoned";
-        readonly reason: "Focused privileged base-schema adoption hook. Schema preparation calls its single owner on every open because all edge writes name the nullable columns; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.";
+        readonly reason: "Focused privileged base-schema adoption hook. The versioned base-schema lifecycle calls it only while adopting an unstamped release because all edge writes name the nullable columns; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.";
         readonly accesses: 1;
     };
     readonly claimEdgeCardinalityGuarded: {

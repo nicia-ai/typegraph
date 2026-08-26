@@ -2,11 +2,11 @@
  * `createVerifiedStore` / `assertSchemaCurrent` — the runtime
  * counterpart of `createStoreWithSchema` for the "Database roles &
  * least privilege" deployment model. SELECT-only attach with a
- * verification gate: throws `ConfigurationError` when no schema has
- * been initialized, `MigrationError` when the persisted schema is
- * behind the code graph by **any** change (safe or breaking), and
- * `StoreNotInitializedError` when the schema is current but the
- * runtime-contribution markers are missing.
+ * verification gate: throws `BaseSchemaMigrationError` when deployment-wide
+ * storage has not been adopted, `ConfigurationError` when no graph schema has
+ * been initialized, `MigrationError` when the persisted schema is behind the
+ * code graph by **any** change (safe or breaking), and
+ * `StoreNotInitializedError` when runtime-contribution markers are missing.
  */
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  BaseSchemaMigrationError,
   ConfigurationError,
   createStore,
   createStoreWithSchema,
@@ -152,13 +153,13 @@ describe("createVerifiedStore", () => {
     });
   });
 
-  it("throws ConfigurationError on a fresh database without bootstrapping tables", async () => {
+  it("throws BaseSchemaMigrationError on a fresh database without bootstrapping tables", async () => {
     const backend = freshBackend(sqlite);
     const bootstrapSpy = vi.spyOn(backend, "bootstrapTables");
     const ensureRuntimeSpy = vi.spyOn(backend, "ensureRuntimeContributions");
 
     await expect(createVerifiedStore(graphV1(), backend)).rejects.toThrow(
-      ConfigurationError,
+      BaseSchemaMigrationError,
     );
 
     // Zero-DDL: the runtime path must not bootstrap or materialize.

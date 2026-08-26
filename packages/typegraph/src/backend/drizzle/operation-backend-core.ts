@@ -660,7 +660,7 @@ async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
     if (claims.length > 0 && isMissingTableError(error)) {
       throw edgeClaimRelationMissing(requireDefined(params[0]).graphId, error);
     }
-    throwEdgeInsertStorageUnavailable(error, params);
+    throw error;
   }
 }
 

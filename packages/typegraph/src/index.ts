@@ -352,6 +352,7 @@ export {
 // ============================================================
 
 export type {
+  BaseSchemaMigrationErrorDetails,
   CardinalityErrorDetails,
   ContributionRebuildRefusal,
   ContributionUnavailableErrorDetails,
@@ -393,6 +394,7 @@ export type {
 export {
   // Error classes
   BackendDisposedError,
+  BaseSchemaMigrationError,
   CardinalityError,
   CompilerInvariantError,
   ConfigurationError,

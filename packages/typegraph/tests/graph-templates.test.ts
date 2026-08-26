@@ -85,10 +85,11 @@ describe("graph templates", () => {
         graphId: "tenant-one-statement",
       });
 
-      expect(preparedStatements).toHaveLength(2);
-      expect(preparedStatements[0]).toContain("INSERT INTO");
-      expect(preparedStatements[0]).not.toContain("schema_doc = ?");
-      expect(preparedStatements[1]).toContain(
+      expect(preparedStatements).toHaveLength(3);
+      expect(preparedStatements[0]).toContain("typegraph_base_schema_versions");
+      expect(preparedStatements[1]).toContain("INSERT INTO");
+      expect(preparedStatements[1]).not.toContain("schema_doc = ?");
+      expect(preparedStatements[2]).toContain(
         "typegraph_contribution_materializations",
       );
     } finally {
