@@ -54,6 +54,30 @@ const cardinalityGraph = defineGraph({
     },
   },
 });
+const uniqueCardinalityGraph = defineGraph({
+  id: "atomic-generated-edge-batch-unique-cardinality",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "unique",
+    },
+  },
+});
+const oneActiveCardinalityGraph = defineGraph({
+  id: "atomic-generated-edge-batch-one-active-cardinality",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "oneActive",
+    },
+  },
+});
 const matchIdentityGraph = defineGraph({
   id: "atomic-generated-edge-batch-identity",
   nodes: { Person: { type: Person }, Company: { type: Company } },
@@ -184,7 +208,9 @@ describe("generated edge batch store consumer", () => {
   });
 
   it.each([
-    ["cardinality constraints", cardinalityGraph],
+    ["one cardinality", cardinalityGraph],
+    ["unique cardinality", uniqueCardinalityGraph],
+    ["oneActive cardinality", oneActiveCardinalityGraph],
     ["durable match identity", matchIdentityGraph],
   ] as const)(
     "selects the atomic executor for %s",

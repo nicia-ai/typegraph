@@ -153,7 +153,16 @@ function nullableText(value: string | undefined): SQL {
 }
 
 export type CommonOperationStrategy = Readonly<{
-  edgeClaimsTableName: string;
+  /**
+   * The exact NOT NULL sentinels emitted by the closed edge-batch program.
+   * Derive them from the same table definitions as the SQL so error
+   * classification cannot drift when a physical column is renamed.
+   */
+  atomicEdgeRefusalConstraints: Readonly<{
+    cardinality: Readonly<{ table: string; column: string }>;
+    durableIdentity: Readonly<{ table: string; column: string }>;
+    endpoint: Readonly<{ table: string; column: string }>;
+  }>;
   /**
    * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
    * only scope in which a driver duplicate-key failure means "this identity is
@@ -706,7 +715,20 @@ function createCommonOperationStrategy(
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",
-    edgeClaimsTableName: getTableName(tables.edgeClaims),
+    atomicEdgeRefusalConstraints: {
+      cardinality: {
+        table: getTableName(tables.edgeClaims),
+        column: tables.edgeClaims.axis.name,
+      },
+      durableIdentity: {
+        table: getTableName(tables.edges),
+        column: tables.edges.createdAt.name,
+      },
+      endpoint: {
+        table: getTableName(tables.edges),
+        column: tables.edges.id.name,
+      },
+    },
     buildDeleteStaleAtomicEdgeClaims: (
       entries,
       schemaFence,
