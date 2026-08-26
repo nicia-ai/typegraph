@@ -430,6 +430,23 @@ type AttemptedEdgeMatchIdentity = Readonly<{
   kind: string;
 }>;
 
+function duplicateKeyOperationError(
+  entity: "node" | "edge",
+  attempted: readonly AttemptedInsert[],
+  cause: unknown,
+): DatabaseOperationError {
+  return new DatabaseOperationError(
+    `Insert ${entity} failed: a row with this identity already exists`,
+    {
+      operation: "insert",
+      entity,
+      reason: "duplicate_key",
+      attempted,
+    },
+    { cause },
+  );
+}
+
 /**
  * Runs an insert and converts a PRIMARY KEY duplicate-key refusal into a
  * classified {@link DatabaseOperationError} carrying the rows it attempted.
@@ -457,15 +474,10 @@ async function withDuplicateKeyClassification<T>(
     return await run();
   } catch (error) {
     if (isDuplicatePrimaryKeyError(error, context.relation)) {
-      throw new DatabaseOperationError(
-        `Insert ${context.entity} failed: a row with this identity already exists`,
-        {
-          operation: "insert",
-          entity: context.entity,
-          reason: "duplicate_key",
-          attempted: context.attempted,
-        },
-        { cause: error },
+      throw duplicateKeyOperationError(
+        context.entity,
+        context.attempted,
+        error,
       );
     }
     if (
@@ -531,29 +543,30 @@ async function withAtomicEdgeDurableRefusalClassification<T>(
       attempted !== undefined &&
       isNotNullColumnViolation(error, constraint)
     ) {
-      throw new EdgeMatchIdentityConflictError(
-        { attempted },
-        { cause: error },
-      );
+      throw new EdgeMatchIdentityConflictError({ attempted }, { cause: error });
     }
     throw error;
   }
 }
 
-function assertCompleteAtomicEdgeChunks(
+function assertCompleteAtomicChunks(
   actualCounts: readonly number[],
   expectedChunks: readonly (readonly unknown[])[],
+  entity: "node" | "edge",
 ): void {
-  const mismatchedChunk = actualCounts.findIndex(
-    (count, index) => count !== expectedChunks[index]?.length,
+  const mismatchedChunk = expectedChunks.findIndex(
+    (expectedChunk, index) => actualCounts[index] !== expectedChunk.length,
   );
-  if (mismatchedChunk === -1) return;
+  if (mismatchedChunk === -1 && actualCounts.length === expectedChunks.length) {
+    return;
+  }
+  const slot = mismatchedChunk === -1 ? expectedChunks.length : mismatchedChunk;
   throw new CompilerInvariantError(
-    "Atomic edge batch returned a partial chunk result.",
+    `Atomic ${entity} batch returned a partial chunk result.`,
     {
-      slot: mismatchedChunk,
-      expected: expectedChunks[mismatchedChunk]?.length,
-      actual: actualCounts[mismatchedChunk],
+      slot,
+      expected: expectedChunks[slot]?.length,
+      actual: actualCounts[slot],
     },
   );
 }
@@ -567,9 +580,7 @@ async function withAtomicNodeBatchClassifications<T>(
   entries: readonly AtomicNodeBatchEntry[],
   operationStrategy: CommonOperationStrategy,
 ): Promise<T> {
-  const attempted = attemptedInserts(
-    entries.map((entry) => entry.params),
-  );
+  const attempted = attemptedInserts(entries.map((entry) => entry.params));
   try {
     return await withDuplicateKeyClassification(run, {
       entity: "node",
@@ -584,16 +595,7 @@ async function withAtomicNodeBatchClassifications<T>(
         operationStrategy.atomicNodeRefusalConstraints.liveIdentity,
       )
     ) {
-      throw new DatabaseOperationError(
-        "Insert node failed: a row with this identity already exists",
-        {
-          operation: "insert",
-          entity: "node",
-          reason: "duplicate_key",
-          attempted,
-        },
-        { cause: error },
-      );
+      throw duplicateKeyOperationError("node", attempted, error);
     }
     throw error;
   }
@@ -647,10 +649,7 @@ async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
       );
     }
     if (claims.length > 0 && isMissingTableError(error)) {
-      throw edgeClaimRelationMissing(
-        requireDefined(params[0]).graphId,
-        error,
-      );
+      throw edgeClaimRelationMissing(requireDefined(params[0]).graphId, error);
     }
     throw error;
   }
@@ -1051,19 +1050,7 @@ export function createCommonOperationBackend(
               slots,
               assemble(counts: readonly number[]): number {
                 if (counts.every((count) => count === 0)) return 0;
-                const mismatchedChunk = counts.findIndex(
-                  (count, index) => count !== chunks[index]?.length,
-                );
-                if (mismatchedChunk !== -1) {
-                  throw new CompilerInvariantError(
-                    "Atomic node batch returned a partial chunk result.",
-                    {
-                      slot: mismatchedChunk,
-                      expected: chunks[mismatchedChunk]?.length,
-                      actual: counts[mismatchedChunk],
-                    },
-                  );
-                }
+                assertCompleteAtomicChunks(counts, chunks, "node");
                 return input.entries.length;
               },
             } satisfies AtomicSqlProgram<number, number>;
@@ -1103,11 +1090,7 @@ export function createCommonOperationBackend(
               }
               const byIdentity = new Map<string, NodeRow>();
               for (const row of rows) {
-                const key = encodeTupleKey([
-                  row.graph_id,
-                  row.kind,
-                  row.id,
-                ]);
+                const key = encodeTupleKey([row.graph_id, row.kind, row.id]);
                 if (byIdentity.has(key)) {
                   throw new CompilerInvariantError(
                     "Atomic node batch returned a duplicate result row.",
@@ -1200,9 +1183,7 @@ export function createCommonOperationBackend(
           );
           const atomicEdgeClaimBatchSize = Math.max(
             1,
-            Math.floor(
-              (maxBindParameters - 2) / ATOMIC_EDGE_CLAIM_PARAM_COUNT,
-            ),
+            Math.floor((maxBindParameters - 2) / ATOMIC_EDGE_CLAIM_PARAM_COUNT),
           );
           function appendClaimSlots<TResult>(
             slots: AtomicSqlProgram<TResult, unknown>["slots"][number][],
@@ -1282,7 +1263,7 @@ export function createCommonOperationBackend(
                   requireDefined(slotCounts[index]),
                 );
                 if (counts.every((count) => count === 0)) return 0;
-                assertCompleteAtomicEdgeChunks(counts, chunks);
+                assertCompleteAtomicChunks(counts, chunks, "edge");
                 return counts.reduce((total, count) => total + count, 0);
               },
             } satisfies AtomicSqlProgram<number, number>;
@@ -1314,8 +1295,7 @@ export function createCommonOperationBackend(
                 ),
               ),
               cardinality: "many",
-              decode: (rows) =>
-                rows.map((row) => rowMappers.toEdgeRow(row)),
+              decode: (rows) => rows.map((row) => rowMappers.toEdgeRow(row)),
             });
           }
           const program = {
@@ -1327,9 +1307,10 @@ export function createCommonOperationBackend(
                 requireDefined(slotRows[index]),
               );
               if (rowChunks.every((rows) => rows.length === 0)) return [];
-              assertCompleteAtomicEdgeChunks(
+              assertCompleteAtomicChunks(
                 rowChunks.map((rows) => rows.length),
                 chunks,
+                "edge",
               );
               const inputOrder = new Map(
                 input.params.map((params, index) => [params.id, index]),

@@ -158,6 +158,58 @@ describe("schema-fenced atomic node batch SQL", () => {
     }
   });
 
+  it("uses the SQLite NOT NULL refusal as the live caller-ID duplicate sentinel", () => {
+    const database = new Database(":memory:");
+    try {
+      database.exec(`
+        CREATE TABLE typegraph_nodes (
+          graph_id TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
+          props TEXT NOT NULL, version INTEGER NOT NULL, valid_from TEXT,
+          valid_to TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          deleted_at TEXT, PRIMARY KEY (graph_id, kind, id)
+        );
+        CREATE TABLE typegraph_schema_versions (
+          graph_id TEXT NOT NULL, version INTEGER NOT NULL,
+          schema_hash TEXT NOT NULL, schema_doc TEXT NOT NULL,
+          created_at TEXT NOT NULL, is_active INTEGER NOT NULL,
+          PRIMARY KEY (graph_id, version)
+        );
+        INSERT INTO typegraph_schema_versions VALUES
+          ('graph-1', 7, 'hash', '{}', '2026-08-24T00:00:00.000Z', 1);
+        INSERT INTO typegraph_nodes VALUES
+          ('graph-1', 'Person', 'person-1', '{"old":true}', 3,
+           '2026-08-20T00:00:00.000Z', NULL, '2026-08-19T00:00:00.000Z',
+           '2026-08-21T00:00:00.000Z', NULL);
+      `);
+      const query = new SQLiteSyncDialect().sqlToQuery(
+        buildAtomicNodeBatchWithSchemaFence(
+          sqliteTables,
+          [
+            {
+              idSource: "caller",
+              params: {
+                graphId: "graph-1",
+                kind: "Person",
+                id: "person-1",
+                props: { name: "Duplicate" },
+              },
+            },
+          ],
+          "2026-08-25T00:00:00.000Z",
+          schemaFence,
+          drizzleSql.empty(),
+          "count",
+        ),
+      );
+
+      expect(() => database.prepare(query.sql).all(...query.params)).toThrow(
+        "NOT NULL constraint failed: typegraph_nodes.props",
+      );
+    } finally {
+      database.close();
+    }
+  });
+
   it("executes the caller UPSERT on PostgreSQL and refuses a live incumbent", async () => {
     const client = await PGlite.create();
     try {

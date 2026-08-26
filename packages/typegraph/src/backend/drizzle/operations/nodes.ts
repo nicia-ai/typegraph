@@ -440,7 +440,11 @@ export function buildAtomicNodeBatchWithSchemaFence(
     SELECT ${inputSelect}
     FROM "input_rows"
     CROSS JOIN "schema_fence"
-    ${generated ? sql.empty() : sql`WHERE TRUE`}
+    ${
+      // SQLite needs a WHERE clause to distinguish this INSERT ... SELECT's
+      // trailing UPSERT clause from a join constraint.
+      generated ? sql.empty() : sql`WHERE TRUE`
+    }
     ${generated ? sql.empty() : resurrection}
     ${resultClause}
   `;
