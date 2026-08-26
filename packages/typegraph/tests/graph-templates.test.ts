@@ -29,7 +29,6 @@ const templateGraph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {},
 });
-
 describe("graph templates", () => {
   it("uses one schema-document-free SQLite statement for instantiation", () => {
     const rendered = renderSqlite(
@@ -39,6 +38,8 @@ describe("graph templates", () => {
         schemaHash: "target-hash",
         schemaVersionsTableName: "typegraph_schema_versions",
         templatesTableName: "typegraph_graph_templates",
+        contributionMaterializationsTableName:
+          "typegraph_contribution_materializations",
         templateId: "people-v1",
         templateSchemaHash: "source-hash",
       }),
@@ -57,7 +58,7 @@ describe("graph templates", () => {
     ]);
   });
 
-  it("executes exactly one SQLite statement when instantiating", async () => {
+  it("executes the schema and marker SQLite statements when instantiating", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = (db as unknown as Readonly<{ $client: Database.Database }>)
       .$client;
@@ -84,9 +85,12 @@ describe("graph templates", () => {
         graphId: "tenant-one-statement",
       });
 
-      expect(preparedStatements).toHaveLength(1);
+      expect(preparedStatements).toHaveLength(2);
       expect(preparedStatements[0]).toContain("INSERT INTO");
       expect(preparedStatements[0]).not.toContain("schema_doc = ?");
+      expect(preparedStatements[1]).toContain(
+        "typegraph_contribution_materializations",
+      );
     } finally {
       await backend.close();
     }
@@ -134,7 +138,9 @@ describe("graph templates", () => {
     expect(targetStore.reconciledSchema).toStrictEqual(first.reconciled);
     await expect(
       createVerifiedAdapterStore(targetGraph, backend),
-    ).rejects.toMatchObject({ name: "StoreNotInitializedError" });
+    ).resolves.toMatchObject({
+      0: { reconciledSchema: first.reconciled },
+    });
   });
 
   it("refuses a stale template handle before consulting the backend registry", async () => {

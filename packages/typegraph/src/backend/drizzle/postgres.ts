@@ -1354,9 +1354,6 @@ export function createPostgresBackend(
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {
-      await executeConcurrentCreateDdl(
-        generatePgCreateTableSQL(tables.graphTemplates),
-      );
       const t = tables.graphTemplates;
       await db
         .insert(t)
@@ -1397,6 +1394,9 @@ export function createPostgresBackend(
           schemaHash: params.schemaHash,
           schemaVersionsTableName: getTableName(tables.schemaVersions),
           templatesTableName: getTableName(tables.graphTemplates),
+          contributionMaterializationsTableName: getTableName(
+            tables.contributionMaterializations,
+          ),
           templateId: params.templateId,
           templateSchemaHash: params.templateSchemaHash,
         }),
