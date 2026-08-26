@@ -471,11 +471,11 @@ export function isDuplicatePrimaryKeyError(
 }
 
 /**
- * Whether the engine refused the exact NULL sentinel emitted by the closed
- * edge-batch program. PostgreSQL supplies relation and column protocol fields;
- * SQLite supplies a NOT NULL extended code and identifies the column in its
- * stable constraint report. No other failure is allowed to trigger endpoint
- * diagnostics.
+ * Whether the engine refused a known NOT NULL sentinel emitted by a write
+ * program. PostgreSQL supplies relation and column protocol fields; SQLite
+ * supplies a NOT NULL extended code and identifies the column in its stable
+ * constraint report. No other failure is allowed to trigger a specialized
+ * write diagnostic.
  */
 export function isNotNullColumnViolation(
   error: unknown,

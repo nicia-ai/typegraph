@@ -32,7 +32,7 @@ read-committed isolation, so queries there can also observe interleaved commits.
 
 Write behavior depends on how the Store was constructed. A schema-managed Store
 fails closed for writes that need the transaction-scoped schema or constraint
-fence, but eligible generated-id nodes and `cardinality: "many"` edges can use
+fence, but eligible plain node batches and `cardinality: "many"` edges can use
 the authoritative one-statement command. A raw `createStore()` /
 `createAdapterStore()` without a reconciled snapshot still uses the sequential fallback:
 `store.transaction(fn)` invokes `fn` against the same backend, writes are applied
@@ -307,16 +307,16 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 }
 ```
 
-### Native `bulkInsert` eligibility
+### Native node bulk eligibility
 
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots can use one schema-fenced
-native atomic exchange for `nodes.bulkInsert()` only when every ID is
-generated and the node has no claims, Operational Identity, history, revision,
-or projections. This is an internal optimization, not a general Store batch
-API. Caller-supplied IDs and unsupported shapes retain the existing
-transaction or fallback behavior. Generated-ID node bulk operations also avoid
-the guaranteed-empty existence-priming read; caller-supplied IDs still perform
-their existence checks.
+native atomic exchange for plain schema-managed `nodes.bulkInsert()` and
+`nodes.bulkCreate()` calls when the node has no claims, Operational Identity,
+history, revision, or projections. IDs may be generated, caller-supplied, or
+mixed, and `bulkCreate()` returns rows in input order. This is an internal
+optimization, not a general Store batch API. Constrained, projected,
+identity-enabled, history/revision-tracked, and other unsupported shapes retain
+the existing transaction or fallback behavior.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
 use one schema-fenced native exchange when history and revision capture are

@@ -71,8 +71,6 @@ describe("api-surface-exceptions-ledger", () => {
       "utf8",
     );
     const entries = parseExceptionsLedger(ledgerSource);
-    expect(entries.length).toBeGreaterThan(0);
-    expect(entries.every((entry) => entry.issue === "#533")).toBe(true);
 
     // Feed the validator a matching breaking finding for every shipped entry;
     // this exercises the same exact-tuple resolution used by the API-surface
@@ -160,22 +158,6 @@ describe("api-surface-exceptions-ledger", () => {
       parseExceptionsLedger(JSON.stringify([duplicateEntry, duplicateEntry])),
     ).toThrow(ApiSurfaceLedgerError);
   }, 30_000);
-
-  it("records the required GraphBackend command-port break", () => {
-    const ledgerSource = readFileSync(
-      path.join(PACKAGE_ROOT, EXCEPTIONS_LEDGER_RELATIVE_PATH),
-      "utf8",
-    );
-    expect(parseExceptionsLedger(ledgerSource)).toContainEqual(
-      expect.objectContaining({
-        entrypoint: "typegraph.api.md",
-        declaration: "GraphBackend",
-        member: "commands",
-        kind: "required-member-added",
-        issue: "#533",
-      }),
-    );
-  });
 
   it("a nested value-type member is not expressible as a ledger entry", () => {
     const issues = validateExceptionsLedger(

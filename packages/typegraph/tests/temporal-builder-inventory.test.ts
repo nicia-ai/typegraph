@@ -47,20 +47,21 @@ const COLUMN_MENTION = /validFrom|valid_from/;
 /**
  * The writer files, with the exact number of call sites of each owner.
  *
- * `operations/nodes.ts` has nine stamping sites: `buildUpdateNode`'s
+ * `operations/nodes.ts` has ten stamping sites: `buildUpdateNode`'s
  * `clearDeleted` leg RESETS the window rather than retaining it, so it chooses a
  * bound exactly as an insert does — and it is reachable unguarded from a `create`
  * whose id names an existing tombstone. The insert-if-absent fast path is a
  * separate INSERT builder and therefore owns its stamped lower bound too. The
- * three schema-fenced INSERT builders retain that same ownership because their
- * `INSERT ... SELECT` changes the admission predicate, not the write instant.
+ * three schema-fenced INSERT builders and the atomic batch builder retain that
+ * same ownership because their admission predicates do not choose the write
+ * instant.
  *
  * `operations/edges.ts` has seven and ONE pass-through: an edge resurrection that
  * names no `validFrom` retains the stored window instead of stamping, so its
  * window-writing leg only runs when the caller stated a bound.
  */
 const WRITER_INVENTORY = {
-  "drizzle/operations/nodes.ts": { stamping: 9, stated: 0 },
+  "drizzle/operations/nodes.ts": { stamping: 10, stated: 0 },
   "drizzle/operations/node-projections.ts": { stamping: 1, stated: 0 },
   "drizzle/operations/edges.ts": { stamping: 7, stated: 1 },
   "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
@@ -90,6 +91,11 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     // The compare-and-set fence's column argument — a READ of the bound the
     // caller asserted, never a choice about what to store.
     "nodes.validFrom,",
+    // The atomic upsert's incumbent read, assignment target, and excluded-row
+    // forwarding expression. The VALUES tuple above owns the stamped bound.
+    "const currentValidFrom = qualifiedColumn(targetAlias, nodes.validFrom);",
+    "${quotedColumn(nodes.validFrom)} = CASE",
+    "ELSE ${excluded(nodes.validFrom)}",
   ],
   "drizzle/operations/edges.ts": [
     // The gate that makes the site below a pass-through: it runs only when the
@@ -120,7 +126,7 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
 const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/operations/edge-claims.ts":
     "writer — fused cardinality claim and edge insert",
-  "drizzle/operations/nodes.ts": "writer — nine stamping sites",
+  "drizzle/operations/nodes.ts": "writer — ten stamping sites",
   "drizzle/operations/node-projections.ts":
     "writer — one planned node insert after unified admission gating",
   "drizzle/operations/edges.ts":

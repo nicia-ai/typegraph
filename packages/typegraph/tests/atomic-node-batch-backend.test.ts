@@ -3,12 +3,28 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, type Mock, vi } from "vitest";
 
-import { resolveBundledRootGeneratedNodeBatch } from "../src/backend/capabilities/generated-node-batch";
+import { resolveBundledRootAtomicNodeBatch } from "../src/backend/capabilities/atomic-node-batch";
 import type { AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { D1_MAX_BIND_PARAMETERS } from "../src/backend/types";
+import { CompilerInvariantError } from "../src/errors";
+
+function nodeResultRow(id: string): Record<string, unknown> {
+  return {
+    graph_id: "graph-1",
+    kind: "Person",
+    id,
+    props: { name: id },
+    version: 1,
+    valid_from: undefined,
+    valid_to: undefined,
+    created_at: "2026-08-25T00:00:00.000Z",
+    updated_at: "2026-08-25T00:00:00.000Z",
+    deleted_at: undefined,
+  };
+}
 
 type NeonRows =
   | readonly Record<string, unknown>[]
@@ -51,28 +67,120 @@ function makeNeonDatabase(rows: NeonRows): Readonly<{
   return { db, query, transaction };
 }
 
-describe("bundled root generated node batch", () => {
-  it("compiles, maps, and dispatches through one Neon atomic exchange", async () => {
-    const { db, query, transaction } = makeNeonDatabase([{ inserted: 1 }]);
+describe("bundled root atomic node batch", () => {
+  it.each([
+    {
+      label: "a partial row result",
+      rows: [nodeResultRow("person-1")],
+      message: "Atomic node batch returned a partial row result",
+    },
+    {
+      label: "a duplicate result row",
+      rows: [nodeResultRow("person-1"), nodeResultRow("person-1")],
+      message: "Atomic node batch returned a duplicate result row",
+    },
+    {
+      label: "a row outside the input set",
+      rows: [nodeResultRow("outside-1"), nodeResultRow("outside-2")],
+      message: "Atomic node batch returned a row outside its input set",
+    },
+  ])("fails closed on $label", async ({ rows, message }) => {
+    const { db, query } = makeNeonDatabase(rows);
     const backend = createPostgresBackend(db, { vector: false });
-    const executeGeneratedNodeBatch =
-      resolveBundledRootGeneratedNodeBatch(backend);
-
-    expect(executeGeneratedNodeBatch).toBeDefined();
-    if (executeGeneratedNodeBatch === undefined) {
-      throw new Error("Expected generated node batch capability");
+    const executeAtomicNodeBatch = resolveBundledRootAtomicNodeBatch(backend);
+    if (executeAtomicNodeBatch === undefined) {
+      throw new Error("Expected atomic node batch capability");
     }
 
-    await expect(
-      executeGeneratedNodeBatch({
-        params: [
-          {
+    const failure = executeAtomicNodeBatch({
+      entries: [
+        {
+          idSource: "generated",
+          params: {
             graphId: "graph-1",
             kind: "Person",
             id: "person-1",
             props: { name: "Alice" },
           },
+        },
+        {
+          idSource: "generated",
+          params: {
+            graphId: "graph-1",
+            kind: "Person",
+            id: "person-2",
+            props: { name: "Bob" },
+          },
+        },
+      ],
+      resultMode: "rows",
+      schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+    });
+    await expect(failure).rejects.toBeInstanceOf(CompilerInvariantError);
+    await expect(failure).rejects.toThrow(message);
+    expect(query).toHaveBeenCalledOnce();
+  });
+
+  it("classifies a PostgreSQL live caller-ID conflict as a duplicate key", async () => {
+    const { db, query } = makeNeonDatabase([]);
+    const backend = createPostgresBackend(db, { vector: false });
+    const executor = resolveBundledRootAtomicNodeBatch(backend);
+    if (executor === undefined) {
+      throw new Error("Expected Neon atomic node batch capability");
+    }
+    query.mockRejectedValueOnce(
+      Object.assign(new Error("null value in column props"), {
+        code: "23502",
+        table: "typegraph_nodes",
+        column: "props",
+      }),
+    );
+
+    await expect(
+      executor({
+        entries: [
+          {
+            idSource: "caller",
+            params: {
+              graphId: "graph-1",
+              kind: "Person",
+              id: "person-1",
+              props: { name: "Alice" },
+            },
+          },
         ],
+        resultMode: "count",
+        schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+      }),
+    ).rejects.toMatchObject({
+      details: { reason: "duplicate_key" },
+    });
+  });
+
+  it("compiles, maps, and dispatches through one Neon atomic exchange", async () => {
+    const { db, query, transaction } = makeNeonDatabase([{ inserted: 1 }]);
+    const backend = createPostgresBackend(db, { vector: false });
+    const executeAtomicNodeBatch = resolveBundledRootAtomicNodeBatch(backend);
+
+    expect(executeAtomicNodeBatch).toBeDefined();
+    if (executeAtomicNodeBatch === undefined) {
+      throw new Error("Expected atomic node batch capability");
+    }
+
+    await expect(
+      executeAtomicNodeBatch({
+        entries: [
+          {
+            idSource: "generated",
+            params: {
+              graphId: "graph-1",
+              kind: "Person",
+              id: "person-1",
+              props: { name: "Alice" },
+            },
+          },
+        ],
+        resultMode: "count",
         schemaFence: { graphId: "graph-1", expectedVersion: 1 },
       }),
     ).resolves.toBe(1);
@@ -85,22 +193,25 @@ describe("bundled root generated node batch", () => {
   it("returns no rows when the schema fence gates the insert", async () => {
     const { db, query } = makeNeonDatabase([]);
     const backend = createPostgresBackend(db, { vector: false });
-    const executeGeneratedNodeBatch =
-      resolveBundledRootGeneratedNodeBatch(backend);
-    if (executeGeneratedNodeBatch === undefined) {
-      throw new Error("Expected generated node batch capability");
+    const executeAtomicNodeBatch = resolveBundledRootAtomicNodeBatch(backend);
+    if (executeAtomicNodeBatch === undefined) {
+      throw new Error("Expected atomic node batch capability");
     }
 
     await expect(
-      executeGeneratedNodeBatch({
-        params: [
+      executeAtomicNodeBatch({
+        entries: [
           {
-            graphId: "graph-1",
-            kind: "Person",
-            id: "person-1",
-            props: { name: "Alice" },
+            idSource: "generated",
+            params: {
+              graphId: "graph-1",
+              kind: "Person",
+              id: "person-1",
+              props: { name: "Alice" },
+            },
           },
         ],
+        resultMode: "count",
         schemaFence: { graphId: "graph-1", expectedVersion: 99 },
       }),
     ).resolves.toBe(0);
@@ -123,20 +234,23 @@ describe("bundled root generated node batch", () => {
       capabilities: { maxBindParameters: 100 },
       vector: false,
     });
-    const executeGeneratedNodeBatch =
-      resolveBundledRootGeneratedNodeBatch(backend);
-    if (executeGeneratedNodeBatch === undefined) {
-      throw new Error("Expected generated node batch capability");
+    const executeAtomicNodeBatch = resolveBundledRootAtomicNodeBatch(backend);
+    if (executeAtomicNodeBatch === undefined) {
+      throw new Error("Expected atomic node batch capability");
     }
 
     await expect(
-      executeGeneratedNodeBatch({
-        params: Array.from({ length: 11 }, (_, index) => ({
-          graphId: "graph-1",
-          kind: "Person",
-          id: `person-${index}`,
-          props: { name: `Person ${index}` },
+      executeAtomicNodeBatch({
+        entries: Array.from({ length: 11 }, (_, index) => ({
+          idSource: "generated" as const,
+          params: {
+            graphId: "graph-1",
+            kind: "Person",
+            id: `person-${index}`,
+            props: { name: `Person ${index}` },
+          },
         })),
+        resultMode: "count",
         schemaFence: { graphId: "graph-1", expectedVersion: 1 },
       }),
     ).resolves.toBe(11);
@@ -189,22 +303,25 @@ describe("bundled root generated node batch", () => {
       run: vi.fn(() => Promise.resolve()),
     } as unknown as AnySqliteDatabase;
     const backend = createSqliteBackend(db);
-    const executeGeneratedNodeBatch =
-      resolveBundledRootGeneratedNodeBatch(backend);
-    if (executeGeneratedNodeBatch === undefined) {
-      throw new Error("Expected D1 generated node batch capability");
+    const executeAtomicNodeBatch = resolveBundledRootAtomicNodeBatch(backend);
+    if (executeAtomicNodeBatch === undefined) {
+      throw new Error("Expected D1 atomic node batch capability");
     }
 
     expect(backend.capabilities.transactions).toBe(false);
     expect(backend.capabilities.maxBindParameters).toBe(D1_MAX_BIND_PARAMETERS);
     await expect(
-      executeGeneratedNodeBatch({
-        params: Array.from({ length: 11 }, (_, index) => ({
-          graphId: "graph-1",
-          kind: "Person",
-          id: `person-${index}`,
-          props: { name: `Person ${index}` },
+      executeAtomicNodeBatch({
+        entries: Array.from({ length: 11 }, (_, index) => ({
+          idSource: "generated" as const,
+          params: {
+            graphId: "graph-1",
+            kind: "Person",
+            id: `person-${index}`,
+            props: { name: `Person ${index}` },
+          },
         })),
+        resultMode: "count",
         schemaFence: { graphId: "graph-1", expectedVersion: 1 },
       }),
     ).resolves.toBe(11);
@@ -234,13 +351,17 @@ describe("bundled root generated node batch", () => {
       },
     ]);
     await expect(
-      executeGeneratedNodeBatch({
-        params: Array.from({ length: 11 }, (_, index) => ({
-          graphId: "graph-1",
-          kind: "Person",
-          id: `second-person-${index}`,
-          props: { name: `Second person ${index}` },
+      executeAtomicNodeBatch({
+        entries: Array.from({ length: 11 }, (_, index) => ({
+          idSource: "generated" as const,
+          params: {
+            graphId: "graph-1",
+            kind: "Person",
+            id: `second-person-${index}`,
+            props: { name: `Second person ${index}` },
+          },
         })),
+        resultMode: "count",
         schemaFence: { graphId: "graph-1", expectedVersion: 1 },
       }),
     ).rejects.toThrow("Atomic node batch returned a partial chunk result");

@@ -709,12 +709,13 @@ Undeclared dynamic matches retain the fenced portable path and fail closed when
 a backend cannot provide it.
 
 For ingestion, bundled Neon HTTP, Cloudflare D1, and libSQL roots have a
-narrower native path for `nodes.bulkInsert()`: a batch whose IDs are all
-generated, with no claims, Operational Identity, history, revision, or
-projections, can run as one schema-fenced atomic exchange. This is an internal
-implementation detail, not a general Store batch surface. Caller-supplied IDs
-and unsupported shapes keep the existing transaction or fallback path, and
-`bulkCreate()` remains the result-returning API.
+narrower native path for plain schema-managed `nodes.bulkInsert()` and
+`nodes.bulkCreate()`: generated, caller-supplied, or mixed IDs can run as one
+schema-fenced atomic exchange when there are no claims, Operational Identity,
+history, revision, or projections. `bulkCreate()` restores rows to input order.
+This is an internal implementation detail, not a general Store batch surface.
+Constrained, projected, identity-enabled, history/revision-tracked, and other
+unsupported shapes keep the existing transaction or fallback path.
 
 Keep these guarantees distinct:
 

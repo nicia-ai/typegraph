@@ -1,7 +1,7 @@
 import { type SQL as DrizzleSql, sql } from "drizzle-orm";
 import { type BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
-import { ConfigurationError } from "../../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../../errors";
 import { isSqlFragment } from "../../../query/sql-fragment";
 import {
   D1_MAX_BIND_PARAMETERS,
@@ -167,11 +167,19 @@ function isD1Client(client: unknown): client is D1Client {
 }
 
 function rowsFromBatchResult(result: unknown): readonly unknown[] {
-  if (typeof result !== "object" || result === null) return [];
+  if (typeof result !== "object" || result === null) {
+    throw new CompilerInvariantError(
+      "SQLite atomic batch returned a malformed result slot.",
+      { resultType: typeof result },
+    );
+  }
   const candidate = result as Readonly<Record<string, unknown>>;
   if (Array.isArray(candidate["results"])) return candidate["results"];
   if (Array.isArray(candidate["rows"])) return candidate["rows"];
-  return [];
+  throw new CompilerInvariantError(
+    "SQLite atomic batch returned a result slot without rows.",
+    { keys: Object.keys(candidate) },
+  );
 }
 
 function assertBatchStatementWithinBindLimit(

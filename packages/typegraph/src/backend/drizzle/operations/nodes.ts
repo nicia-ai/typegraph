@@ -1,8 +1,13 @@
 import { type SQL, sql } from "drizzle-orm";
 
+import { CompilerInvariantError } from "../../../errors";
 import { getDialect } from "../../../query/dialect";
 import { sql as portableSql } from "../../../query/sql-fragment";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
+import type {
+  AtomicNodeBatchEntry,
+  AtomicNodeBatchResultMode,
+} from "../../capabilities/atomic-node-batch";
 import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
@@ -20,6 +25,13 @@ import {
   sqlNull,
   type Tables,
 } from "./shared";
+
+function qualifiedColumn(
+  alias: string,
+  column: Readonly<{ name: string }>,
+): SQL {
+  return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
+}
 
 /**
  * Builds an INSERT query for a node.
@@ -296,6 +308,145 @@ export function buildInsertNodesBatchWithSchemaFence(
     FROM "input_rows"
     CROSS JOIN "schema_fence"
     RETURNING 1 AS "inserted"
+  `;
+}
+
+/**
+ * Builds one schema-fenced atomic node batch statement.
+ *
+ * Generated identities use a plain INSERT. Caller identities use one
+ * conflict-arbitrated upsert: tombstones are resurrected, while a live
+ * incumbent assigns NULL to the NOT NULL `props` column. That deliberate
+ * engine refusal is classified by the backend as a duplicate node identity,
+ * and the native batch rolls back every earlier statement.
+ */
+export function buildAtomicNodeBatchWithSchemaFence(
+  tables: Tables,
+  entries: readonly AtomicNodeBatchEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+  resultMode: AtomicNodeBatchResultMode,
+): SQL {
+  const firstEntry = entries[0];
+  if (firstEntry === undefined) {
+    throw new CompilerInvariantError(
+      "An atomic node batch statement needs at least one entry.",
+    );
+  }
+  if (!entries.every((entry) => entry.idSource === firstEntry.idSource)) {
+    throw new CompilerInvariantError(
+      "An atomic node batch statement cannot mix identity sources.",
+    );
+  }
+  const generated = firstEntry.idSource === "generated";
+  const { nodes, schemaVersions } = tables;
+  const columns = nodeColumnList(nodes);
+  const inputColumns = [
+    nodes.graphId,
+    nodes.kind,
+    nodes.id,
+    nodes.props,
+    nodes.version,
+    nodes.validFrom,
+    nodes.validTo,
+    nodes.createdAt,
+    nodes.updatedAt,
+  ];
+  const inputColumnList = sql.raw(
+    inputColumns
+      .map((column) => `"${column.name.replaceAll('"', '""')}"`)
+      .join(", "),
+  );
+  const inputSelect = sql.join(
+    inputColumns.map((column) =>
+      sql.raw(`"input_rows"."${column.name.replaceAll('"', '""')}"`),
+    ),
+    sql`, `,
+  );
+  const values = entries.map((entry) => {
+    const nodeParams = entry.params;
+    const propsJson = JSON.stringify(nodeParams.props);
+    return sql`
+      (
+        ${castBoundValueForColumn(nodes.graphId, nodeParams.graphId)},
+        ${castBoundValueForColumn(nodes.kind, nodeParams.kind)},
+        ${castBoundValueForColumn(nodes.id, nodeParams.id)},
+        ${castBoundValueForColumn(nodes.props, propsJson)},
+        ${castBoundValueForColumn(nodes.version, 1)},
+        ${castBoundValueForColumn(nodes.validFrom, sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp)))},
+        ${castBoundValueForColumn(nodes.validTo, sqlNull(nodeParams.validTo))},
+        ${castBoundValueForColumn(nodes.createdAt, timestamp)},
+        ${castBoundValueForColumn(nodes.updatedAt, timestamp)}
+      )
+    `;
+  });
+  const resultClause =
+    resultMode === "rows" ? sql`RETURNING *` : sql`RETURNING 1 AS "inserted"`;
+  const conflictColumns = sql.join(
+    [nodes.graphId, nodes.kind, nodes.id].map((column) =>
+      sql.identifier(column.name),
+    ),
+    sql`, `,
+  );
+  const targetAlias = "atomic_node_target";
+  const currentVersion = qualifiedColumn(targetAlias, nodes.version);
+  const currentValidFrom = qualifiedColumn(targetAlias, nodes.validFrom);
+  const currentValidTo = qualifiedColumn(targetAlias, nodes.validTo);
+  const currentDeletedAt = qualifiedColumn(targetAlias, nodes.deletedAt);
+  const currentUpdatedAt = qualifiedColumn(targetAlias, nodes.updatedAt);
+  const excluded = (column: Readonly<{ name: string }>): SQL =>
+    sql.raw(`"excluded"."${column.name.replaceAll('"', '""')}"`);
+  const resurrection = sql`
+    ON CONFLICT (${conflictColumns}) DO UPDATE SET
+      ${quotedColumn(nodes.props)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN NULL
+        ELSE ${excluded(nodes.props)}
+      END,
+      ${quotedColumn(nodes.version)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentVersion}
+        ELSE ${currentVersion} + 1
+      END,
+      ${quotedColumn(nodes.validFrom)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentValidFrom}
+        ELSE ${excluded(nodes.validFrom)}
+      END,
+      ${quotedColumn(nodes.validTo)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentValidTo}
+        ELSE ${excluded(nodes.validTo)}
+      END,
+      ${quotedColumn(nodes.deletedAt)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentDeletedAt}
+        ELSE NULL
+      END,
+      ${quotedColumn(nodes.updatedAt)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentUpdatedAt}
+        ELSE ${excluded(nodes.updatedAt)}
+      END
+  `;
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    ), "input_rows" (${inputColumnList}) AS (
+      VALUES ${sql.join(values, sql`, `)}
+    )
+    INSERT INTO ${nodes} AS ${sql.identifier(targetAlias)} (${columns})
+    SELECT ${inputSelect}
+    FROM "input_rows"
+    CROSS JOIN "schema_fence"
+    ${
+      // SQLite needs a WHERE clause to distinguish this INSERT ... SELECT's
+      // trailing UPSERT clause from a join constraint.
+      generated ? sql.empty() : sql`WHERE TRUE`
+    }
+    ${generated ? sql.empty() : resurrection}
+    ${resultClause}
   `;
 }
 

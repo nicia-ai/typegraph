@@ -71,7 +71,7 @@ describe("managed write exchange inventory", () => {
       }
 
       const measurements = [
-        await measure("generated-node-batch", () =>
+        await measure("atomic-node-batch", () =>
           store.nodes.Person.bulkInsert([
             { props: { name: "Generated A" } },
             { props: { name: "Generated B" } },
@@ -81,6 +81,33 @@ describe("managed write exchange inventory", () => {
           store.nodes.Person.bulkInsert([
             { id: "caller-a", props: { name: "Caller A" } },
             { id: "caller-b", props: { name: "Caller B" } },
+          ]),
+        ),
+        await measure("mixed-id-node-batch", () =>
+          store.nodes.Person.bulkInsert([
+            { props: { name: "Mixed Generated" } },
+            { id: "mixed-caller", props: { name: "Mixed Caller" } },
+          ]),
+        ),
+        await measure("generated-node-create-batch", () =>
+          store.nodes.Person.bulkCreate([
+            { props: { name: "Created Generated A" } },
+            { props: { name: "Created Generated B" } },
+          ]),
+        ),
+        await measure("caller-id-node-create-batch", () =>
+          store.nodes.Person.bulkCreate([
+            { id: "create-caller-a", props: { name: "Created Caller A" } },
+            { id: "create-caller-b", props: { name: "Created Caller B" } },
+          ]),
+        ),
+        await measure("mixed-id-node-create-batch", () =>
+          store.nodes.Person.bulkCreate([
+            { props: { name: "Created Mixed Generated" } },
+            {
+              id: "create-mixed-caller",
+              props: { name: "Created Mixed Caller" },
+            },
           ]),
         ),
         await measure("unconstrained-edge-batch", () =>
@@ -107,12 +134,32 @@ describe("managed write exchange inventory", () => {
           {
             "batch": 1,
             "execute": 0,
-            "name": "generated-node-batch",
+            "name": "atomic-node-batch",
           },
           {
-            "batch": 0,
-            "execute": 5,
+            "batch": 1,
+            "execute": 0,
             "name": "caller-id-node-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "mixed-id-node-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "generated-node-create-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "caller-id-node-create-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "mixed-id-node-create-batch",
           },
           {
             "batch": 1,
