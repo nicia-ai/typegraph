@@ -1338,16 +1338,15 @@ export function createPostgresBackend(
   async function writeBaseSchemaVersion(version: number): Promise<boolean> {
     const marker = tables.baseSchemaVersions;
     const timestamp = new Date();
-    const rows = await db
+    await db
       .insert(marker)
       .values({ installation: 1, version, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: marker.installation,
         set: { version, updatedAt: timestamp },
         setWhere: lte(marker.version, version),
-      })
-      .returning({ version: marker.version });
-    return rows[0]?.version === version;
+      });
+    return (await readBaseSchemaVersion()) === version;
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {
