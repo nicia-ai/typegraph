@@ -1,6 +1,6 @@
 import { BaseSchemaMigrationError, CompilerInvariantError } from "../../errors";
 
-const CURRENT_BASE_SCHEMA_VERSION = 1;
+export const CURRENT_BASE_SCHEMA_VERSION = 1;
 
 export type BaseSchemaLifecycle = Readonly<{
   adopt(): Promise<void>;
@@ -38,10 +38,16 @@ function migrationError(
   installedVersion: number | undefined,
 ): BaseSchemaMigrationError {
   const state = classifyVersion(installedVersion);
+  if (state === "current") {
+    throw new CompilerInvariantError(
+      "A current base schema version cannot require migration.",
+      { installedVersion, requiredVersion: CURRENT_BASE_SCHEMA_VERSION },
+    );
+  }
   return new BaseSchemaMigrationError({
     installedVersion,
     requiredVersion: CURRENT_BASE_SCHEMA_VERSION,
-    reason: state === "current" ? "stale" : state,
+    reason: state,
   });
 }
 

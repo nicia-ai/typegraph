@@ -29,6 +29,7 @@ import {
   type StrategyTableContribution,
   type TableContribution,
 } from "../table-contribution";
+import { CURRENT_BASE_SCHEMA_VERSION } from "./base-schema";
 import {
   type PostgresTables,
   tables as postgresTables,
@@ -49,6 +50,14 @@ const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
 
 function quoteDdlIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+/** Publishes the lifecycle version owned by a complete installation script. */
+function generateBaseSchemaVersionMarkerSQL(tableName: string): string {
+  const table = quoteDdlIdentifier(tableName);
+  return `INSERT INTO ${table} ("installation", "version", "updated_at")
+VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION)}, CURRENT_TIMESTAMP)
+ON CONFLICT ("installation") DO NOTHING;`;
 }
 
 /** Identifier-preserving text accepted by PostgreSQL's `regclass` input. */
@@ -417,7 +426,11 @@ export function generateSqliteMigrationSQL(
   tables: SqliteTables = sqliteTables,
   fulltextStrategy: FulltextStrategy = fts5Strategy,
 ): string {
-  return generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
+  const ddlSql = generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
+  const markerSql = generateBaseSchemaVersionMarkerSQL(
+    getSqliteTableConfig(tables.baseSchemaVersions).name,
+  );
+  return `${ddlSql}\n\n${markerSql}`;
 }
 
 // ============================================================
@@ -624,6 +637,26 @@ export function generatePostgresDDL(
   );
 }
 
+/** Builds complete PostgreSQL installation SQL for a bundled factory profile. */
+function generatePostgresInstallationSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  includeVectorExtension: boolean,
+): string {
+  // pgvector extension is required for the per-field embedding tables
+  const extensionSql =
+    includeVectorExtension ?
+      "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;"
+    : undefined;
+  const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
+  const markerSql = generateBaseSchemaVersionMarkerSQL(
+    getPgTableConfig(tables.baseSchemaVersions).name,
+  );
+  return [extensionSql, ddlSql, markerSql]
+    .filter((statement) => statement !== undefined)
+    .join("\n\n");
+}
+
 /**
  * Generates complete PostgreSQL installation DDL for a fresh database.
  * This is not an incremental upgrade planner.
@@ -636,9 +669,13 @@ export function generatePostgresMigrationSQL(
   tables: PostgresTables = postgresTables,
   fulltextStrategy: FulltextStrategy = tsvectorStrategy,
 ): string {
-  // pgvector extension is required for the per-field embedding tables
-  const extensionSql =
-    "-- Enable pgvector extension for vector similarity search\nCREATE EXTENSION IF NOT EXISTS vector;";
-  const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
-  return `${extensionSql}\n\n${ddlSql}`;
+  return generatePostgresInstallationSQL(tables, fulltextStrategy, true);
+}
+
+/** @internal Complete installation SQL for the vector-disabled PGlite factory. */
+export function generateVectorlessPostgresMigrationSQL(
+  tables: PostgresTables = postgresTables,
+  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+): string {
+  return generatePostgresInstallationSQL(tables, fulltextStrategy, false);
 }

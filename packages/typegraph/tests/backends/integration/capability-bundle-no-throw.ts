@@ -8,10 +8,10 @@
  * `ConfigurationError` whose `code` the registry declares on the override
  * rows.
  *
- * Construction only — no query runs — so a `drizzle-orm/sqlite-proxy` stub
- * suffices for SQLite and one shared PGlite client (no Docker lane) for
- * PostgreSQL, chosen off `context.getBackend().dialect`. The precedent and
- * its justification are `tests/capability-declaration-validation.test.ts:1-38`.
+ * Construction only — no query runs — so the Drizzle SQLite and PostgreSQL
+ * proxy adapters suffice. Using a live PGlite client here made this pure
+ * capability test inherit database startup latency in every host integration
+ * suite that registers it.
  *
  * SCOPE NOTE: the `vector` dimension is fixed at each dialect's DEFAULT
  * (unset for SQLite, `pgvectorStrategy` for PostgreSQL) rather than swept —
@@ -19,8 +19,7 @@
  * SQLite lane would exercise the strategy's own shape rather than the bundle
  * model this test targets, and no pilot bundle reads `capabilities.vector`.
  */
-import { PGlite } from "@electric-sql/pglite";
-import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import { drizzle as drizzlePgProxy } from "drizzle-orm/pg-proxy";
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { describe, expect, it } from "vitest";
 
@@ -118,7 +117,7 @@ function buildSqliteBackends(): readonly Readonly<{
   return rows;
 }
 
-function buildPostgresBackends(pgliteClient: PGlite): readonly Readonly<{
+function buildPostgresBackends(): readonly Readonly<{
   label: string;
   overrideKey: CapabilityOverrideKey;
   backend: GraphBackend;
@@ -131,10 +130,13 @@ function buildPostgresBackends(pgliteClient: PGlite): readonly Readonly<{
   for (const fulltext of [undefined, tsvectorStrategy]) {
     for (const windowFunctions of [true, false]) {
       for (const overrideKey of OVERRIDES) {
-        const base = createPostgresBackend(drizzlePglite(pgliteClient), {
-          vector: false,
-          ...(fulltext === undefined ? {} : { fulltext }),
-        });
+        const base = createPostgresBackend(
+          drizzlePgProxy(() => Promise.resolve({ rows: [] })),
+          {
+            vector: false,
+            ...(fulltext === undefined ? {} : { fulltext }),
+          },
+        );
         const capabilities = {
           ...base.capabilities,
           windowFunctions,
@@ -169,19 +171,10 @@ export function registerCapabilityBundleNoThrowIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("capability bundle construction never throws unexpectedly (T9b)", () => {
-    it("resolves all six bundles against the factory matrix", async () => {
+    it("resolves all six bundles against the factory matrix", () => {
       const dialect = context.getBackend().dialect;
       const rows =
-        dialect === "sqlite" ?
-          buildSqliteBackends()
-        : await (async () => {
-            const pgliteClient = await PGlite.create();
-            try {
-              return buildPostgresBackends(pgliteClient);
-            } finally {
-              await pgliteClient.close();
-            }
-          })();
+        dialect === "sqlite" ? buildSqliteBackends() : buildPostgresBackends();
 
       const decisions: Readonly<{ label: string; outcome: string }>[] = [];
       for (const row of rows) {

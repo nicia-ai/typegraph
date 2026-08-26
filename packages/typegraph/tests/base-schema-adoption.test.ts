@@ -1,5 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
-import type Database from "better-sqlite3";
+import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
+import Database from "better-sqlite3";
+import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -19,13 +21,17 @@ import {
   edgeMatchIdentityPairCheckName,
   edgeMatchIdentityUniqueIndexName,
   generatePostgresDDL,
+  generatePostgresMigrationSQL,
+  generateSqliteMigrationSQL,
 } from "../src/backend/drizzle/ddl";
 import {
   createPostgresBackend,
   createPostgresTables,
 } from "../src/backend/postgres";
-import { createSqliteTables } from "../src/backend/sqlite";
+import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
+import { createSqliteBackend, createSqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -106,6 +112,60 @@ function reconciledSurface(
 
 describe("deployment-wide base-schema adoption", () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it("publishes the current marker in generated SQLite installation SQL", async () => {
+    const tableNames = {
+      baseSchemaVersions: "generated_base_schema_versions",
+    } as const;
+    const tables = createSqliteTables(tableNames);
+    const client = new Database(":memory:");
+    client.exec(generateSqliteMigrationSQL(tables));
+    const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
+      executionProfile: { isSync: true },
+      tables,
+    });
+    try {
+      await requireDefined(backend.assertBaseSchemaCurrent)();
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(1);
+    } finally {
+      await backend.close();
+      client.close();
+    }
+  });
+
+  it("publishes the current marker in generated PostgreSQL installation SQL", async () => {
+    const tableNames = {
+      baseSchemaVersions: "generated_base_schema_versions",
+    } as const;
+    const tables = createPostgresTables(tableNames);
+    const client = await PGlite.create({
+      extensions: { vector: pgvectorExtension },
+    });
+    await client.exec(generatePostgresMigrationSQL(tables));
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      tables,
+      vector: false,
+    });
+    try {
+      await requireDefined(backend.assertBaseSchemaCurrent)();
+      const marker = await client.query<{ version: number }>(
+        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      );
+      expect(marker.rows).toEqual([{ version: 1 }]);
+    } finally {
+      await backend.close();
+      await client.close();
+    }
+  });
+
+  it("publishes the current marker for vector-disabled local PGlite", async () => {
+    const { backend } = await createLocalPgliteBackend({ vector: false });
+    try {
+      await requireDefined(backend.assertBaseSchemaCurrent)();
+    } finally {
+      await backend.close();
+    }
+  });
 
   it("adopts a legacy SQLite installation and registers templates", async () => {
     const tableNames = {
@@ -378,11 +438,7 @@ describe("deployment-wide base-schema adoption", () => {
         return prepare(source);
       });
 
-      await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
-        (error: unknown) =>
-          error instanceof BaseSchemaMigrationError &&
-          error.details.reason === "newer",
-      );
+      await expect(backend.bootstrapTables?.()).resolves.toBeUndefined();
       expect(publishedNewerMarker).toBe(true);
       expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(2);
     } finally {

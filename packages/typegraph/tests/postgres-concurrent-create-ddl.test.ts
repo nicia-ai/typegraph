@@ -118,6 +118,8 @@ function stubPostgresDatabase(
     insert: () => ({
       values: (values: Readonly<Record<string, unknown>>) => ({
         onConflictDoUpdate: () => {
+          // This DDL-retry stub is not the marker-protocol specification;
+          // base-schema-adoption.test.ts owns monotonic race coverage.
           if (
             values["installation"] === 1 &&
             typeof values["version"] === "number"

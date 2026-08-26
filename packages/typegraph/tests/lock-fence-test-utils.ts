@@ -23,12 +23,13 @@
  * declared-advisory-only declaration).
  */
 import { PGlite, type QueryOptions } from "@electric-sql/pglite";
+import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 
 import {
-  generatePostgresDDL,
+  generatePostgresMigrationSQL,
   generateSqliteMigrationSQL,
 } from "../src/backend/drizzle/ddl";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
@@ -66,11 +67,10 @@ export type LoggedBackend = Readonly<{
 export async function createLoggedPostgresBackend(
   capabilities?: Partial<BackendCapabilities>,
 ): Promise<LoggedBackend> {
-  const client = await PGlite.create();
-  await client.exec(generatePostgresDDL().join("\n\n"));
-  await client.exec(
-    "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 1, NOW())",
-  );
+  const client = await PGlite.create({
+    extensions: { vector: pgvectorExtension },
+  });
+  await client.exec(generatePostgresMigrationSQL());
   const statements: LoggedStatement[] = [];
   const originalQuery = client.query.bind(client);
   client.query = (<T>(
@@ -118,9 +118,6 @@ export function createLoggedSqliteBackend(
 ): LoggedBackend {
   const client = new Database(":memory:");
   client.exec(generateSqliteMigrationSQL());
-  client.exec(
-    "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 1, CURRENT_TIMESTAMP)",
-  );
   const statements: LoggedStatement[] = [];
   const originalPrepare = client.prepare.bind(client);
   client.prepare = ((sqlText: string) => {

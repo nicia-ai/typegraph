@@ -45,8 +45,8 @@ import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-si
 import { wrapWithManagedClose } from "../derive-backend";
 export type { GraphIdentityConfig } from "../../core/define-graph";
 import {
-  generatePostgresDDL,
   generatePostgresMigrationSQL,
+  generateVectorlessPostgresMigrationSQL,
 } from "../drizzle/ddl";
 import { type AnyPgTransaction } from "../drizzle/execution";
 export type { AnyPgDatabase, AnyPgTransaction } from "../drizzle/execution";
@@ -199,7 +199,7 @@ export async function createLocalPgliteBackend(
     const migrationSql =
       vectorEnabled ?
         generatePostgresMigrationSQL(tables)
-      : generatePostgresDDL(tables).join("\n\n");
+      : generateVectorlessPostgresMigrationSQL(tables);
     await client.exec(migrationSql);
 
     const db = drizzle(client);
