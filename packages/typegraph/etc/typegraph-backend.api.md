@@ -3375,7 +3375,7 @@ type TypeGraphErrorOptions = Readonly<{
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly ensureEdgeMatchIdentityStorage: {
         readonly kind: "reasoned";
-        readonly reason: "Focused privileged schema-adoption hook. A changed graph declaration gates its single store-preparation call; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.";
+        readonly reason: "Focused privileged base-schema adoption hook. Schema preparation calls its single owner on every open because all edge writes name the nullable columns; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.";
         readonly accesses: 1;
     };
     readonly claimEdgeCardinalityGuarded: {
