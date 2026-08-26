@@ -665,6 +665,74 @@ describe("durable edge match identity", () => {
     }
   });
 
+  it("classifies plain edge inserts when legacy storage lacks identity columns", async () => {
+    const client = await PGlite.create();
+    await client.exec(generatePostgresDDL().join("\n\n"));
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    const graphId = "legacy_edge_missing_identity_columns";
+    const edge = (id: string) => ({
+      graphId,
+      id,
+      kind: "knows",
+      fromKind: "Person",
+      fromId: "alice",
+      toKind: "Person",
+      toId: "bob",
+      props: { label: id },
+    });
+    const expectStorageRefusal = async (operation: Promise<unknown>) => {
+      const error = await operation.catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect(error).toMatchObject({
+        code: "CONFIGURATION_ERROR",
+        details: {
+          code: "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE",
+          graphId,
+          edgeKind: "knows",
+        },
+      });
+    };
+
+    try {
+      await client.exec(
+        `DROP INDEX "${edgeMatchIdentityUniqueIndexName("typegraph_edges")}"; ` +
+          `ALTER TABLE "typegraph_edges" DROP CONSTRAINT "${edgeMatchIdentityPairCheckName("typegraph_edges")}"; ` +
+          `ALTER TABLE "typegraph_edges" DROP COLUMN "match_identity_name"; ` +
+          `ALTER TABLE "typegraph_edges" DROP COLUMN "match_identity_key";`,
+      );
+
+      await expectStorageRefusal(backend.insertEdge(edge("direct")));
+
+      const insertEdgeNoReturn = backend.insertEdgeNoReturn;
+      if (insertEdgeNoReturn === undefined) {
+        throw new Error("PostgreSQL backend must support insertEdgeNoReturn");
+      }
+      await expectStorageRefusal(insertEdgeNoReturn(edge("no-return")));
+
+      const insertEdgesBatch = backend.insertEdgesBatch;
+      if (insertEdgesBatch === undefined) {
+        throw new Error("PostgreSQL backend must support insertEdgesBatch");
+      }
+      await expectStorageRefusal(
+        insertEdgesBatch([edge("batch-a"), edge("batch-b")]),
+      );
+
+      const insertEdgesBatchReturning = backend.insertEdgesBatchReturning;
+      if (insertEdgesBatchReturning === undefined) {
+        throw new Error(
+          "PostgreSQL backend must support insertEdgesBatchReturning",
+        );
+      }
+      await expectStorageRefusal(
+        insertEdgesBatchReturning([edge("returning-a")]),
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
   it("arbitrates create and found outcomes in one root statement", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const sqlite = (db as typeof db & { $client: Database.Database }).$client;
