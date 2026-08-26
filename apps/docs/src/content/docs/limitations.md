@@ -312,11 +312,24 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots can use one schema-fenced
 native atomic exchange for plain schema-managed `nodes.bulkInsert()` and
 `nodes.bulkCreate()` calls when the node has no claims, Operational Identity,
-history, revision, or projections. IDs may be generated, caller-supplied, or
-mixed, and `bulkCreate()` returns rows in input order. This is an internal
-optimization, not a general Store batch API. Constrained, projected,
-identity-enabled, history/revision-tracked, and other unsupported shapes retain
-the existing transaction or fallback behavior.
+history, revision, or projections. If any batch member has a claim, every
+claimed member must have exactly one `unique` constraint whose scope is the
+literal `kind`, every input ID must be generated, and the backend's
+claimed-member budget must accommodate the batch. Claim-free kinds may
+participate in that generated-ID batch. IDs may otherwise be generated,
+caller-supplied, or mixed only for the wholly claim-free shape, and
+`bulkCreate()` returns rows in input order. This is an internal optimization,
+not a general Store batch API. A
+caller-supplied or mixed ID in a claimed batch, multiple unique constraints,
+non-kind uniqueness scope, disjointness, projected or identity-enabled nodes,
+history/revision tracking, missing schema-fence support, and other unsupported
+shapes fail closed to the existing transaction or fallback behavior.
+
+The transport inventory for the supported libSQL root records one client
+`batch` submission and zero client `execute` calls for both generated-ID
+claim-free batches and generated-ID batches with one same-kind uniqueness
+claim. This is a measured submission count, not a wall-clock RTT benchmark;
+fallback paths are intentionally not assigned a latency claim.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
 use one schema-fenced native exchange when history and revision capture are

@@ -2,6 +2,7 @@
 import type {
   GraphBackend,
   InsertNodeParams,
+  NodeInsertClaim,
   NodeRow,
   SchemaWriteFenceParams,
   TransactionBackend,
@@ -13,6 +14,13 @@ export type AtomicNodeBatchResultMode = "count" | "rows";
 export type AtomicNodeBatchEntry = Readonly<{
   idSource: AtomicNodeBatchIdSource;
   params: InsertNodeParams;
+  /**
+   * The one claim this row owes in the constrained native shape. Absence is
+   * the existing claim-free program. The store proves the supported claim is
+   * generated-id, same-kind uniqueness with one canonical probe axis; the
+   * backend treats anything else as ineligible rather than re-deriving it.
+   */
+  claim?: NodeInsertClaim;
 }>;
 
 export type AtomicNodeBatchInput = Readonly<{
@@ -22,6 +30,8 @@ export type AtomicNodeBatchInput = Readonly<{
 }>;
 
 export interface AtomicNodeBatchExecutor {
+  /** Maximum constrained members the backend can gate in one statement. */
+  readonly maxClaimedEntries?: number;
   (
     input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
   ): Promise<number>;

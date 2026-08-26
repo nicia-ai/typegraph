@@ -16,12 +16,29 @@ const Person = defineNode("Person", {
 const Company = defineNode("Company", {
   schema: z.object({ name: z.string() }),
 });
+const ClaimedPerson = defineNode("ClaimedPerson", {
+  schema: z.object({ name: z.string() }),
+});
 const worksAt = defineEdge("worksAt", {
   schema: z.object({ role: z.string() }),
 });
 const graph = defineGraph({
   id: "write-exchange-inventory",
-  nodes: { Person: { type: Person }, Company: { type: Company } },
+  nodes: {
+    Person: { type: Person },
+    Company: { type: Company },
+    ClaimedPerson: {
+      type: ClaimedPerson,
+      unique: [
+        {
+          name: "claimed_person_name",
+          fields: ["name"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
   edges: {
     unconstrained: {
       type: worksAt,
@@ -110,6 +127,18 @@ describe("managed write exchange inventory", () => {
             },
           ]),
         ),
+        await measure("generated-claimed-node-batch", () =>
+          store.nodes.ClaimedPerson.bulkInsert([
+            { props: { name: "Claimed Generated A" } },
+            { props: { name: "Claimed Generated B" } },
+          ]),
+        ),
+        await measure("generated-claimed-node-create-batch", () =>
+          store.nodes.ClaimedPerson.bulkCreate([
+            { props: { name: "Claimed Created A" } },
+            { props: { name: "Claimed Created B" } },
+          ]),
+        ),
         await measure("unconstrained-edge-batch", () =>
           store.edges.unconstrained.bulkInsert([
             { from, to, props: { role: "U1" } },
@@ -160,6 +189,16 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "mixed-id-node-create-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "generated-claimed-node-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "generated-claimed-node-create-batch",
           },
           {
             "batch": 1,

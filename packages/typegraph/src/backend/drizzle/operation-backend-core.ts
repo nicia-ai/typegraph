@@ -18,7 +18,11 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../query/sql-intent";
 import { asCompiledStatementSql } from "../../query/sql-intent";
-import { type ClaimOwner, isSameClaimOwner } from "../../store/claims/axis";
+import {
+  type ClaimOwner,
+  compareClaimTargets,
+  isSameClaimOwner,
+} from "../../store/claims/axis";
 import {
   type ConstrainedCardinality,
   edgeCardinalityClaimTarget,
@@ -124,6 +128,10 @@ import type {
 } from "../types";
 import { edgeMatchIdentityUniqueIndexName } from "./ddl";
 import { type CompiledSqlQuery, type ExecutableSql } from "./execution/types";
+import type {
+  AtomicNodeClaimEntry,
+  AtomicNodeClaimOwnerRow,
+} from "./operations/atomic-node-claims";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -1049,6 +1057,143 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : (() => {
+        const maxClaimedEntries = Math.max(
+          0,
+          Math.floor((options.maxBindParameters - 13) / 6),
+        );
+
+        function orderedAtomicNodeClaims(
+          entries: readonly AtomicNodeBatchEntry[],
+        ): readonly AtomicNodeClaimEntry[] {
+          return entries
+            .map((entry, ordinal) => ({ ordinal, entry }))
+            .filter((item) => item.entry.claim !== undefined)
+            .toSorted((left, right) => {
+              const leftClaim = requireDefined(left.entry.claim);
+              const rightClaim = requireDefined(right.entry.claim);
+              return compareClaimTargets(
+                {
+                  relation: "uniques",
+                  graphId: left.entry.params.graphId,
+                  axis: leftClaim.axis,
+                  constraintName: leftClaim.constraintName,
+                  key: leftClaim.key,
+                },
+                {
+                  relation: "uniques",
+                  graphId: right.entry.params.graphId,
+                  axis: rightClaim.axis,
+                  constraintName: rightClaim.constraintName,
+                  key: rightClaim.key,
+                },
+              );
+            });
+        }
+
+        function atomicNodeClaimTargetKey(entry: AtomicNodeClaimEntry): string {
+          const claim = requireDefined(entry.entry.claim);
+          return encodeTupleKey([claim.axis, claim.constraintName, claim.key]);
+        }
+
+        function atomicNodeClaimOwnerKey(row: AtomicNodeClaimOwnerRow): string {
+          return encodeTupleKey([row.node_kind, row.constraint_name, row.key]);
+        }
+
+        type AtomicNodeProgramSlot =
+          | Readonly<{
+              kind: "claims";
+              entries: readonly AtomicNodeClaimEntry[];
+              rows: readonly AtomicNodeClaimOwnerRow[];
+            }>
+          | Readonly<{ kind: "cleanup" }>
+          | Readonly<{
+              kind: "counts";
+              chunk: readonly AtomicNodeBatchEntry[];
+              count: number;
+            }>
+          | Readonly<{
+              kind: "rows";
+              chunk: readonly AtomicNodeBatchEntry[];
+              rows: readonly NodeRow[];
+            }>;
+
+        function classifyAtomicNodeClaimResults(
+          claimEntries: readonly AtomicNodeClaimEntry[],
+          results: readonly AtomicNodeProgramSlot[],
+        ): "stale" | "owned" | UniquenessError {
+          const ownerByTarget = new Map<string, ClaimOwner>();
+          let returnedClaims = 0;
+          for (const result of results) {
+            if (result.kind !== "claims") continue;
+            returnedClaims += result.rows.length;
+            for (const row of result.rows) {
+              ownerByTarget.set(atomicNodeClaimOwnerKey(row), {
+                concreteKind: row.concrete_kind,
+                nodeId: row.node_id,
+              });
+            }
+          }
+          if (returnedClaims === 0) return "stale";
+          if (returnedClaims !== claimEntries.length) {
+            throw new CompilerInvariantError(
+              "Atomic node claim program returned a partial claim result.",
+              { expected: claimEntries.length, actual: returnedClaims },
+            );
+          }
+
+          for (const item of claimEntries.toSorted(
+            (left, right) => left.ordinal - right.ordinal,
+          )) {
+            const claim = requireDefined(item.entry.claim);
+            const owner = ownerByTarget.get(atomicNodeClaimTargetKey(item));
+            if (owner === undefined) {
+              throw new CompilerInvariantError(
+                "Atomic node claim program omitted a claim target.",
+                { ordinal: item.ordinal },
+              );
+            }
+            const proposedOwner = {
+              concreteKind: item.entry.params.kind,
+              nodeId: item.entry.params.id,
+            };
+            if (!isSameClaimOwner(owner, proposedOwner)) {
+              if (claim.verdict.kind !== "uniqueness") {
+                throw new CompilerInvariantError(
+                  "Atomic node claim program received an unsupported claim verdict.",
+                  { ordinal: item.ordinal },
+                );
+              }
+              return new UniquenessError({
+                constraintName: claim.constraintName,
+                kind: owner.concreteKind,
+                existingId: owner.nodeId,
+                newId: item.entry.params.id,
+                fields: claim.verdict.fields,
+                axis: claim.axis,
+              });
+            }
+          }
+          return "owned";
+        }
+
+        function requireAtomicNodeClaimWrite(
+          claimEntries: readonly AtomicNodeClaimEntry[],
+          results: readonly AtomicNodeProgramSlot[],
+          insertedCount: number,
+        ): "stale" | "owned" {
+          const verdict = classifyAtomicNodeClaimResults(claimEntries, results);
+          if (verdict === "owned") return verdict;
+          if (insertedCount !== 0) {
+            throw new CompilerInvariantError(
+              verdict === "stale" ?
+                "A stale atomic node claim fence still inserted nodes."
+              : "A refused atomic node claim program still inserted nodes.",
+            );
+          }
+          if (verdict instanceof UniquenessError) throw verdict;
+          return verdict;
+        }
+
         function executeAtomicNodeBatch(
           input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
         ): Promise<number>;
@@ -1078,6 +1223,176 @@ export function createCommonOperationBackend(
           const atomicSchemaFenceLockClause = requireDefined(
             schemaFenceLockClause,
           );
+          const claimEntries = orderedAtomicNodeClaims(input.entries);
+          if (claimEntries.length > 0) {
+            if (claimEntries.length > maxClaimedEntries) {
+              throw new CompilerInvariantError(
+                "Atomic node claim program exceeded its declared member budget.",
+                {
+                  claimedEntries: claimEntries.length,
+                  maxClaimedEntries,
+                },
+              );
+            }
+            const claimChunkSize = Math.max(
+              1,
+              Math.floor((options.maxBindParameters - 2) / 6),
+            );
+            const nodeChunkSize = Math.max(
+              1,
+              Math.floor(
+                (options.maxBindParameters - 4 - 6 * claimEntries.length) / 9,
+              ),
+            );
+            const nodeChunks = chunkArray(input.entries, nodeChunkSize);
+            const claimChunks = chunkArray(claimEntries, claimChunkSize);
+            const claimSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = claimChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeClaimUpsertWithSchemaFence(
+                  chunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+                kind: "claims" as const,
+                entries: chunk,
+                rows: rows.map((row) => ({
+                  node_kind: String(row["node_kind"]),
+                  constraint_name: String(row["constraint_name"]),
+                  key: String(row["key"]),
+                  node_id: String(row["node_id"]),
+                  concrete_kind: String(row["concrete_kind"]),
+                })),
+              }),
+            }));
+            const writeGate =
+              operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
+                claimEntries,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+              );
+            const cleanupSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = claimChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeClaimCleanupWithSchemaFence(
+                  chunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "none" as const,
+              decode: () => ({ kind: "cleanup" as const }),
+            }));
+
+            if (input.resultMode === "count") {
+              const nodeSlots: AtomicSqlProgram<
+                AtomicNodeProgramSlot,
+                unknown
+              >["slots"] = nodeChunks.map((chunk) => ({
+                statement: execution.compile(
+                  operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    "count",
+                    writeGate,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows) => ({
+                  kind: "counts" as const,
+                  chunk,
+                  count: rows.length,
+                }),
+              }));
+              const program = {
+                slots: [...claimSlots, ...nodeSlots, ...cleanupSlots],
+                assemble(results: readonly AtomicNodeProgramSlot[]): number {
+                  const counts = results.flatMap((result) =>
+                    result.kind === "counts" ? [result.count] : [],
+                  );
+                  const insertedCount = counts.reduce(
+                    (total, count) => total + count,
+                    0,
+                  );
+                  const claimVerdict = requireAtomicNodeClaimWrite(
+                    claimEntries,
+                    results,
+                    insertedCount,
+                  );
+                  if (claimVerdict === "stale") return 0;
+                  assertCompleteAtomicChunks(counts, nodeChunks, "node");
+                  return input.entries.length;
+                },
+              } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
+              return withAtomicNodeBatchClassifications(
+                () => atomicExecutor.execute(program),
+                input.entries,
+                operationStrategy,
+              );
+            }
+
+            const nodeSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = nodeChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                  chunk,
+                  timestamp,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                  "rows",
+                  writeGate,
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows) => ({
+                kind: "rows" as const,
+                chunk,
+                rows: rows.map((row) => rowMappers.toNodeRow(row)),
+              }),
+            }));
+            const program = {
+              slots: [...claimSlots, ...nodeSlots, ...cleanupSlots],
+              assemble(
+                results: readonly AtomicNodeProgramSlot[],
+              ): readonly NodeRow[] {
+                const rows = results.flatMap((result) =>
+                  result.kind === "rows" ? result.rows : [],
+                );
+                const claimVerdict = requireAtomicNodeClaimWrite(
+                  claimEntries,
+                  results,
+                  rows.length,
+                );
+                if (claimVerdict === "stale") return [];
+                if (rows.length !== input.entries.length) {
+                  throw new CompilerInvariantError(
+                    "Atomic node claim program returned a partial node result.",
+                    { expected: input.entries.length, actual: rows.length },
+                  );
+                }
+                return rows;
+              },
+            } satisfies AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              readonly NodeRow[]
+            >;
+            return withAtomicNodeBatchClassifications(
+              () => atomicExecutor.execute(program),
+              input.entries,
+              operationStrategy,
+            );
+          }
 
           if (input.resultMode === "count") {
             const slots = chunks.map((chunk) => ({
@@ -1175,7 +1490,13 @@ export function createCommonOperationBackend(
           );
         }
 
-        return { executeAtomicNodeBatch } satisfies Readonly<{
+        const boundedExecuteAtomicNodeBatch = Object.assign(
+          executeAtomicNodeBatch,
+          { maxClaimedEntries },
+        );
+        return {
+          executeAtomicNodeBatch: boundedExecuteAtomicNodeBatch,
+        } satisfies Readonly<{
           executeAtomicNodeBatch: AtomicNodeBatchExecutor;
         }>;
       })();

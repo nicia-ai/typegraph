@@ -6,9 +6,10 @@ import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { StaleVersionError } from "../src";
+import { StaleVersionError, UniquenessError } from "../src";
 import { resolveBundledRootAtomicNodeBatch } from "../src/backend/capabilities/atomic-node-batch";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
+import { computeUniqueKey } from "../src/constraints";
 import { defineGraph, defineNode, searchable } from "../src/core";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
@@ -54,6 +55,19 @@ const fallbackGraph = defineGraph({
           collation: "binary",
         },
       ],
+    },
+    SearchDocument: { type: SearchDocument },
+  },
+  edges: {},
+});
+const evolvedFallbackGraph = defineGraph({
+  id: fallbackGraph.id,
+  nodes: {
+    UniquePerson: {
+      type: defineNode("UniquePerson", {
+        schema: z.object({ name: z.string(), nickname: z.string().optional() }),
+      }),
+      unique: fallbackGraph.nodes.UniquePerson.unique,
     },
     SearchDocument: { type: SearchDocument },
   },
@@ -301,6 +315,162 @@ describe("plain node batch store contract", () => {
       ]);
 
       expect(transaction).toHaveBeenCalledOnce();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+});
+
+describe("constrained node batch store contract", () => {
+  it("uses one native exchange for generated unique bulkInsert", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      await fixture.store.nodes.UniquePerson.bulkInsert([
+        { props: { name: "Alice" } },
+        { props: { name: "Bob" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(2);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("uses one native exchange for generated unique bulkCreate in input order", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      const created = await fixture.store.nodes.UniquePerson.bulkCreate([
+        { props: { name: "First" } },
+        { props: { name: "Second" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      expect(created.map((node) => node.name)).toEqual(["First", "Second"]);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("reports an external uniqueness conflict without nodes or leaked claims", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const alice = await fixture.store.nodes.UniquePerson.create({
+        name: "Alice",
+      });
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      const insertion = fixture.store.nodes.UniquePerson.bulkInsert([
+        { props: { name: "Alice" } },
+        { props: { name: "Bob" } },
+      ]);
+      await expect(insertion).rejects.toBeInstanceOf(UniquenessError);
+      const rejection = await insertion.catch((error: unknown) => error);
+      if (!(rejection instanceof UniquenessError)) {
+        throw rejection;
+      }
+      expect(rejection.details).toMatchObject({
+        constraintName: "unique_person_name",
+        existingId: alice.id,
+        fields: ["name"],
+      });
+      expect(typeof rejection.details.newId).toBe("string");
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(1);
+      const claim = await fixture.backend.checkUnique({
+        graphId: fallbackGraph.id,
+        nodeKind: "UniquePerson",
+        constraintName: "unique_person_name",
+        key: computeUniqueKey({ name: "Bob" }, ["name"], "binary"),
+      });
+      expect(claim).toBeUndefined();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("rejects an in-batch duplicate claim before dispatch", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+      const insertion = fixture.store.nodes.UniquePerson.bulkInsert([
+        { props: { name: "Duplicate" } },
+        { props: { name: "Duplicate" } },
+      ]);
+
+      await expect(insertion).rejects.toBeInstanceOf(UniquenessError);
+      const rejection = await insertion.catch((error: unknown) => error);
+      if (!(rejection instanceof UniquenessError)) throw rejection;
+      expect(rejection.details).toMatchObject({
+        constraintName: "unique_person_name",
+        fields: ["name"],
+      });
+      expect(rejection.details.existingId).not.toBe(rejection.details.newId);
+      expect(batch).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("takes over a tombstoned unique claim for a new generated node", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const old = await fixture.store.nodes.UniquePerson.create(
+        { name: "Old" },
+        { id: "tombstone" },
+      );
+      await fixture.store.nodes.UniquePerson.delete(old.id);
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      const [replacement] = await fixture.store.nodes.UniquePerson.bulkCreate([
+        { props: { name: "Old" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      expect(replacement).toMatchObject({ name: "Old" });
+      if (replacement === undefined) {
+        throw new Error("Expected the constrained batch to return one node.");
+      }
+      await expect(
+        fixture.store.nodes.UniquePerson.getById(replacement.id),
+      ).resolves.toMatchObject({ name: "Old" });
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("does not mutate a constrained batch behind a stale schema fence", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await migrateSchema(fixture.backend, evolvedFallbackGraph, 1);
+      await expect(
+        fixture.store.nodes.UniquePerson.bulkInsert([
+          { props: { name: "Stale" } },
+        ]),
+      ).rejects.toThrow(StaleVersionError);
+      await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(0);
+      const claim = await fixture.backend.checkUnique({
+        graphId: fallbackGraph.id,
+        nodeKind: "UniquePerson",
+        constraintName: "unique_person_name",
+        key: computeUniqueKey({ name: "Stale" }, ["name"], "binary"),
+      });
+      expect(claim).toBeUndefined();
     } finally {
       await closeFixture(fixture);
     }

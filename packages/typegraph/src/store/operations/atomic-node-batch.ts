@@ -53,16 +53,39 @@ export function resolveAtomicNodeBatchExecutor(
   if (input.schemaVersion === undefined) return;
   if (identityEnabled || historyEnabled || revisionTrackingEnabled) return;
 
-  const eligible = inputs.every((item) => {
+  const registrations = inputs.map((item) => {
     if (!hasOwnKey(graph.nodes, item.kind)) return false;
     const registration = graph.nodes[item.kind];
     if (registration === undefined) return false;
-    if ((registration.unique ?? []).length > 0) return false;
     if (registry.getDisjointKinds(item.kind).length > 0) return false;
     if (getSearchableFields(registration.type.schema).length > 0) return false;
-    return getEmbeddingFields(registration.type.schema).length === 0;
+    if (getEmbeddingFields(registration.type.schema).length > 0) return false;
+    return registration;
   });
-  if (!eligible) return;
+  if (registrations.includes(false)) return;
+
+  const hasDeclaredClaims = registrations.some(
+    (registration) =>
+      registration !== false && (registration.unique ?? []).length > 0,
+  );
+  if (hasDeclaredClaims) {
+    // The complete plan is proved after props validation. This static gate
+    // admits only candidates for the existing generated/same-kind/one-claim
+    // root shape; predicates may still yield zero claims for individual rows.
+    if (inputs.some((item) => item.id !== undefined)) return;
+    if (
+      registrations.some(
+        (registration) =>
+          registration !== false &&
+          ((registration.unique ?? []).length > 1 ||
+            (registration.unique ?? []).some(
+              (constraint) => constraint.scope !== "kind",
+            )),
+      )
+    ) {
+      return;
+    }
+  }
 
   return resolveBundledRootAtomicNodeBatch(backend);
 }
