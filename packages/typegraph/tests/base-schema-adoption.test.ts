@@ -243,6 +243,15 @@ describe("deployment-wide base-schema adoption", () => {
       );
       await assertTemplatesWork(backend, reconciledSurface(reopened));
 
+      await client.exec(
+        `UPDATE "${tableNames.baseSchemaVersions}" SET version = 0 WHERE installation = 1`,
+      );
+      await createStoreWithSchema(graph, backend);
+      const advancedMarker = await client.query<{ version: number }>(
+        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      );
+      expect(advancedMarker.rows[0]?.version).toBe(1);
+
       const querySpy = vi.spyOn(client, "query");
       await createStoreWithSchema(graph, backend);
       expect(
