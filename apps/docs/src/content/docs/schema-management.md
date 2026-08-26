@@ -153,11 +153,14 @@ the same `SchemaValidationResult` or throws the same errors.
 :::note[Database privileges]
 Only `createStoreWithSchema()` runs DDL. `createStore()` is a
 synchronous zero-I/O attach; `createVerifiedStore()` is a SELECT-only
-attach (zero DDL — reads the active schema row and contribution
-markers, nothing else). To run the application under a least-privilege,
-DML-only role, do the privileged migration step once with
-`createStoreWithSchema(graph, adminBackend)` and use
-`createVerifiedStore()` at runtime. See
+attach (zero DDL — reads the active schema row and contribution markers,
+nothing else). Graph-template registration and instantiation are also DML-only;
+instantiation copies the source graph's durable contribution markers so a
+target can be reopened by `createVerifiedStore()` from a later serverless
+isolate. To run the application under a least-privilege, DML-only role, do the
+privileged migration step once with `createStoreWithSchema(graph, adminBackend)`
+and preprovision the graph-template table before using the template APIs at
+runtime. See
 [Database roles & least privilege](/backend-setup#database-roles--least-privilege)
 for the canonical breakdown.
 :::
