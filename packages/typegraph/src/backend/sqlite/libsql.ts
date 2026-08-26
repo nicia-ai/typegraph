@@ -26,10 +26,16 @@
  * ```
  */
 import type { Client } from "@libsql/client";
+import { getTableName } from "drizzle-orm";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
 import { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy";
-import { generateSqliteDDL } from "../drizzle/ddl";
+import { isEdgeMatchIdentityStorageUnavailableError } from "../../utils/sql-errors";
+import {
+  generateSqliteMigrationSQL,
+  planSqliteEdgeMatchIdentityAdoption,
+  quoteDdlIdentifier,
+} from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
@@ -46,6 +52,33 @@ export type {
   ContributionRepairEntry,
   ContributionRepairResult,
 } from "../types";
+
+async function installLibsqlBaseSchema(
+  client: Client,
+  tables: SqliteTables,
+): Promise<void> {
+  const installationSql = generateSqliteMigrationSQL(tables);
+  try {
+    await client.executeMultiple(installationSql);
+  } catch (error) {
+    if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
+    const edgeTableName = getTableName(tables.edges);
+    const result = await client.execute(
+      `PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`,
+    );
+    const columns = new Set(
+      result.rows.flatMap((row) =>
+        typeof row["name"] === "string" ? [row["name"]] : [],
+      ),
+    );
+    const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
+      edgeTableName,
+      columns,
+    );
+    if (adoptionSql.length === 0) throw error;
+    await client.executeMultiple([...adoptionSql, installationSql].join("\n"));
+  }
+}
 
 // ============================================================
 // Types
@@ -123,8 +156,7 @@ export async function createLibsqlBackend(
   const tables = options.tables ?? defaultTables;
   const db = drizzle(client);
 
-  const ddlStatements = generateSqliteDDL(tables);
-  await client.executeMultiple(ddlStatements.join(";\n"));
+  await installLibsqlBaseSchema(client, tables);
 
   const backend = createSqliteBackend(db, {
     executionProfile: {

@@ -24,6 +24,7 @@
 import { createRequire } from "node:module";
 
 import Database from "better-sqlite3";
+import { getTableName } from "drizzle-orm";
 import {
   type BetterSQLite3Database,
   drizzle,
@@ -31,9 +32,14 @@ import {
 
 import { ConfigurationError } from "../../errors";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
+import { isEdgeMatchIdentityStorageUnavailableError } from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
-import { generateSqliteDDL } from "../drizzle/ddl";
+import {
+  generateSqliteMigrationSQL,
+  planSqliteEdgeMatchIdentityAdoption,
+  quoteDdlIdentifier,
+} from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
@@ -64,6 +70,31 @@ export type {
 } from "../types";
 
 const nodeRequire = createRequire(import.meta.url);
+
+function installLocalSqliteBaseSchema(
+  sqlite: Database.Database,
+  tables: SqliteTables,
+): void {
+  const installationSql = generateSqliteMigrationSQL(tables);
+  try {
+    sqlite.exec(installationSql);
+  } catch (error) {
+    if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
+    const edgeTableName = getTableName(tables.edges);
+    const rows = sqlite
+      .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
+      .all() as readonly Readonly<{ name?: unknown }>[];
+    const columns = new Set(
+      rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+    );
+    const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
+      edgeTableName,
+      columns,
+    );
+    if (adoptionSql.length === 0) throw error;
+    sqlite.exec([...adoptionSql, installationSql].join("\n"));
+  }
+}
 
 // ============================================================
 // Native Addon Helpers
@@ -339,11 +370,10 @@ export function createLocalSqliteBackend(
 
     const db = drizzle(sqlite);
 
-    // Generate and execute DDL from schema
-    const ddlStatements = generateSqliteDDL(tables);
-    for (const statement of ddlStatements) {
-      sqlite.exec(statement);
-    }
+    // The managed factory owns a complete fresh installation, including the
+    // deployment-wide base-schema marker consumed by verified/runtime-only
+    // entrypoints. Raw generateSqliteDDL intentionally omits that marker.
+    installLocalSqliteBaseSchema(sqlite, tables);
 
     const backend = createSqliteBackend(db, {
       executionProfile: {

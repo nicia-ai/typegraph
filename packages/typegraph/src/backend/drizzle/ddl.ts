@@ -48,16 +48,31 @@ type CustomColumnType = Readonly<{
 const EDGE_MATCH_IDENTITY_NAME_COLUMN = "match_identity_name";
 const EDGE_MATCH_IDENTITY_KEY_COLUMN = "match_identity_key";
 
-function quoteDdlIdentifier(identifier: string): string {
+export function quoteDdlIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
-/** Publishes the lifecycle version owned by a complete installation script. */
-function generateBaseSchemaVersionMarkerSQL(tableName: string): string {
+type BaseSchemaVersionMarkerTable = Readonly<{
+  installation: Readonly<{ name: string }>;
+  updatedAt: Readonly<{ name: string }>;
+  version: Readonly<{ name: string }>;
+}>;
+
+/** Publishes the lifecycle version owned by a complete fresh installation. */
+function generateBaseSchemaVersionMarkerSQL(
+  tableName: string,
+  columns: BaseSchemaVersionMarkerTable,
+): string {
   const table = quoteDdlIdentifier(tableName);
-  return `INSERT INTO ${table} ("installation", "version", "updated_at")
+  const installation = quoteDdlIdentifier(columns.installation.name);
+  const version = quoteDdlIdentifier(columns.version.name);
+  const updatedAt = quoteDdlIdentifier(columns.updatedAt.name);
+  // DO NOTHING is deliberate: this generator is a fresh-installation tool,
+  // not an upgrade planner. Replaying it must never advance a stale marker
+  // without running the numbered adoption steps that marker certifies.
+  return `INSERT INTO ${table} (${installation}, ${version}, ${updatedAt})
 VALUES (1, ${String(CURRENT_BASE_SCHEMA_VERSION)}, CURRENT_TIMESTAMP)
-ON CONFLICT ("installation") DO NOTHING;`;
+ON CONFLICT (${installation}) DO NOTHING;`;
 }
 
 /** Identifier-preserving text accepted by PostgreSQL's `regclass` input. */
@@ -101,7 +116,7 @@ export function generatePostgresEdgeMatchIdentityUpgradeDDL(
  * second added column so old edge tables receive the invariant without a
  * destructive table rebuild.
  */
-export function generateSqliteEdgeMatchIdentityColumnDDL(
+function generateSqliteEdgeMatchIdentityColumnDDL(
   tableName: string,
   column: "match_identity_name" | "match_identity_key",
   withPairCheck = false,
@@ -113,10 +128,44 @@ export function generateSqliteEdgeMatchIdentityColumnDDL(
   return `ALTER TABLE ${quoteDdlIdentifier(tableName)} ADD COLUMN ${quoteDdlIdentifier(column)} TEXT${pairCheck};`;
 }
 
-export function generateSqliteEdgeMatchIdentityIndexDDL(
+function generateSqliteEdgeMatchIdentityIndexDDL(
   tableName: string,
 ): string {
   return `CREATE UNIQUE INDEX IF NOT EXISTS ${quoteDdlIdentifier(edgeMatchIdentityUniqueIndexName(tableName))} ON ${quoteDdlIdentifier(tableName)} (${quoteDdlIdentifier("graph_id")}, ${quoteDdlIdentifier("kind")}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_NAME_COLUMN)}, ${quoteDdlIdentifier(EDGE_MATCH_IDENTITY_KEY_COLUMN)});`;
+}
+
+/**
+ * Plans the focused SQLite v1 adoption from one authoritative column
+ * inventory. Factories and backend lifecycle hooks share this owner so a
+ * bootstrap retry cannot drift from privileged adoption.
+ */
+export function planSqliteEdgeMatchIdentityAdoption(
+  tableName: string,
+  existingColumns: ReadonlySet<string>,
+): readonly string[] {
+  if (existingColumns.size === 0) return [];
+  const nameMissing = !existingColumns.has(EDGE_MATCH_IDENTITY_NAME_COLUMN);
+  const keyMissing = !existingColumns.has(EDGE_MATCH_IDENTITY_KEY_COLUMN);
+  const columnStatements = [
+    nameMissing ?
+      generateSqliteEdgeMatchIdentityColumnDDL(
+        tableName,
+        EDGE_MATCH_IDENTITY_NAME_COLUMN,
+        !keyMissing,
+      )
+    : undefined,
+    keyMissing ?
+      generateSqliteEdgeMatchIdentityColumnDDL(
+        tableName,
+        EDGE_MATCH_IDENTITY_KEY_COLUMN,
+        true,
+      )
+    : undefined,
+  ].filter((statement): statement is string => statement !== undefined);
+  return [
+    ...columnStatements,
+    generateSqliteEdgeMatchIdentityIndexDDL(tableName),
+  ];
 }
 
 // ============================================================
@@ -407,7 +456,9 @@ export function sqliteContributions(
  * Iterates the unified contribution set (#129) — base tables first,
  * then strategy-owned tables. Per-contribution ordering is
  * table-then-its-own-indexes; safe because TypeGraph's tables carry no
- * cross-table foreign keys.
+ * cross-table foreign keys. This low-level array deliberately omits the
+ * deployment-wide version marker; use generateSqliteMigrationSQL for a
+ * complete fresh installation.
  */
 export function generateSqliteDDL(
   tables: SqliteTables = sqliteTables,
@@ -429,6 +480,7 @@ export function generateSqliteMigrationSQL(
   const ddlSql = generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
   const markerSql = generateBaseSchemaVersionMarkerSQL(
     getSqliteTableConfig(tables.baseSchemaVersions).name,
+    tables.baseSchemaVersions,
   );
   return `${ddlSql}\n\n${markerSql}`;
 }
@@ -626,7 +678,9 @@ export function postgresContributions(
  * Iterates the unified contribution set (#129) — base tables first,
  * then strategy-owned tables. Per-contribution ordering is
  * table-then-its-own-indexes; safe because TypeGraph's tables carry no
- * cross-table foreign keys.
+ * cross-table foreign keys. This low-level array deliberately omits the
+ * deployment-wide version marker; use generatePostgresMigrationSQL for a
+ * complete fresh installation.
  */
 export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
@@ -651,6 +705,7 @@ function generatePostgresInstallationSQL(
   const ddlSql = generatePostgresDDL(tables, fulltextStrategy).join("\n\n");
   const markerSql = generateBaseSchemaVersionMarkerSQL(
     getPgTableConfig(tables.baseSchemaVersions).name,
+    tables.baseSchemaVersions,
   );
   return [extensionSql, ddlSql, markerSql]
     .filter((statement) => statement !== undefined)

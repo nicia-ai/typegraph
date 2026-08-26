@@ -20,11 +20,13 @@ import { scanClaimSites } from "../scripts/drizzle-claim-inventory";
 const CLAIM_WORD = "Drizzle";
 
 /** Derived by `node --import tsx scripts/drizzle-claim-inventory.ts`. */
-const RECORDED_CLAIM_SITES: readonly Readonly<{
+type RecordedClaimSite = Readonly<{
   file: string;
-  line: number;
   text: string;
-}>[] = [
+}> &
+  (Readonly<{ line: number }> | Readonly<{ anchor: "exact-text-in-file" }>);
+
+const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   {
     file: "README.md",
     line: 118,
@@ -49,7 +51,7 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
   {
     file: "apps/docs/src/content/docs/backend-setup.md",
-    line: 913,
+    anchor: "exact-text-in-file",
     text: "## " + CLAIM_WORD + "-Free Entrypoints",
   },
   {
@@ -120,6 +122,15 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
 ];
 
+function matchesRecordedSite(
+  scanned: Readonly<{ file: string; line: number; text: string }>,
+  recorded: RecordedClaimSite,
+): boolean {
+  if (scanned.file !== recorded.file) return false;
+  if ("line" in recorded) return scanned.line === recorded.line;
+  return scanned.text === recorded.text;
+}
+
 describe("drizzle claim-site inventory", () => {
   it("has the recorded shape: 13 occurrences across 11 files", () => {
     expect(RECORDED_CLAIM_SITES.length).toBe(13);
@@ -134,33 +145,27 @@ describe("drizzle claim-site inventory", () => {
     expect(scanned.length).toBe(13);
     expect(new Set(scanned.map((site) => site.file)).size).toBe(11);
 
-    const recordedKeys = new Set(
-      RECORDED_CLAIM_SITES.map((site) => `${site.file}:${site.line}`),
-    );
     for (const site of scanned) {
       expect(
-        recordedKeys.has(`${site.file}:${site.line}`),
+        RECORDED_CLAIM_SITES.some((recorded) =>
+          matchesRecordedSite(site, recorded),
+        ),
         `claim site not in the recorded inventory: ${site.file}:${site.line}`,
       ).toBe(true);
     }
 
-    const scannedKeys = new Set(
-      scanned.map((site) => `${site.file}:${site.line}`),
-    );
     for (const recorded of RECORDED_CLAIM_SITES) {
       expect(
-        scannedKeys.has(`${recorded.file}:${recorded.line}`),
-        `recorded claim site no longer exists: ${recorded.file}:${recorded.line}`,
+        scanned.some((site) => matchesRecordedSite(site, recorded)),
+        `recorded claim site no longer exists: ${recorded.file}`,
       ).toBe(true);
     }
 
     for (const recorded of RECORDED_CLAIM_SITES) {
-      const scannedSite = scanned.find(
-        (site) => site.file === recorded.file && site.line === recorded.line,
+      const scannedSite = scanned.find((site) =>
+        matchesRecordedSite(site, recorded),
       );
-      expect(scannedSite?.text, `${recorded.file}:${recorded.line}`).toBe(
-        recorded.text,
-      );
+      expect(scannedSite?.text).toBe(recorded.text);
     }
   });
 

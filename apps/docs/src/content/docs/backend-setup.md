@@ -159,7 +159,11 @@ const store = createStore(graph, backend);
 execution profile automatically. It returns both the `backend` and the underlying
 Drizzle `db` instance for direct SQL access. The caller retains ownership of the
 client and is responsible for closing it when done — this allows sharing a single
-client across TypeGraph and other libraries.
+client across TypeGraph and other libraries. Its installation is complete: the
+factory publishes the deployment-wide base-schema marker, and when it encounters
+a pre-0.52 edge table it applies the focused match-identity storage adoption
+before retrying the idempotent installation script. The local SQLite factory has
+the same behavior.
 
 The libsql backend has native vector and hybrid search, wired automatically via `libsqlVectorStrategy` — no
 extension to load. It uses libSQL's built-in engine (`F32_BLOB(N)` storage, `vector_distance_cos` /
@@ -210,6 +214,12 @@ stamping the current deployment-wide base-schema marker in SQLite.
 ```typescript
 function generateSqliteMigrationSQL(): string;
 ```
+
+`generateSqliteDDL()` is the lower-level table/index statement array used by
+backend bootstrap. It deliberately omits the deployment-wide marker row and is
+therefore not a complete installation script. Use `generateSqliteMigrationSQL()`
+when the resulting database will be opened through `createVerifiedStore()` or
+the DML-only graph-template APIs.
 
 #### `createLibsqlBackend(client, options?)`
 
@@ -777,7 +787,10 @@ function generatePostgresMigrationSQL(
 
 Returns individual DDL statements (CREATE TABLE, CREATE INDEX) as an array. Useful when you
 need per-statement control, for example to execute them in separate transactions or log them
-individually.
+individually. This low-level array deliberately omits the deployment-wide
+marker row, so joining it does not produce a complete installation. Use
+`generatePostgresMigrationSQL()` for a database that will be opened through
+`createVerifiedStore()` or the DML-only graph-template APIs.
 
 ```typescript
 function generatePostgresDDL(tables?: PostgresTables): string[];
@@ -839,7 +852,8 @@ INSERT INTO "typegraph_base_schema_versions"
 VALUES (1, 1, CURRENT_TIMESTAMP)
 ON CONFLICT ("installation") DO UPDATE SET
   "version" = excluded."version",
-  "updated_at" = excluded."updated_at";
+  "updated_at" = excluded."updated_at"
+WHERE "typegraph_base_schema_versions"."version" <= excluded."version";
 ```
 
 For PostgreSQL, the adoption statements are idempotent:
@@ -892,8 +906,15 @@ INSERT INTO "typegraph_base_schema_versions"
 VALUES (1, 1, NOW())
 ON CONFLICT ("installation") DO UPDATE SET
   "version" = excluded."version",
-  "updated_at" = excluded."updated_at";
+  "updated_at" = excluded."updated_at"
+WHERE "typegraph_base_schema_versions"."version" <= excluded."version";
 ```
+
+The conditional update makes marker publication monotonic: replaying an older
+migration can never claim that storage prepared by a newer TypeGraph release is
+older. The fresh-installation generators use `DO NOTHING` instead because they
+are not upgrade planners; an existing stale marker remains stale until the
+numbered privileged adoption lifecycle runs.
 
 `createVerifiedStore`, `assertSchemaCurrent`, and the DML-only graph-template
 APIs read this marker and throw `BaseSchemaMigrationError` when it is missing,

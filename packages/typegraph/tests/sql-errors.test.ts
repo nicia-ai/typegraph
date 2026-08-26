@@ -850,6 +850,16 @@ describe("isEdgeMatchIdentityStorageUnavailableError", () => {
       isEdgeMatchIdentityStorageUnavailableError(
         Object.assign(
           new Error(
+            'no such column: "match_identity_name" - should this be a string literal in single-quotes?',
+          ),
+          { code: "SQLITE_ERROR" },
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isEdgeMatchIdentityStorageUnavailableError(
+        Object.assign(
+          new Error(
             "UNIQUE constraint failed: typegraph_edges.match_identity_name",
           ),
           { code: "SQLITE_ERROR" },

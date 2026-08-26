@@ -178,8 +178,7 @@ import {
 import {
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
-  generateSqliteEdgeMatchIdentityColumnDDL,
-  generateSqliteEdgeMatchIdentityIndexDDL,
+  planSqliteEdgeMatchIdentityAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1846,34 +1845,11 @@ export function createSqliteBackend(
         typeof row.name === "string" ? [row.name] : [],
       ),
     );
-    const nameMissing = !columns.has("match_identity_name");
-    const keyMissing = !columns.has("match_identity_key");
-    if (columnRows.length > 0 && nameMissing) {
-      await db.run(
-        sql.raw(
-          generateSqliteEdgeMatchIdentityColumnDDL(
-            edgeTableName,
-            "match_identity_name",
-            !keyMissing,
-          ),
-        ),
-      );
-    }
-    if (columnRows.length > 0 && keyMissing) {
-      await db.run(
-        sql.raw(
-          generateSqliteEdgeMatchIdentityColumnDDL(
-            edgeTableName,
-            "match_identity_key",
-            true,
-          ),
-        ),
-      );
-    }
-    if (columnRows.length > 0) {
-      await db.run(
-        sql.raw(generateSqliteEdgeMatchIdentityIndexDDL(edgeTableName)),
-      );
+    for (const statement of planSqliteEdgeMatchIdentityAdoption(
+      edgeTableName,
+      columns,
+    )) {
+      await db.run(sql.raw(statement));
     }
   }
 
@@ -1896,7 +1872,9 @@ export function createSqliteBackend(
     );
   }
 
-  async function writeBaseSchemaVersion(version: number): Promise<boolean> {
+  async function writeBaseSchemaVersion(
+    version: number,
+  ): Promise<number | undefined> {
     const marker = tables.baseSchemaVersions;
     const timestamp = nowIso();
     await db
@@ -1908,9 +1886,9 @@ export function createSqliteBackend(
         setWhere: lte(marker.version, version),
       });
     // Read back on this backend's primary connection: remote adapters do not
-    // all support RETURNING, and a concurrent adopter may already be ahead.
-    const installedVersion = await readBaseSchemaVersion();
-    return installedVersion !== undefined && installedVersion >= version;
+    // all support RETURNING. The monotonic upsert plus same-primary read makes
+    // this two-statement observation safe when a concurrent adopter is ahead.
+    return readBaseSchemaVersion();
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {
@@ -1928,7 +1906,7 @@ export function createSqliteBackend(
           await ensureGraphTemplatesTable();
           await ensureEdgeMatchIdentityStorage();
         },
-        adoptAfterBootstrap: ensureEdgeMatchIdentityStorage,
+        adoptBeforeBootstrap: ensureEdgeMatchIdentityStorage,
       },
     ],
   });
@@ -1974,6 +1952,9 @@ export function createSqliteBackend(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
+      await baseSchemaLifecycle.adoptBeforeBootstrap(
+        startingBaseSchemaVersion,
+      );
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));

@@ -596,7 +596,7 @@ export function isEdgeMatchIdentityStorageUnavailableError(
     }
     if (
       code === "SQLITE_ERROR" &&
-      /^(?:no such column: (?:[^.]+\.)?|table .+ has no column named |no column named )match_identity_(?:name|key)$/.test(
+      /^(?:no such column: (?:[^.]+\.)?|table .+ has no column named |no column named )"?match_identity_(?:name|key)"?(?: - should this be a string literal in single-quotes\?)?$/.test(
         message,
       )
     ) {
