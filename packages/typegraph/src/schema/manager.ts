@@ -422,6 +422,7 @@ export async function ensureSchema<G extends GraphDef>(
   const currentHash = await getSchemaHash(graph, activeSchema.version + 1);
 
   if (storedHash === currentHash) {
+    await provisionEdgeMatchIdentityStorage(backend, graph);
     return { status: "unchanged", version: activeSchema.version };
   }
 
@@ -433,12 +434,17 @@ export async function ensureSchema<G extends GraphDef>(
 
   if (!diff.hasChanges) {
     // Hash changed but no semantic changes (shouldn't happen, but handle it)
+    await provisionEdgeMatchIdentityStorage(backend, graph);
     return { status: "unchanged", version: activeSchema.version };
   }
 
   // Check if changes are backwards compatible
   if (isBackwardsCompatible(diff)) {
     if (autoMigrate) {
+      // Base storage belongs to the running library version, not to the graph
+      // document. Adopt it before publishing the new schema version so a DDL
+      // refusal cannot leave a current schema over an obsolete edge relation.
+      await provisionEdgeMatchIdentityStorage(backend, graph);
       // Safe changes - auto-migrate
       const hookContext: MigrationHookContext = {
         graphId: graph.id,
@@ -479,6 +485,7 @@ export async function ensureSchema<G extends GraphDef>(
       };
     }
     // Auto-migrate disabled but changes are safe
+    await provisionEdgeMatchIdentityStorage(backend, graph);
     return {
       status: "pending",
       version: activeSchema.version,
@@ -521,6 +528,7 @@ export async function ensureSchema<G extends GraphDef>(
     );
   }
 
+  await provisionEdgeMatchIdentityStorage(backend, graph);
   return { status: "breaking", diff, actions };
 }
 
@@ -960,9 +968,7 @@ export async function migrateSchema<G extends GraphDef>(
     target,
     storedSchema,
   );
-  if (rekeyedEdgeKinds.length > 0) {
-    await provisionEdgeMatchIdentityStorage(backend, target);
-  }
+  await provisionEdgeMatchIdentityStorage(backend, target);
   // No cleanup is queued here, deliberately, and redundancy is the whole
   // reason. `materializeRemovals` derives removals by walking schema-version
   // history (`reconcilePendingRemovals` diffs consecutive documents' kind
@@ -1051,18 +1057,31 @@ export async function migrateSchema<G extends GraphDef>(
   return committed.version;
 }
 
+/**
+ * Adopts the physical edge columns and arbiter required by this library
+ * version. Every edge write names the nullable identity columns, including
+ * writes for graphs that do not declare a durable match identity, so this is
+ * a base-schema upgrade rather than a graph-feature migration.
+ *
+ * Privileged store preparation calls this on every open. Runtime-only store
+ * construction remains DDL-free.
+ */
+async function adoptEdgeMatchIdentityStorage(
+  backend: GraphBackend,
+): Promise<void> {
+  await backend.ensureEdgeMatchIdentityStorage?.();
+}
+
 async function provisionEdgeMatchIdentityStorage(
   backend: GraphBackend,
   graph: GraphDef,
 ): Promise<void> {
-  let declaresIdentity = false;
   for (const [kind, registration] of Object.entries(graph.edges)) {
     const identity = registration.matchIdentity;
     if (identity === undefined) continue;
-    declaresIdentity = true;
     assertEdgeMatchIdentityBackendSupport(identity, backend.capabilities, kind);
   }
-  if (declaresIdentity) await backend.ensureEdgeMatchIdentityStorage?.();
+  await adoptEdgeMatchIdentityStorage(backend);
 }
 
 /**

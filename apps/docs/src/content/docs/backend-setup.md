@@ -90,12 +90,14 @@ const store = createStore(graph, backend);
 ```
 
 The generated script is complete installation DDL, not an incremental upgrade
-planner. Existing databases must apply release-specific additive migrations
-through their migration tool. See
+planner. Existing databases attached only through the zero-DDL runtime
+factories must apply release-specific additive migrations through their
+migration tool. See
 [Upgrading an existing edge table for durable match identity](#upgrading-an-existing-edge-table-for-durable-match-identity)
 for the exact SQLite and PostgreSQL statements. The privileged
-`createStoreWithSchema()` path applies that storage upgrade automatically before
-it publishes a schema declaration.
+`createStoreWithSchema()` path applies that storage upgrade automatically on
+every open, including when the base tables were provisioned externally and the
+graph schema is unchanged.
 
 ### SQLite with Vector Search
 
@@ -776,8 +778,10 @@ function generatePostgresDDL(tables?: PostgresTables): string[];
 ### Upgrading an existing edge table for durable match identity
 
 Skip this section when `createStoreWithSchema()` owns schema preparation: the
-bundled SQLite and PostgreSQL adapters perform this adoption idempotently before
-publishing a graph schema that declares `matchIdentity`.
+bundled SQLite and PostgreSQL adapters perform this base-storage adoption
+idempotently on every privileged open. This is required even for graphs without
+a `matchIdentity` declaration because every edge write names the two nullable
+columns.
 
 When database DDL is managed externally, apply the matching migration before a
 runtime worker opens the new graph schema. The examples use the default
@@ -1631,6 +1635,8 @@ least-privilege, DML-only database role.
 
 - **`createStoreWithSchema(graph, backend)` runs DDL.** It bootstraps the
   base tables on a fresh database, applies safe auto-migrations, and
+  adopts release-added base edge storage on pre-provisioned databases, even
+  when the persisted graph schema is unchanged. It also
   durably materializes strategy-owned runtime storage — both fulltext and
   each `embedding()` field's per-`(kind, field)` vector table, plus a
   durable marker for each. It also brings TypeGraph's own base-relation

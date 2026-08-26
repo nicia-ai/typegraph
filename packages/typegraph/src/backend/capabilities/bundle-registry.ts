@@ -827,7 +827,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   ensureEdgeMatchIdentityStorage: {
     kind: "reasoned",
     reason:
-      "Focused privileged schema-adoption hook. A changed graph declaration gates its single store-preparation call; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.",
+      "Focused privileged base-schema adoption hook. Schema preparation calls its single owner on every open because all edge writes name the nullable columns; runtime stores never consult it. Custom backends may omit it only when their durableEdgeMatchIdentity declaration promises independently provisioned storage.",
     accesses: 1,
   },
   claimEdgeCardinalityGuarded: {

@@ -8,12 +8,14 @@ import {
   ConfigurationError,
   createStore,
   createStoreWithSchema,
+  createVerifiedStore,
   DatabaseOperationError,
   defineEdge,
   defineEdgeIndex,
   defineGraph,
   defineNode,
   EdgeMatchIdentityConflictError,
+  MigrationError,
   ValidationError,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
@@ -32,7 +34,11 @@ import {
   importGraph,
   ImportOptionsSchema,
 } from "../src/interchange";
-import { initializeSchema, migrateSchema } from "../src/schema/manager";
+import {
+  getActiveSchema,
+  initializeSchema,
+  migrateSchema,
+} from "../src/schema/manager";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -278,7 +284,7 @@ describe("durable edge match identity", () => {
     }
   });
 
-  it("provisions storage exactly when a schema first declares identity", async () => {
+  it("provisions declarations and rechecks storage on privileged open", async () => {
     const { backend } = createLocalSqliteBackend();
     const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
     if (ensureStorage === undefined) {
@@ -297,7 +303,53 @@ describe("durable edge match identity", () => {
       expect(ensureCalls).toBe(1);
 
       await createStoreWithSchema(graph, tracked);
-      expect(ensureCalls).toBe(1);
+      expect(ensureCalls).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("does not publish a safe migration when edge storage adoption fails", async () => {
+    const graphId = "durable_identity_adoption_failure";
+    const { backend } = createLocalSqliteBackend();
+    const upgradedPerson = defineNode("Person", {
+      schema: z.object({
+        name: z.string(),
+        email: z.string().optional(),
+      }),
+    });
+    const upgradedGraph = defineGraph({
+      id: graphId,
+      nodes: { Person: { type: upgradedPerson } },
+      edges: {
+        knows: {
+          type: knows,
+          from: [upgradedPerson],
+          to: [upgradedPerson],
+        },
+      },
+    });
+    try {
+      await createStoreWithSchema(legacyGraph(graphId), backend);
+      const failingBackend = deriveBackend(backend, {
+        ensureEdgeMatchIdentityStorage(): Promise<void> {
+          return Promise.reject(new Error("edge storage adoption failed"));
+        },
+      });
+
+      await expect(
+        createStoreWithSchema(upgradedGraph, failingBackend),
+      ).rejects.toThrow("edge storage adoption failed");
+      await expect(getActiveSchema(backend, graphId)).resolves.toMatchObject({
+        version: 1,
+      });
+      await expect(
+        createVerifiedStore(upgradedGraph, backend),
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof MigrationError &&
+          error.details.reason === "schema-behind",
+      );
     } finally {
       await backend.close();
     }
@@ -327,7 +379,7 @@ describe("durable edge match identity", () => {
       ).resolves.toBe(2);
       const durableSchema = await tracked.getActiveSchema(graphId);
       expect(durableSchema?.version).toBe(2);
-      expect(ensureCalls).toBe(1);
+      expect(ensureCalls).toBe(2);
 
       const [store] = await createStoreWithSchema(
         durableGraph(graphId),
@@ -340,7 +392,7 @@ describe("durable edge match identity", () => {
           label: "friend",
         }),
       ).resolves.toMatchObject({ action: "created" });
-      expect(ensureCalls).toBe(1);
+      expect(ensureCalls).toBe(3);
     } finally {
       await backend.close();
     }

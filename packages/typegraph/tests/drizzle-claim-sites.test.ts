@@ -49,7 +49,7 @@ const RECORDED_CLAIM_SITES: readonly Readonly<{
   },
   {
     file: "apps/docs/src/content/docs/backend-setup.md",
-    line: 843,
+    line: 847,
     text: "## " + CLAIM_WORD + "-Free Entrypoints",
   },
   {

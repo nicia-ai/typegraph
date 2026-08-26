@@ -2664,11 +2664,11 @@ export type GraphBackend = Readonly<{
    * Idempotently add the durable edge-match identity columns, pair constraint,
    * and unique index to the configured edge relation.
    *
-   * This focused adoption hook lets an already-initialized database activate a
-   * graph-local `matchIdentity` without replaying the complete base-table DDL
-   * set. Privileged schema preparation calls it before publishing a schema
-   * that declares durable identity; ordinary runtime store construction never
-   * performs DDL.
+   * Every edge write names these nullable columns, even when its graph does
+   * not declare `matchIdentity`. Privileged schema preparation therefore calls
+   * this focused hook on every open so pre-provisioned base tables adopt newer
+   * physical storage without replaying the complete base-table DDL set.
+   * Ordinary runtime store construction never performs DDL.
    *
    * @internal
    */

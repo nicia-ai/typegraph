@@ -2,7 +2,15 @@ import { PGlite } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
 import {
   edgeMatchIdentityPairCheckName,
   edgeMatchIdentityUniqueIndexName,
@@ -16,6 +24,7 @@ import { createSqliteTables, generateSqliteDDL } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { sql as portableSql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
+import { initializeSchema } from "../src/schema/manager";
 
 describe("durable edge-match identity DDL", () => {
   it("declares the nullable pair check and unique arbiter for custom names", () => {
@@ -103,6 +112,78 @@ describe("durable edge-match identity DDL", () => {
       );
     } finally {
       await client.close();
+    }
+  });
+
+  it("adopts a complete pre-match-identity PostgreSQL schema when reopening a legacy graph", async () => {
+    const edgeTableName = "typegraph_edges";
+    const graphTemplatesTableName = "typegraph_graph_templates";
+    const tables = createPostgresTables({ edges: edgeTableName });
+    const client = await PGlite.create();
+    await client.exec(generatePostgresDDL(tables).join("\n\n"));
+
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      tables,
+      vector: false,
+    });
+    const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
+    if (ensureStorage === undefined) {
+      throw new Error(
+        "PostgreSQL backend must expose identity storage adoption",
+      );
+    }
+    let ensureCalls = 0;
+    const tracked = deriveBackend(backend, {
+      async ensureEdgeMatchIdentityStorage(): Promise<void> {
+        ensureCalls += 1;
+        await ensureStorage();
+      },
+    });
+
+    const Person = defineNode("Person", {
+      schema: z.object({ name: z.string() }),
+    });
+    const knows = defineEdge("knows", {
+      schema: z.object({ label: z.string() }),
+    });
+    const graph = defineGraph({
+      id: "preprovisioned_match_identity",
+      nodes: { Person: { type: Person } },
+      edges: {
+        knows: {
+          type: knows,
+          from: [Person],
+          to: [Person],
+        },
+      },
+    });
+
+    try {
+      await initializeSchema(backend, graph);
+      // Rewind the physical installation after publishing the active schema:
+      // a 0.51 deployment has a current graph document but its base relations
+      // predate the template table and nullable match-identity columns.
+      await client.exec(
+        [
+          `DROP TABLE "${graphTemplatesTableName}"`,
+          `DROP INDEX "${edgeMatchIdentityUniqueIndexName(edgeTableName)}"`,
+          `ALTER TABLE "${edgeTableName}" DROP CONSTRAINT "${edgeMatchIdentityPairCheckName(edgeTableName)}"`,
+          `ALTER TABLE "${edgeTableName}" DROP COLUMN "match_identity_key"`,
+          `ALTER TABLE "${edgeTableName}" DROP COLUMN "match_identity_name"`,
+        ].join(";\n"),
+      );
+
+      const [store, result] = await createStoreWithSchema(graph, tracked);
+      expect(result.status).toBe("unchanged");
+
+      const from = await store.nodes.Person.create({ name: "From" });
+      const to = await store.nodes.Person.create({ name: "To" });
+      await expect(
+        store.edges.knows.create(from, to, { label: "first" }),
+      ).resolves.toMatchObject({ label: "first" });
+      expect(ensureCalls).toBe(1);
+    } finally {
+      await backend.close();
     }
   });
 
