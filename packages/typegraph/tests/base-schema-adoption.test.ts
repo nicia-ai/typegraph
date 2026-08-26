@@ -327,4 +327,24 @@ describe("deployment-wide base-schema adoption", () => {
       await backend.close();
     }
   });
+
+  it("refuses to downgrade a newer base marker during bootstrap", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec(
+        "UPDATE typegraph_base_schema_versions SET version = 2 WHERE installation = 1",
+      );
+
+      await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof BaseSchemaMigrationError &&
+          error.details.reason === "newer",
+      );
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
 });

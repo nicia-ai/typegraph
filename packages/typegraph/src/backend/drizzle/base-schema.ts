@@ -54,8 +54,8 @@ function migrationError(
 export function createBaseSchemaLifecycle(
   options: BaseSchemaLifecycleOptions,
 ): BaseSchemaLifecycle {
-  const steps = options.steps.toSorted((left, right) =>
-    left.version - right.version,
+  const steps = options.steps.toSorted(
+    (left, right) => left.version - right.version,
   );
   for (const [index, step] of steps.entries()) {
     if (step.version !== index + 1) {
@@ -100,7 +100,14 @@ export function createBaseSchemaLifecycle(
     // Full generated DDL already created every current base relation. A step's
     // bootstrap hook therefore owns only upgrades CREATE TABLE cannot apply to
     // a pre-existing relation, avoiding duplicate cold-start CREATEs.
+    const installedVersion = await options.readVersion();
+    const state = classifyVersion(installedVersion);
+    if (state === "current") return;
+    if (state === "newer") throw migrationError(installedVersion);
+
+    const startingVersion = installedVersion ?? 0;
     for (const step of steps) {
+      if (step.version <= startingVersion) continue;
       await (step.adoptAfterBootstrap ?? step.adopt)();
       await options.writeVersion(step.version);
     }
