@@ -67,12 +67,14 @@ const POSTGRES_NOT_NULL_VIOLATION_CODE = "23502";
  * waits for the winner and is then handed the conflict the winner's commit
  * produced — `unique_violation` (23505) from `pg_type`/`pg_class` for a racing
  * CREATE, `duplicate_column` (42701) for a racing `ALTER TABLE ... ADD COLUMN
- * IF NOT EXISTS`. Retrying once after that wait observes the committed object
- * and succeeds; a failure the retry cannot clear stays loud.
+ * IF NOT EXISTS`, and `duplicate_object` (42710) for a racing named constraint.
+ * Retrying once after that wait observes the committed object and succeeds; a
+ * failure the retry cannot clear stays loud.
  */
 const POSTGRES_CONCURRENT_DDL_RACE_SQL_STATES = [
   POSTGRES_UNIQUE_VIOLATION_CODE,
   "42701",
+  "42710",
 ] as const;
 
 /**

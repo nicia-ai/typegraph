@@ -25,6 +25,7 @@ import {
   getTableName,
   inArray,
   isNull,
+  lte,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -162,6 +163,7 @@ import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
+import { createBaseSchemaLifecycle } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -1875,8 +1877,64 @@ export function createSqliteBackend(
     }
   }
 
+  async function readBaseSchemaVersion(): Promise<number | undefined> {
+    try {
+      const rows = await db
+        .select({ version: tables.baseSchemaVersions.version })
+        .from(tables.baseSchemaVersions)
+        .where(eq(tables.baseSchemaVersions.installation, 1));
+      return rows.at(0)?.version;
+    } catch (error) {
+      if (isMissingTableError(error)) return undefined;
+      throw error;
+    }
+  }
+
+  async function ensureBaseSchemaVersionTable(): Promise<void> {
+    await db.run(
+      sql.raw(generateSqliteCreateTableSQL(tables.baseSchemaVersions)),
+    );
+  }
+
+  async function writeBaseSchemaVersion(version: number): Promise<boolean> {
+    const marker = tables.baseSchemaVersions;
+    const timestamp = nowIso();
+    await db
+      .insert(marker)
+      .values({ installation: 1, version, updatedAt: timestamp })
+      .onConflictDoUpdate({
+        target: marker.installation,
+        set: { version, updatedAt: timestamp },
+        setWhere: lte(marker.version, version),
+      });
+    return (await readBaseSchemaVersion()) === version;
+  }
+
+  async function ensureGraphTemplatesTable(): Promise<void> {
+    await db.run(sql.raw(generateSqliteCreateTableSQL(tables.graphTemplates)));
+  }
+
+  const baseSchemaLifecycle = createBaseSchemaLifecycle({
+    readVersion: readBaseSchemaVersion,
+    ensureVersionTable: ensureBaseSchemaVersionTable,
+    writeVersion: writeBaseSchemaVersion,
+    steps: [
+      {
+        version: 1,
+        async adopt(): Promise<void> {
+          await ensureGraphTemplatesTable();
+          await ensureEdgeMatchIdentityStorage();
+        },
+        adoptAfterBootstrap: ensureEdgeMatchIdentityStorage,
+      },
+    ],
+  });
+
   const backend: AdapterBackend<AnySqliteDatabase> = {
     ...operations,
+
+    adoptBaseSchema: baseSchemaLifecycle.adopt,
+    assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
 
     ...((
       isSync &&
@@ -1911,12 +1969,13 @@ export function createSqliteBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
-      await ensureEdgeMatchIdentityStorage();
-
+      const startingBaseSchemaVersion =
+        await baseSchemaLifecycle.prepareBootstrap();
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
+      await baseSchemaLifecycle.adoptAfterBootstrap(startingBaseSchemaVersion);
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {

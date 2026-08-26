@@ -360,9 +360,9 @@ function requireSourceFile(
 }
 
 /**
- * The 91 optional `GraphBackend` members, read off the CHECKER rather than
+ * The 93 optional `GraphBackend` members, read off the CHECKER rather than
  * hand-copied — a member added or removed from `GraphBackend` changes this
- * set automatically. The `size === 91` assertion is the scan's own
+ * set automatically. The `size === 93` assertion is the scan's own
  * precondition: it throws, rather than silently scanning a stale set, the
  * moment `GraphBackend`'s optional surface moves without this scanner
  * (re-)running.
@@ -392,9 +392,9 @@ function deriveOptionalGraphBackendMembers(
     .getPropertiesOfType(graphBackendType)
     .filter((property) => (property.flags & ts.SymbolFlags.Optional) !== 0)
     .map((property) => property.name);
-  if (optionalNames.length !== 91) {
+  if (optionalNames.length !== 93) {
     throw new Error(
-      `Expected exactly 91 optional GraphBackend members (the scan's own precondition); found ${optionalNames.length}. GraphBackend's optional surface has changed — re-derive every partition constant before trusting this scan.`,
+      `Expected exactly 93 optional GraphBackend members (the scan's own precondition); found ${optionalNames.length}. GraphBackend's optional surface has changed — re-derive every partition constant before trusting this scan.`,
     );
   }
   return new Set(optionalNames);

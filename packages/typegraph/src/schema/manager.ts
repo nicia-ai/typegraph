@@ -398,13 +398,17 @@ export async function ensureSchema<G extends GraphDef>(
       await loadActiveSchemaWithBootstrap(backend, graph.id)
     : preloaded.activeRow;
 
+  await adoptBaseSchemaStorage(backend);
+  assertGraphEdgeMatchIdentitySupport(backend, graph);
+
   if (activeSchema === undefined) {
     // No schema exists - initialize with version 1. Only the effective
     // `SqlSchema` is threaded through; `initializeSchema` derives the
     // mandatory identity preflight itself, so no public first-commit path
     // can skip or replace the enablement work.
-    const result = await initializeSchema(backend, graph, {
+    const result = await initializeSchemaImpl(backend, graph, {
       ...(options?.schema === undefined ? {} : { schema: options.schema }),
+      baseSchemaPrepared: true,
     });
     return {
       status: "initialized",
@@ -538,6 +542,8 @@ export async function ensureSchema<G extends GraphDef>(
  * build a `Store` on the correct graph without paying for a second
  * `getActiveSchema` round trip or re-merging.
  *
+ * @throws BaseSchemaMigrationError if deployment-wide base storage is not at
+ *   the version required by the backend.
  * @throws ConfigurationError if no schema has been initialized for
  *   `graph.id` (the privileged migration step has not run, or the base
  *   tables do not exist on this connection).
@@ -556,6 +562,7 @@ export async function loadAndVerifyGraph<G extends GraphDef>(
     result: SchemaValidationResult;
   }>
 > {
+  await backend.assertBaseSchemaCurrent?.();
   const activeRow = await readActiveSchemaPure(backend, graph.id);
   const { graph: merged, storedSchema } = mergeStoredGraphExtension(
     graph,
@@ -646,6 +653,8 @@ function schemaBehindError(
  * role, optionally after applying generated migration SQL externally) is
  * responsible for advancing the schema; runtimes assert it.
  *
+ * @throws BaseSchemaMigrationError if deployment-wide base storage is not at
+ *   the version required by the backend.
  * @throws ConfigurationError if no schema has been initialized.
  * @throws MigrationError if the persisted schema is behind the code
  *   graph by any change (safe or breaking).
@@ -782,6 +791,20 @@ async function commitInitialEdgeIdentityOnEmptyKinds(
  * @param graph - The graph definition
  * @returns The created schema version row
  */
+type InitializeSchemaOptions = Readonly<{
+  /**
+   * The effective `SqlSchema` (custom table names) the graph's Store will
+   * read. The identity enablement preflight is always derived internally.
+   */
+  schema?: SqlSchema;
+}>;
+
+type InitializeSchemaImplOptions = InitializeSchemaOptions &
+  Readonly<{
+    /** The caller already completed the deployment-wide adoption gate. */
+    baseSchemaPrepared: boolean;
+  }>;
+
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
@@ -796,13 +819,30 @@ export async function initializeSchema<G extends GraphDef>(
     schema?: SqlSchema;
   }>,
 ): Promise<SchemaVersionRow> {
+  return initializeSchemaImpl(backend, graph, {
+    ...(options?.schema === undefined ? {} : { schema: options.schema }),
+    baseSchemaPrepared: false,
+  });
+}
+
+async function initializeSchemaImpl<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  options: InitializeSchemaImplOptions,
+): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
   // Store is later constructed against it — buildKindRegistry throws the
   // same ConfigurationError a Store construction would, just earlier.
   buildKindRegistry(graph);
 
-  await provisionEdgeMatchIdentityStorage(backend, graph);
+  if (!options.baseSchemaPrepared) {
+    // Base storage belongs to the running library version, not to this graph
+    // document. Adopt it before publishing schema version 1 so a DDL refusal
+    // cannot leave a current graph schema over obsolete physical relations.
+    await adoptBaseSchemaStorage(backend);
+    assertGraphEdgeMatchIdentitySupport(backend, graph);
+  }
 
   const edgeIdentityKinds =
     edgeKindsRequiringMatchIdentityMaterialization(graph);
@@ -850,7 +890,7 @@ export async function initializeSchema<G extends GraphDef>(
   // accepts while identity reads answer from a never-built closure.
   const preflight = await prepareIdentitySchemaCommit(backend, graph, {
     enablement: true,
-    ...(options?.schema === undefined ? {} : { schema: options.schema }),
+    ...(options.schema === undefined ? {} : { schema: options.schema }),
   });
   // The preflight issues idempotent identity DDL INSIDE this transaction (see
   // `provisionDerivedRelationsInCommit`), so two replicas booting at once can
@@ -960,9 +1000,8 @@ export async function migrateSchema<G extends GraphDef>(
     target,
     storedSchema,
   );
-  if (rekeyedEdgeKinds.length > 0) {
-    await provisionEdgeMatchIdentityStorage(backend, target);
-  }
+  await adoptBaseSchemaStorage(backend);
+  assertGraphEdgeMatchIdentitySupport(backend, target);
   // No cleanup is queued here, deliberately, and redundancy is the whole
   // reason. `materializeRemovals` derives removals by walking schema-version
   // history (`reconcilePendingRemovals` diffs consecutive documents' kind
@@ -1051,18 +1090,31 @@ export async function migrateSchema<G extends GraphDef>(
   return committed.version;
 }
 
-async function provisionEdgeMatchIdentityStorage(
+/**
+ * Adopts deployment-wide physical storage required by this library version.
+ * This is independent of any one graph's schema document.
+ *
+ * Bundled backends use a durable version marker, so a warm privileged open is
+ * one read and no base-adoption DDL. Runtime-only construction remains
+ * DDL-free.
+ */
+async function adoptBaseSchemaStorage(backend: GraphBackend): Promise<void> {
+  if (backend.adoptBaseSchema !== undefined) {
+    await backend.adoptBaseSchema();
+    return;
+  }
+  await backend.ensureEdgeMatchIdentityStorage?.();
+}
+
+function assertGraphEdgeMatchIdentitySupport(
   backend: GraphBackend,
   graph: GraphDef,
-): Promise<void> {
-  let declaresIdentity = false;
+): void {
   for (const [kind, registration] of Object.entries(graph.edges)) {
     const identity = registration.matchIdentity;
     if (identity === undefined) continue;
-    declaresIdentity = true;
     assertEdgeMatchIdentityBackendSupport(identity, backend.capabilities, kind);
   }
-  if (declaresIdentity) await backend.ensureEdgeMatchIdentityStorage?.();
 }
 
 /**

@@ -8,12 +8,14 @@ import {
   ConfigurationError,
   createStore,
   createStoreWithSchema,
+  createVerifiedStore,
   DatabaseOperationError,
   defineEdge,
   defineEdgeIndex,
   defineGraph,
   defineNode,
   EdgeMatchIdentityConflictError,
+  MigrationError,
   ValidationError,
 } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
@@ -32,7 +34,11 @@ import {
   importGraph,
   ImportOptionsSchema,
 } from "../src/interchange";
-import { initializeSchema, migrateSchema } from "../src/schema/manager";
+import {
+  getActiveSchema,
+  initializeSchema,
+  migrateSchema,
+} from "../src/schema/manager";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -278,26 +284,60 @@ describe("durable edge match identity", () => {
     }
   });
 
-  it("provisions storage exactly when a schema first declares identity", async () => {
+  it("keeps durable declarations usable across privileged reopens", async () => {
     const { backend } = createLocalSqliteBackend();
-    const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
-    if (ensureStorage === undefined) {
-      throw new Error("SQLite backend must expose identity storage adoption");
+    try {
+      const graph = durableGraph("durable_identity_activation");
+      await initializeSchema(backend, graph);
+      await expect(
+        createStoreWithSchema(graph, backend),
+      ).resolves.toBeDefined();
+    } finally {
+      await backend.close();
     }
-    let ensureCalls = 0;
-    const tracked = deriveBackend(backend, {
-      async ensureEdgeMatchIdentityStorage(): Promise<void> {
-        ensureCalls += 1;
-        await ensureStorage();
+  });
+
+  it("does not publish a safe migration when edge storage adoption fails", async () => {
+    const graphId = "durable_identity_adoption_failure";
+    const { backend } = createLocalSqliteBackend();
+    const upgradedPerson = defineNode("Person", {
+      schema: z.object({
+        name: z.string(),
+        email: z.string().optional(),
+      }),
+    });
+    const upgradedGraph = defineGraph({
+      id: graphId,
+      nodes: { Person: { type: upgradedPerson } },
+      edges: {
+        knows: {
+          type: knows,
+          from: [upgradedPerson],
+          to: [upgradedPerson],
+        },
       },
     });
     try {
-      const graph = durableGraph("durable_identity_activation");
-      await initializeSchema(tracked, graph);
-      expect(ensureCalls).toBe(1);
+      await createStoreWithSchema(legacyGraph(graphId), backend);
+      const failingBackend = deriveBackend(backend, {
+        adoptBaseSchema(): Promise<void> {
+          return Promise.reject(new Error("edge storage adoption failed"));
+        },
+      });
 
-      await createStoreWithSchema(graph, tracked);
-      expect(ensureCalls).toBe(1);
+      await expect(
+        createStoreWithSchema(upgradedGraph, failingBackend),
+      ).rejects.toThrow("edge storage adoption failed");
+      await expect(getActiveSchema(backend, graphId)).resolves.toMatchObject({
+        version: 1,
+      });
+      await expect(
+        createVerifiedStore(upgradedGraph, backend),
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof MigrationError &&
+          error.details.reason === "schema-behind",
+      );
     } finally {
       await backend.close();
     }
@@ -305,33 +345,21 @@ describe("durable edge match identity", () => {
 
   it("activates identity on an empty legacy kind and materializes its key", async () => {
     const { backend } = createLocalSqliteBackend();
-    const ensureStorage = backend.ensureEdgeMatchIdentityStorage;
-    if (ensureStorage === undefined) {
-      throw new Error("SQLite backend must expose identity storage adoption");
-    }
-    let ensureCalls = 0;
-    const tracked = deriveBackend(backend, {
-      async ensureEdgeMatchIdentityStorage(): Promise<void> {
-        ensureCalls += 1;
-        await ensureStorage();
-      },
-    });
     try {
       const graphId = "durable_identity_empty_migration";
-      await createStoreWithSchema(legacyGraph(graphId), tracked);
-      const legacySchema = await tracked.getActiveSchema(graphId);
+      await createStoreWithSchema(legacyGraph(graphId), backend);
+      const legacySchema = await backend.getActiveSchema(graphId);
       expect(legacySchema?.version).toBe(1);
 
       await expect(
-        migrateSchema(tracked, durableGraph(graphId), 1),
+        migrateSchema(backend, durableGraph(graphId), 1),
       ).resolves.toBe(2);
-      const durableSchema = await tracked.getActiveSchema(graphId);
+      const durableSchema = await backend.getActiveSchema(graphId);
       expect(durableSchema?.version).toBe(2);
-      expect(ensureCalls).toBe(1);
 
       const [store] = await createStoreWithSchema(
         durableGraph(graphId),
-        tracked,
+        backend,
       );
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
@@ -340,7 +368,6 @@ describe("durable edge match identity", () => {
           label: "friend",
         }),
       ).resolves.toMatchObject({ action: "created" });
-      expect(ensureCalls).toBe(1);
     } finally {
       await backend.close();
     }
@@ -608,6 +635,74 @@ describe("durable edge match identity", () => {
           identityName: "knows-label",
         },
       });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("classifies plain edge inserts when legacy storage lacks identity columns", async () => {
+    const client = await PGlite.create();
+    await client.exec(generatePostgresDDL().join("\n\n"));
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    const graphId = "legacy_edge_missing_identity_columns";
+    const edge = (id: string) => ({
+      graphId,
+      id,
+      kind: "knows",
+      fromKind: "Person",
+      fromId: "alice",
+      toKind: "Person",
+      toId: "bob",
+      props: { label: id },
+    });
+    const expectStorageRefusal = async (operation: Promise<unknown>) => {
+      const error = await operation.catch((error_: unknown) => error_);
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect(error).toMatchObject({
+        code: "CONFIGURATION_ERROR",
+        details: {
+          code: "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE",
+          graphId,
+          edgeKind: "knows",
+        },
+      });
+    };
+
+    try {
+      await client.exec(
+        `DROP INDEX "${edgeMatchIdentityUniqueIndexName("typegraph_edges")}"; ` +
+          `ALTER TABLE "typegraph_edges" DROP CONSTRAINT "${edgeMatchIdentityPairCheckName("typegraph_edges")}"; ` +
+          `ALTER TABLE "typegraph_edges" DROP COLUMN "match_identity_name"; ` +
+          `ALTER TABLE "typegraph_edges" DROP COLUMN "match_identity_key";`,
+      );
+
+      await expectStorageRefusal(backend.insertEdge(edge("direct")));
+
+      const insertEdgeNoReturn = backend.insertEdgeNoReturn;
+      if (insertEdgeNoReturn === undefined) {
+        throw new Error("PostgreSQL backend must support insertEdgeNoReturn");
+      }
+      await expectStorageRefusal(insertEdgeNoReturn(edge("no-return")));
+
+      const insertEdgesBatch = backend.insertEdgesBatch;
+      if (insertEdgesBatch === undefined) {
+        throw new Error("PostgreSQL backend must support insertEdgesBatch");
+      }
+      await expectStorageRefusal(
+        insertEdgesBatch([edge("batch-a"), edge("batch-b")]),
+      );
+
+      const insertEdgesBatchReturning = backend.insertEdgesBatchReturning;
+      if (insertEdgesBatchReturning === undefined) {
+        throw new Error(
+          "PostgreSQL backend must support insertEdgesBatchReturning",
+        );
+      }
+      await expectStorageRefusal(
+        insertEdgesBatchReturning([edge("returning-a")]),
+      );
     } finally {
       await client.close();
     }

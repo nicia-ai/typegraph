@@ -114,6 +114,7 @@ const CLONE_TABLE_NAMES = {
   identitySeparation: "clone_identity_separation",
   uniques: "clone_node_uniques",
   edgeClaims: "clone_edge_claims",
+  baseSchemaVersions: "clone_base_schema_versions",
   schemaVersions: "clone_schema_versions",
   fulltext: "clone_node_fulltext",
   indexMaterializations: "clone_index_materializations",

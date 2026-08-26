@@ -90,12 +90,14 @@ const store = createStore(graph, backend);
 ```
 
 The generated script is complete installation DDL, not an incremental upgrade
-planner. Existing databases must apply release-specific additive migrations
-through their migration tool. See
-[Upgrading an existing edge table for durable match identity](#upgrading-an-existing-edge-table-for-durable-match-identity)
-for the exact SQLite and PostgreSQL statements. The privileged
-`createStoreWithSchema()` path applies that storage upgrade automatically before
-it publishes a schema declaration.
+planner. Existing databases attached only through the zero-DDL runtime
+factories must apply release-specific additive migrations through their
+migration tool. See
+[Upgrading deployment-wide base storage](#upgrading-deployment-wide-base-storage)
+for the exact SQLite and PostgreSQL statements. A privileged
+`createStoreWithSchema()` open adopts missing release storage once, then stamps
+a deployment-wide base-schema marker. Warm opens read that marker and issue no
+base-adoption DDL.
 
 ### SQLite with Vector Search
 
@@ -286,7 +288,7 @@ const store = createStore(graph, backend);
 
 As with SQLite, this is complete installation DDL rather than an incremental
 upgrade plan. Apply the
-[durable match identity upgrade](#upgrading-an-existing-edge-table-for-durable-match-identity)
+[base-schema upgrade](#upgrading-deployment-wide-base-storage)
 to an existing database, or let a privileged `createStoreWithSchema()`
 preparation adopt the storage before runtime workers use `createStore()`.
 
@@ -773,22 +775,37 @@ individually.
 function generatePostgresDDL(tables?: PostgresTables): string[];
 ```
 
-### Upgrading an existing edge table for durable match identity
+### Upgrading deployment-wide base storage
 
 Skip this section when `createStoreWithSchema()` owns schema preparation: the
-bundled SQLite and PostgreSQL adapters perform this adoption idempotently before
-publishing a graph schema that declares `matchIdentity`.
+bundled SQLite and PostgreSQL adapters adopt each numbered base-schema release
+on the first privileged open. Base-schema version 1 includes the durable graph
+template relation and edge match-identity storage. It is required even for
+graphs without a `matchIdentity` declaration because every edge write names the
+two nullable columns.
 
 When database DDL is managed externally, apply the matching migration before a
-runtime worker opens the new graph schema. The examples use the default
-`typegraph_edges` relation and its derived constraint/index names. Replace every
-occurrence consistently when the adapter uses a custom edge-table name.
+runtime worker opens the new graph schema. Apply the marker write last: it is
+the durable proof that every preceding step succeeded. The examples use the
+default TypeGraph table names. Replace every occurrence consistently when the
+adapter uses custom table names.
 
 For SQLite, run this migration exactly once. SQLite has no portable `ADD COLUMN
 IF NOT EXISTS`, so a migration tool must record whether it has already applied
-the two `ALTER TABLE` statements:
+the two `ALTER TABLE` statements. Fresh and published schemas include the
+nullable-pair `CHECK` below. Privileged adoption accepts an externally managed
+table that already has both columns without that defensive constraint: SQLite
+does not expose structural CHECK metadata or support adding one without a full
+table rebuild, while TypeGraph writes always bind both values or neither.
 
 ```sql
+CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (
+  "template_id" TEXT PRIMARY KEY NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" TEXT NOT NULL,
+  "created_at" TEXT NOT NULL
+);
+
 ALTER TABLE "typegraph_edges"
   ADD COLUMN "match_identity_name" TEXT;
 
@@ -800,11 +817,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq"
   ON "typegraph_edges" (
     "graph_id", "kind", "match_identity_name", "match_identity_key"
   );
+
+CREATE TABLE IF NOT EXISTS "typegraph_base_schema_versions" (
+  "installation" INTEGER PRIMARY KEY NOT NULL,
+  "version" INTEGER NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  CONSTRAINT "typegraph_base_schema_versions_singleton_check"
+    CHECK ("installation" = 1)
+);
+
+INSERT INTO "typegraph_base_schema_versions"
+  ("installation", "version", "updated_at")
+VALUES (1, 1, CURRENT_TIMESTAMP)
+ON CONFLICT ("installation") DO UPDATE SET
+  "version" = excluded."version",
+  "updated_at" = excluded."updated_at";
 ```
 
 For PostgreSQL, the adoption statements are idempotent:
 
 ```sql
+CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (
+  "template_id" TEXT PRIMARY KEY NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" JSONB NOT NULL,
+  "created_at" TIMESTAMPTZ NOT NULL
+);
+
 ALTER TABLE "typegraph_edges"
   ADD COLUMN IF NOT EXISTS "match_identity_name" TEXT;
 
@@ -831,7 +870,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq"
   ON "typegraph_edges" (
     "graph_id", "kind", "match_identity_name", "match_identity_key"
   );
+
+CREATE TABLE IF NOT EXISTS "typegraph_base_schema_versions" (
+  "installation" INTEGER PRIMARY KEY NOT NULL,
+  "version" INTEGER NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  CONSTRAINT "typegraph_base_schema_versions_singleton_check"
+    CHECK ("installation" = 1)
+);
+
+INSERT INTO "typegraph_base_schema_versions"
+  ("installation", "version", "updated_at")
+VALUES (1, 1, NOW())
+ON CONFLICT ("installation") DO UPDATE SET
+  "version" = excluded."version",
+  "updated_at" = excluded."updated_at";
 ```
+
+`createVerifiedStore`, `assertSchemaCurrent`, and the DML-only graph-template
+APIs read this marker and throw `BaseSchemaMigrationError` when it is missing,
+stale, or newer than the running library. They never attempt repair. A plain
+`createStore` remains a synchronous zero-I/O attach; if it reaches an edge
+write on legacy storage, the write fails with `ConfigurationError` and
+`details.code === "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE"` rather than a raw
+missing-column error.
 
 Provisioning the columns does not authorize re-keying existing data. Adding,
 removing, renaming, or changing the fields of a declared `matchIdentity` remains
@@ -1631,6 +1693,11 @@ least-privilege, DML-only database role.
 
 - **`createStoreWithSchema(graph, backend)` runs DDL.** It bootstraps the
   base tables on a fresh database, applies safe auto-migrations, and
+  adopts release-added deployment-wide base storage on pre-provisioned
+  databases, even when the persisted graph schema is unchanged. The first
+  adoption creates or repairs the graph-template and edge match-identity
+  storage, then stamps a version marker; a warm base-schema check is one
+  `SELECT` with no base-adoption DDL. It also
   durably materializes strategy-owned runtime storage — both fulltext and
   each `embedding()` field's per-`(kind, field)` vector table, plus a
   durable marker for each. It also brings TypeGraph's own base-relation
@@ -1638,10 +1705,9 @@ least-privilege, DML-only database role.
   runs on the very first boot, so an index shipped in a newer version
   reaches an already-initialized database through this step (built with
   `CREATE INDEX CONCURRENTLY` on PostgreSQL; a database whose indexes all
-  exist settles from the catalog with no DDL). It re-issues idempotent DDL
-  on every cold boot — at minimum a `CREATE TABLE IF NOT EXISTS` for the
-  contribution-marker table — so the role it runs under **must hold
-  `CREATE` / DDL privileges**. Run it once at startup, outside request
+  exist settles from the catalog with no DDL). Contribution and system-index
+  preparation have their own catalog checks and may still issue DDL, so the
+  role it runs under **must hold `CREATE` / DDL privileges**. Run it once at startup, outside request
   handlers and transactions. (`store.evolve()` likewise provisions any
   embedding field it introduces, so it too needs DDL privileges.)
   Deployments that never run `createStoreWithSchema` (manual-DDL boot with
@@ -1676,8 +1742,10 @@ least-privilege, DML-only database role.
   with a verification gate.** It reads the active schema row, folds the
   persisted graph extension, and refuses to construct the Store unless
   the database is at the same schema version as the code graph. Throws
-  `MigrationError` on drift (safe or breaking), `ConfigurationError`
-  when no schema has been initialized, and `StoreNotInitializedError`
+  `BaseSchemaMigrationError` when deployment-wide base storage is missing,
+  stale, or newer than the library, `MigrationError` on graph-schema drift
+  (safe or breaking), `ConfigurationError` when no graph schema has been
+  initialized, and `StoreNotInitializedError`
   when the schema is current but runtime-contribution markers are
   missing. The runtime-side counterpart of `createStoreWithSchema` for
   least-privilege deployments. If you only need the gate without

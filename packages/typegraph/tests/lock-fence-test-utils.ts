@@ -22,7 +22,7 @@
  * factory cannot construct directly (a present-but-all-false declaration, a
  * declared-advisory-only declaration).
  */
-import { PGlite } from "@electric-sql/pglite";
+import { PGlite, type QueryOptions } from "@electric-sql/pglite";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
@@ -68,11 +68,18 @@ export async function createLoggedPostgresBackend(
 ): Promise<LoggedBackend> {
   const client = await PGlite.create();
   await client.exec(generatePostgresDDL().join("\n\n"));
+  await client.exec(
+    "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 1, NOW())",
+  );
   const statements: LoggedStatement[] = [];
   const originalQuery = client.query.bind(client);
-  client.query = (async (query: string, params?: unknown[]) => {
+  client.query = (<T>(
+    query: string,
+    params?: unknown[],
+    options?: QueryOptions,
+  ) => {
     statements.push({ query, params: params ?? [] });
-    return originalQuery(query, params);
+    return originalQuery<T>(query, params, options);
   }) as typeof client.query;
   const backend = createPostgresBackend(
     drizzlePglite(client, {
@@ -111,6 +118,9 @@ export function createLoggedSqliteBackend(
 ): LoggedBackend {
   const client = new Database(":memory:");
   client.exec(generateSqliteMigrationSQL());
+  client.exec(
+    "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 1, CURRENT_TIMESTAMP)",
+  );
   const statements: LoggedStatement[] = [];
   const originalPrepare = client.prepare.bind(client);
   client.prepare = ((sqlText: string) => {

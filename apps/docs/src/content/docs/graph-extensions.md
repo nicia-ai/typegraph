@@ -148,9 +148,11 @@ Templates clone the source graph's durable runtime-contribution markers along
 with its schema row. A target can therefore be reopened with
 `createVerifiedStore` or `createVerifiedAdapterStore` from a later serverless
 isolate without another schema reconciliation or provisioning DDL step.
-Registration and instantiation are DML-only; provision the graph-template table
-through the normal privileged bootstrap or migration before handing runtime
-requests to a DML-only role.
+Registration and instantiation are DML-only. They assert the deployment-wide
+base-schema marker and throw `BaseSchemaMigrationError` rather than attempting
+DDL when adoption is missing, stale, or newer than the running library. Run the
+normal privileged `createStoreWithSchema` boot or the published external
+migration before handing runtime requests to a DML-only role.
 
 Template eligibility follows the backend's capabilities. Embedding declarations
 are allowed when the backend is configured with `vector: false`, because that

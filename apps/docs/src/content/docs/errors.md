@@ -1044,6 +1044,33 @@ try {
 }
 ```
 
+### `BaseSchemaMigrationError`
+
+Thrown by zero-DDL verified and graph-template entry points when the
+deployment-wide physical TypeGraph schema has not been adopted to the version
+required by the running library. This is separate from `MigrationError`, which
+describes one graph's serialized schema evolution.
+
+```typescript
+try {
+  const [store] = await createVerifiedStore(graph, backend);
+} catch (error) {
+  if (error instanceof BaseSchemaMigrationError) {
+    console.log(error.details);
+    // {
+    //   installedVersion: undefined,
+    //   requiredVersion: 1,
+    //   reason: "missing"
+    // }
+  }
+}
+```
+
+`reason` is `"missing"`, `"stale"`, or `"newer"`. For missing or stale
+storage, run `createStoreWithSchema()` or `createAdapterStoreWithSchema()` once
+under a DDL-capable role, or apply the published external base-schema migration.
+A newer marker requires a TypeGraph release that supports that version.
+
 ## Query Errors
 
 ### `UnsupportedPredicateError`
@@ -1281,6 +1308,7 @@ try {
 | `CONFIGURATION_ERROR` | `ConfigurationError` | system | Invalid configuration |
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
+| `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |

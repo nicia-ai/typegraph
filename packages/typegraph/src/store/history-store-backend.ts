@@ -49,6 +49,8 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "deleteVectorSlotContribution",
   "dialect",
   "dropVectorIndex",
+  "adoptBaseSchema",
+  "assertBaseSchemaCurrent",
   "edgeExistsBetween",
   "ensureContributionMaterializationsTable",
   // Installs a database-global extension — and `ensureTrigramExtension` is the

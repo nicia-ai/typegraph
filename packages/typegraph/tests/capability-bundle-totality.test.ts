@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 76 unbundled = 91, with no member counted twice", () => {
+  it("15 pilot + 78 unbundled = 93, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(76);
+    expect(unbundledNames.length).toBe(78);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(91);
+    expect(bundledSet.size + unbundledNames.length).toBe(93);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("27 reasoned entries sum to 81 accesses; 49 deferred entries sum to 207", () => {
+  it("29 reasoned entries sum to 86 accesses; 49 deferred entries sum to 207", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(27);
+    expect(reasoned.length).toBe(29);
     expect(deferred.length).toBe(49);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -122,7 +122,7 @@ describe("capability bundle totality (T9)", () => {
     // one live `recordedTableDdl` access. The required command port no longer
     // belongs in this optional-member inventory. Durable identity adoption
     // adds one empty-kind fence and one optional preflight selection.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(81);
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(86);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(207);
   });
 });

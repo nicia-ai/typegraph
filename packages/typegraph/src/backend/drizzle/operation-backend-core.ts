@@ -549,6 +549,24 @@ async function withAtomicEdgeDurableRefusalClassification<T>(
   }
 }
 
+/**
+ * Translate a missing edge match-identity column or arbiter for every edge
+ * insert route. A plain edge write still targets these columns because the
+ * physical edge row has a stable shape; it therefore needs the same typed
+ * migration guidance as a durable write when an older database is used.
+ */
+async function withEdgeInsertClassification<T>(
+  run: () => Promise<T>,
+  params: readonly InsertEdgeParams[],
+  durableIdentityName?: string,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throwEdgeInsertStorageUnavailable(error, params, durableIdentityName);
+  }
+}
+
 function assertCompleteAtomicChunks(
   actualCounts: readonly number[],
   expectedChunks: readonly (readonly unknown[])[],
@@ -611,43 +629,37 @@ async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
 ): Promise<TResult> {
   const matchIdentities = attemptedEdgeMatchIdentities(params);
   try {
-    return await withDuplicateKeyClassification(
+    // Classifiers are intentionally nested from the broad edge-insert wrapper
+    // to the narrow sentinel refusals. Each inner layer recognizes only its
+    // own storage signal; the outer layers preserve the public error contract.
+    return await withEdgeInsertClassification(
       () =>
-        withAtomicEdgeEndpointRefusalClassification(
+        withDuplicateKeyClassification(
           () =>
-            withAtomicEdgeCardinalityRefusalClassification(
+            withAtomicEdgeEndpointRefusalClassification(
               () =>
-                withAtomicEdgeDurableRefusalClassification(
-                  () => atomicExecutor.execute(program),
-                  relation,
-                  refusalConstraints.durableIdentity,
-                  matchIdentities,
+                withAtomicEdgeCardinalityRefusalClassification(
+                  () =>
+                    withAtomicEdgeDurableRefusalClassification(
+                      () => atomicExecutor.execute(program),
+                      relation,
+                      refusalConstraints.durableIdentity,
+                      matchIdentities,
+                    ),
+                  refusalConstraints.cardinality,
                 ),
-              refusalConstraints.cardinality,
+              refusalConstraints.endpoint,
             ),
-          refusalConstraints.endpoint,
+          {
+            entity: "edge",
+            relation,
+            attempted: attemptedInserts(params),
+            matchIdentities,
+          },
         ),
-      {
-        entity: "edge",
-        relation,
-        attempted: attemptedInserts(params),
-        matchIdentities,
-      },
+      params,
     );
   } catch (error) {
-    const durableParams = params.find(
-      (item) => item.matchIdentity !== undefined,
-    );
-    if (
-      durableParams !== undefined &&
-      isEdgeMatchIdentityStorageUnavailableError(error)
-    ) {
-      throwDurableIdentityStorageUnavailable(
-        error,
-        durableParams,
-        requireDefined(durableParams.matchIdentity).name,
-      );
-    }
     if (claims.length > 0 && isMissingTableError(error)) {
       throw edgeClaimRelationMissing(requireDefined(params[0]).graphId, error);
     }
@@ -690,6 +702,42 @@ function throwDurableIdentityStorageUnavailable(
     {
       suggestion:
         "Initialize or migrate the graph through the schema manager before using a durable identity store.",
+      cause: error,
+    },
+  );
+}
+
+function throwEdgeInsertStorageUnavailable(
+  error: unknown,
+  params: readonly InsertEdgeParams[],
+  durableIdentityName?: string,
+): never {
+  if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
+
+  const firstParams = requireDefined(params[0]);
+  const durableParams = params.find(
+    (item) => item.matchIdentity !== undefined,
+  );
+  const identityName =
+    durableIdentityName ?? durableParams?.matchIdentity?.name;
+  if (identityName !== undefined) {
+    throwDurableIdentityStorageUnavailable(
+      error,
+      durableParams ?? firstParams,
+      identityName,
+    );
+  }
+
+  throw new ConfigurationError(
+    "Edge match identity storage is not provisioned for this backend.",
+    {
+      code: "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE",
+      graphId: firstParams.graphId,
+      edgeKind: firstParams.kind,
+    },
+    {
+      suggestion:
+        "Initialize or migrate the graph through the schema manager before inserting edges.",
       cause: error,
     },
   );
@@ -1406,14 +1454,18 @@ export function createCommonOperationBackend(
       ): Promise<EdgeRow | undefined> {
         assertMatchingFusedEdgeClaim(params, claim);
         const query = buildEdgeCardinalityInsert(params, claim, nowIso());
-        const row = await withDuplicateKeyClassification(
-          () => execution.execGet<Record<string, unknown>>(query),
-          {
-            entity: "edge",
-            relation: operationStrategy.primaryKeyConstraints.edges,
-            attempted: attemptedInserts([params]),
-            matchIdentities: attemptedEdgeMatchIdentities([params]),
-          },
+        const row = await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(
+              () => execution.execGet<Record<string, unknown>>(query),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts([params]),
+                matchIdentities: attemptedEdgeMatchIdentities([params]),
+              },
+            ),
+          [params],
         );
         return row === undefined ? undefined : rowMappers.toEdgeRow(row);
       }
@@ -1612,14 +1664,18 @@ export function createCommonOperationBackend(
       params,
       nowIso(),
     );
-    const row = await withDuplicateKeyClassification(
-      () => execution.execGet<Record<string, unknown>>(query),
-      {
-        entity: "edge",
-        relation: operationStrategy.primaryKeyConstraints.edges,
-        attempted: attemptedInserts([params]),
-        matchIdentities: attemptedEdgeMatchIdentities([params]),
-      },
+    const row = await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          },
+        ),
+      [params],
     );
     return row === undefined ? undefined : rowMappers.toEdgeRow(row);
   }
@@ -1646,14 +1702,18 @@ export function createCommonOperationBackend(
         schemaFence,
         schemaLockClause,
       );
-    const row = await withDuplicateKeyClassification(
-      () => execution.execGet<Record<string, unknown>>(query),
-      {
-        entity: "edge",
-        relation: operationStrategy.primaryKeyConstraints.edges,
-        attempted: attemptedInserts([params]),
-        matchIdentities: attemptedEdgeMatchIdentities([params]),
-      },
+    const row = await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          },
+        ),
+      [params],
     );
     return row === undefined ? undefined : rowMappers.toEdgeRow(row);
   }
@@ -1777,30 +1837,20 @@ export function createCommonOperationBackend(
           schemaLockClause: requireDefined(options.schemaFenceLockClause),
         }),
     });
-    let row: Record<string, unknown> | undefined;
-    try {
-      row = await withDuplicateKeyClassification(
-        () => execution.execGet<Record<string, unknown>>(query),
-        {
-          entity: "edge",
-          relation: operationStrategy.primaryKeyConstraints.edges,
-          attempted: attemptedInserts([params]),
-          matchIdentities: attemptedEdgeMatchIdentities([params]),
-        },
-      );
-    } catch (error) {
-      if (
-        command.match.kind !== "durable" ||
-        !isEdgeMatchIdentityStorageUnavailableError(error)
-      ) {
-        throw error;
-      }
-      throwDurableIdentityStorageUnavailable(
-        error,
-        params,
-        command.match.identity.name,
-      );
-    }
+    const row = await withEdgeInsertClassification(
+      () =>
+        withDuplicateKeyClassification(
+          () => execution.execGet<Record<string, unknown>>(query),
+          {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          },
+        ),
+      [params],
+      command.match.kind === "durable" ? command.match.identity.name : undefined,
+    );
     if (row === undefined) {
       return { outcome: "rejected", entity: "edge", reason: "unknown" };
     }
@@ -2099,14 +2149,18 @@ export function createCommonOperationBackend(
     async insertEdge(params: InsertEdgeParams): Promise<EdgeRow> {
       const timestamp = nowIso();
       const query = operationStrategy.buildInsertEdge(params, timestamp);
-      const row = await withDuplicateKeyClassification(
-        () => execution.execGet<Record<string, unknown>>(query),
-        {
-          entity: "edge",
-          relation: operationStrategy.primaryKeyConstraints.edges,
-          attempted: attemptedInserts([params]),
-          matchIdentities: attemptedEdgeMatchIdentities([params]),
-        },
+      const row = await withEdgeInsertClassification(
+        () =>
+          withDuplicateKeyClassification(
+            () => execution.execGet<Record<string, unknown>>(query),
+            {
+              entity: "edge",
+              relation: operationStrategy.primaryKeyConstraints.edges,
+              attempted: attemptedInserts([params]),
+              matchIdentities: attemptedEdgeMatchIdentities([params]),
+            },
+          ),
+        [params],
       );
       if (!row)
         throw new DatabaseOperationError(
@@ -2126,12 +2180,16 @@ export function createCommonOperationBackend(
         params,
         timestamp,
       );
-      await withDuplicateKeyClassification(() => execution.execRun(query), {
-        entity: "edge",
-        relation: operationStrategy.primaryKeyConstraints.edges,
-        attempted: attemptedInserts([params]),
-        matchIdentities: attemptedEdgeMatchIdentities([params]),
-      });
+      await withEdgeInsertClassification(
+        () =>
+          withDuplicateKeyClassification(() => execution.execRun(query), {
+            entity: "edge",
+            relation: operationStrategy.primaryKeyConstraints.edges,
+            attempted: attemptedInserts([params]),
+            matchIdentities: attemptedEdgeMatchIdentities([params]),
+          }),
+        [params],
+      );
     },
 
     async insertEdgesBatch(params: readonly InsertEdgeParams[]): Promise<void> {
@@ -2141,12 +2199,16 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       for (const chunk of chunkArray(params, batchConfig.edgeInsertBatchSize)) {
         const query = operationStrategy.buildInsertEdgesBatch(chunk, timestamp);
-        await withDuplicateKeyClassification(() => execution.execRun(query), {
-          entity: "edge",
-          relation: operationStrategy.primaryKeyConstraints.edges,
-          attempted: attemptedInserts(chunk),
-          matchIdentities: attemptedEdgeMatchIdentities(chunk),
-        });
+        await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(() => execution.execRun(query), {
+              entity: "edge",
+              relation: operationStrategy.primaryKeyConstraints.edges,
+              attempted: attemptedInserts(chunk),
+              matchIdentities: attemptedEdgeMatchIdentities(chunk),
+            }),
+          chunk,
+        );
       }
     },
 
@@ -2163,14 +2225,18 @@ export function createCommonOperationBackend(
           chunk,
           timestamp,
         );
-        const rows = await withDuplicateKeyClassification(
-          () => execution.execAll<Record<string, unknown>>(query),
-          {
-            entity: "edge",
-            relation: operationStrategy.primaryKeyConstraints.edges,
-            attempted: attemptedInserts(chunk),
-            matchIdentities: attemptedEdgeMatchIdentities(chunk),
-          },
+        const rows = await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(
+              () => execution.execAll<Record<string, unknown>>(query),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts(chunk),
+                matchIdentities: attemptedEdgeMatchIdentities(chunk),
+              },
+            ),
+          chunk,
         );
         allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
       }
@@ -2197,26 +2263,19 @@ export function createCommonOperationBackend(
           chunk,
           timestamp,
         );
-        let rows: readonly Record<string, unknown>[];
-        try {
-          rows = await withDuplicateKeyClassification(
-            () => execution.execAll<Record<string, unknown>>(query),
-            {
-              entity: "edge",
-              relation: operationStrategy.primaryKeyConstraints.edges,
-              attempted: attemptedInserts(chunk),
-              matchIdentities: attemptedEdgeMatchIdentities(chunk),
-            },
-          );
-        } catch (error) {
-          const firstParams = requireDefined(chunk[0]);
-          const identity = requireDefined(firstParams.matchIdentity);
-          throwDurableIdentityStorageUnavailable(
-            error,
-            firstParams,
-            identity.name,
-          );
-        }
+        const rows = await withEdgeInsertClassification(
+          () =>
+            withDuplicateKeyClassification(
+              () => execution.execAll<Record<string, unknown>>(query),
+              {
+                entity: "edge",
+                relation: operationStrategy.primaryKeyConstraints.edges,
+                attempted: attemptedInserts(chunk),
+                matchIdentities: attemptedEdgeMatchIdentities(chunk),
+              },
+            ),
+          chunk,
+        );
         allRows.push(...rows.map((row) => rowMappers.toEdgeRow(row)));
       }
       return allRows;

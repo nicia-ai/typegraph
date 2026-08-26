@@ -1086,6 +1086,8 @@ type GraphBackend = Readonly<{
     ensureFulltextTable?: (this: void, graphId: string) => Promise<void>;
     getReconciliationMarker?: (this: void, graphId: string) => Promise<number | undefined>;
     setReconciliationMarker?: (this: void, graphId: string, version: number) => Promise<void>;
+    adoptBaseSchema?: (this: void) => Promise<void>;
+    assertBaseSchemaCurrent?: (this: void) => Promise<void>;
     clearGraph: (this: void, graphId: string) => Promise<void>;
     bootstrapTables?: (this: void) => Promise<void>;
     refreshStatistics: (this: void) => Promise<void>;
@@ -1397,7 +1399,7 @@ type IndexWhereOperand = Readonly<{
 // @public
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
-// @public
+// @public (undocumented)
 export function initializeSchema<G extends GraphDef>(backend: GraphBackend, graph: G, options?: Readonly<{
     schema?: SqlSchema;
 }>): Promise<SchemaVersionRow>;

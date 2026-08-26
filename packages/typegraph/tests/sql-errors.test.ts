@@ -372,6 +372,14 @@ describe("isPostgresConcurrentDdlRaceError", () => {
     ).toBe(true);
   });
 
+  it("detects the duplicate-object race a named constraint addition loses", () => {
+    expect(
+      isPostgresConcurrentDdlRaceError(
+        pgError("constraint already exists", "42710"),
+      ),
+    ).toBe(true);
+  });
+
   it("detects the un-coded `tuple concurrently updated` catalog race", () => {
     expect(
       isPostgresConcurrentDdlRaceError(

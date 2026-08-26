@@ -1072,6 +1072,50 @@ export class MigrationError extends TypeGraphError {
   }
 }
 
+export type BaseSchemaMigrationErrorDetails = Readonly<{
+  installedVersion: number | undefined;
+  requiredVersion: number;
+  reason: "missing" | "stale" | "newer";
+}>;
+
+/**
+ * Thrown when the deployment-wide TypeGraph base relations have not been
+ * adopted to the physical schema required by this library version.
+ *
+ * Unlike {@link MigrationError}, this is not about one graph's serialized
+ * schema document. It is the zero-DDL runtime refusal that tells an operator
+ * to run privileged store preparation before attaching a DML-only role.
+ */
+export class BaseSchemaMigrationError extends TypeGraphError {
+  declare readonly details: BaseSchemaMigrationErrorDetails;
+
+  constructor(
+    details: BaseSchemaMigrationErrorDetails,
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    const installed =
+      details.installedVersion === undefined ?
+        "no installation marker"
+      : `base schema version ${String(details.installedVersion)}`;
+    super(
+      details.reason === "newer" ?
+        `The database has ${installed}, which is newer than this TypeGraph release supports (version ${String(details.requiredVersion)}).`
+      : `The database has ${installed}; this TypeGraph release requires base schema version ${String(details.requiredVersion)}.`,
+      "BASE_SCHEMA_MIGRATION_REQUIRED",
+      {
+        category: "system",
+        details,
+        suggestion:
+          details.reason === "newer" ?
+            "Use a TypeGraph release that supports the installed base schema version."
+          : "Run createStoreWithSchema() or createAdapterStoreWithSchema() once with a privileged DDL-capable database role before attaching the runtime role.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "BaseSchemaMigrationError";
+  }
+}
+
 /**
  * Details for EagerMaterializationError.
  */

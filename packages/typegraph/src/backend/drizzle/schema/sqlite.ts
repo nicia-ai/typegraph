@@ -56,6 +56,7 @@ export type SqliteTableNames = Readonly<{
   identitySeparation: string;
   uniques: string;
   edgeClaims: string;
+  baseSchemaVersions: string;
   schemaVersions: string;
   graphTemplates: string;
   fulltext: string;
@@ -95,6 +96,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   identitySeparation: "typegraph_identity_separation",
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
+  baseSchemaVersions: "typegraph_base_schema_versions",
   schemaVersions: "typegraph_schema_versions",
   graphTemplates: "typegraph_graph_templates",
   fulltext: "typegraph_node_fulltext",
@@ -429,6 +431,22 @@ export function createSqliteTables(
     ],
   );
 
+  const baseSchemaVersions = sqliteTable(
+    n.baseSchemaVersions,
+    {
+      installation: integer("installation").notNull(),
+      version: integer("version").notNull(),
+      updatedAt: text("updated_at").notNull(),
+    },
+    (t) => [
+      primaryKey({ columns: [t.installation] }),
+      check(
+        systemIndexName(n.baseSchemaVersions, "singleton_check"),
+        sql`${t.installation} = 1`,
+      ),
+    ],
+  );
+
   const schemaVersions = sqliteTable(
     n.schemaVersions,
     {
@@ -579,6 +597,7 @@ export function createSqliteTables(
     identitySeparation,
     uniques,
     edgeClaims,
+    baseSchemaVersions,
     schemaVersions,
     graphTemplates,
     indexMaterializations,

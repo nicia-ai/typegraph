@@ -14,6 +14,7 @@
  * No server needed: the driver seam is a stub, so the retry is observed
  * directly instead of raced for.
  */
+import { getTableName, type Table } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
 import { type AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
@@ -90,18 +91,42 @@ function stubPostgresDatabase(
 ): Readonly<{ db: AnyPgDatabase; attempts: readonly string[] }> {
   const attempts: string[] = [];
   const failed = new Set<string>();
+  let baseSchemaVersion: number | undefined;
   const db = {
     $client: { query: () => Promise.resolve({ rows: [] }) },
     dialect: {
       sqlToQuery: () => ({ params: [] as readonly unknown[], sql: "SELECT 1" }),
     },
-    // The contribution materializer's marker table: absent rows on read, a
-    // no-op on write. Enough for `ensureRuntimeContributions` to reach its DDL.
-    select: () => ({
-      from: () => ({ where: () => Promise.resolve([] as readonly unknown[]) }),
+    // The base-schema marker participates in bootstrap; all other marker
+    // tables remain empty so their materializers still reach the DDL seam.
+    select: (selection?: Readonly<Record<string, unknown>>) => ({
+      from: (table: Table) => ({
+        where: () =>
+          Promise.resolve(
+            (
+              getTableName(table) === "typegraph_base_schema_versions" &&
+                selection !== undefined &&
+                Object.keys(selection).length === 1 &&
+                selection["version"] !== undefined &&
+                baseSchemaVersion !== undefined
+            ) ?
+              [{ version: baseSchemaVersion }]
+            : [],
+          ),
+      }),
     }),
     insert: () => ({
-      values: () => ({ onConflictDoUpdate: () => Promise.resolve(undefined) }),
+      values: (values: Readonly<Record<string, unknown>>) => ({
+        onConflictDoUpdate: () => {
+          if (
+            values["installation"] === 1 &&
+            typeof values["version"] === "number"
+          ) {
+            baseSchemaVersion = values["version"];
+          }
+          return Promise.resolve(undefined);
+        },
+      }),
     }),
     execute(statement: unknown) {
       const text = statementText(statement);
@@ -206,6 +231,11 @@ describe("Postgres concurrent CREATE DDL", () => {
   it("still surfaces a uniqueness failure the retry cannot clear", async () => {
     const db = {
       $client: { query: () => Promise.resolve({ rows: [] }) },
+      select: () => ({
+        from: () => ({
+          where: () => Promise.resolve([] as readonly unknown[]),
+        }),
+      }),
       execute: () => Promise.reject(duplicateKeyError()),
     } as unknown as AnyPgDatabase;
     const backend = createPostgresBackend(db, { vector: false });

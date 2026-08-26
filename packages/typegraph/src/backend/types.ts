@@ -2664,11 +2664,11 @@ export type GraphBackend = Readonly<{
    * Idempotently add the durable edge-match identity columns, pair constraint,
    * and unique index to the configured edge relation.
    *
-   * This focused adoption hook lets an already-initialized database activate a
-   * graph-local `matchIdentity` without replaying the complete base-table DDL
-   * set. Privileged schema preparation calls it before publishing a schema
-   * that declares durable identity; ordinary runtime store construction never
-   * performs DDL.
+   * Every edge write names these nullable columns, even when its graph does
+   * not declare `matchIdentity`. Privileged schema preparation therefore calls
+   * this focused hook on every open so pre-provisioned base tables adopt newer
+   * physical storage without replaying the complete base-table DDL set.
+   * Ordinary runtime store construction never performs DDL.
    *
    * @internal
    */
@@ -3143,6 +3143,25 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
 
   // === Graph Lifecycle ===
+  /**
+   * Adopts deployment-wide base relations to the physical schema required by
+   * this library version and stamps the singleton installation marker.
+   * Privileged schema-management entry points call this; ordinary raw Store
+   * construction never does.
+   *
+   * @internal
+   */
+  adoptBaseSchema?: (this: void) => Promise<void>;
+
+  /**
+   * SELECT-only sibling of {@link GraphBackend.adoptBaseSchema}. Throws a
+   * typed base-schema migration error when privileged adoption has not run.
+   * Least-privilege verified/template entry points call this before DML.
+   *
+   * @internal
+   */
+  assertBaseSchemaCurrent?: (this: void) => Promise<void>;
+
   /**
    * Hard-deletes all data for a graph (nodes, edges, uniques, embeddings, schema versions).
    * Intended for import-replacement workflows. No hooks, no per-row logic.
