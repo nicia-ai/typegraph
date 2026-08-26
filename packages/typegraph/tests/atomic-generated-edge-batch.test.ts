@@ -360,10 +360,7 @@ describe("generated edge batch store consumer", () => {
       ]);
 
       expect(batch).toHaveBeenCalledOnce();
-      expect(edges.map((edge) => edge.role)).toEqual([
-        "Engineer",
-        "Designer",
-      ]);
+      expect(edges.map((edge) => edge.role)).toEqual(["Engineer", "Designer"]);
     } finally {
       await backend.close();
       client.close();
@@ -589,9 +586,7 @@ describe("generated edge batch store consumer", () => {
       const batch = vi.spyOn(client, "batch");
 
       await expect(
-        store.edges.worksAt.bulkInsert([
-          { from, to, props: { role: "New" } },
-        ]),
+        store.edges.worksAt.bulkInsert([{ from, to, props: { role: "New" } }]),
       ).rejects.toMatchObject({
         details: { code: "EDGE_MATCH_IDENTITY_STORAGE_UNAVAILABLE" },
       });
@@ -726,7 +721,9 @@ describe("generated edge batch store consumer", () => {
       const conflictingPerson = people[19];
       const incumbentCompany = companies[20];
       if (conflictingPerson === undefined || incumbentCompany === undefined) {
-        throw new Error("Expected generated endpoints for chunk rollback test.");
+        throw new Error(
+          "Expected generated endpoints for chunk rollback test.",
+        );
       }
       await store.edges.worksAt.create(conflictingPerson, incumbentCompany, {
         role: "Incumbent",
@@ -739,9 +736,9 @@ describe("generated edge batch store consumer", () => {
         props: { role: `Role ${index}` },
       }));
 
-      await expect(store.edges.worksAt.bulkInsert(items)).rejects.toBeInstanceOf(
-        CardinalityError,
-      );
+      await expect(
+        store.edges.worksAt.bulkInsert(items),
+      ).rejects.toBeInstanceOf(CardinalityError);
 
       expect(batch).toHaveBeenCalledOnce();
       expect(batch.mock.calls[0]?.[0].length).toBeGreaterThan(4);

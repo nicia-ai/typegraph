@@ -357,9 +357,7 @@ describe("bundled root atomic edge batch", () => {
       ),
     ).toBe(true);
     expect(
-      boundStatements.some((statement) =>
-        statement.sql.includes("AS axis"),
-      ),
+      boundStatements.some((statement) => statement.sql.includes("AS axis")),
     ).toBe(true);
     for (const statement of boundStatements) {
       expect(statement.params.length).toBeLessThanOrEqual(
