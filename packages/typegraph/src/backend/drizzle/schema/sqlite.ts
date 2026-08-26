@@ -441,7 +441,7 @@ export function createSqliteTables(
     (t) => [
       primaryKey({ columns: [t.installation] }),
       check(
-        `${n.baseSchemaVersions}_singleton_check`,
+        systemIndexName(n.baseSchemaVersions, "singleton_check"),
         sql`${t.installation} = 1`,
       ),
     ],

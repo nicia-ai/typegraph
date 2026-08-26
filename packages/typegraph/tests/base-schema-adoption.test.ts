@@ -168,6 +168,42 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
+  it("accepts pre-provisioned SQLite identity columns without a pair CHECK", async () => {
+    const tableNames = {
+      baseSchemaVersions: "tg_base_schema_versions",
+      edges: "tg_edges",
+      graphTemplates: "tg_graph_templates",
+    } as const;
+    const tables = createSqliteTables(tableNames);
+    const { backend, db } = createLocalSqliteBackend({ tables });
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec(`DROP TABLE "${tableNames.edges}"`);
+      client.exec(
+        `CREATE TABLE "${tableNames.edges}" ("graph_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "from_kind" TEXT NOT NULL, "from_id" TEXT NOT NULL, "to_kind" TEXT NOT NULL, "to_id" TEXT NOT NULL, "props" TEXT NOT NULL, "match_identity_name" TEXT, "match_identity_key" TEXT, "valid_from" TEXT, "valid_to" TEXT, "created_at" TEXT NOT NULL, "updated_at" TEXT NOT NULL, "deleted_at" TEXT, PRIMARY KEY ("graph_id", "id"))`,
+      );
+      client.exec(`DROP TABLE "${tableNames.baseSchemaVersions}"`);
+
+      const [reopened] = await createStoreWithSchema(graph, backend);
+      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(1);
+      const indexes = client
+        .prepare(`PRAGMA index_list("${tableNames.edges}")`)
+        .all() as readonly Readonly<{ name: string }>[];
+      expect(indexes.map((index) => index.name)).toContain(
+        edgeMatchIdentityUniqueIndexName(tableNames.edges),
+      );
+
+      const from = await reopened.nodes.Person.create({ name: "From" });
+      const to = await reopened.nodes.Person.create({ name: "To" });
+      await expect(
+        reopened.edges.knows.create(from, to, { label: "works" }),
+      ).resolves.toMatchObject({ label: "works" });
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("adopts a legacy PostgreSQL/PGlite installation and registers templates", async () => {
     const tableNames = {
       baseSchemaVersions: "tg_base_schema_versions",

@@ -629,6 +629,9 @@ async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
 ): Promise<TResult> {
   const matchIdentities = attemptedEdgeMatchIdentities(params);
   try {
+    // Classifiers are intentionally nested from the broad edge-insert wrapper
+    // to the narrow sentinel refusals. Each inner layer recognizes only its
+    // own storage signal; the outer layers preserve the public error contract.
     return await withEdgeInsertClassification(
       () =>
         withDuplicateKeyClassification(
@@ -686,6 +689,7 @@ function throwDurableIdentityStorageUnavailable(
   params: InsertEdgeParams,
   identityName: string,
 ): never {
+  if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
   throw new ConfigurationError(
     "Backend declares durable edge match identity support, but its storage has not been provisioned.",
     {

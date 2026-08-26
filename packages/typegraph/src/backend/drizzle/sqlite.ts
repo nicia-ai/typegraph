@@ -1849,39 +1849,6 @@ export function createSqliteBackend(
     );
     const nameMissing = !columns.has("match_identity_name");
     const keyMissing = !columns.has("match_identity_key");
-    const tableSqlRows = await executionAdapter.execute<{ sql?: unknown }>(
-      portableSql`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ${edgeTableName}`,
-    );
-    const tableSql = tableSqlRows.at(0)?.sql;
-    const normalizedTableSql =
-      typeof tableSql === "string" ?
-        tableSql.toLowerCase().replaceAll('"', "").replaceAll(/\s+/g, " ")
-      : undefined;
-    const hasPairCheck =
-      normalizedTableSql?.includes(
-        "check ((match_identity_name is null) = (match_identity_key is null))",
-      ) === true ||
-      normalizedTableSql?.includes(
-        "check ((match_identity_key is null) = (match_identity_name is null))",
-      ) === true;
-    if (
-      columnRows.length > 0 &&
-      !nameMissing &&
-      !keyMissing &&
-      !hasPairCheck
-    ) {
-      throw new ConfigurationError(
-        `SQLite edge table "${edgeTableName}" has match-identity columns without the required nullable-pair CHECK constraint.`,
-        {
-          code: "EDGE_MATCH_IDENTITY_PAIR_CHECK_MISSING",
-          table: edgeTableName,
-        },
-        {
-          suggestion:
-            "Rebuild the edge table with TypeGraph's published schema DDL before retrying privileged base-schema adoption.",
-        },
-      );
-    }
     if (columnRows.length > 0 && nameMissing) {
       await db.run(
         sql.raw(
@@ -1932,12 +1899,13 @@ export function createSqliteBackend(
 
   async function writeBaseSchemaVersion(version: number): Promise<void> {
     const marker = tables.baseSchemaVersions;
+    const timestamp = nowIso();
     await db
       .insert(marker)
-      .values({ installation: 1, version, updatedAt: nowIso() })
+      .values({ installation: 1, version, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: marker.installation,
-        set: { version, updatedAt: nowIso() },
+        set: { version, updatedAt: timestamp },
       });
   }
 

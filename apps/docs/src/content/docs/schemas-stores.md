@@ -561,11 +561,13 @@ operation against an uninitialized database throws
 The privileged open also adopts versioned, deployment-wide physical base
 storage even when the per-graph TypeGraph schema document is unchanged.
 Base-schema version 1 covers the durable graph-template relation and nullable
-edge match-identity columns, constraint, and arbiter. The marker advances only
-after all adoption steps succeed. A database provisioned by an older release
-must either be opened once with `createStoreWithSchema()` under a DDL-capable
-role or receive the published additive migration before a DML-only runtime
-attaches.
+edge match-identity columns and arbiter. Fresh and published schemas also carry
+the nullable-pair CHECK; SQLite adoption does not require rebuilding an
+externally managed table solely to add that defensive constraint. The marker
+advances only after all adoption steps succeed. A database provisioned by an
+older release must either be opened once with `createStoreWithSchema()` under a
+DDL-capable role or receive the published additive migration before a DML-only
+runtime attaches.
 
 With `history: true`, the async open also verifies the recorded node, edge, and
 clock column shapes before returning. Databases created by the timestamp-only

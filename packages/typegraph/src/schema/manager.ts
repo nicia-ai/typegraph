@@ -406,14 +406,10 @@ export async function ensureSchema<G extends GraphDef>(
     // `SqlSchema` is threaded through; `initializeSchema` derives the
     // mandatory identity preflight itself, so no public first-commit path
     // can skip or replace the enablement work.
-    const result = await initializeSchemaImpl(
-      backend,
-      graph,
-      {
-        ...(options?.schema === undefined ? {} : { schema: options.schema }),
-      },
-      true,
-    );
+    const result = await initializeSchemaImpl(backend, graph, {
+      ...(options?.schema === undefined ? {} : { schema: options.schema }),
+      baseSchemaPrepared: true,
+    });
     return {
       status: "initialized",
       version: result.version,
@@ -447,9 +443,6 @@ export async function ensureSchema<G extends GraphDef>(
   // Check if changes are backwards compatible
   if (isBackwardsCompatible(diff)) {
     if (autoMigrate) {
-      // Base storage belongs to the running library version, not to the graph
-      // document. Adopt it before publishing the new schema version so a DDL
-      // refusal cannot leave a current schema over an obsolete edge relation.
       // Safe changes - auto-migrate
       const hookContext: MigrationHookContext = {
         graphId: graph.id,
@@ -806,25 +799,36 @@ type InitializeSchemaOptions = Readonly<{
   schema?: SqlSchema;
 }>;
 
+type InitializeSchemaImplOptions = InitializeSchemaOptions &
+  Readonly<{
+    /** The caller already completed the deployment-wide adoption gate. */
+    baseSchemaPrepared: boolean;
+  }>;
+
 export async function initializeSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   options?: Readonly<{
     /**
      * The effective `SqlSchema` (custom table names) the graph's Store will
-     * read. The identity enablement preflight is always derived internally.
+     * read. The identity enablement preflight is always derived internally —
+     * it is deliberately not a parameter, so no caller can commit version 1
+     * of an identity-enabled graph without the fold scan, contradiction
+     * validation, and closure build.
      */
     schema?: SqlSchema;
   }>,
 ): Promise<SchemaVersionRow> {
-  return initializeSchemaImpl(backend, graph, options, false);
+  return initializeSchemaImpl(backend, graph, {
+    ...(options?.schema === undefined ? {} : { schema: options.schema }),
+    baseSchemaPrepared: false,
+  });
 }
 
 async function initializeSchemaImpl<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
-  options: InitializeSchemaOptions | undefined,
-  baseSchemaPrepared: boolean,
+  options: InitializeSchemaImplOptions,
 ): Promise<SchemaVersionRow> {
   // Structural gates (e.g. endpoint-incompatible implies() relations)
   // must reject before the schema is durably committed, not only when a
@@ -832,7 +836,10 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // same ConfigurationError a Store construction would, just earlier.
   buildKindRegistry(graph);
 
-  if (!baseSchemaPrepared) {
+  if (!options.baseSchemaPrepared) {
+    // Base storage belongs to the running library version, not to this graph
+    // document. Adopt it before publishing schema version 1 so a DDL refusal
+    // cannot leave a current graph schema over obsolete physical relations.
     await adoptBaseSchemaStorage(backend);
     assertGraphEdgeMatchIdentitySupport(backend, graph);
   }
@@ -883,7 +890,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // accepts while identity reads answer from a never-built closure.
   const preflight = await prepareIdentitySchemaCommit(backend, graph, {
     enablement: true,
-    ...(options?.schema === undefined ? {} : { schema: options.schema }),
+    ...(options.schema === undefined ? {} : { schema: options.schema }),
   });
   // The preflight issues idempotent identity DDL INSIDE this transaction (see
   // `provisionDerivedRelationsInCommit`), so two replicas booting at once can

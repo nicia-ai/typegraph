@@ -3382,7 +3382,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly assertBaseSchemaCurrent: {
         readonly kind: "reasoned";
-        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write.";
+        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.";
         readonly accesses: 3;
     };
     readonly ensureEdgeMatchIdentityStorage: {

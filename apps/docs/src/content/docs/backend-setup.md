@@ -792,7 +792,11 @@ adapter uses custom table names.
 
 For SQLite, run this migration exactly once. SQLite has no portable `ADD COLUMN
 IF NOT EXISTS`, so a migration tool must record whether it has already applied
-the two `ALTER TABLE` statements:
+the two `ALTER TABLE` statements. Fresh and published schemas include the
+nullable-pair `CHECK` below. Privileged adoption accepts an externally managed
+table that already has both columns without that defensive constraint: SQLite
+does not expose structural CHECK metadata or support adding one without a full
+table rebuild, while TypeGraph writes always bind both values or neither.
 
 ```sql
 CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (

@@ -833,7 +833,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   assertBaseSchemaCurrent: {
     kind: "reasoned",
     reason:
-      "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write.",
+      "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.",
     accesses: 3,
   },
   ensureEdgeMatchIdentityStorage: {

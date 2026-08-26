@@ -1337,12 +1337,13 @@ export function createPostgresBackend(
 
   async function writeBaseSchemaVersion(version: number): Promise<void> {
     const marker = tables.baseSchemaVersions;
+    const timestamp = new Date();
     await db
       .insert(marker)
-      .values({ installation: 1, version, updatedAt: new Date() })
+      .values({ installation: 1, version, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: marker.installation,
-        set: { version, updatedAt: new Date() },
+        set: { version, updatedAt: timestamp },
       });
   }
 
