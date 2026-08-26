@@ -645,13 +645,15 @@ catch-all:
   transactionless path for eligible durable edge `matchIdentity` convergence;
   it is not a promise that every command or side effect can be fused.
 
-Operational Identity, claim/cardinality checks, and undeclared dynamic
-`matchOn` convergence remain interactive-transaction contracts. A custom or
-non-transactional backend must refuse those dimensions rather than silently
-falling through to a sequence of independent statements. A declared durable
-edge `matchIdentity` is different: its canonical key has a database arbiter,
-so the eligible root create/found command can be authoritative in one
-statement.
+Operational Identity, single-edge claim/cardinality checks, and undeclared
+dynamic `matchOn` convergence remain interactive-transaction contracts. A
+custom or non-transactional backend must refuse those dimensions rather than
+silently falling through to a sequence of independent statements. Eligible
+direct edge batches on bundled roots are a narrower static-program contract:
+the insert and cardinality sidecars execute in one native atomic exchange. A
+declared durable edge `matchIdentity` is different for endpoint convergence:
+its canonical key has a database arbiter, so the eligible root create/found
+command can be authoritative in one statement.
 
 ### Connection Pooling
 
@@ -1423,7 +1425,7 @@ TypeGraph choosing separate query semantics per backend:
 | Managed node projection fusion                        | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite                        | SQLite writes the node and fulltext/vector sidecars through the portable transaction path. PostgreSQL can compile them into one managed statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
-| Eligible bundled-root managed autocommit              | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative statement. Projection-free node `bulkInsert` batches with generated IDs and no claims, Operational Identity, history, or revision work can additionally use one schema-fenced native atomic exchange. Derived wrappers, adopted caller transactions, caller-supplied batch IDs, custom backends, and other managed writes retain the existing path |
+| Eligible bundled-root managed autocommit              | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative statement. Projection-free generated-ID node batches and direct edge batches without history/revision capture use one schema-fenced native atomic exchange; edge programs also maintain durable match identity and cardinality claims. Derived wrappers, adopted caller transactions, caller-supplied node batch IDs, custom backends, and other managed writes retain the existing path |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |

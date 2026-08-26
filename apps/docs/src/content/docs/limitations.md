@@ -82,9 +82,12 @@ calls atomic. An authoritative command is a single `commands.execute` write
 whose database statement returns the decision it made. It can provide a safe
 transactionless create/found path only when the backend has a durable arbiter.
 
-Operational Identity, claim/cardinality enforcement, and undeclared dynamic
-`matchOn` convergence still require an interactive transaction and fail closed
-on a backend that cannot provide one. A declared edge `matchIdentity` persists
+Operational Identity, single-edge claim/cardinality enforcement, and
+undeclared dynamic `matchOn` convergence still require an interactive
+transaction and fail closed on a backend that cannot provide one. Eligible
+direct edge batches on bundled roots are the narrow exception: their closed
+native program carries the claim sidecars inside one atomic exchange. A
+declared edge `matchIdentity` persists
 a canonical endpoint/property key and has a unique database arbiter; eligible
 root `getOrCreateByEndpoints` calls can therefore use the authoritative
 one-statement command. The durable identity does not make unrelated Store
@@ -314,6 +317,14 @@ API. Caller-supplied IDs and unsupported shapes retain the existing
 transaction or fallback behavior. Generated-ID node bulk operations also avoid
 the guaranteed-empty existence-priming read; caller-supplied IDs still perform
 their existence checks.
+
+Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
+use one schema-fenced native exchange when history and revision capture are
+disabled. Declared durable match identities and `one`, `unique`, or
+`oneActive` cardinality are maintained inside that exchange; any endpoint,
+identity, or cardinality refusal rolls the whole call back. Transaction-scoped
+stores, derived/custom backends, and dynamic get-or-create convergence retain
+the interactive path.
 
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 

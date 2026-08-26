@@ -121,8 +121,8 @@ describe("computeSqliteBatchChunkSizes", () => {
     expect(computeSqliteBatchChunkSizes(999)).toEqual({
       checkUniqueBatchChunkSize: 996,
       embeddingUpsertBatchSize: 199,
-      edgeInsertBatchSize: 83,
-      edgeSchemaFencedInsertBatchSize: 83,
+      edgeInsertBatchSize: 71,
+      edgeSchemaFencedInsertBatchSize: 71,
       fulltextUpsertBatchSize: 166,
       findEdgesEndpointChunkSize: 993,
       fulltextDeleteChunkSize: 997,
@@ -139,8 +139,8 @@ describe("computeSqliteBatchChunkSizes", () => {
     expect(computeSqliteBatchChunkSizes(MODERN_BETTER_SQLITE3_BUDGET)).toEqual({
       checkUniqueBatchChunkSize: 32_763,
       embeddingUpsertBatchSize: 6553,
-      edgeInsertBatchSize: 2730,
-      edgeSchemaFencedInsertBatchSize: 2730,
+      edgeInsertBatchSize: 2340,
+      edgeSchemaFencedInsertBatchSize: 2340,
       fulltextUpsertBatchSize: 5461,
       findEdgesEndpointChunkSize: 32_760,
       fulltextDeleteChunkSize: 32_764,

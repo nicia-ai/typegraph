@@ -7,6 +7,7 @@
  * program whose atomicity contract belongs to the bundled root.
  */
 import type {
+  ClaimEdgeCardinalityParams,
   EdgeRow,
   GraphBackend,
   InsertEdgeParams,
@@ -15,12 +16,14 @@ import type {
 } from "../types";
 
 export type AtomicEdgeBatchCountInput = Readonly<{
+  claims: readonly ClaimEdgeCardinalityParams[];
   params: readonly InsertEdgeParams[];
   resultMode: "count";
   schemaFence: SchemaWriteFenceParams;
 }>;
 
 export type AtomicEdgeBatchRowsInput = Readonly<{
+  claims: readonly ClaimEdgeCardinalityParams[];
   params: readonly InsertEdgeParams[];
   resultMode: "rows";
   schemaFence: SchemaWriteFenceParams;
@@ -41,6 +44,14 @@ export class AtomicEdgeBatchEndpointRefusalError extends Error {
   constructor(cause: unknown) {
     super("Atomic edge batch endpoint validation failed", { cause });
     this.name = "AtomicEdgeBatchEndpointRefusalError";
+  }
+}
+
+/** Internal proof that the closed SQL program refused a cardinality claim. */
+export class AtomicEdgeBatchCardinalityRefusalError extends Error {
+  constructor(cause: unknown) {
+    super("Atomic edge batch cardinality validation failed", { cause });
+    this.name = "AtomicEdgeBatchCardinalityRefusalError";
   }
 }
 

@@ -124,9 +124,11 @@ PostgreSQL implementation performs a no-op conflict update: it takes a row lock
 and can create write amplification, so it is not a substitute for a hot read
 cache.
 
-Dynamic call-level `matchOn`, constrained cardinalities, history/revision
+Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
 stores, caller-owned transactions, and custom backends retain the transactional
-path required by their additional contracts. Bulk endpoint convergence still
+path required by their additional contracts. Eligible direct edge batches can
+instead carry their cardinality claims inside the native atomic program
+described below. Bulk endpoint convergence still
 uses one transaction in this release, but bundled backends discover exact
 directed endpoint pairs in set-oriented bind-budget chunks instead of issuing a
 candidate read per item. See
@@ -151,22 +153,25 @@ Generated-ID node batches also skip the guaranteed-empty existence-priming
 read; caller-supplied IDs retain their existence and resurrection checks.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use one
-schema-fenced atomic exchange when every edge has unconstrained `many`
-cardinality, no durable `matchIdentity`, and the store has no history or
-revision capture. The program validates live endpoints at the write boundary,
-rolls back the whole call when any bind-budget chunk fails, and restores
-`bulkCreate()` results to input order. At the data-statement layer, its success
-path changes from one endpoint read per referenced node kind plus one insert
-per bind-budget chunk to one exchange for the entire call. For a one-chunk
-batch this is commonly 2 → 1 data exchanges when both endpoints share a kind
-or 3 → 1 when they use two kinds. The previous path can additionally pay a
-schema-fence statement and transaction framing, depending on the driver, so
-the full-call reduction may be larger.
+schema-fenced atomic exchange when the store has no history or revision
+capture. The program validates live endpoints, arbitrates declared durable
+`matchIdentity`, and maintains `one`, `unique`, and `oneActive` cardinality
+claims at the write boundary. It rolls back the whole call when any
+bind-budget chunk or constraint sidecar fails and restores `bulkCreate()`
+results to input order.
+
+Measured at the libSQL transport boundary, a one-chunk unconstrained edge
+batch remains 1 exchange, a durable-match batch drops from 6 transport
+submissions to 1 atomic exchange, and a cardinality-constrained batch drops
+from 8 transport submissions to 1 atomic exchange. The native exchange still
+contains the SQL statements needed for inserts and sidecars; it submits them as
+one transaction so they do not each pay network latency. The exact previous
+count varies by driver and endpoint shape.
 
 These are internal execution optimizations, not a public Store batch API.
-Constrained cardinality, durable identity, history/revision capture,
-caller-owned transactions, derived or custom backends, and other unsupported
-shapes retain their transaction or fallback behavior.
+History/revision capture, caller-owned transactions, derived or custom
+backends, dynamic get-or-create convergence, and other unsupported shapes
+retain their transaction or fallback behavior.
 
 ### Single vs bulk operations
 
@@ -197,19 +202,19 @@ PostgreSQL's protocol can encode 65,535 bind parameters, while TypeGraph uses a 
 stay within that budget:
 
 - Node inserts: ~7,200 per chunk (9 params per node)
-- Edge inserts: ~5,400 per chunk (12 params per edge)
+- Edge inserts: ~4,680 per chunk (budgeted at 14 params per durable edge)
 
 You don't need to chunk manually — pass arrays of any size and TypeGraph handles the rest.
 
 ### Transaction wrapping
 
 On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
-chunks. Eligible generated-ID `nodes.bulkInsert()` and unconstrained `edges.bulkInsert()` /
+chunks. Eligible generated-ID `nodes.bulkInsert()` and direct `edges.bulkInsert()` /
 `edges.bulkCreate()` calls also provide whole-call atomicity on bundled transactionless roots through
-one native atomic exchange. Other bulk shapes on a transactionless root either refuse when their
-contract requires a fence or use sequential fallback, which can leave earlier chunks committed if a
-later one fails. `store.transaction()` cannot add atomicity to a backend that does not support
-transactions.
+one native atomic exchange, including durable-match and cardinality-constrained edge batches. Other
+bulk shapes on a transactionless root either refuse when their contract requires a fence or use
+sequential fallback, which can leave earlier chunks committed if a later one fails.
+`store.transaction()` cannot add atomicity to a backend that does not support transactions.
 
 To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
 transaction:

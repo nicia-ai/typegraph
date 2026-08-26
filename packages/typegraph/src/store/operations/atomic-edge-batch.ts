@@ -27,11 +27,11 @@ export type AtomicEdgeBatchExecutor = BackendAtomicEdgeBatchExecutor;
 /**
  * The one owner of the store proof for a native edge batch.
  *
- * The program currently covers unconstrained, non-durable edge creates. It
- * has no claim sidecar or convergence arbitration to fold into its statement;
- * those shapes remain on the ordinary write-session path. The exact-root
- * marker is checked after the portable predicates so an unmarked or derived
- * backend always fails closed.
+ * The program covers direct edge batches whose endpoint, durable identity and
+ * cardinality decisions can all be enforced by the native atomic program.
+ * Dynamic get-or-create convergence is a separate API and never reaches this
+ * classifier. The exact-root marker is checked after the portable predicates
+ * so an unmarked or derived backend always fails closed.
  */
 export function resolveAtomicEdgeBatchExecutor(
   input: AtomicEdgeBatchEligibilityInput,
@@ -54,8 +54,7 @@ export function resolveAtomicEdgeBatchExecutor(
     if (!hasOwnKey(graph.edges, item.kind)) return false;
     const registration = graph.edges[item.kind];
     if (registration === undefined) return false;
-    if ((registration.cardinality ?? "many") !== "many") return false;
-    return registration.matchIdentity === undefined;
+    return true;
   });
   if (!eligible) return;
 

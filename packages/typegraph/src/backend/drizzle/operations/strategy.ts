@@ -66,6 +66,9 @@ import {
   buildDisjointOverlapAudit,
 } from "./constraint-fence-audit";
 import {
+  buildAcquireAtomicEdgeClaims,
+  buildAssertAtomicEdgeClaimsOwned,
+  buildDeleteStaleAtomicEdgeClaims,
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
   buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
@@ -150,6 +153,16 @@ function nullableText(value: string | undefined): SQL {
 }
 
 export type CommonOperationStrategy = Readonly<{
+  /**
+   * The exact NOT NULL sentinels emitted by the closed edge-batch program.
+   * Derive them from the same table definitions as the SQL so error
+   * classification cannot drift when a physical column is renamed.
+   */
+  atomicEdgeRefusalConstraints: Readonly<{
+    cardinality: Readonly<{ table: string; column: string }>;
+    durableIdentity: Readonly<{ table: string; column: string }>;
+    endpoint: Readonly<{ table: string; column: string }>;
+  }>;
   /**
    * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
    * only scope in which a driver duplicate-key failure means "this identity is
@@ -254,6 +267,23 @@ export type CommonOperationStrategy = Readonly<{
     params: InsertEdgeParams,
     claim: ClaimEdgeCardinalityParams,
     timestamp: string,
+  ) => SQL;
+  buildDeleteStaleAtomicEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAcquireAtomicEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAssertAtomicEdgeClaimsOwned: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
   ) => SQL;
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
@@ -685,6 +715,57 @@ function createCommonOperationStrategy(
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",
+    atomicEdgeRefusalConstraints: {
+      cardinality: {
+        table: getTableName(tables.edgeClaims),
+        column: tables.edgeClaims.axis.name,
+      },
+      durableIdentity: {
+        table: getTableName(tables.edges),
+        column: tables.edges.createdAt.name,
+      },
+      endpoint: {
+        table: getTableName(tables.edges),
+        column: tables.edges.id.name,
+      },
+    },
+    buildDeleteStaleAtomicEdgeClaims: (
+      entries,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildDeleteStaleAtomicEdgeClaims(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildAcquireAtomicEdgeClaims: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAcquireAtomicEdgeClaims(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildAssertAtomicEdgeClaimsOwned: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAssertAtomicEdgeClaimsOwned(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
     primaryKeyConstraints: {
       nodes: nodePrimaryKeyConstraint(tables.nodes),
       edges: edgePrimaryKeyConstraint(tables.edges),

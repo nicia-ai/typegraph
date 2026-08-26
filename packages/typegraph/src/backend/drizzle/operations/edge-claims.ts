@@ -9,8 +9,10 @@ import type {
   ClaimEdgeCardinalityParams,
   InsertEdgeParams,
   PurgeEdgeClaimsParams,
+  SchemaWriteFenceParams,
 } from "../../types";
 import {
+  castBoundValueForColumn,
   edgeColumnList,
   quotedColumn,
   quotedTableName,
@@ -63,6 +65,196 @@ function competingLiveEdgePredicate(
       AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
       AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
       AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+  `;
+}
+
+function proposedEndpointsLivePredicate(
+  tables: Tables,
+  params: ClaimEdgeCardinalityParams,
+): SQL {
+  const { nodes } = tables;
+  return sql`
+    EXISTS (
+      SELECT 1 FROM ${nodes} AS "from_node"
+      WHERE ${qualifiedAlias("from_node", nodes.graphId)} = ${params.graphId}
+        AND ${qualifiedAlias("from_node", nodes.kind)} = ${params.fromKind}
+        AND ${qualifiedAlias("from_node", nodes.id)} = ${params.fromId}
+        AND ${qualifiedAlias("from_node", nodes.deletedAt)} IS NULL
+    )
+    AND EXISTS (
+      SELECT 1 FROM ${nodes} AS "to_node"
+      WHERE ${qualifiedAlias("to_node", nodes.graphId)} = ${params.graphId}
+        AND ${qualifiedAlias("to_node", nodes.kind)} = ${params.toKind}
+        AND ${qualifiedAlias("to_node", nodes.id)} = ${params.toId}
+        AND ${qualifiedAlias("to_node", nodes.deletedAt)} IS NULL
+    )
+  `;
+}
+
+function schemaFenceCte(
+  tables: Tables,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { schemaVersions } = tables;
+  return sql`
+    "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    )
+  `;
+}
+
+function recordedClaimHolderIsLivePredicate(
+  tables: Tables,
+  params: ClaimEdgeCardinalityParams,
+): SQL {
+  const { edgeClaims, edges } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const edgesName = getTableName(edges);
+  const spec = EDGE_CARDINALITY_SPECS[params.cardinality];
+  const toEndpointTerms =
+    spec.keyShape === "fromAndTo" ?
+      sql` AND ${qualified(edgesName, edges.toKind)} = ${params.toKind} AND ${qualified(edgesName, edges.toId)} = ${params.toId}`
+    : sql``;
+  const activeTerm =
+    spec.holderLiveness === "liveAndActive" ?
+      sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
+    : sql``;
+  return sql`
+    ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
+      AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
+      AND ${qualified(edgesName, edges.deletedAt)} IS NULL
+      AND ${qualified(edgesName, edges.kind)} = ${params.edgeKind}
+      AND ${qualified(edgesName, edges.fromKind)} = ${params.fromKind}
+      AND ${qualified(edgesName, edges.fromId)} = ${params.fromId}${toEndpointTerms}${activeTerm}
+  `;
+}
+
+/**
+ * Removes stale foreign holders before the guarded edge rows are inserted.
+ * The schema and endpoint gates ensure a stale fence remains a side-effect-free
+ * no-op; a later edge refusal rolls this mutation back with the whole program.
+ */
+export function buildDeleteStaleAtomicEdgeClaims(
+  tables: Tables,
+  entries: readonly ClaimEdgeCardinalityParams[],
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { edgeClaims, edges } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const conditions = entries.map((entry) => {
+    const target = edgeCardinalityClaimTarget(entry);
+    return sql`
+      (
+            ${qualified(claimsName, edgeClaims.graphId)} = ${entry.graphId}
+            AND ${qualified(claimsName, edgeClaims.axis)} = ${target.axis}
+            AND ${qualified(claimsName, edgeClaims.key)} = ${target.key}
+            AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${entry.edgeId}
+            AND EXISTS (SELECT 1 FROM "schema_fence")
+            AND ${proposedEndpointsLivePredicate(tables, entry)}
+            AND NOT EXISTS (
+              SELECT 1 FROM ${edges}
+              WHERE ${recordedClaimHolderIsLivePredicate(tables, entry)}
+            )
+          )
+    `;
+  });
+  return sql`
+    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
+    DELETE FROM ${edgeClaims}
+    WHERE ${sql.join(conditions, sql` OR `)}
+  `;
+}
+
+/** Acquires every still-unowned axis before inserting the guarded edge rows. */
+export function buildAcquireAtomicEdgeClaims(
+  tables: Tables,
+  entries: readonly ClaimEdgeCardinalityParams[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { edgeClaims, edges } = tables;
+  const columns = sql.raw(
+    `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}", "${edgeClaims.edgeId.name}", "${edgeClaims.updatedAt.name}"`,
+  );
+  const conflictColumns = sql.raw(
+    `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}"`,
+  );
+  const rows = entries.map((entry) => {
+    const target = edgeCardinalityClaimTarget(entry);
+    return sql`
+      SELECT
+        ${castBoundValueForColumn(edgeClaims.graphId, entry.graphId)},
+        ${castBoundValueForColumn(edgeClaims.axis, target.axis)},
+        ${castBoundValueForColumn(edgeClaims.key, target.key)},
+        ${castBoundValueForColumn(edgeClaims.edgeId, entry.edgeId)},
+        ${castBoundValueForColumn(edgeClaims.updatedAt, timestamp)}
+      FROM "schema_fence"
+      WHERE ${proposedEndpointsLivePredicate(tables, entry)}
+      AND NOT EXISTS (
+        SELECT 1 FROM ${edges}
+        WHERE ${competingLiveEdgePredicate(tables, entry)}
+      )
+    `;
+  });
+  return sql`
+    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
+    INSERT INTO ${edgeClaims} (${columns})
+    ${sql.join(rows, sql` UNION ALL `)}
+    ON CONFLICT (${conflictColumns}) DO NOTHING
+  `;
+}
+
+/**
+ * Aborts the atomic transport when any proposed edge does not own its declared
+ * axis. The NULL axis is an internal sentinel classified at the backend seam;
+ * the surrounding native transaction rolls the earlier claim mutations back.
+ */
+export function buildAssertAtomicEdgeClaimsOwned(
+  tables: Tables,
+  entries: readonly ClaimEdgeCardinalityParams[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { edgeClaims } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const columns = sql.raw(
+    `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}", "${edgeClaims.edgeId.name}", "${edgeClaims.updatedAt.name}"`,
+  );
+  const refusals = entries.map((entry) => {
+    const target = edgeCardinalityClaimTarget(entry);
+    return sql`
+      SELECT
+        ${castBoundValueForColumn(edgeClaims.graphId, entry.graphId)} AS graph_id,
+        ${castBoundValueForColumn(edgeClaims.axis, sql.raw("NULL"))} AS axis,
+        ${castBoundValueForColumn(edgeClaims.key, target.key)} AS key,
+        ${castBoundValueForColumn(edgeClaims.edgeId, entry.edgeId)} AS edge_id,
+        ${castBoundValueForColumn(edgeClaims.updatedAt, timestamp)} AS updated_at
+      FROM "schema_fence"
+      WHERE ${proposedEndpointsLivePredicate(tables, entry)}
+      AND NOT EXISTS (
+        SELECT 1 FROM ${edgeClaims}
+        WHERE ${qualified(claimsName, edgeClaims.graphId)} = ${entry.graphId}
+          AND ${qualified(claimsName, edgeClaims.axis)} = ${target.axis}
+          AND ${qualified(claimsName, edgeClaims.key)} = ${target.key}
+          AND ${qualified(claimsName, edgeClaims.edgeId)} = ${entry.edgeId}
+      )
+    `;
+  });
+  return sql`
+    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
+    INSERT INTO ${edgeClaims} (${columns})
+    SELECT graph_id, axis, key, edge_id, updated_at
+    FROM (${sql.join(refusals, sql` UNION ALL `)}) AS refused_claims
+    LIMIT 1
   `;
 }
 

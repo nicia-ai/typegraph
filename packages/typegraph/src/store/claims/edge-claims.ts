@@ -170,7 +170,7 @@ export function edgeCardinalityClaim(
  * owner. Keeping the translation here prevents a backend result discriminator
  * from growing a second spelling of the same typed error.
  */
-function edgeClaimRefusal(
+export function edgeCardinalityClaimRefusal(
   params: ClaimEdgeCardinalityParams,
 ): CardinalityError {
   const error =
@@ -216,6 +216,27 @@ function edgeClaimRefusal(
  * relation existed reaches it here, on the first constrained edge write, with
  * an error that says what to run instead of an opaque driver failure.
  */
+export function edgeClaimRelationMissing(
+  graphId: string,
+  cause: unknown,
+): ConfigurationError {
+  return new ConfigurationError(
+    "Enforcing a declared edge cardinality needs the edge claim relation " +
+      "(typegraph_edge_claims), and this database does not have it. " +
+      "Databases initialized before this relation existed were never sent " +
+      "its CREATE TABLE, because the bootstrap DDL runs only on first boot.",
+    { code: "EDGE_CLAIM_RELATION_MISSING", graphId },
+    {
+      cause,
+      suggestion:
+        "Run the generated migration SQL (generatePostgresMigrationSQL / " +
+        "generateSqliteMigrationSQL) against this database, or declare the " +
+        'edge kind `cardinality: "many"` and enforce the limit in ' +
+        "application code.",
+    },
+  );
+}
+
 async function withEdgeClaimRelationPrecondition<T>(
   graphId: string,
   issue: () => Promise<T>,
@@ -224,21 +245,7 @@ async function withEdgeClaimRelationPrecondition<T>(
     return await issue();
   } catch (error) {
     if (!isMissingTableError(error)) throw error;
-    throw new ConfigurationError(
-      "Enforcing a declared edge cardinality needs the edge claim relation " +
-        "(typegraph_edge_claims), and this database does not have it. " +
-        "Databases initialized before this relation existed were never sent " +
-        "its CREATE TABLE, because the bootstrap DDL runs only on first boot.",
-      { code: "EDGE_CLAIM_RELATION_MISSING", graphId },
-      {
-        cause: error,
-        suggestion:
-          "Run the generated migration SQL (generatePostgresMigrationSQL / " +
-          "generateSqliteMigrationSQL) against this database, or declare the " +
-          'edge kind `cardinality: "many"` and enforce the limit in ' +
-          "application code.",
-      },
-    );
+    throw edgeClaimRelationMissing(graphId, error);
   }
 }
 
@@ -299,7 +306,9 @@ export async function claimEdgeCardinality(
     const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
       mode.claim(claim),
     );
-    if (outcome.status === "refused") throw edgeClaimRefusal(claim);
+    if (outcome.status === "refused") {
+      throw edgeCardinalityClaimRefusal(claim);
+    }
     return;
   }
   const support = mode.support;
@@ -307,7 +316,7 @@ export async function claimEdgeCardinality(
   const outcome = await withEdgeClaimRelationPrecondition(claim.graphId, () =>
     support.claims.claimEdgeCardinality(claim),
   );
-  if (outcome.status === "refused") throw edgeClaimRefusal(claim);
+  if (outcome.status === "refused") throw edgeCardinalityClaimRefusal(claim);
 }
 
 /**
@@ -340,7 +349,7 @@ export async function claimEdgeCardinalityBatch(
   for (const [index, outcome] of outcomes.entries()) {
     const entry = ordered[index];
     if (entry !== undefined && outcome.status === "refused") {
-      throw edgeClaimRefusal(entry.claim);
+      throw edgeCardinalityClaimRefusal(entry.claim);
     }
   }
 }
