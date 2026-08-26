@@ -142,17 +142,20 @@ const store = createAdapterStore(tenantGraph, runtimeBackend, {
 Instantiation is idempotent for the same template and target. A target already
 initialized with a different schema is refused. On PostgreSQL the clone
 statement takes the same graph advisory-lock key as schema commits; SQLite's
-single write statement is serialized by its writer lock.
+schema and marker writes are serialized by its writer lock.
 
-Templates are currently **schema-only**: they do not seed graph rows or create
-runtime-contribution markers. The returned snapshot is therefore for an
-unverified, zero-RTT `createAdapterStore` attach; a target cannot be reopened
-with `createVerifiedStore` until the normal privileged
-`createStoreWithSchema()` boot path has materialized its markers. This matters
-even without `searchable()` fields because verified opens always assert the
-runtime-contribution marker. Templates containing embedding fields are refused
-because their vector storage is graph-scoped and cannot safely be cloned by a
-schema-only statement.
+Templates clone the source graph's durable runtime-contribution markers along
+with its schema row. A target can therefore be reopened with
+`createVerifiedStore` or `createVerifiedAdapterStore` from a later serverless
+isolate without another schema reconciliation or provisioning DDL step.
+Registration and instantiation are DML-only; provision the graph-template table
+through the normal privileged bootstrap or migration before handing runtime
+requests to a DML-only role.
+
+Template eligibility follows the backend's capabilities. Embedding declarations
+are allowed when the backend is configured with `vector: false`, because that
+backend has no graph-scoped vector storage to clone. A vector-enabled backend
+continues to refuse embedding-bearing schema-only templates.
 
 ## The graph extension
 

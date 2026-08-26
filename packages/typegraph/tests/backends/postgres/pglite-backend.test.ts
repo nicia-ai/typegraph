@@ -50,6 +50,7 @@ import {
   createAdapterStoreWithSchema,
   createStore,
   createStoreWithSchema,
+  createVerifiedAdapterStore,
   type Store,
 } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
@@ -317,9 +318,10 @@ describe("PGlite backend", () => {
   });
 
   it("instantiates a durable graph template through the PostgreSQL dialect", async () => {
-    const { backend } = await createLocalPgliteBackend({ vector: false });
+    const { backend, db } = await createLocalPgliteBackend({ vector: false });
     cleanups.push(() => backend.close());
     const [source] = await createAdapterStoreWithSchema(peopleGraph, backend);
+    const executeDdl = vi.spyOn(backend, "executeDdl");
     const template = await registerGraphTemplate(backend, {
       templateId: "pglite-people-v1",
       reconciled: source.reconciledSchema,
@@ -341,6 +343,59 @@ describe("PGlite backend", () => {
       version: 1,
       hash: first.schema.schema_hash,
     });
+    expect(executeDdl).not.toHaveBeenCalled();
+
+    const runtimeBackend = createPostgresBackend(db, {
+      vector: false,
+    });
+    const targetGraph = defineGraph({
+      id: "pglite-template-target",
+      nodes: { Person: { type: Person } },
+      edges: {},
+    });
+    await expect(
+      createVerifiedAdapterStore(targetGraph, runtimeBackend),
+    ).resolves.toBeDefined();
+  });
+
+  it("still refuses vector-enabled schema-only templates", async () => {
+    const { backend } = await createLocalPgliteBackend();
+    cleanups.push(() => backend.close());
+    const [source] = await createAdapterStoreWithSchema(
+      documentsGraph,
+      backend,
+    );
+
+    await expect(
+      registerGraphTemplate(backend, {
+        templateId: "pglite-vector-template",
+        reconciled: source.reconciledSchema,
+      }),
+    ).rejects.toMatchObject({
+      details: { code: "GRAPH_TEMPLATE_VECTOR_UNSUPPORTED" },
+    });
+  });
+
+  it("registers and instantiates embedding templates when vector storage is disabled", async () => {
+    const { backend } = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(() => backend.close());
+    const [source] = await createAdapterStoreWithSchema(
+      documentsGraph,
+      backend,
+    );
+    const executeDdl = vi.spyOn(backend, "executeDdl");
+    const template = await registerGraphTemplate(backend, {
+      templateId: "pglite-vector-disabled-template",
+      reconciled: source.reconciledSchema,
+    });
+
+    await expect(
+      instantiateGraphTemplate(backend, {
+        template,
+        graphId: "pglite-vector-disabled-target",
+      }),
+    ).resolves.toMatchObject({ status: "ready" });
+    expect(executeDdl).not.toHaveBeenCalled();
   });
 
   describe("serialized transaction resource ownership", () => {

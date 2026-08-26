@@ -135,7 +135,10 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
-import { instantiateGraphTemplateSql } from "./graph-template-sql";
+import {
+  copyGraphTemplateContributionMarkersStatement,
+  instantiateGraphTemplateSql,
+} from "./graph-template-sql";
 import { isLocalLibsqlClient } from "./libsql-client";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
@@ -1917,9 +1920,6 @@ export function createSqliteBackend(
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {
-      await db.run(
-        sql.raw(generateSqliteCreateTableSQL(tables.graphTemplates)),
-      );
       const t = tables.graphTemplates;
       await db
         .insert(t)
@@ -1960,12 +1960,28 @@ export function createSqliteBackend(
           schemaHash: params.schemaHash,
           schemaVersionsTableName: getTableName(tables.schemaVersions),
           templatesTableName: getTableName(tables.graphTemplates),
+          contributionMaterializationsTableName: getTableName(
+            tables.contributionMaterializations,
+          ),
           templateId: params.templateId,
           templateSchemaHash: params.templateSchemaHash,
         }),
       );
       const row = rows[0];
       if (row === undefined) return { status: "refused" } as const;
+      await operations.execute<Record<string, unknown>>(
+        copyGraphTemplateContributionMarkersStatement({
+          graphId: params.graphId,
+          schemaHash: params.schemaHash,
+          schemaVersionsTableName: getTableName(tables.schemaVersions),
+          templatesTableName: getTableName(tables.graphTemplates),
+          contributionMaterializationsTableName: getTableName(
+            tables.contributionMaterializations,
+          ),
+          templateId: params.templateId,
+          templateSchemaHash: params.templateSchemaHash,
+        }),
+      );
       return { status: "ready", row: toSchemaVersionRow(row) } as const;
     },
 

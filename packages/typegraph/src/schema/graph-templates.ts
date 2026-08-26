@@ -36,7 +36,10 @@ export async function registerGraphTemplate<G extends GraphDef>(
       { code: "GRAPH_TEMPLATE_REQUIRES_RECONCILED_SCHEMA" },
     );
   }
-  if (resolveGraphVectorSlots(reconciled.graph).length > 0) {
+  if (
+    resolveGraphVectorSlots(reconciled.graph).length > 0 &&
+    backend.capabilities.vector?.supported === true
+  ) {
     throw new ConfigurationError(
       "Graph templates do not support embedding fields because vector storage is graph-scoped and cannot be instantiated schema-only.",
       {
