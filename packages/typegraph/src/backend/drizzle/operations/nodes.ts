@@ -327,6 +327,7 @@ export function buildAtomicNodeBatchWithSchemaFence(
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
   resultMode: AtomicNodeBatchResultMode,
+  writeGate?: SQL,
 ): SQL {
   const firstEntry = entries[0];
   if (firstEntry === undefined) {
@@ -443,7 +444,10 @@ export function buildAtomicNodeBatchWithSchemaFence(
     ${
       // SQLite needs a WHERE clause to distinguish this INSERT ... SELECT's
       // trailing UPSERT clause from a join constraint.
-      generated ? sql.empty() : sql`WHERE TRUE`
+      writeGate === undefined ?
+        generated ? sql.empty()
+        : sql`WHERE TRUE`
+      : sql`WHERE ${writeGate}`
     }
     ${generated ? sql.empty() : resurrection}
     ${resultClause}

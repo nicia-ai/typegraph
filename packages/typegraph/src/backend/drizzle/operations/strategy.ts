@@ -55,6 +55,12 @@ import type {
 import { toDrizzleSql } from "../execution/types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
+import {
+  type AtomicNodeClaimEntry,
+  buildAtomicNodeClaimCleanupWithSchemaFence,
+  buildAtomicNodeClaimGatePredicateWithSchemaFence,
+  buildAtomicNodeClaimUpsertWithSchemaFence,
+} from "./atomic-node-claims";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
   buildCountEdgesByKind,
@@ -255,6 +261,22 @@ export type CommonOperationStrategy = Readonly<{
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
     resultMode: AtomicNodeBatchResultMode,
+    writeGate?: SQL,
+  ) => SQL;
+  buildAtomicNodeClaimUpsertWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeClaimGatePredicateWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeClaimCleanupWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
   ) => SQL;
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
@@ -802,6 +824,43 @@ function createCommonOperationStrategy(
     },
     buildInsertUniqueBatch(entries: readonly InsertUniqueParams[]): SQL {
       return buildInsertUniqueBatch(tables, dialect, entries);
+    },
+    buildAtomicNodeClaimUpsertWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeClaimUpsertWithSchemaFence(
+        tables,
+        dialect,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeClaimGatePredicateWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeClaimGatePredicateWithSchemaFence(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeClaimCleanupWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeClaimCleanupWithSchemaFence(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
     },
     buildHardDeleteUniquesByConcreteKind(
       params: HardDeleteUniquesByConcreteKindParams,

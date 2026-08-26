@@ -17,7 +17,7 @@ import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend } from "../src/backend/types";
 import { defineGraph, defineNode, embedding, searchable } from "../src/core";
-import { disjointWith } from "../src/ontology";
+import { disjointWith, subClassOf } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
@@ -69,6 +69,51 @@ const uniqueGraph = defineGraph({
     },
   },
   edges: {},
+});
+const multipleUniqueGraph = defineGraph({
+  id: "atomic-node-batch-multiple-unique",
+  nodes: {
+    Person: {
+      type: Person,
+      unique: [
+        {
+          name: "person_name",
+          fields: ["name"],
+          scope: "kind",
+          collation: "binary",
+        },
+        {
+          name: "person_name_second",
+          fields: ["name"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+const Child = defineNode("Child", {
+  schema: z.object({ name: z.string() }),
+});
+const subclassUniqueGraph = defineGraph({
+  id: "atomic-node-batch-subclass-unique",
+  nodes: {
+    Person: {
+      type: Person,
+      unique: [
+        {
+          name: "person_name_across_subclasses",
+          fields: ["name"],
+          scope: "kindWithSubClasses",
+          collation: "binary",
+        },
+      ],
+    },
+    Child: { type: Child },
+  },
+  edges: {},
+  ontology: [subClassOf(Child, Person)],
 });
 const disjointGraph = defineGraph({
   id: "atomic-node-batch-disjoint",
@@ -140,28 +185,42 @@ describe("atomic node batch eligibility", () => {
     ).toBeDefined();
   });
 
-  it("accepts generated, caller, and mixed ids", () => {
+  it("accepts only generated ids for one same-kind unique constraint", () => {
     const backend = rootBackend(false);
     markAtomicRoot(backend);
 
-    for (const inputs of [
-      [input],
-      [{ ...input, id: "person-1" }],
-      [input, { ...input, id: "person-2" }],
-    ]) {
-      expect(
-        resolveAtomicNodeBatchExecutor({
-          backend,
-          graph,
-          registry: buildKindRegistry(graph),
-          inputs,
-          schemaVersion: 1,
-          identityEnabled: false,
-          historyEnabled: false,
-          revisionTrackingEnabled: false,
-        }),
-      ).toBeDefined();
-    }
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: uniqueGraph,
+        registry: buildKindRegistry(uniqueGraph),
+        inputs: [input],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
+  });
+
+  it.each([
+    ["caller id", [{ ...input, id: "person-1" }]],
+    ["mixed ids", [input, { ...input, id: "person-2" }]],
+  ] as const)("refuses %s for constrained nodes", (_label, inputs) => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: uniqueGraph,
+        registry: buildKindRegistry(uniqueGraph),
+        inputs,
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
   });
 
   it("refuses a schema-less shape", () => {
@@ -268,7 +327,22 @@ describe("atomic node batch eligibility", () => {
   });
 
   it.each([
-    ["unique constraint", uniqueGraph, input, false, false, false],
+    [
+      "multiple unique constraints",
+      multipleUniqueGraph,
+      input,
+      false,
+      false,
+      false,
+    ],
+    [
+      "kindWithSubClasses unique constraint",
+      subclassUniqueGraph,
+      input,
+      false,
+      false,
+      false,
+    ],
     ["disjointness", disjointGraph, input, false, false, false],
     [
       "search projection",

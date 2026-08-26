@@ -46,6 +46,7 @@
  */
 import { type z } from "zod";
 
+import type { AtomicNodeBatchEntry } from "../../backend/capabilities/atomic-node-batch";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
@@ -53,6 +54,7 @@ import {
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
 import {
+  rephaseNonTransactionalNodeClaimPlan,
   supportsNodeCreatePlan,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
@@ -1619,14 +1621,68 @@ async function prepareAtomicBatchCreates<G extends GraphDef>(
 
 function atomicNodeBatchEntries(
   preparedCreates: readonly NodeCreatePrepared[],
-): readonly Readonly<{
-  idSource: "generated" | "caller";
-  params: InsertNodeParams;
-}>[] {
-  return preparedCreates.map((prepared) => ({
-    idSource: prepared.idProvided ? "caller" : "generated",
-    params: prepared.insertParams,
-  }));
+  maxClaimedEntries: number,
+): readonly AtomicNodeBatchEntry[] | undefined {
+  const entries: AtomicNodeBatchEntry[] = [];
+  const ownerByClaimTarget = new Map<
+    string,
+    Readonly<{ kind: string; id: string }>
+  >();
+  for (const prepared of preparedCreates) {
+    if (prepared.claimPlan.claims.length === 0) {
+      entries.push({
+        idSource: prepared.idProvided ? "caller" : "generated",
+        params: prepared.insertParams,
+      });
+      continue;
+    }
+
+    const rephased = rephaseNonTransactionalNodeClaimPlan({
+      entity: "node",
+      params: prepared.insertParams,
+      idGenerated: !prepared.idProvided,
+      mode: { kind: "ordinary" },
+      claims: prepared.claimPlan.claims,
+      projections: [],
+    });
+    if (rephased?.claims.length !== 1) return;
+    const claim = rephased.claims[0];
+    if (claim === undefined) return;
+    const targetKey = encodeTupleKey([
+      prepared.insertParams.graphId,
+      claim.axis,
+      claim.constraintName,
+      claim.key,
+    ]);
+    const existingOwner = ownerByClaimTarget.get(targetKey);
+    if (existingOwner !== undefined) {
+      if (claim.verdict.kind !== "uniqueness") return;
+      throw new UniquenessError({
+        constraintName: claim.constraintName,
+        kind: existingOwner.kind,
+        existingId: existingOwner.id,
+        newId: prepared.id,
+        fields: claim.verdict.fields,
+        axis: claim.axis,
+      });
+    }
+    ownerByClaimTarget.set(targetKey, {
+      kind: prepared.kind,
+      id: prepared.id,
+    });
+    entries.push({
+      idSource: "generated",
+      params: prepared.insertParams,
+      claim,
+    });
+  }
+  if (
+    entries.filter((entry) => entry.claim !== undefined).length >
+    maxClaimedEntries
+  ) {
+    return;
+  }
+  return entries;
 }
 
 /**
@@ -2255,35 +2311,37 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       inputs,
       backend,
     );
-    const schemaFence = {
-      graphId: ctx.graphId,
-      expectedVersion: requireDefined(ctx.schemaVersion),
-    };
-    const insertedCount = await withAlreadyExistsTranslation("node", () =>
-      atomicExecutor({
-        entries: atomicNodeBatchEntries(preparedCreates),
-        resultMode: "count",
-        schemaFence,
-      }),
+    const entries = atomicNodeBatchEntries(
+      preparedCreates,
+      atomicExecutor.maxClaimedEntries ?? 0,
     );
-    if (insertedCount === 0) {
-      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    }
-    if (insertedCount !== inputs.length) {
-      throw new DatabaseOperationError(
-        `Atomic node batch returned ${insertedCount} rows, expected ${inputs.length}`,
-        {
-          operation: "insert",
-          entity: "node",
-          attempted: preparedCreates.map((prepared) => ({
-            kind: prepared.kind,
-            id: prepared.id,
-          })),
-        },
+    if (entries !== undefined) {
+      const schemaFence = {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      };
+      const insertedCount = await withAlreadyExistsTranslation("node", () =>
+        atomicExecutor({ entries, resultMode: "count", schemaFence }),
       );
+      if (insertedCount === 0) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+      }
+      if (insertedCount !== inputs.length) {
+        throw new DatabaseOperationError(
+          `Atomic node batch returned ${insertedCount} rows, expected ${inputs.length}`,
+          {
+            operation: "insert",
+            entity: "node",
+            attempted: preparedCreates.map((prepared) => ({
+              kind: prepared.kind,
+              id: prepared.id,
+            })),
+          },
+        );
+      }
+      memoizeLeasedSchemaFence(ctx, backend);
+      return;
     }
-    memoizeLeasedSchemaFence(ctx, backend);
-    return;
   }
 
   await runWritePlan(
@@ -2362,39 +2420,41 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       backend,
       options,
     );
-    const schemaFence = {
-      graphId: ctx.graphId,
-      expectedVersion: requireDefined(ctx.schemaVersion),
-    };
-    const returnedRows = await withAlreadyExistsTranslation("node", () =>
-      atomicExecutor({
-        entries: atomicNodeBatchEntries(preparedCreates),
-        resultMode: "rows",
-        schemaFence,
-      }),
-    );
-    if (returnedRows.length === 0) {
-      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    }
-    if (returnedRows.length !== preparedCreates.length) {
-      throw new DatabaseOperationError(
-        `Atomic node batch returned ${returnedRows.length} rows, expected ${preparedCreates.length}`,
-        {
-          operation: "insert",
-          entity: "node",
-          attempted: preparedCreates.map((prepared) => ({
-            kind: prepared.kind,
-            id: prepared.id,
-          })),
-        },
-      );
-    }
-    memoizeLeasedSchemaFence(ctx, backend);
-    return restoreAtomicNodeBatchRows(
-      ctx.graphId,
+    const entries = atomicNodeBatchEntries(
       preparedCreates,
-      returnedRows,
-    ).map((row) => rowToNode(row));
+      atomicExecutor.maxClaimedEntries ?? 0,
+    );
+    if (entries !== undefined) {
+      const schemaFence = {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      };
+      const returnedRows = await withAlreadyExistsTranslation("node", () =>
+        atomicExecutor({ entries, resultMode: "rows", schemaFence }),
+      );
+      if (returnedRows.length === 0) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+      }
+      if (returnedRows.length !== preparedCreates.length) {
+        throw new DatabaseOperationError(
+          `Atomic node batch returned ${returnedRows.length} rows, expected ${preparedCreates.length}`,
+          {
+            operation: "insert",
+            entity: "node",
+            attempted: preparedCreates.map((prepared) => ({
+              kind: prepared.kind,
+              id: prepared.id,
+            })),
+          },
+        );
+      }
+      memoizeLeasedSchemaFence(ctx, backend);
+      return restoreAtomicNodeBatchRows(
+        ctx.graphId,
+        preparedCreates,
+        returnedRows,
+      ).map((row) => rowToNode(row));
+    }
   }
 
   return runWritePlan(
