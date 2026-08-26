@@ -1,5 +1,57 @@
 # @nicia-ai/typegraph
 
+## 0.52.0
+
+### Minor Changes
+
+- [#558](https://github.com/nicia-ai/typegraph/pull/558) [`48532f8`](https://github.com/nicia-ai/typegraph/commit/48532f87de7ce5a769c5e090b5afddae325dbdc5) Thanks [@pdlug](https://github.com/pdlug)! - Eligible schema-managed generated-id node creates and `cardinality: "many"` edge creates on bundled root backends can now execute as one authoritative statement, including Neon HTTP and Cloudflare D1, where all required claims, projections, and side effects are either absent or fused into that statement. History/revision and Operational Identity work, plus other managed writes, continue to require the interactive transaction or an explicit typed refusal.
+
+  Clarify and harden execution boundaries for managed writes. The authoritative command helper now validates command/result correlation once, with typed node, edge, and convergence overloads; first-party Store consumers no longer duplicate that check, while recorded-capture retains its direct transaction-wrapper assertion. `OptionalTransactionExecution` is now a discriminated `{ mode: "interactive-transaction" | "sequential" }` value; migrate custom consumers from `execution.atomic` to `execution.mode`.
+
+  Document the distinction between interactive Store transactions, static internal adapter batches, and authoritative one-statement commands. Durable edge `matchIdentity` convergence may qualify for the one-statement root command because its canonical key has a database arbiter; claims/cardinality, undeclared dynamic `matchOn`, history/revision sidecars, and Operational Identity remain interactive-transaction contracts. The static native-batch adapter foundation remains internal; no new public Store batching API is implied.
+
+- [#556](https://github.com/nicia-ai/typegraph/pull/556) [`d2c2557`](https://github.com/nicia-ai/typegraph/commit/d2c25576fd4fb32b4db5cfe2af33b92e309060ae) Thanks [@pdlug](https://github.com/pdlug)! - Replace the optional managed-create hook with a required semantic command port that carries its root or transaction session and, only after an advisory graph lock is acquired, a graph- and session-bound coordination token. On PostgreSQL that lock statement records the effective transaction isolation in the same token, so convergence never trusts a requested option or assumed server default and adds no isolation-probe round trip. Transparent `deriveBackend` command wrappers retain the underlying session identity; a wrapper for another connection cannot reuse its token. Under that lock, PostgreSQL endpoint get-or-create folds the match-key read, endpoint validation, and insert into one statement, returning either the created edge or the existing winner without another application-level read. Adopted transactions may return an existing match at any isolation, but the create leg refuses repeatable read.
+
+  Breaking change and migration: custom `GraphBackend` implementations must add a `commands` member with `{ session, execute(command, context) }`. Move managed-create and specialized edge-insert behavior into the `node.create`, `edge.create`, and `edge.converge-create` command cases, and return the typed `unsupported` result for dimensions the backend cannot apply. The optional combined-fence hook `lockSchemaVersionAndGraphWrite` now returns `Promise<GraphCommandIsolation>` instead of `Promise<void>`; custom implementations must return the normalized effective isolation observed by the same pinned-session statement that acquires both locks. Built-in adapters already provide this port.
+
+- [#554](https://github.com/nicia-ai/typegraph/pull/554) [`ddf851d`](https://github.com/nicia-ai/typegraph/commit/ddf851d99774b5d7be9a962a7994bf405188d7ee) Thanks [@pdlug](https://github.com/pdlug)! - Introduce authoritative node create commands and reduce first-party PostgreSQL write round trips by folding schema and graph fences, uniqueness and disjointness verdicts, endpoint and cardinality checks, and generated fulltext/vector projections into atomic statements. Managed Store transactions now lease one schema fence across their writes without sacrificing the fused first statement, and endpoint get-or-create decisions are confirmed from transaction-scoped evidence on caching transports.
+
+  The backend planning API now uses one required semantic command port for node and edge creates. Commands carry an explicit root or transaction session and, when an advisory graph lock was actually acquired, a graph- and port-bound coordination token; custom backends implement that same contract rather than silently falling back to a second decision path.
+
+  Breaking change and migration: add `commands: { session, execute }` to custom `GraphBackend` objects and route node/edge create plans through it. A backend that cannot honor a requested plan dimension must return its typed `unsupported` result; it must not silently ignore the dimension. See the authoritative command sessions section of the backend setup guide.
+
+- [#554](https://github.com/nicia-ai/typegraph/pull/554) [`ddf851d`](https://github.com/nicia-ai/typegraph/commit/ddf851d99774b5d7be9a962a7994bf405188d7ee) Thanks [@pdlug](https://github.com/pdlug)! - Replace the three specialized edge-insert backend hooks with the shared semantic command port. Managed edge creates now compile endpoint validation, an optional schema fence, and an optional cardinality claim into one all-or-nothing `edge.create` command with an explicit result. Custom backends implement the required command contract and must apply or refuse every requested dimension.
+
+  Breaking change and migration: custom backends should remove their old specialized edge-insert hook wiring and implement `commands.execute` for `edge.create` (and `edge.converge-create` when convergence is supported). Return the typed `unsupported` dimension result when endpoint, schema-fence, cardinality, or convergence behavior is unavailable.
+
+- [#561](https://github.com/nicia-ai/typegraph/pull/561) [`cdcb814`](https://github.com/nicia-ai/typegraph/commit/cdcb8144df618b4cd2294ef39969f637df831ad2) Thanks [@pdlug](https://github.com/pdlug)! - Execute eligible durable-match and cardinality-constrained `edges.bulkInsert` and `edges.bulkCreate` calls as one schema-fenced atomic exchange on bundled Neon HTTP, Cloudflare D1, and libSQL roots. The program maintains stale-claim takeover and legacy-incumbent detection, preserves typed endpoint, match-identity, and cardinality refusals, and rolls back every edge row when any constraint sidecar fails.
+
+- [#557](https://github.com/nicia-ai/typegraph/pull/557) [`6799b65`](https://github.com/nicia-ai/typegraph/commit/6799b65cff2e667aa858b625b0e0236e1bcfac28) Thanks [@pdlug](https://github.com/pdlug)! - Add graph-local durable edge match identities. An edge registration can declare one named, canonical property-field set; TypeGraph persists its directed endpoint/property key on every edge row, maintains it across normal and trusted import writers, refuses ordinary updates to identity fields, retains it across soft deletion, and releases it on hard deletion. SQLite and PostgreSQL provision and idempotently upgrade the edge relation with a pair-null check and unique arbiter.
+
+  Schema-managed root `getOrCreateByEndpoints` calls using a declared identity now compile endpoint validation, the schema fence, conflict arbitration, and the created/found result into one database statement on bundled SQLite and PostgreSQL backends. Dynamic call-level `matchOn` remains available through the transaction-fenced compatibility path, and a supplied field list on a declared edge must exactly match the declaration. Bulk endpoint candidate reads use the set-oriented heterogeneous endpoint member instead of one read per endpoint pair on bundled backends.
+
+  Direct creates use the same durable arbiter at every cardinality. Built-in bulk creates preserve set-oriented insertion through a conflict-arbitrated batch command rather than falling back to one managed write per row.
+
+  Operation-end hooks now report `outcome: "written" | "unchanged" | "unknown"`. An authoritative get-or-create command that finds an incumbent completes as `"unchanged"` and does not fire `onError`; the same explicit outcome prevents revision/history churn for the no-write leg. Commands without an authoritative physical-write verdict report `"unknown"` instead of guessing from success.
+
+  Normal import uses the same set-oriented durable command for claimless slices and savepoint-protected batch recovery for exceptional conflicts, including on history-enabled stores. Non-transactional backends refuse ambiguous per-row retry after a failed batch rather than re-inserting a possibly committed prefix.
+
+  Adding, removing, or changing a match identity is a breaking schema change. The initial migration contract refuses activation while the affected edge kind holds rows; export and hard-delete those rows, migrate the schema, then import them so every row receives the new durable key.
+
+- [#539](https://github.com/nicia-ai/typegraph/pull/539) [`2dcae2f`](https://github.com/nicia-ai/typegraph/commit/2dcae2f074c00a46f521f2c45f73e49f12bfee2d) Thanks [@pdlug](https://github.com/pdlug)! - Add durable schema-only graph templates with idempotent v1 instantiation.
+
+- [#560](https://github.com/nicia-ai/typegraph/pull/560) [`da56b5f`](https://github.com/nicia-ai/typegraph/commit/da56b5f08d67fb5c867b895b8d6d988efdaecd96) Thanks [@pdlug](https://github.com/pdlug)! - Execute eligible unconstrained `edges.bulkInsert` and `edges.bulkCreate` calls as one schema-fenced native atomic exchange on bundled Neon HTTP, Cloudflare D1, and libSQL roots. The closed program validates live endpoints at the write boundary, preserves input-order results, and rolls back every bind-budget chunk when any statement fails. Cardinality claims, durable match identity, history, revision tracking, caller-owned transactions, derived backends, and unproven custom backends retain the existing transaction or fallback path.
+
+  Cast closed-program CTE values to their destination column types so PostgreSQL accepts JSON and temporal values in both node and edge native batches.
+
+- [#559](https://github.com/nicia-ai/typegraph/pull/559) [`ff42eb4`](https://github.com/nicia-ai/typegraph/commit/ff42eb4c1eced3a66628ec6bd71ebfb273443394) Thanks [@pdlug](https://github.com/pdlug)! - Execute eligible schema-managed, generated-ID `nodes.bulkInsert` batches as one schema-fenced native atomic exchange on bundled Neon HTTP, Cloudflare D1, and libSQL roots. This first closed-program slice excludes claims, Operational Identity, projections, history, revision, and caller-supplied IDs; unsupported shapes retain their existing transaction or fallback path.
+
+  Skip the guaranteed-empty existence-priming read for generated-ID bulk node operations while preserving caller-ID existence and resurrection checks.
+
+### Patch Changes
+
+- [#537](https://github.com/nicia-ai/typegraph/pull/537) [`57ea6ac`](https://github.com/nicia-ai/typegraph/commit/57ea6ac74aef5a8ce22043f4cbf066d8fcac834f) Thanks [@pdlug](https://github.com/pdlug)! - Compute reciprocal-rank-fusion scores with floating-point division.
+
 ## 0.51.1
 
 ### Patch Changes
