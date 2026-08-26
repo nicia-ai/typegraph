@@ -7,8 +7,11 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { StaleVersionError } from "../src";
+import {
+  type AtomicNodeBatchInput,
+  markBundledRootAtomicNodeBatch,
+} from "../src/backend/capabilities/atomic-node-batch";
 import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
-import { markBundledRootGeneratedNodeBatch } from "../src/backend/capabilities/generated-node-batch";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -18,7 +21,7 @@ import { disjointWith } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
-import { resolveAtomicGeneratedNodeBatchExecutor } from "../src/store/operations/atomic-generated-node-batch";
+import { resolveAtomicNodeBatchExecutor } from "../src/store/operations/atomic-node-batch";
 import type { CreateNodeInput } from "../src/store/types";
 
 const Person = defineNode("Person", {
@@ -26,7 +29,7 @@ const Person = defineNode("Person", {
 });
 
 const graph = defineGraph({
-  id: "atomic-generated-node-batch",
+  id: "atomic-node-batch",
   nodes: { Person: { type: Person } },
   edges: {},
 });
@@ -51,7 +54,7 @@ const VectorDocument = defineNode("VectorDocument", {
 const Rival = defineNode("Rival", { schema: z.object({ name: z.string() }) });
 
 const uniqueGraph = defineGraph({
-  id: "atomic-generated-node-batch-unique",
+  id: "atomic-node-batch-unique",
   nodes: {
     Person: {
       type: Person,
@@ -68,18 +71,18 @@ const uniqueGraph = defineGraph({
   edges: {},
 });
 const disjointGraph = defineGraph({
-  id: "atomic-generated-node-batch-disjoint",
+  id: "atomic-node-batch-disjoint",
   nodes: { Person: { type: Person }, Rival: { type: Rival } },
   edges: {},
   ontology: [disjointWith(Person, Rival)],
 });
 const searchableGraph = defineGraph({
-  id: "atomic-generated-node-batch-searchable",
+  id: "atomic-node-batch-searchable",
   nodes: { SearchDocument: { type: SearchDocument } },
   edges: {},
 });
 const embeddingGraph = defineGraph({
-  id: "atomic-generated-node-batch-embedding",
+  id: "atomic-node-batch-embedding",
   nodes: { VectorDocument: { type: VectorDocument } },
   edges: {},
 });
@@ -95,20 +98,36 @@ function rootBackend(transactions: boolean): GraphBackend {
   } as GraphBackend;
 }
 
-function markAtomicRoot(backend: GraphBackend): void {
-  markBundledRootAutocommitEligible(backend);
-  markBundledRootGeneratedNodeBatch(backend, ({ params }) =>
-    Promise.resolve(params.length),
-  );
+function createFakeAtomicNodeBatch(onCall?: () => void) {
+  async function execute(
+    input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
+  ): Promise<number>;
+  async function execute(
+    input: AtomicNodeBatchInput & Readonly<{ resultMode: "rows" }>,
+  ): Promise<readonly never[]>;
+  function execute(
+    input: AtomicNodeBatchInput,
+  ): Promise<number | readonly never[]> {
+    onCall?.();
+    return Promise.resolve(
+      input.resultMode === "count" ? input.entries.length : [],
+    );
+  }
+  return execute;
 }
 
-describe("generated node batch eligibility", () => {
+function markAtomicRoot(backend: GraphBackend): void {
+  markBundledRootAutocommitEligible(backend);
+  markBundledRootAtomicNodeBatch(backend, createFakeAtomicNodeBatch());
+}
+
+describe("atomic node batch eligibility", () => {
   it("accepts the exact bundled root even when it advertises transactions", () => {
     const backend = rootBackend(true);
     markAtomicRoot(backend);
 
     expect(
-      resolveAtomicGeneratedNodeBatchExecutor({
+      resolveAtomicNodeBatchExecutor({
         backend,
         graph,
         registry: buildKindRegistry(graph),
@@ -121,20 +140,59 @@ describe("generated node batch eligibility", () => {
     ).toBeDefined();
   });
 
-  it.each([
-    ["caller id", { ...input, id: "person-1" }],
-    ["schema-less", input],
-  ])("refuses %s shapes", (_label, candidate) => {
+  it("accepts generated, caller, and mixed ids", () => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+
+    for (const inputs of [
+      [input],
+      [{ ...input, id: "person-1" }],
+      [input, { ...input, id: "person-2" }],
+    ]) {
+      expect(
+        resolveAtomicNodeBatchExecutor({
+          backend,
+          graph,
+          registry: buildKindRegistry(graph),
+          inputs,
+          schemaVersion: 1,
+          identityEnabled: false,
+          historyEnabled: false,
+          revisionTrackingEnabled: false,
+        }),
+      ).toBeDefined();
+    }
+  });
+
+  it("refuses a schema-less shape", () => {
     const backend = rootBackend(false);
     markAtomicRoot(backend);
 
     expect(
-      resolveAtomicGeneratedNodeBatchExecutor({
+      resolveAtomicNodeBatchExecutor({
         backend,
         graph,
         registry: buildKindRegistry(graph),
-        inputs: [candidate],
-        schemaVersion: _label === "schema-less" ? undefined : 1,
+        inputs: [input],
+        schemaVersion: undefined,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("refuses a prototype-named unknown kind without touching inherited members", () => {
+    const backend = rootBackend(true);
+    markAtomicRoot(backend);
+
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph,
+        registry: buildKindRegistry(graph),
+        inputs: [{ kind: "toString", props: {} }],
+        schemaVersion: 1,
         identityEnabled: false,
         historyEnabled: false,
         revisionTrackingEnabled: false,
@@ -146,13 +204,12 @@ describe("generated node batch eligibility", () => {
     ["empty batch", []],
     ["unknown kind", [{ kind: "Unknown", props: {} }]],
     ["mixed batch", [input, { kind: "Unknown", props: {} }]],
-    ["mixed generated and caller IDs", [input, { ...input, id: "person-1" }]],
   ] as const)("refuses a %s as a whole", (_label, inputs) => {
     const backend = rootBackend(true);
     markAtomicRoot(backend);
 
     expect(
-      resolveAtomicGeneratedNodeBatchExecutor({
+      resolveAtomicNodeBatchExecutor({
         backend,
         graph,
         registry: buildKindRegistry(graph),
@@ -173,7 +230,7 @@ describe("generated node batch eligibility", () => {
 
     for (const backend of [unmarked, deriveBackend(marked, {})]) {
       expect(
-        resolveAtomicGeneratedNodeBatchExecutor({
+        resolveAtomicNodeBatchExecutor({
           backend,
           graph,
           registry: buildKindRegistry(graph),
@@ -192,7 +249,7 @@ describe("generated node batch eligibility", () => {
     try {
       await backend.transaction((transactionBackend) => {
         expect(
-          resolveAtomicGeneratedNodeBatchExecutor({
+          resolveAtomicNodeBatchExecutor({
             backend: transactionBackend,
             graph,
             registry: buildKindRegistry(graph),
@@ -246,7 +303,7 @@ describe("generated node batch eligibility", () => {
       markAtomicRoot(backend);
 
       expect(
-        resolveAtomicGeneratedNodeBatchExecutor({
+        resolveAtomicNodeBatchExecutor({
           backend,
           graph: candidateGraph,
           registry: buildKindRegistry(candidateGraph),
@@ -261,16 +318,18 @@ describe("generated node batch eligibility", () => {
   );
 });
 
-describe("generated node batch store consumer", () => {
+describe("atomic node batch store consumer", () => {
   it("uses the exact-root native batch without opening an outer transaction", async () => {
     const { backend } = createLocalSqliteBackend();
     let calls = 0;
     try {
       const [store] = await createStoreWithSchema(graph, backend);
-      markBundledRootGeneratedNodeBatch(backend, ({ params }) => {
-        calls += 1;
-        return Promise.resolve(params.length);
-      });
+      markBundledRootAtomicNodeBatch(
+        backend,
+        createFakeAtomicNodeBatch(() => {
+          calls += 1;
+        }),
+      );
 
       await store.nodes.Person.bulkInsert([
         { props: { name: "Alice" } },
@@ -287,10 +346,12 @@ describe("generated node batch store consumer", () => {
     let nativeCalls = 0;
     try {
       const [store] = await createStoreWithSchema(uniqueGraph, backend);
-      markBundledRootGeneratedNodeBatch(backend, ({ params }) => {
-        nativeCalls += 1;
-        return Promise.resolve(params.length);
-      });
+      markBundledRootAtomicNodeBatch(
+        backend,
+        createFakeAtomicNodeBatch(() => {
+          nativeCalls += 1;
+        }),
+      );
       const transaction = vi.spyOn(backend, "transaction");
 
       await store.nodes.Person.bulkInsert([
@@ -311,7 +372,6 @@ describe("generated node batch store consumer", () => {
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       await migrateSchema(backend, evolvedGraph, 1);
-      markBundledRootGeneratedNodeBatch(backend, () => Promise.resolve(0));
 
       await expect(
         store.nodes.Person.bulkInsert([{ props: { name: "Alice" } }]),
@@ -327,10 +387,12 @@ describe("generated node batch store consumer", () => {
     let calls = 0;
     try {
       const [store] = await createStoreWithSchema(graph, backend);
-      markBundledRootGeneratedNodeBatch(backend, ({ params }) => {
-        calls += 1;
-        return Promise.resolve(params.length);
-      });
+      markBundledRootAtomicNodeBatch(
+        backend,
+        createFakeAtomicNodeBatch(() => {
+          calls += 1;
+        }),
+      );
 
       await expect(
         store.nodes.Person.bulkInsert([
@@ -382,7 +444,7 @@ describe("generated node batch store consumer", () => {
     const { backend } = await createLibsqlBackend(client);
     try {
       const [store] = await createStoreWithSchema(graph, backend);
-      const executor = resolveAtomicGeneratedNodeBatchExecutor({
+      const executor = resolveAtomicNodeBatchExecutor({
         backend,
         graph,
         registry: buildKindRegistry(graph),
@@ -393,20 +455,24 @@ describe("generated node batch store consumer", () => {
         revisionTrackingEnabled: false,
       });
       if (executor === undefined) {
-        throw new Error("Expected libSQL generated node batch capability");
+        throw new Error("Expected libSQL atomic node batch capability");
       }
       await migrateSchema(backend, evolvedGraph, 1);
 
       await expect(
         executor({
-          params: [
+          entries: [
             {
-              graphId: graph.id,
-              kind: "Person",
-              id: "person-1",
-              props: { name: "Alice" },
+              idSource: "generated",
+              params: {
+                graphId: graph.id,
+                kind: "Person",
+                id: "person-1",
+                props: { name: "Alice" },
+              },
             },
           ],
+          resultMode: "count",
           schemaFence: { graphId: graph.id, expectedVersion: 1 },
         }),
       ).resolves.toBe(0);
@@ -428,7 +494,7 @@ describe("generated node batch store consumer", () => {
     const { backend } = await createLibsqlBackend(client);
     try {
       const [store] = await createStoreWithSchema(graph, backend);
-      const executor = resolveAtomicGeneratedNodeBatchExecutor({
+      const executor = resolveAtomicNodeBatchExecutor({
         backend,
         graph,
         registry: buildKindRegistry(graph),
@@ -439,7 +505,7 @@ describe("generated node batch store consumer", () => {
         revisionTrackingEnabled: false,
       });
       if (executor === undefined) {
-        throw new Error("Expected libSQL generated node batch capability");
+        throw new Error("Expected libSQL atomic node batch capability");
       }
       const batch = vi.spyOn(client, "batch");
       const transaction = vi.spyOn(backend, "transaction");
@@ -452,7 +518,11 @@ describe("generated node batch store consumer", () => {
 
       await expect(
         executor({
-          params,
+          entries: params.map((params) => ({
+            idSource: "generated" as const,
+            params,
+          })),
+          resultMode: "count",
           schemaFence: { graphId: graph.id, expectedVersion: 1 },
         }),
       ).rejects.toThrow();

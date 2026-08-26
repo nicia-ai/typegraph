@@ -58,6 +58,7 @@ import {
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import { markBundledRootAtomicEdgeBatch } from "../capabilities/atomic-edge-batch";
+import { markBundledRootAtomicNodeBatch } from "../capabilities/atomic-node-batch";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -65,7 +66,6 @@ import {
 } from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
-import { markBundledRootGeneratedNodeBatch } from "../capabilities/generated-node-batch";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -2536,10 +2536,7 @@ export function createSqliteBackend(
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicSqlProgram(backend, atomicSqlProgramExecutor);
-  markBundledRootGeneratedNodeBatch(
-    backend,
-    operations.executeGeneratedNodeBatch,
-  );
+  markBundledRootAtomicNodeBatch(backend, operations.executeAtomicNodeBatch);
   markBundledRootAtomicEdgeBatch(backend, operations.executeAtomicEdgeBatch);
 
   return backend;

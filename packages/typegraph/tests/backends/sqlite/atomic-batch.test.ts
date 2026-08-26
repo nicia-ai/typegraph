@@ -8,6 +8,7 @@ import {
 } from "../../../src/backend/drizzle/execution/sqlite-execution";
 import { isLocalLibsqlClient } from "../../../src/backend/drizzle/libsql-client";
 import { D1_MAX_BIND_PARAMETERS } from "../../../src/backend/types";
+import { CompilerInvariantError } from "../../../src/errors";
 import { createTestDatabase } from "../../test-utils";
 
 describe("SQLite native atomic batches", () => {
@@ -74,6 +75,44 @@ describe("SQLite native atomic batches", () => {
     });
     expect(prepare).not.toHaveBeenCalled();
     expect(batch).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when D1 returns a malformed result slot", async () => {
+    const prepare = vi.fn(() => ({ bind: vi.fn() }));
+    const batch = vi.fn(() => [undefined]);
+    const db = {
+      $client: { prepare, batch },
+      session: { constructor: { name: "SQLiteD1Session" } },
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+    } as unknown as AnySqliteDatabase;
+    const adapter = createSqliteExecutionAdapter(db);
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected D1 atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([{ sql: "SELECT 1", params: [] }]),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
+  });
+
+  it("fails closed when D1 omits rows from a result slot", async () => {
+    const prepare = vi.fn(() => ({ bind: vi.fn() }));
+    const batch = vi.fn(() => [{}]);
+    const db = {
+      $client: { prepare, batch },
+      session: { constructor: { name: "SQLiteD1Session" } },
+      dialect: { sqlToQuery: () => ({ params: [], sql: "SELECT 1" }) },
+    } as unknown as AnySqliteDatabase;
+    const adapter = createSqliteExecutionAdapter(db);
+    const executeAtomicBatch = adapter.executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected D1 atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([{ sql: "SELECT 1", params: [] }]),
+    ).rejects.toThrow("result slot without rows");
   });
 
   it("propagates a D1 batch rejection without falling back to individual writes", async () => {

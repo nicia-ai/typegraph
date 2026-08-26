@@ -43,13 +43,14 @@ import {
   type AtomicEdgeBatchRowsInput,
 } from "../capabilities/atomic-edge-batch";
 import type {
+  AtomicNodeBatchEntry,
+  AtomicNodeBatchExecutor,
+  AtomicNodeBatchInput,
+} from "../capabilities/atomic-node-batch";
+import type {
   AtomicSqlProgram,
   AtomicSqlProgramExecutor,
 } from "../capabilities/atomic-sql-program";
-import type {
-  GeneratedNodeBatchExecutor,
-  GeneratedNodeBatchInput,
-} from "../capabilities/generated-node-batch";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
   assertGraphCommandConvergenceIsolation,
@@ -295,7 +296,7 @@ export type CommonOperationBackend = Pick<
   | "updateNodeSet"
 > &
   Readonly<{
-    executeGeneratedNodeBatch?: GeneratedNodeBatchExecutor;
+    executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
     executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
@@ -559,6 +560,43 @@ function assertCompleteAtomicEdgeChunks(
 
 function decodeNoEdgeRows(): readonly EdgeRow[] {
   return [];
+}
+
+async function withAtomicNodeBatchClassifications<T>(
+  run: () => Promise<T>,
+  entries: readonly AtomicNodeBatchEntry[],
+  operationStrategy: CommonOperationStrategy,
+): Promise<T> {
+  const attempted = attemptedInserts(
+    entries.map((entry) => entry.params),
+  );
+  try {
+    return await withDuplicateKeyClassification(run, {
+      entity: "node",
+      relation: operationStrategy.primaryKeyConstraints.nodes,
+      attempted,
+    });
+  } catch (error) {
+    if (
+      entries.some((entry) => entry.idSource === "caller") &&
+      isNotNullColumnViolation(
+        error,
+        operationStrategy.atomicNodeRefusalConstraints.liveIdentity,
+      )
+    ) {
+      throw new DatabaseOperationError(
+        "Insert node failed: a row with this identity already exists",
+        {
+          operation: "insert",
+          entity: "node",
+          reason: "duplicate_key",
+          attempted,
+        },
+        { cause: error },
+      );
+    }
+    throw error;
+  }
 }
 
 async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
@@ -957,68 +995,159 @@ export function createCommonOperationBackend(
       };
 
   const atomicSqlProgramExecutor = options.atomicSqlProgramExecutor;
-  const generatedNodeBatchMembers =
+  const atomicNodeBatchMembers =
     (
       atomicSqlProgramExecutor === undefined ||
       schemaFenceLockClause === undefined
     ) ?
       {}
-    : ({
-        async executeGeneratedNodeBatch(
-          input: GeneratedNodeBatchInput,
-        ): Promise<number> {
-          if (input.params.length === 0) return 0;
-          assertMatchingNodeSchemaFences(input.params, input.schemaFence);
+    : (() => {
+        function executeAtomicNodeBatch(
+          input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
+        ): Promise<number>;
+        function executeAtomicNodeBatch(
+          input: AtomicNodeBatchInput & Readonly<{ resultMode: "rows" }>,
+        ): Promise<readonly NodeRow[]>;
+        async function executeAtomicNodeBatch(
+          input: AtomicNodeBatchInput,
+        ): Promise<number | readonly NodeRow[]> {
+          if (input.entries.length === 0) {
+            return input.resultMode === "count" ? 0 : [];
+          }
+          assertMatchingNodeSchemaFences(
+            input.entries.map((entry) => entry.params),
+            input.schemaFence,
+          );
 
           const timestamp = nowIso();
-          const chunks = chunkArray(
-            input.params,
-            batchConfig.nodeSchemaFencedInsertBatchSize,
+          const sourceGroups = ["generated", "caller"] as const;
+          const chunks = sourceGroups.flatMap((idSource) =>
+            chunkArray(
+              input.entries.filter((entry) => entry.idSource === idSource),
+              batchConfig.nodeSchemaFencedInsertBatchSize,
+            ),
           );
-          const program = {
-            slots: chunks.map((chunk) => ({
+          const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+          const atomicSchemaFenceLockClause = requireDefined(
+            schemaFenceLockClause,
+          );
+
+          if (input.resultMode === "count") {
+            const slots = chunks.map((chunk) => ({
               statement: execution.compile(
-                operationStrategy.buildInsertNodesBatchWithSchemaFence(
+                operationStrategy.buildAtomicNodeBatchWithSchemaFence(
                   chunk,
                   timestamp,
                   input.schemaFence,
-                  schemaFenceLockClause,
+                  atomicSchemaFenceLockClause,
+                  "count",
                 ),
               ),
               cardinality: "many" as const,
               decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
                 rows.length,
-            })),
-            assemble(counts: readonly number[]): number {
-              if (counts.every((count) => count === 0)) return 0;
-              const mismatchedChunk = counts.findIndex(
-                (count, index) => count !== chunks[index]?.length,
-              );
-              if (mismatchedChunk !== -1) {
+            }));
+            const program = {
+              slots,
+              assemble(counts: readonly number[]): number {
+                if (counts.every((count) => count === 0)) return 0;
+                const mismatchedChunk = counts.findIndex(
+                  (count, index) => count !== chunks[index]?.length,
+                );
+                if (mismatchedChunk !== -1) {
+                  throw new CompilerInvariantError(
+                    "Atomic node batch returned a partial chunk result.",
+                    {
+                      slot: mismatchedChunk,
+                      expected: chunks[mismatchedChunk]?.length,
+                      actual: counts[mismatchedChunk],
+                    },
+                  );
+                }
+                return input.entries.length;
+              },
+            } satisfies AtomicSqlProgram<number, number>;
+            return withAtomicNodeBatchClassifications(
+              () => atomicExecutor.execute(program),
+              input.entries,
+              operationStrategy,
+            );
+          }
+
+          const slots = chunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                chunk,
+                timestamp,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+                "rows",
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+              rows.map((row) => rowMappers.toNodeRow(row)),
+          }));
+          const program = {
+            slots,
+            assemble(
+              rowChunks: readonly (readonly NodeRow[])[],
+            ): readonly NodeRow[] {
+              if (rowChunks.every((rows) => rows.length === 0)) return [];
+              const rows = rowChunks.flat();
+              if (rows.length !== input.entries.length) {
                 throw new CompilerInvariantError(
-                  "Atomic node batch returned a partial chunk result.",
-                  {
-                    slot: mismatchedChunk,
-                    expected: chunks[mismatchedChunk]?.length,
-                    actual: counts[mismatchedChunk],
-                  },
+                  "Atomic node batch returned a partial row result.",
+                  { expected: input.entries.length, actual: rows.length },
                 );
               }
-              return input.params.length;
+              const byIdentity = new Map<string, NodeRow>();
+              for (const row of rows) {
+                const key = encodeTupleKey([
+                  row.graph_id,
+                  row.kind,
+                  row.id,
+                ]);
+                if (byIdentity.has(key)) {
+                  throw new CompilerInvariantError(
+                    "Atomic node batch returned a duplicate result row.",
+                    { graphId: row.graph_id, kind: row.kind, id: row.id },
+                  );
+                }
+                byIdentity.set(key, row);
+              }
+              return input.entries.map((entry) => {
+                const key = encodeTupleKey([
+                  entry.params.graphId,
+                  entry.params.kind,
+                  entry.params.id,
+                ]);
+                const row = byIdentity.get(key);
+                if (row === undefined) {
+                  throw new CompilerInvariantError(
+                    "Atomic node batch returned a row outside its input set.",
+                    {
+                      graphId: entry.params.graphId,
+                      kind: entry.params.kind,
+                      id: entry.params.id,
+                    },
+                  );
+                }
+                return row;
+              });
             },
-          } satisfies AtomicSqlProgram<number, number>;
-          return withDuplicateKeyClassification(
-            () => atomicSqlProgramExecutor.execute(program),
-            {
-              entity: "node",
-              relation: operationStrategy.primaryKeyConstraints.nodes,
-              attempted: attemptedInserts(input.params),
-            },
+          } satisfies AtomicSqlProgram<readonly NodeRow[], readonly NodeRow[]>;
+          return withAtomicNodeBatchClassifications(
+            () => atomicExecutor.execute(program),
+            input.entries,
+            operationStrategy,
           );
-        },
-      } satisfies Readonly<{
-        executeGeneratedNodeBatch: GeneratedNodeBatchExecutor;
-      }>);
+        }
+
+        return { executeAtomicNodeBatch } satisfies Readonly<{
+          executeAtomicNodeBatch: AtomicNodeBatchExecutor;
+        }>;
+      })();
 
   const atomicEdgeBatchMembers =
     (
@@ -1772,7 +1901,7 @@ export function createCommonOperationBackend(
     tableExists,
 
     ...schemaFenceMembers,
-    ...generatedNodeBatchMembers,
+    ...atomicNodeBatchMembers,
     ...atomicEdgeBatchMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,

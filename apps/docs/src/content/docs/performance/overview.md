@@ -146,11 +146,14 @@ that interactive-transaction requirement; only a schema-declared durable
 `matchIdentity` can qualify for the one-statement root command.
 
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
-programs for eligible ingestion calls. `nodes.bulkInsert(items)` uses one
-schema-fenced atomic exchange when every item has a generated ID and the node
-has no claims, Operational Identity, history, revision, or projections.
-Generated-ID node batches also skip the guaranteed-empty existence-priming
-read; caller-supplied IDs retain their existence and resurrection checks.
+programs for eligible ingestion calls. Plain schema-managed
+`nodes.bulkInsert(items)` and `nodes.bulkCreate(items)` use one schema-fenced
+atomic exchange when the node has no claims, Operational Identity, history,
+revision, or projections. The batch may use generated IDs, caller-supplied IDs,
+or a mixture of both; `bulkCreate()` restores its rows to input order.
+Claimed, projected, identity-enabled, history/revision-tracked, constrained,
+and other unsupported node shapes retain their existing transaction or
+fallback path.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use one
 schema-fenced atomic exchange when the store has no history or revision
@@ -160,7 +163,9 @@ claims at the write boundary. It rolls back the whole call when any
 bind-budget chunk or constraint sidecar fails and restores `bulkCreate()`
 results to input order.
 
-Measured at the libSQL transport boundary, a one-chunk unconstrained edge
+Measured at the libSQL transport boundary, eligible plain node
+`bulkInsert()` and `bulkCreate()` calls each submit one exchange for generated,
+caller-supplied, and mixed ID batches. A one-chunk unconstrained edge
 batch remains 1 exchange, a durable-match batch drops from 6 transport
 submissions to 1 atomic exchange, and a cardinality-constrained batch drops
 from 8 transport submissions to 1 atomic exchange. The native exchange still
@@ -209,9 +214,11 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 ### Transaction wrapping
 
 On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
-chunks. Eligible generated-ID `nodes.bulkInsert()` and direct `edges.bulkInsert()` /
-`edges.bulkCreate()` calls also provide whole-call atomicity on bundled transactionless roots through
-one native atomic exchange, including durable-match and cardinality-constrained edge batches. Other
+chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
+plus direct `edges.bulkInsert()` / `edges.bulkCreate()` calls, also provide
+whole-call atomicity on bundled transactionless roots through one native
+atomic exchange, including durable-match and cardinality-constrained edge
+batches. Other
 bulk shapes on a transactionless root either refuse when their contract requires a fence or use
 sequential fallback, which can leave earlier chunks committed if a later one fails.
 `store.transaction()` cannot add atomicity to a backend that does not support transactions.

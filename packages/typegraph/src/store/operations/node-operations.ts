@@ -83,6 +83,7 @@ import {
   type UniqueConstraint,
 } from "../../core/types";
 import {
+  CompilerInvariantError,
   ConfigurationError,
   DatabaseOperationError,
   KindNotFoundError,
@@ -173,7 +174,7 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
-import { resolveAtomicGeneratedNodeBatchExecutor } from "./atomic-generated-node-batch";
+import { resolveAtomicNodeBatchExecutor } from "./atomic-node-batch";
 import {
   AutocommitWriteRequiresTransaction,
   canFuseSchemaFenceInFirstWrite,
@@ -805,7 +806,8 @@ type NodeCreateInternalOptions = Readonly<{
 
 /** Whether create preparation retains application probes or defers them to
  * the authoritative verdict returned by the planned insert statement. */
-type NodeCreatePreparationMode = "probe" | "authoritative-plan";
+type NodeCreatePreparationMode =
+  "probe" | "authoritative-plan" | "atomic-batch";
 
 export type NodeCreateDraft = Readonly<{
   kind: string;
@@ -909,11 +911,12 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
       "create",
     ).length === 0;
 
-  // A generated id is fresh by construction, so probing it for a duplicate or
-  // tombstone can only report absence. Caller-supplied ids retain the probe:
-  // they may name either a live duplicate or a tombstone to resurrect.
+  // Generated ids are fresh by construction on the ordinary path. The atomic
+  // path deliberately skips this read for caller ids too: its backend program
+  // owns absent-insert, tombstone-resurrection, and live-duplicate semantics.
   const existingNode =
-    draft.idProvided && !insertIfAbsent ?
+    mode === "atomic-batch" ? undefined
+    : draft.idProvided && !insertIfAbsent ?
       await backend.getNode(ctx.graphId, kind, id)
     : undefined;
   if (existingNode && !existingNode.deleted_at) {
@@ -925,10 +928,10 @@ async function finishNodeCreatePreparation<G extends GraphDef>(
   // same probes for fallback backends, no-return writes, and tombstones (the
   // latter route through the resurrection transition rather than this plan).
   const deferConstraintProbes =
-    mode === "authoritative-plan" &&
+    (mode === "authoritative-plan" || mode === "atomic-batch") &&
     existingNode === undefined &&
     claimPlan.claims.length > 0;
-  if (!deferConstraintProbes) {
+  if (mode !== "atomic-batch" && !deferConstraintProbes) {
     const constraintContext: ConstraintContext = {
       graphId: ctx.graphId,
       registry: ctx.registry,
@@ -1565,22 +1568,32 @@ async function prepareBatchCreates<G extends GraphDef>(
 }
 
 /**
- * Prepares the closed generated-id batch shape without any validation reads.
+ * Prepares the closed atomic node-batch shape without any external reads.
  *
  * The draft and claim planners remain the owners of validation and claim
- * semantics. This path only reaches them after the batch eligibility owner
- * proved that every generated row is unconstrained, so the authoritative
- * preparation mode has no existence, uniqueness, or disjointness probe to
- * perform.
+ * semantics. The atomic backend owns row-state semantics, so this preparation
+ * records the caller/generated source for every id and rejects duplicate
+ * (graph, kind, id) inputs before dispatch.
  */
-async function prepareGeneratedBatchCreates<G extends GraphDef>(
+async function prepareAtomicBatchCreates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   inputs: readonly CreateNodeInput[],
   backend: WriteTarget,
+  options?: NodeCreateInternalOptions,
 ): Promise<readonly NodeCreatePrepared[]> {
   const drafts = inputs.map((input) =>
-    draftNodeCreate(ctx, input, input.id ?? generateId()),
+    draftNodeCreate(ctx, input, input.id ?? generateId(), options),
   );
+
+  const seen = new Set<string>();
+  for (const draft of drafts) {
+    const key = buildNodeCacheKey(ctx.graphId, draft.kind, draft.id);
+    if (seen.has(key)) {
+      throw createAlreadyExistsError("node", draft.kind, draft.id);
+    }
+    seen.add(key);
+  }
+
   return Promise.all(
     drafts.map(async (draft) => {
       const claimPlan = planNodeCreateClaims(
@@ -1597,11 +1610,65 @@ async function prepareGeneratedBatchCreates<G extends GraphDef>(
         draft,
         backend,
         false,
-        "authoritative-plan",
+        "atomic-batch",
         claimPlan,
       );
     }),
   );
+}
+
+function atomicNodeBatchEntries(
+  preparedCreates: readonly NodeCreatePrepared[],
+): readonly Readonly<{
+  idSource: "generated" | "caller";
+  params: InsertNodeParams;
+}>[] {
+  return preparedCreates.map((prepared) => ({
+    idSource: prepared.idProvided ? "caller" : "generated",
+    params: prepared.insertParams,
+  }));
+}
+
+/**
+ * The backend may return rows in any order. Validate the complete result set
+ * before restoring caller order so a malformed native result cannot silently
+ * attach one returned payload to another input.
+ */
+function restoreAtomicNodeBatchRows(
+  graphId: string,
+  preparedCreates: readonly NodeCreatePrepared[],
+  returnedRows: readonly BackendNodeRow[],
+): readonly BackendNodeRow[] {
+  const rowsByReference = new Map<string, BackendNodeRow>();
+  for (const row of returnedRows) {
+    if (row.graph_id !== graphId) {
+      throw new CompilerInvariantError(
+        "Atomic node batch returned a row for the wrong graph.",
+        { expectedGraphId: graphId, actualGraphId: row.graph_id },
+      );
+    }
+    const key = refKey({ kind: row.kind, id: row.id });
+    if (rowsByReference.has(key)) {
+      throw new CompilerInvariantError(
+        "Atomic node batch returned duplicate node references.",
+        { kind: row.kind, id: row.id },
+      );
+    }
+    rowsByReference.set(key, row);
+  }
+
+  return preparedCreates.map((prepared) => {
+    const row = rowsByReference.get(
+      refKey({ kind: prepared.kind, id: prepared.id }),
+    );
+    if (row === undefined) {
+      throw new CompilerInvariantError(
+        "Atomic node batch omitted a written node row.",
+        { kind: prepared.kind, id: prepared.id },
+      );
+    }
+    return row;
+  });
 }
 
 type CreatePartition = Readonly<{
@@ -2171,7 +2238,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
 ): Promise<void> {
   if (inputs.length === 0) return;
 
-  const atomicExecutor = resolveAtomicGeneratedNodeBatchExecutor({
+  const atomicExecutor = resolveAtomicNodeBatchExecutor({
     backend,
     graph: ctx.graph,
     registry: ctx.registry,
@@ -2183,7 +2250,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
   });
 
   if (atomicExecutor !== undefined) {
-    const preparedCreates = await prepareGeneratedBatchCreates(
+    const preparedCreates = await prepareAtomicBatchCreates(
       ctx,
       inputs,
       backend,
@@ -2194,7 +2261,8 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     };
     const insertedCount = await withAlreadyExistsTranslation("node", () =>
       atomicExecutor({
-        params: preparedCreates.map((prepared) => prepared.insertParams),
+        entries: atomicNodeBatchEntries(preparedCreates),
+        resultMode: "count",
         schemaFence,
       }),
     );
@@ -2203,7 +2271,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     }
     if (insertedCount !== inputs.length) {
       throw new DatabaseOperationError(
-        `Generated node batch insert returned ${insertedCount} rows, expected ${inputs.length}`,
+        `Atomic node batch returned ${insertedCount} rows, expected ${inputs.length}`,
         {
           operation: "insert",
           entity: "node",
@@ -2275,6 +2343,59 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
   options?: NodeCreateInternalOptions,
 ): Promise<readonly Node[]> {
   if (inputs.length === 0) return [];
+
+  const atomicExecutor = resolveAtomicNodeBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    registry: ctx.registry,
+    inputs,
+    schemaVersion: ctx.schemaVersion,
+    identityEnabled: ctx.identity !== undefined,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+
+  if (atomicExecutor !== undefined) {
+    const preparedCreates = await prepareAtomicBatchCreates(
+      ctx,
+      inputs,
+      backend,
+      options,
+    );
+    const schemaFence = {
+      graphId: ctx.graphId,
+      expectedVersion: requireDefined(ctx.schemaVersion),
+    };
+    const returnedRows = await withAlreadyExistsTranslation("node", () =>
+      atomicExecutor({
+        entries: atomicNodeBatchEntries(preparedCreates),
+        resultMode: "rows",
+        schemaFence,
+      }),
+    );
+    if (returnedRows.length === 0) {
+      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    }
+    if (returnedRows.length !== preparedCreates.length) {
+      throw new DatabaseOperationError(
+        `Atomic node batch returned ${returnedRows.length} rows, expected ${preparedCreates.length}`,
+        {
+          operation: "insert",
+          entity: "node",
+          attempted: preparedCreates.map((prepared) => ({
+            kind: prepared.kind,
+            id: prepared.id,
+          })),
+        },
+      );
+    }
+    memoizeLeasedSchemaFence(ctx, backend);
+    return restoreAtomicNodeBatchRows(
+      ctx.graphId,
+      preparedCreates,
+      returnedRows,
+    ).map((row) => rowToNode(row));
+  }
 
   return runWritePlan(
     nodeWritePlanContext(ctx),

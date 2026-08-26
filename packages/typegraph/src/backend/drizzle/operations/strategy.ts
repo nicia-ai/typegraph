@@ -6,6 +6,10 @@ import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
 import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
 import { isPresent } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
+import type {
+  AtomicNodeBatchEntry,
+  AtomicNodeBatchResultMode,
+} from "../../capabilities/atomic-node-batch";
 import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -104,6 +108,7 @@ import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
 import { buildInsertNodeWithProjections } from "./node-projections";
 import {
+  buildAtomicNodeBatchWithSchemaFence,
   buildDeleteNode,
   buildGetNode,
   buildGetNodes,
@@ -162,6 +167,9 @@ export type CommonOperationStrategy = Readonly<{
     cardinality: Readonly<{ table: string; column: string }>;
     durableIdentity: Readonly<{ table: string; column: string }>;
     endpoint: Readonly<{ table: string; column: string }>;
+  }>;
+  atomicNodeRefusalConstraints: Readonly<{
+    liveIdentity: Readonly<{ table: string; column: string }>;
   }>;
   /**
    * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
@@ -240,6 +248,13 @@ export type CommonOperationStrategy = Readonly<{
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeBatchWithSchemaFence: (
+    entries: readonly AtomicNodeBatchEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    resultMode: AtomicNodeBatchResultMode,
   ) => SQL;
   buildGetNode: (graphId: string, kind: string, id: string) => SQL;
   buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
@@ -486,6 +501,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNodesBatch,
   buildInsertNodesBatchReturning,
   buildInsertNodesBatchWithSchemaFence,
+  buildAtomicNodeBatchWithSchemaFence,
   buildGetNode,
   buildGetNodes,
   buildUpdateNode,
@@ -727,6 +743,12 @@ function createCommonOperationStrategy(
       endpoint: {
         table: getTableName(tables.edges),
         column: tables.edges.id.name,
+      },
+    },
+    atomicNodeRefusalConstraints: {
+      liveIdentity: {
+        table: getTableName(tables.nodes),
+        column: tables.nodes.props.name,
       },
     },
     buildDeleteStaleAtomicEdgeClaims: (
