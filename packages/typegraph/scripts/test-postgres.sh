@@ -89,6 +89,14 @@ vitest_args=(
   --maxWorkers="$MAX_WORKERS"
 )
 
+# GitHub's non-TTY default reporter prints every successful test, and expected
+# negative-path PostgreSQL errors can add hundreds of thousands of log lines.
+# Keep local runs unchanged, but make CI compact while retaining console output
+# for failed tests and Vitest's full failure diagnostics.
+if [[ -n "${CI:-}" ]]; then
+  vitest_args+=(--reporter=dot --silent=passed-only)
+fi
+
 if [[ -n "${VITEST_SHARD:-}" ]]; then
   vitest_args+=("--shard=$VITEST_SHARD")
 fi

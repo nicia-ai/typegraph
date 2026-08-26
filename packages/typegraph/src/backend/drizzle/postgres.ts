@@ -1346,7 +1346,10 @@ export function createPostgresBackend(
         set: { version, updatedAt: timestamp },
         setWhere: lte(marker.version, version),
       });
-    return (await readBaseSchemaVersion()) === version;
+    // Read back on this backend's primary connection: remote adapters do not
+    // all support RETURNING, and a concurrent adopter may already be ahead.
+    const installedVersion = await readBaseSchemaVersion();
+    return installedVersion !== undefined && installedVersion >= version;
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {

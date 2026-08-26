@@ -372,7 +372,12 @@ jobs:
         run: |
           set -euo pipefail
           container='${{ job.services.postgres.id }}'
-          docker exec "$container" psql -U typegraph -d typegraph_test -c "ALTER SYSTEM SET max_connections = 400"
+          docker exec -i "$container" psql -U typegraph -d typegraph_test <<'SQL'
+          ALTER SYSTEM SET max_connections = 400;
+          ALTER SYSTEM SET client_min_messages = 'warning';
+          ALTER SYSTEM SET log_min_messages = 'fatal';
+          ALTER SYSTEM SET log_min_error_statement = 'fatal';
+          SQL
           docker restart "$container"
           for _ in {1..30}; do
             if docker exec "$container" pg_isready -U typegraph -d typegraph_test >/dev/null 2>&1; then

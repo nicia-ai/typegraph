@@ -89,7 +89,8 @@ sqlite.exec(generateSqliteMigrationSQL());
 const store = createStore(graph, backend);
 ```
 
-The generated script is complete installation DDL, not an incremental upgrade
+The generated script is complete installation DDL and stamps the current
+deployment-wide base-schema marker last; it is not an incremental upgrade
 planner. Existing databases attached only through the zero-DDL runtime
 factories must apply release-specific additive migrations through their
 migration tool. See
@@ -203,7 +204,8 @@ function createSqliteBackend(
 
 #### `generateSqliteMigrationSQL()`
 
-Returns SQL for creating TypeGraph tables in SQLite.
+Returns complete fresh-installation SQL for creating TypeGraph tables and
+stamping the current deployment-wide base-schema marker in SQLite.
 
 ```typescript
 function generateSqliteMigrationSQL(): string;
@@ -759,10 +761,16 @@ async function createLocalPgliteBackend(options?: {
 
 #### `generatePostgresMigrationSQL()`
 
-Returns SQL for creating TypeGraph tables in PostgreSQL, including the pgvector extension.
+Returns complete fresh-installation SQL for creating TypeGraph tables and
+stamping the current deployment-wide base-schema marker in PostgreSQL. It
+includes the pgvector extension. The vector-disabled local PGlite factory uses
+the same installation builder internally while omitting only that extension.
 
 ```typescript
-function generatePostgresMigrationSQL(): string;
+function generatePostgresMigrationSQL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy,
+): string;
 ```
 
 #### `generatePostgresDDL(tables?)`
