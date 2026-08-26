@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  buildAcquireAtomicEdgeClaims,
+  buildAssertAtomicEdgeClaimsOwned,
+  buildDeleteStaleAtomicEdgeClaims,
+} from "../src/backend/drizzle/operations/edge-claims";
+import {
   buildInsertEdgesBatchReturningWithSchemaFence,
   buildInsertEdgesBatchWithSchemaFence,
 } from "../src/backend/drizzle/operations/edges";
@@ -12,6 +17,8 @@ import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { createStoreWithSchema } from "../src/store";
+import { edgeCardinalityClaim } from "../src/store/claims/edge-claims";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -27,12 +34,103 @@ const graph = defineGraph({
   nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
 });
+const cardinalityGraph = defineGraph({
+  id: "atomic-cardinality-edge-batch-pglite",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt: {
+      type: worksAt,
+      from: [Person],
+      to: [Company],
+      cardinality: "one",
+    },
+  },
+});
 
 function compile(query: SQL) {
   return new PgDialect().sqlToQuery(query);
 }
 
 describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
+  it("executes and rolls back cardinality sidecars on real PostgreSQL", async () => {
+    const { backend, client } = await createLocalPgliteBackend({
+      vector: false,
+    });
+    try {
+      const [store] = await createStoreWithSchema(cardinalityGraph, backend);
+      const from = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+      const beta = await store.nodes.Company.create({ name: "Beta" });
+      const schemaFence = {
+        graphId: cardinalityGraph.id,
+        expectedVersion: 1,
+      } as const;
+      const timestamp = "2026-08-25T00:00:00.000Z";
+
+      async function executeProgram(id: string, toId: string): Promise<void> {
+        const params = {
+          graphId: cardinalityGraph.id,
+          id,
+          kind: "worksAt",
+          fromKind: from.kind,
+          fromId: from.id,
+          toKind: "Company",
+          toId,
+          props: { role: id },
+        } as const;
+        const claim = requireDefined(edgeCardinalityClaim("one", params));
+        const statements = [
+          buildDeleteStaleAtomicEdgeClaims(
+            tables,
+            [claim],
+            schemaFence,
+            drizzleSql`FOR SHARE`,
+          ),
+          buildAcquireAtomicEdgeClaims(
+            tables,
+            [claim],
+            timestamp,
+            schemaFence,
+            drizzleSql`FOR SHARE`,
+          ),
+          buildAssertAtomicEdgeClaimsOwned(
+            tables,
+            [claim],
+            timestamp,
+            schemaFence,
+            drizzleSql`FOR SHARE`,
+          ),
+          buildInsertEdgesBatchWithSchemaFence(
+            tables,
+            [params],
+            timestamp,
+            schemaFence,
+            drizzleSql`FOR SHARE`,
+          ),
+        ].map((statement) => compile(statement));
+
+        await client.exec("BEGIN");
+        try {
+          for (const statement of statements) {
+            await client.query(statement.sql, statement.params);
+          }
+          await client.exec("COMMIT");
+        } catch (error) {
+          await client.exec("ROLLBACK");
+          throw error;
+        }
+      }
+
+      await executeProgram("first-edge", acme.id);
+      await expect(executeProgram("conflicting-edge", beta.id)).rejects.toThrow(
+        /null value|not-null/i,
+      );
+      await expect(store.edges.worksAt.count()).resolves.toBe(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("executes the Store fallback path against real PostgreSQL", async () => {
     const { backend } = await createLocalPgliteBackend({ vector: false });
     try {

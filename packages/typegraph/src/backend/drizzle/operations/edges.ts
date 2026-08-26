@@ -1,5 +1,6 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
+import { CompilerInvariantError } from "../../../errors";
 import {
   resolveStampedValidityLowerBound,
   resolveStatedValidityLowerBound,
@@ -450,6 +451,25 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
           )
     `;
   });
+  const durableRowCount = params.filter(
+    (edgeParams) => edgeParams.matchIdentity !== undefined,
+  ).length;
+  if (durableRowCount !== 0 && durableRowCount !== params.length) {
+    throw new CompilerInvariantError(
+      "An atomic edge batch cannot mix durable and ordinary rows.",
+    );
+  }
+  const durableConflictRefusal =
+    durableRowCount === 0 ?
+      sql``
+    : sql`
+      ON CONFLICT (
+        ${sql.identifier(edges.graphId.name)},
+        ${sql.identifier(edges.kind.name)},
+        ${sql.identifier(edges.matchIdentityName.name)},
+        ${sql.identifier(edges.matchIdentityKey.name)}
+      ) DO UPDATE SET ${sql.identifier(edges.createdAt.name)} = NULL
+    `;
   const result = returning ? sql`RETURNING *` : sql`RETURNING 1 AS "inserted"`;
 
   // The invalid-endpoint arm deliberately inserts a NULL primary-key id. It
@@ -502,6 +522,7 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
     FROM "input_rows"
     CROSS JOIN "invalid_endpoint"
     LIMIT (SELECT COUNT(*) FROM "valid_rows") + (SELECT COUNT(*) FROM "invalid_endpoint")
+    ${durableConflictRefusal}
     ${result}
   `;
 }

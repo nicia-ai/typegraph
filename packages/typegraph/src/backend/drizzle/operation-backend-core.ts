@@ -22,6 +22,7 @@ import { type ClaimOwner, isSameClaimOwner } from "../../store/claims/axis";
 import {
   type ConstrainedCardinality,
   edgeCardinalityClaimTarget,
+  edgeClaimRelationMissing,
 } from "../../store/claims/edge-claims";
 import { chunk as chunkArray } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
@@ -29,10 +30,12 @@ import {
   isDuplicatePrimaryKeyError,
   isDuplicateUniqueIndexError,
   isEdgeMatchIdentityStorageUnavailableError,
+  isMissingTableError,
   isNotNullColumnViolation,
   type PrimaryKeyRelation,
 } from "../../utils/sql-errors";
 import {
+  AtomicEdgeBatchCardinalityRefusalError,
   type AtomicEdgeBatchCountInput,
   AtomicEdgeBatchEndpointRefusalError,
   type AtomicEdgeBatchExecutor,
@@ -124,6 +127,12 @@ import {
   createCachedTableExistence,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
+
+// The set-based claim acquisition is the widest sidecar statement: five row
+// values plus the inserted-edge and competing-holder predicates. Keep a
+// conservative ceiling so every dialect remains below its declared bind
+// budget even for `unique`, whose axis includes both endpoints.
+const ATOMIC_EDGE_CLAIM_PARAM_COUNT = 16;
 
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
@@ -497,6 +506,49 @@ async function withAtomicEdgeEndpointRefusalClassification<T>(
   }
 }
 
+async function withAtomicEdgeCardinalityRefusalClassification<T>(
+  run: () => Promise<T>,
+  edgeClaimsTableName: string,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (
+      isNotNullColumnViolation(error, {
+        table: edgeClaimsTableName,
+        column: "axis",
+      })
+    ) {
+      throw new AtomicEdgeBatchCardinalityRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+async function withAtomicEdgeDurableRefusalClassification<T>(
+  run: () => Promise<T>,
+  relation: PrimaryKeyRelation,
+  attempted: readonly AttemptedEdgeMatchIdentity[] | undefined,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (
+      attempted !== undefined &&
+      isNotNullColumnViolation(error, {
+        table: relation.table,
+        column: "created_at",
+      })
+    ) {
+      throw new EdgeMatchIdentityConflictError(
+        { attempted },
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 function assertCompleteAtomicEdgeChunks(
   actualCounts: readonly number[],
   expectedChunks: readonly (readonly unknown[])[],
@@ -515,20 +567,61 @@ function assertCompleteAtomicEdgeChunks(
   );
 }
 
+function decodeNoEdgeRows(): readonly EdgeRow[] {
+  return [];
+}
+
 async function executeClassifiedAtomicEdgeBatch<TSlot, TResult>(
   atomicExecutor: AtomicSqlProgramExecutor,
   program: AtomicSqlProgram<TSlot, TResult>,
   relation: PrimaryKeyRelation,
-  attempted: readonly AttemptedInsert[],
+  edgeClaimsTableName: string,
+  params: readonly InsertEdgeParams[],
+  claims: readonly ClaimEdgeCardinalityParams[],
 ): Promise<TResult> {
-  return withDuplicateKeyClassification(
-    () =>
-      withAtomicEdgeEndpointRefusalClassification(
-        () => atomicExecutor.execute(program),
+  const matchIdentities = attemptedEdgeMatchIdentities(params);
+  try {
+    return await withDuplicateKeyClassification(
+      () =>
+        withAtomicEdgeEndpointRefusalClassification(
+          () =>
+            withAtomicEdgeCardinalityRefusalClassification(
+              () =>
+                withAtomicEdgeDurableRefusalClassification(
+                  () => atomicExecutor.execute(program),
+                  relation,
+                  matchIdentities,
+                ),
+              edgeClaimsTableName,
+            ),
+          relation,
+        ),
+      {
+        entity: "edge",
         relation,
-      ),
-    { entity: "edge", relation, attempted },
-  );
+        attempted: attemptedInserts(params),
+        matchIdentities,
+      },
+    );
+  } catch (error) {
+    const durableParams = params.find(
+      (item) => item.matchIdentity !== undefined,
+    );
+    if (
+      durableParams !== undefined &&
+      isEdgeMatchIdentityStorageUnavailableError(error)
+    ) {
+      throwDurableIdentityStorageUnavailable(
+        error,
+        durableParams,
+        requireDefined(durableParams.matchIdentity).name,
+      );
+    }
+    if (claims.length > 0 && isMissingTableError(error)) {
+      throw edgeClaimRelationMissing(requireDefined(params[0]).graphId, error);
+    }
+    throw error;
+  }
 }
 
 function attemptedEdgeMatchIdentities(
@@ -958,15 +1051,90 @@ export function createCommonOperationBackend(
             return input.resultMode === "count" ? 0 : [];
           }
           assertMatchingEdgeSchemaFences(input.params, input.schemaFence);
+          for (const claim of input.claims) {
+            const params = input.params.find(
+              (item) =>
+                item.graphId === claim.graphId && item.id === claim.edgeId,
+            );
+            if (params === undefined) {
+              throw new CompilerInvariantError(
+                "An atomic edge batch claim has no matching input row.",
+                { graphId: claim.graphId, edgeId: claim.edgeId },
+              );
+            }
+            assertMatchingFusedEdgeClaim(params, claim);
+          }
 
           const timestamp = nowIso();
           const chunks = chunkArray(
             input.params,
             batchConfig.edgeSchemaFencedInsertBatchSize,
           );
+          const atomicEdgeClaimBatchSize = Math.max(
+            1,
+            Math.floor(
+              (maxBindParameters - 2) / ATOMIC_EDGE_CLAIM_PARAM_COUNT,
+            ),
+          );
+          function appendClaimSlots<TResult>(
+            slots: AtomicSqlProgram<TResult, unknown>["slots"][number][],
+            claims: readonly ClaimEdgeCardinalityParams[],
+            decode: AtomicSqlProgram<
+              TResult,
+              unknown
+            >["slots"][number]["decode"],
+          ): void {
+            for (const claimChunk of chunkArray(
+              claims,
+              atomicEdgeClaimBatchSize,
+            )) {
+              slots.push(
+                {
+                  statement: execution.compile(
+                    operationStrategy.buildDeleteStaleAtomicEdgeClaims(
+                      claimChunk,
+                      input.schemaFence,
+                      atomicSchemaFenceLockClause,
+                    ),
+                  ),
+                  cardinality: "none",
+                  decode,
+                },
+                {
+                  statement: execution.compile(
+                    operationStrategy.buildAcquireAtomicEdgeClaims(
+                      claimChunk,
+                      timestamp,
+                      input.schemaFence,
+                      atomicSchemaFenceLockClause,
+                    ),
+                  ),
+                  cardinality: "none",
+                  decode,
+                },
+                {
+                  statement: execution.compile(
+                    operationStrategy.buildAssertAtomicEdgeClaimsOwned(
+                      claimChunk,
+                      timestamp,
+                      input.schemaFence,
+                      atomicSchemaFenceLockClause,
+                    ),
+                  ),
+                  cardinality: "none",
+                  decode,
+                },
+              );
+            }
+          }
           if (input.resultMode === "count") {
-            const program = {
-              slots: chunks.map((chunk) => ({
+            const edgeSlotIndexes: number[] = [];
+            const slots: AtomicSqlProgram<number, number>["slots"][number][] =
+              [];
+            appendClaimSlots(slots, input.claims, (rows) => rows.length);
+            for (const chunk of chunks) {
+              edgeSlotIndexes.push(slots.length);
+              slots.push({
                 statement: execution.compile(
                   operationStrategy.buildInsertEdgesBatchWithSchemaFence(
                     chunk,
@@ -975,11 +1143,16 @@ export function createCommonOperationBackend(
                     atomicSchemaFenceLockClause,
                   ),
                 ),
-                cardinality: "many" as const,
-                decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
-                  rows.length,
-              })),
-              assemble(counts: readonly number[]): number {
+                cardinality: "many",
+                decode: (rows) => rows.length,
+              });
+            }
+            const program = {
+              slots,
+              assemble(slotCounts: readonly number[]): number {
+                const counts = edgeSlotIndexes.map((index) =>
+                  requireDefined(slotCounts[index]),
+                );
                 if (counts.every((count) => count === 0)) return 0;
                 assertCompleteAtomicEdgeChunks(counts, chunks);
                 return counts.reduce((total, count) => total + count, 0);
@@ -989,12 +1162,21 @@ export function createCommonOperationBackend(
               atomicExecutor,
               program,
               operationStrategy.primaryKeyConstraints.edges,
-              attemptedInserts(input.params),
+              operationStrategy.edgeClaimsTableName,
+              input.params,
+              input.claims,
             );
           }
 
-          const program = {
-            slots: chunks.map((chunk) => ({
+          const edgeSlotIndexes: number[] = [];
+          const slots: AtomicSqlProgram<
+            readonly EdgeRow[],
+            readonly EdgeRow[]
+          >["slots"][number][] = [];
+          appendClaimSlots(slots, input.claims, decodeNoEdgeRows);
+          for (const chunk of chunks) {
+            edgeSlotIndexes.push(slots.length);
+            slots.push({
               statement: execution.compile(
                 operationStrategy.buildInsertEdgesBatchReturningWithSchemaFence(
                   chunk,
@@ -1003,13 +1185,19 @@ export function createCommonOperationBackend(
                   atomicSchemaFenceLockClause,
                 ),
               ),
-              cardinality: "many" as const,
-              decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+              cardinality: "many",
+              decode: (rows) =>
                 rows.map((row) => rowMappers.toEdgeRow(row)),
-            })),
+            });
+          }
+          const program = {
+            slots,
             assemble(
-              rowChunks: readonly (readonly EdgeRow[])[],
+              slotRows: readonly (readonly EdgeRow[])[],
             ): readonly EdgeRow[] {
+              const rowChunks = edgeSlotIndexes.map((index) =>
+                requireDefined(slotRows[index]),
+              );
               if (rowChunks.every((rows) => rows.length === 0)) return [];
               assertCompleteAtomicEdgeChunks(
                 rowChunks.map((rows) => rows.length),
@@ -1046,7 +1234,9 @@ export function createCommonOperationBackend(
             atomicExecutor,
             program,
             operationStrategy.primaryKeyConstraints.edges,
-            attemptedInserts(input.params),
+            operationStrategy.edgeClaimsTableName,
+            input.params,
+            input.claims,
           );
         }
 

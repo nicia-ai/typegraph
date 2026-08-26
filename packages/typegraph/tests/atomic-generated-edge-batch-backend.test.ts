@@ -8,7 +8,12 @@ import type { AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-ex
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
-import { D1_MAX_BIND_PARAMETERS } from "../src/backend/types";
+import {
+  type ClaimEdgeCardinalityParams,
+  D1_MAX_BIND_PARAMETERS,
+  type InsertEdgeParams,
+} from "../src/backend/types";
+import { requireDefined } from "../src/utils/presence";
 
 const schemaFence = { graphId: "graph-1", expectedVersion: 1 } as const;
 
@@ -23,6 +28,19 @@ function edgeParams(prefix: string, count: number) {
     toId: `${prefix}-company-${index}`,
     props: { role: `Role ${index}` },
   }));
+}
+
+function edgeClaim(params: InsertEdgeParams): ClaimEdgeCardinalityParams {
+  return {
+    graphId: params.graphId,
+    cardinality: "one",
+    edgeKind: params.kind,
+    edgeId: params.id,
+    fromKind: params.fromKind,
+    fromId: params.fromId,
+    toKind: params.toKind,
+    toId: params.toId,
+  };
 }
 
 type NeonRows =
@@ -82,6 +100,7 @@ describe("bundled root atomic edge batch", () => {
 
     await expect(
       executeAtomicEdgeBatch({
+        claims: [],
         params: edgeParams("first", 2),
         schemaFence,
         resultMode: "count",
@@ -102,12 +121,43 @@ describe("bundled root atomic edge batch", () => {
 
     await expect(
       executeAtomicEdgeBatch({
+        claims: [],
         params: edgeParams("stale", 1),
         schemaFence: { graphId: "graph-1", expectedVersion: 99 },
         resultMode: "count",
       }),
     ).resolves.toBe(0);
     expect(query).toHaveBeenCalledOnce();
+  });
+
+  it("dispatches edge rows and cardinality sidecars in one Neon exchange", async () => {
+    const params = edgeParams("claimed", 1);
+    const { db, query, transaction } = makeNeonDatabase((sqlText) =>
+      sqlText.includes('RETURNING 1 AS "inserted"') ? [{ inserted: 1 }] : [],
+    );
+    const backend = createPostgresBackend(db, { vector: false });
+    const executeAtomicEdgeBatch = resolveBundledRootAtomicEdgeBatch(backend);
+    if (executeAtomicEdgeBatch === undefined) {
+      throw new Error("Expected atomic edge batch capability");
+    }
+
+    await expect(
+      executeAtomicEdgeBatch({
+        claims: [edgeClaim(requireDefined(params[0]))],
+        params,
+        schemaFence,
+        resultMode: "count",
+      }),
+    ).resolves.toBe(1);
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledTimes(4);
+    expect(query.mock.calls.map(([sqlText]) => sqlText)).toEqual([
+      expect.stringContaining("DELETE FROM"),
+      expect.stringContaining("ON CONFLICT"),
+      expect.stringContaining("AS axis"),
+      expect.stringContaining("INSERT INTO"),
+    ]);
   });
 
   it("keeps every PostgreSQL fenced chunk inside its bind limit", async () => {
@@ -133,6 +183,7 @@ describe("bundled root atomic edge batch", () => {
 
     await expect(
       executeAtomicEdgeBatch({
+        claims: [],
         params: edgeParams("chunk", 9),
         schemaFence,
         resultMode: "count",
@@ -202,6 +253,7 @@ describe("bundled root atomic edge batch", () => {
     expect(backend.capabilities.maxBindParameters).toBe(D1_MAX_BIND_PARAMETERS);
     await expect(
       executeAtomicEdgeBatch({
+        claims: [],
         params: edgeParams("d1", 20),
         schemaFence,
         resultMode: "count",
@@ -220,6 +272,98 @@ describe("bundled root atomic edge batch", () => {
       );
       expect(statement.sql.toLowerCase()).toContain(
         'returning 1 as "inserted"',
+      );
+    }
+  });
+
+  it("dispatches a constrained edge program through one D1 batch", async () => {
+    const boundStatements: Readonly<{
+      sql: string;
+      params: readonly unknown[];
+    }>[] = [];
+    const prepare = vi.fn((sqlText: string) => ({
+      bind(...params: readonly unknown[]) {
+        const statement = { sql: sqlText, params };
+        boundStatements.push(statement);
+        return statement;
+      },
+    }));
+    const batch = vi.fn(
+      (
+        statements: readonly Readonly<{
+          sql: string;
+          params: readonly unknown[];
+        }>[],
+      ) =>
+        Promise.resolve(
+          statements.map((statement) => ({
+            results:
+              statement.sql.includes('RETURNING 1 AS "inserted"') ?
+                Array.from(
+                  {
+                    length: statement.params.filter(
+                      (value) =>
+                        typeof value === "string" && value.includes("-edge-"),
+                    ).length,
+                  },
+                  () => ({ inserted: 1 }),
+                )
+              : [],
+          })),
+        ),
+    );
+    const dialect = new SQLiteSyncDialect();
+    const db = {
+      $client: { batch, prepare },
+      session: { constructor: { name: "SQLiteD1Session" } },
+      dialect: {
+        sqlToQuery(query: SQL) {
+          return dialect.sqlToQuery(query);
+        },
+      },
+      all: vi.fn(() => Promise.resolve([])),
+      get: vi.fn(() => Promise.resolve(undefined)),
+      run: vi.fn(() => Promise.resolve()),
+    } as unknown as AnySqliteDatabase;
+    const backend = createSqliteBackend(db);
+    const executeAtomicEdgeBatch = resolveBundledRootAtomicEdgeBatch(backend);
+    if (executeAtomicEdgeBatch === undefined) {
+      throw new Error("Expected D1 atomic edge batch capability");
+    }
+    const params = edgeParams("d1-claimed", 20).map((item, index) => ({
+      ...item,
+      matchIdentity: { name: "role", key: `role-${index}` },
+    }));
+
+    await expect(
+      executeAtomicEdgeBatch({
+        claims: params.map((item) => edgeClaim(item)),
+        params,
+        schemaFence,
+        resultMode: "count",
+      }),
+    ).resolves.toBe(20);
+
+    expect(batch).toHaveBeenCalledOnce();
+    expect(boundStatements.length).toBeGreaterThan(4);
+    expect(
+      boundStatements.some((statement) =>
+        statement.sql.includes("DELETE FROM"),
+      ),
+    ).toBe(true);
+    expect(
+      boundStatements.some((statement) =>
+        statement.sql.includes("ON CONFLICT"),
+      ),
+    ).toBe(true);
+    expect(
+      boundStatements.some((statement) =>
+        statement.sql.includes("AS axis"),
+      ),
+    ).toBe(true);
+    for (const statement of boundStatements) {
+      expect(statement.params.length).toBeLessThanOrEqual(
+        D1_MAX_BIND_PARAMETERS,
       );
     }
   });

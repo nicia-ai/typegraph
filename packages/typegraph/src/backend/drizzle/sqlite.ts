@@ -274,7 +274,10 @@ export type SqliteBackendOptions = Readonly<{
 
 const NODE_INSERT_PARAM_COUNT = 9;
 const SCHEMA_FENCE_PARAM_COUNT = 2;
-const EDGE_INSERT_PARAM_COUNT = 12;
+// Durable edge rows bind match-identity name and key in addition to the
+// ordinary edge shape. Budget for the widest supported row so native batches
+// never cross the driver's parameter ceiling.
+const EDGE_INSERT_PARAM_COUNT = 14;
 const GET_NODES_FIXED_PARAM_COUNT = 2;
 const GET_EDGES_FIXED_PARAM_COUNT = 1;
 const CHECK_UNIQUE_BATCH_FIXED_PARAM_COUNT = 3;

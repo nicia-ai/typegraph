@@ -66,6 +66,9 @@ import {
   buildDisjointOverlapAudit,
 } from "./constraint-fence-audit";
 import {
+  buildAcquireAtomicEdgeClaims,
+  buildAssertAtomicEdgeClaimsOwned,
+  buildDeleteStaleAtomicEdgeClaims,
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
   buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
@@ -150,6 +153,7 @@ function nullableText(value: string | undefined): SQL {
 }
 
 export type CommonOperationStrategy = Readonly<{
+  edgeClaimsTableName: string;
   /**
    * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
    * only scope in which a driver duplicate-key failure means "this identity is
@@ -254,6 +258,23 @@ export type CommonOperationStrategy = Readonly<{
     params: InsertEdgeParams,
     claim: ClaimEdgeCardinalityParams,
     timestamp: string,
+  ) => SQL;
+  buildDeleteStaleAtomicEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAcquireAtomicEdgeClaims: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAssertAtomicEdgeClaimsOwned: (
+    entries: readonly ClaimEdgeCardinalityParams[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
   ) => SQL;
   buildInsertEdgeNoReturn: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgesBatch: (
@@ -685,6 +706,44 @@ function createCommonOperationStrategy(
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",
+    edgeClaimsTableName: getTableName(tables.edgeClaims),
+    buildDeleteStaleAtomicEdgeClaims: (
+      entries,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildDeleteStaleAtomicEdgeClaims(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildAcquireAtomicEdgeClaims: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAcquireAtomicEdgeClaims(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
+    buildAssertAtomicEdgeClaimsOwned: (
+      entries,
+      timestamp,
+      schemaFence,
+      schemaLockClause,
+    ) =>
+      buildAssertAtomicEdgeClaimsOwned(
+        tables,
+        entries,
+        timestamp,
+        schemaFence,
+        schemaLockClause,
+      ),
     primaryKeyConstraints: {
       nodes: nodePrimaryKeyConstraint(tables.nodes),
       edges: edgePrimaryKeyConstraint(tables.edges),

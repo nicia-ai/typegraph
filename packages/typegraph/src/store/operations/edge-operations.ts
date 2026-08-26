@@ -72,7 +72,10 @@
  *    `oneActive` population — asserted only for that decision; other
  *    cardinalities do not turn an unconditional clear into a stale-value CAS.
  */
-import { AtomicEdgeBatchEndpointRefusalError } from "../../backend/capabilities/atomic-edge-batch";
+import {
+  AtomicEdgeBatchCardinalityRefusalError,
+  AtomicEdgeBatchEndpointRefusalError,
+} from "../../backend/capabilities/atomic-edge-batch";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
@@ -133,10 +136,13 @@ import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
 import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import { compareClaimTargets } from "../claims/axis";
 import {
   claimEdgeCardinality,
   edgeCardinalityClaim,
   edgeCardinalityClaimMode,
+  edgeCardinalityClaimRefusal,
+  edgeCardinalityClaimTarget,
 } from "../claims/edge-claims";
 import {
   shouldCoalesceUpsert,
@@ -1193,28 +1199,52 @@ async function prepareEdgeBatchCreates<G extends GraphDef>(
 
 /**
  * Prepares the closed input to the native edge batch program without issuing
- * reads. Eligibility has already proved that no cardinality or durable-match
- * decision is required; the SQL program owns live-endpoint and schema-fence
- * enforcement at the authoritative write boundary.
+ * reads. The SQL program owns endpoint, schema-fence, durable-identity and
+ * cardinality enforcement at the authoritative write boundary. The only
+ * client-side constraint decision is the closed input's own duplicate axes,
+ * which need no database state and must refuse before dispatch.
  */
+type AtomicEdgeBatchPreparation = Readonly<{
+  claims: readonly ClaimEdgeCardinalityParams[];
+  preparedCreates: readonly EdgeCreatePrepared[];
+}>;
+
 async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
   backend: WriteTarget,
-): Promise<readonly EdgeCreatePrepared[]> {
+): Promise<AtomicEdgeBatchPreparation> {
   const preparedCreates: EdgeCreatePrepared[] = [];
+  const claims: ClaimEdgeCardinalityParams[] = [];
+  const claimedTargets = new Set<string>();
   for (const input of inputs) {
-    preparedCreates.push(
-      await validateAndPrepareEdgeCreate(
-        ctx,
-        input,
-        input.id ?? generateId(),
-        backend,
-        { validateEndpoints: false, validateCardinality: false },
-      ),
+    const prepared = await validateAndPrepareEdgeCreate(
+      ctx,
+      input,
+      input.id ?? generateId(),
+      backend,
+      { validateEndpoints: false, validateCardinality: false },
     );
+    preparedCreates.push(prepared);
+    const claim = edgeInsertWork(prepared).claim;
+    if (claim === undefined) continue;
+    const target = edgeCardinalityClaimTarget(claim);
+    const targetKey = `${target.axis}\u0000${target.key}`;
+    if (claimedTargets.has(targetKey)) {
+      throw edgeCardinalityClaimRefusal(claim);
+    }
+    claimedTargets.add(targetKey);
+    claims.push(claim);
   }
-  return preparedCreates;
+  return {
+    claims: claims.toSorted((left, right) =>
+      compareClaimTargets(
+        edgeCardinalityClaimTarget(left),
+        edgeCardinalityClaimTarget(right),
+      ),
+    ),
+    preparedCreates,
+  };
 }
 
 /**
@@ -1241,10 +1271,34 @@ async function assertAtomicEdgeBatchEndpoints<G extends GraphDef>(
   }
 }
 
+async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly CreateEdgeInput[],
+  backend: WriteTarget,
+): Promise<void> {
+  const constraintContext: ConstraintContext = {
+    graphId: ctx.graphId,
+    registry: ctx.registry,
+    backend,
+  };
+  for (const input of inputs) {
+    await checkCardinalityConstraint(
+      constraintContext,
+      input.kind,
+      edgeCardinality(ctx, input.kind),
+      input.fromKind,
+      input.fromId,
+      input.toKind,
+      input.toId,
+      input.validTo,
+    );
+  }
+}
+
 async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  preparedCreates: readonly EdgeCreatePrepared[],
+  preparation: AtomicEdgeBatchPreparation,
   backend: GraphBackend | TransactionBackend,
   atomicExecutor: AtomicEdgeBatchExecutor,
   resultMode: "count",
@@ -1252,7 +1306,7 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
 async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  preparedCreates: readonly EdgeCreatePrepared[],
+  preparation: AtomicEdgeBatchPreparation,
   backend: GraphBackend | TransactionBackend,
   atomicExecutor: AtomicEdgeBatchExecutor,
   resultMode: "rows",
@@ -1261,12 +1315,14 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
 async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  preparedCreates: readonly EdgeCreatePrepared[],
+  preparation: AtomicEdgeBatchPreparation,
   backend: GraphBackend | TransactionBackend,
   atomicExecutor: AtomicEdgeBatchExecutor,
   resultMode: "count" | "rows",
 ): Promise<number | readonly BackendEdgeRow[]> {
-  const params = preparedCreates.map((prepared) => prepared.insertParams);
+  const params = preparation.preparedCreates.map(
+    (prepared) => prepared.insertParams,
+  );
   const schemaFence = {
     graphId: ctx.graphId,
     expectedVersion: requireDefined(ctx.schemaVersion),
@@ -1274,13 +1330,35 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   const result = await withAlreadyExistsTranslation("edge", async () => {
     try {
       if (resultMode === "count") {
-        return await atomicExecutor({ params, resultMode, schemaFence });
+        return await atomicExecutor({
+          claims: preparation.claims,
+          params,
+          resultMode,
+          schemaFence,
+        });
       }
-      return await atomicExecutor({ params, resultMode, schemaFence });
+      return await atomicExecutor({
+        claims: preparation.claims,
+        params,
+        resultMode,
+        schemaFence,
+      });
     } catch (error) {
       if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
         await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
         throw error.cause;
+      }
+      if (error instanceof AtomicEdgeBatchCardinalityRefusalError) {
+        await assertAtomicEdgeBatchCardinality(ctx, inputs, backend);
+        throw new DatabaseOperationError(
+          "Atomic edge batch refused a cardinality claim, but no current " +
+            "competing edge could be diagnosed.",
+          {
+            operation: "insert",
+            entity: "edge",
+          },
+          { cause: error.cause },
+        );
       }
       throw error;
     }
@@ -1354,7 +1432,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    const preparedCreates = await prepareAtomicEdgeBatchCreates(
+    const preparation = await prepareAtomicEdgeBatchCreates(
       ctx,
       inputs,
       backend,
@@ -1362,7 +1440,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
     await runAtomicEdgeBatchProgram(
       ctx,
       inputs,
-      preparedCreates,
+      preparation,
       backend,
       atomicExecutor,
       "count",
@@ -1441,7 +1519,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    const preparedCreates = await prepareAtomicEdgeBatchCreates(
+    const preparation = await prepareAtomicEdgeBatchCreates(
       ctx,
       inputs,
       backend,
@@ -1449,7 +1527,7 @@ export async function executeEdgeCreateBatch<G extends GraphDef>(
     const rows = await runAtomicEdgeBatchProgram(
       ctx,
       inputs,
-      preparedCreates,
+      preparation,
       backend,
       atomicExecutor,
       "rows",
