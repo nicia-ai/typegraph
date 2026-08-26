@@ -25,6 +25,7 @@ import {
   getTableName,
   inArray,
   isNull,
+  lte,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -162,9 +163,7 @@ import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
-import {
-  createBaseSchemaLifecycle,
-} from "./base-schema";
+import { createBaseSchemaLifecycle } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -1897,16 +1896,19 @@ export function createSqliteBackend(
     );
   }
 
-  async function writeBaseSchemaVersion(version: number): Promise<void> {
+  async function writeBaseSchemaVersion(version: number): Promise<boolean> {
     const marker = tables.baseSchemaVersions;
     const timestamp = nowIso();
-    await db
+    const rows = await db
       .insert(marker)
       .values({ installation: 1, version, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: marker.installation,
         set: { version, updatedAt: timestamp },
-      });
+        setWhere: lte(marker.version, version),
+      })
+      .returning({ version: marker.version });
+    return rows[0]?.version === version;
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {
@@ -1968,11 +1970,13 @@ export function createSqliteBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
+      const startingBaseSchemaVersion =
+        await baseSchemaLifecycle.prepareBootstrap();
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));
       }
-      await baseSchemaLifecycle.adoptAfterBootstrap();
+      await baseSchemaLifecycle.adoptAfterBootstrap(startingBaseSchemaVersion);
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {

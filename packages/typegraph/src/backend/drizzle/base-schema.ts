@@ -4,8 +4,10 @@ const CURRENT_BASE_SCHEMA_VERSION = 1;
 
 export type BaseSchemaLifecycle = Readonly<{
   adopt(): Promise<void>;
+  /** Read and refuse a newer marker before bootstrap emits any DDL. */
+  prepareBootstrap(): Promise<number | undefined>;
   /** Complete adoption after the adapter's full current-schema DDL ran. */
-  adoptAfterBootstrap(): Promise<void>;
+  adoptAfterBootstrap(startingVersion: number | undefined): Promise<void>;
   assertCurrent(): Promise<void>;
 }>;
 
@@ -18,7 +20,8 @@ type BaseSchemaStep = Readonly<{
 type BaseSchemaLifecycleOptions = Readonly<{
   readVersion(): Promise<number | undefined>;
   ensureVersionTable(): Promise<void>;
-  writeVersion(version: number): Promise<void>;
+  /** Monotonically stamp `version`; false means a newer marker won the race. */
+  writeVersion(version: number): Promise<boolean>;
   steps: readonly BaseSchemaStep[];
 }>;
 
@@ -81,6 +84,11 @@ export function createBaseSchemaLifecycle(
     throw migrationError(installedVersion);
   }
 
+  async function writeVersion(version: number): Promise<void> {
+    if (await options.writeVersion(version)) return;
+    throw migrationError(await options.readVersion());
+  }
+
   async function adopt(): Promise<void> {
     const installedVersion = await options.readVersion();
     const state = classifyVersion(installedVersion);
@@ -92,26 +100,35 @@ export function createBaseSchemaLifecycle(
     for (const step of steps) {
       if (step.version <= startingVersion) continue;
       await step.adopt();
-      await options.writeVersion(step.version);
+      await writeVersion(step.version);
     }
   }
 
-  async function adoptAfterBootstrap(): Promise<void> {
+  async function prepareBootstrap(): Promise<number | undefined> {
+    const installedVersion = await options.readVersion();
+    if (classifyVersion(installedVersion) === "newer") {
+      throw migrationError(installedVersion);
+    }
+    return installedVersion;
+  }
+
+  async function adoptAfterBootstrap(
+    startingVersion: number | undefined,
+  ): Promise<void> {
     // Full generated DDL already created every current base relation. A step's
     // bootstrap hook therefore owns only upgrades CREATE TABLE cannot apply to
     // a pre-existing relation, avoiding duplicate cold-start CREATEs.
-    const installedVersion = await options.readVersion();
-    const state = classifyVersion(installedVersion);
+    const state = classifyVersion(startingVersion);
     if (state === "current") return;
-    if (state === "newer") throw migrationError(installedVersion);
+    if (state === "newer") throw migrationError(startingVersion);
 
-    const startingVersion = installedVersion ?? 0;
+    const completedVersion = startingVersion ?? 0;
     for (const step of steps) {
-      if (step.version <= startingVersion) continue;
+      if (step.version <= completedVersion) continue;
       await (step.adoptAfterBootstrap ?? step.adopt)();
-      await options.writeVersion(step.version);
+      await writeVersion(step.version);
     }
   }
 
-  return { adopt, adoptAfterBootstrap, assertCurrent };
+  return { adopt, prepareBootstrap, adoptAfterBootstrap, assertCurrent };
 }

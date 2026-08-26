@@ -347,4 +347,37 @@ describe("deployment-wide base-schema adoption", () => {
       await backend.close();
     }
   });
+
+  it("keeps a concurrently published newer marker during bootstrap", async () => {
+    const { backend, db } = createLocalSqliteBackend();
+    const client = sqliteClient(db);
+    try {
+      await createStoreWithSchema(graph, backend);
+      client.exec(
+        "DELETE FROM typegraph_base_schema_versions WHERE installation = 1",
+      );
+
+      const prepare = client.prepare.bind(client);
+      let publishedNewerMarker = false;
+      vi.spyOn(client, "prepare").mockImplementation((source) => {
+        if (!publishedNewerMarker && source.includes("CREATE TABLE")) {
+          publishedNewerMarker = true;
+          prepare(
+            "INSERT INTO typegraph_base_schema_versions (installation, version, updated_at) VALUES (1, 2, CURRENT_TIMESTAMP)",
+          ).run();
+        }
+        return prepare(source);
+      });
+
+      await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof BaseSchemaMigrationError &&
+          error.details.reason === "newer",
+      );
+      expect(publishedNewerMarker).toBe(true);
+      expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(2);
+    } finally {
+      await backend.close();
+    }
+  });
 });

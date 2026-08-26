@@ -35,6 +35,7 @@ import {
   getTableName,
   inArray,
   isNull,
+  lte,
   type SQL,
   sql,
 } from "drizzle-orm";
@@ -165,9 +166,7 @@ import {
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
-import {
-  createBaseSchemaLifecycle,
-} from "./base-schema";
+import { createBaseSchemaLifecycle } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -1304,7 +1303,8 @@ export function createPostgresBackend(
         to_regclass(${postgresIdentifierRegclassName(edgeMatchIdentityUniqueIndexName(edgeTableName))}) IS NOT NULL AS has_index`,
     );
     if (typeof storage?.table_name !== "string") return;
-    const statements = generatePostgresEdgeMatchIdentityUpgradeDDL(edgeTableName);
+    const statements =
+      generatePostgresEdgeMatchIdentityUpgradeDDL(edgeTableName);
     const missingStatements = [
       storage.has_name === true ? undefined : statements[0],
       storage.has_key === true ? undefined : statements[1],
@@ -1335,16 +1335,19 @@ export function createPostgresBackend(
     );
   }
 
-  async function writeBaseSchemaVersion(version: number): Promise<void> {
+  async function writeBaseSchemaVersion(version: number): Promise<boolean> {
     const marker = tables.baseSchemaVersions;
     const timestamp = new Date();
-    await db
+    const rows = await db
       .insert(marker)
       .values({ installation: 1, version, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: marker.installation,
         set: { version, updatedAt: timestamp },
-      });
+        setWhere: lte(marker.version, version),
+      })
+      .returning({ version: marker.version });
+    return rows[0]?.version === version;
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {
@@ -1427,6 +1430,8 @@ export function createPostgresBackend(
     : {}),
 
     async bootstrapTables(): Promise<void> {
+      const startingBaseSchemaVersion =
+        await baseSchemaLifecycle.prepareBootstrap();
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         // Cold boot is the single most contended DDL path there is — two
@@ -1436,7 +1441,7 @@ export function createPostgresBackend(
         // documents.
         await executeConcurrentCreateDdl(statement);
       }
-      await baseSchemaLifecycle.adoptAfterBootstrap();
+      await baseSchemaLifecycle.adoptAfterBootstrap(startingBaseSchemaVersion);
     },
 
     async registerGraphTemplate(params): Promise<GraphTemplateRow> {
