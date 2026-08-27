@@ -580,15 +580,28 @@ type AtomicDeleteSlotResult =
 function assembleAtomicDeleteBatchResult(
   results: readonly AtomicDeleteSlotResult[],
 ): AtomicDeleteBatchResult {
-  const fenceResult = results.at(-1);
+  let fenceResult: Readonly<{ kind: "fence"; matched: boolean }> | undefined;
   let affectedCount = 0;
   for (const result of results) {
-    if (result.kind === "affected") affectedCount += result.count;
+    if (result.kind === "affected") {
+      affectedCount += result.count;
+      continue;
+    }
+    if (fenceResult !== undefined) {
+      throw new CompilerInvariantError(
+        "Atomic delete program returned more than one schema-fence result.",
+      );
+    }
+    fenceResult = result;
+  }
+  if (fenceResult === undefined) {
+    throw new CompilerInvariantError(
+      "Atomic delete program omitted its schema-fence result.",
+    );
   }
   return {
     affectedCount,
-    schemaFenceMatched:
-      fenceResult?.kind === "fence" && fenceResult.matched,
+    schemaFenceMatched: fenceResult.matched,
   };
 }
 

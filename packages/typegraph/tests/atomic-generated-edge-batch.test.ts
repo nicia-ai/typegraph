@@ -10,6 +10,7 @@ import {
   CardinalityError,
   EdgeMatchIdentityConflictError,
   StaleVersionError,
+  ValidationError,
 } from "../src";
 import {
   type AtomicEdgeBatchExecutor,
@@ -982,7 +983,13 @@ describe("generated edge batch store consumer", () => {
   });
 
   it("keeps missing and already-deleted edge ids as successful no-ops", async () => {
-    const { backend } = createLocalSqliteBackend();
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-delete-noop-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       const { from, to } = await createEndpoints(store);
@@ -990,6 +997,7 @@ describe("generated edge batch store consumer", () => {
         role: "Engineer",
       });
       await store.edges.worksAt.delete(edge.id);
+      const batch = vi.spyOn(client, "batch");
 
       await expect(
         store.edges.worksAt.bulkDelete([
@@ -997,8 +1005,11 @@ describe("generated edge batch store consumer", () => {
           "missing-edge-id" as typeof edge.id,
         ]),
       ).resolves.toBeUndefined();
+      expect(batch).toHaveBeenCalledOnce();
     } finally {
       await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
 
@@ -1043,7 +1054,7 @@ describe("generated edge batch store consumer", () => {
           second.id,
           foreign.id as never,
         ]),
-      ).rejects.toThrow();
+      ).rejects.toBeInstanceOf(ValidationError);
 
       for (const id of [first.id, second.id]) {
         await expect(store.edges.worksAt.getById(id)).resolves.toMatchObject({

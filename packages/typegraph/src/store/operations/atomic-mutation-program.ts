@@ -15,11 +15,13 @@ import {
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import type { GraphDef } from "../../core/define-graph";
+import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
 import { hasOwnKey } from "../../utils/object";
 import { getEmbeddingFields } from "../embedding-sync";
 import { getSearchableFields } from "../fulltext-sync";
 import type { CreateEdgeInput, CreateNodeInput } from "../types";
+import { diagnoseFusedSchemaFenceNoRow } from "./write-transaction";
 
 type CommonAtomicMutationEligibility = Readonly<{
   backend: GraphBackend | TransactionBackend;
@@ -34,6 +36,29 @@ function resolveAtomicMutationProfile(input: CommonAtomicMutationEligibility) {
   if (input.schemaVersion === undefined) return;
   if (input.historyEnabled || input.revisionTrackingEnabled) return;
   return resolveBundledRootAtomicMutationPrograms(input.backend);
+}
+
+/**
+ * Interprets explicit fence evidence from a closed delete program.
+ *
+ * A matching diagnostic after the program reported no fence row is not
+ * success: either state changed between the atomic batch and its diagnostic,
+ * or the backend violated the program contract.
+ */
+export async function assertAtomicDeleteSchemaFenceMatched(
+  matched: boolean,
+  ctx: Readonly<{ graphId: string; schemaVersion: number | undefined }>,
+  backend: GraphBackend | TransactionBackend,
+  entity: "node" | "edge",
+): Promise<void> {
+  if (matched) return;
+  await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+  throw new DatabaseOperationError(
+    "Atomic delete reported a stale schema fence, but the current schema " +
+      "matched during diagnosis. The schema may have changed concurrently, " +
+      "or the backend returned inconsistent fence evidence.",
+    { operation: "delete", entity },
+  );
 }
 
 export type AtomicNodeBatchEligibilityInput = CommonAtomicMutationEligibility &

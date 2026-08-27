@@ -766,6 +766,11 @@ function createCommonOperationStrategy(
     `;
   }
 
+  const nodePropsNotNullConstraint = {
+    table: getTableName(tables.nodes),
+    column: tables.nodes.props.name,
+  } as const;
+
   return {
     ...tableOperations,
     ...fulltextBuilders,
@@ -804,14 +809,8 @@ function createCommonOperationStrategy(
         schemaLockClause,
       ),
     atomicNodeRefusalConstraints: {
-      deleteRestricted: {
-        table: getTableName(tables.nodes),
-        column: tables.nodes.props.name,
-      },
-      liveIdentity: {
-        table: getTableName(tables.nodes),
-        column: tables.nodes.props.name,
-      },
+      deleteRestricted: nodePropsNotNullConstraint,
+      liveIdentity: nodePropsNotNullConstraint,
     },
     buildAtomicNodeDeleteBatchWithSchemaFence: (
       input,

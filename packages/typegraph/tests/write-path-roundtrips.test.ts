@@ -128,7 +128,7 @@ async function seedHubAndSpokes(
 }
 
 describe("cascade edge deletion batches", () => {
-  it("atomic node bulkDelete rolls back earlier ids when restrict refuses", async () => {
+  it("portable node bulkDelete rolls back earlier ids when restrict refuses", async () => {
     const { backend } = createLocalSqliteBackend();
     try {
       const [store] = await createStoreWithSchema(

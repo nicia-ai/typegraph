@@ -156,6 +156,11 @@ describe("plain node batch store contract", () => {
     });
     try {
       const [store] = await createStoreWithSchema(deleteGraph, backend);
+      const batchConnectivity = vi.spyOn(
+        backend,
+        "findEdgesByHeterogeneousEndpointSet",
+      );
+      const scalarConnectivity = vi.spyOn(backend, "findEdgesConnectedTo");
       const source = await store.nodes.Person.create({ name: "Source" });
       const first = await store.nodes.Person.create({ name: "First" });
       const second = await store.nodes.Person.create({ name: "Second" });
@@ -165,6 +170,9 @@ describe("plain node batch store contract", () => {
       await expect(
         store.nodes.Person.bulkDelete([first.id, second.id, connected.id]),
       ).rejects.toBeInstanceOf(RestrictedDeleteError);
+
+      expect(batchConnectivity).toHaveBeenCalledTimes(2);
+      expect(scalarConnectivity).not.toHaveBeenCalled();
 
       for (const id of [first.id, second.id, connected.id]) {
         await expect(store.nodes.Person.getById(id)).resolves.toBeDefined();

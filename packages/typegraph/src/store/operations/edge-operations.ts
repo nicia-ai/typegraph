@@ -181,6 +181,7 @@ import {
 } from "../validity-end";
 import { withAlreadyExistsTranslation } from "./already-exists";
 import {
+  assertAtomicDeleteSchemaFenceMatched,
   type AtomicEdgeBatchExecutor,
   resolveAtomicEdgeBatchExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
@@ -2196,9 +2197,12 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
           expectedVersion: requireDefined(ctx.schemaVersion),
         },
       });
-      if (!result.schemaFenceMatched) {
-        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-      }
+      await assertAtomicDeleteSchemaFenceMatched(
+        result.schemaFenceMatched,
+        ctx,
+        backend,
+        "edge",
+      );
       return;
     } catch (error) {
       if (!(error instanceof AtomicEdgeDeleteIdentityRefusalError)) throw error;
@@ -2220,7 +2224,8 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
       }
       throw new DatabaseOperationError(
         "Atomic edge delete refused an identity mismatch, but no current " +
-          "foreign collection row could be diagnosed.",
+          "foreign collection row could be diagnosed. The row identity may " +
+          "have changed concurrently after the atomic program aborted.",
         { operation: "delete", entity: "edge" },
         { cause: error.cause },
       );

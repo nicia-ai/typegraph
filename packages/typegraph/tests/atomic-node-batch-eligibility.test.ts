@@ -6,7 +6,7 @@ import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { StaleVersionError } from "../src";
+import { DatabaseOperationError, StaleVersionError } from "../src";
 import {
   type AtomicNodeBatchInput,
   markBundledRootAtomicMutationPrograms,
@@ -23,6 +23,7 @@ import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
 import {
+  assertAtomicDeleteSchemaFenceMatched,
   resolveAtomicNodeBatchExecutor,
   resolveAtomicNodeDeleteBatchExecutor,
 } from "../src/store/operations/atomic-mutation-program";
@@ -133,6 +134,16 @@ const searchableGraph = defineGraph({
 const embeddingGraph = defineGraph({
   id: "atomic-node-batch-embedding",
   nodes: { VectorDocument: { type: VectorDocument } },
+  edges: {},
+});
+const cascadeDeleteGraph = defineGraph({
+  id: "atomic-node-batch-cascade-delete",
+  nodes: { Person: { type: Person, onDelete: "cascade" } },
+  edges: {},
+});
+const disconnectDeleteGraph = defineGraph({
+  id: "atomic-node-batch-disconnect-delete",
+  nodes: { Person: { type: Person, onDelete: "disconnect" } },
   edges: {},
 });
 
@@ -408,6 +419,21 @@ describe("atomic node batch eligibility", () => {
 });
 
 describe("atomic node delete batch eligibility", () => {
+  it("never accepts contradictory stale-fence evidence as success", async () => {
+    const backend = {
+      getActiveSchema: () => Promise.resolve({ version: 1 }),
+    } as unknown as GraphBackend;
+
+    await expect(
+      assertAtomicDeleteSchemaFenceMatched(
+        false,
+        { graphId: "graph-1", schemaVersion: 1 },
+        backend,
+        "node",
+      ),
+    ).rejects.toBeInstanceOf(DatabaseOperationError);
+  });
+
   it("accepts only a sidecar-free exact bundled root", () => {
     const backend = rootBackend(true);
     markAtomicDeleteRoot(backend);
@@ -449,6 +475,22 @@ describe("atomic node delete batch eligibility", () => {
     ["Operational Identity", graph, "Person", true, false, false],
     ["history", graph, "Person", false, true, false],
     ["revision tracking", graph, "Person", false, false, true],
+    [
+      "cascade delete behavior",
+      cascadeDeleteGraph,
+      "Person",
+      false,
+      false,
+      false,
+    ],
+    [
+      "disconnect delete behavior",
+      disconnectDeleteGraph,
+      "Person",
+      false,
+      false,
+      false,
+    ],
   ] as const)(
     "refuses %s work that owes transactional cleanup",
     (
