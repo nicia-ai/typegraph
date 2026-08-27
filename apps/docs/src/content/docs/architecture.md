@@ -609,9 +609,12 @@ submitted:
 - A **resolved mutation set** requires an authoritative database preimage and
   application computation before its writes are known. `bulkUpsertById()` is
   the canonical example: stored props are merged and Zod-validated, temporal
-  decisions are derived, and repeated IDs observe earlier batch items. These
-  operations resolve and execute inside one transaction and may use set-based
-  backend ports, but they are not mislabeled as read-free programs.
+  decisions are derived, and repeated IDs observe earlier batch items. An
+  eligible distinct-ID, update-only set can cross the exact-root boundary after
+  resolution: its guarded SQL carries the node versions or complete edge
+  preimages that justified the after-images and updates every member or none.
+  Complex sets resolve and execute inside one interactive transaction. Neither
+  shape is mislabeled as a read-free program.
 
 This boundary keeps transport optimization subordinate to Store semantics. A
 new bulk optimization must either prove its mutation is closed or name the

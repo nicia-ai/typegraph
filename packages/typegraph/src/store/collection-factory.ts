@@ -15,8 +15,11 @@ import type { CompiledSelectSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
-import { type UpsertUpdateEdgeInput } from "./collections/edge-collection";
-import { type UpsertUpdateNodeInput } from "./collections/node-collection";
+import { type EdgeUpsertUpdateBatchEntry } from "./collections/edge-collection";
+import {
+  type NodeUpsertUpdateBatchEntry,
+  type UpsertUpdateNodeInput,
+} from "./collections/node-collection";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
   type CreateEdgeInput,
@@ -69,11 +72,10 @@ export type NodeOperations = Readonly<{
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ affectedCount: number }>>;
-  executeUpsertUpdate: (
-    input: UpsertUpdateNodeInput,
+  executeUpsertUpdateBatch: (
+    entries: readonly NodeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ clearDeleted?: boolean }>,
-  ) => Promise<Node>;
+  ) => Promise<readonly Node[]>;
   /**
    * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
    * the store was created with `coalesceUnchangedUpserts: true`; its absence is
@@ -172,11 +174,10 @@ export type EdgeOperations = Readonly<{
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
-  executeUpsertUpdate: (
-    input: UpsertUpdateEdgeInput,
+  executeUpsertUpdateBatch: (
+    entries: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ clearDeleted?: boolean }>,
-  ) => Promise<Edge>;
+  ) => Promise<readonly Edge[]>;
   /**
    * Coalesce dirty-check for `bulkUpsertById` (props only — endpoints are the
    * edge's identity). Present only when the store was created with

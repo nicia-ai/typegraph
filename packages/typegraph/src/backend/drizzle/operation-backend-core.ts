@@ -49,12 +49,16 @@ import {
   type AtomicEdgeDeleteBatchExecutor,
   type AtomicEdgeDeleteBatchInput,
   AtomicEdgeDeleteIdentityRefusalError,
+  type AtomicEdgeResolvedUpdateBatchExecutor,
+  type AtomicEdgeResolvedUpdateEntry,
   type AtomicNodeBatchEntry,
   type AtomicNodeBatchExecutor,
   type AtomicNodeBatchInput,
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeDeleteBatchInput,
   AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodeResolvedUpdateBatchExecutor,
+  type AtomicNodeResolvedUpdateEntry,
 } from "../capabilities/atomic-mutation-program";
 import type {
   AtomicSqlProgram,
@@ -239,6 +243,63 @@ function assertMatchingEdgeSchemaFences(
   }
 }
 
+function assertResolvedNodeUpdateBatchInput(
+  entries: readonly AtomicNodeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  const first = entries[0];
+  if (first === undefined) return;
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    if (
+      entry.graphId !== first.graphId ||
+      entry.kind !== first.kind ||
+      entry.graphId !== schemaFence.graphId ||
+      ids.has(entry.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved node update requires distinct ids from one fenced graph and kind.",
+        {
+          expected: {
+            graphId: first.graphId,
+            kind: first.kind,
+            fenceGraphId: schemaFence.graphId,
+          },
+          actual: { graphId: entry.graphId, kind: entry.kind, id: entry.id },
+        },
+      );
+    }
+    ids.add(entry.id);
+  }
+}
+
+function assertResolvedEdgeUpdateBatchInput(
+  entries: readonly AtomicEdgeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  const first = entries[0];
+  if (first === undefined) return;
+  const graphId = first.existing.graph_id;
+  const ids = new Set<string>();
+  for (const entry of entries) {
+    const existing = entry.existing;
+    if (
+      existing.graph_id !== graphId ||
+      existing.graph_id !== schemaFence.graphId ||
+      ids.has(existing.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved edge update requires distinct ids from one fenced graph.",
+        {
+          expected: { graphId, fenceGraphId: schemaFence.graphId },
+          actual: { graphId: existing.graph_id, id: existing.id },
+        },
+      );
+    }
+    ids.add(existing.id);
+  }
+}
+
 /**
  * The owner a claim write proposes. Reading it off the params in one place is
  * what keeps the accept/refuse test comparing the same pair the SQL arms do.
@@ -311,8 +372,10 @@ export type CommonOperationBackend = Pick<
   Readonly<{
     executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
     executeAtomicNodeDeleteBatch?: AtomicNodeDeleteBatchExecutor;
+    executeAtomicNodeResolvedUpdateBatch?: AtomicNodeResolvedUpdateBatchExecutor;
     executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
     executeAtomicEdgeDeleteBatch?: AtomicEdgeDeleteBatchExecutor;
+    executeAtomicEdgeResolvedUpdateBatch?: AtomicEdgeResolvedUpdateBatchExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
      * diagnostic the store runs at the top-level backend, and nothing inside a
@@ -1864,6 +1927,65 @@ export function createCommonOperationBackend(
         }>;
       })();
 
+  const atomicNodeResolvedUpdateBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // Each member binds its id in CASE, membership and preimage predicates,
+        // plus props and version. Leave a conservative fixed allowance for the
+        // graph/kind/fence/timestamp/count binds.
+        const maxEntries = Math.max(
+          1,
+          Math.floor((maxBindParameters - 12) / 5),
+        );
+
+        const executeAtomicNodeResolvedUpdateBatch = Object.assign(
+          async (input: Parameters<AtomicNodeResolvedUpdateBatchExecutor>[0]) => {
+            if (input.entries.length === 0) return [];
+            assertResolvedNodeUpdateBatchInput(
+              input.entries,
+              input.schemaFence,
+            );
+            if (input.entries.length > maxEntries) {
+              throw new CompilerInvariantError(
+                "Atomic resolved node update exceeded its declared bind budget.",
+                { entries: input.entries.length, maxEntries },
+              );
+            }
+            const query =
+              operationStrategy.buildAtomicNodeResolvedUpdateBatch(
+                input.entries,
+                nowIso(),
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+              );
+            const program = {
+              slots: [
+                {
+                  statement: execution.compile(query),
+                  cardinality: "many" as const,
+                  decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                    rows.map((row) => rowMappers.toNodeRow(row)),
+                },
+              ],
+              assemble: (results: readonly (readonly NodeRow[])[]) =>
+                results[0] ?? [],
+            } satisfies AtomicSqlProgram<readonly NodeRow[], readonly NodeRow[]>;
+            return atomicExecutor.execute(program);
+          },
+          { maxEntries },
+        ) satisfies AtomicNodeResolvedUpdateBatchExecutor;
+
+        return { executeAtomicNodeResolvedUpdateBatch };
+      })();
+
   const atomicEdgeDeleteBatchMembers =
     (
       atomicSqlProgramExecutor === undefined ||
@@ -1939,6 +2061,61 @@ export function createCommonOperationBackend(
         return { executeAtomicEdgeDeleteBatch } satisfies Readonly<{
           executeAtomicEdgeDeleteBatch: AtomicEdgeDeleteBatchExecutor;
         }>;
+      })();
+
+  const atomicEdgeResolvedUpdateBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+
+        const maxEntries = Math.max(
+          1,
+          Math.floor((maxBindParameters - 12) / 14),
+        );
+        const executeAtomicEdgeResolvedUpdateBatch = Object.assign(
+          async (input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0]) => {
+            if (input.entries.length === 0) return [];
+            assertResolvedEdgeUpdateBatchInput(
+              input.entries,
+              input.schemaFence,
+            );
+            if (input.entries.length > maxEntries) {
+              throw new CompilerInvariantError(
+                "Atomic resolved edge update exceeded its declared bind budget.",
+                { entries: input.entries.length, maxEntries },
+              );
+            }
+            const query = operationStrategy.buildAtomicEdgeResolvedUpdateBatch(
+              input.entries,
+              nowIso(),
+              input.schemaFence,
+              atomicSchemaFenceLockClause,
+            );
+            const program = {
+              slots: [
+                {
+                  statement: execution.compile(query),
+                  cardinality: "many" as const,
+                  decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                    rows.map((row) => rowMappers.toEdgeRow(row)),
+                },
+              ],
+              assemble: (results: readonly (readonly EdgeRow[])[]) =>
+                results[0] ?? [],
+            } satisfies AtomicSqlProgram<readonly EdgeRow[], readonly EdgeRow[]>;
+            return atomicExecutor.execute(program);
+          },
+          { maxEntries },
+        ) satisfies AtomicEdgeResolvedUpdateBatchExecutor;
+
+        return { executeAtomicEdgeResolvedUpdateBatch };
       })();
 
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
@@ -2476,7 +2653,9 @@ export function createCommonOperationBackend(
     ...atomicNodeBatchMembers,
     ...atomicEdgeBatchMembers,
     ...atomicNodeDeleteBatchMembers,
+    ...atomicNodeResolvedUpdateBatchMembers,
     ...atomicEdgeDeleteBatchMembers,
+    ...atomicEdgeResolvedUpdateBatchMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,
 

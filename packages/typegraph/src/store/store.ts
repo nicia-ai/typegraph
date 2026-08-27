@@ -253,7 +253,7 @@ import {
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
   executeEdgeUpdate,
-  executeEdgeUpsertUpdate,
+  executeEdgeUpsertUpdateBatch,
   executeNodeBulkFindByConstraint,
   executeNodeBulkFindByIndex,
   executeNodeBulkGetOrCreateByConstraint,
@@ -267,7 +267,7 @@ import {
   executeNodeHardDelete,
   executeNodeUpdate,
   executeNodeUpdateWhere,
-  executeNodeUpsertUpdate,
+  executeNodeUpsertUpdateBatch,
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
@@ -1964,13 +1964,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           candidateIdColumn,
           backend,
         ),
-      executeUpsertUpdate: (input, backend, options) =>
-        executeNodeUpsertUpdate(
-          ctx,
-          { ...input, id: input.id },
-          backend,
-          options,
-        ),
+      executeUpsertUpdateBatch: (entries, backend) =>
+        executeNodeUpsertUpdateBatch(ctx, entries, backend),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
@@ -2055,8 +2050,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       executeCreateNoReturnBatch: (inputs, backend) =>
         executeEdgeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
-      executeUpsertUpdate: (input, backend, options) =>
-        executeEdgeUpsertUpdate(ctx, input, backend, options),
+      executeUpsertUpdateBatch: (entries, backend) =>
+        executeEdgeUpsertUpdateBatch(ctx, entries, backend),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>

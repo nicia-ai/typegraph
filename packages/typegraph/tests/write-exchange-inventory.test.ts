@@ -6,9 +6,11 @@ import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
+import { resolveBundledRootAtomicMutationPrograms } from "../src/backend/capabilities/atomic-mutation-program";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
-import { createStoreWithSchema } from "../src/store";
+import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -19,7 +21,13 @@ const Company = defineNode("Company", {
 const ClaimedPerson = defineNode("ClaimedPerson", {
   schema: z.object({ name: z.string() }),
 });
-const worksAt = defineEdge("worksAt", {
+const unconstrained = defineEdge("unconstrained", {
+  schema: z.object({ role: z.string() }),
+});
+const constrained = defineEdge("constrained", {
+  schema: z.object({ role: z.string() }),
+});
+const durable = defineEdge("durable", {
   schema: z.object({ role: z.string() }),
 });
 const graph = defineGraph({
@@ -41,18 +49,18 @@ const graph = defineGraph({
   },
   edges: {
     unconstrained: {
-      type: worksAt,
+      type: unconstrained,
       from: [Person],
       to: [Company],
     },
     constrained: {
-      type: worksAt,
+      type: constrained,
       from: [Person],
       to: [Company],
       cardinality: "one",
     },
     durable: {
-      type: worksAt,
+      type: durable,
       from: [Person],
       to: [Company],
       matchIdentity: { name: "role", fields: ["role"] },
@@ -68,9 +76,20 @@ describe("managed write exchange inventory", () => {
     const client = createClient({
       url: `file:${path.join(temporaryDirectory, "graph.db")}`,
     });
-    const { backend } = await createLibsqlBackend(client);
+    const { backend, db } = await createLibsqlBackend(client);
     try {
       const [store] = await createStoreWithSchema(graph, backend);
+      const transactionlessBackend = createSqliteBackend(db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+      });
+      const [transactionlessStore] = await createVerifiedStore(
+        graph,
+        transactionlessBackend,
+      );
+      expect(
+        resolveBundledRootAtomicMutationPrograms(transactionlessBackend)
+          ?.updateEdges,
+      ).toBeDefined();
       const from = await store.nodes.Person.create({ name: "Alice" });
       const to = await store.nodes.Company.create({ name: "Acme" });
       const deletableEdges = await store.edges.unconstrained.bulkCreate([
@@ -80,6 +99,14 @@ describe("managed write exchange inventory", () => {
       const deletableNodes = await store.nodes.Person.bulkCreate([
         { props: { name: "Delete Node A" } },
         { props: { name: "Delete Node B" } },
+      ]);
+      const upsertableNodes = await store.nodes.Person.bulkCreate([
+        { props: { name: "Upsert Node A" } },
+        { props: { name: "Upsert Node B" } },
+      ]);
+      const upsertableEdges = await store.edges.unconstrained.bulkCreate([
+        { from, to, props: { role: "Upsert Edge A" } },
+        { from, to, props: { role: "Upsert Edge B" } },
       ]);
       const execute = vi.spyOn(client, "execute");
       const batch = vi.spyOn(client, "batch");
@@ -172,6 +199,24 @@ describe("managed write exchange inventory", () => {
         await measure("node-delete-batch", () =>
           store.nodes.Person.bulkDelete(deletableNodes.map((node) => node.id)),
         ),
+        await measure("node-update-upsert-batch", () =>
+          transactionlessStore.nodes.Person.bulkUpsertById(
+            upsertableNodes.map((node, index) => ({
+              id: node.id,
+              props: { name: `Updated Node ${index}` },
+            })),
+          ),
+        ),
+        await measure("edge-update-upsert-batch", () =>
+          transactionlessStore.edges.unconstrained.bulkUpsertById(
+            upsertableEdges.map((edge, index) => ({
+              id: edge.id,
+              from,
+              to,
+              props: { role: `Updated Edge ${index}` },
+            })),
+          ),
+        ),
       ];
 
       expect(measurements).toMatchInlineSnapshot(`
@@ -240,6 +285,16 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "node-delete-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "node-update-upsert-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "edge-update-upsert-batch",
           },
         ]
       `);

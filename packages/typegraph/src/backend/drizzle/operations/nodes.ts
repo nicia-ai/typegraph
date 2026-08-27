@@ -8,6 +8,7 @@ import type {
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
   AtomicNodeDeleteBatchInput,
+  AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import type {
   DeleteNodeParams,
@@ -576,6 +577,63 @@ export function buildUpdateNode(
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.id} = ${params.id}${expectedValidFrom}
       AND ${nodes.deletedAt} IS NULL
+    RETURNING *
+  `;
+}
+
+/**
+ * Builds one guarded set update for distinct, live node after-images.
+ * The preimage version predicates are evaluated as one count gate, so either
+ * every resolved row still matches or the statement updates none of them.
+ */
+export function buildAtomicNodeResolvedUpdateBatch(
+  tables: Tables,
+  entries: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const propsCases = entries.map(
+    (entry) =>
+      sql`WHEN ${entry.id} THEN ${castBoundValueForColumn(nodes.props, JSON.stringify(entry.props))}`,
+  );
+  const expectedRows = entries.map(
+    (entry) =>
+      sql`(${nodes.id} = ${entry.id} AND ${nodes.version} = ${entry.expectedVersion})`,
+  );
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    )
+    UPDATE ${nodes}
+    SET ${quotedColumn(nodes.props)} = CASE ${nodes.id}
+          ${sql.join(propsCases, sql` `)}
+          ELSE ${nodes.props}
+        END,
+        ${quotedColumn(nodes.updatedAt)} = ${timestamp},
+        ${quotedColumn(nodes.version)} = ${nodes.version} + 1
+    WHERE ${nodes.graphId} = ${first.graphId}
+      AND ${nodes.kind} = ${first.kind}
+      AND ${nodes.deletedAt} IS NULL
+      AND ${nodes.id} IN (${sql.join(entries.map((entry) => sql`${entry.id}`), sql`, `)})
+      AND (
+        SELECT COUNT(*)
+        FROM ${nodes}
+        CROSS JOIN "schema_fence"
+        WHERE ${nodes.graphId} = ${first.graphId}
+          AND ${nodes.kind} = ${first.kind}
+          AND ${nodes.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) = ${entries.length}
     RETURNING *
   `;
 }

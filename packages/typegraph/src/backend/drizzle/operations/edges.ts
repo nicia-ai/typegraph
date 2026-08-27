@@ -5,7 +5,10 @@ import {
   resolveStampedValidityLowerBound,
   resolveStatedValidityLowerBound,
 } from "../../../utils/date";
-import type { AtomicEdgeDeleteBatchInput } from "../../capabilities/atomic-mutation-program";
+import type {
+  AtomicEdgeDeleteBatchInput,
+  AtomicEdgeResolvedUpdateEntry,
+} from "../../capabilities/atomic-mutation-program";
 import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
@@ -18,6 +21,7 @@ import type {
   SchemaWriteFenceParams,
   UpdateEdgeParams,
 } from "../../types";
+import { rowPropsToJsonText } from "../../types";
 import {
   castBoundValueForColumn,
   edgeColumnList,
@@ -764,6 +768,69 @@ export function buildUpdateEdge(
     WHERE ${edges.graphId} = ${params.graphId}
       AND ${edges.id} = ${params.id}${expectedIdentity}${expectedValidFrom}${expectedValidTo}
       AND ${edges.deletedAt} IS NULL
+    RETURNING *
+  `;
+}
+
+/** One guarded set update for distinct, live edge after-images. */
+export function buildAtomicEdgeResolvedUpdateBatch(
+  tables: Tables,
+  entries: readonly AtomicEdgeResolvedUpdateEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { edges, schemaVersions } = tables;
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const propsCases = entries.map(
+    (entry) =>
+      sql`WHEN ${entry.existing.id} THEN ${castBoundValueForColumn(edges.props, JSON.stringify(entry.props))}`,
+  );
+  const expectedRows = entries.map((entry) => {
+    const existing = entry.existing;
+    return sql`
+      (
+            ${edges.id} = ${existing.id}
+            AND ${edges.kind} = ${existing.kind}
+            AND ${edges.fromKind} = ${existing.from_kind}
+            AND ${edges.fromId} = ${existing.from_id}
+            AND ${edges.toKind} = ${existing.to_kind}
+            AND ${edges.toId} = ${existing.to_id}
+            AND ${edges.updatedAt} = ${existing.updated_at}
+            AND ${edges.props} = ${castBoundValueForColumn(edges.props, rowPropsToJsonText(existing.props))}
+            ${expectedValidFromPredicate(edges.validFrom, existing.valid_from)}
+            ${expectedValidFromPredicate(edges.validTo, existing.valid_to)}
+          )
+    `;
+  });
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+        AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    )
+    UPDATE ${edges}
+    SET ${quotedColumn(edges.props)} = CASE ${edges.id}
+          ${sql.join(propsCases, sql` `)}
+          ELSE ${edges.props}
+        END,
+        ${quotedColumn(edges.updatedAt)} = ${timestamp}
+    WHERE ${edges.graphId} = ${first.existing.graph_id}
+      AND ${edges.deletedAt} IS NULL
+      AND ${edges.id} IN (${sql.join(entries.map((entry) => sql`${entry.existing.id}`), sql`, `)})
+      AND (
+        SELECT COUNT(*)
+        FROM ${edges}
+        CROSS JOIN "schema_fence"
+        WHERE ${edges.graphId} = ${first.existing.graph_id}
+          AND ${edges.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) = ${entries.length}
     RETURNING *
   `;
 }

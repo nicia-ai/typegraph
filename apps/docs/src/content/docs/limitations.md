@@ -343,9 +343,13 @@ Direct edge `bulkDelete()` calls use the same exact-root exchange and refuse a
 foreign-kind ID atomically. Plain node `bulkDelete()` qualifies when no unique,
 disjointness, identity, projection, history, revision, cascade, or disconnect
 work is owed; the program enforces `restrict` against live connected edges in
-SQL. Other delete shapes retain their transaction path. This eligibility is
-intentionally separate from `bulkUpsertById()`: upsert must resolve and
-schema-validate a database preimage before its write set is known.
+SQL. Other delete shapes retain their transaction path. `bulkUpsertById()`
+remains a resolved mutation set because it must read and schema-validate a
+database preimage before its writes are known. Bundled serverless roots can
+submit an eligible distinct-ID, live-row, update-only resolved set as one
+guarded atomic update after that read; repeated IDs, creates, temporal changes,
+sidecars, history/revision capture, and caller transactions use the interactive
+path.
 
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 

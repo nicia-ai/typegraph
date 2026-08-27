@@ -103,6 +103,9 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     "if (params.clearDeleted && params.validFrom !== undefined) {",
     // The fence's column argument, as for nodes.
     "edges.validFrom,",
+    // The resolved-set update compares the caller's already-read temporal
+    // preimage; the caller remains the owner of the new stamped bound.
+    "${expectedValidFromPredicate(edges.validFrom, existing.valid_from)}",
   ],
   "drizzle/trusted-import.ts": [
     // Column lists and projections in the two dialects' INSERT text. They name

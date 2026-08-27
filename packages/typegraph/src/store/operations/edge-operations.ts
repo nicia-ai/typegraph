@@ -149,7 +149,10 @@ import {
   shouldCoalesceUpsert,
   type UpsertDirtyCheck,
 } from "../collections/coalesce";
-import { type UpsertUpdateEdgeInput } from "../collections/edge-collection";
+import {
+  type EdgeUpsertUpdateBatchEntry,
+  type UpsertUpdateEdgeInput,
+} from "../collections/edge-collection";
 import {
   checkCardinalityConstraint,
   type ConstraintContext,
@@ -185,6 +188,7 @@ import {
   type AtomicEdgeBatchExecutor,
   resolveAtomicEdgeBatchExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
+  resolveAtomicEdgeResolvedUpdateBatchExecutor,
 } from "./atomic-mutation-program";
 import {
   AutocommitWriteRequiresTransaction,
@@ -1710,6 +1714,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     matchOn?: readonly string[];
     matchProps?: Record<string, unknown>;
   }>,
+  resolvedExisting?: BackendEdgeRow,
 ): Promise<Edge> {
   const id = input.id;
 
@@ -1719,7 +1724,7 @@ async function performEdgeUpdate<G extends GraphDef>(
     id,
   });
 
-  const existing = await target.getEdge(ctx.graphId, id);
+  const existing = resolvedExisting ?? (await target.getEdge(ctx.graphId, id));
   if (!existing || (!options?.clearDeleted && existing.deleted_at)) {
     throw new EdgeNotFoundError(input.identity.kind, id);
   }
@@ -1926,10 +1931,18 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
     matchOn?: readonly string[];
     matchProps?: Record<string, unknown>;
   }>,
+  resolvedExisting?: BackendEdgeRow,
 ): Promise<Edge> {
   for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
     try {
-      return await performEdgeUpdate(ctx, input, session, target, options);
+      return await performEdgeUpdate(
+        ctx,
+        input,
+        session,
+        target,
+        options,
+        attempt === 1 ? resolvedExisting : undefined,
+      );
     } catch (error) {
       if (!(error instanceof EdgeUpdateTargetMoved)) throw error;
       if (attempt === EDGE_UPDATE_ATTEMPTS) {
@@ -2118,6 +2131,168 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
     options,
   );
   return outcome.edge;
+}
+
+/**
+ * Executes an already-resolved set of edge upsert updates under one write plan.
+ * The collection owns ordering and repeated-id resolution; this boundary keeps
+ * the complete set under one graph fence and one write session.
+ */
+export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<readonly Edge[]> {
+  if (entries.length === 0) return [];
+  for (const entry of entries) {
+    if (entry.input.clearValidTo === true) {
+      assertClearValidToSupported(backend, "edge");
+    }
+  }
+
+  const first = requireDefined(entries[0]);
+  const distinctIds = new Set(entries.map((entry) => entry.input.id));
+  const atomicExecutor = resolveAtomicEdgeResolvedUpdateBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind: first.input.identity.kind,
+    entryCount: entries.length,
+  });
+  const atomicShape =
+    atomicExecutor !== undefined &&
+    distinctIds.size === entries.length &&
+    entries.every(
+      (entry) =>
+        !entry.clearDeleted &&
+        entry.input.validFrom === undefined &&
+        entry.input.validTo === undefined &&
+        entry.input.clearValidTo !== true,
+    );
+  if (atomicShape) {
+    const supplied = entries.flatMap((entry) =>
+      entry.existing === undefined ? [] : [entry.existing],
+    );
+    const fetched =
+      supplied.length === entries.length ?
+        undefined
+      : await getEdgeRowsByIds(backend, ctx.batchPointRead, ctx.graphId, [
+          ...distinctIds,
+        ]);
+    let existing = fetched === undefined ? supplied : [...fetched.values()];
+    for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
+      const byId = new Map(existing.map((row) => [row.id, row]));
+      const missing = entries.find((entry) => {
+        const row = byId.get(entry.input.id);
+        return row === undefined || row.deleted_at !== undefined;
+      });
+      if (missing !== undefined) {
+        throw new EdgeNotFoundError(
+          first.input.identity.kind,
+          missing.input.id,
+        );
+      }
+      const resolved = entries.map((entry) => {
+        const row = requireDefined(byId.get(entry.input.id));
+        assertEdgeIdentityMatches(
+          entry.input.id,
+          entry.input.identity,
+          edgeIdentityFromRow(row),
+          "update",
+        );
+        const { validatedProps } = resolveEdgeUpdateProps(
+          ctx,
+          row,
+          entry.input.props,
+        );
+        return { existing: row, props: validatedProps };
+      });
+      const rows = await atomicExecutor({
+        entries: resolved,
+        schemaFence: {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        },
+      });
+      if (rows.length === entries.length) {
+        memoizeLeasedSchemaFence(ctx, backend);
+        const returned = new Map(rows.map((row) => [row.id, row]));
+        return entries.map((entry) =>
+          rowToEdge(requireDefined(returned.get(entry.input.id))),
+        );
+      }
+      if (rows.length > 0) {
+        throw new CompilerInvariantError(
+          "Atomic resolved edge update returned a partial result.",
+          { expected: entries.length, actual: rows.length },
+        );
+      }
+      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+      if (attempt === EDGE_UPDATE_ATTEMPTS) {
+        throw new DatabaseOperationError(
+          `Atomic edge upsert batch could not be applied to stable rows after ${EDGE_UPDATE_ATTEMPTS} attempts.`,
+          {
+            operation: "update",
+            entity: "edge",
+            attempted: entries.map((entry) => ({
+              kind: entry.input.identity.kind,
+              id: entry.input.id,
+            })),
+          },
+        );
+      }
+      const refreshed = await getEdgeRowsByIds(
+        backend,
+        ctx.batchPointRead,
+        ctx.graphId,
+        [...distinctIds],
+      );
+      existing = [...refreshed.values()];
+    }
+  }
+
+  const needsConstraintFence = entries.some(
+    (entry) => entry.clearDeleted || entry.input.clearValidTo === true,
+  );
+  return runWritePlan(
+    ctx,
+    edgeWritePlan(
+      needsConstraintFence ?
+        edgeWriteNeedsConstraintFence(
+          edgeCardinality(ctx, first.input.identity.kind),
+        )
+      : undefined,
+    ),
+    backend,
+    async (session, target) => {
+      const resolvedRows =
+        (
+          target.capabilities.transactions &&
+          distinctIds.size === entries.length
+        ) ?
+          await getEdgeRowsByIds(target, ctx.batchPointRead, ctx.graphId, [
+            ...distinctIds,
+          ])
+        : undefined;
+      const edges: Edge[] = [];
+      for (const entry of entries) {
+        edges.push(
+          await performEdgeUpdateConverging(
+            ctx,
+            entry.input,
+            session,
+            target,
+            entry.clearDeleted ? { clearDeleted: true } : undefined,
+            resolvedRows?.get(entry.input.id),
+          ),
+        );
+      }
+      return edges;
+    },
+    { didWrite: writeResultAlwaysChanges },
+  );
 }
 
 /**
