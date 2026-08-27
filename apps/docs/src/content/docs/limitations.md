@@ -41,9 +41,9 @@ raw. Eligible operations that use a certified atomic SQL program can still be
 available on these roots, but that transport guarantee is separate from the
 interactive transaction capability.
 
-These backends also ignore the `isolationLevel` option on
-`store.transaction(...)`, so the collection-read snapshot recipe documented
-elsewhere does nothing here.
+These backends cannot honor the `isolationLevel` option on
+`store.transaction(...)`; the method refuses before invoking its callback, so
+the collection-read snapshot recipe documented elsewhere does not apply here.
 
 ```typescript
 // On a raw D1 / neon-http Store, this refuses before the callback runs.

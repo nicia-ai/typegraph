@@ -278,7 +278,10 @@ bulk shapes on a transactionless root either refuse when their contract requires
 their documented non-atomic path. A certified atomic SQL program is available only to operations
 whose closed statement contract has been proven by the backend conformance runner; it does not
 make arbitrary Store calls atomic.
-`store.transaction()` cannot add atomicity to a backend that does not support transactions.
+their explicitly non-transactional operation semantics. A certified atomic SQL program is available
+only to operations whose closed statement contract has been proven by the backend conformance runner;
+it does not make arbitrary Store calls atomic. `store.transaction()` refuses before
+invoking its callback on a transactionless root; it never presents sequential writes as atomic.
 
 To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
 transaction:

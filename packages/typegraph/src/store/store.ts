@@ -103,6 +103,7 @@ import {
   EagerMaterializationError,
   KindNotFoundError,
   MigrationError,
+  UnsupportedBackendCapabilityError,
   ValidationError,
 } from "../errors";
 import {
@@ -2840,19 +2841,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * cannot drain a raw statement still in flight when the transaction commits.
    *
    * **Backends without transactions.** When `backend.capabilities.execution.interactiveTransactions`
-   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), a raw Store runs the
-   * callback against the same backend used outside `transaction()` — writes
-   * are applied as they happen and a thrown error does **not** roll back
-   * earlier writes inside the callback. A schema-managed Store may run a
-   * read-only callback, but its first write fails closed because the backend
-   * cannot hold the schema-version fence. Branch on
-   * `backend.capabilities.execution.interactiveTransactions` if you require atomicity:
+   * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), this method refuses
+   * before invoking the callback. A callback-shaped API that silently applies
+   * writes one by one is not a transaction and would make the atomicity
+   * contract depend on backend selection. Use the Store's ordinary write
+   * methods for deliberately non-atomic work, or provide a backend with real
+   * transaction support:
    *
    * ```typescript
    * if (backend.capabilities.execution.interactiveTransactions) {
    *   await store.transaction(async (tx) => { ... });
-   * } else {
-   *   // sequential, non-atomic — handle partial-failure recovery yourself
    * }
    * ```
    *
@@ -2860,9 +2858,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @param options Optional {@link TransactionOptions} forwarded to the
    *   backend (e.g. `isolationLevel: "serializable"` on Postgres). Backends
    *   without isolation-level support ignore it. On non-transactional
-   *   backends, raw Stores use the sequential fallback while schema-managed
-   *   Stores fail closed at their first write because no transaction-scoped
-   *   schema fence is available. A concurrent schema commit can make a
+   *   backends, the method refuses before invoking `fn`. A concurrent schema commit can make a
    *   snapshot-isolated PostgreSQL write fail with the database's normal
    *   serialization error; retry the whole transaction. Graph-merge commits
    *   retry serialization failures automatically. Stores created with
@@ -2893,7 +2889,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const { result } = await this.#runTransaction(invoke, options, undefined);
+    const { result } = await this.#runTransaction(
+      invoke,
+      options,
+      undefined,
+      "store.transaction()",
+    );
     return result;
   }
 
@@ -2913,11 +2914,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * {@link AdapterStore.withRecordedTransaction} also returns a
    * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
    * entirely to the caller with no flush point) produces no receipt. On
-   * non-transactional backends, a raw Store still returns a receipt, but it
-   * describes operations that individually committed rather than one atomic
-   * commit; if the callback rejects there, no receipt is returned even though
-   * earlier operations committed individually. A schema-managed Store fails
-   * closed on its first write instead.
+   * non-transactional backends, this method refuses before invoking the
+   * callback, so it cannot produce a receipt. Use ordinary Store writes when
+   * deliberately performing non-atomic work.
    *
    * For stores created with `{ history: true }`, `receipt.recorded` is the
    * recorded commit instant this transaction allocated for the store's
@@ -2972,6 +2971,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       invoke,
       options,
       receiptRecorder,
+      "store.transactionWithReceipt()",
     );
     return transactionOutcome(
       result,
@@ -2987,64 +2987,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     ) => Promise<T>,
     backendOptions: TransactionOptions | undefined,
     receiptRecorder: TransactionReceiptRecorder | undefined,
+    operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
-    // Without a real transaction the tx-scoped collections would be
-    // bound to the same backend as this.nodes/this.edges and exposing
-    // the cached versions avoids rebuilding the proxies on every call.
-    // An isolation-level request in the options is equally meaningless here.
     if (!this.#backend.capabilities.execution.interactiveTransactions) {
-      let nodes = this.nodes;
-      let edges = this.edges;
-      if (receiptRecorder !== undefined) {
-        ({ nodes, edges } = wrapTransactionCollections(
-          nodes,
-          edges,
-          receiptRecorder,
-        ));
-      }
-      const identity =
-        this.#graph.identity === undefined ?
-          undefined
-        : createIdentityFacade(this.#identityContext(this.#backend));
-      const receiptIdentity =
-        identity === undefined || receiptRecorder === undefined ?
-          identity
-        : wrapTransactionIdentity(identity, receiptRecorder);
-      const fallbackContext: AdapterTransactionContext<G, TNativeTransaction> =
-        {
-          nodes,
-          edges,
-          ...(receiptIdentity === undefined ?
-            {}
-          : { identity: receiptIdentity }),
-          // No real transaction: `tx.sql` is absent and there is no atomicity.
-          sqlAvailability: "unavailable",
-          backend: createTransactionReadBackend(this.#backend),
-          [TRANSACTION_RUNTIME]: {
-            backend: this.#backend,
-            runNodeOperationHooks: (operation, kind, id, hookedFunction) =>
-              this.#withOperationHooks(
-                this.#createOperationContext(operation, "node", kind, id),
-                hookedFunction,
-              ),
-          },
-          getNodeCollection: <const K extends string>(kind: K) =>
-            this.#resolveDynamicNodeCollection(nodes, kind),
-        };
-      Object.defineProperty(fallbackContext, TRANSACTION_RUNTIME, {
-        configurable: false,
-        enumerable: false,
-        writable: false,
-      });
-      // `measure` on this non-transactional fallback scopes writes that
-      // individually committed rather than one atomic commit, mirroring the
-      // receipt caveat.
-      const result = await invoke(
-        receiptRecorder === undefined ? fallbackContext : (
-          this.#attachMeasure(fallbackContext)
-        ),
+      throw new UnsupportedBackendCapabilityError(
+        operation,
+        "transactions",
+        { graphId: this.graphId, dialect: this.#backend.dialect },
+        "Use a backend with transaction support, or call ordinary Store write methods when non-atomic work is intentional.",
       );
-      return { result, recordedByGraph: undefined };
     }
 
     // #134/#135: no gate here. The backend's transaction() wraps the

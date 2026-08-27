@@ -1970,11 +1970,10 @@ adopted-commit path for history stores — returns the same `TransactionOutcome`
 so the exactly-once cursor pattern gets a receipt too (see
 [Recorded time](/queries/temporal/#raw-sql-under-history-capture)); only
 `withTransaction`, whose commit belongs entirely to the caller with no flush
-point, produces no receipt. On a raw Store backed by a non-transactional driver,
-a receipt describes operations that individually committed; if the callback
-rejects there, no receipt is returned even though earlier operations committed.
-A schema-managed Store instead fails closed on its first write because it cannot
-hold the schema-version fence.
+point, produces no receipt. On a Store backed by a non-transactional driver,
+`transactionWithReceipt()` refuses before invoking the callback, so it cannot
+produce a receipt. Ordinary Store writes remain available when the application
+deliberately owns non-atomic coordination.
 
 ##### Scoped receipts: `tx.measure()`
 
