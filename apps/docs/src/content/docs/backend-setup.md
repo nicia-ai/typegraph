@@ -256,9 +256,9 @@ Both Neon drivers work with TypeGraph. They have different tradeoffs:
 - **`drizzle-orm/neon-http`** uses HTTP per statement. Lowest cold-start cost; survives Workers'
   per-request isolation. **Cannot hold a session across statements**, so multi-statement transactions
   are unavailable — TypeGraph auto-detects this driver and sets `capabilities.transactions = false`,
-  so `store.transaction(...)` on a raw Store falls through to non-transactional sequential execution.
-  A schema-managed Store may attach for reads, but its first write fails closed because the driver
-  cannot hold the schema-version fence.
+  so `store.transaction(...)` refuses before invoking its callback. A schema-managed Store may
+  attach for reads, but its first unsupported write also fails closed because the driver cannot
+  hold the schema-version fence.
 - **`drizzle-orm/neon-serverless`** uses a WebSocket Pool. Holds a session, supports full transactional
   semantics, but the WebSocket connection lifecycle needs care in serverless / per-request contexts
   (you typically want a fresh Pool per request).
@@ -373,8 +373,8 @@ Edge runtimes expose `WebSocket` globally and need no extra setup.
 For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
 to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
-to `false`. On a raw Store, `store.transaction(...)` falls through to sequential
-execution rather than throwing. Eligible plain node batches and
+to `false`. `store.transaction(...)` refuses before invoking its callback rather
+than presenting sequential writes as atomic. Eligible plain node batches and
 `cardinality: "many"` edge creates use the authoritative one-statement command
 even on a schema-managed Store; other managed writes fail closed when they
 need an interactive schema or constraint fence.
@@ -1090,7 +1090,8 @@ transaction runner.
 
 **Important:** D1 has no interactive transaction primitive
 (`D1Database.batch(...)` is transactional, but batch-only — not an
-interactive runner), so `store.transaction()` is non-atomic on D1. See
+interactive runner), so `store.transaction()` refuses on D1 before invoking
+its callback. See
 [Limitations](/limitations) for details. For a transactional Cloudflare
 SQLite store, use **Durable Objects** (below) instead.
 
@@ -1596,9 +1597,10 @@ SQLite those run as `json_each()` scans — correct results, just not index-acce
 Both backends report `transactions: true` by default. The exception is symmetric and lives in specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
 `transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`, Operational
-Identity) throw on those drivers regardless of backend. Schema-managed Store writes also fail closed because they
-cannot hold the transaction-scoped schema fence; only raw Store or direct-backend writes retain the sequential,
-non-atomic fallback.
+Identity) throw on those drivers regardless of backend. Schema-managed Store writes also fail closed when they
+cannot hold the transaction-scoped schema fence. Raw Store and direct-backend writes remain available when the
+application explicitly accepts their operation-level, non-atomic semantics, but public Store transaction methods
+refuse.
 :::
 
 :::note[Aggregate set operations are a builder limitation, not a parity gap]

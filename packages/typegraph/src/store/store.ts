@@ -2497,7 +2497,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * snapshot across fluent queries is not available today. Collection reads
    * can have one — `store.transaction(fn, { isolationLevel: "repeatable_read" })`
    * reading through `tx.nodes` / `tx.edges` — but only where the backend has
-   * transactions (others ignore the option entirely), and a history-enabled
+   * transactions (other backends refuse before invoking the callback), and a history-enabled
    * store on PostgreSQL additionally requires `accessMode: "read_only"` or the
    * call throws.
    *
@@ -3302,7 +3302,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         { capability: "adoptTransaction" },
         {
           suggestion:
-            "Use a Drizzle PostgreSQL/SQLite backend with transaction support, or run writes through store.transaction(...).",
+            "Use a Drizzle PostgreSQL/SQLite backend that can adopt this transaction, use store.transaction(...) on a backend with transaction support, or call ordinary Store writes when non-atomic work is intentional.",
         },
       );
     }
