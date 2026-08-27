@@ -31,7 +31,11 @@ import {
 } from "drizzle-orm";
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
-import { BackendDisposedError, ConfigurationError } from "../../errors";
+import {
+  BackendDisposedError,
+  CompilerInvariantError,
+  ConfigurationError,
+} from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   buildFulltextCapabilities,
@@ -1867,6 +1871,9 @@ export function createSqliteBackend(
         }
       }
     }
+    throw new CompilerInvariantError(
+      "SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
+    );
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {
@@ -1971,9 +1978,7 @@ export function createSqliteBackend(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));

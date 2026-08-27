@@ -114,6 +114,9 @@ function installLocalSqliteBaseSchema(
         }
       }
     }
+    throw new CompilerInvariantError(
+      "Local SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
+    );
   }
 }
 

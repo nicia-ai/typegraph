@@ -3382,8 +3382,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly assertBaseSchemaCurrent: {
         readonly kind: "reasoned";
-        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.";
-        readonly accesses: 3;
+        readonly reason: "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.";
+        readonly accesses: 4;
     };
     readonly ensureEdgeMatchIdentityStorage: {
         readonly kind: "reasoned";
@@ -3407,8 +3407,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly bootstrapTables: {
         readonly kind: "reasoned";
-        readonly reason: "One-shot provisioning hook consulted by createStore before any capability question exists; it has no operation that could refuse or degrade.";
-        readonly accesses: 3;
+        readonly reason: "One-shot provisioning hook consulted by createStore and the managed libSQL legacy fallback before any capability question exists; it has no operation that could refuse or degrade.";
+        readonly accesses: 4;
     };
     readonly tableNames: {
         readonly kind: "reasoned";

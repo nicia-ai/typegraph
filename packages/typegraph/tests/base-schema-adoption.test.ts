@@ -38,6 +38,7 @@ import { createSqliteBackend, createSqliteTables } from "../src/backend/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { requireDefined } from "../src/utils/presence";
+import { isSqliteMissingEdgeMatchIdentityColumnError } from "../src/utils/sql-errors";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -138,6 +139,9 @@ async function assertTemplatesWork<G extends typeof graph>(
 }
 
 async function assertMatchIdentityWrite(backend: GraphBackend): Promise<void> {
+  // createStoreWithSchema is privileged, but a current marker makes adoption
+  // return before DDL. A false-stamped installation therefore reaches this
+  // real edge write unchanged and still fails on its missing physical storage.
   const [store] = await createStoreWithSchema(graph, backend);
   const source = await store.nodes.Person.create({ name: "source" });
   const target = await store.nodes.Person.create({ name: "target" });
@@ -357,11 +361,19 @@ describe("deployment-wide base-schema adoption", () => {
     },
   );
 
-  it("refuses to false-stamp a legacy database through fresh-installation SQL", () => {
+  it("refuses to false-stamp a legacy SQLite database through fresh-installation SQL", () => {
     const client = new Database(":memory:");
     try {
       client.exec(LEGACY_EDGE_TABLE_SQL);
-      expect(() => client.exec(generateSqliteMigrationSQL())).toThrow();
+      let installationError: unknown;
+      try {
+        client.exec(generateSqliteMigrationSQL());
+      } catch (error) {
+        installationError = error;
+      }
+      expect(
+        isSqliteMissingEdgeMatchIdentityColumnError(installationError),
+      ).toBe(true);
       const markerTable = client
         .prepare(
           "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'typegraph_base_schema_versions'",
@@ -378,6 +390,87 @@ describe("deployment-wide base-schema adoption", () => {
       expect(marker).toBeUndefined();
     } finally {
       client.close();
+    }
+  });
+
+  it("refuses to false-stamp a legacy PostgreSQL database through fresh-installation SQL", async () => {
+    const client = await PGlite.create({
+      extensions: { vector: pgvectorExtension },
+    });
+    try {
+      await client.exec(LEGACY_EDGE_TABLE_SQL);
+      await expect(
+        client.exec(generatePostgresMigrationSQL()),
+      ).rejects.toMatchObject({ code: "42703" });
+      const markerRelation = await client.query<{ exists: boolean }>(
+        "SELECT to_regclass('typegraph_base_schema_versions') IS NOT NULL AS exists",
+      );
+      const markerResult =
+        markerRelation.rows[0]?.exists === true ?
+          await client.query<{ version: number }>(
+            'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+          )
+        : { rows: [] };
+      const markerRows = markerResult.rows;
+      expect(markerRows).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("re-plans both local SQLite column races before publishing the marker", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "typegraph-base-race-"));
+    const databasePath = path.join(directory, "legacy.sqlite");
+    const legacy = new Database(databasePath);
+    legacy.exec(LEGACY_EDGE_TABLE_SQL);
+    legacy.close();
+    const competitor = new Database(databasePath);
+    // The unbound method is intentional: the spy must invoke the native method
+    // against both the factory-owned connection and the competitor connection.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalExec = Database.prototype.exec;
+    const racedColumns = new Set<string>();
+    const execSpy = vi
+      .spyOn(Database.prototype, "exec")
+      .mockImplementation(function (
+        this: Database.Database,
+        source,
+      ): Database.Database {
+        for (const column of ["match_identity_name", "match_identity_key"]) {
+          if (
+            racedColumns.has(column) ||
+            !source.includes(`ADD COLUMN "${column}"`)
+          ) {
+            continue;
+          }
+          const statement = source
+            .split(";")
+            .find((part) => part.includes(`ADD COLUMN "${column}"`));
+          if (statement !== undefined) {
+            originalExec.call(competitor, statement);
+            racedColumns.add(column);
+          }
+          break;
+        }
+        return originalExec.call(this, source);
+      });
+    try {
+      const { backend } = createLocalSqliteBackend({ path: databasePath });
+      await backend.close();
+      expect([...racedColumns]).toEqual([
+        "match_identity_name",
+        "match_identity_key",
+      ]);
+      const marker = competitor
+        .prepare(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        )
+        .get();
+      expect(marker).toEqual({ version: 1 });
+    } finally {
+      execSpy.mockRestore();
+      competitor.close();
+      rmSync(directory, { force: true, recursive: true });
     }
   });
 

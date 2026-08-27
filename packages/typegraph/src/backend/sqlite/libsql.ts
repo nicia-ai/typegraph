@@ -67,7 +67,9 @@ async function installLibsqlBaseSchema(
     if (!requiresLifecycleAdoption) throw error;
     // The fast script is fresh-installation DDL, not an upgrade planner. A
     // legacy or stale database must re-enter the numbered lifecycle so future
-    // releases cannot be stamped without every missing adoption step.
+    // releases cannot be stamped without every missing adoption step. The
+    // marker-error arm is intentionally dormant at v1: it becomes reachable
+    // when a later release can observe a missing or stale older marker.
     await requireDefined(backend.bootstrapTables)();
   }
 }
