@@ -1,4 +1,13 @@
+import {
+  type AtomicEdgeResolvedMutationSetExecutor,
+  type AtomicNodeResolvedMutationSetExecutor,
+  resolveBundledRootAtomicMutationPrograms,
+} from "../backend/capabilities/atomic-mutation-program";
+import type { GraphBackend, TransactionBackend } from "../backend/types";
 import { DatabaseOperationError } from "../errors";
+
+type ResolvedMutationSetExecutor =
+  AtomicNodeResolvedMutationSetExecutor | AtomicEdgeResolvedMutationSetExecutor;
 
 /**
  * Internal retry signal for a resolved mutation set whose authoritative
@@ -8,9 +17,24 @@ import { DatabaseOperationError } from "../errors";
  * isolation.
  */
 export class ResolvedMutationSetMoved extends Error {
-  constructor(entity: "node" | "edge") {
+  constructor(
+    entity: "node" | "edge",
+    private readonly executor: ResolvedMutationSetExecutor,
+  ) {
     super(`Resolved ${entity} mutation set moved before execution.`);
     this.name = "ResolvedMutationSetMoved";
+  }
+
+  /** Only the exact bundled root/executor that minted the signal may retry. */
+  isOwnedBy(
+    entity: "node" | "edge",
+    backend: GraphBackend | TransactionBackend,
+  ): boolean {
+    const profile = resolveBundledRootAtomicMutationPrograms(backend);
+    return (
+      (entity === "node" ? profile?.mutateNodes : profile?.mutateEdges) ===
+      this.executor
+    );
   }
 }
 
@@ -19,6 +43,7 @@ const RESOLVED_MUTATION_SET_ATTEMPTS = 2;
 /** Rebuilds the collection-owned partition once after authoritative movement. */
 export async function runResolvedMutationSetConverging<T>(
   entity: "node" | "edge",
+  backend: GraphBackend | TransactionBackend,
   run: () => Promise<T>,
 ): Promise<T> {
   for (
@@ -29,7 +54,12 @@ export async function runResolvedMutationSetConverging<T>(
     try {
       return await run();
     } catch (error) {
-      if (!(error instanceof ResolvedMutationSetMoved)) throw error;
+      if (
+        !(error instanceof ResolvedMutationSetMoved) ||
+        !error.isOwnedBy(entity, backend)
+      ) {
+        throw error;
+      }
       if (attempt === RESOLVED_MUTATION_SET_ATTEMPTS) {
         throw new DatabaseOperationError(
           `Atomic ${entity} upsert set could not be applied to stable rows after ${RESOLVED_MUTATION_SET_ATTEMPTS} attempts.`,

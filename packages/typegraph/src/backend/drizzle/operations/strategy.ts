@@ -178,10 +178,6 @@ function nullableText(value: string | undefined): SQL {
 
 export type CommonOperationStrategy = Readonly<{
   /** Terminal NOT NULL sentinel shared by resolved mutation-set programs. */
-  atomicMutationPostimageRefusalConstraint: Readonly<{
-    table: string;
-    column: string;
-  }>;
   /**
    * The exact NOT NULL sentinels emitted by the closed edge-batch program.
    * Derive them from the same table definitions as the SQL so error
@@ -833,10 +829,6 @@ function createCommonOperationStrategy(
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",
-    atomicMutationPostimageRefusalConstraint: {
-      table: getTableName(tables.schemaVersions),
-      column: tables.schemaVersions.version.name,
-    },
     atomicEdgeRefusalConstraints: {
       cardinality: {
         table: getTableName(tables.edgeClaims),

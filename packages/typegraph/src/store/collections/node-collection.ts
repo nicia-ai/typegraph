@@ -1020,6 +1020,7 @@ export function createNodeCollection<
 
       const { results, mutations } = await runResolvedMutationSetConverging(
         "node",
+        backend,
         () =>
           runOptionallyInTransaction(backend, (target) => upsertAll(target)),
       );

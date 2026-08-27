@@ -2223,7 +2223,7 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
   });
   if (result.created.length === 0 && result.updated.length === 0) {
     await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    throw new ResolvedMutationSetMoved("edge");
+    throw new ResolvedMutationSetMoved("edge", executor);
   }
   if (
     result.created.length !== creates.length ||

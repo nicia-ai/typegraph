@@ -2231,6 +2231,11 @@ export function createCommonOperationBackend(
         const atomicSchemaFenceLockClause = requireDefined(
           schemaFenceLockClause,
         );
+        // One ceiling covers every unchunked slot in the mixed program. The
+        // guarded update is currently dominant; the conservative ceiling
+        // budgets 5 binds/member plus 12 fixed. The D1 compile-count ratchet
+        // also checks the assertion and postimage read at this exact ceiling so
+        // a future wider slot cannot drift past the transport budget unnoticed.
         const maxEntries = Math.max(
           1,
           Math.floor((maxBindParameters - 12) / 5),
@@ -2319,7 +2324,7 @@ export function createCommonOperationBackend(
               if (
                 isNotNullColumnViolation(
                   error,
-                  operationStrategy.atomicMutationPostimageRefusalConstraint,
+                  operationStrategy.atomicNodeRefusalConstraints.liveIdentity,
                 )
               ) {
                 return { created: [], updated: [] };
@@ -2482,6 +2487,11 @@ export function createCommonOperationBackend(
         const atomicSchemaFenceLockClause = requireDefined(
           schemaFenceLockClause,
         );
+        // As for nodes, this is the program-wide ceiling, not merely the
+        // update statement's. The update is currently dominant; the
+        // conservative ceiling budgets 14 binds/member plus 12 fixed, while
+        // the D1 compile-count ratchet verifies every unchunked slot at the
+        // same declared maximum.
         const maxEntries = Math.max(
           1,
           Math.floor((maxBindParameters - 12) / 14),
@@ -2577,7 +2587,7 @@ export function createCommonOperationBackend(
               if (
                 isNotNullColumnViolation(
                   error,
-                  operationStrategy.atomicMutationPostimageRefusalConstraint,
+                  operationStrategy.atomicEdgeRefusalConstraints.deleteIdentity,
                 )
               ) {
                 return { created: [], updated: [] };

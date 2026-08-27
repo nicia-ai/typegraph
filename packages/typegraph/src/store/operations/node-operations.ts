@@ -2891,7 +2891,7 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
   );
   if (result.created.length === 0 && result.updated.length === 0) {
     await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    throw new ResolvedMutationSetMoved("node");
+    throw new ResolvedMutationSetMoved("node", executor);
   }
   if (
     result.created.length !== creates.length ||

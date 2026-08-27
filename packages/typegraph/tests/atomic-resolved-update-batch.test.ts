@@ -1,5 +1,5 @@
 import { createClient } from "@libsql/client";
-import { eq, type SQL,sql as drizzleSql } from "drizzle-orm";
+import { eq, type SQL, sql as drizzleSql } from "drizzle-orm";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -34,6 +34,10 @@ import {
   resolveAtomicNodeResolvedMutationSetExecutor,
   resolveAtomicNodeResolvedUpdateBatchExecutor,
 } from "../src/store/operations/atomic-mutation-program";
+import {
+  ResolvedMutationSetMoved,
+  runResolvedMutationSetConverging,
+} from "../src/store/resolved-mutation-set";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
@@ -376,6 +380,10 @@ describe("atomic resolved update batches", () => {
       id: "new",
       props: { name: "New", score: 1 },
     } as const;
+    const nodeCreateWithoutId = {
+      kind: nodeCreate.kind,
+      props: nodeCreate.props,
+    };
     expect(
       resolveAtomicNodeResolvedMutationSetExecutor({
         ...nodeInput,
@@ -390,6 +398,13 @@ describe("atomic resolved update batches", () => {
         updateCount: 17,
       }),
     ).toBeUndefined();
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        ...nodeInput,
+        creates: [nodeCreateWithoutId],
+        updateCount: 1,
+      }),
+    ).toBeUndefined();
     const edgeCreate = {
       kind: relates.kind,
       id: "new",
@@ -399,6 +414,14 @@ describe("atomic resolved update batches", () => {
       toId: "to",
       props: { label: "New" },
     } as const;
+    const edgeCreateWithoutId = {
+      kind: edgeCreate.kind,
+      fromKind: edgeCreate.fromKind,
+      fromId: edgeCreate.fromId,
+      toKind: edgeCreate.toKind,
+      toId: edgeCreate.toId,
+      props: edgeCreate.props,
+    };
     expect(
       resolveAtomicEdgeResolvedMutationSetExecutor({
         ...common,
@@ -418,12 +441,39 @@ describe("atomic resolved update batches", () => {
     expect(
       resolveAtomicEdgeResolvedMutationSetExecutor({
         ...common,
+        kind: relates.kind,
+        creates: [edgeCreateWithoutId],
+        updateCount: 1,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeResolvedMutationSetExecutor({
+        ...common,
         graph: durableGraph,
         kind: durableRelates.kind,
         creates: [{ ...edgeCreate, kind: durableRelates.kind }],
         updateCount: 1,
       }),
     ).toBeUndefined();
+  });
+
+  it("retries only movement raised by the exact bundled executor", async () => {
+    const { backend } = await fixture();
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(backend),
+    );
+    const owner = requireDefined(profile.mutateNodes);
+    const foreignExecutor = Object.assign(vi.fn(), {
+      maxEntries: owner.maxEntries,
+    }) satisfies typeof owner;
+    const run = vi.fn(() =>
+      Promise.reject(new ResolvedMutationSetMoved("node", foreignExecutor)),
+    );
+
+    await expect(
+      runResolvedMutationSetConverging("node", backend, run),
+    ).rejects.toBeInstanceOf(ResolvedMutationSetMoved);
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it("keeps every mixed-set statement within the pinned D1 ceilings", () => {
@@ -542,11 +592,17 @@ describe("atomic resolved update batches", () => {
       ),
     ];
     const dialect = new SQLiteSyncDialect();
+    const parameterCounts = statements.map(
+      (statement) => dialect.sqlToQuery(statement).params.length,
+    );
 
-    for (const statement of statements) {
-      expect(dialect.sqlToQuery(statement).params.length).toBeLessThanOrEqual(
-        100,
-      );
+    // The create statements are independently chunked. These exact counts pin
+    // every unchunked slot at the public D1 ceilings (17 total nodes, 6 total
+    // edges), so the shared maxEntries formula cannot silently become too wide.
+    expect(parameterCounts.slice(1, 4)).toEqual([88, 76, 21]);
+    expect(parameterCounts.slice(5)).toEqual([62, 54, 9]);
+    for (const parameterCount of parameterCounts) {
+      expect(parameterCount).toBeLessThanOrEqual(100);
     }
   });
 

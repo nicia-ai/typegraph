@@ -1109,6 +1109,7 @@ export function createEdgeCollection<
       // is to say not at all, matching the atomicity it already cannot offer.
       const { results, mutations } = await runResolvedMutationSetConverging(
         "edge",
+        backend,
         () =>
           runOptionallyInTransaction(backend, (target) => upsertAll(target)),
       );

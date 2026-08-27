@@ -298,7 +298,11 @@ export function resolveAtomicEdgeResolvedMutationSetExecutor(
 ): AtomicEdgeResolvedMutationSetExecutor | undefined {
   const entryCount = input.creates.length + input.updateCount;
   if (entryCount === 0 || !isAtomicResolvedEdgeKindEligible(input)) return;
-  if (input.creates.some((item) => item.kind !== input.kind)) {
+  if (
+    input.creates.some(
+      (item) => item.kind !== input.kind || item.id === undefined,
+    )
+  ) {
     return;
   }
   const executor = resolveAtomicMutationProfile(input)?.mutateEdges;

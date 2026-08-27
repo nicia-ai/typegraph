@@ -23,9 +23,7 @@ import {
 
 type RefusalConstraints = Pick<
   CommonOperationStrategy,
-  | "atomicEdgeRefusalConstraints"
-  | "atomicMutationPostimageRefusalConstraint"
-  | "atomicNodeRefusalConstraints"
+  "atomicEdgeRefusalConstraints" | "atomicNodeRefusalConstraints"
 >;
 
 function assertRefusalSentinelsAreNotNull(
@@ -33,7 +31,6 @@ function assertRefusalSentinelsAreNotNull(
   tables: readonly Table[],
 ): void {
   const constraints = [
-    strategy.atomicMutationPostimageRefusalConstraint,
     ...Object.values(strategy.atomicEdgeRefusalConstraints),
     ...Object.values(strategy.atomicNodeRefusalConstraints),
   ];
@@ -57,21 +54,11 @@ describe("atomic mutation program execution profile", () => {
   it("binds every refusal classifier to a NOT NULL schema column", () => {
     assertRefusalSentinelsAreNotNull(
       createSqliteOperationStrategy(sqliteTables, fts5Strategy),
-      [
-        sqliteTables.nodes,
-        sqliteTables.edges,
-        sqliteTables.edgeClaims,
-        sqliteTables.schemaVersions,
-      ],
+      [sqliteTables.nodes, sqliteTables.edges, sqliteTables.edgeClaims],
     );
     assertRefusalSentinelsAreNotNull(
       createPostgresOperationStrategy(postgresTables, tsvectorStrategy),
-      [
-        postgresTables.nodes,
-        postgresTables.edges,
-        postgresTables.edgeClaims,
-        postgresTables.schemaVersions,
-      ],
+      [postgresTables.nodes, postgresTables.edges, postgresTables.edgeClaims],
     );
   });
 
