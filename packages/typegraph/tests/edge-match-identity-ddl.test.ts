@@ -1,4 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
+import type Database from "better-sqlite3";
 import { sql } from "drizzle-orm";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { describe, expect, it, vi } from "vitest";
@@ -82,6 +83,51 @@ describe("durable edge-match identity DDL", () => {
       expect(() => insert("e2", "identity", "same")).toThrow();
       expect(() => insert("e3", "identity", undefined)).toThrow();
       expect(() => insert("e4", "NULL", "different")).toThrow();
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("re-plans when a concurrent SQLite adopter wins an ADD COLUMN race", async () => {
+    const tableName = "raced_edges";
+    const { backend, db } = createLocalSqliteBackend({
+      tables: createSqliteTables({ edges: tableName }),
+    });
+    const client = (db as unknown as { $client: Database.Database }).$client;
+    try {
+      db.run(sql.raw(`DROP TABLE "${tableName}"`));
+      db.run(
+        sql.raw(
+          `CREATE TABLE "${tableName}" ("graph_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "from_kind" TEXT NOT NULL, "from_id" TEXT NOT NULL, "to_kind" TEXT NOT NULL, "to_id" TEXT NOT NULL, "props" TEXT NOT NULL, "created_at" TEXT NOT NULL, "updated_at" TEXT NOT NULL, PRIMARY KEY ("graph_id", "id"))`,
+        ),
+      );
+      const prepare = client.prepare.bind(client);
+      let injectedRace = false;
+      const prepareSpy = vi
+        .spyOn(client, "prepare")
+        .mockImplementation((source) => {
+          if (
+            !injectedRace &&
+            typeof source === "string" &&
+            source.includes('ADD COLUMN "match_identity_name"')
+          ) {
+            injectedRace = true;
+            prepare(source).run();
+          }
+          return prepare(source);
+        });
+
+      await expect(
+        backend.ensureEdgeMatchIdentityStorage?.(),
+      ).resolves.toBeUndefined();
+      expect(injectedRace).toBe(true);
+      const columns = prepare(
+        `PRAGMA table_info("${tableName}")`,
+      ).all() as readonly Readonly<{ name: string }>[];
+      expect(columns.map((column) => column.name)).toEqual(
+        expect.arrayContaining(["match_identity_name", "match_identity_key"]),
+      );
+      prepareSpy.mockRestore();
     } finally {
       await backend.close();
     }

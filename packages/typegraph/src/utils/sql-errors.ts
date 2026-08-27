@@ -556,19 +556,57 @@ export function isDuplicateUniqueIndexError(
   return false;
 }
 
+/** Whether SQLite DDL named one of the two absent match-identity columns. */
+export function isSqliteMissingEdgeMatchIdentityColumnError(
+  error: unknown,
+): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    const code: unknown = Reflect.get(link, "code");
+    const message = sqliteErrorMessage(link);
+    if (
+      code === "SQLITE_ERROR" &&
+      typeof message === "string" &&
+      /^(?:no such column: (?:[^.]+\.)?|table .+ has no column named |no column named )"?match_identity_(?:name|key)"?(?: - should this be a string literal in single-quotes\?)?$/.test(
+        message,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether a concurrent SQLite adopter already added the column we planned. */
+export function isSqliteDuplicateEdgeMatchIdentityColumnError(
+  error: unknown,
+): boolean {
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) continue;
+    if (Reflect.get(link, "code") !== "SQLITE_ERROR") continue;
+    const message = sqliteErrorMessage(link);
+    if (
+      message === "duplicate column name: match_identity_name" ||
+      message === "duplicate column name: match_identity_key"
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Whether a durable convergence statement proved that the adapter's static
  * capability declaration has not been provisioned in this database yet.
  *
- * This predicate is intentionally consumed only by the durable convergence
- * command, whose conflict target and two identity columns are known. SQLSTATE
- * 42P10 structurally identifies a missing PostgreSQL conflict arbiter; the
- * remaining messages are SQLite's only structured-enough reports for the same
- * missing index/column states.
+ * This runtime-DML classifier deliberately includes missing conflict arbiters
+ * as well as missing columns. Provisioning code must instead use the narrower
+ * SQLite column predicate above before it performs any DDL.
  */
 export function isEdgeMatchIdentityStorageUnavailableError(
   error: unknown,
 ): boolean {
+  if (isSqliteMissingEdgeMatchIdentityColumnError(error)) return true;
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) continue;
     const code: unknown = Reflect.get(link, "code");
@@ -586,19 +624,10 @@ export function isEdgeMatchIdentityStorageUnavailableError(
         return true;
       }
     }
-    if (typeof message !== "string") continue;
     if (
       code === "SQLITE_ERROR" &&
       message ===
         "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint"
-    ) {
-      return true;
-    }
-    if (
-      code === "SQLITE_ERROR" &&
-      /^(?:no such column: (?:[^.]+\.)?|table .+ has no column named |no column named )"?match_identity_(?:name|key)"?(?: - should this be a string literal in single-quotes\?)?$/.test(
-        message,
-      )
     ) {
       return true;
     }

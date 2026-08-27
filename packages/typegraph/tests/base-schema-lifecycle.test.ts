@@ -13,6 +13,14 @@ function resolvedVoid(): Promise<void> {
   return Promise.resolve();
 }
 
+function coveredStep(version: number) {
+  return {
+    version,
+    adopt: resolvedVoid,
+    bootstrap: { phase: "covered-by-generated-ddl" as const },
+  };
+}
+
 describe("base schema lifecycle state machine", () => {
   it.each([0, 1.5])("refuses invalid current version %s", (currentVersion) => {
     expect(() =>
@@ -33,10 +41,7 @@ describe("base schema lifecycle state machine", () => {
         readVersion: () => Promise.resolve(0),
         ensureVersionTable: resolvedVoid,
         writeVersion: (version) => Promise.resolve(version),
-        steps: [
-          { version: 1, adopt: resolvedVoid },
-          { version: 3, adopt: resolvedVoid },
-        ],
+        steps: [coveredStep(1), coveredStep(3)],
       }),
     ).toThrow(CompilerInvariantError);
   });
@@ -48,7 +53,7 @@ describe("base schema lifecycle state machine", () => {
         readVersion: () => Promise.resolve(0),
         ensureVersionTable: resolvedVoid,
         writeVersion: (version) => Promise.resolve(version),
-        steps: [{ version: 1, adopt: resolvedVoid }],
+        steps: [coveredStep(1)],
       }),
     ).toThrow(CompilerInvariantError);
   });
@@ -63,10 +68,7 @@ describe("base schema lifecycle state machine", () => {
       readVersion: () => Promise.resolve(version),
       ensureVersionTable: resolvedVoid,
       writeVersion: (writtenVersion) => Promise.resolve(writtenVersion),
-      steps: [1, 2, 3].map((stepVersion) => ({
-        version: stepVersion,
-        adopt: resolvedVoid,
-      })),
+      steps: [1, 2, 3].map((stepVersion) => coveredStep(stepVersion)),
     });
 
     await expect(lifecycle.assertCurrent()).rejects.toSatisfy(
@@ -93,6 +95,7 @@ describe("base schema lifecycle state machine", () => {
           adopted.push(version);
           return Promise.resolve();
         },
+        bootstrap: { phase: "covered-by-generated-ddl" },
       })),
     });
 
@@ -115,6 +118,7 @@ describe("base schema lifecycle state machine", () => {
           adopted.push(version);
           return Promise.resolve();
         },
+        bootstrap: { phase: "covered-by-generated-ddl" },
       })),
     });
 
@@ -130,10 +134,7 @@ describe("base schema lifecycle state machine", () => {
       readVersion,
       ensureVersionTable: resolvedVoid,
       writeVersion: () => Promise.resolve(4),
-      steps: [1, 2, 3].map((version) => ({
-        version,
-        adopt: resolvedVoid,
-      })),
+      steps: [1, 2, 3].map((version) => coveredStep(version)),
     });
 
     await expect(lifecycle.adopt()).rejects.toSatisfy(
@@ -153,7 +154,7 @@ describe("base schema lifecycle state machine", () => {
         readVersion: () => Promise.resolve(0),
         ensureVersionTable: resolvedVoid,
         writeVersion: () => Promise.resolve(observedVersion),
-        steps: [{ version: 1, adopt: resolvedVoid }],
+        steps: [coveredStep(1)],
       });
 
       await expect(lifecycle.adopt()).rejects.toSatisfy(
@@ -165,7 +166,7 @@ describe("base schema lifecycle state machine", () => {
   it("uses bootstrap-specific adoption while preserving the final-version gate", async () => {
     const beforeBootstrapAdopt = vi.fn(resolvedVoid);
     const regularAdopt = vi.fn(resolvedVoid);
-    const bootstrapAdopt = vi.fn(resolvedVoid);
+    const afterBootstrapAdopt = vi.fn(resolvedVoid);
     const lifecycle = createBaseSchemaLifecycle({
       currentVersion: 2,
       readVersion: () => Promise.resolve(0),
@@ -175,14 +176,12 @@ describe("base schema lifecycle state machine", () => {
         {
           version: 1,
           adopt: regularAdopt,
-          adoptBeforeBootstrap: beforeBootstrapAdopt,
-          adoptAfterBootstrap: bootstrapAdopt,
+          bootstrap: { phase: "before", adopt: beforeBootstrapAdopt },
         },
         {
           version: 2,
           adopt: regularAdopt,
-          adoptBeforeBootstrap: beforeBootstrapAdopt,
-          adoptAfterBootstrap: bootstrapAdopt,
+          bootstrap: { phase: "after", adopt: afterBootstrapAdopt },
         },
       ],
     });
@@ -191,7 +190,7 @@ describe("base schema lifecycle state machine", () => {
     await lifecycle.adoptAfterBootstrap(0);
 
     expect(regularAdopt).not.toHaveBeenCalled();
-    expect(beforeBootstrapAdopt).toHaveBeenCalledTimes(2);
-    expect(bootstrapAdopt).toHaveBeenCalledTimes(2);
+    expect(beforeBootstrapAdopt).toHaveBeenCalledTimes(1);
+    expect(afterBootstrapAdopt).toHaveBeenCalledTimes(1);
   });
 });

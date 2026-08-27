@@ -26,16 +26,13 @@
  * ```
  */
 import type { Client } from "@libsql/client";
-import { getTableName } from "drizzle-orm";
 import { drizzle, type LibSQLDatabase } from "drizzle-orm/libsql";
 
+import { BaseSchemaMigrationError } from "../../errors";
 import { libsqlVectorStrategy } from "../../query/dialect/vector/libsql-strategy";
-import { isEdgeMatchIdentityStorageUnavailableError } from "../../utils/sql-errors";
-import {
-  generateSqliteMigrationSQL,
-  planSqliteEdgeMatchIdentityAdoption,
-  quoteDdlIdentifier,
-} from "../drizzle/ddl";
+import { requireDefined } from "../../utils/presence";
+import { isSqliteMissingEdgeMatchIdentityColumnError } from "../../utils/sql-errors";
+import { generateSqliteMigrationSQL } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
@@ -56,27 +53,22 @@ export type {
 async function installLibsqlBaseSchema(
   client: Client,
   tables: SqliteTables,
+  backend: AdapterBackend<AnySqliteDatabase>,
 ): Promise<void> {
   const installationSql = generateSqliteMigrationSQL(tables);
   try {
     await client.executeMultiple(installationSql);
+    await requireDefined(backend.assertBaseSchemaCurrent)();
   } catch (error) {
-    if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
-    const edgeTableName = getTableName(tables.edges);
-    const result = await client.execute(
-      `PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`,
-    );
-    const columns = new Set(
-      result.rows.flatMap((row) =>
-        typeof row["name"] === "string" ? [row["name"]] : [],
-      ),
-    );
-    const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
-      edgeTableName,
-      columns,
-    );
-    if (adoptionSql.length === 0) throw error;
-    await client.executeMultiple([...adoptionSql, installationSql].join("\n"));
+    const requiresLifecycleAdoption =
+      isSqliteMissingEdgeMatchIdentityColumnError(error) ||
+      (error instanceof BaseSchemaMigrationError &&
+        error.details.reason !== "newer");
+    if (!requiresLifecycleAdoption) throw error;
+    // The fast script is fresh-installation DDL, not an upgrade planner. A
+    // legacy or stale database must re-enter the numbered lifecycle so future
+    // releases cannot be stamped without every missing adoption step.
+    await requireDefined(backend.bootstrapTables)();
   }
 }
 
@@ -155,9 +147,6 @@ export async function createLibsqlBackend(
 ): Promise<LibsqlBackendResult> {
   const tables = options.tables ?? defaultTables;
   const db = drizzle(client);
-
-  await installLibsqlBaseSchema(client, tables);
-
   const backend = createSqliteBackend(db, {
     executionProfile: {
       isSync: false,
@@ -168,6 +157,8 @@ export async function createLibsqlBackend(
     // so the strategy is wired unconditionally.
     vector: libsqlVectorStrategy,
   });
+
+  await installLibsqlBaseSchema(client, tables, backend);
 
   return { backend, db };
 }

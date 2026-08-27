@@ -30,11 +30,15 @@ import {
   drizzle,
 } from "drizzle-orm/better-sqlite3";
 
-import { ConfigurationError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
-import { isEdgeMatchIdentityStorageUnavailableError } from "../../utils/sql-errors";
+import {
+  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteMissingEdgeMatchIdentityColumnError,
+} from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
+import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
 import {
   generateSqliteMigrationSQL,
   planSqliteEdgeMatchIdentityAdoption,
@@ -75,24 +79,41 @@ function installLocalSqliteBaseSchema(
   sqlite: Database.Database,
   tables: SqliteTables,
 ): void {
+  if (CURRENT_BASE_SCHEMA_VERSION !== 1) {
+    throw new CompilerInvariantError(
+      "The synchronous managed SQLite installation path only implements base-schema v1 adoption.",
+      { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
+    );
+  }
   const installationSql = generateSqliteMigrationSQL(tables);
   try {
     sqlite.exec(installationSql);
   } catch (error) {
-    if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
+    if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
     const edgeTableName = getTableName(tables.edges);
-    const rows = sqlite
-      .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
-      .all() as readonly Readonly<{ name?: unknown }>[];
-    const columns = new Set(
-      rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
-    );
-    const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
-      edgeTableName,
-      columns,
-    );
-    if (adoptionSql.length === 0) throw error;
-    sqlite.exec([...adoptionSql, installationSql].join("\n"));
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const rows = sqlite
+        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
+        .all() as readonly Readonly<{ name?: unknown }>[];
+      const columns = new Set(
+        rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+      );
+      const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
+        edgeTableName,
+        columns,
+      );
+      try {
+        sqlite.exec([...adoptionSql, installationSql].join("\n"));
+        return;
+      } catch (repairError) {
+        if (
+          attempt === 2 ||
+          !isSqliteDuplicateEdgeMatchIdentityColumnError(repairError)
+        ) {
+          throw repairError;
+        }
+      }
+    }
   }
 }
 

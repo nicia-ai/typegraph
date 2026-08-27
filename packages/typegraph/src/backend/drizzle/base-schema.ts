@@ -5,19 +5,19 @@ import { BaseSchemaMigrationError, CompilerInvariantError } from "../../errors";
  *
  * A new base-table shape replaces neither an older entry nor its digests: add
  * the next version here and add the corresponding adoption step to every
- * bundled backend. The shape ratchet tests compare the latest entry with the
- * generated base DDL, while the lifecycle refuses a backend whose step
+ * bundled backend. The ordered-shape ratchet tests compare the latest entry
+ * with generated base DDL, while the lifecycle refuses a backend whose step
  * registry does not reach the same version.
  */
 export const BASE_SCHEMA_RELEASES = [
   {
     version: 1,
     id: "versioned-base-storage",
-    shapeDigests: {
+    orderedShapeDigests: {
       postgres:
-        "c9c81dcb1e7b8a1a8ccf43fe48aebb9677d211b734be0d24a94ecb3b148ebd60",
+        "b8f25c291cc75a36102ba7160c25923926f263f61ed1d3d05619708936d0246f",
       sqlite:
-        "0f5a64c5efd432fad2b93bb13353d20e37d57a845bacfb28c8cc604e1ae99b6f",
+        "68363b5bf1c91c5f3e7528ebd255b542a1cd26677a01c7b2271e100e08a1e354",
     },
   },
 ] as const;
@@ -45,11 +45,16 @@ export type BaseSchemaLifecycle = Readonly<{
   assertCurrent(): Promise<void>;
 }>;
 
+type BaseSchemaBootstrapStrategy =
+  | Readonly<{ phase: "covered-by-generated-ddl" }>
+  | Readonly<{ phase: "before"; adopt(): Promise<void> }>
+  | Readonly<{ phase: "after"; adopt(): Promise<void> }>;
+
 type BaseSchemaStep = Readonly<{
   version: number;
+  /** Steps may be retried or raced by concurrent adopters and must be idempotent. */
   adopt(): Promise<void>;
-  adoptBeforeBootstrap?(): Promise<void>;
-  adoptAfterBootstrap?(): Promise<void>;
+  bootstrap: BaseSchemaBootstrapStrategy;
 }>;
 
 type BaseSchemaLifecycleOptions = Readonly<{
@@ -182,17 +187,16 @@ export function createBaseSchemaLifecycle(
   async function adoptAfterBootstrap(
     startingVersion: number | undefined,
   ): Promise<void> {
-    // Full generated DDL already created every current base relation. A step's
-    // bootstrap hook therefore owns only upgrades CREATE TABLE cannot apply to
-    // a pre-existing relation, avoiding duplicate cold-start CREATEs.
+    // Generated DDL owns explicitly covered steps. Before/after strategies own
+    // only upgrades that CREATE TABLE cannot apply to a pre-existing relation.
     const state = classifyVersion(startingVersion, currentVersion);
     if (state === "current") return;
     if (state === "newer") {
       throw migrationError(startingVersion, currentVersion, state);
     }
-    await runSteps(startingVersion ?? 0, (step) =>
-      step.adoptAfterBootstrap?.() ?? Promise.resolve(),
-    );
+    await runSteps(startingVersion ?? 0, async (step) => {
+      if (step.bootstrap.phase === "after") await step.bootstrap.adopt();
+    });
   }
 
   async function adoptBeforeBootstrap(
@@ -204,7 +208,7 @@ export function createBaseSchemaLifecycle(
     }
     for (const step of steps) {
       if (step.version <= startingVersion) continue;
-      await step.adoptBeforeBootstrap?.();
+      if (step.bootstrap.phase === "before") await step.bootstrap.adopt();
     }
   }
 

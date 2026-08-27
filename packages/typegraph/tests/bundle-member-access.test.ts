@@ -33,11 +33,11 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 86;
+const REASONED_FLOOR = 88;
 const DEFERRED_LIVE_TOTAL = 204;
 const DEFERRED_DECLARED_TOTAL = 207;
 const EXCLUDED_COUNT = 4;
-const TOTAL_ROW_COUNT = 303;
+const TOTAL_ROW_COUNT = 305;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:160#executeStatement",
   "backend/migrate-recorded-time.ts:167#executeStatement",

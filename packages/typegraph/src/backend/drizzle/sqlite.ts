@@ -56,6 +56,7 @@ import { chunk as chunkArray } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
+  isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import { markBundledRootAtomicEdgeBatch } from "../capabilities/atomic-edge-batch";
@@ -1837,19 +1838,34 @@ export function createSqliteBackend(
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
     const edgeTableName = getTableName(tables.edges);
-    const columnRows = await executionAdapter.execute<{
-      name?: unknown;
-    }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
-    const columns = new Set(
-      columnRows.flatMap((row) =>
-        typeof row.name === "string" ? [row.name] : [],
-      ),
-    );
-    for (const statement of planSqliteEdgeMatchIdentityAdoption(
-      edgeTableName,
-      columns,
-    )) {
-      await db.run(sql.raw(statement));
+    // SQLite has no ADD COLUMN IF NOT EXISTS. Re-read and re-plan after each
+    // precisely classified duplicate-column race; two retries cover the two
+    // additive columns even when concurrent cold starts interleave both.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const columnRows = await executionAdapter.execute<{
+        name?: unknown;
+      }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
+      const columns = new Set(
+        columnRows.flatMap((row) =>
+          typeof row.name === "string" ? [row.name] : [],
+        ),
+      );
+      try {
+        for (const statement of planSqliteEdgeMatchIdentityAdoption(
+          edgeTableName,
+          columns,
+        )) {
+          await db.run(sql.raw(statement));
+        }
+        return;
+      } catch (error) {
+        if (
+          attempt === 2 ||
+          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
+        ) {
+          throw error;
+        }
+      }
     }
   }
 
@@ -1906,7 +1922,10 @@ export function createSqliteBackend(
           await ensureGraphTemplatesTable();
           await ensureEdgeMatchIdentityStorage();
         },
-        adoptBeforeBootstrap: ensureEdgeMatchIdentityStorage,
+        bootstrap: {
+          phase: "before",
+          adopt: ensureEdgeMatchIdentityStorage,
+        },
       },
     ],
   });

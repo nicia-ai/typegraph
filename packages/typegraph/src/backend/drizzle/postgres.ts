@@ -1371,7 +1371,10 @@ export function createPostgresBackend(
           await ensureGraphTemplatesTable();
           await ensureEdgeMatchIdentityStorage();
         },
-        adoptBeforeBootstrap: ensureEdgeMatchIdentityStorage,
+        bootstrap: {
+          phase: "before",
+          adopt: ensureEdgeMatchIdentityStorage,
+        },
       },
     ],
   });

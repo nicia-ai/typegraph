@@ -29,6 +29,8 @@ import {
   isMissingTableError,
   isNotNullColumnViolation,
   isPostgresConcurrentDdlRaceError,
+  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteMissingEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
   isSqliteStaleSnapshotError,
 } from "../src/utils/sql-errors";
@@ -864,6 +866,45 @@ describe("isEdgeMatchIdentityStorageUnavailableError", () => {
           ),
           { code: "SQLITE_ERROR" },
         ),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("edge match-identity provisioning error classifiers", () => {
+  it("restricts automatic DDL to SQLite missing-column failures", () => {
+    const missingColumn = Object.assign(
+      new Error("no such column: match_identity_name"),
+      { code: "SQLITE_ERROR" },
+    );
+    const missingArbiter = Object.assign(
+      new Error(
+        "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint",
+      ),
+      { code: "SQLITE_ERROR" },
+    );
+
+    expect(isSqliteMissingEdgeMatchIdentityColumnError(missingColumn)).toBe(
+      true,
+    );
+    expect(isSqliteMissingEdgeMatchIdentityColumnError(missingArbiter)).toBe(
+      false,
+    );
+  });
+
+  it("recognizes only the two duplicate-column adoption races", () => {
+    expect(
+      isSqliteDuplicateEdgeMatchIdentityColumnError(
+        Object.assign(new Error("duplicate column name: match_identity_key"), {
+          code: "SQLITE_ERROR",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isSqliteDuplicateEdgeMatchIdentityColumnError(
+        Object.assign(new Error("duplicate column name: props"), {
+          code: "SQLITE_ERROR",
+        }),
       ),
     ).toBe(false);
   });

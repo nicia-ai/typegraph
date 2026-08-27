@@ -50,7 +50,14 @@ const knows = defineEdge("knows", {
 const graph = defineGraph({
   id: "base_schema_adoption",
   nodes: { Person: { type: Person } },
-  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  edges: {
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      matchIdentity: { name: "knows-label", fields: ["label"] },
+    },
+  },
 });
 
 type SqliteClient = Database.Database;
@@ -128,6 +135,13 @@ async function assertTemplatesWork<G extends typeof graph>(
     graphId: "base_schema_adoption_target",
   });
   expect(instantiated.status).toBe("ready");
+}
+
+async function assertMatchIdentityWrite(backend: GraphBackend): Promise<void> {
+  const [store] = await createStoreWithSchema(graph, backend);
+  const source = await store.nodes.Person.create({ name: "source" });
+  const target = await store.nodes.Person.create({ name: "target" });
+  await store.edges.knows.create(source, target, { label: "provisioned" });
 }
 
 function reconciledSurface(
@@ -283,10 +297,7 @@ async function provisionLegacyPostgresBootstrap(): Promise<ProvisionedInstallati
   }
 }
 
-/**
- * Closed registry of every factory/script that claims to finish base-schema
- * installation without a later privileged adoption call.
- */
+/** Covered complete-installation entry points; bring-your-own factories omit DDL. */
 const PROVISIONING_PATHS = [
   {
     id: "generated-postgres-installation",
@@ -326,6 +337,7 @@ describe("deployment-wide base-schema adoption", () => {
       const installation = await provision();
       try {
         await requireDefined(installation.backend.assertBaseSchemaCurrent)();
+        await assertMatchIdentityWrite(installation.backend);
       } finally {
         await installation.close();
       }
@@ -338,11 +350,36 @@ describe("deployment-wide base-schema adoption", () => {
       const installation = await provision();
       try {
         await requireDefined(installation.backend.assertBaseSchemaCurrent)();
+        await assertMatchIdentityWrite(installation.backend);
       } finally {
         await installation.close();
       }
     },
   );
+
+  it("refuses to false-stamp a legacy database through fresh-installation SQL", () => {
+    const client = new Database(":memory:");
+    try {
+      client.exec(LEGACY_EDGE_TABLE_SQL);
+      expect(() => client.exec(generateSqliteMigrationSQL())).toThrow();
+      const markerTable = client
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'typegraph_base_schema_versions'",
+        )
+        .get();
+      const marker =
+        markerTable === undefined ? undefined : (
+          client
+            .prepare(
+              'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+            )
+            .get()
+        );
+      expect(marker).toBeUndefined();
+    } finally {
+      client.close();
+    }
+  });
 
   it("adopts a legacy SQLite installation and registers templates", async () => {
     const tableNames = {

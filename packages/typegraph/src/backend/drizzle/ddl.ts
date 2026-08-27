@@ -143,6 +143,8 @@ export function planSqliteEdgeMatchIdentityAdoption(
   tableName: string,
   existingColumns: ReadonlySet<string>,
 ): readonly string[] {
+  // A real SQLite table always has at least one column; an empty PRAGMA result
+  // means the edge table does not exist and current generated DDL will create it.
   if (existingColumns.size === 0) return [];
   const nameMissing = !existingColumns.has(EDGE_MATCH_IDENTITY_NAME_COLUMN);
   const keyMissing = !existingColumns.has(EDGE_MATCH_IDENTITY_KEY_COLUMN);
