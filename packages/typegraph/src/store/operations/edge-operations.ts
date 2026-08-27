@@ -3767,15 +3767,18 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           writes += toCreate.length;
         }
 
-        // Step 5: Handle existing edges (update/skip/resurrect)
-        for (const entry of toFetch) {
-          if (entry.isDeleted) {
-            // As in the single-item path: a resurrection forwards `validFrom`
-            // so a stated lower bound restates the revived row's whole window,
-            // and its cardinality re-check runs inside the resurrecting write.
-            const edge = await executeEdgeUpsertUpdate(
-              ctx,
-              {
+        // Step 5: Handle existing edges (update/skip/resurrect). The batch
+        // helper owns the same update/resurrection semantics as the single
+        // entry path, including validity-window checks and cardinality
+        // fencing. It can also select the native resolved-update program for
+        // a live, no-window batch. Coalescing is intentionally kept on the
+        // outcome path below: the batch helper has no per-entry dirty-check
+        // candidate, so routing that shape through it would turn a found
+        // replay into an update.
+        const updateEntries = toFetch.map(
+          (entry) =>
+            ({
+              input: {
                 id: entry.row.id,
                 identity: {
                   kind,
@@ -3796,55 +3799,75 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
                   onImmutableLowerBound: entry.onImmutableLowerBound,
                 }),
               },
-              rawTarget,
-              { clearDeleted: true },
-            );
-            results[entry.index] = { edge, action: "resurrected" };
+              clearDeleted: entry.isDeleted,
+              existing: entry.row,
+            }) satisfies EdgeUpsertUpdateBatchEntry,
+        );
+
+        const batchEntryIndexes =
+          ifExists === "update" ?
+            toFetch.map((_entry, index) => index)
+          : toFetch.flatMap((entry, index) => (entry.isDeleted ? [index] : []));
+        const canBatchUpdates =
+          !ctx.coalesceUnchangedUpsertsEnabled && batchEntryIndexes.length > 0;
+        if (canBatchUpdates) {
+          const updated = await executeEdgeUpsertUpdateBatch(
+            ctx,
+            batchEntryIndexes.map((index) =>
+              requireDefined(updateEntries[index]),
+            ),
+            rawTarget,
+          );
+          for (const [updateIndex, entryIndex] of batchEntryIndexes.entries()) {
+            const entry = requireDefined(toFetch[entryIndex]);
+            const edge = requireDefined(updated[updateIndex]);
+            results[entry.index] = {
+              edge,
+              action: entry.isDeleted ? "resurrected" : "updated",
+            };
             writes += 1;
-          } else if (ifExists === "update") {
-            // As in the single-item path: `validFrom` is forwarded so the
-            // shared write guard refuses a bound the in-place update cannot
-            // store, rather than dropping it silently here.
-            const outcome = await executeEdgeUpsertUpdateWithOutcome(
-              ctx,
-              {
-                id: entry.row.id,
-                identity: {
-                  kind,
-                  fromKind: entry.fromKind,
-                  fromId: entry.fromId,
-                  toKind: entry.toKind,
-                  toId: entry.toId,
+          }
+        } else {
+          for (const [entryIndex, entry] of toFetch.entries()) {
+            const input = requireDefined(updateEntries[entryIndex]).input;
+            if (entry.isDeleted) {
+              // As in the single-item path: a resurrection forwards
+              // `validFrom` so a stated lower bound restates the revived row's
+              // whole window, and its cardinality re-check runs inside the
+              // resurrecting write.
+              const edge = await executeEdgeUpsertUpdate(
+                ctx,
+                input,
+                rawTarget,
+                { clearDeleted: true },
+              );
+              results[entry.index] = { edge, action: "resurrected" };
+              writes += 1;
+            } else if (ifExists === "update") {
+              // As in the single-item path: `validFrom` is forwarded so the
+              // shared write guard refuses a bound the in-place update cannot
+              // store, rather than dropping it here.
+              const outcome = await executeEdgeUpsertUpdateWithOutcome(
+                ctx,
+                input,
+                rawTarget,
+                {
+                  coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled,
+                  coalesceCandidate: entry.row,
                 },
-                props: entry.validatedProps,
-                ...(entry.validFrom !== undefined && {
-                  validFrom: entry.validFrom,
-                }),
-                ...(entry.validTo !== undefined && { validTo: entry.validTo }),
-                ...(entry.clearValidTo === true && {
-                  clearValidTo: true as const,
-                }),
-                ...(entry.onImmutableLowerBound !== undefined && {
-                  onImmutableLowerBound: entry.onImmutableLowerBound,
-                }),
-              },
-              rawTarget,
-              {
-                coalesceUnchanged: ctx.coalesceUnchangedUpsertsEnabled,
-                coalesceCandidate: entry.row,
-              },
-            );
-            results[entry.index] = {
-              edge: outcome.edge,
-              action: outcome.wrote ? "updated" : "found",
-            };
-            if (outcome.wrote) writes += 1;
-          } else {
-            assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
-            results[entry.index] = {
-              edge: rowToEdge(entry.row),
-              action: "found",
-            };
+              );
+              results[entry.index] = {
+                edge: outcome.edge,
+                action: outcome.wrote ? "updated" : "found",
+              };
+              if (outcome.wrote) writes += 1;
+            } else {
+              assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
+              results[entry.index] = {
+                edge: rowToEdge(entry.row),
+                action: "found",
+              };
+            }
           }
         }
 
