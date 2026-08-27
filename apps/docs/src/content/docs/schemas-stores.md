@@ -2108,7 +2108,7 @@ isolation, so a later query in the batch can observe a commit the earlier ones d
 there is no public way to run a fluent query or a batch inside a transaction, so a snapshot across
 fluent queries is **not available today**. Collection reads can have one —
 `store.transaction(fn, { isolationLevel: "repeatable_read" })` reading through `tx.nodes` /
-`tx.edges` — but only where the backend has transactions (others ignore the option entirely), and a
+`tx.edges` — but only where the backend has transactions (other backends refuse before invoking the callback), and a
 history-enabled store on PostgreSQL additionally requires `accessMode: "read_only"` or the call
 throws.
 

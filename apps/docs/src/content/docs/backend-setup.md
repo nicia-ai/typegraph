@@ -1099,7 +1099,8 @@ transaction runner.
 
 **Important:** D1 has no interactive transaction primitive
 (`D1Database.batch(...)` is transactional, but batch-only — not an
-interactive runner), so `store.transaction()` is non-atomic on D1. See
+interactive runner), so `store.transaction()` refuses on D1 before invoking
+its callback. See
 [Limitations](/limitations) for details. For a transactional Cloudflare
 SQLite store, use **Durable Objects** (below) instead.
 

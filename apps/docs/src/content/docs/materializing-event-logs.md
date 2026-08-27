@@ -214,11 +214,10 @@ transactional driver, or deliberately construct a raw Store and own schema/write
 coordination yourself.
 
 ```typescript
-await store.transaction(async (tx) => {
-  for (const change of batch.changes) {
-    await projectChange(tx, change);
-  }
-});
+for (const change of batch.changes) {
+  // Each successful projection may commit before a later projection or cursor write fails.
+  await projectChange(store, change);
+}
 
 await cursorStore.save({
   sourceId: batch.sourceId,
