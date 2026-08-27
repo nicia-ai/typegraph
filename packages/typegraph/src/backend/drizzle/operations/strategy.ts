@@ -96,6 +96,8 @@ import {
   buildAtomicEdgeDeleteBatchWithSchemaFence,
   buildAtomicEdgeResolvedUpdateBatch,
   buildConvergeEdgeCreate,
+  buildAtomicConvergeEdgeCreate,
+  buildAtomicConvergeEdgeResurrect,
   buildCountEdgesFrom,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
@@ -342,6 +344,9 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   /** Single-statement match-key convergence. */
   buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
+  /** Closed-program durable convergence and its tombstone revival leg. */
+  buildAtomicConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
+  buildAtomicConvergeEdgeResurrect?: (params: ConvergeEdgeCreateParams) => SQL;
   /** Whether the builder may inspect dynamic JSON match fields. */
   dynamicEdgeConvergence: boolean;
   /** PostgreSQL transaction-only claim + endpoint + edge write. */
@@ -828,6 +833,10 @@ function createCommonOperationStrategy(
     ...fulltextBuilders,
     buildConvergeEdgeCreate: (params) =>
       buildConvergeEdgeCreate(tables, params),
+    buildAtomicConvergeEdgeCreate: (params) =>
+      buildAtomicConvergeEdgeCreate(tables, params),
+    buildAtomicConvergeEdgeResurrect: (params) =>
+      buildAtomicConvergeEdgeResurrect(tables, params),
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",

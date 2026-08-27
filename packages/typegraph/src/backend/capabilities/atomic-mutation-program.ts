@@ -10,6 +10,7 @@
 import type {
   ClaimEdgeCardinalityParams,
   EdgeRow,
+  EdgeConvergenceMatch,
   GraphBackend,
   InsertEdgeParams,
   InsertNodeParams,
@@ -63,6 +64,27 @@ export type AtomicEdgeBatchRowsInput = Readonly<{
 export interface AtomicEdgeBatchExecutor {
   (input: AtomicEdgeBatchCountInput): Promise<number>;
   (input: AtomicEdgeBatchRowsInput): Promise<readonly EdgeRow[]>;
+}
+
+export type AtomicEdgeConvergenceEntry = Readonly<{
+  params: InsertEdgeParams;
+  match: EdgeConvergenceMatch;
+}>;
+
+export type AtomicEdgeConvergenceResult = Readonly<{
+  row: EdgeRow;
+  outcome: "created" | "found" | "resurrected";
+}>;
+
+/** One native program for a durable, many-cardinality endpoint convergence. */
+export interface AtomicEdgeConvergenceExecutor {
+  readonly maxEntries: number;
+  (
+    input: Readonly<{
+      entries: readonly AtomicEdgeConvergenceEntry[];
+      schemaFence: SchemaWriteFenceParams;
+    }>,
+  ): Promise<readonly AtomicEdgeConvergenceResult[]>;
 }
 
 export type AtomicEdgeDeleteBatchInput = Readonly<{
@@ -198,6 +220,7 @@ export class AtomicNodeDeleteRestrictedRefusalError extends Error {
 export type AtomicMutationProgramExecutor = Readonly<{
   createNodes?: AtomicNodeBatchExecutor;
   createEdges?: AtomicEdgeBatchExecutor;
+  convergeEdges?: AtomicEdgeConvergenceExecutor;
   deleteNodes?: AtomicNodeDeleteBatchExecutor;
   deleteEdges?: AtomicEdgeDeleteBatchExecutor;
   updateNodes?: AtomicNodeResolvedUpdateBatchExecutor;
@@ -217,6 +240,7 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
   executor: Readonly<{
     createNodes?: AtomicNodeBatchExecutor | undefined;
     createEdges?: AtomicEdgeBatchExecutor | undefined;
+    convergeEdges?: AtomicEdgeConvergenceExecutor | undefined;
     deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
     deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
     updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
@@ -235,7 +259,10 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
       {}
     : {
         createEdges: executor.createEdges,
-      }),
+    }),
+    ...(executor.convergeEdges === undefined ?
+      {}
+    : { convergeEdges: executor.convergeEdges }),
     ...(executor.deleteNodes === undefined ?
       {}
     : {
@@ -294,6 +321,18 @@ export function markBundledRootAtomicEdgeBatch<T extends object>(
 }
 
 /** @internal Narrow test seam over the single mutation-program registry. */
+export function markBundledRootAtomicEdgeConvergence<T extends object>(
+  target: T,
+  executor: AtomicEdgeConvergenceExecutor,
+): T {
+  const existing = ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+  return markBundledRootAtomicMutationPrograms(target, {
+    ...existing,
+    convergeEdges: executor,
+  });
+}
+
+/** @internal Narrow test seam over the single mutation-program registry. */
 export function resolveBundledRootAtomicNodeBatch(
   target: GraphBackend | TransactionBackend,
 ): AtomicNodeBatchExecutor | undefined {
@@ -305,4 +344,11 @@ export function resolveBundledRootAtomicEdgeBatch(
   target: GraphBackend | TransactionBackend,
 ): AtomicEdgeBatchExecutor | undefined {
   return resolveBundledRootAtomicMutationPrograms(target)?.createEdges;
+}
+
+/** @internal Narrow test seam over the single mutation-program registry. */
+export function resolveBundledRootAtomicEdgeConvergence(
+  target: GraphBackend | TransactionBackend,
+): AtomicEdgeConvergenceExecutor | undefined {
+  return resolveBundledRootAtomicMutationPrograms(target)?.convergeEdges;
 }
