@@ -11,6 +11,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -217,6 +218,31 @@ describe("managed write exchange inventory", () => {
             })),
           ),
         ),
+        await measure("node-mixed-upsert-batch", () =>
+          transactionlessStore.nodes.Person.bulkUpsertById([
+            {
+              id: requireDefined(upsertableNodes[0]).id,
+              props: { name: "Mixed Node Update" },
+            },
+            { id: "mixed-node-create", props: { name: "Mixed Node Create" } },
+          ]),
+        ),
+        await measure("edge-mixed-upsert-batch", () =>
+          transactionlessStore.edges.unconstrained.bulkUpsertById([
+            {
+              id: requireDefined(upsertableEdges[0]).id,
+              from,
+              to,
+              props: { role: "Mixed Edge Update" },
+            },
+            {
+              id: "mixed-edge-create" as never,
+              from,
+              to,
+              props: { role: "Mixed Edge Create" },
+            },
+          ]),
+        ),
       ];
 
       expect(measurements).toMatchInlineSnapshot(`
@@ -295,6 +321,16 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 1,
             "name": "edge-update-upsert-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "node-mixed-upsert-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "edge-mixed-upsert-batch",
           },
         ]
       `);

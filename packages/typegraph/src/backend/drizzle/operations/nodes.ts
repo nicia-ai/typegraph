@@ -35,6 +35,43 @@ function qualifiedColumn(
   return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
 }
 
+const INITIAL_NODE_VERSION = 1;
+const NODE_VERSION_INCREMENT = 1;
+
+function atomicNodeCreatePostimage(
+  entry: AtomicNodeBatchEntry,
+  timestamp: string,
+) {
+  const params = entry.params;
+  return {
+    graphId: params.graphId,
+    kind: params.kind,
+    id: params.id,
+    propsJson: JSON.stringify(params.props),
+    version: INITIAL_NODE_VERSION,
+    // The temporal inventory requires the owner and its input on one line.
+    // prettier-ignore
+    validFrom: resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp),
+    validTo: params.validTo,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  } as const;
+}
+
+function atomicNodeUpdatePostimage(
+  entry: AtomicNodeResolvedUpdateEntry,
+  timestamp: string,
+) {
+  return {
+    graphId: entry.graphId,
+    kind: entry.kind,
+    id: entry.id,
+    propsJson: JSON.stringify(entry.props),
+    version: entry.expectedVersion + NODE_VERSION_INCREMENT,
+    updatedAt: timestamp,
+  } as const;
+}
+
 /**
  * Builds an INSERT query for a node.
  * Uses raw column names in the column list (required by SQL syntax).
@@ -368,19 +405,18 @@ export function buildAtomicNodeBatchWithSchemaFence(
     sql`, `,
   );
   const values = entries.map((entry) => {
-    const nodeParams = entry.params;
-    const propsJson = JSON.stringify(nodeParams.props);
+    const postimage = atomicNodeCreatePostimage(entry, timestamp);
     return sql`
       (
-        ${castBoundValueForColumn(nodes.graphId, nodeParams.graphId)},
-        ${castBoundValueForColumn(nodes.kind, nodeParams.kind)},
-        ${castBoundValueForColumn(nodes.id, nodeParams.id)},
-        ${castBoundValueForColumn(nodes.props, propsJson)},
-        ${castBoundValueForColumn(nodes.version, 1)},
-        ${castBoundValueForColumn(nodes.validFrom, sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp)))},
-        ${castBoundValueForColumn(nodes.validTo, sqlNull(nodeParams.validTo))},
-        ${castBoundValueForColumn(nodes.createdAt, timestamp)},
-        ${castBoundValueForColumn(nodes.updatedAt, timestamp)}
+        ${castBoundValueForColumn(nodes.graphId, postimage.graphId)},
+        ${castBoundValueForColumn(nodes.kind, postimage.kind)},
+        ${castBoundValueForColumn(nodes.id, postimage.id)},
+        ${castBoundValueForColumn(nodes.props, postimage.propsJson)},
+        ${castBoundValueForColumn(nodes.version, postimage.version)},
+        ${castBoundValueForColumn(nodes.validFrom, sqlNull(postimage.validFrom))},
+        ${castBoundValueForColumn(nodes.validTo, sqlNull(postimage.validTo))},
+        ${castBoundValueForColumn(nodes.createdAt, postimage.createdAt)},
+        ${castBoundValueForColumn(nodes.updatedAt, postimage.updatedAt)}
       )
     `;
   });
@@ -596,9 +632,16 @@ export function buildAtomicNodeResolvedUpdateBatch(
   const { nodes, schemaVersions } = tables;
   const first = entries[0];
   if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
-  const propsCases = entries.map(
-    (entry) =>
-      sql`WHEN ${entry.id} THEN ${castBoundValueForColumn(nodes.props, JSON.stringify(entry.props))}`,
+  const firstPostimage = atomicNodeUpdatePostimage(first, timestamp);
+  const postimages = [
+    firstPostimage,
+    ...entries
+      .slice(1)
+      .map((entry) => atomicNodeUpdatePostimage(entry, timestamp)),
+  ];
+  const propsCases = postimages.map(
+    (postimage) =>
+      sql`WHEN ${postimage.id} THEN ${castBoundValueForColumn(nodes.props, postimage.propsJson)}`,
   );
   const expectedRows = entries.map(
     (entry) =>
@@ -619,12 +662,15 @@ export function buildAtomicNodeResolvedUpdateBatch(
           ${sql.join(propsCases, sql` `)}
           ELSE ${nodes.props}
         END,
-        ${quotedColumn(nodes.updatedAt)} = ${timestamp},
-        ${quotedColumn(nodes.version)} = ${nodes.version} + 1
+        ${quotedColumn(nodes.updatedAt)} = ${firstPostimage.updatedAt},
+        ${quotedColumn(nodes.version)} = ${nodes.version} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
     WHERE ${nodes.graphId} = ${first.graphId}
       AND ${nodes.kind} = ${first.kind}
       AND ${nodes.deletedAt} IS NULL
-      AND ${nodes.id} IN (${sql.join(entries.map((entry) => sql`${entry.id}`), sql`, `)})
+      AND ${nodes.id} IN (${sql.join(
+        entries.map((entry) => sql`${entry.id}`),
+        sql`, `,
+      )})
       AND (
         SELECT COUNT(*)
         FROM ${nodes}
@@ -635,6 +681,105 @@ export function buildAtomicNodeResolvedUpdateBatch(
           AND (${sql.join(expectedRows, sql` OR `)})
       ) = ${entries.length}
     RETURNING *
+  `;
+}
+
+/**
+ * Terminal database assertion for an atomic resolved node mutation set.
+ *
+ * Every earlier slot is schema-fenced, but a guarded update can legitimately
+ * return no rows when one preimage moved. The transport cannot discover that
+ * after committing: this final slot rechecks the complete postimage set and
+ * deliberately violates the created node's NOT NULL created_at column when it is
+ * incomplete, forcing the native batch to roll every preceding insert/update
+ * back. Its dedicated sentinel keeps create-collision classification distinct
+ * and the hot write path away from the schema registry; the duplicate primary
+ * key is an independent refusal if the timestamp invariant is ever weakened. A
+ * stale fence matches no marker row and remains the program's ordinary all-zero
+ * diagnostic signal.
+ */
+export function buildAssertAtomicNodeMutationPostimages(
+  tables: Tables,
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  const firstCreate = creates[0];
+  if (firstCreate === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const first = atomicNodeCreatePostimage(firstCreate, timestamp);
+  const entries = [
+    first,
+    ...creates
+      .slice(1)
+      .map((entry) => atomicNodeCreatePostimage(entry, timestamp)),
+    ...updates.map((entry) => atomicNodeUpdatePostimage(entry, timestamp)),
+  ];
+  const expectedRows = entries.map(
+    (entry) => sql`
+      (
+            ${nodes.id} = ${entry.id}
+            AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, entry.propsJson)}
+            AND ${nodes.version} = ${entry.version}
+            AND ${nodes.updatedAt} = ${entry.updatedAt}
+          )
+    `,
+  );
+
+  return sql`
+    INSERT INTO ${nodes} (${nodeColumnList(nodes)})
+    SELECT
+      ${nodes.graphId},
+      ${nodes.kind},
+      ${nodes.id},
+      ${nodes.props},
+      ${nodes.version},
+      ${nodes.validFrom},
+      ${nodes.validTo},
+      NULL,
+      ${nodes.updatedAt}
+    FROM ${nodes}
+    CROSS JOIN ${schemaVersions}
+    WHERE ${nodes.graphId} = ${firstCreate.params.graphId}
+      AND ${nodes.kind} = ${firstCreate.params.kind}
+      AND ${nodes.id} = ${firstCreate.params.id}
+      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+      AND (
+        SELECT COUNT(*)
+        FROM ${nodes}
+        WHERE ${nodes.graphId} = ${first.graphId}
+          AND ${nodes.kind} = ${first.kind}
+          AND ${nodes.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) <> ${entries.length}
+  `;
+}
+
+/** Reads the asserted rows only while the same schema fence remains current. */
+export function buildReadAtomicNodeMutationPostimages(
+  tables: Tables,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  return sql`
+    SELECT ${nodes}.*
+    FROM ${nodes}
+    CROSS JOIN ${schemaVersions}
+    WHERE ${nodes.graphId} = ${graphId}
+      AND ${nodes.kind} = ${kind}
+      AND ${nodes.id} IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
   `;
 }
 

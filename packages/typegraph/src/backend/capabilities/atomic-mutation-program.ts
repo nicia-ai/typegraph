@@ -125,6 +125,40 @@ export interface AtomicEdgeResolvedUpdateBatchExecutor {
   ): Promise<readonly EdgeRow[]>;
 }
 
+type AtomicNodeResolvedMutationSetResult = Readonly<{
+  created: readonly NodeRow[];
+  updated: readonly NodeRow[];
+}>;
+
+export interface AtomicNodeResolvedMutationSetExecutor {
+  /** Maximum total members the terminal postimage assertion can prove. */
+  readonly maxEntries: number;
+  (
+    input: Readonly<{
+      creates: readonly AtomicNodeBatchEntry[];
+      updates: readonly AtomicNodeResolvedUpdateEntry[];
+      schemaFence: SchemaWriteFenceParams;
+    }>,
+  ): Promise<AtomicNodeResolvedMutationSetResult>;
+}
+
+type AtomicEdgeResolvedMutationSetResult = Readonly<{
+  created: readonly EdgeRow[];
+  updated: readonly EdgeRow[];
+}>;
+
+export interface AtomicEdgeResolvedMutationSetExecutor {
+  /** Maximum total members the terminal postimage assertion can prove. */
+  readonly maxEntries: number;
+  (
+    input: Readonly<{
+      creates: readonly InsertEdgeParams[];
+      updates: readonly AtomicEdgeResolvedUpdateEntry[];
+      schemaFence: SchemaWriteFenceParams;
+    }>,
+  ): Promise<AtomicEdgeResolvedMutationSetResult>;
+}
+
 /** Internal proof that the closed SQL program rejected a missing endpoint. */
 export class AtomicEdgeBatchEndpointRefusalError extends Error {
   constructor(cause: unknown) {
@@ -168,6 +202,8 @@ export type AtomicMutationProgramExecutor = Readonly<{
   deleteEdges?: AtomicEdgeDeleteBatchExecutor;
   updateNodes?: AtomicNodeResolvedUpdateBatchExecutor;
   updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor;
+  mutateNodes?: AtomicNodeResolvedMutationSetExecutor;
+  mutateEdges?: AtomicEdgeResolvedMutationSetExecutor;
 }>;
 
 const ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
@@ -185,6 +221,8 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
     updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
     updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor | undefined;
+    mutateNodes?: AtomicNodeResolvedMutationSetExecutor | undefined;
+    mutateEdges?: AtomicEdgeResolvedMutationSetExecutor | undefined;
   }>,
 ): T {
   ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(target, {
@@ -214,6 +252,12 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     ...(executor.updateEdges === undefined ?
       {}
     : { updateEdges: executor.updateEdges }),
+    ...(executor.mutateNodes === undefined ?
+      {}
+    : { mutateNodes: executor.mutateNodes }),
+    ...(executor.mutateEdges === undefined ?
+      {}
+    : { mutateEdges: executor.mutateEdges }),
   });
   return target;
 }

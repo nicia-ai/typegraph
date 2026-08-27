@@ -169,6 +169,7 @@ import {
   resolveEdgeMatchIdentityStorage,
 } from "../edge-match-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { ResolvedMutationSetMoved } from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -188,6 +189,7 @@ import {
   type AtomicEdgeBatchExecutor,
   resolveAtomicEdgeBatchExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
+  resolveAtomicEdgeResolvedMutationSetExecutor,
   resolveAtomicEdgeResolvedUpdateBatchExecutor,
 } from "./atomic-mutation-program";
 import {
@@ -2138,6 +2140,112 @@ export async function executeEdgeUpsertUpdate<G extends GraphDef>(
  * The collection owns ordering and repeated-id resolution; this boundary keeps
  * the complete set under one graph fence and one write session.
  */
+export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  creates: readonly CreateEdgeInput[],
+  updates: readonly EdgeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<
+  Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }> | undefined
+> {
+  if (creates.length === 0 || updates.length === 0) return;
+  const firstUpdate = requireDefined(updates[0]);
+  const executor = resolveAtomicEdgeResolvedMutationSetExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind: firstUpdate.input.identity.kind,
+    creates,
+    updateCount: updates.length,
+  });
+  if (executor === undefined) return;
+  const ids = new Set([
+    ...creates.map((input) => requireDefined(input.id)),
+    ...updates.map((entry) => entry.input.id),
+  ]);
+  if (ids.size !== creates.length + updates.length) return;
+  if (
+    updates.some(
+      (entry) =>
+        entry.clearDeleted ||
+        entry.existing === undefined ||
+        entry.input.validFrom !== undefined ||
+        entry.input.validTo !== undefined ||
+        entry.input.clearValidTo === true,
+    )
+  ) {
+    return;
+  }
+
+  const preparation = await prepareAtomicEdgeBatchCreates(
+    ctx,
+    creates,
+    backend,
+  );
+  if (preparation.claims.length > 0) return;
+  const createParams = preparation.preparedCreates.map(
+    (prepared) => prepared.insertParams,
+  );
+  const resolvedUpdates = updates.map((entry) => {
+    const existing = requireDefined(entry.existing);
+    assertEdgeIdentityMatches(
+      entry.input.id,
+      entry.input.identity,
+      edgeIdentityFromRow(existing),
+      "update",
+    );
+    const { validatedProps } = resolveEdgeUpdateProps(
+      ctx,
+      existing,
+      entry.input.props,
+    );
+    return { existing, props: validatedProps };
+  });
+  const result = await withAlreadyExistsTranslation("edge", async () => {
+    try {
+      return await executor({
+        creates: createParams,
+        updates: resolvedUpdates,
+        schemaFence: {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        },
+      });
+    } catch (error) {
+      if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
+        await assertAtomicEdgeBatchEndpoints(ctx, creates, backend);
+        throw error.cause;
+      }
+      throw error;
+    }
+  });
+  if (result.created.length === 0 && result.updated.length === 0) {
+    await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    throw new ResolvedMutationSetMoved("edge", executor);
+  }
+  if (
+    result.created.length !== creates.length ||
+    result.updated.length !== updates.length
+  ) {
+    throw new CompilerInvariantError(
+      "Atomic resolved edge mutation set returned a partial result.",
+    );
+  }
+  memoizeLeasedSchemaFence(ctx, backend);
+  const createdById = new Map(result.created.map((row) => [row.id, row]));
+  const updatedById = new Map(result.updated.map((row) => [row.id, row]));
+  return {
+    created: creates.map((input) =>
+      rowToEdge(requireDefined(createdById.get(requireDefined(input.id)))),
+    ),
+    updated: updates.map((entry) =>
+      rowToEdge(requireDefined(updatedById.get(entry.input.id))),
+    ),
+  };
+}
+
 export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   entries: readonly EdgeUpsertUpdateBatchEntry[],

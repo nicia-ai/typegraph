@@ -165,6 +165,7 @@ import {
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { ResolvedMutationSetMoved } from "../resolved-mutation-set";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
@@ -188,6 +189,7 @@ import {
   assertAtomicDeleteSchemaFenceMatched,
   resolveAtomicNodeBatchExecutor,
   resolveAtomicNodeDeleteBatchExecutor,
+  resolveAtomicNodeResolvedMutationSetExecutor,
   resolveAtomicNodeResolvedUpdateBatchExecutor,
 } from "./atomic-mutation-program";
 import {
@@ -2814,6 +2816,106 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
  * one graph fence and one write session cover the complete update set instead
  * of opening a managed frame for every member.
  */
+export async function executeNodeResolvedMutationSet<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  creates: readonly CreateNodeInput[],
+  updates: readonly NodeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<
+  Readonly<{ created: readonly Node[]; updated: readonly Node[] }> | undefined
+> {
+  if (creates.length === 0 || updates.length === 0) return;
+  const firstUpdate = requireDefined(updates[0]);
+  const executor = resolveAtomicNodeResolvedMutationSetExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind: firstUpdate.input.kind,
+    creates,
+    updateCount: updates.length,
+    identityEnabled: ctx.identity !== undefined,
+    registry: ctx.registry,
+  });
+  if (executor === undefined) return;
+  const ids = new Set([
+    ...creates.map((input) => requireDefined(input.id)),
+    ...updates.map((entry) => entry.input.id),
+  ]);
+  if (ids.size !== creates.length + updates.length) return;
+  if (
+    updates.some(
+      (entry) =>
+        entry.clearDeleted ||
+        entry.existing === undefined ||
+        entry.input.validFrom !== undefined ||
+        entry.input.validTo !== undefined ||
+        entry.input.clearValidTo === true,
+    )
+  ) {
+    return;
+  }
+
+  const preparedCreates = await prepareAtomicBatchCreates(
+    ctx,
+    creates,
+    backend,
+  );
+  const createEntries = atomicNodeBatchEntries(preparedCreates, 0);
+  if (createEntries === undefined) return;
+  const resolvedUpdates = updates.map((entry) => {
+    const existing = requireDefined(entry.existing);
+    const { validatedProps } = resolveNodeUpdateProps(
+      ctx,
+      existing,
+      entry.input.props,
+    );
+    return {
+      graphId: ctx.graphId,
+      kind: entry.input.kind,
+      id: entry.input.id,
+      props: validatedProps,
+      expectedVersion: existing.version,
+    };
+  });
+  const result = await withAlreadyExistsTranslation("node", () =>
+    executor({
+      creates: createEntries,
+      updates: resolvedUpdates,
+      schemaFence: {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      },
+    }),
+  );
+  if (result.created.length === 0 && result.updated.length === 0) {
+    await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    throw new ResolvedMutationSetMoved("node", executor);
+  }
+  if (
+    result.created.length !== creates.length ||
+    result.updated.length !== updates.length
+  ) {
+    throw new CompilerInvariantError(
+      "Atomic resolved node mutation set returned a partial result.",
+    );
+  }
+  memoizeLeasedSchemaFence(ctx, backend);
+  const created = restoreAtomicNodeBatchRows(
+    ctx.graphId,
+    preparedCreates,
+    result.created,
+  ).map((row) => rowToNode(row));
+  const updatedById = new Map(result.updated.map((row) => [row.id, row]));
+  return {
+    created,
+    updated: updates.map((entry) =>
+      rowToNode(requireDefined(updatedById.get(entry.input.id))),
+    ),
+  };
+}
+
 export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],

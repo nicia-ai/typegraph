@@ -610,11 +610,14 @@ submitted:
   application computation before its writes are known. `bulkUpsertById()` is
   the canonical example: stored props are merged and Zod-validated, temporal
   decisions are derived, and repeated IDs observe earlier batch items. An
-  eligible distinct-ID, update-only set can cross the exact-root boundary after
-  resolution: its guarded SQL carries the node versions or complete edge
-  preimages that justified the after-images and updates every member or none.
-  Complex sets resolve and execute inside one interactive transaction. Neither
-  shape is mislabeled as a read-free program.
+  eligible distinct-ID set can cross the exact-root boundary after resolution:
+  its guarded SQL carries the node versions or complete edge preimages that
+  justified the after-images. Update-only sets use one guarded set statement;
+  mixed create/update sets add a terminal database postimage assertion inside
+  the same native exchange, so an incomplete update aborts and rolls back its
+  creates before the transport commits. Complex sets resolve and execute inside
+  one interactive transaction. Neither shape is mislabeled as a read-free
+  program.
 
 This boundary keeps transport optimization subordinate to Store semantics. A
 new bulk optimization must either prove its mutation is closed or name the

@@ -252,6 +252,7 @@ import {
   executeEdgeFindByEndpoints,
   executeEdgeGetOrCreateByEndpoints,
   executeEdgeHardDelete,
+  executeEdgeResolvedMutationSet,
   executeEdgeUpdate,
   executeEdgeUpsertUpdateBatch,
   executeNodeBulkFindByConstraint,
@@ -265,6 +266,7 @@ import {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeResolvedMutationSet,
   executeNodeUpdate,
   executeNodeUpdateWhere,
   executeNodeUpsertUpdateBatch,
@@ -1966,6 +1968,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ),
       executeUpsertUpdateBatch: (entries, backend) =>
         executeNodeUpsertUpdateBatch(ctx, entries, backend),
+      executeResolvedMutationSet: (creates, updates, backend) =>
+        executeNodeResolvedMutationSet(ctx, creates, updates, backend),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>
@@ -2052,6 +2056,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       executeUpdate: (input, backend) => executeEdgeUpdate(ctx, input, backend),
       executeUpsertUpdateBatch: (entries, backend) =>
         executeEdgeUpsertUpdateBatch(ctx, entries, backend),
+      executeResolvedMutationSet: (creates, updates, backend) =>
+        executeEdgeResolvedMutationSet(ctx, creates, updates, backend),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>

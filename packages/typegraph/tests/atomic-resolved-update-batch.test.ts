@@ -1,5 +1,6 @@
 import { createClient } from "@libsql/client";
-import { eq, sql as drizzleSql } from "drizzle-orm";
+import { eq, type SQL, sql as drizzleSql } from "drizzle-orm";
+import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -7,6 +8,18 @@ import {
   markBundledRootAtomicMutationPrograms,
   resolveBundledRootAtomicMutationPrograms,
 } from "../src/backend/capabilities/atomic-mutation-program";
+import {
+  buildAssertAtomicEdgeMutationPostimages,
+  buildAtomicEdgeResolvedUpdateBatch,
+  buildInsertEdgesBatchReturningWithSchemaFence,
+  buildReadAtomicEdgeMutationPostimages,
+} from "../src/backend/drizzle/operations/edges";
+import {
+  buildAssertAtomicNodeMutationPostimages,
+  buildAtomicNodeBatchWithSchemaFence,
+  buildAtomicNodeResolvedUpdateBatch,
+  buildReadAtomicNodeMutationPostimages,
+} from "../src/backend/drizzle/operations/nodes";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
@@ -16,9 +29,15 @@ import { CompilerInvariantError, DatabaseOperationError } from "../src/errors";
 import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import {
+  resolveAtomicEdgeResolvedMutationSetExecutor,
   resolveAtomicEdgeResolvedUpdateBatchExecutor,
+  resolveAtomicNodeResolvedMutationSetExecutor,
   resolveAtomicNodeResolvedUpdateBatchExecutor,
 } from "../src/store/operations/atomic-mutation-program";
+import {
+  ResolvedMutationSetMoved,
+  runResolvedMutationSetConverging,
+} from "../src/store/resolved-mutation-set";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
@@ -306,6 +325,8 @@ describe("atomic resolved update batches", () => {
     );
     expect(requireDefined(profile.updateNodes).maxEntries).toBe(17);
     expect(requireDefined(profile.updateEdges).maxEntries).toBe(6);
+    expect(requireDefined(profile.mutateNodes).maxEntries).toBe(17);
+    expect(requireDefined(profile.mutateEdges).maxEntries).toBe(6);
 
     const common = {
       backend: budgetedBackend,
@@ -354,6 +375,235 @@ describe("atomic resolved update batches", () => {
         entryCount: 1,
       }),
     ).toBeUndefined();
+    const nodeCreate = {
+      kind: Person.kind,
+      id: "new",
+      props: { name: "New", score: 1 },
+    } as const;
+    const nodeCreateWithoutId = {
+      kind: nodeCreate.kind,
+      props: nodeCreate.props,
+    };
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        ...nodeInput,
+        creates: [nodeCreate],
+        updateCount: 16,
+      }),
+    ).toBe(profile.mutateNodes);
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        ...nodeInput,
+        creates: [nodeCreate],
+        updateCount: 17,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicNodeResolvedMutationSetExecutor({
+        ...nodeInput,
+        creates: [nodeCreateWithoutId],
+        updateCount: 1,
+      }),
+    ).toBeUndefined();
+    const edgeCreate = {
+      kind: relates.kind,
+      id: "new",
+      fromKind: Person.kind,
+      fromId: "from",
+      toKind: Person.kind,
+      toId: "to",
+      props: { label: "New" },
+    } as const;
+    const edgeCreateWithoutId = {
+      kind: edgeCreate.kind,
+      fromKind: edgeCreate.fromKind,
+      fromId: edgeCreate.fromId,
+      toKind: edgeCreate.toKind,
+      toId: edgeCreate.toId,
+      props: edgeCreate.props,
+    };
+    expect(
+      resolveAtomicEdgeResolvedMutationSetExecutor({
+        ...common,
+        kind: relates.kind,
+        creates: [edgeCreate],
+        updateCount: 5,
+      }),
+    ).toBe(profile.mutateEdges);
+    expect(
+      resolveAtomicEdgeResolvedMutationSetExecutor({
+        ...common,
+        kind: relates.kind,
+        creates: [edgeCreate],
+        updateCount: 6,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeResolvedMutationSetExecutor({
+        ...common,
+        kind: relates.kind,
+        creates: [edgeCreateWithoutId],
+        updateCount: 1,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeResolvedMutationSetExecutor({
+        ...common,
+        graph: durableGraph,
+        kind: durableRelates.kind,
+        creates: [{ ...edgeCreate, kind: durableRelates.kind }],
+        updateCount: 1,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("retries only movement raised by the exact bundled executor", async () => {
+    const { backend } = await fixture();
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(backend),
+    );
+    const owner = requireDefined(profile.mutateNodes);
+    const foreignExecutor = Object.assign(vi.fn(), {
+      maxEntries: owner.maxEntries,
+    }) satisfies typeof owner;
+    const run = vi.fn(() =>
+      Promise.reject(new ResolvedMutationSetMoved("node", foreignExecutor)),
+    );
+
+    await expect(
+      runResolvedMutationSetConverging("node", backend, run),
+    ).rejects.toBeInstanceOf(ResolvedMutationSetMoved);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("keeps every mixed-set statement within the pinned D1 ceilings", () => {
+    const timestamp = "2026-08-27T00:00:00.000Z";
+    const schemaFence = { graphId: graph.id, expectedVersion: 1 } as const;
+    const nodeCreates = [
+      {
+        idSource: "caller" as const,
+        params: {
+          graphId: graph.id,
+          kind: Person.kind,
+          id: "new-node",
+          props: { name: "New", score: 1 },
+        },
+      },
+    ];
+    const nodeUpdates = Array.from({ length: 16 }, (_, index) => ({
+      graphId: graph.id,
+      kind: Person.kind,
+      id: `node-${index}`,
+      props: { name: `Node ${index}`, score: index },
+      expectedVersion: 1,
+    }));
+    const edgeCreates = [
+      {
+        graphId: graph.id,
+        kind: relates.kind,
+        id: "new-edge",
+        fromKind: Person.kind,
+        fromId: "from",
+        toKind: Person.kind,
+        toId: "to",
+        props: { label: "New" },
+      },
+    ];
+    const edgeUpdates = Array.from({ length: 5 }, (_, index) => ({
+      existing: {
+        graph_id: graph.id,
+        kind: relates.kind,
+        id: `edge-${index}`,
+        from_kind: Person.kind,
+        from_id: "from",
+        to_kind: Person.kind,
+        to_id: "to",
+        props: { label: `Before ${index}` },
+        valid_from: undefined,
+        valid_to: undefined,
+        created_at: timestamp,
+        updated_at: timestamp,
+        deleted_at: undefined,
+      },
+      props: { label: `After ${index}` },
+    }));
+    const statements: readonly SQL[] = [
+      buildAtomicNodeBatchWithSchemaFence(
+        sqliteTables,
+        nodeCreates,
+        timestamp,
+        schemaFence,
+        drizzleSql.empty(),
+        "rows",
+      ),
+      buildAtomicNodeResolvedUpdateBatch(
+        sqliteTables,
+        nodeUpdates,
+        timestamp,
+        schemaFence,
+        drizzleSql.empty(),
+      ),
+      buildAssertAtomicNodeMutationPostimages(
+        sqliteTables,
+        nodeCreates,
+        nodeUpdates,
+        timestamp,
+        schemaFence,
+      ),
+      buildReadAtomicNodeMutationPostimages(
+        sqliteTables,
+        graph.id,
+        Person.kind,
+        [
+          ...nodeCreates.map((entry) => entry.params.id),
+          ...nodeUpdates.map((entry) => entry.id),
+        ],
+        schemaFence,
+      ),
+      buildInsertEdgesBatchReturningWithSchemaFence(
+        sqliteTables,
+        edgeCreates,
+        timestamp,
+        schemaFence,
+        drizzleSql.empty(),
+      ),
+      buildAtomicEdgeResolvedUpdateBatch(
+        sqliteTables,
+        edgeUpdates,
+        timestamp,
+        schemaFence,
+        drizzleSql.empty(),
+      ),
+      buildAssertAtomicEdgeMutationPostimages(
+        sqliteTables,
+        edgeCreates,
+        edgeUpdates,
+        timestamp,
+        schemaFence,
+      ),
+      buildReadAtomicEdgeMutationPostimages(
+        sqliteTables,
+        graph.id,
+        [
+          ...edgeCreates.map((entry) => entry.id),
+          ...edgeUpdates.map((entry) => entry.existing.id),
+        ],
+        schemaFence,
+      ),
+    ];
+    const dialect = new SQLiteSyncDialect();
+    const parameterCounts = statements.map(
+      (statement) => dialect.sqlToQuery(statement).params.length,
+    );
+
+    // The create statements are independently chunked. These exact counts pin
+    // every unchunked slot at the public D1 ceilings (17 total nodes, 6 total
+    // edges), so the shared maxEntries formula cannot silently become too wide.
+    expect(parameterCounts.slice(1, 4)).toEqual([88, 76, 21]);
+    expect(parameterCounts.slice(5)).toEqual([62, 54, 9]);
+    for (const parameterCount of parameterCounts) {
+      expect(parameterCount).toBeLessThanOrEqual(100);
+    }
   });
 
   it("re-resolves the complete node set after a moved preimage", async () => {

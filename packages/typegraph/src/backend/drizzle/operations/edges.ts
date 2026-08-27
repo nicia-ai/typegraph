@@ -60,6 +60,48 @@ function qualifiedColumn(
   return sql.raw(`"${alias}"."${column.name.replaceAll('"', '""')}"`);
 }
 
+function atomicEdgeCreatePostimage(
+  params: InsertEdgeParams,
+  timestamp: string,
+) {
+  return {
+    graphId: params.graphId,
+    id: params.id,
+    kind: params.kind,
+    fromKind: params.fromKind,
+    fromId: params.fromId,
+    toKind: params.toKind,
+    toId: params.toId,
+    propsJson: JSON.stringify(params.props),
+    matchIdentityName: params.matchIdentity?.name,
+    matchIdentityKey: params.matchIdentity?.key,
+    // The temporal inventory requires the owner and its input on one line.
+    // prettier-ignore
+    validFrom: resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp),
+    validTo: params.validTo,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  } as const;
+}
+
+function atomicEdgeUpdatePostimage(
+  entry: AtomicEdgeResolvedUpdateEntry,
+  timestamp: string,
+) {
+  const existing = entry.existing;
+  return {
+    graphId: existing.graph_id,
+    id: existing.id,
+    kind: existing.kind,
+    fromKind: existing.from_kind,
+    fromId: existing.from_id,
+    toKind: existing.to_kind,
+    toId: existing.to_id,
+    propsJson: JSON.stringify(entry.props),
+    updatedAt: timestamp,
+  } as const;
+}
+
 /**
  * Requires the exact source and target nodes to be live. All endpoint-guarded
  * edge insert statements use this one predicate so their liveness semantics
@@ -441,23 +483,23 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
     sql`, `,
   );
   const values = params.map((edgeParams) => {
-    const propsJson = JSON.stringify(edgeParams.props);
+    const postimage = atomicEdgeCreatePostimage(edgeParams, timestamp);
     return sql`
       (
-            ${castBoundValueForColumn(edges.graphId, edgeParams.graphId)},
-            ${castBoundValueForColumn(edges.id, edgeParams.id)},
-            ${castBoundValueForColumn(edges.kind, edgeParams.kind)},
-            ${castBoundValueForColumn(edges.fromKind, edgeParams.fromKind)},
-            ${castBoundValueForColumn(edges.fromId, edgeParams.fromId)},
-            ${castBoundValueForColumn(edges.toKind, edgeParams.toKind)},
-            ${castBoundValueForColumn(edges.toId, edgeParams.toId)},
-            ${castBoundValueForColumn(edges.props, propsJson)},
-            ${castBoundValueForColumn(edges.matchIdentityName, sqlNull(edgeParams.matchIdentity?.name))},
-            ${castBoundValueForColumn(edges.matchIdentityKey, sqlNull(edgeParams.matchIdentity?.key))},
-            ${castBoundValueForColumn(edges.validFrom, sqlNull(resolveStampedValidityLowerBound(edgeParams.validFrom, edgeParams.validTo, timestamp)))},
-            ${castBoundValueForColumn(edges.validTo, sqlNull(edgeParams.validTo))},
-            ${castBoundValueForColumn(edges.createdAt, timestamp)},
-            ${castBoundValueForColumn(edges.updatedAt, timestamp)}
+            ${castBoundValueForColumn(edges.graphId, postimage.graphId)},
+            ${castBoundValueForColumn(edges.id, postimage.id)},
+            ${castBoundValueForColumn(edges.kind, postimage.kind)},
+            ${castBoundValueForColumn(edges.fromKind, postimage.fromKind)},
+            ${castBoundValueForColumn(edges.fromId, postimage.fromId)},
+            ${castBoundValueForColumn(edges.toKind, postimage.toKind)},
+            ${castBoundValueForColumn(edges.toId, postimage.toId)},
+            ${castBoundValueForColumn(edges.props, postimage.propsJson)},
+            ${castBoundValueForColumn(edges.matchIdentityName, sqlNull(postimage.matchIdentityName))},
+            ${castBoundValueForColumn(edges.matchIdentityKey, sqlNull(postimage.matchIdentityKey))},
+            ${castBoundValueForColumn(edges.validFrom, sqlNull(postimage.validFrom))},
+            ${castBoundValueForColumn(edges.validTo, sqlNull(postimage.validTo))},
+            ${castBoundValueForColumn(edges.createdAt, postimage.createdAt)},
+            ${castBoundValueForColumn(edges.updatedAt, postimage.updatedAt)}
           )
     `;
   });
@@ -788,9 +830,16 @@ export function buildAtomicEdgeResolvedUpdateBatch(
   const { edges, schemaVersions } = tables;
   const first = entries[0];
   if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
-  const propsCases = entries.map(
-    (entry) =>
-      sql`WHEN ${entry.existing.id} THEN ${castBoundValueForColumn(edges.props, JSON.stringify(entry.props))}`,
+  const firstPostimage = atomicEdgeUpdatePostimage(first, timestamp);
+  const postimages = [
+    firstPostimage,
+    ...entries
+      .slice(1)
+      .map((entry) => atomicEdgeUpdatePostimage(entry, timestamp)),
+  ];
+  const propsCases = postimages.map(
+    (postimage) =>
+      sql`WHEN ${postimage.id} THEN ${castBoundValueForColumn(edges.props, postimage.propsJson)}`,
   );
   const expectedRows = entries.map((entry) => {
     const existing = entry.existing;
@@ -824,11 +873,14 @@ export function buildAtomicEdgeResolvedUpdateBatch(
           ${sql.join(propsCases, sql` `)}
           ELSE ${edges.props}
         END,
-        ${quotedColumn(edges.updatedAt)} = ${timestamp}
+        ${quotedColumn(edges.updatedAt)} = ${firstPostimage.updatedAt}
     WHERE ${edges.graphId} = ${first.existing.graph_id}
       AND ${edges.kind} = ${first.existing.kind}
       AND ${edges.deletedAt} IS NULL
-      AND ${edges.id} IN (${sql.join(entries.map((entry) => sql`${entry.existing.id}`), sql`, `)})
+      AND ${edges.id} IN (${sql.join(
+        entries.map((entry) => sql`${entry.existing.id}`),
+        sql`, `,
+      )})
       AND (
         SELECT COUNT(*)
         FROM ${edges}
@@ -838,6 +890,103 @@ export function buildAtomicEdgeResolvedUpdateBatch(
           AND (${sql.join(expectedRows, sql` OR `)})
       ) = ${entries.length}
     RETURNING *
+  `;
+}
+
+/**
+ * Terminal database assertion for an atomic resolved edge mutation set.
+ * A missing guarded update turns the created edge's NOT NULL kind into the
+ * rollback sentinel; the duplicate primary key independently refuses the row
+ * if that invariant is ever weakened. A stale schema fence still matches no
+ * marker row and is diagnosed by the Store from the program's all-zero result.
+ */
+export function buildAssertAtomicEdgeMutationPostimages(
+  tables: Tables,
+  creates: readonly InsertEdgeParams[],
+  updates: readonly AtomicEdgeResolvedUpdateEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { edges, schemaVersions } = tables;
+  const firstCreate = creates[0];
+  if (firstCreate === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const first = atomicEdgeCreatePostimage(firstCreate, timestamp);
+  const entries = [
+    first,
+    ...creates
+      .slice(1)
+      .map((params) => atomicEdgeCreatePostimage(params, timestamp)),
+    ...updates.map((entry) => atomicEdgeUpdatePostimage(entry, timestamp)),
+  ];
+  const expectedRows = entries.map(
+    (entry) => sql`
+      (
+            ${edges.id} = ${entry.id}
+            AND ${edges.kind} = ${entry.kind}
+            AND ${edges.fromKind} = ${entry.fromKind}
+            AND ${edges.fromId} = ${entry.fromId}
+            AND ${edges.toKind} = ${entry.toKind}
+            AND ${edges.toId} = ${entry.toId}
+            AND ${edges.props} = ${castBoundValueForColumn(edges.props, entry.propsJson)}
+            AND ${edges.updatedAt} = ${entry.updatedAt}
+          )
+    `,
+  );
+
+  return sql`
+    INSERT INTO ${edges} (${edgeColumnList(edges)})
+    SELECT
+      ${edges.graphId},
+      ${edges.id},
+      NULL,
+      ${edges.fromKind},
+      ${edges.fromId},
+      ${edges.toKind},
+      ${edges.toId},
+      ${edges.props},
+      ${edges.matchIdentityName},
+      ${edges.matchIdentityKey},
+      ${edges.validFrom},
+      ${edges.validTo},
+      ${edges.createdAt},
+      ${edges.updatedAt}
+    FROM ${edges}
+    CROSS JOIN ${schemaVersions}
+    WHERE ${edges.graphId} = ${firstCreate.graphId}
+      AND ${edges.id} = ${firstCreate.id}
+      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+      AND (
+        SELECT COUNT(*)
+        FROM ${edges}
+        WHERE ${edges.graphId} = ${first.graphId}
+          AND ${edges.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) <> ${entries.length}
+  `;
+}
+
+/** Reads the asserted rows only while the same schema fence remains current. */
+export function buildReadAtomicEdgeMutationPostimages(
+  tables: Tables,
+  graphId: string,
+  ids: readonly string[],
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { edges, schemaVersions } = tables;
+  return sql`
+    SELECT ${edges}.*
+    FROM ${edges}
+    CROSS JOIN ${schemaVersions}
+    WHERE ${edges.graphId} = ${graphId}
+      AND ${edges.id} IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
   `;
 }
 

@@ -76,6 +76,13 @@ export type NodeOperations = Readonly<{
     entries: readonly NodeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly Node[]>;
+  executeResolvedMutationSet: (
+    creates: readonly CreateNodeInput[],
+    updates: readonly NodeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<
+    Readonly<{ created: readonly Node[]; updated: readonly Node[] }> | undefined
+  >;
   /**
    * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
    * the store was created with `coalesceUnchangedUpserts: true`; its absence is
@@ -178,6 +185,13 @@ export type EdgeOperations = Readonly<{
     entries: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly Edge[]>;
+  executeResolvedMutationSet: (
+    creates: readonly CreateEdgeInput[],
+    updates: readonly EdgeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<
+    Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }> | undefined
+  >;
   /**
    * Coalesce dirty-check for `bulkUpsertById` (props only — endpoints are the
    * edge's identity). Present only when the store was created with
