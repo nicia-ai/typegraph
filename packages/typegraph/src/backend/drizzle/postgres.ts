@@ -1335,7 +1335,9 @@ export function createPostgresBackend(
     );
   }
 
-  async function writeBaseSchemaVersion(version: number): Promise<boolean> {
+  async function writeBaseSchemaVersion(
+    version: number,
+  ): Promise<number | undefined> {
     const marker = tables.baseSchemaVersions;
     const timestamp = new Date();
     await db
@@ -1347,9 +1349,9 @@ export function createPostgresBackend(
         setWhere: lte(marker.version, version),
       });
     // Read back on this backend's primary connection: remote adapters do not
-    // all support RETURNING, and a concurrent adopter may already be ahead.
-    const installedVersion = await readBaseSchemaVersion();
-    return installedVersion !== undefined && installedVersion >= version;
+    // all support RETURNING. The monotonic upsert plus same-primary read makes
+    // this two-statement observation safe when a concurrent adopter is ahead.
+    return readBaseSchemaVersion();
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {
@@ -1369,7 +1371,10 @@ export function createPostgresBackend(
           await ensureGraphTemplatesTable();
           await ensureEdgeMatchIdentityStorage();
         },
-        adoptAfterBootstrap: ensureEdgeMatchIdentityStorage,
+        bootstrap: {
+          phase: "before",
+          adopt: ensureEdgeMatchIdentityStorage,
+        },
       },
     ],
   });
@@ -1434,6 +1439,9 @@ export function createPostgresBackend(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
+      await baseSchemaLifecycle.adoptBeforeBootstrap(
+        startingBaseSchemaVersion,
+      );
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         // Cold boot is the single most contended DDL path there is — two

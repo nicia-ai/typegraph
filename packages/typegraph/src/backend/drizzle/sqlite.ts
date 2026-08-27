@@ -31,7 +31,11 @@ import {
 } from "drizzle-orm";
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
-import { BackendDisposedError, ConfigurationError } from "../../errors";
+import {
+  BackendDisposedError,
+  CompilerInvariantError,
+  ConfigurationError,
+} from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   buildFulltextCapabilities,
@@ -56,6 +60,7 @@ import { chunk as chunkArray } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
+  isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
 import { markBundledRootAtomicEdgeBatch } from "../capabilities/atomic-edge-batch";
@@ -178,8 +183,7 @@ import {
 import {
   generateSqliteCreateTableSQL,
   generateSqliteDDL,
-  generateSqliteEdgeMatchIdentityColumnDDL,
-  generateSqliteEdgeMatchIdentityIndexDDL,
+  planSqliteEdgeMatchIdentityAdoption,
   sqliteContributions,
 } from "./ddl";
 import {
@@ -1838,43 +1842,38 @@ export function createSqliteBackend(
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
     const edgeTableName = getTableName(tables.edges);
-    const columnRows = await executionAdapter.execute<{
-      name?: unknown;
-    }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
-    const columns = new Set(
-      columnRows.flatMap((row) =>
-        typeof row.name === "string" ? [row.name] : [],
-      ),
+    // SQLite has no ADD COLUMN IF NOT EXISTS. Re-read and re-plan after each
+    // precisely classified duplicate-column race; two retries cover the two
+    // additive columns even when concurrent cold starts interleave both.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const columnRows = await executionAdapter.execute<{
+        name?: unknown;
+      }>(sql`PRAGMA table_info(${sql.identifier(edgeTableName)})`);
+      const columns = new Set(
+        columnRows.flatMap((row) =>
+          typeof row.name === "string" ? [row.name] : [],
+        ),
+      );
+      try {
+        for (const statement of planSqliteEdgeMatchIdentityAdoption(
+          edgeTableName,
+          columns,
+        )) {
+          await db.run(sql.raw(statement));
+        }
+        return;
+      } catch (error) {
+        if (
+          attempt === 2 ||
+          !isSqliteDuplicateEdgeMatchIdentityColumnError(error)
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new CompilerInvariantError(
+      "SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
     );
-    const nameMissing = !columns.has("match_identity_name");
-    const keyMissing = !columns.has("match_identity_key");
-    if (columnRows.length > 0 && nameMissing) {
-      await db.run(
-        sql.raw(
-          generateSqliteEdgeMatchIdentityColumnDDL(
-            edgeTableName,
-            "match_identity_name",
-            !keyMissing,
-          ),
-        ),
-      );
-    }
-    if (columnRows.length > 0 && keyMissing) {
-      await db.run(
-        sql.raw(
-          generateSqliteEdgeMatchIdentityColumnDDL(
-            edgeTableName,
-            "match_identity_key",
-            true,
-          ),
-        ),
-      );
-    }
-    if (columnRows.length > 0) {
-      await db.run(
-        sql.raw(generateSqliteEdgeMatchIdentityIndexDDL(edgeTableName)),
-      );
-    }
   }
 
   async function readBaseSchemaVersion(): Promise<number | undefined> {
@@ -1896,7 +1895,9 @@ export function createSqliteBackend(
     );
   }
 
-  async function writeBaseSchemaVersion(version: number): Promise<boolean> {
+  async function writeBaseSchemaVersion(
+    version: number,
+  ): Promise<number | undefined> {
     const marker = tables.baseSchemaVersions;
     const timestamp = nowIso();
     await db
@@ -1908,9 +1909,9 @@ export function createSqliteBackend(
         setWhere: lte(marker.version, version),
       });
     // Read back on this backend's primary connection: remote adapters do not
-    // all support RETURNING, and a concurrent adopter may already be ahead.
-    const installedVersion = await readBaseSchemaVersion();
-    return installedVersion !== undefined && installedVersion >= version;
+    // all support RETURNING. The monotonic upsert plus same-primary read makes
+    // this two-statement observation safe when a concurrent adopter is ahead.
+    return readBaseSchemaVersion();
   }
 
   async function ensureGraphTemplatesTable(): Promise<void> {
@@ -1928,7 +1929,10 @@ export function createSqliteBackend(
           await ensureGraphTemplatesTable();
           await ensureEdgeMatchIdentityStorage();
         },
-        adoptAfterBootstrap: ensureEdgeMatchIdentityStorage,
+        bootstrap: {
+          phase: "before",
+          adopt: ensureEdgeMatchIdentityStorage,
+        },
       },
     ],
   });
@@ -1974,6 +1978,7 @@ export function createSqliteBackend(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generateSqliteDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         await db.run(sql.raw(statement));

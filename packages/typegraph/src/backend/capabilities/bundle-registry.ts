@@ -833,8 +833,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   assertBaseSchemaCurrent: {
     kind: "reasoned",
     reason:
-      "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points so DML-only roles fail before their first write. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.",
-    accesses: 3,
+      "SELECT-only sibling of base adoption, consulted by verified and graph-template entry points plus the managed libSQL installation postcondition so incompatible storage fails before use. Custom backends may omit it only when they own base-schema compatibility themselves; omission intentionally preserves the legacy no-gate contract.",
+    accesses: 4,
   },
   ensureEdgeMatchIdentityStorage: {
     kind: "reasoned",
@@ -863,8 +863,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   bootstrapTables: {
     kind: "reasoned",
     reason:
-      "One-shot provisioning hook consulted by createStore before any capability question exists; it has no operation that could refuse or degrade.",
-    accesses: 3,
+      "One-shot provisioning hook consulted by createStore and the managed libSQL legacy fallback before any capability question exists; it has no operation that could refuse or degrade.",
+    accesses: 4,
   },
   tableNames: {
     kind: "reasoned",

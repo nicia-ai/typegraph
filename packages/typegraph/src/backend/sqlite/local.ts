@@ -24,16 +24,26 @@
 import { createRequire } from "node:module";
 
 import Database from "better-sqlite3";
+import { getTableName } from "drizzle-orm";
 import {
   type BetterSQLite3Database,
   drizzle,
 } from "drizzle-orm/better-sqlite3";
 
-import { ConfigurationError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
+import {
+  isSqliteDuplicateEdgeMatchIdentityColumnError,
+  isSqliteMissingEdgeMatchIdentityColumnError,
+} from "../../utils/sql-errors";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
-import { generateSqliteDDL } from "../drizzle/ddl";
+import { CURRENT_BASE_SCHEMA_VERSION } from "../drizzle/base-schema";
+import {
+  generateSqliteMigrationSQL,
+  planSqliteEdgeMatchIdentityAdoption,
+  quoteDdlIdentifier,
+} from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
 import {
@@ -64,6 +74,51 @@ export type {
 } from "../types";
 
 const nodeRequire = createRequire(import.meta.url);
+
+function installLocalSqliteBaseSchema(
+  sqlite: Database.Database,
+  tables: SqliteTables,
+): void {
+  if (CURRENT_BASE_SCHEMA_VERSION !== 1) {
+    throw new CompilerInvariantError(
+      "The synchronous managed SQLite installation path only implements base-schema v1 adoption.",
+      { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
+    );
+  }
+  const installationSql = generateSqliteMigrationSQL(tables);
+  try {
+    sqlite.exec(installationSql);
+  } catch (error) {
+    if (!isSqliteMissingEdgeMatchIdentityColumnError(error)) throw error;
+    const edgeTableName = getTableName(tables.edges);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const rows = sqlite
+        .prepare(`PRAGMA table_info(${quoteDdlIdentifier(edgeTableName)})`)
+        .all() as readonly Readonly<{ name?: unknown }>[];
+      const columns = new Set(
+        rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
+      );
+      const adoptionSql = planSqliteEdgeMatchIdentityAdoption(
+        edgeTableName,
+        columns,
+      );
+      try {
+        sqlite.exec([...adoptionSql, installationSql].join("\n"));
+        return;
+      } catch (repairError) {
+        if (
+          attempt === 2 ||
+          !isSqliteDuplicateEdgeMatchIdentityColumnError(repairError)
+        ) {
+          throw repairError;
+        }
+      }
+    }
+    throw new CompilerInvariantError(
+      "Local SQLite match-identity adoption exhausted its retry loop without returning or throwing.",
+    );
+  }
+}
 
 // ============================================================
 // Native Addon Helpers
@@ -339,11 +394,10 @@ export function createLocalSqliteBackend(
 
     const db = drizzle(sqlite);
 
-    // Generate and execute DDL from schema
-    const ddlStatements = generateSqliteDDL(tables);
-    for (const statement of ddlStatements) {
-      sqlite.exec(statement);
-    }
+    // The managed factory owns a complete fresh installation, including the
+    // deployment-wide base-schema marker consumed by verified/runtime-only
+    // entrypoints. Raw generateSqliteDDL intentionally omits that marker.
+    installLocalSqliteBaseSchema(sqlite, tables);
 
     const backend = createSqliteBackend(db, {
       executionProfile: {

@@ -1,5 +1,10 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { PGlite } from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
+import { createClient } from "@libsql/client";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
@@ -30,8 +35,10 @@ import {
 } from "../src/backend/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createSqliteBackend, createSqliteTables } from "../src/backend/sqlite";
+import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { requireDefined } from "../src/utils/presence";
+import { isSqliteMissingEdgeMatchIdentityColumnError } from "../src/utils/sql-errors";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -44,10 +51,39 @@ const knows = defineEdge("knows", {
 const graph = defineGraph({
   id: "base_schema_adoption",
   nodes: { Person: { type: Person } },
-  edges: { knows: { type: knows, from: [Person], to: [Person] } },
+  edges: {
+    knows: {
+      type: knows,
+      from: [Person],
+      to: [Person],
+      matchIdentity: { name: "knows-label", fields: ["label"] },
+    },
+  },
 });
 
 type SqliteClient = Database.Database;
+
+type ProvisionedInstallation = Readonly<{
+  backend: GraphBackend;
+  close(): Promise<void>;
+}>;
+
+const LEGACY_EDGE_TABLE_SQL = `CREATE TABLE "typegraph_edges" (
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "from_kind" TEXT NOT NULL,
+  "from_id" TEXT NOT NULL,
+  "to_kind" TEXT NOT NULL,
+  "to_id" TEXT NOT NULL,
+  "props" TEXT NOT NULL,
+  "valid_from" TEXT,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  PRIMARY KEY ("graph_id", "id")
+);`;
 
 function sqliteClient(db: unknown): SqliteClient {
   return (db as { $client: SqliteClient }).$client;
@@ -102,6 +138,16 @@ async function assertTemplatesWork<G extends typeof graph>(
   expect(instantiated.status).toBe("ready");
 }
 
+async function assertMatchIdentityWrite(backend: GraphBackend): Promise<void> {
+  // createStoreWithSchema is privileged, but a current marker makes adoption
+  // return before DDL. A false-stamped installation therefore reaches this
+  // real edge write unchanged and still fails on its missing physical storage.
+  const [store] = await createStoreWithSchema(graph, backend);
+  const source = await store.nodes.Person.create({ name: "source" });
+  const target = await store.nodes.Person.create({ name: "target" });
+  await store.edges.knows.create(source, target, { label: "provisioned" });
+}
+
 function reconciledSurface(
   store: unknown,
 ): Readonly<{ reconciledSchema: ReconciledSchema<typeof graph> }> {
@@ -110,60 +156,321 @@ function reconciledSurface(
   }>;
 }
 
+function provisionGeneratedSqlite(): Promise<ProvisionedInstallation> {
+  const tables = createSqliteTables({
+    baseSchemaVersions: "generated_base_schema_versions",
+  });
+  const client = new Database(":memory:");
+  client.exec(generateSqliteMigrationSQL(tables));
+  const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
+    executionProfile: { isSync: true },
+    tables,
+  });
+  return Promise.resolve({
+    backend,
+    async close(): Promise<void> {
+      await backend.close();
+      client.close();
+    },
+  });
+}
+
+async function provisionGeneratedPostgres(): Promise<ProvisionedInstallation> {
+  const tables = createPostgresTables({
+    baseSchemaVersions: "generated_base_schema_versions",
+  });
+  const client = await PGlite.create({
+    extensions: { vector: pgvectorExtension },
+  });
+  await client.exec(generatePostgresMigrationSQL(tables));
+  const backend = createPostgresBackend(drizzlePglite(client), {
+    tables,
+    vector: false,
+  });
+  return {
+    backend,
+    async close(): Promise<void> {
+      await backend.close();
+      await client.close();
+    },
+  };
+}
+
+async function provisionVectorlessPglite(): Promise<ProvisionedInstallation> {
+  const { backend } = await createLocalPgliteBackend({ vector: false });
+  return { backend, close: async () => backend.close() };
+}
+
+function provisionLocalSqlite(): Promise<ProvisionedInstallation> {
+  const { backend } = createLocalSqliteBackend();
+  return Promise.resolve({ backend, close: () => backend.close() });
+}
+
+async function provisionLibsql(): Promise<ProvisionedInstallation> {
+  const client = createClient({ url: ":memory:" });
+  const { backend } = await createLibsqlBackend(client);
+  return {
+    backend,
+    async close(): Promise<void> {
+      await backend.close();
+      client.close();
+    },
+  };
+}
+
+function provisionLegacyLocalSqlite(): Promise<ProvisionedInstallation> {
+  const directory = mkdtempSync(path.join(tmpdir(), "typegraph-base-schema-"));
+  const databasePath = path.join(directory, "legacy.sqlite");
+  const legacy = new Database(databasePath);
+  legacy.exec(LEGACY_EDGE_TABLE_SQL);
+  legacy.close();
+  try {
+    const { backend } = createLocalSqliteBackend({ path: databasePath });
+    return Promise.resolve({
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        rmSync(directory, { force: true, recursive: true });
+      },
+    });
+  } catch (error) {
+    rmSync(directory, { force: true, recursive: true });
+    throw error;
+  }
+}
+
+async function provisionLegacyLibsql(): Promise<ProvisionedInstallation> {
+  const client = createClient({ url: ":memory:" });
+  await client.executeMultiple(LEGACY_EDGE_TABLE_SQL);
+  try {
+    const { backend } = await createLibsqlBackend(client);
+    return {
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        client.close();
+      },
+    };
+  } catch (error) {
+    client.close();
+    throw error;
+  }
+}
+
+async function provisionLegacySqliteBootstrap(): Promise<ProvisionedInstallation> {
+  const client = new Database(":memory:");
+  client.exec(LEGACY_EDGE_TABLE_SQL);
+  const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
+    executionProfile: { isSync: true },
+  });
+  try {
+    await requireDefined(backend.bootstrapTables)();
+    return {
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        client.close();
+      },
+    };
+  } catch (error) {
+    await backend.close();
+    client.close();
+    throw error;
+  }
+}
+
+async function provisionLegacyPostgresBootstrap(): Promise<ProvisionedInstallation> {
+  const client = await PGlite.create();
+  await client.exec(LEGACY_EDGE_TABLE_SQL);
+  const backend = createPostgresBackend(drizzlePglite(client), {
+    vector: false,
+  });
+  try {
+    await requireDefined(backend.bootstrapTables)();
+    return {
+      backend,
+      async close(): Promise<void> {
+        await backend.close();
+        await client.close();
+      },
+    };
+  } catch (error) {
+    await backend.close();
+    await client.close();
+    throw error;
+  }
+}
+
+/** Covered complete-installation entry points; bring-your-own factories omit DDL. */
+const PROVISIONING_PATHS = [
+  {
+    id: "generated-postgres-installation",
+    provision: provisionGeneratedPostgres,
+  },
+  { id: "generated-sqlite-installation", provision: provisionGeneratedSqlite },
+  { id: "libsql-managed-installation", provision: provisionLibsql },
+  {
+    id: "local-pglite-vectorless-installation",
+    provision: provisionVectorlessPglite,
+  },
+  { id: "local-sqlite-managed-installation", provision: provisionLocalSqlite },
+] as const;
+
+const LEGACY_FACTORY_ADOPTION_PATHS = [
+  { id: "libsql-managed-upgrade", provision: provisionLegacyLibsql },
+  {
+    id: "local-sqlite-managed-upgrade",
+    provision: provisionLegacyLocalSqlite,
+  },
+  {
+    id: "postgres-backend-bootstrap-upgrade",
+    provision: provisionLegacyPostgresBootstrap,
+  },
+  {
+    id: "sqlite-backend-bootstrap-upgrade",
+    provision: provisionLegacySqliteBootstrap,
+  },
+] as const;
+
 describe("deployment-wide base-schema adoption", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("publishes the current marker in generated SQLite installation SQL", async () => {
-    const tableNames = {
-      baseSchemaVersions: "generated_base_schema_versions",
-    } as const;
-    const tables = createSqliteTables(tableNames);
+  it.each(PROVISIONING_PATHS)(
+    "$id satisfies the base-schema gate",
+    async ({ provision }) => {
+      const installation = await provision();
+      try {
+        await requireDefined(installation.backend.assertBaseSchemaCurrent)();
+        await assertMatchIdentityWrite(installation.backend);
+      } finally {
+        await installation.close();
+      }
+    },
+  );
+
+  it.each(LEGACY_FACTORY_ADOPTION_PATHS)(
+    "$id repairs v0.51 edge storage before completing installation",
+    async ({ provision }) => {
+      const installation = await provision();
+      try {
+        await requireDefined(installation.backend.assertBaseSchemaCurrent)();
+        await assertMatchIdentityWrite(installation.backend);
+      } finally {
+        await installation.close();
+      }
+    },
+  );
+
+  it("refuses to false-stamp a legacy SQLite database through fresh-installation SQL", () => {
     const client = new Database(":memory:");
-    client.exec(generateSqliteMigrationSQL(tables));
-    const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
-      executionProfile: { isSync: true },
-      tables,
-    });
     try {
-      await requireDefined(backend.assertBaseSchemaCurrent)();
-      expect(markerVersion(client, tableNames.baseSchemaVersions)).toBe(1);
+      client.exec(LEGACY_EDGE_TABLE_SQL);
+      let installationError: unknown;
+      try {
+        client.exec(generateSqliteMigrationSQL());
+      } catch (error) {
+        installationError = error;
+      }
+      expect(
+        isSqliteMissingEdgeMatchIdentityColumnError(installationError),
+      ).toBe(true);
+      const markerTable = client
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'typegraph_base_schema_versions'",
+        )
+        .get();
+      const marker =
+        markerTable === undefined ? undefined : (
+          client
+            .prepare(
+              'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+            )
+            .get()
+        );
+      expect(marker).toBeUndefined();
     } finally {
-      await backend.close();
       client.close();
     }
   });
 
-  it("publishes the current marker in generated PostgreSQL installation SQL", async () => {
-    const tableNames = {
-      baseSchemaVersions: "generated_base_schema_versions",
-    } as const;
-    const tables = createPostgresTables(tableNames);
+  it("refuses to false-stamp a legacy PostgreSQL database through fresh-installation SQL", async () => {
     const client = await PGlite.create({
       extensions: { vector: pgvectorExtension },
     });
-    await client.exec(generatePostgresMigrationSQL(tables));
-    const backend = createPostgresBackend(drizzlePglite(client), {
-      tables,
-      vector: false,
-    });
     try {
-      await requireDefined(backend.assertBaseSchemaCurrent)();
-      const marker = await client.query<{ version: number }>(
-        `SELECT version FROM "${tableNames.baseSchemaVersions}" WHERE installation = 1`,
+      await client.exec(LEGACY_EDGE_TABLE_SQL);
+      await expect(
+        client.exec(generatePostgresMigrationSQL()),
+      ).rejects.toMatchObject({ code: "42703" });
+      const markerRelation = await client.query<{ exists: boolean }>(
+        "SELECT to_regclass('typegraph_base_schema_versions') IS NOT NULL AS exists",
       );
-      expect(marker.rows).toEqual([{ version: 1 }]);
+      const markerResult =
+        markerRelation.rows[0]?.exists === true ?
+          await client.query<{ version: number }>(
+            'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+          )
+        : { rows: [] };
+      const markerRows = markerResult.rows;
+      expect(markerRows).toEqual([]);
     } finally {
-      await backend.close();
       await client.close();
     }
   });
 
-  it("publishes the current marker for vector-disabled local PGlite", async () => {
-    const { backend } = await createLocalPgliteBackend({ vector: false });
+  it("re-plans both local SQLite column races before publishing the marker", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "typegraph-base-race-"));
+    const databasePath = path.join(directory, "legacy.sqlite");
+    const legacy = new Database(databasePath);
+    legacy.exec(LEGACY_EDGE_TABLE_SQL);
+    legacy.close();
+    const competitor = new Database(databasePath);
+    // The unbound method is intentional: the spy must invoke the native method
+    // against both the factory-owned connection and the competitor connection.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalExec = Database.prototype.exec;
+    const racedColumns = new Set<string>();
+    const execSpy = vi
+      .spyOn(Database.prototype, "exec")
+      .mockImplementation(function (
+        this: Database.Database,
+        source,
+      ): Database.Database {
+        for (const column of ["match_identity_name", "match_identity_key"]) {
+          if (
+            racedColumns.has(column) ||
+            !source.includes(`ADD COLUMN "${column}"`)
+          ) {
+            continue;
+          }
+          const statement = source
+            .split(";")
+            .find((part) => part.includes(`ADD COLUMN "${column}"`));
+          if (statement !== undefined) {
+            originalExec.call(competitor, statement);
+            racedColumns.add(column);
+          }
+          break;
+        }
+        return originalExec.call(this, source);
+      });
     try {
-      await requireDefined(backend.assertBaseSchemaCurrent)();
-    } finally {
+      const { backend } = createLocalSqliteBackend({ path: databasePath });
       await backend.close();
+      expect([...racedColumns]).toEqual([
+        "match_identity_name",
+        "match_identity_key",
+      ]);
+      const marker = competitor
+        .prepare(
+          'SELECT version FROM "typegraph_base_schema_versions" WHERE installation = 1',
+        )
+        .get();
+      expect(marker).toEqual({ version: 1 });
+    } finally {
+      execSpy.mockRestore();
+      competitor.close();
+      rmSync(directory, { force: true, recursive: true });
     }
   });
 
@@ -417,7 +724,7 @@ describe("deployment-wide base-schema adoption", () => {
     }
   });
 
-  it("keeps a concurrently published newer marker during bootstrap", async () => {
+  it("keeps and refuses a concurrently published newer marker during bootstrap", async () => {
     const { backend, db } = createLocalSqliteBackend();
     const client = sqliteClient(db);
     try {
@@ -438,7 +745,11 @@ describe("deployment-wide base-schema adoption", () => {
         return prepare(source);
       });
 
-      await expect(backend.bootstrapTables?.()).resolves.toBeUndefined();
+      await expect(backend.bootstrapTables?.()).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof BaseSchemaMigrationError &&
+          error.details.reason === "newer",
+      );
       expect(publishedNewerMarker).toBe(true);
       expect(markerVersion(client, "typegraph_base_schema_versions")).toBe(2);
     } finally {
