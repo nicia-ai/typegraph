@@ -184,6 +184,50 @@ describe("plain node batch store contract", () => {
     }
   });
 
+  it("diagnoses an out-of-schema connected edge after native refusal", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-node-delete-legacy-edge-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
+    try {
+      const [store] = await createStoreWithSchema(deleteGraph, backend);
+      const source = await store.nodes.Person.create({ name: "Source" });
+      const connected = await store.nodes.Person.create({ name: "Connected" });
+      await backend.insertEdge({
+        graphId: deleteGraph.id,
+        id: "legacy-edge",
+        kind: "legacy-kind",
+        fromKind: source.kind,
+        fromId: source.id,
+        toKind: connected.kind,
+        toId: connected.id,
+        props: {},
+      });
+      const batchConnectivity = vi.spyOn(
+        backend,
+        "findEdgesByHeterogeneousEndpointSet",
+      );
+      const scalarConnectivity = vi.spyOn(backend, "findEdgesConnectedTo");
+
+      await expect(
+        store.nodes.Person.bulkDelete([connected.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+
+      expect(batchConnectivity).toHaveBeenCalledTimes(2);
+      expect(scalarConnectivity).toHaveBeenCalledOnce();
+      await expect(
+        store.nodes.Person.getById(connected.id),
+      ).resolves.toBeDefined();
+    } finally {
+      await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the native capability on the exact root only", async () => {
     const fixture = await createFixture();
     try {

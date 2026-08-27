@@ -2865,9 +2865,7 @@ async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
   const edgeKinds = Object.keys(ctx.graph.edges);
   const connectedByNode = new Map<string, Map<string, BackendEdgeRow>>();
   for (const id of uniqueIds) connectedByNode.set(id, new Map());
-  if (edgeKinds.length === 0) {
-    return new Map(uniqueIds.map((id) => [id, []]));
-  }
+  if (edgeKinds.length === 0) return;
 
   const endpoints = uniqueIds.map((id) => ({ kind, id }));
   const [fromRows, toRows] = await Promise.all([
@@ -2886,6 +2884,11 @@ async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
       excludeDeleted: true,
     }),
   ]);
+  // The closed program deliberately checks every stored edge kind, while the
+  // heterogeneous set port is licensed by the reconciled graph's kind set.
+  // No licensed rows after a refusal is therefore insufficient evidence: let
+  // the caller recover through the kind-blind scalar authority.
+  if (fromRows.length === 0 && toRows.length === 0) return;
   for (const row of fromRows) {
     connectedByNode.get(row.from_id)?.set(row.id, row);
   }
