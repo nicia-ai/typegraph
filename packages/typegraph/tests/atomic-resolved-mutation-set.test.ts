@@ -10,7 +10,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { rowPropsToObject } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
-import { DatabaseOperationError } from "../src/errors";
+import { CompilerInvariantError, DatabaseOperationError } from "../src/errors";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 
@@ -137,6 +137,96 @@ describe("atomic resolved mutation sets", () => {
     await expect(
       store.nodes.Person.getById("existing" as never),
     ).resolves.toMatchObject({ score: 2 });
+  });
+
+  it("preserves a live node create collision instead of reporting movement", async () => {
+    const { backend, store } = await fixture();
+    await store.nodes.Person.bulkCreate([
+      { id: "collision", props: { name: "Collision", score: 1 } },
+      { id: "existing", props: { name: "Existing", score: 2 } },
+    ]);
+    const before = requireDefined(
+      await backend.getNode(graph.id, Person.kind, "existing"),
+    );
+    const executor = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(backend)?.mutateNodes,
+    );
+
+    await expect(
+      executor({
+        creates: [
+          {
+            idSource: "caller",
+            params: {
+              graphId: graph.id,
+              kind: Person.kind,
+              id: "collision",
+              props: { name: "Replacement", score: 3 },
+            },
+          },
+        ],
+        updates: [
+          {
+            graphId: graph.id,
+            kind: Person.kind,
+            id: before.id,
+            props: { ...rowPropsToObject(before.props), score: 4 },
+            expectedVersion: before.version,
+          },
+        ],
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).rejects.toMatchObject({ details: { reason: "duplicate_key" } });
+  });
+
+  it("refuses create-less mutation programs at the backend seam", async () => {
+    const { backend, store } = await fixture();
+    await store.nodes.Person.create(
+      { name: "Existing", score: 1 },
+      { id: "existing" },
+    );
+    const node = requireDefined(
+      await backend.getNode(graph.id, Person.kind, "existing"),
+    );
+    const [from, to] = await store.nodes.Person.bulkCreate([
+      { id: "from", props: { name: "From", score: 2 } },
+      { id: "to", props: { name: "To", score: 3 } },
+    ]);
+    await store.edges.relates.create(
+      requireDefined(from),
+      requireDefined(to),
+      { label: "Existing" },
+      { id: "existing-edge" },
+    );
+    const edge = requireDefined(
+      await backend.getEdge(graph.id, "existing-edge"),
+    );
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(backend),
+    );
+
+    await expect(
+      requireDefined(profile.mutateNodes)({
+        creates: [],
+        updates: [
+          {
+            graphId: graph.id,
+            kind: Person.kind,
+            id: node.id,
+            props: { ...rowPropsToObject(node.props), score: 4 },
+            expectedVersion: node.version,
+          },
+        ],
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
+    await expect(
+      requireDefined(profile.mutateEdges)({
+        creates: [],
+        updates: [{ existing: edge, props: { label: "Updated" } }],
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
   });
 
   it("rolls an edge create back when one guarded update preimage moved", async () => {

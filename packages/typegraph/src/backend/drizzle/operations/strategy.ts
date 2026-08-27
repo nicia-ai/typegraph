@@ -188,10 +188,12 @@ export type CommonOperationStrategy = Readonly<{
     deleteIdentity: Readonly<{ table: string; column: string }>;
     durableIdentity: Readonly<{ table: string; column: string }>;
     endpoint: Readonly<{ table: string; column: string }>;
+    mutationPostimage: Readonly<{ table: string; column: string }>;
   }>;
   atomicNodeRefusalConstraints: Readonly<{
     deleteRestricted: Readonly<{ table: string; column: string }>;
     liveIdentity: Readonly<{ table: string; column: string }>;
+    mutationPostimage: Readonly<{ table: string; column: string }>;
   }>;
   /**
    * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
@@ -846,6 +848,10 @@ function createCommonOperationStrategy(
         table: getTableName(tables.edges),
         column: tables.edges.id.name,
       },
+      mutationPostimage: {
+        table: getTableName(tables.edges),
+        column: tables.edges.kind.name,
+      },
     },
     buildAtomicEdgeDeleteBatchWithSchemaFence: (
       input,
@@ -874,6 +880,10 @@ function createCommonOperationStrategy(
     atomicNodeRefusalConstraints: {
       deleteRestricted: nodePropsNotNullConstraint,
       liveIdentity: nodePropsNotNullConstraint,
+      mutationPostimage: {
+        table: getTableName(tables.nodes),
+        column: tables.nodes.createdAt.name,
+      },
     },
     buildAtomicNodeDeleteBatchWithSchemaFence: (
       input,

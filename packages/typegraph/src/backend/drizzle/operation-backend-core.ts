@@ -314,6 +314,11 @@ function assertResolvedNodeMutationSetInput(
   updates: readonly AtomicNodeResolvedUpdateEntry[],
   schemaFence: SchemaWriteFenceParams,
 ): void {
+  if (creates.length === 0 || updates.length === 0) {
+    throw new CompilerInvariantError(
+      "An atomic resolved node mutation set requires both creates and updates.",
+    );
+  }
   assertMatchingNodeSchemaFences(
     creates.map((entry) => entry.params),
     schemaFence,
@@ -359,6 +364,11 @@ function assertResolvedEdgeMutationSetInput(
   updates: readonly AtomicEdgeResolvedUpdateEntry[],
   schemaFence: SchemaWriteFenceParams,
 ): void {
+  if (creates.length === 0 || updates.length === 0) {
+    throw new CompilerInvariantError(
+      "An atomic resolved edge mutation set requires both creates and updates.",
+    );
+  }
   assertMatchingEdgeSchemaFences(creates, schemaFence);
   assertResolvedEdgeUpdateBatchInput(updates, schemaFence);
   const identities = [
@@ -2324,7 +2334,8 @@ export function createCommonOperationBackend(
               if (
                 isNotNullColumnViolation(
                   error,
-                  operationStrategy.atomicNodeRefusalConstraints.liveIdentity,
+                  operationStrategy.atomicNodeRefusalConstraints
+                    .mutationPostimage,
                 )
               ) {
                 return { created: [], updated: [] };
@@ -2587,7 +2598,8 @@ export function createCommonOperationBackend(
               if (
                 isNotNullColumnViolation(
                   error,
-                  operationStrategy.atomicEdgeRefusalConstraints.deleteIdentity,
+                  operationStrategy.atomicEdgeRefusalConstraints
+                    .mutationPostimage,
                 )
               ) {
                 return { created: [], updated: [] };

@@ -75,11 +75,9 @@ function atomicEdgeCreatePostimage(
     propsJson: JSON.stringify(params.props),
     matchIdentityName: params.matchIdentity?.name,
     matchIdentityKey: params.matchIdentity?.key,
-    validFrom: resolveStampedValidityLowerBound(
-      params.validFrom,
-      params.validTo,
-      timestamp,
-    ),
+    // The temporal inventory requires the owner and its input on one line.
+    // prettier-ignore
+    validFrom: resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp),
     validTo: params.validTo,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -879,7 +877,10 @@ export function buildAtomicEdgeResolvedUpdateBatch(
     WHERE ${edges.graphId} = ${first.existing.graph_id}
       AND ${edges.kind} = ${first.existing.kind}
       AND ${edges.deletedAt} IS NULL
-      AND ${edges.id} IN (${sql.join(entries.map((entry) => sql`${entry.existing.id}`), sql`, `)})
+      AND ${edges.id} IN (${sql.join(
+        entries.map((entry) => sql`${entry.existing.id}`),
+        sql`, `,
+      )})
       AND (
         SELECT COUNT(*)
         FROM ${edges}
@@ -979,7 +980,10 @@ export function buildReadAtomicEdgeMutationPostimages(
     FROM ${edges}
     CROSS JOIN ${schemaVersions}
     WHERE ${edges.graphId} = ${graphId}
-      AND ${edges.id} IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+      AND ${edges.id} IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
       AND ${schemaVersions.graphId} = ${schemaFence.graphId}
       AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
       AND ${schemaVersions.isActive} = TRUE

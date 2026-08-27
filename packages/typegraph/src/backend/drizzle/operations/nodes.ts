@@ -49,11 +49,9 @@ function atomicNodeCreatePostimage(
     id: params.id,
     propsJson: JSON.stringify(params.props),
     version: INITIAL_NODE_VERSION,
-    validFrom: resolveStampedValidityLowerBound(
-      params.validFrom,
-      params.validTo,
-      timestamp,
-    ),
+    // The temporal inventory requires the owner and its input on one line.
+    // prettier-ignore
+    validFrom: resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp),
     validTo: params.validTo,
     createdAt: timestamp,
     updatedAt: timestamp,
@@ -669,7 +667,10 @@ export function buildAtomicNodeResolvedUpdateBatch(
     WHERE ${nodes.graphId} = ${first.graphId}
       AND ${nodes.kind} = ${first.kind}
       AND ${nodes.deletedAt} IS NULL
-      AND ${nodes.id} IN (${sql.join(entries.map((entry) => sql`${entry.id}`), sql`, `)})
+      AND ${nodes.id} IN (${sql.join(
+        entries.map((entry) => sql`${entry.id}`),
+        sql`, `,
+      )})
       AND (
         SELECT COUNT(*)
         FROM ${nodes}
@@ -689,12 +690,13 @@ export function buildAtomicNodeResolvedUpdateBatch(
  * Every earlier slot is schema-fenced, but a guarded update can legitimately
  * return no rows when one preimage moved. The transport cannot discover that
  * after committing: this final slot rechecks the complete postimage set and
- * deliberately violates the created node's NOT NULL props column when it is
+ * deliberately violates the created node's NOT NULL created_at column when it is
  * incomplete, forcing the native batch to roll every preceding insert/update
- * back. Reusing the create-path sentinel keeps the hot write path away from the
- * schema registry; the duplicate primary key is an independent refusal if the
- * props invariant is ever weakened. A stale fence matches no marker row and
- * remains the program's ordinary all-zero diagnostic signal.
+ * back. Its dedicated sentinel keeps create-collision classification distinct
+ * and the hot write path away from the schema registry; the duplicate primary
+ * key is an independent refusal if the timestamp invariant is ever weakened. A
+ * stale fence matches no marker row and remains the program's ordinary all-zero
+ * diagnostic signal.
  */
 export function buildAssertAtomicNodeMutationPostimages(
   tables: Tables,
@@ -731,11 +733,11 @@ export function buildAssertAtomicNodeMutationPostimages(
       ${nodes.graphId},
       ${nodes.kind},
       ${nodes.id},
-      NULL,
+      ${nodes.props},
       ${nodes.version},
       ${nodes.validFrom},
       ${nodes.validTo},
-      ${nodes.createdAt},
+      NULL,
       ${nodes.updatedAt}
     FROM ${nodes}
     CROSS JOIN ${schemaVersions}
@@ -771,7 +773,10 @@ export function buildReadAtomicNodeMutationPostimages(
     CROSS JOIN ${schemaVersions}
     WHERE ${nodes.graphId} = ${graphId}
       AND ${nodes.kind} = ${kind}
-      AND ${nodes.id} IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+      AND ${nodes.id} IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
       AND ${schemaVersions.graphId} = ${schemaFence.graphId}
       AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
       AND ${schemaVersions.isActive} = TRUE

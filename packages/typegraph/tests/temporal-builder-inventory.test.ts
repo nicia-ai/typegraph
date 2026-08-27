@@ -91,6 +91,12 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     // The compare-and-set fence's column argument — a READ of the bound the
     // caller asserted, never a choice about what to store.
     "nodes.validFrom,",
+    // The atomic create postimage owns the stamped value; the VALUES tuple only
+    // forwards it into the physical column.
+    "${castBoundValueForColumn(nodes.validFrom, sqlNull(postimage.validFrom))},",
+    // The terminal assertion duplicates the already-written row solely to
+    // trigger its dedicated created_at refusal sentinel.
+    "${nodes.validFrom},",
     // The atomic upsert's incumbent read, assignment target, and excluded-row
     // forwarding expression. The VALUES tuple above owns the stamped bound.
     "const currentValidFrom = qualifiedColumn(targetAlias, nodes.validFrom);",
@@ -103,6 +109,12 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     "if (params.clearDeleted && params.validFrom !== undefined) {",
     // The fence's column argument, as for nodes.
     "edges.validFrom,",
+    // The atomic create postimage owns the stamped value; the VALUES tuple only
+    // forwards it into the physical column.
+    "${castBoundValueForColumn(edges.validFrom, sqlNull(postimage.validFrom))},",
+    // The terminal assertion duplicates the already-written row solely to
+    // trigger its dedicated kind refusal sentinel.
+    "${edges.validFrom},",
     // The resolved-set update compares the caller's already-read temporal
     // preimage; the caller remains the owner of the new stamped bound.
     "${expectedValidFromPredicate(edges.validFrom, existing.valid_from ?? EXPECTED_SQL_NULL)}",
