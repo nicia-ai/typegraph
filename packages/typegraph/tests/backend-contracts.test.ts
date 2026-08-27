@@ -1581,9 +1581,7 @@ const KIND_PREDICATED_EDGE_WRITES = new Set([
 ]);
 
 /** Edge write members that are deliberately kind-blind. */
-const KIND_BLIND_EDGE_WRITES = new Set([
-  "hardDeleteEdgesBatch",
-]);
+const KIND_BLIND_EDGE_WRITES = new Set(["hardDeleteEdgesBatch"]);
 
 /**
  * Records the params the store hands each edge write, on the TRANSACTION
