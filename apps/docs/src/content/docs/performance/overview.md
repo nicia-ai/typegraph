@@ -180,11 +180,12 @@ can be expressed by the submitted SQL itself. `bulkUpsertById()` is deliberately
 different. It first reads authoritative stored properties, then merges and
 validates them before its write set is known. On bundled serverless roots, an
 update-only batch of distinct live IDs with no claims, projections, Operational
-Identity, temporal mutation, history, or revision capture submits that resolved
-set as one guarded atomic update. The preimage version (nodes) or complete
-mutable preimage (edges) is part of the SQL gate, so every row updates or none
-do. Repeated IDs, creates, resurrections, temporal changes, sidecars, and caller
-transactions retain the consolidated interactive path.
+Identity, durable edge match identity, temporal mutation, history, or revision
+capture submits that resolved set as one guarded atomic update. The preimage
+version (nodes) or complete mutable preimage (edges) is part of the SQL gate, so
+every row updates or none do. Repeated IDs, creates, resurrections, temporal
+changes, sidecars, and caller transactions retain the consolidated interactive
+path.
 
 Measured at the libSQL transport boundary, eligible plain node
 `bulkInsert()` and `bulkCreate()` calls each submit one exchange for generated,
@@ -197,7 +198,12 @@ transaction plus per-row probes/writes. On the portable edge path, one batched
 authoritative read plus one set-based soft delete replaces the former two
 statements per input. Eligible update-only node and edge `bulkUpsertById()`
 calls submit 2 exchanges regardless of row count within the bind budget: one
-batched preimage read and one atomic set update. The native exchange still
+batched preimage read and one atomic set update. The D1 100-parameter budget
+admits at most 17 node updates or 6 edge updates in that shape. The ceiling is
+all-or-nothing rather than chunked: a larger batch returns to the consolidated
+interactive path because separate autocommit statements could not preserve the
+set's atomic guard. Other backends derive their ceiling from their declared
+parameter budget. The native exchange still
 contains the SQL statements needed for inserts and sidecars; it submits them as
 one transaction so they do not each pay network latency. The exact previous
 count varies by driver and endpoint shape.

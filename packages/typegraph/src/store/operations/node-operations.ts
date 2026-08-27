@@ -2871,6 +2871,10 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
         return row === undefined || row.deleted_at !== undefined;
       });
       if (missing !== undefined) {
+        // This update-only partition was resolved from live rows. Once a
+        // refreshed preimage is absent or tombstoned, the requested update
+        // target no longer exists; do not reinterpret it as a create or fall
+        // through to a transactionless portable write.
         throw new NodeNotFoundError(first.input.kind, missing.input.id);
       }
       const resolved = entries.map((entry) => {

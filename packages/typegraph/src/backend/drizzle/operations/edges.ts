@@ -32,6 +32,11 @@ import {
   type Tables,
 } from "./shared";
 
+// EdgeRow follows the public no-null convention, while the SQL predicate's
+// three-state input uses null to mean "assert the stored column is SQL NULL."
+// eslint-disable-next-line unicorn/no-null
+const EXPECTED_SQL_NULL = null;
+
 /**
  * Inputs for the dialect-specific edge convergence statement.
  *
@@ -799,8 +804,8 @@ export function buildAtomicEdgeResolvedUpdateBatch(
             AND ${edges.toId} = ${existing.to_id}
             AND ${edges.updatedAt} = ${existing.updated_at}
             AND ${edges.props} = ${castBoundValueForColumn(edges.props, rowPropsToJsonText(existing.props))}
-            ${expectedValidFromPredicate(edges.validFrom, existing.valid_from)}
-            ${expectedValidFromPredicate(edges.validTo, existing.valid_to)}
+            ${expectedValidFromPredicate(edges.validFrom, existing.valid_from ?? EXPECTED_SQL_NULL)}
+            ${expectedValidFromPredicate(edges.validTo, existing.valid_to ?? EXPECTED_SQL_NULL)}
           )
     `;
   });
@@ -821,6 +826,7 @@ export function buildAtomicEdgeResolvedUpdateBatch(
         END,
         ${quotedColumn(edges.updatedAt)} = ${timestamp}
     WHERE ${edges.graphId} = ${first.existing.graph_id}
+      AND ${edges.kind} = ${first.existing.kind}
       AND ${edges.deletedAt} IS NULL
       AND ${edges.id} IN (${sql.join(entries.map((entry) => sql`${entry.existing.id}`), sql`, `)})
       AND (

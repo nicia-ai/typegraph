@@ -221,7 +221,8 @@ export function resolveAtomicEdgeResolvedUpdateBatchExecutor(
   const registration = input.graph.edges[input.kind];
   if (
     registration === undefined ||
-    (registration.cardinality ?? "many") !== "many"
+    (registration.cardinality ?? "many") !== "many" ||
+    registration.matchIdentity !== undefined
   ) {
     return;
   }

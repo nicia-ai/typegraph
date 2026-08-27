@@ -348,8 +348,11 @@ remains a resolved mutation set because it must read and schema-validate a
 database preimage before its writes are known. Bundled serverless roots can
 submit an eligible distinct-ID, live-row, update-only resolved set as one
 guarded atomic update after that read; repeated IDs, creates, temporal changes,
-sidecars, history/revision capture, and caller transactions use the interactive
-path.
+sidecars (including durable edge match identity), history/revision capture, and
+caller transactions use the interactive path. On D1's 100-parameter budget the
+native ceiling is 17 node updates or 6 edge updates; larger batches return to
+the interactive path rather than splitting the all-or-nothing guard across
+autocommit statements.
 
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 

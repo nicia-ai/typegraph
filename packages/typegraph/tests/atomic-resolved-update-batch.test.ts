@@ -1,4 +1,5 @@
 import { createClient } from "@libsql/client";
+import { eq, sql as drizzleSql } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -6,12 +7,18 @@ import {
   markBundledRootAtomicMutationPrograms,
   resolveBundledRootAtomicMutationPrograms,
 } from "../src/backend/capabilities/atomic-mutation-program";
+import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { rowPropsToObject } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
-import { CompilerInvariantError } from "../src/errors";
+import { CompilerInvariantError, DatabaseOperationError } from "../src/errors";
+import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
+import {
+  resolveAtomicEdgeResolvedUpdateBatchExecutor,
+  resolveAtomicNodeResolvedUpdateBatchExecutor,
+} from "../src/store/operations/atomic-mutation-program";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
@@ -20,11 +27,26 @@ const Person = defineNode("Person", {
 const relates = defineEdge("relates", {
   schema: z.object({ label: z.string() }),
 });
+const durableRelates = defineEdge("durableRelates", {
+  schema: z.object({ label: z.string() }),
+});
 const graph = defineGraph({
   id: "atomic-resolved-update-batch",
   nodes: { Person: { type: Person } },
   edges: {
     relates: { type: relates, from: [Person], to: [Person] },
+  },
+});
+const durableGraph = defineGraph({
+  id: "atomic-resolved-update-batch-durable",
+  nodes: { Person: { type: Person } },
+  edges: {
+    durableRelates: {
+      type: durableRelates,
+      from: [Person],
+      to: [Person],
+      matchIdentity: { name: "label", fields: ["label"] },
+    },
   },
 });
 
@@ -178,6 +200,121 @@ describe("atomic resolved update batches", () => {
     });
   });
 
+  it("asserts stored NULL edge validity bounds in the preimage guard", async () => {
+    const { backend, db, profile, store } = await fixture();
+    const [from, to] = await store.nodes.Person.bulkCreate([
+      { id: "from", props: { name: "From", score: 1 } },
+      { id: "to", props: { name: "To", score: 2 } },
+    ]);
+    const edges = await store.edges.relates.bulkCreate([
+      {
+        id: "a",
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "A" },
+      },
+      {
+        id: "b",
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "B" },
+      },
+    ]);
+    await db
+      .update(sqliteTables.edges)
+      .set({ validFrom: drizzleSql`NULL` })
+      .where(eq(sqliteTables.edges.id, "a"));
+    const beforeFrom = requireDefined(
+      await backend.getEdge(graph.id, requireDefined(edges[0]).id),
+    );
+    const beforeTo = requireDefined(
+      await backend.getEdge(graph.id, requireDefined(edges[1]).id),
+    );
+    await db
+      .update(sqliteTables.edges)
+      .set({ validFrom: "2026-08-27T00:00:00.000Z" })
+      .where(eq(sqliteTables.edges.id, "a"));
+
+    await expect(
+      requireDefined(profile.updateEdges)({
+        entries: [{ existing: beforeFrom, props: { label: "resolved" } }],
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).resolves.toEqual([]);
+
+    await db
+      .update(sqliteTables.edges)
+      .set({ validTo: "2026-08-28T00:00:00.000Z" })
+      .where(eq(sqliteTables.edges.id, "b"));
+    await expect(
+      requireDefined(profile.updateEdges)({
+        entries: [{ existing: beforeTo, props: { label: "resolved" } }],
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("pins the D1 eligibility ceilings and refuses durable match identity", async () => {
+    const { db } = await fixture();
+    const budgetedBackend = createSqliteBackend(db, {
+      capabilities: { maxBindParameters: 100 },
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(budgetedBackend),
+    );
+    expect(requireDefined(profile.updateNodes).maxEntries).toBe(17);
+    expect(requireDefined(profile.updateEdges).maxEntries).toBe(6);
+
+    const common = {
+      backend: budgetedBackend,
+      graph,
+      schemaVersion: 1,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+    } as const;
+    const nodeInput = {
+      ...common,
+      kind: Person.kind,
+      identityEnabled: false,
+      registry: buildKindRegistry(graph),
+    } as const;
+    expect(
+      resolveAtomicNodeResolvedUpdateBatchExecutor({
+        ...nodeInput,
+        entryCount: 17,
+      }),
+    ).toBe(profile.updateNodes);
+    expect(
+      resolveAtomicNodeResolvedUpdateBatchExecutor({
+        ...nodeInput,
+        entryCount: 18,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeResolvedUpdateBatchExecutor({
+        ...common,
+        kind: relates.kind,
+        entryCount: 6,
+      }),
+    ).toBe(profile.updateEdges);
+    expect(
+      resolveAtomicEdgeResolvedUpdateBatchExecutor({
+        ...common,
+        kind: relates.kind,
+        entryCount: 7,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeResolvedUpdateBatchExecutor({
+        ...common,
+        graph: durableGraph,
+        kind: durableRelates.kind,
+        entryCount: 1,
+      }),
+    ).toBeUndefined();
+  });
+
   it("re-resolves the complete node set after a moved preimage", async () => {
     const { db, store } = await fixture();
     const nodes = await store.nodes.Person.bulkCreate([
@@ -218,5 +355,108 @@ describe("atomic resolved update batches", () => {
 
     expect(retrying).toHaveBeenCalledTimes(2);
     expect(updated.map((node) => node.score)).toEqual([10, 10]);
+  });
+
+  it("re-resolves the complete edge set after a moved preimage", async () => {
+    const { db, store } = await fixture();
+    const [from, to] = await store.nodes.Person.bulkCreate([
+      { id: "from", props: { name: "From", score: 1 } },
+      { id: "to", props: { name: "To", score: 2 } },
+    ]);
+    const edges = await store.edges.relates.bulkCreate([
+      {
+        id: "a",
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "A" },
+      },
+      {
+        id: "b",
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "B" },
+      },
+    ]);
+    const transactionlessBackend = createSqliteBackend(db, {
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const [transactionlessStore] = await createVerifiedStore(
+      graph,
+      transactionlessBackend,
+    );
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(transactionlessBackend),
+    );
+    const original = requireDefined(profile.updateEdges);
+    let attempts = 0;
+    const run = vi.fn(async (input: Parameters<typeof original>[0]) => {
+      attempts += 1;
+      if (attempts === 1) return [];
+      return original(input);
+    });
+    const retrying = Object.assign(run, {
+      maxEntries: original.maxEntries,
+    }) satisfies typeof original;
+    markBundledRootAtomicMutationPrograms(transactionlessBackend, {
+      ...profile,
+      updateEdges: retrying,
+    });
+
+    const updated = await transactionlessStore.edges.relates.bulkUpsertById(
+      edges.map((edge) => ({
+        id: edge.id,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: `${edge.label} updated` },
+      })),
+    );
+
+    expect(retrying).toHaveBeenCalledTimes(2);
+    expect(updated.map((edge) => edge.label)).toEqual([
+      "A updated",
+      "B updated",
+    ]);
+  });
+
+  it("fails closed when the resolved node set never stabilizes", async () => {
+    const { db, store } = await fixture();
+    const nodes = await store.nodes.Person.bulkCreate([
+      { id: "a", props: { name: "A", score: 1 } },
+      { id: "b", props: { name: "B", score: 2 } },
+    ]);
+    const transactionlessBackend = createSqliteBackend(db, {
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const [transactionlessStore] = await createVerifiedStore(
+      graph,
+      transactionlessBackend,
+    );
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(transactionlessBackend),
+    );
+    const original = requireDefined(profile.updateNodes);
+    const refusing = Object.assign(
+      vi.fn(() => Promise.resolve([])),
+      {
+        maxEntries: original.maxEntries,
+      },
+    ) satisfies typeof original;
+    markBundledRootAtomicMutationPrograms(transactionlessBackend, {
+      ...profile,
+      updateNodes: refusing,
+    });
+
+    await expect(
+      transactionlessStore.nodes.Person.bulkUpsertById(
+        nodes.map((node) => ({
+          id: node.id,
+          props: { name: node.name, score: 10 },
+        })),
+      ),
+    ).rejects.toBeInstanceOf(DatabaseOperationError);
+    expect(refusing).toHaveBeenCalledTimes(2);
+    await expect(
+      transactionlessStore.nodes.Person.getByIds(nodes.map((node) => node.id)),
+    ).resolves.toEqual(nodes);
   });
 });
