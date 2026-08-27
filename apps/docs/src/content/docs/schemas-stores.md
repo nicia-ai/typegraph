@@ -1806,10 +1806,13 @@ Batch version of `getOrCreateByEndpoints`. Returns results in input order.
 The bundled backends read all candidate endpoint pairs with set-oriented
 statements rather than one lookup per item. These are exact directed-pair
 joins, so a high-fan-out source does not materialize all of its unrelated
-outgoing edges for client-side filtering. Bulk convergence still uses one
-transaction and an authoritative in-transaction set read in this release; the
-single-statement durable arbiter described above applies to the single-item
-method, not yet to this batch method.
+outgoing edges for client-side filtering. For a schema-declared durable
+`matchIdentity` with `cardinality: "many"`, the declaration's match fields,
+default `ifExists: "return"`, and no temporal mutation, bundled roots use one
+closed native atomic exchange. That program owns endpoint validation, durable
+identity arbitration, tombstone resurrection, and ordered results, so it does
+not perform a probe or open a separate interactive transaction. Other shapes
+retain the set-oriented read plus transactional write path.
 
 ```typescript
 store.edges.worksAt.bulkGetOrCreateByEndpoints(

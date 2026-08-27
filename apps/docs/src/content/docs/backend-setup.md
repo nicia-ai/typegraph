@@ -1434,8 +1434,13 @@ id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
 enabled, confirming that a single `ifExists: "update"` endpoint replay is
 unchanged requires the endpoint match-key convergence fence and therefore
 refuses on these backends. The bulk `getOrCreateByEndpoints` form fences its
-whole batch, so it refuses on those backends whatever the outcome would have
-been.
+whole batch, so it retains that refusal on transactionless roots unless it
+matches the narrow native durable-convergence envelope: schema-declared
+`matchIdentity`, `cardinality: "many"`, declared match fields, default
+`ifExists: "return"`, and no temporal mutation. That eligible form is one
+closed atomic exchange; dynamic match fields, update mode, constrained
+cardinality, temporal options, and all transaction-scoped or derived roots
+retain the refusal or fallback path required by their contracts.
 
 ### Claim relations, and what they do not promise
 

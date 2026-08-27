@@ -126,12 +126,13 @@ cache.
 
 Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
 stores, caller-owned transactions, and custom backends retain the transactional
-path required by their additional contracts. Eligible direct edge batches can
-instead carry their cardinality claims inside the native atomic program
-described below. Bulk endpoint convergence still
-uses one transaction in this release, but bundled backends discover exact
-directed endpoint pairs in set-oriented bind-budget chunks instead of issuing a
-candidate read per item. See
+path required by their additional contracts. Eligible durable bulk endpoint
+convergence now submits one closed native atomic exchange: the durable identity
+arbiter, endpoint validation, tombstone resurrection, and ordered created/found
+results are all resolved by the program. This removes the outside probe, the
+transaction open/commit, and the per-item write legs for the eligible shape.
+The fallback bulk path still discovers exact directed endpoint pairs in
+set-oriented bind-budget chunks and retains its transactional contract. See
 [`getOrCreateByEndpoints`](/schemas-stores#getorcreatebyendpointsfrom-to-props-options)
 for field restrictions, migration rules, and PostgreSQL retry guidance.
 
@@ -144,6 +145,16 @@ operations—including claims, Operational Identity, history, or revision
 sidecars—must commit together. Undeclared dynamic `matchOn` convergence keeps
 that interactive-transaction requirement; only a schema-declared durable
 `matchIdentity` can qualify for the one-statement root command.
+
+Bulk endpoint convergence has a narrower native envelope than direct edge
+inserts. A schema-declared durable `matchIdentity` with `cardinality: "many"`,
+the declaration's match fields, default `ifExists: "return"`, and no temporal
+mutation qualifies on an exact bundled root. The libSQL transport inventory
+records one client `batch` submission and zero client `execute` calls for a
+multi-item eligible call; this is a submission-count measurement, not a
+wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
+cardinality, temporal options, caller transactions, derived/custom backends,
+and history/revision stores intentionally retain the fallback path.
 
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
 programs for eligible ingestion calls. Plain schema-managed

@@ -192,6 +192,12 @@ describe("managed write exchange inventory", () => {
             { from, to, props: { role: "D2" } },
           ]),
         ),
+        await measure("durable-edge-bulk-get-or-create", () =>
+          store.edges.durable.bulkGetOrCreateByEndpoints([
+            { from, to, props: { role: "D3" } },
+            { from, to, props: { role: "D4" } },
+          ]),
+        ),
         await measure("edge-delete-batch", () =>
           store.edges.unconstrained.bulkDelete(
             deletableEdges.map((edge) => edge.id),
@@ -301,6 +307,11 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "durable-edge-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "durable-edge-bulk-get-or-create",
           },
           {
             "batch": 1,
