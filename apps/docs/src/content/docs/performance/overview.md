@@ -259,8 +259,8 @@ whole-call atomicity on bundled transactionless roots through one native
 atomic exchange, including durable-match and cardinality-constrained edge
 batches. Other
 bulk shapes on a transactionless root either refuse when their contract requires a fence or use
-sequential fallback, which can leave earlier chunks committed if a later one fails.
-`store.transaction()` cannot add atomicity to a backend that does not support transactions.
+their explicitly non-transactional operation semantics. `store.transaction()` refuses before
+invoking its callback on a transactionless root; it never presents sequential writes as atomic.
 
 To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
 transaction:

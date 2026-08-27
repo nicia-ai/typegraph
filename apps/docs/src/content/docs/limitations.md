@@ -34,22 +34,17 @@ Write behavior depends on how the Store was constructed. A schema-managed Store
 fails closed for writes that need the transaction-scoped schema or constraint
 fence, but eligible plain node batches and `cardinality: "many"` edges can use
 the authoritative one-statement command. A raw `createStore()` /
-`createAdapterStore()` without a reconciled snapshot still uses the sequential fallback:
-`store.transaction(fn)` invokes `fn` against the same backend, writes are applied
-as they happen, and a thrown error does not roll back earlier writes. Direct
-backend writes are raw as well.
+`createAdapterStore()` without a reconciled snapshot can still issue ordinary
+non-atomic writes, but `store.transaction(fn)` refuses before invoking `fn`.
+Direct backend writes are raw as well.
 
-These backends also ignore the `isolationLevel` option on
-`store.transaction(...)`, so the collection-read snapshot recipe documented
-elsewhere does nothing here.
+These backends cannot honor the `isolationLevel` option on
+`store.transaction(...)`; the method refuses before invoking its callback, so
+the collection-read snapshot recipe documented elsewhere does not apply here.
 
 ```typescript
-// On a raw D1 / neon-http Store: every successful create persists immediately.
-// If the throw fires after Alice is created, Alice stays in the database.
-await store.transaction(async (tx) => {
-  await tx.nodes.Person.create({ name: "Alice" });
-  throw new Error("boom"); // does NOT roll back the create above
-});
+// On a raw D1 / neon-http Store, use ordinary writes explicitly.
+await store.nodes.Person.create({ name: "Alice" });
 ```
 
 **If you require atomicity or schema-version fencing, branch on the capability:**
@@ -60,7 +55,7 @@ if (store.capabilities.transactions) {
     /* atomic */
   });
 } else {
-  // Raw Store only: sequential, non-atomic, and not schema-fenced.
+  // Use ordinary writes explicitly when non-atomic behavior is intentional.
   const person = await store.nodes.Person.create({ name: "Alice" });
   const company = await store.nodes.Company.create({ name: "Acme" });
   await store.edges.worksAt.create(person, company, { role: "Engineer" });

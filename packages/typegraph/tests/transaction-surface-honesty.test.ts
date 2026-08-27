@@ -34,6 +34,7 @@ import {
   type TransactionBackend,
   type TransactionContext,
   type TransactionReadBackend,
+  UnsupportedBackendCapabilityError,
 } from "../src";
 import { projectGraphBackend } from "../src/backend/derive-backend";
 import {
@@ -44,7 +45,6 @@ import { STORE_RUNTIME } from "../src/store/runtime-port";
 import { TRANSACTION_RUNTIME } from "../src/store/types";
 import {
   createInitializedStore,
-  createRawInitializedStore,
   createTestBackend,
   disableTransactions,
 } from "./test-utils";
@@ -97,16 +97,17 @@ describe("#254 tx.sqlAvailability discriminant", () => {
     });
   });
 
-  it("reports 'unavailable' with tx.sql === undefined on a non-transactional backend", async () => {
-    const store = await createRawInitializedStore(
-      graph,
-      disableTransactions(createTestBackend()),
-    );
-    await store.transaction(async (tx) => {
-      await tx.nodes.Person.create({ name: "probe" });
-      expect(tx.sqlAvailability).toBe("unavailable");
-      expect(Reflect.get(tx, "sql")).toBeUndefined();
-    });
+  it("refuses before invoking a callback on a non-transactional backend", async () => {
+    const store = createStore(graph, disableTransactions(createTestBackend()));
+    let invoked = false;
+
+    await expect(
+      store.transaction(() => {
+        invoked = true;
+        return Promise.resolve();
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+    expect(invoked).toBe(false);
   });
 
   it("reports 'history' with a present-but-throwing tx.sql under history capture", async () => {
