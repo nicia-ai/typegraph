@@ -10,6 +10,7 @@ import { BATCH_POINT_READ } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type GraphBackend,
+  type NodeRow as BackendNodeRow,
   rowPropsToObject,
   runOptionallyInTransaction,
   type TransactionBackend,
@@ -165,6 +166,12 @@ export type UpsertUpdateNodeInput = UpdateNodeInput &
     onImmutableLowerBound?: OnImmutableLowerBound;
   }>;
 
+export type NodeUpsertUpdateBatchEntry = Readonly<{
+  input: UpsertUpdateNodeInput;
+  clearDeleted: boolean;
+  existing?: BackendNodeRow;
+}>;
+
 /**
  * Config for creating a NodeCollection.
  */
@@ -203,11 +210,10 @@ export type NodeCollectionConfig = Readonly<{
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Readonly<{ affectedCount: number }>>;
-  executeUpsertUpdate: (
-    input: UpsertUpdateNodeInput,
+  executeUpsertUpdateBatch: (
+    entries: readonly NodeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ clearDeleted?: boolean }>,
-  ) => Promise<Node>;
+  ) => Promise<readonly Node[]>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
@@ -361,7 +367,7 @@ export function createNodeCollection<
     executeCreateBatch: executeNodeCreateBatch,
     executeUpdate: executeNodeUpdate,
     executeUpdateWhere: executeNodeUpdateWhere,
-    executeUpsertUpdate: executeNodeUpsertUpdate,
+    executeUpsertUpdateBatch: executeNodeUpsertUpdateBatch,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -755,7 +761,7 @@ export function createNodeCollection<
         const ids = items.map((item) => item.id);
         // Full existing rows: the coalesce dirty-check needs their stored
         // props, not just deleted_at.
-        const existingMap = new Map<string, NodeRow>();
+        const existingMap = new Map<string, BackendNodeRow>();
 
         const boundGetNodes = bindExtraIfReachable(
           target,
@@ -787,6 +793,7 @@ export function createNodeCollection<
           index: number;
           input: UpsertUpdateNodeInput;
           clearDeleted: boolean;
+          existing?: BackendNodeRow;
         }[] = [];
 
         // Batch-local running state per id: the props AND validity window the
@@ -929,6 +936,9 @@ export function createNodeCollection<
               index: itemIndex,
               input: buildUpsertUpdateInput(kind, item.id, item.props, item),
               clearDeleted: deletedAt !== undefined,
+              ...(pendingEntry === undefined && original !== undefined ?
+                { existing: original }
+              : {}),
             });
             pending.set(item.id, {
               props: dirty?.validatedProps,
@@ -955,12 +965,21 @@ export function createNodeCollection<
           }
         }
 
-        // Hookless individual updates
-        for (const entry of toUpdate) {
-          const result = await executeNodeUpsertUpdate(entry.input, target, {
-            clearDeleted: entry.clearDeleted,
-          });
-          results[entry.index] = narrowNode<N>(result);
+        if (toUpdate.length > 0) {
+          const updated = await executeNodeUpsertUpdateBatch(
+            toUpdate.map((entry) => ({
+              input: entry.input,
+              clearDeleted: entry.clearDeleted,
+              ...(entry.existing === undefined ?
+                {}
+              : { existing: entry.existing }),
+            })),
+            target,
+          );
+          for (const [updateIndex, entry] of toUpdate.entries()) {
+            const result = requireDefined(updated[updateIndex]);
+            results[entry.index] = narrowNode<N>(result);
+          }
         }
 
         // Items that coalesced against an in-batch write take that write's

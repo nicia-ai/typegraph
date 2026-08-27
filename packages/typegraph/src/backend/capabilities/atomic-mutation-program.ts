@@ -92,6 +92,39 @@ export type AtomicNodeDeleteBatchExecutor = (
   input: AtomicNodeDeleteBatchInput,
 ) => Promise<AtomicDeleteBatchResult>;
 
+export type AtomicNodeResolvedUpdateEntry = Readonly<{
+  graphId: string;
+  kind: string;
+  id: string;
+  props: Readonly<Record<string, unknown>>;
+  expectedVersion: number;
+}>;
+
+export interface AtomicNodeResolvedUpdateBatchExecutor {
+  readonly maxEntries: number;
+  (
+    input: Readonly<{
+      entries: readonly AtomicNodeResolvedUpdateEntry[];
+      schemaFence: SchemaWriteFenceParams;
+    }>,
+  ): Promise<readonly NodeRow[]>;
+}
+
+export type AtomicEdgeResolvedUpdateEntry = Readonly<{
+  existing: EdgeRow;
+  props: Readonly<Record<string, unknown>>;
+}>;
+
+export interface AtomicEdgeResolvedUpdateBatchExecutor {
+  readonly maxEntries: number;
+  (
+    input: Readonly<{
+      entries: readonly AtomicEdgeResolvedUpdateEntry[];
+      schemaFence: SchemaWriteFenceParams;
+    }>,
+  ): Promise<readonly EdgeRow[]>;
+}
+
 /** Internal proof that the closed SQL program rejected a missing endpoint. */
 export class AtomicEdgeBatchEndpointRefusalError extends Error {
   constructor(cause: unknown) {
@@ -133,6 +166,8 @@ export type AtomicMutationProgramExecutor = Readonly<{
   createEdges?: AtomicEdgeBatchExecutor;
   deleteNodes?: AtomicNodeDeleteBatchExecutor;
   deleteEdges?: AtomicEdgeDeleteBatchExecutor;
+  updateNodes?: AtomicNodeResolvedUpdateBatchExecutor;
+  updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor;
 }>;
 
 const ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
@@ -148,6 +183,8 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     createEdges?: AtomicEdgeBatchExecutor | undefined;
     deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
     deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
+    updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
+    updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor | undefined;
   }>,
 ): T {
   ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(target, {
@@ -171,6 +208,12 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     : {
         deleteEdges: executor.deleteEdges,
       }),
+    ...(executor.updateNodes === undefined ?
+      {}
+    : { updateNodes: executor.updateNodes }),
+    ...(executor.updateEdges === undefined ?
+      {}
+    : { updateEdges: executor.updateEdges }),
   });
   return target;
 }

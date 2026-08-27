@@ -37,13 +37,13 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/architecture.md",
-    line: 656,
+    line: 659,
     text:
       "graph DSL and its schema-derived types from the " + CLAIM_WORD + "-free",
   },
   {
     file: "apps/docs/src/content/docs/architecture.md",
-    line: 658,
+    line: 661,
     text:
       "import the full " +
       CLAIM_WORD +

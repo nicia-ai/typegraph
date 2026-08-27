@@ -8,8 +8,10 @@
 import {
   type AtomicEdgeBatchExecutor as BackendAtomicEdgeBatchExecutor,
   type AtomicEdgeDeleteBatchExecutor,
+  type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicNodeBatchExecutor as BackendAtomicNodeBatchExecutor,
   type AtomicNodeDeleteBatchExecutor,
+  type AtomicNodeResolvedUpdateBatchExecutor,
   resolveBundledRootAtomicMutationPrograms,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
@@ -178,4 +180,53 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   if (getSearchableFields(registration.type.schema).length > 0) return;
   if (getEmbeddingFields(registration.type.schema).length > 0) return;
   return resolveAtomicMutationProfile(input)?.deleteNodes;
+}
+
+export type AtomicNodeResolvedUpdateEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{
+      kind: string;
+      entryCount: number;
+      identityEnabled: boolean;
+      registry: KindRegistry;
+    }>;
+
+/** The one owner of the static proof for resolved live-node set updates. */
+export function resolveAtomicNodeResolvedUpdateBatchExecutor(
+  input: AtomicNodeResolvedUpdateEligibilityInput,
+): AtomicNodeResolvedUpdateBatchExecutor | undefined {
+  if (input.entryCount === 0 || input.identityEnabled) return;
+  if (!hasOwnKey(input.graph.nodes, input.kind)) return;
+  const registration = input.graph.nodes[input.kind];
+  if (registration === undefined) return;
+  if (input.registry.getDisjointKinds(input.kind).length > 0) return;
+  if ((registration.unique ?? []).length > 0) return;
+  if (getSearchableFields(registration.type.schema).length > 0) return;
+  if (getEmbeddingFields(registration.type.schema).length > 0) return;
+  const executor = resolveAtomicMutationProfile(input)?.updateNodes;
+  if (executor === undefined || input.entryCount > executor.maxEntries) return;
+  return executor;
+}
+
+export type AtomicEdgeResolvedUpdateEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{ kind: string; entryCount: number }>;
+
+/** The one owner of the static proof for resolved live-edge set updates. */
+export function resolveAtomicEdgeResolvedUpdateBatchExecutor(
+  input: AtomicEdgeResolvedUpdateEligibilityInput,
+): AtomicEdgeResolvedUpdateBatchExecutor | undefined {
+  if (input.entryCount === 0) return;
+  if (!hasOwnKey(input.graph.edges, input.kind)) return;
+  const registration = input.graph.edges[input.kind];
+  if (
+    registration === undefined ||
+    (registration.cardinality ?? "many") !== "many" ||
+    registration.matchIdentity !== undefined
+  ) {
+    return;
+  }
+  const executor = resolveAtomicMutationProfile(input)?.updateEdges;
+  if (executor === undefined || input.entryCount > executor.maxEntries) return;
+  return executor;
 }

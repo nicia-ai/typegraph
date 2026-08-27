@@ -145,7 +145,10 @@ import {
   planNodeCreateClaims,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
-import { type UpsertUpdateNodeInput } from "../collections/node-collection";
+import {
+  type NodeUpsertUpdateBatchEntry,
+  type UpsertUpdateNodeInput,
+} from "../collections/node-collection";
 import {
   checkDisjointnessConstraint,
   type ConstraintContext,
@@ -185,6 +188,7 @@ import {
   assertAtomicDeleteSchemaFenceMatched,
   resolveAtomicNodeBatchExecutor,
   resolveAtomicNodeDeleteBatchExecutor,
+  resolveAtomicNodeResolvedUpdateBatchExecutor,
 } from "./atomic-mutation-program";
 import {
   AutocommitWriteRequiresTransaction,
@@ -1153,12 +1157,14 @@ async function performNodeUpdate<G extends GraphDef>(
   session: NodeWriteSession,
   target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
+  resolvedExisting?: BackendNodeRow,
 ): Promise<Node> {
   const { kind, id } = input;
 
   assertValidityEndMutation(input, { entityType: "node", kind, id });
 
-  const existing = await target.getNode(ctx.graphId, kind, id);
+  const existing =
+    resolvedExisting ?? (await target.getNode(ctx.graphId, kind, id));
   if (!existing) throw new NodeNotFoundError(kind, id);
 
   const { registration, validatedProps } = resolveNodeUpdateProps(
@@ -1345,6 +1351,7 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   session: NodeWriteSession,
   target: WriteTarget,
   options?: Readonly<{ clearDeleted?: boolean }>,
+  resolvedExisting?: BackendNodeRow,
 ): Promise<Node> {
   for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
     try {
@@ -1356,6 +1363,7 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
         session,
         target,
         attempt === 1 ? options : undefined,
+        attempt === 1 ? resolvedExisting : undefined,
       );
     } catch (error) {
       if (!isNodeUpdateNoRowError(error) || attempt === NODE_UPDATE_ATTEMPTS) {
@@ -2793,6 +2801,184 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
         ]);
       }
       return node;
+    },
+    { didWrite: writeResultAlwaysChanges },
+  );
+}
+
+/**
+ * Executes an already-resolved set of node upsert updates under one write plan.
+ *
+ * Collection-level resolution still owns input order, repeated-id running
+ * state, and create/update partitioning. This boundary owns the database work:
+ * one graph fence and one write session cover the complete update set instead
+ * of opening a managed frame for every member.
+ */
+export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  entries: readonly NodeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<readonly Node[]> {
+  if (entries.length === 0) return [];
+  for (const entry of entries) {
+    if (entry.input.clearValidTo === true) {
+      assertClearValidToSupported(backend, "node");
+    }
+  }
+
+  const first = requireDefined(entries[0]);
+  const distinctIds = new Set(entries.map((entry) => entry.input.id));
+  const atomicExecutor = resolveAtomicNodeResolvedUpdateBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind: first.input.kind,
+    entryCount: entries.length,
+    identityEnabled: ctx.identity !== undefined,
+    registry: ctx.registry,
+  });
+  const atomicShape =
+    atomicExecutor !== undefined &&
+    distinctIds.size === entries.length &&
+    entries.every(
+      (entry) =>
+        !entry.clearDeleted &&
+        entry.input.validFrom === undefined &&
+        entry.input.validTo === undefined &&
+        entry.input.clearValidTo !== true,
+    );
+  if (atomicShape) {
+    const supplied = entries.flatMap((entry) =>
+      entry.existing === undefined ? [] : [entry.existing],
+    );
+    const fetched =
+      supplied.length === entries.length ?
+        undefined
+      : await getNodeRowsByIds(
+          backend,
+          ctx.batchPointRead,
+          ctx.graphId,
+          first.input.kind,
+          [...distinctIds],
+        );
+    let existing = fetched === undefined ? supplied : [...fetched.values()];
+    for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
+      const byId = new Map(existing.map((row) => [row.id, row]));
+      const missing = entries.find((entry) => {
+        const row = byId.get(entry.input.id);
+        return row === undefined || row.deleted_at !== undefined;
+      });
+      if (missing !== undefined) {
+        // This update-only partition was resolved from live rows. Once a
+        // refreshed preimage is absent or tombstoned, the requested update
+        // target no longer exists; do not reinterpret it as a create or fall
+        // through to a transactionless portable write.
+        throw new NodeNotFoundError(first.input.kind, missing.input.id);
+      }
+      const resolved = entries.map((entry) => {
+        const row = requireDefined(byId.get(entry.input.id));
+        const { validatedProps } = resolveNodeUpdateProps(
+          ctx,
+          row,
+          entry.input.props,
+        );
+        return {
+          graphId: ctx.graphId,
+          kind: entry.input.kind,
+          id: entry.input.id,
+          props: validatedProps,
+          expectedVersion: row.version,
+        };
+      });
+      const rows = await atomicExecutor({
+        entries: resolved,
+        schemaFence: {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        },
+      });
+      if (rows.length === entries.length) {
+        memoizeLeasedSchemaFence(ctx, backend);
+        const returned = new Map(rows.map((row) => [row.id, row]));
+        return entries.map((entry) =>
+          rowToNode(requireDefined(returned.get(entry.input.id))),
+        );
+      }
+      if (rows.length > 0) {
+        throw new CompilerInvariantError(
+          "Atomic resolved node update returned a partial result.",
+          { expected: entries.length, actual: rows.length },
+        );
+      }
+      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+      if (attempt === NODE_UPDATE_ATTEMPTS) {
+        throw new DatabaseOperationError(
+          `Atomic node upsert batch could not be applied to stable rows after ${NODE_UPDATE_ATTEMPTS} attempts.`,
+          {
+            operation: "update",
+            entity: "node",
+            attempted: entries.map((entry) => ({
+              kind: entry.input.kind,
+              id: entry.input.id,
+            })),
+          },
+        );
+      }
+      const refreshed = await getNodeRowsByIds(
+        backend,
+        ctx.batchPointRead,
+        ctx.graphId,
+        first.input.kind,
+        [...distinctIds],
+      );
+      existing = [...refreshed.values()];
+    }
+  }
+
+  return runWritePlan(
+    nodeWritePlanContext(ctx),
+    nodeWritePlan(
+      nodeFencesConstraintProbe(ctx, first.input.kind, "update"),
+      entries.some(
+        (entry) => entry.clearDeleted || entry.input.validTo !== undefined,
+      ) && nodeRequiresIdentityLock(ctx),
+    ),
+    backend,
+    async (session, target) => {
+      const resolvedRows =
+        (
+          target.capabilities.transactions &&
+          distinctIds.size === entries.length
+        ) ?
+          await getNodeRowsByIds(
+            target,
+            ctx.batchPointRead,
+            ctx.graphId,
+            first.input.kind,
+            [...distinctIds],
+          )
+        : undefined;
+      const nodes: Node[] = [];
+      for (const entry of entries) {
+        nodes.push(
+          await performNodeUpdateWithResurrectionRecovery(
+            ctx,
+            entry.input,
+            session,
+            target,
+            entry.clearDeleted ? { clearDeleted: true } : undefined,
+            resolvedRows?.get(entry.input.id),
+          ),
+        );
+        if (entry.clearDeleted && ctx.identity !== undefined) {
+          await ctx.identity.foldCreated(target, [
+            { kind: entry.input.kind, id: entry.input.id },
+          ]);
+        }
+      }
+      return nodes;
     },
     { didWrite: writeResultAlwaysChanges },
   );

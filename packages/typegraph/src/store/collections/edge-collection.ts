@@ -9,6 +9,7 @@ import { type BATCH_POINT_READ } from "../../backend/capabilities/bundle-registr
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   type EdgeEndpointSide,
+  type EdgeRow as BackendEdgeRow,
   type FindEdgesByKindParams,
   type GraphBackend,
   rowPropsToObject,
@@ -118,11 +119,10 @@ export type EdgeCollectionConfig = Readonly<{
     },
     backend: GraphBackend | TransactionBackend,
   ) => Promise<Edge>;
-  executeUpsertUpdate: (
-    input: UpsertUpdateEdgeInput,
+  executeUpsertUpdateBatch: (
+    entries: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{ clearDeleted?: boolean }>,
-  ) => Promise<Edge>;
+  ) => Promise<readonly Edge[]>;
   /** See EdgeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
@@ -258,6 +258,12 @@ export type UpsertUpdateEdgeInput = EdgeUpdateInput &
     validFrom?: string;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>;
+
+export type EdgeUpsertUpdateBatchEntry = Readonly<{
+  input: UpsertUpdateEdgeInput;
+  clearDeleted: boolean;
+  existing?: BackendEdgeRow;
+}>;
 
 function buildUpdateEdgeInput(
   kind: string,
@@ -405,7 +411,7 @@ export function createEdgeCollection<
     executeCreateNoReturnBatch: executeEdgeCreateNoReturnBatch,
     executeCreateBatch: executeEdgeCreateBatch,
     executeUpdate: executeEdgeUpdate,
-    executeUpsertUpdate: executeEdgeUpsertUpdate,
+    executeUpsertUpdateBatch: executeEdgeUpsertUpdateBatch,
     executeDelete: executeEdgeDelete,
     executeDeleteBatch: executeEdgeDeleteBatch,
     executeHardDelete: executeEdgeHardDelete,
@@ -832,6 +838,7 @@ export function createEdgeCollection<
           index: number;
           input: UpsertUpdateEdgeInput;
           clearDeleted: boolean;
+          existing?: BackendEdgeRow;
         }[] = [];
 
         // Batch-local running state per id so a repeated id coalesces against
@@ -1005,6 +1012,9 @@ export function createEdgeCollection<
                 item,
               ),
               clearDeleted: deletedAt !== undefined,
+              ...(pendingEntry === undefined && original !== undefined ?
+                { existing: original }
+              : {}),
             });
             pending.set(item.id, {
               identity: actualIdentity,
@@ -1032,12 +1042,21 @@ export function createEdgeCollection<
           }
         }
 
-        // Hookless individual updates (executeEdgeUpsertUpdate is already hookless)
-        for (const entry of toUpdate) {
-          const result = await executeEdgeUpsertUpdate(entry.input, target, {
-            clearDeleted: entry.clearDeleted,
-          });
-          results[entry.index] = narrowEdge<E>(result);
+        if (toUpdate.length > 0) {
+          const updated = await executeEdgeUpsertUpdateBatch(
+            toUpdate.map((entry) => ({
+              input: entry.input,
+              clearDeleted: entry.clearDeleted,
+              ...(entry.existing === undefined ?
+                {}
+              : { existing: entry.existing }),
+            })),
+            target,
+          );
+          for (const [updateIndex, entry] of toUpdate.entries()) {
+            const result = requireDefined(updated[updateIndex]);
+            results[entry.index] = narrowEdge<E>(result);
+          }
         }
 
         // Items that coalesced against an in-batch write take that write's

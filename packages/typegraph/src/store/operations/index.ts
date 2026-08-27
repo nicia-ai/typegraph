@@ -33,6 +33,7 @@ export {
   executeEdgeHardDelete,
   executeEdgeUpdate,
   executeEdgeUpsertUpdate,
+  executeEdgeUpsertUpdateBatch,
 } from "./edge-operations";
 export {
   executeNodeBulkFindByConstraint,
@@ -50,6 +51,7 @@ export {
   executeNodeUpdate,
   executeNodeUpdateWhere,
   executeNodeUpsertUpdate,
+  executeNodeUpsertUpdateBatch,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
 } from "./node-operations";

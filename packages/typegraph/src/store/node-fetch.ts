@@ -13,7 +13,6 @@ import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type GraphBackend,
   type NodeRow as BackendNodeRow,
-  type TransactionBackend,
 } from "../backend/types";
 import { getRowsByIds } from "./row-fetch";
 
@@ -25,7 +24,7 @@ import { getRowsByIds } from "./row-fetch";
  * off `backend`, the port the call executes on, never re-resolved here.
  */
 export async function getNodeRowsByIds(
-  backend: GraphBackend | TransactionBackend,
+  backend: Readonly<Pick<GraphBackend, "getNode" | "getNodes">>,
   verdict: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   kind: string,

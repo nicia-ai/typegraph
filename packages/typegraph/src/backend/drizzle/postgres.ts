@@ -2097,6 +2097,8 @@ export function createPostgresBackend(
     createEdges: operations.executeAtomicEdgeBatch,
     deleteNodes: operations.executeAtomicNodeDeleteBatch,
     deleteEdges: operations.executeAtomicEdgeDeleteBatch,
+    updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
+    updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
   });
   return backend;
 }
