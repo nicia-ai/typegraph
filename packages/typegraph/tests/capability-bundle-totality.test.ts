@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("29 reasoned entries sum to 88 accesses; 49 deferred entries sum to 208", () => {
+  it("29 reasoned entries sum to 88 accesses; 49 deferred entries sum to 209", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -122,8 +122,9 @@ describe("capability bundle totality (T9)", () => {
     // one live `recordedTableDdl` access. The required command port no longer
     // belongs in this optional-member inventory. Durable identity adoption
     // adds one empty-kind fence and one optional preflight selection. The
-    // set-based edge-delete fallback adds one batch write access.
+    // set-based edge-delete fallback adds one batch write access, and atomic
+    // node-delete refusal diagnosis adds one heterogeneous endpoint-set read.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(88);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(208);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(209);
   });
 });

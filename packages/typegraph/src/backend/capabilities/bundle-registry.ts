@@ -1150,7 +1150,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "heterogeneousEndpointSetRead",
-    ceiling: 3,
+    ceiling: 4,
   },
   fulltextSearch: {
     kind: "deferred",
