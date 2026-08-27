@@ -157,6 +157,47 @@ describe("atomic resolved update batches", () => {
     ).rejects.toBeInstanceOf(CompilerInvariantError);
   });
 
+  it("refuses a resolved edge set with mixed kinds at the executor seam", async () => {
+    const { backend, profile, store } = await fixture();
+    const [from, to] = await store.nodes.Person.bulkCreate([
+      { id: "from", props: { name: "From", score: 1 } },
+      { id: "to", props: { name: "To", score: 2 } },
+    ]);
+    const edges = await store.edges.relates.bulkCreate([
+      {
+        id: "a",
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "A" },
+      },
+      {
+        id: "b",
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "B" },
+      },
+    ]);
+    const rows = await requireDefined(backend.getEdges)(
+      graph.id,
+      edges.map((edge) => edge.id),
+    );
+    const first = requireDefined(rows[0]);
+    const second = requireDefined(rows[1]);
+
+    await expect(
+      requireDefined(profile.updateEdges)({
+        entries: [
+          { existing: first, props: { label: "resolved" } },
+          {
+            existing: { ...second, kind: "another-kind" },
+            props: { label: "resolved" },
+          },
+        ],
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
+  });
+
   it("updates no edge when one preimage moved", async () => {
     const { backend, profile, store } = await fixture();
     const [from, to] = await store.nodes.Person.bulkCreate([

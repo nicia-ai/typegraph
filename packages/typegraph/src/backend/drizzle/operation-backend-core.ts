@@ -280,19 +280,25 @@ function assertResolvedEdgeUpdateBatchInput(
   const first = entries[0];
   if (first === undefined) return;
   const graphId = first.existing.graph_id;
+  const kind = first.existing.kind;
   const ids = new Set<string>();
   for (const entry of entries) {
     const existing = entry.existing;
     if (
       existing.graph_id !== graphId ||
       existing.graph_id !== schemaFence.graphId ||
+      existing.kind !== kind ||
       ids.has(existing.id)
     ) {
       throw new CompilerInvariantError(
-        "An atomic resolved edge update requires distinct ids from one fenced graph.",
+        "An atomic resolved edge update requires distinct ids from one fenced graph and kind.",
         {
-          expected: { graphId, fenceGraphId: schemaFence.graphId },
-          actual: { graphId: existing.graph_id, id: existing.id },
+          expected: { graphId, kind, fenceGraphId: schemaFence.graphId },
+          actual: {
+            graphId: existing.graph_id,
+            kind: existing.kind,
+            id: existing.id,
+          },
         },
       );
     }
@@ -1947,7 +1953,9 @@ export function createCommonOperationBackend(
         );
 
         const executeAtomicNodeResolvedUpdateBatch = Object.assign(
-          async (input: Parameters<AtomicNodeResolvedUpdateBatchExecutor>[0]) => {
+          async (
+            input: Parameters<AtomicNodeResolvedUpdateBatchExecutor>[0],
+          ) => {
             if (input.entries.length === 0) return [];
             assertResolvedNodeUpdateBatchInput(
               input.entries,
@@ -1959,25 +1967,28 @@ export function createCommonOperationBackend(
                 { entries: input.entries.length, maxEntries },
               );
             }
-            const query =
-              operationStrategy.buildAtomicNodeResolvedUpdateBatch(
-                input.entries,
-                nowIso(),
-                input.schemaFence,
-                atomicSchemaFenceLockClause,
-              );
+            const query = operationStrategy.buildAtomicNodeResolvedUpdateBatch(
+              input.entries,
+              nowIso(),
+              input.schemaFence,
+              atomicSchemaFenceLockClause,
+            );
             const program = {
               slots: [
                 {
                   statement: execution.compile(query),
                   cardinality: "many" as const,
-                  decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
-                    rows.map((row) => rowMappers.toNodeRow(row)),
+                  decode: (
+                    rows: readonly Readonly<Record<string, unknown>>[],
+                  ) => rows.map((row) => rowMappers.toNodeRow(row)),
                 },
               ],
               assemble: (results: readonly (readonly NodeRow[])[]) =>
                 results[0] ?? [],
-            } satisfies AtomicSqlProgram<readonly NodeRow[], readonly NodeRow[]>;
+            } satisfies AtomicSqlProgram<
+              readonly NodeRow[],
+              readonly NodeRow[]
+            >;
             return atomicExecutor.execute(program);
           },
           { maxEntries },
@@ -2080,7 +2091,9 @@ export function createCommonOperationBackend(
           Math.floor((maxBindParameters - 12) / 14),
         );
         const executeAtomicEdgeResolvedUpdateBatch = Object.assign(
-          async (input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0]) => {
+          async (
+            input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0],
+          ) => {
             if (input.entries.length === 0) return [];
             assertResolvedEdgeUpdateBatchInput(
               input.entries,
@@ -2103,13 +2116,17 @@ export function createCommonOperationBackend(
                 {
                   statement: execution.compile(query),
                   cardinality: "many" as const,
-                  decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
-                    rows.map((row) => rowMappers.toEdgeRow(row)),
+                  decode: (
+                    rows: readonly Readonly<Record<string, unknown>>[],
+                  ) => rows.map((row) => rowMappers.toEdgeRow(row)),
                 },
               ],
               assemble: (results: readonly (readonly EdgeRow[])[]) =>
                 results[0] ?? [],
-            } satisfies AtomicSqlProgram<readonly EdgeRow[], readonly EdgeRow[]>;
+            } satisfies AtomicSqlProgram<
+              readonly EdgeRow[],
+              readonly EdgeRow[]
+            >;
             return atomicExecutor.execute(program);
           },
           { maxEntries },
