@@ -7,6 +7,7 @@
  */
 import {
   type AtomicEdgeBatchExecutor as BackendAtomicEdgeBatchExecutor,
+  type AtomicEdgeConvergenceExecutor as BackendAtomicEdgeConvergenceExecutor,
   type AtomicEdgeDeleteBatchExecutor,
   type AtomicEdgeResolvedMutationSetExecutor,
   type AtomicEdgeResolvedUpdateBatchExecutor,
@@ -118,6 +119,55 @@ export type AtomicEdgeBatchEligibilityInput = CommonAtomicMutationEligibility &
   Readonly<{ inputs: readonly CreateEdgeInput[] }>;
 
 export type AtomicEdgeBatchExecutor = BackendAtomicEdgeBatchExecutor;
+
+export type AtomicEdgeConvergenceEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{
+      kind: string;
+      matchOn: readonly string[];
+      inputs: readonly Readonly<{
+        validFrom?: string;
+        validTo?: string;
+        clearValidTo?: true;
+        onImmutableLowerBound?: "preserve" | "refuse";
+      }>[];
+      ifExists: "return" | "update";
+    }>;
+
+export type AtomicEdgeConvergenceExecutor =
+  BackendAtomicEdgeConvergenceExecutor;
+
+/** The one owner of the static proof for durable bulk edge convergence. */
+export function resolveAtomicEdgeConvergenceExecutor(
+  input: AtomicEdgeConvergenceEligibilityInput,
+): BackendAtomicEdgeConvergenceExecutor | undefined {
+  if (input.inputs.length === 0 || input.ifExists !== "return") return;
+  if (
+    input.inputs.some(
+      (item) =>
+        item.validFrom !== undefined ||
+        item.validTo !== undefined ||
+        item.clearValidTo === true ||
+        item.onImmutableLowerBound !== undefined,
+    )
+  ) {
+    return;
+  }
+  if (!hasOwnKey(input.graph.edges, input.kind)) return;
+  const registration = input.graph.edges[input.kind];
+  if (registration === undefined || registration.matchIdentity === undefined) {
+    return;
+  }
+  if ((registration.cardinality ?? "many") !== "many") return;
+  const declaredFields = registration.matchIdentity.fields;
+  if (
+    declaredFields.length !== input.matchOn.length ||
+    declaredFields.some((field, index) => field !== input.matchOn[index])
+  ) {
+    return;
+  }
+  return resolveAtomicMutationProfile(input)?.convergeEdges;
+}
 
 /** The one owner of the static store proof for atomic edge creates. */
 export function resolveAtomicEdgeBatchExecutor(

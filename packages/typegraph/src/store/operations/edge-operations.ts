@@ -187,7 +187,9 @@ import { withAlreadyExistsTranslation } from "./already-exists";
 import {
   assertAtomicDeleteSchemaFenceMatched,
   type AtomicEdgeBatchExecutor,
+  type AtomicEdgeConvergenceExecutor,
   resolveAtomicEdgeBatchExecutor,
+  resolveAtomicEdgeConvergenceExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
   resolveAtomicEdgeResolvedMutationSetExecutor,
   resolveAtomicEdgeResolvedUpdateBatchExecutor,
@@ -1263,9 +1265,17 @@ async function prepareAtomicEdgeBatchCreates<G extends GraphDef>(
  * chunk rolls back; these reads recover the precise source-before-target
  * refusal only on that exceptional path.
  */
+type EdgeEndpointInput = Readonly<{
+  kind: string;
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
 async function assertAtomicEdgeBatchEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
-  inputs: readonly CreateEdgeInput[],
+  inputs: readonly EdgeEndpointInput[],
   backend: WriteTarget,
 ): Promise<void> {
   for (const input of inputs) {
@@ -3310,6 +3320,145 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     });
   }
 
+  interface Result {
+    readonly edge: Edge;
+    readonly action: GetOrCreateAction;
+  }
+
+  // Durable many-cardinality batches have a database arbiter for their match
+  // key. Dispatch this closed program before the collection can wrap the call
+  // in a caller transaction; otherwise the exact-root proof is hidden behind
+  // a derived transaction target and the operation falls back to the old
+  // read/transaction/one-row-at-a-time path.
+  const atomicConvergenceExecutor = resolveAtomicEdgeConvergenceExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind,
+    matchOn,
+    inputs: items,
+    ifExists,
+  });
+  if (atomicConvergenceExecutor !== undefined) {
+    const nativeEntries: {
+      index: number;
+      compositeKey: string;
+      params: InsertEdgeParams;
+      match: { kind: "durable"; identity: { name: string; key: string } };
+    }[] = [];
+    const firstByCompositeKey = new Set<string>();
+    for (const [index, entry] of validated.entries()) {
+      if (firstByCompositeKey.has(entry.compositeKey)) continue;
+      firstByCompositeKey.add(entry.compositeKey);
+      const endpointError = validateEdgeEndpoints(
+        kind,
+        entry.fromKind,
+        entry.toKind,
+        registration,
+        ctx.registry,
+      );
+      if (endpointError) throw endpointError;
+      const matchIdentity = resolveEdgeMatchIdentityStorage(
+        registration.matchIdentity,
+        {
+          fromKind: entry.fromKind,
+          fromId: entry.fromId,
+          toKind: entry.toKind,
+          toId: entry.toId,
+          props: entry.validatedProps,
+        },
+        { graphId: ctx.graphId, edgeKind: kind },
+      );
+      if (matchIdentity === undefined) {
+        throw new CompilerInvariantError(
+          "Atomic edge convergence requires durable match identity storage.",
+          { kind, index },
+        );
+      }
+      const params = buildInsertEdgeParams(
+        ctx.graphId,
+        generateId(),
+        kind,
+        entry.fromKind,
+        entry.fromId,
+        entry.toKind,
+        entry.toId,
+        entry.validatedProps,
+        undefined,
+        undefined,
+        matchIdentity,
+      );
+      nativeEntries.push({
+        index,
+        compositeKey: entry.compositeKey,
+        params,
+        match: { kind: "durable", identity: matchIdentity },
+      });
+    }
+
+    if (nativeEntries.length <= atomicConvergenceExecutor.maxEntries) {
+      const schemaFence = {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      };
+      let nativeResults: readonly {
+        readonly row: BackendEdgeRow;
+        readonly outcome: "created" | "found" | "resurrected";
+      }[];
+      try {
+        nativeResults = await atomicConvergenceExecutor({
+          entries: nativeEntries.map((entry) => ({
+            params: entry.params,
+            match: entry.match,
+          })),
+          schemaFence,
+        });
+      } catch (error) {
+        if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
+          await assertAtomicEdgeBatchEndpoints(
+            ctx,
+            nativeEntries.map((entry) => entry.params),
+            backend,
+          );
+          throw error.cause;
+        }
+        throw error;
+      }
+      if (nativeResults.length !== nativeEntries.length) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+        throw new DatabaseOperationError(
+          `Atomic edge convergence returned ${nativeResults.length} results, expected ${nativeEntries.length}.`,
+          { operation: "insert", entity: "edge" },
+        );
+      }
+      const results: Result[] = Array.from({ length: items.length });
+      const resultByCompositeKey = new Map<string, Result>();
+      for (const [nativeIndex, nativeResult] of nativeResults.entries()) {
+        const nativeEntry = requireDefined(nativeEntries[nativeIndex]);
+        const result = {
+          edge: rowToEdge(nativeResult.row),
+          action: nativeResult.outcome,
+        } satisfies Result;
+        results[nativeEntry.index] = result;
+        resultByCompositeKey.set(nativeEntry.compositeKey, result);
+      }
+      for (const [index, entry] of validated.entries()) {
+        if (results[index] !== undefined) continue;
+        const result = resultByCompositeKey.get(entry.compositeKey);
+        if (result === undefined) {
+          throw new CompilerInvariantError(
+            "Atomic edge convergence omitted an input result.",
+            { index, compositeKey: entry.compositeKey },
+          );
+        }
+        results[index] = { edge: result.edge, action: "found" };
+      }
+      return results;
+    }
+  }
+
   // Step 2: Group by unique endpoint pair
   const uniqueEndpoints = new Map<
     string,
@@ -3430,11 +3579,6 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     index: number;
     sourceIndex: number;
   }
-  interface Result {
-    readonly edge: Edge;
-    readonly action: GetOrCreateAction;
-  }
-
   // Step 3: Partition into toCreate, toFetch, and duplicates
   function partitionEntries(
     rowsByEndpoint: ReadonlyMap<string, readonly BackendEdgeRow[]>,
@@ -3522,30 +3666,42 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     return { toCreate, toFetch, duplicateOf };
   }
 
-  // Probe outside the transaction: with ifExists "return" and every entry
-  // matching a live edge, the whole call performs no write, so it must not
-  // pay for a write transaction (BEGIN IMMEDIATE on SQLite, the per-graph
-  // advisory lock under history). The transactional body re-queries, so a
-  // concurrent write between this probe and the write lock is still handled
-  // correctly.
+  // A root read is only a dispatcher hint. A caching transport can replay a
+  // stale positive, so it cannot by itself justify returning a found row.
+  // Confirm the positive through a transaction-scoped target before taking
+  // the no-write fast path. Transactionless roots deliberately skip this
+  // optimization and use the complete fenced fallback below.
   if (ifExists === "return") {
     const probe = partitionEntries(await fetchRowsByEndpoint(backend));
     const allFoundLive =
       probe.toCreate.length === 0 &&
       probe.toFetch.every((entry) => !entry.isDeleted);
-    if (allFoundLive) {
-      const found: Result[] = Array.from({ length: items.length });
-      for (const entry of probe.toFetch) {
-        assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
-        found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
+    if (
+      allFoundLive &&
+      "transaction" in backend &&
+      backend.capabilities.transactions
+    ) {
+      const authoritativeProbe = await backend.transaction(
+        async (target) => partitionEntries(await fetchRowsByEndpoint(target)),
+        { accessMode: "read_only" },
+      );
+      const authoritativeAllFoundLive =
+        authoritativeProbe.toCreate.length === 0 &&
+        authoritativeProbe.toFetch.every((entry) => !entry.isDeleted);
+      if (authoritativeAllFoundLive) {
+        const found: Result[] = Array.from({ length: items.length });
+        for (const entry of authoritativeProbe.toFetch) {
+          assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
+          found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
+        }
+        for (const { index, sourceIndex } of authoritativeProbe.duplicateOf) {
+          found[index] = {
+            edge: requireDefined(found[sourceIndex]).edge,
+            action: "found",
+          };
+        }
+        return found;
       }
-      for (const { index, sourceIndex } of probe.duplicateOf) {
-        found[index] = {
-          edge: requireDefined(found[sourceIndex]).edge,
-          action: "found",
-        };
-      }
-      return found;
     }
   }
 

@@ -1261,11 +1261,10 @@ export function createEdgeCollection<
         }));
       };
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
+      // The operation owns its transaction boundary. This lets exact-root
+      // atomic convergence dispatch before a derived transaction target hides
+      // the bundled backend proof; the portable implementation still enters
+      // `runWritePlan` and receives the same all-or-nothing boundary.
       return getOrCreateAll(backend);
     },
   };
