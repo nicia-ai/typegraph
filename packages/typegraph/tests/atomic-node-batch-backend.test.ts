@@ -3,7 +3,10 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, type Mock, vi } from "vitest";
 
-import { resolveBundledRootAtomicNodeBatch } from "../src/backend/capabilities/atomic-node-batch";
+import {
+  resolveBundledRootAtomicMutationPrograms,
+  resolveBundledRootAtomicNodeBatch,
+} from "../src/backend/capabilities/atomic-mutation-program";
 import type { AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
@@ -68,6 +71,46 @@ function makeNeonDatabase(rows: NeonRows): Readonly<{
 }
 
 describe("bundled root atomic node batch", () => {
+  it("dispatches node-delete chunks through one Neon atomic exchange", async () => {
+    const { db, query, transaction } = makeNeonDatabase((sqlText, params) =>
+      sqlText.includes("UPDATE") ?
+        params
+          .filter(
+            (parameter): parameter is string =>
+              typeof parameter === "string" &&
+              parameter.startsWith("delete-person-"),
+          )
+          .map((id) => ({ id }))
+      : [{ version: 1 }],
+    );
+    const backend = createPostgresBackend(db, {
+      capabilities: { maxBindParameters: 7 },
+      vector: false,
+    });
+    const executeAtomicNodeDelete =
+      resolveBundledRootAtomicMutationPrograms(backend)?.deleteNodes;
+    if (executeAtomicNodeDelete === undefined) {
+      throw new Error("Expected Neon atomic node delete capability");
+    }
+
+    await expect(
+      executeAtomicNodeDelete({
+        graphId: "graph-1",
+        kind: "Person",
+        ids: ["delete-person-1", "delete-person-2", "delete-person-3"],
+        schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+      }),
+    ).resolves.toEqual({ affectedCount: 3, schemaFenceMatched: true });
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledTimes(3);
+    for (const [sqlText, params] of query.mock.calls.slice(0, 2)) {
+      expect(sqlText).toContain("UPDATE");
+      expect(params.length).toBeLessThanOrEqual(7);
+    }
+    expect(query.mock.calls[2]?.[0]).toContain("SELECT");
+  });
+
   it.each([
     {
       label: "a partial row result",

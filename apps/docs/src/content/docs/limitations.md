@@ -339,6 +339,14 @@ identity, or cardinality refusal rolls the whole call back. Transaction-scoped
 stores, derived/custom backends, and dynamic get-or-create convergence retain
 the interactive path.
 
+Direct edge `bulkDelete()` calls use the same exact-root exchange and refuse a
+foreign-kind ID atomically. Plain node `bulkDelete()` qualifies when no unique,
+disjointness, identity, projection, history, revision, cascade, or disconnect
+work is owed; the program enforces `restrict` against live connected edges in
+SQL. Other delete shapes retain their transaction path. This eligibility is
+intentionally separate from `bulkUpsertById()`: upsert must resolve and
+schema-validate a database preimage before its write set is known.
+
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 
 `bulkUpsertById` applies items in order for the purpose of deciding each row's

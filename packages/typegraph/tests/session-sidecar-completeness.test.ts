@@ -759,6 +759,21 @@ const CASES: Record<keyof WriteSession, Case> = {
     row: "deleteEdge",
     plan: EDGE_PLAN,
   },
+  retireEdges: {
+    run: async (raw) => {
+      await seed(raw, "q-batch-1");
+      await seed(raw, "q-batch-2");
+      // eslint-disable-next-line unicorn/consistent-function-scoping -- every case returns its row work beside the fixture it closes over.
+      return (session) =>
+        session.retireEdges([
+          { id: "edge-q-batch-1", kind: "links" },
+          { id: "edge-q-batch-2", kind: "links" },
+        ]);
+    },
+    sidecars: [],
+    row: "deleteEdgesBatch",
+    plan: EDGE_PLAN,
+  },
   purgeEdge: {
     run: async (raw) => {
       await seed(raw, "r");

@@ -343,6 +343,7 @@ type DeleteEdgeParams = Readonly<{
 type DeleteEdgesBatchParams = Readonly<{
     graphId: string;
     ids: readonly string[];
+    kind?: string;
 }>;
 
 // @public

@@ -21,6 +21,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  RestrictedDeleteError,
 } from "../src";
 import {
   deriveBackend,
@@ -39,6 +40,7 @@ const COUNTED_METHODS = [
   "deleteEdge",
   "deleteEdgesBatch",
   "getEdge",
+  "getEdges",
   "getNode",
   "hardDeleteEdge",
   "hardDeleteEdgesBatch",
@@ -126,6 +128,56 @@ async function seedHubAndSpokes(
 }
 
 describe("cascade edge deletion batches", () => {
+  it("portable node bulkDelete rolls back earlier ids when restrict refuses", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("restricted_atomic_node_batch_delete"),
+        backend,
+      );
+      const hub = await store.nodes.Hub.create({ name: "hub" });
+      const connected = await store.nodes.Spoke.create({ name: "connected" });
+      const isolated = await store.nodes.Spoke.create({ name: "isolated" });
+      await store.edges.links.create(hub, connected, {});
+
+      await expect(
+        store.nodes.Spoke.bulkDelete([isolated.id, connected.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+      await expect(
+        store.nodes.Spoke.getById(isolated.id),
+      ).resolves.toBeDefined();
+      await expect(
+        store.nodes.Spoke.getById(connected.id),
+      ).resolves.toBeDefined();
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("direct bulkDelete resolves and retires N edges with two batch calls", async () => {
+    const { backend: rawBackend } = createLocalSqliteBackend();
+    try {
+      const { backend, counts } = withCallCounts(rawBackend);
+      const [store] = await createStoreWithSchema(
+        buildCascadeGraph("direct_edge_batch_delete"),
+        backend,
+      );
+      const hub = await seedHubAndSpokes(store);
+      const edges = await store.edges.links.findFrom(hub);
+
+      for (const name of COUNTED_METHODS) counts[name] = 0;
+      await store.edges.links.bulkDelete(edges.map((edge) => edge.id));
+
+      expect(counts["getEdges"]).toBe(1);
+      expect(counts["getEdge"]).toBe(0);
+      expect(counts["deleteEdgesBatch"]).toBe(1);
+      expect(counts["deleteEdge"]).toBe(0);
+      expect(await store.edges.links.findFrom(hub)).toHaveLength(0);
+    } finally {
+      await rawBackend.close();
+    }
+  });
+
   it("soft delete removes N edges with one batched statement", async () => {
     const { backend: rawBackend } = createLocalSqliteBackend();
     try {

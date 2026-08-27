@@ -46,7 +46,10 @@
  */
 import { type z } from "zod";
 
-import type { AtomicNodeBatchEntry } from "../../backend/capabilities/atomic-node-batch";
+import {
+  type AtomicNodeBatchEntry,
+  AtomicNodeDeleteRestrictedRefusalError,
+} from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
@@ -66,6 +69,7 @@ import {
 import { isSchemaFencedInsertEligible } from "../../backend/capabilities/schema-fenced-insert";
 import { deriveBackend } from "../../backend/derive-backend";
 import {
+  type EdgeRow as BackendEdgeRow,
   type GraphBackend,
   type InsertNodeParams,
   isLiveNodeRow,
@@ -92,6 +96,7 @@ import {
   NodeConstraintNotFoundError,
   NodeIndexNotFoundError,
   NodeNotFoundError,
+  RestrictedDeleteError,
   UniquenessError,
   ValidationError,
 } from "../../errors";
@@ -176,7 +181,11 @@ import {
   createAlreadyExistsError,
   withAlreadyExistsTranslation,
 } from "./already-exists";
-import { resolveAtomicNodeBatchExecutor } from "./atomic-node-batch";
+import {
+  assertAtomicDeleteSchemaFenceMatched,
+  resolveAtomicNodeBatchExecutor,
+  resolveAtomicNodeDeleteBatchExecutor,
+} from "./atomic-mutation-program";
 import {
   AutocommitWriteRequiresTransaction,
   canFuseSchemaFenceInFirstWrite,
@@ -2843,6 +2852,54 @@ export async function executeNodeDelete<G extends GraphDef>(
   );
 }
 
+async function findConnectedEdgesForNodeBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<ReadonlyMap<string, readonly BackendEdgeRow[]> | undefined> {
+  const setRead = backend.findEdgesByHeterogeneousEndpointSet;
+  if (setRead === undefined) return;
+
+  const uniqueIds = [...new Set(ids)];
+  const edgeKinds = Object.keys(ctx.graph.edges);
+  const connectedByNode = new Map<string, Map<string, BackendEdgeRow>>();
+  for (const id of uniqueIds) connectedByNode.set(id, new Map());
+  if (edgeKinds.length === 0) return;
+
+  const endpoints = uniqueIds.map((id) => ({ kind, id }));
+  const [fromRows, toRows] = await Promise.all([
+    setRead({
+      graphId: ctx.graphId,
+      side: "from",
+      endpoints,
+      edgeKinds,
+      excludeDeleted: true,
+    }),
+    setRead({
+      graphId: ctx.graphId,
+      side: "to",
+      endpoints,
+      edgeKinds,
+      excludeDeleted: true,
+    }),
+  ]);
+  // The closed program deliberately checks every stored edge kind, while the
+  // heterogeneous set port is licensed by the reconciled graph's kind set.
+  // No licensed rows after a refusal is therefore insufficient evidence: let
+  // the caller recover through the kind-blind scalar authority.
+  if (fromRows.length === 0 && toRows.length === 0) return;
+  for (const row of fromRows) {
+    connectedByNode.get(row.from_id)?.set(row.id, row);
+  }
+  for (const row of toRows) {
+    connectedByNode.get(row.to_id)?.set(row.id, row);
+  }
+  return new Map(
+    [...connectedByNode].map(([id, rows]) => [id, [...rows.values()]]),
+  );
+}
+
 /**
  * Soft-deletes a batch without per-item operation hooks.
  *
@@ -2856,6 +2913,71 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
   ids: readonly string[],
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
+  const atomicExecutor = resolveAtomicNodeDeleteBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    kind,
+    ids,
+    schemaVersion: ctx.schemaVersion,
+    identityEnabled: ctx.identity !== undefined,
+    registry: ctx.registry,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (atomicExecutor !== undefined) {
+    try {
+      const result = await atomicExecutor({
+        graphId: ctx.graphId,
+        kind,
+        ids,
+        schemaFence: {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        },
+      });
+      await assertAtomicDeleteSchemaFenceMatched(
+        result.schemaFenceMatched,
+        ctx,
+        backend,
+        "node",
+      );
+      return;
+    } catch (error) {
+      if (!(error instanceof AtomicNodeDeleteRestrictedRefusalError)) {
+        throw error;
+      }
+      const connectedById = await findConnectedEdgesForNodeBatch(
+        ctx,
+        kind,
+        ids,
+        backend,
+      );
+      for (const id of ids) {
+        const connectedEdges =
+          connectedById?.get(id) ??
+          (await backend.findEdgesConnectedTo({
+            graphId: ctx.graphId,
+            nodeKind: kind,
+            nodeId: id,
+          }));
+        if (connectedEdges.length === 0) continue;
+        throw new RestrictedDeleteError({
+          nodeKind: kind,
+          nodeId: id,
+          edgeCount: connectedEdges.length,
+          edgeKinds: [...new Set(connectedEdges.map((edge) => edge.kind))],
+        });
+      }
+      throw new DatabaseOperationError(
+        "Atomic node delete refused a connected edge, but no current " +
+          "restriction could be diagnosed. The connected edge may have " +
+          "changed concurrently after the atomic program aborted.",
+        { operation: "delete", entity: "node" },
+        { cause: error.cause },
+      );
+    }
+  }
+
   await runWritePlan(
     nodeWritePlanContext(ctx),
     nodeWritePlan(undefined, nodeRequiresIdentityLock(ctx)),

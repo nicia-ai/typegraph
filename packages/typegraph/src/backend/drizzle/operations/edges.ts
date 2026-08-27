@@ -5,6 +5,7 @@ import {
   resolveStampedValidityLowerBound,
   resolveStatedValidityLowerBound,
 } from "../../../utils/date";
+import type { AtomicEdgeDeleteBatchInput } from "../../capabilities/atomic-mutation-program";
 import type {
   CountEdgesFromParams,
   DeleteEdgeParams,
@@ -806,8 +807,52 @@ export function buildDeleteEdgesBatch(
       AND ${edges.id} IN (${sql.join(
         params.ids.map((id) => sql`${id}`),
         sql`, `,
-      )})
+      )})${expectedIdentityPredicate(tables, params.kind === undefined ? {} : { kind: params.kind })}
       AND ${edges.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds one closed, schema-fenced edge soft-delete statement.
+ *
+ * A foreign-kind row deliberately assigns NULL to the NOT NULL kind column,
+ * aborting this statement and every earlier native-program chunk. A stale
+ * fence selects no rows, preserving the side-effect-free zero-row sentinel.
+ */
+export function buildAtomicEdgeDeleteBatchWithSchemaFence(
+  tables: Tables,
+  input: AtomicEdgeDeleteBatchInput,
+  timestamp: string,
+  schemaLockClause: SQL,
+): SQL {
+  const { edges, schemaVersions } = tables;
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${input.schemaFence.graphId}
+        AND ${schemaVersions.version} = ${input.schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    )
+    UPDATE ${edges}
+    SET ${quotedColumn(edges.deletedAt)} = CASE
+          WHEN ${edges.kind} = ${input.expectedKind} THEN ${timestamp}
+          ELSE ${edges.deletedAt}
+        END,
+        ${quotedColumn(edges.kind)} = CASE
+          WHEN ${edges.kind} = ${input.expectedKind} THEN ${edges.kind}
+          ELSE NULL
+        END
+    WHERE ${edges.graphId} = ${input.graphId}
+      AND ${edges.id} IN (${sql.join(
+        input.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND EXISTS (SELECT 1 FROM "schema_fence")
+      AND (${edges.deletedAt} IS NULL OR ${edges.kind} <> ${input.expectedKind})
+    RETURNING ${edges.id}
   `;
 }
 
@@ -828,7 +873,7 @@ export function buildHardDeleteEdgesBatch(
       AND ${edges.id} IN (${sql.join(
         params.ids.map((id) => sql`${id}`),
         sql`, `,
-      )})
+      )})${expectedIdentityPredicate(tables, params.kind === undefined ? {} : { kind: params.kind })}
   `;
 }
 

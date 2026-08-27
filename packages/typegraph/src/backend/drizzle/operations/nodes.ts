@@ -7,7 +7,8 @@ import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
-} from "../../capabilities/atomic-node-batch";
+  AtomicNodeDeleteBatchInput,
+} from "../../capabilities/atomic-mutation-program";
 import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
@@ -640,6 +641,57 @@ export function buildDeleteNode(
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.id} = ${params.id}
       AND ${nodes.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds a closed, schema-fenced soft delete for claim- and projection-free
+ * nodes whose delete behavior is `restrict`.
+ *
+ * A connected live edge assigns NULL to the NOT NULL props column, aborting
+ * the whole native program. Missing and already-tombstoned ids remain no-ops.
+ */
+export function buildAtomicNodeDeleteBatchWithSchemaFence(
+  tables: Tables,
+  input: AtomicNodeDeleteBatchInput,
+  timestamp: string,
+  schemaLockClause: SQL,
+): SQL {
+  const { edges, nodes, schemaVersions } = tables;
+
+  return sql`
+    WITH "schema_fence" AS (
+      SELECT ${schemaVersions.version}
+      FROM ${schemaVersions}
+      WHERE ${schemaVersions.graphId} = ${input.schemaFence.graphId}
+        AND ${schemaVersions.version} = ${input.schemaFence.expectedVersion}
+        AND ${schemaVersions.isActive} = TRUE
+      ${schemaLockClause}
+    )
+    UPDATE ${nodes}
+    SET ${quotedColumn(nodes.deletedAt)} = ${timestamp},
+        ${quotedColumn(nodes.props)} = CASE
+          WHEN EXISTS (
+            SELECT 1
+            FROM ${edges}
+            WHERE ${edges.graphId} = ${nodes.graphId}
+              AND ${edges.deletedAt} IS NULL
+              AND (
+                (${edges.fromKind} = ${nodes.kind} AND ${edges.fromId} = ${nodes.id})
+                OR (${edges.toKind} = ${nodes.kind} AND ${edges.toId} = ${nodes.id})
+              )
+          ) THEN NULL
+          ELSE ${nodes.props}
+        END
+    WHERE ${nodes.graphId} = ${input.graphId}
+      AND ${nodes.kind} = ${input.kind}
+      AND ${nodes.id} IN (${sql.join(
+        input.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND ${nodes.deletedAt} IS NULL
+      AND EXISTS (SELECT 1 FROM "schema_fence")
+    RETURNING ${nodes.id}
   `;
 }
 

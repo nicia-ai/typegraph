@@ -11,11 +11,13 @@ import {
   buildAtomicNodeClaimUpsertWithSchemaFence,
 } from "../src/backend/drizzle/operations/atomic-node-claims";
 import { buildAtomicNodeBatchWithSchemaFence } from "../src/backend/drizzle/operations/nodes";
+import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import type { SchemaWriteFenceParams } from "../src/backend/types";
 import { computeUniqueKey } from "../src/constraints";
-import { defineGraph, defineNode } from "../src/core";
+import { defineEdge, defineGraph, defineNode } from "../src/core";
+import { RestrictedDeleteError } from "../src/errors";
 import { createStoreWithSchema } from "../src/store";
 
 const UniquePerson = defineNode("UniquePerson", {
@@ -38,6 +40,23 @@ const graph = defineGraph({
     },
   },
   edges: {},
+});
+
+const PlainPerson = defineNode("PlainPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const knows = defineEdge("knows", { schema: z.object({}) });
+const deleteGraph = defineGraph({
+  id: "atomic-node-delete-pglite",
+  nodes: { PlainPerson: { type: PlainPerson } },
+  edges: {
+    knows: {
+      type: knows,
+      from: [PlainPerson],
+      to: [PlainPerson],
+      cardinality: "many",
+    },
+  },
 });
 
 const schemaFence = { graphId: graph.id, expectedVersion: 1 } as const;
@@ -184,6 +203,30 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         key: entries[0]?.entry.claim?.key ?? "",
       }),
     ).resolves.toMatchObject({ node_id: "generated-success" });
+  });
+
+  it("rolls back a plain node delete set when a connected edge restricts it", async () => {
+    // The convenience factory returns a managed-close wrapper. Native mutation
+    // programs are exact-root capabilities, so use the marked Drizzle root to
+    // prove this test exercises the program rather than its fallback.
+    const directBackend = createPostgresBackend(backend.db, { vector: false });
+    const [store] = await createStoreWithSchema(deleteGraph, directBackend);
+    const source = await store.nodes.PlainPerson.create({ name: "Source" });
+    const connected = await store.nodes.PlainPerson.create({
+      name: "Connected",
+    });
+    const isolated = await store.nodes.PlainPerson.create({ name: "Isolated" });
+    await store.edges.knows.create(source, connected, {});
+
+    await expect(
+      store.nodes.PlainPerson.bulkDelete([isolated.id, connected.id]),
+    ).rejects.toBeInstanceOf(RestrictedDeleteError);
+    await expect(
+      store.nodes.PlainPerson.getById(isolated.id),
+    ).resolves.toBeDefined();
+    await expect(
+      store.nodes.PlainPerson.getById(connected.id),
+    ).resolves.toBeDefined();
   });
 
   it("returns the incumbent owner and gates a conflicting generated node", async () => {

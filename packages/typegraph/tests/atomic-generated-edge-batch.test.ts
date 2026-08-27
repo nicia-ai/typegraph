@@ -10,11 +10,13 @@ import {
   CardinalityError,
   EdgeMatchIdentityConflictError,
   StaleVersionError,
+  ValidationError,
 } from "../src";
 import {
   type AtomicEdgeBatchExecutor,
   markBundledRootAtomicEdgeBatch,
-} from "../src/backend/capabilities/atomic-edge-batch";
+  markBundledRootAtomicMutationPrograms,
+} from "../src/backend/capabilities/atomic-mutation-program";
 import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { edgeMatchIdentityUniqueIndexName } from "../src/backend/drizzle/ddl";
@@ -26,7 +28,10 @@ import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { migrateSchema } from "../src/schema";
 import type { Store } from "../src/store";
 import { createStoreWithSchema } from "../src/store";
-import { resolveAtomicEdgeBatchExecutor } from "../src/store/operations/atomic-edge-batch";
+import {
+  resolveAtomicEdgeBatchExecutor,
+  resolveAtomicEdgeDeleteBatchExecutor,
+} from "../src/store/operations/atomic-mutation-program";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -37,10 +42,21 @@ const Company = defineNode("Company", {
 const worksAt = defineEdge("worksAt", {
   schema: z.object({ role: z.string() }),
 });
+const consultsFor = defineEdge("consultsFor", {
+  schema: z.object({ role: z.string() }),
+});
 const graph = defineGraph({
   id: "atomic-generated-edge-batch",
   nodes: { Person: { type: Person }, Company: { type: Company } },
   edges: { worksAt: { type: worksAt, from: [Person], to: [Company] } },
+});
+const deleteRollbackGraph = defineGraph({
+  id: "atomic-edge-delete-multi-chunk",
+  nodes: { Person: { type: Person }, Company: { type: Company } },
+  edges: {
+    worksAt: { type: worksAt, from: [Person], to: [Company] },
+    consultsFor: { type: consultsFor, from: [Person], to: [Company] },
+  },
 });
 const cardinalityGraph = defineGraph({
   id: "atomic-generated-edge-batch-cardinality",
@@ -146,6 +162,64 @@ async function createChunkedLibsqlBackend(
 }
 
 describe("generated edge batch store consumer", () => {
+  it("selects edge delete only for a valid exact-root input", () => {
+    const backend = { capabilities: { transactions: false } } as GraphBackend;
+    markBundledRootAutocommitEligible(backend);
+    markBundledRootAtomicMutationPrograms(backend, {
+      deleteEdges: (deleteInput) =>
+        Promise.resolve({
+          affectedCount: deleteInput.ids.length,
+          schemaFenceMatched: true,
+        }),
+    });
+    const common = {
+      graph,
+      expectedKind: "worksAt",
+      ids: ["edge-1"],
+      schemaVersion: 1,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+    } as const;
+
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({ ...common, backend }),
+    ).toBeDefined();
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        ...common,
+        backend,
+        ids: [],
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        ...common,
+        backend,
+        expectedKind: "Unknown",
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        ...common,
+        backend,
+        historyEnabled: true,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        ...common,
+        backend,
+        revisionTrackingEnabled: true,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicEdgeDeleteBatchExecutor({
+        ...common,
+        backend: deriveBackend(backend, {}),
+      }),
+    ).toBeUndefined();
+  });
+
   it("selects the atomic executor only for the exact marked root", async () => {
     const backend = { capabilities: { transactions: false } } as GraphBackend;
     const executor = vi.fn(() =>
@@ -876,6 +950,122 @@ describe("generated edge batch store consumer", () => {
       await expect(store.edges.worksAt.count()).resolves.toBe(0);
     } finally {
       await backend.close();
+    }
+  });
+
+  it("does not delete a native batch when its schema fence is stale", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-delete-stale-fence-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const { from, to } = await createEndpoints(store);
+      const edge = await store.edges.worksAt.create(from, to, {
+        role: "Engineer",
+      });
+      await migrateSchema(backend, evolvedGraph, 1);
+
+      await expect(
+        store.edges.worksAt.bulkDelete([edge.id]),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(store.edges.worksAt.getById(edge.id)).resolves.toMatchObject(
+        { id: edge.id, meta: { deletedAt: undefined } },
+      );
+    } finally {
+      await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps missing and already-deleted edge ids as successful no-ops", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-delete-noop-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const { from, to } = await createEndpoints(store);
+      const edge = await store.edges.worksAt.create(from, to, {
+        role: "Engineer",
+      });
+      await store.edges.worksAt.delete(edge.id);
+      const batch = vi.spyOn(client, "batch");
+
+      await expect(
+        store.edges.worksAt.bulkDelete([
+          edge.id,
+          "missing-edge-id" as typeof edge.id,
+        ]),
+      ).resolves.toBeUndefined();
+      expect(batch).toHaveBeenCalledOnce();
+    } finally {
+      await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back earlier edge-delete chunks when a later identity refuses", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-delete-chunks-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const installed = await createLibsqlBackend(client);
+    const backend = createSqliteBackend(installed.db, {
+      capabilities: { maxBindParameters: 9 },
+      executionProfile: { isSync: false, transactionMode: "sql" },
+    });
+    try {
+      const [store] = await createStoreWithSchema(deleteRollbackGraph, backend);
+      const person = await store.nodes.Person.create({ name: "Alice" });
+      const company = await store.nodes.Company.create({ name: "Acme" });
+      const first = await store.edges.worksAt.create(
+        person,
+        company,
+        { role: "First" },
+        { id: "delete-edge-first" },
+      );
+      const second = await store.edges.worksAt.create(
+        person,
+        company,
+        { role: "Second" },
+        { id: "delete-edge-second" },
+      );
+      const foreign = await store.edges.consultsFor.create(
+        person,
+        company,
+        { role: "Foreign" },
+        { id: "delete-edge-foreign" },
+      );
+
+      await expect(
+        store.edges.worksAt.bulkDelete([
+          first.id,
+          second.id,
+          foreign.id as never,
+        ]),
+      ).rejects.toBeInstanceOf(ValidationError);
+
+      for (const id of [first.id, second.id]) {
+        await expect(store.edges.worksAt.getById(id)).resolves.toMatchObject({
+          id,
+          meta: { deletedAt: undefined },
+        });
+      }
+    } finally {
+      await installed.backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
 

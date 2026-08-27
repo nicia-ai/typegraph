@@ -3,7 +3,10 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, type Mock, vi } from "vitest";
 
-import { resolveBundledRootAtomicEdgeBatch } from "../src/backend/capabilities/atomic-edge-batch";
+import {
+  resolveBundledRootAtomicEdgeBatch,
+  resolveBundledRootAtomicMutationPrograms,
+} from "../src/backend/capabilities/atomic-mutation-program";
 import type { AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
@@ -141,6 +144,46 @@ function makeD1Database(): Readonly<{
 }
 
 describe("bundled root atomic edge batch", () => {
+  it("dispatches edge-delete chunks through one Neon atomic exchange", async () => {
+    const { db, query, transaction } = makeNeonDatabase((sqlText, params) =>
+      sqlText.includes("UPDATE") ?
+        params
+          .filter(
+            (parameter): parameter is string =>
+              typeof parameter === "string" &&
+              parameter.startsWith("delete-edge-"),
+          )
+          .map((id) => ({ id }))
+      : [{ version: 1 }],
+    );
+    const backend = createPostgresBackend(db, {
+      capabilities: { maxBindParameters: 9 },
+      vector: false,
+    });
+    const executeAtomicEdgeDelete =
+      resolveBundledRootAtomicMutationPrograms(backend)?.deleteEdges;
+    if (executeAtomicEdgeDelete === undefined) {
+      throw new Error("Expected Neon atomic edge delete capability");
+    }
+
+    await expect(
+      executeAtomicEdgeDelete({
+        graphId: "graph-1",
+        expectedKind: "worksAt",
+        ids: ["delete-edge-1", "delete-edge-2", "delete-edge-3"],
+        schemaFence,
+      }),
+    ).resolves.toEqual({ affectedCount: 3, schemaFenceMatched: true });
+
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(query).toHaveBeenCalledTimes(3);
+    for (const [sqlText, params] of query.mock.calls.slice(0, 2)) {
+      expect(sqlText).toContain("UPDATE");
+      expect(params.length).toBeLessThanOrEqual(9);
+    }
+    expect(query.mock.calls[2]?.[0]).toContain("SELECT");
+  });
+
   it("compiles and dispatches one Neon exchange for a count-only batch", async () => {
     const { db, query, transaction } = makeNeonDatabase([
       { inserted: 1 },

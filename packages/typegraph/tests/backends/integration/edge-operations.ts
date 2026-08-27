@@ -175,13 +175,10 @@ export function registerEdgeOperationIntegrationTests(
     });
 
     it("rolls back every earlier delete in the batch when a later id triggers EDGE_IDENTITY_MISMATCH", async () => {
-      // `executeEdgeDeleteBatch` loops over the ids inside ONE write
-      // transaction, checking `assertEdgeIdentityMatches` per id — it
-      // deliberately does not pre-check every id before deleting any. So when
-      // a LATER id belongs to another edge kind, the guarantee that the
-      // EARLIER deletes disappear has to come from the transaction rolling
-      // back, not from check-ordering. That is backend behavior, hence the
-      // cross-backend suite.
+      // The exact-root program turns a foreign kind into an in-statement
+      // refusal; the portable interpreter resolves the whole identity gate
+      // before its batched update. Either execution mode must keep every
+      // earlier input live, hence this belongs in the cross-backend suite.
       const store = context.getStore();
       const alice = await store.nodes.Person.create({ name: "Alice" });
       const bob = await store.nodes.Person.create({ name: "Bob" });
