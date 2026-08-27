@@ -639,6 +639,107 @@ export function buildAtomicNodeResolvedUpdateBatch(
 }
 
 /**
+ * Terminal database assertion for an atomic resolved node mutation set.
+ *
+ * Every earlier slot is schema-fenced, but a guarded update can legitimately
+ * return no rows when one preimage moved. The transport cannot discover that
+ * after committing: this final slot rechecks the complete postimage set and
+ * deliberately violates the schema marker's NOT NULL version when it is
+ * incomplete, forcing the native batch to roll every preceding insert/update
+ * back. A stale fence matches no marker row and remains the program's ordinary
+ * all-zero diagnostic signal.
+ */
+export function buildAssertAtomicNodeMutationPostimages(
+  tables: Tables,
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  const entries = [
+    ...creates.map((entry) => ({
+      graphId: entry.params.graphId,
+      kind: entry.params.kind,
+      id: entry.params.id,
+      props: entry.params.props,
+      version: 1,
+    })),
+    ...updates.map((entry) => ({
+      graphId: entry.graphId,
+      kind: entry.kind,
+      id: entry.id,
+      props: entry.props,
+      version: entry.expectedVersion + 1,
+    })),
+  ];
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const expectedRows = entries.map(
+    (entry) => sql`
+      (
+            ${nodes.id} = ${entry.id}
+            AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, JSON.stringify(entry.props))}
+            AND ${nodes.version} = ${entry.version}
+            AND ${nodes.updatedAt} = ${timestamp}
+          )
+    `,
+  );
+
+  return sql`
+    INSERT INTO ${schemaVersions} (
+      ${sql.identifier(schemaVersions.graphId.name)},
+      ${sql.identifier(schemaVersions.version.name)},
+      ${sql.identifier(schemaVersions.schemaHash.name)},
+      ${sql.identifier(schemaVersions.schemaDoc.name)},
+      ${sql.identifier(schemaVersions.createdAt.name)},
+      ${sql.identifier(schemaVersions.isActive.name)}
+    )
+    SELECT
+      ${schemaVersions.graphId},
+      NULL,
+      ${schemaVersions.schemaHash},
+      ${schemaVersions.schemaDoc},
+      ${schemaVersions.createdAt},
+      FALSE
+    FROM ${schemaVersions}
+    WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+      AND (
+        SELECT COUNT(*)
+        FROM ${nodes}
+        WHERE ${nodes.graphId} = ${first.graphId}
+          AND ${nodes.kind} = ${first.kind}
+          AND ${nodes.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) <> ${entries.length}
+  `;
+}
+
+/** Reads the asserted rows only while the same schema fence remains current. */
+export function buildReadAtomicNodeMutationPostimages(
+  tables: Tables,
+  graphId: string,
+  kind: string,
+  ids: readonly string[],
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { nodes, schemaVersions } = tables;
+  return sql`
+    SELECT ${nodes}.*
+    FROM ${nodes}
+    CROSS JOIN ${schemaVersions}
+    WHERE ${nodes.graphId} = ${graphId}
+      AND ${nodes.kind} = ${kind}
+      AND ${nodes.id} IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+  `;
+}
+
+/**
  * Builds one set-based update over candidate ids selected by the shared query
  * compiler. The outer graph/kind/live-row predicates are deliberate write
  * fences and must not be delegated solely to the candidate subquery.

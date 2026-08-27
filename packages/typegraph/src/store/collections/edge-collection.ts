@@ -35,6 +35,7 @@ import {
   type EdgeIdentityExpectation,
   edgeIdentityFromRow,
 } from "../operations/edge-identity";
+import { runResolvedMutationSetConverging } from "../resolved-mutation-set";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -123,6 +124,13 @@ export type EdgeCollectionConfig = Readonly<{
     entries: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly Edge[]>;
+  executeResolvedMutationSet: (
+    creates: readonly CreateEdgeInput[],
+    updates: readonly EdgeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<
+    Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }> | undefined
+  >;
   /** See EdgeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
@@ -412,6 +420,7 @@ export function createEdgeCollection<
     executeCreateBatch: executeEdgeCreateBatch,
     executeUpdate: executeEdgeUpdate,
     executeUpsertUpdateBatch: executeEdgeUpsertUpdateBatch,
+    executeResolvedMutationSet: executeEdgeResolvedMutationSet,
     executeDelete: executeEdgeDelete,
     executeDeleteBatch: executeEdgeDeleteBatch,
     executeHardDelete: executeEdgeHardDelete,
@@ -1032,30 +1041,47 @@ export function createEdgeCollection<
           itemIndex++;
         }
 
-        if (toCreate.length > 0) {
-          const createInputs = toCreate.map((entry) => entry.input);
-          const created = await executeEdgeCreateBatch(createInputs, target);
+        const createInputs = toCreate.map((entry) => entry.input);
+        const updateEntries = toUpdate.map((entry) => ({
+          input: entry.input,
+          clearDeleted: entry.clearDeleted,
+          ...(entry.existing === undefined ? {} : { existing: entry.existing }),
+        }));
+        const mutationSet = await executeEdgeResolvedMutationSet(
+          createInputs,
+          updateEntries,
+          target,
+        );
+        if (mutationSet === undefined) {
+          if (toCreate.length > 0) {
+            const created = await executeEdgeCreateBatch(createInputs, target);
+            for (const [index, entry] of toCreate.entries()) {
+              results[entry.index] = narrowEdge<E>(
+                requireDefined(created[index]),
+              );
+            }
+          }
+
+          if (toUpdate.length > 0) {
+            const updated = await executeEdgeUpsertUpdateBatch(
+              updateEntries,
+              target,
+            );
+            for (const [updateIndex, entry] of toUpdate.entries()) {
+              const result = requireDefined(updated[updateIndex]);
+              results[entry.index] = narrowEdge<E>(result);
+            }
+          }
+        } else {
           for (const [index, entry] of toCreate.entries()) {
             results[entry.index] = narrowEdge<E>(
-              requireDefined(created[index]),
+              requireDefined(mutationSet.created[index]),
             );
           }
-        }
-
-        if (toUpdate.length > 0) {
-          const updated = await executeEdgeUpsertUpdateBatch(
-            toUpdate.map((entry) => ({
-              input: entry.input,
-              clearDeleted: entry.clearDeleted,
-              ...(entry.existing === undefined ?
-                {}
-              : { existing: entry.existing }),
-            })),
-            target,
-          );
-          for (const [updateIndex, entry] of toUpdate.entries()) {
-            const result = requireDefined(updated[updateIndex]);
-            results[entry.index] = narrowEdge<E>(result);
+          for (const [index, entry] of toUpdate.entries()) {
+            results[entry.index] = narrowEdge<E>(
+              requireDefined(mutationSet.updated[index]),
+            );
           }
         }
 
@@ -1081,9 +1107,10 @@ export function createEdgeCollection<
       // backend that reports `transactions: false` there is nothing to open, so
       // the decision is exactly as fenced as that backend's writes are — which
       // is to say not at all, matching the atomicity it already cannot offer.
-      const { results, mutations } = await runOptionallyInTransaction(
-        backend,
-        (target) => upsertAll(target),
+      const { results, mutations } = await runResolvedMutationSetConverging(
+        "edge",
+        () =>
+          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real

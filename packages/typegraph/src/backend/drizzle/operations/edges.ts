@@ -842,6 +842,109 @@ export function buildAtomicEdgeResolvedUpdateBatch(
 }
 
 /**
+ * Terminal database assertion for an atomic resolved edge mutation set.
+ * A missing guarded update turns the schema marker's NOT NULL version into the
+ * rollback sentinel; a stale schema fence still matches no marker row and is
+ * diagnosed by the Store from the program's all-zero result.
+ */
+export function buildAssertAtomicEdgeMutationPostimages(
+  tables: Tables,
+  creates: readonly InsertEdgeParams[],
+  updates: readonly AtomicEdgeResolvedUpdateEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { edges, schemaVersions } = tables;
+  const entries = [
+    ...creates.map((params) => ({
+      graphId: params.graphId,
+      id: params.id,
+      kind: params.kind,
+      fromKind: params.fromKind,
+      fromId: params.fromId,
+      toKind: params.toKind,
+      toId: params.toId,
+      props: JSON.stringify(params.props),
+    })),
+    ...updates.map(({ existing, props }) => ({
+      graphId: existing.graph_id,
+      id: existing.id,
+      kind: existing.kind,
+      fromKind: existing.from_kind,
+      fromId: existing.from_id,
+      toKind: existing.to_kind,
+      toId: existing.to_id,
+      props: JSON.stringify(props),
+    })),
+  ];
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  const expectedRows = entries.map(
+    (entry) => sql`
+      (
+            ${edges.id} = ${entry.id}
+            AND ${edges.kind} = ${entry.kind}
+            AND ${edges.fromKind} = ${entry.fromKind}
+            AND ${edges.fromId} = ${entry.fromId}
+            AND ${edges.toKind} = ${entry.toKind}
+            AND ${edges.toId} = ${entry.toId}
+            AND ${edges.props} = ${castBoundValueForColumn(edges.props, entry.props)}
+            AND ${edges.updatedAt} = ${timestamp}
+          )
+    `,
+  );
+
+  return sql`
+    INSERT INTO ${schemaVersions} (
+      ${sql.identifier(schemaVersions.graphId.name)},
+      ${sql.identifier(schemaVersions.version.name)},
+      ${sql.identifier(schemaVersions.schemaHash.name)},
+      ${sql.identifier(schemaVersions.schemaDoc.name)},
+      ${sql.identifier(schemaVersions.createdAt.name)},
+      ${sql.identifier(schemaVersions.isActive.name)}
+    )
+    SELECT
+      ${schemaVersions.graphId},
+      NULL,
+      ${schemaVersions.schemaHash},
+      ${schemaVersions.schemaDoc},
+      ${schemaVersions.createdAt},
+      FALSE
+    FROM ${schemaVersions}
+    WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+      AND (
+        SELECT COUNT(*)
+        FROM ${edges}
+        WHERE ${edges.graphId} = ${first.graphId}
+          AND ${edges.deletedAt} IS NULL
+          AND (${sql.join(expectedRows, sql` OR `)})
+      ) <> ${entries.length}
+  `;
+}
+
+/** Reads the asserted rows only while the same schema fence remains current. */
+export function buildReadAtomicEdgeMutationPostimages(
+  tables: Tables,
+  graphId: string,
+  ids: readonly string[],
+  schemaFence: SchemaWriteFenceParams,
+): SQL {
+  const { edges, schemaVersions } = tables;
+  return sql`
+    SELECT ${edges}.*
+    FROM ${edges}
+    CROSS JOIN ${schemaVersions}
+    WHERE ${edges.graphId} = ${graphId}
+      AND ${edges.id} IN (${sql.join(ids.map((id) => sql`${id}`), sql`, `)})
+      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
+      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+      AND ${schemaVersions.isActive} = TRUE
+  `;
+}
+
+/**
  * Builds a soft DELETE query for an edge (sets deleted_at).
  * Uses raw column name in SET clause.
  */

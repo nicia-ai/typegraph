@@ -49,6 +49,7 @@ import {
   type AtomicEdgeDeleteBatchExecutor,
   type AtomicEdgeDeleteBatchInput,
   AtomicEdgeDeleteIdentityRefusalError,
+  type AtomicEdgeResolvedMutationSetExecutor,
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicEdgeResolvedUpdateEntry,
   type AtomicNodeBatchEntry,
@@ -57,12 +58,14 @@ import {
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeDeleteBatchInput,
   AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   type AtomicNodeResolvedUpdateEntry,
 } from "../capabilities/atomic-mutation-program";
 import type {
   AtomicSqlProgram,
   AtomicSqlProgramExecutor,
+  CompiledAtomicSqlStatement,
 } from "../capabilities/atomic-sql-program";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
 import {
@@ -306,6 +309,93 @@ function assertResolvedEdgeUpdateBatchInput(
   }
 }
 
+function assertResolvedNodeMutationSetInput(
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  assertMatchingNodeSchemaFences(
+    creates.map((entry) => entry.params),
+    schemaFence,
+  );
+  assertResolvedNodeUpdateBatchInput(updates, schemaFence);
+  const identities = [
+    ...creates.map((entry) => ({
+      graphId: entry.params.graphId,
+      kind: entry.params.kind,
+      id: entry.params.id,
+    })),
+    ...updates,
+  ];
+  const first = identities[0];
+  if (first === undefined) return;
+  const ids = new Set<string>();
+  for (const identity of identities) {
+    if (
+      identity.graphId !== first.graphId ||
+      identity.kind !== first.kind ||
+      identity.graphId !== schemaFence.graphId ||
+      ids.has(identity.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved node mutation set requires distinct ids from one fenced graph and kind.",
+      );
+    }
+    ids.add(identity.id);
+  }
+  if (
+    creates.some(
+      (entry) => entry.idSource !== "caller" || entry.claim !== undefined,
+    )
+  ) {
+    throw new CompilerInvariantError(
+      "An atomic resolved node mutation set accepts only unclaimed caller-id creates.",
+    );
+  }
+}
+
+function assertResolvedEdgeMutationSetInput(
+  creates: readonly InsertEdgeParams[],
+  updates: readonly AtomicEdgeResolvedUpdateEntry[],
+  schemaFence: SchemaWriteFenceParams,
+): void {
+  assertMatchingEdgeSchemaFences(creates, schemaFence);
+  assertResolvedEdgeUpdateBatchInput(updates, schemaFence);
+  const identities = [
+    ...creates.map((entry) => ({
+      graphId: entry.graphId,
+      kind: entry.kind,
+      id: entry.id,
+    })),
+    ...updates.map((entry) => ({
+      graphId: entry.existing.graph_id,
+      kind: entry.existing.kind,
+      id: entry.existing.id,
+    })),
+  ];
+  const first = identities[0];
+  if (first === undefined) return;
+  const ids = new Set<string>();
+  for (const identity of identities) {
+    if (
+      identity.graphId !== first.graphId ||
+      identity.kind !== first.kind ||
+      identity.graphId !== schemaFence.graphId ||
+      ids.has(identity.id)
+    ) {
+      throw new CompilerInvariantError(
+        "An atomic resolved edge mutation set requires distinct ids from one fenced graph and kind.",
+      );
+    }
+    ids.add(identity.id);
+  }
+  if (creates.some((entry) => entry.matchIdentity !== undefined)) {
+    throw new CompilerInvariantError(
+      "An atomic resolved edge mutation set cannot carry durable match identity.",
+    );
+  }
+}
+
 /**
  * The owner a claim write proposes. Reading it off the params in one place is
  * what keeps the accept/refuse test comparing the same pair the SQL arms do.
@@ -379,9 +469,11 @@ export type CommonOperationBackend = Pick<
     executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
     executeAtomicNodeDeleteBatch?: AtomicNodeDeleteBatchExecutor;
     executeAtomicNodeResolvedUpdateBatch?: AtomicNodeResolvedUpdateBatchExecutor;
+    executeAtomicNodeResolvedMutationSet?: AtomicNodeResolvedMutationSetExecutor;
     executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
     executeAtomicEdgeDeleteBatch?: AtomicEdgeDeleteBatchExecutor;
     executeAtomicEdgeResolvedUpdateBatch?: AtomicEdgeResolvedUpdateBatchExecutor;
+    executeAtomicEdgeResolvedMutationSet?: AtomicEdgeResolvedMutationSetExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
      * diagnostic the store runs at the top-level backend, and nothing inside a
@@ -671,6 +763,137 @@ function assembleAtomicDeleteBatchResult(
   return {
     affectedCount,
     schemaFenceMatched: fenceResult.matched,
+  };
+}
+
+type AtomicResolvedMutationSlot<TRow> =
+  | Readonly<{ kind: "created"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "updated"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "postimages"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "assertion" }>;
+
+function assembleAtomicResolvedMutationSet<TRow>(
+  entity: "node" | "edge",
+  results: readonly AtomicResolvedMutationSlot<TRow>[],
+  createIds: readonly string[],
+  updateIds: readonly string[],
+  rowId: (row: TRow) => string,
+): Readonly<{ created: readonly TRow[]; updated: readonly TRow[] }> {
+  const assertionCount = results.filter(
+    (result) => result.kind === "assertion",
+  ).length;
+  const postimageSlots = results.filter(
+    (result) => result.kind === "postimages",
+  );
+  if (assertionCount !== 1 || postimageSlots.length !== 1) {
+    throw new CompilerInvariantError(
+      `Atomic ${entity} mutation set returned an invalid terminal result.`,
+      { assertions: assertionCount, postimages: postimageSlots.length },
+    );
+  }
+
+  const postimages = requireDefined(postimageSlots[0]).rows;
+  if (postimages.length !== createIds.length + updateIds.length) {
+    const mutationRows = results.flatMap((result) =>
+      result.kind === "created" || result.kind === "updated" ? result.rows : [],
+    );
+    if (mutationRows.length > 0) {
+      throw new CompilerInvariantError(
+        `Atomic ${entity} mutation assertion allowed an incomplete postimage set.`,
+      );
+    }
+    return { created: [], updated: [] };
+  }
+
+  const expectedIds = new Set([...createIds, ...updateIds]);
+  const byId = new Map<string, TRow>();
+  for (const row of postimages) {
+    const id = rowId(row);
+    if (!expectedIds.has(id)) {
+      throw new CompilerInvariantError(
+        `Atomic ${entity} mutation set returned a postimage outside its input set.`,
+        { id },
+      );
+    }
+    if (byId.has(id)) {
+      throw new CompilerInvariantError(
+        `Atomic ${entity} mutation set returned a duplicate postimage.`,
+        { id },
+      );
+    }
+    byId.set(id, row);
+  }
+  return {
+    created: createIds.map((id) => requireDefined(byId.get(id))),
+    updated: updateIds.map((id) => requireDefined(byId.get(id))),
+  };
+}
+
+function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
+  input: Readonly<{
+    entity: "node" | "edge";
+    createChunks: readonly (readonly TCreate[])[];
+    updates: readonly TUpdate[];
+    createIds: readonly string[];
+    updateIds: readonly string[];
+    compileCreate: (chunk: readonly TCreate[]) => CompiledAtomicSqlStatement;
+    compileUpdate: (updates: readonly TUpdate[]) => CompiledAtomicSqlStatement;
+    compileAssertion: () => CompiledAtomicSqlStatement;
+    compilePostimages: () => CompiledAtomicSqlStatement;
+    decodeRow: (row: Readonly<Record<string, unknown>>) => TRow;
+    rowId: (row: TRow) => string;
+  }>,
+): AtomicSqlProgram<
+  AtomicResolvedMutationSlot<TRow>,
+  Readonly<{ created: readonly TRow[]; updated: readonly TRow[] }>
+> {
+  const createSlots = input.createChunks.map((chunk) => ({
+    statement: input.compileCreate(chunk),
+    cardinality: "many" as const,
+    decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+      kind: "created" as const,
+      rows: rows.map((row) => input.decodeRow(row)),
+    }),
+  }));
+  const updateSlots =
+    input.updates.length === 0 ?
+      []
+    : [
+        {
+          statement: input.compileUpdate(input.updates),
+          cardinality: "many" as const,
+          decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+            kind: "updated" as const,
+            rows: rows.map((row) => input.decodeRow(row)),
+          }),
+        },
+      ];
+  return {
+    slots: [
+      ...createSlots,
+      ...updateSlots,
+      {
+        statement: input.compileAssertion(),
+        cardinality: "none",
+        decode: () => ({ kind: "assertion" as const }),
+      },
+      {
+        statement: input.compilePostimages(),
+        cardinality: "many",
+        decode: (rows) => ({
+          kind: "postimages" as const,
+          rows: rows.map((row) => input.decodeRow(row)),
+        }),
+      },
+    ],
+    assemble: (results) =>
+      assembleAtomicResolvedMutationSet(
+        input.entity,
+        results,
+        input.createIds,
+        input.updateIds,
+        input.rowId,
+      ),
   };
 }
 
@@ -1997,6 +2220,119 @@ export function createCommonOperationBackend(
         return { executeAtomicNodeResolvedUpdateBatch };
       })();
 
+  const atomicNodeResolvedMutationSetMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        const maxEntries = Math.max(
+          1,
+          Math.floor((maxBindParameters - 12) / 5),
+        );
+
+        const executeAtomicNodeResolvedMutationSet = Object.assign(
+          async (
+            input: Parameters<AtomicNodeResolvedMutationSetExecutor>[0],
+          ) => {
+            const entryCount = input.creates.length + input.updates.length;
+            if (entryCount === 0) return { created: [], updated: [] };
+            assertResolvedNodeMutationSetInput(
+              input.creates,
+              input.updates,
+              input.schemaFence,
+            );
+            if (entryCount > maxEntries) {
+              throw new CompilerInvariantError(
+                "Atomic resolved node mutation set exceeded its declared bind budget.",
+                { entries: entryCount, maxEntries },
+              );
+            }
+
+            const timestamp = nowIso();
+            const firstIdentity = input.creates[0]?.params ?? input.updates[0];
+            const program = buildAtomicResolvedMutationSetProgram({
+              entity: "node",
+              createChunks: chunkArray(
+                input.creates,
+                batchConfig.nodeSchemaFencedInsertBatchSize,
+              ),
+              updates: input.updates,
+              createIds: input.creates.map((entry) => entry.params.id),
+              updateIds: input.updates.map((entry) => entry.id),
+              compileCreate: (chunk) =>
+                execution.compile(
+                  operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    "rows",
+                  ),
+                ),
+              compileUpdate: (updates) =>
+                execution.compile(
+                  operationStrategy.buildAtomicNodeResolvedUpdateBatch(
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compileAssertion: () =>
+                execution.compile(
+                  operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                    input.creates,
+                    input.updates,
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+              compilePostimages: () =>
+                execution.compile(
+                  operationStrategy.buildReadAtomicNodeMutationPostimages(
+                    input.schemaFence.graphId,
+                    requireDefined(firstIdentity).kind,
+                    [
+                      ...input.creates.map((entry) => entry.params.id),
+                      ...input.updates.map((entry) => entry.id),
+                    ],
+                    input.schemaFence,
+                  ),
+                ),
+              decodeRow: (row) => rowMappers.toNodeRow(row),
+              rowId: (row) => row.id,
+            });
+
+            try {
+              return await withAtomicNodeBatchClassifications(
+                () => atomicExecutor.execute(program),
+                input.creates,
+                operationStrategy,
+              );
+            } catch (error) {
+              if (
+                isNotNullColumnViolation(
+                  error,
+                  operationStrategy.atomicMutationPostimageRefusalConstraint,
+                )
+              ) {
+                return { created: [], updated: [] };
+              }
+              throw error;
+            }
+          },
+          { maxEntries },
+        ) satisfies AtomicNodeResolvedMutationSetExecutor;
+
+        return { executeAtomicNodeResolvedMutationSet };
+      })();
+
   const atomicEdgeDeleteBatchMembers =
     (
       atomicSqlProgramExecutor === undefined ||
@@ -2133,6 +2469,126 @@ export function createCommonOperationBackend(
         ) satisfies AtomicEdgeResolvedUpdateBatchExecutor;
 
         return { executeAtomicEdgeResolvedUpdateBatch };
+      })();
+
+  const atomicEdgeResolvedMutationSetMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        const maxEntries = Math.max(
+          1,
+          Math.floor((maxBindParameters - 12) / 14),
+        );
+
+        const executeAtomicEdgeResolvedMutationSet = Object.assign(
+          async (
+            input: Parameters<AtomicEdgeResolvedMutationSetExecutor>[0],
+          ) => {
+            const entryCount = input.creates.length + input.updates.length;
+            if (entryCount === 0) return { created: [], updated: [] };
+            assertResolvedEdgeMutationSetInput(
+              input.creates,
+              input.updates,
+              input.schemaFence,
+            );
+            if (entryCount > maxEntries) {
+              throw new CompilerInvariantError(
+                "Atomic resolved edge mutation set exceeded its declared bind budget.",
+                { entries: entryCount, maxEntries },
+              );
+            }
+
+            let timestamp = nowIso();
+            while (
+              input.updates.some(
+                (entry) => entry.existing.updated_at === timestamp,
+              )
+            ) {
+              timestamp = new Date(Date.parse(timestamp) + 1).toISOString();
+            }
+            const program = buildAtomicResolvedMutationSetProgram({
+              entity: "edge",
+              createChunks: chunkArray(
+                input.creates,
+                batchConfig.edgeSchemaFencedInsertBatchSize,
+              ),
+              updates: input.updates,
+              createIds: input.creates.map((entry) => entry.id),
+              updateIds: input.updates.map((entry) => entry.existing.id),
+              compileCreate: (chunk) =>
+                execution.compile(
+                  operationStrategy.buildInsertEdgesBatchReturningWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compileUpdate: (updates) =>
+                execution.compile(
+                  operationStrategy.buildAtomicEdgeResolvedUpdateBatch(
+                    updates,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+              compileAssertion: () =>
+                execution.compile(
+                  operationStrategy.buildAssertAtomicEdgeMutationPostimages(
+                    input.creates,
+                    input.updates,
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+              compilePostimages: () =>
+                execution.compile(
+                  operationStrategy.buildReadAtomicEdgeMutationPostimages(
+                    input.schemaFence.graphId,
+                    [
+                      ...input.creates.map((entry) => entry.id),
+                      ...input.updates.map((entry) => entry.existing.id),
+                    ],
+                    input.schemaFence,
+                  ),
+                ),
+              decodeRow: (row) => rowMappers.toEdgeRow(row),
+              rowId: (row) => row.id,
+            });
+
+            try {
+              return await executeClassifiedAtomicEdgeBatch(
+                atomicExecutor,
+                program,
+                operationStrategy.primaryKeyConstraints.edges,
+                operationStrategy.atomicEdgeRefusalConstraints,
+                input.creates,
+                [],
+              );
+            } catch (error) {
+              if (
+                isNotNullColumnViolation(
+                  error,
+                  operationStrategy.atomicMutationPostimageRefusalConstraint,
+                )
+              ) {
+                return { created: [], updated: [] };
+              }
+              throw error;
+            }
+          },
+          { maxEntries },
+        ) satisfies AtomicEdgeResolvedMutationSetExecutor;
+
+        return { executeAtomicEdgeResolvedMutationSet };
       })();
 
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
@@ -2671,8 +3127,10 @@ export function createCommonOperationBackend(
     ...atomicEdgeBatchMembers,
     ...atomicNodeDeleteBatchMembers,
     ...atomicNodeResolvedUpdateBatchMembers,
+    ...atomicNodeResolvedMutationSetMembers,
     ...atomicEdgeDeleteBatchMembers,
     ...atomicEdgeResolvedUpdateBatchMembers,
+    ...atomicEdgeResolvedMutationSetMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,
 

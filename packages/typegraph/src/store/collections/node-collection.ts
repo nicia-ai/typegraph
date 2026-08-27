@@ -33,6 +33,7 @@ import {
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
+import { runResolvedMutationSetConverging } from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
 import {
   type CreateNodeInput,
@@ -214,6 +215,13 @@ export type NodeCollectionConfig = Readonly<{
     entries: readonly NodeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<readonly Node[]>;
+  executeResolvedMutationSet: (
+    creates: readonly CreateNodeInput[],
+    updates: readonly NodeUpsertUpdateBatchEntry[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<
+    Readonly<{ created: readonly Node[]; updated: readonly Node[] }> | undefined
+  >;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
@@ -368,6 +376,7 @@ export function createNodeCollection<
     executeUpdate: executeNodeUpdate,
     executeUpdateWhere: executeNodeUpdateWhere,
     executeUpsertUpdateBatch: executeNodeUpsertUpdateBatch,
+    executeResolvedMutationSet: executeNodeResolvedMutationSet,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -955,30 +964,47 @@ export function createNodeCollection<
           itemIndex++;
         }
 
-        if (toCreate.length > 0) {
-          const createInputs = toCreate.map((entry) => entry.input);
-          const created = await executeNodeCreateBatch(createInputs, target);
+        const createInputs = toCreate.map((entry) => entry.input);
+        const updateEntries = toUpdate.map((entry) => ({
+          input: entry.input,
+          clearDeleted: entry.clearDeleted,
+          ...(entry.existing === undefined ? {} : { existing: entry.existing }),
+        }));
+        const mutationSet = await executeNodeResolvedMutationSet(
+          createInputs,
+          updateEntries,
+          target,
+        );
+        if (mutationSet === undefined) {
+          if (toCreate.length > 0) {
+            const created = await executeNodeCreateBatch(createInputs, target);
+            for (const [index, entry] of toCreate.entries()) {
+              results[entry.index] = narrowNode<N>(
+                requireDefined(created[index]),
+              );
+            }
+          }
+
+          if (toUpdate.length > 0) {
+            const updated = await executeNodeUpsertUpdateBatch(
+              updateEntries,
+              target,
+            );
+            for (const [updateIndex, entry] of toUpdate.entries()) {
+              const result = requireDefined(updated[updateIndex]);
+              results[entry.index] = narrowNode<N>(result);
+            }
+          }
+        } else {
           for (const [index, entry] of toCreate.entries()) {
             results[entry.index] = narrowNode<N>(
-              requireDefined(created[index]),
+              requireDefined(mutationSet.created[index]),
             );
           }
-        }
-
-        if (toUpdate.length > 0) {
-          const updated = await executeNodeUpsertUpdateBatch(
-            toUpdate.map((entry) => ({
-              input: entry.input,
-              clearDeleted: entry.clearDeleted,
-              ...(entry.existing === undefined ?
-                {}
-              : { existing: entry.existing }),
-            })),
-            target,
-          );
-          for (const [updateIndex, entry] of toUpdate.entries()) {
-            const result = requireDefined(updated[updateIndex]);
-            results[entry.index] = narrowNode<N>(result);
+          for (const [index, entry] of toUpdate.entries()) {
+            results[entry.index] = narrowNode<N>(
+              requireDefined(mutationSet.updated[index]),
+            );
           }
         }
 
@@ -992,9 +1018,10 @@ export function createNodeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } = await runOptionallyInTransaction(
-        backend,
-        (target) => upsertAll(target),
+      const { results, mutations } = await runResolvedMutationSetConverging(
+        "node",
+        () =>
+          runOptionallyInTransaction(backend, (target) => upsertAll(target)),
       );
       // Match bulkCreate/bulkInsert: refresh planner statistics after a large
       // autocommit bulk write. Coalesced items wrote nothing, so only real

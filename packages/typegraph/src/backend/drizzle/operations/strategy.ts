@@ -92,6 +92,7 @@ import {
 } from "./edge-claims";
 import type { ConvergeEdgeCreateParams } from "./edges";
 import {
+  buildAssertAtomicEdgeMutationPostimages,
   buildAtomicEdgeDeleteBatchWithSchemaFence,
   buildAtomicEdgeResolvedUpdateBatch,
   buildConvergeEdgeCreate,
@@ -114,12 +115,14 @@ import {
   buildInsertEdgesBatchReturningWithSchemaFence,
   buildInsertEdgesBatchWithSchemaFence,
   buildInsertEdgesDurableBatchReturning,
+  buildReadAtomicEdgeMutationPostimages,
   buildUpdateEdge,
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
 import { buildInsertNodeWithProjections } from "./node-projections";
 import {
+  buildAssertAtomicNodeMutationPostimages,
   buildAtomicNodeBatchWithSchemaFence,
   buildAtomicNodeDeleteBatchWithSchemaFence,
   buildAtomicNodeResolvedUpdateBatch,
@@ -135,6 +138,7 @@ import {
   buildInsertNodesBatchReturning,
   buildInsertNodesBatchWithSchemaFence,
   buildInsertNodeWithSchemaFence,
+  buildReadAtomicNodeMutationPostimages,
   buildUpdateNode,
   buildUpdateNodeSet,
 } from "./nodes";
@@ -173,6 +177,11 @@ function nullableText(value: string | undefined): SQL {
 }
 
 export type CommonOperationStrategy = Readonly<{
+  /** Terminal NOT NULL sentinel shared by resolved mutation-set programs. */
+  atomicMutationPostimageRefusalConstraint: Readonly<{
+    table: string;
+    column: string;
+  }>;
   /**
    * The exact NOT NULL sentinels emitted by the closed edge-batch program.
    * Derive them from the same table definitions as the SQL so error
@@ -298,6 +307,18 @@ export type CommonOperationStrategy = Readonly<{
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
+  buildAssertAtomicNodeMutationPostimages: (
+    creates: readonly AtomicNodeBatchEntry[],
+    updates: readonly AtomicNodeResolvedUpdateEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
+  buildReadAtomicNodeMutationPostimages: (
+    graphId: string,
+    kind: string,
+    ids: readonly string[],
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
   buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildAtomicNodeDeleteBatchWithSchemaFence: (
@@ -381,6 +402,17 @@ export type CommonOperationStrategy = Readonly<{
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
+  ) => SQL;
+  buildAssertAtomicEdgeMutationPostimages: (
+    creates: readonly InsertEdgeParams[],
+    updates: readonly AtomicEdgeResolvedUpdateEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
+  buildReadAtomicEdgeMutationPostimages: (
+    graphId: string,
+    ids: readonly string[],
+    schemaFence: SchemaWriteFenceParams,
   ) => SQL;
   buildDeleteEdge: (params: DeleteEdgeParams, timestamp: string) => SQL;
   buildDeleteEdgesBatch: (
@@ -565,6 +597,8 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetNodes,
   buildUpdateNode,
   buildAtomicNodeResolvedUpdateBatch,
+  buildAssertAtomicNodeMutationPostimages,
+  buildReadAtomicNodeMutationPostimages,
   buildDeleteNode,
   buildHardDeleteNode,
   buildInsertEdge,
@@ -579,6 +613,8 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetEdges,
   buildUpdateEdge,
   buildAtomicEdgeResolvedUpdateBatch,
+  buildAssertAtomicEdgeMutationPostimages,
+  buildReadAtomicEdgeMutationPostimages,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
   buildHardDeleteEdge,
@@ -797,6 +833,10 @@ function createCommonOperationStrategy(
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",
+    atomicMutationPostimageRefusalConstraint: {
+      table: getTableName(tables.schemaVersions),
+      column: tables.schemaVersions.version.name,
+    },
     atomicEdgeRefusalConstraints: {
       cardinality: {
         table: getTableName(tables.edgeClaims),

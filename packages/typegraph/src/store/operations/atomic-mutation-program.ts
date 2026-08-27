@@ -8,9 +8,11 @@
 import {
   type AtomicEdgeBatchExecutor as BackendAtomicEdgeBatchExecutor,
   type AtomicEdgeDeleteBatchExecutor,
+  type AtomicEdgeResolvedMutationSetExecutor,
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicNodeBatchExecutor as BackendAtomicNodeBatchExecutor,
   type AtomicNodeDeleteBatchExecutor,
+  type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   resolveBundledRootAtomicMutationPrograms,
 } from "../../backend/capabilities/atomic-mutation-program";
@@ -191,18 +193,48 @@ export type AtomicNodeResolvedUpdateEligibilityInput =
       registry: KindRegistry;
     }>;
 
+type AtomicResolvedNodeKindEligibility = Readonly<{
+  graph: GraphDef;
+  kind: string;
+  identityEnabled: boolean;
+  registry: KindRegistry;
+}>;
+
+function isAtomicResolvedNodeKindEligible(
+  input: AtomicResolvedNodeKindEligibility,
+): boolean {
+  if (input.identityEnabled || !hasOwnKey(input.graph.nodes, input.kind)) {
+    return false;
+  }
+  const registration = input.graph.nodes[input.kind];
+  return (
+    registration !== undefined &&
+    input.registry.getDisjointKinds(input.kind).length === 0 &&
+    (registration.unique ?? []).length === 0 &&
+    getSearchableFields(registration.type.schema).length === 0 &&
+    getEmbeddingFields(registration.type.schema).length === 0
+  );
+}
+
+function isAtomicResolvedEdgeKindEligible(
+  input: Readonly<{ graph: GraphDef; kind: string }>,
+): boolean {
+  if (!hasOwnKey(input.graph.edges, input.kind)) return false;
+  const registration = input.graph.edges[input.kind];
+  return (
+    registration !== undefined &&
+    (registration.cardinality ?? "many") === "many" &&
+    registration.matchIdentity === undefined
+  );
+}
+
 /** The one owner of the static proof for resolved live-node set updates. */
 export function resolveAtomicNodeResolvedUpdateBatchExecutor(
   input: AtomicNodeResolvedUpdateEligibilityInput,
 ): AtomicNodeResolvedUpdateBatchExecutor | undefined {
-  if (input.entryCount === 0 || input.identityEnabled) return;
-  if (!hasOwnKey(input.graph.nodes, input.kind)) return;
-  const registration = input.graph.nodes[input.kind];
-  if (registration === undefined) return;
-  if (input.registry.getDisjointKinds(input.kind).length > 0) return;
-  if ((registration.unique ?? []).length > 0) return;
-  if (getSearchableFields(registration.type.schema).length > 0) return;
-  if (getEmbeddingFields(registration.type.schema).length > 0) return;
+  if (input.entryCount === 0 || !isAtomicResolvedNodeKindEligible(input)) {
+    return;
+  }
   const executor = resolveAtomicMutationProfile(input)?.updateNodes;
   if (executor === undefined || input.entryCount > executor.maxEntries) return;
   return executor;
@@ -216,17 +248,60 @@ export type AtomicEdgeResolvedUpdateEligibilityInput =
 export function resolveAtomicEdgeResolvedUpdateBatchExecutor(
   input: AtomicEdgeResolvedUpdateEligibilityInput,
 ): AtomicEdgeResolvedUpdateBatchExecutor | undefined {
-  if (input.entryCount === 0) return;
-  if (!hasOwnKey(input.graph.edges, input.kind)) return;
-  const registration = input.graph.edges[input.kind];
-  if (
-    registration === undefined ||
-    (registration.cardinality ?? "many") !== "many" ||
-    registration.matchIdentity !== undefined
-  ) {
+  if (input.entryCount === 0 || !isAtomicResolvedEdgeKindEligible(input)) {
     return;
   }
   const executor = resolveAtomicMutationProfile(input)?.updateEdges;
   if (executor === undefined || input.entryCount > executor.maxEntries) return;
+  return executor;
+}
+
+export type AtomicNodeResolvedMutationSetEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{
+      kind: string;
+      creates: readonly CreateNodeInput[];
+      updateCount: number;
+      identityEnabled: boolean;
+      registry: KindRegistry;
+    }>;
+
+/** The one owner of the static proof for mixed resolved node mutations. */
+export function resolveAtomicNodeResolvedMutationSetExecutor(
+  input: AtomicNodeResolvedMutationSetEligibilityInput,
+): AtomicNodeResolvedMutationSetExecutor | undefined {
+  const entryCount = input.creates.length + input.updateCount;
+  if (entryCount === 0 || !isAtomicResolvedNodeKindEligible(input)) return;
+  if (
+    input.creates.some(
+      (item) => item.kind !== input.kind || item.id === undefined,
+    )
+  ) {
+    return;
+  }
+  const executor = resolveAtomicMutationProfile(input)?.mutateNodes;
+  if (executor === undefined || entryCount > executor.maxEntries) return;
+  return executor;
+}
+
+export type AtomicEdgeResolvedMutationSetEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{
+      kind: string;
+      creates: readonly CreateEdgeInput[];
+      updateCount: number;
+    }>;
+
+/** The one owner of the static proof for mixed resolved edge mutations. */
+export function resolveAtomicEdgeResolvedMutationSetExecutor(
+  input: AtomicEdgeResolvedMutationSetEligibilityInput,
+): AtomicEdgeResolvedMutationSetExecutor | undefined {
+  const entryCount = input.creates.length + input.updateCount;
+  if (entryCount === 0 || !isAtomicResolvedEdgeKindEligible(input)) return;
+  if (input.creates.some((item) => item.kind !== input.kind)) {
+    return;
+  }
+  const executor = resolveAtomicMutationProfile(input)?.mutateEdges;
+  if (executor === undefined || entryCount > executor.maxEntries) return;
   return executor;
 }
