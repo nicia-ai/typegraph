@@ -63,8 +63,7 @@ import {
   isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
-import { markBundledRootAtomicEdgeBatch } from "../capabilities/atomic-edge-batch";
-import { markBundledRootAtomicNodeBatch } from "../capabilities/atomic-node-batch";
+import { markBundledRootAtomicMutationPrograms } from "../capabilities/atomic-mutation-program";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -2619,8 +2618,12 @@ export function createSqliteBackend(
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicSqlProgram(backend, atomicSqlProgramExecutor);
-  markBundledRootAtomicNodeBatch(backend, operations.executeAtomicNodeBatch);
-  markBundledRootAtomicEdgeBatch(backend, operations.executeAtomicEdgeBatch);
+  markBundledRootAtomicMutationPrograms(backend, {
+    createNodes: operations.executeAtomicNodeBatch,
+    createEdges: operations.executeAtomicEdgeBatch,
+    deleteNodes: operations.executeAtomicNodeDeleteBatch,
+    deleteEdges: operations.executeAtomicEdgeDeleteBatch,
+  });
 
   return backend;
 }

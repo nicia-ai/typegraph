@@ -6,11 +6,16 @@ import { createClient } from "@libsql/client";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { StaleVersionError, UniquenessError } from "../src";
-import { resolveBundledRootAtomicNodeBatch } from "../src/backend/capabilities/atomic-node-batch";
+import {
+  RestrictedDeleteError,
+  StaleVersionError,
+  UniquenessError,
+} from "../src";
+import { resolveBundledRootAtomicNodeBatch } from "../src/backend/capabilities/atomic-mutation-program";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { computeUniqueKey } from "../src/constraints";
-import { defineGraph, defineNode, searchable } from "../src/core";
+import { defineEdge, defineGraph, defineNode, searchable } from "../src/core";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
 
@@ -22,6 +27,15 @@ const graph = defineGraph({
   id: "atomic-node-batch-store",
   nodes: { Person: { type: Person } },
   edges: {},
+});
+
+const knows = defineEdge("knows", { schema: z.object({}) });
+const deleteGraph = defineGraph({
+  id: "atomic-node-delete-multi-chunk",
+  nodes: { Person: { type: Person } },
+  edges: {
+    knows: { type: knows, from: [Person], to: [Person] },
+  },
 });
 
 const evolvedGraph = defineGraph({
@@ -111,6 +125,57 @@ async function closeFixture(
 }
 
 describe("plain node batch store contract", () => {
+  it("keeps missing and already-deleted node ids as successful no-ops", async () => {
+    const fixture = await createFixture();
+    try {
+      const node = await fixture.store.nodes.Person.create({ name: "Deleted" });
+      await fixture.store.nodes.Person.delete(node.id);
+
+      await expect(
+        fixture.store.nodes.Person.bulkDelete([
+          node.id,
+          "missing-node-id" as typeof node.id,
+        ]),
+      ).resolves.toBeUndefined();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("rolls back earlier delete chunks when a later restriction refuses", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-node-delete-chunks-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const installed = await createLibsqlBackend(client);
+    const backend = createSqliteBackend(installed.db, {
+      capabilities: { maxBindParameters: 7 },
+      executionProfile: { isSync: false, transactionMode: "sql" },
+    });
+    try {
+      const [store] = await createStoreWithSchema(deleteGraph, backend);
+      const source = await store.nodes.Person.create({ name: "Source" });
+      const first = await store.nodes.Person.create({ name: "First" });
+      const second = await store.nodes.Person.create({ name: "Second" });
+      const connected = await store.nodes.Person.create({ name: "Connected" });
+      await store.edges.knows.create(source, connected, {});
+
+      await expect(
+        store.nodes.Person.bulkDelete([first.id, second.id, connected.id]),
+      ).rejects.toBeInstanceOf(RestrictedDeleteError);
+
+      for (const id of [first.id, second.id, connected.id]) {
+        await expect(store.nodes.Person.getById(id)).resolves.toBeDefined();
+      }
+    } finally {
+      await installed.backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the native capability on the exact root only", async () => {
     const fixture = await createFixture();
     try {
@@ -285,6 +350,26 @@ describe("plain node batch store contract", () => {
         ]),
       ).rejects.toThrow(StaleVersionError);
       await expect(fixture.store.nodes.Person.count()).resolves.toBe(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("refuses a stale schema fence without deleting nodes", async () => {
+    const fixture = await createFixture();
+    try {
+      const node = await fixture.store.nodes.Person.create(
+        { name: "Keep" },
+        { id: "stale-delete" },
+      );
+      await migrateSchema(fixture.backend, evolvedGraph, 1);
+
+      await expect(
+        fixture.store.nodes.Person.bulkDelete([node.id]),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(
+        fixture.store.nodes.Person.getById(node.id),
+      ).resolves.toBeDefined();
     } finally {
       await closeFixture(fixture);
     }

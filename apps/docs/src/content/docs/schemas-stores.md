@@ -728,6 +728,15 @@ This is an internal implementation detail, not a general Store batch surface.
 Constrained, projected, identity-enabled, history/revision-tracked, and other
 unsupported shapes keep the existing transaction or fallback path.
 
+The same bundled roots execute eligible node and edge `bulkDelete()` calls as
+closed schema-fenced mutation programs. Edge collection identity and node
+`restrict` behavior are rechecked by the write statement itself. Nodes with
+unique, disjointness, search, identity, or capture sidecars, or with cascade or
+disconnect behavior, retain the interactive path, as do derived/custom
+backends and caller-owned transactions. On a portable backend, edge bulk
+deletion still resolves all IDs in one batched read and applies them through a
+set-based delete port when available, replacing the former per-ID loop.
+
 Keep these guarantees distinct:
 
 - An **interactive transaction** is the public `store.transaction(...)` API;
@@ -1205,6 +1214,11 @@ store.nodes.Person.bulkDelete(
 ): Promise<void>;
 ```
 
+On eligible bundled roots, a plain restricted node kind runs this call as one
+schema-fenced atomic exchange. Kinds that owe unique, disjointness, search,
+identity, or capture cleanup, or cascade/disconnect work, use the transactional
+path instead.
+
 #### `getOrCreateByConstraint(constraintName, props, options?)`
 
 Looks up an existing node by a named uniqueness constraint. Returns the match if found, or creates a new node if not.
@@ -1658,6 +1672,11 @@ store.edges.worksAt.bulkDelete(
   ids: readonly EdgeId<worksAt>[]
 ): Promise<void>;
 ```
+
+On eligible bundled roots, the whole call is one schema-fenced atomic exchange.
+An ID belonging to another edge kind refuses the call and rolls back every
+chunk. Portable backends batch both the authoritative lookup and soft delete
+when their optional batch ports are available.
 
 #### `bulkUpsertById(items)`
 

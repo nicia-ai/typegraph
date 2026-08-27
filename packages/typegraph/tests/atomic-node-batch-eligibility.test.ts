@@ -9,8 +9,9 @@ import { z } from "zod";
 import { StaleVersionError } from "../src";
 import {
   type AtomicNodeBatchInput,
+  markBundledRootAtomicMutationPrograms,
   markBundledRootAtomicNodeBatch,
-} from "../src/backend/capabilities/atomic-node-batch";
+} from "../src/backend/capabilities/atomic-mutation-program";
 import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
@@ -21,7 +22,10 @@ import { disjointWith, subClassOf } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
-import { resolveAtomicNodeBatchExecutor } from "../src/store/operations/atomic-node-batch";
+import {
+  resolveAtomicNodeBatchExecutor,
+  resolveAtomicNodeDeleteBatchExecutor,
+} from "../src/store/operations/atomic-mutation-program";
 import type { CreateNodeInput } from "../src/store/types";
 
 const Person = defineNode("Person", {
@@ -164,6 +168,17 @@ function createFakeAtomicNodeBatch(onCall?: () => void) {
 function markAtomicRoot(backend: GraphBackend): void {
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicNodeBatch(backend, createFakeAtomicNodeBatch());
+}
+
+function markAtomicDeleteRoot(backend: GraphBackend): void {
+  markBundledRootAutocommitEligible(backend);
+  markBundledRootAtomicMutationPrograms(backend, {
+    deleteNodes: (deleteInput) =>
+      Promise.resolve({
+        affectedCount: deleteInput.ids.length,
+        schemaFenceMatched: true,
+      }),
+  });
 }
 
 describe("atomic node batch eligibility", () => {
@@ -392,7 +407,137 @@ describe("atomic node batch eligibility", () => {
   );
 });
 
+describe("atomic node delete batch eligibility", () => {
+  it("accepts only a sidecar-free exact bundled root", () => {
+    const backend = rootBackend(true);
+    markAtomicDeleteRoot(backend);
+
+    expect(
+      resolveAtomicNodeDeleteBatchExecutor({
+        backend,
+        graph,
+        registry: buildKindRegistry(graph),
+        kind: "Person",
+        ids: ["person-1"],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
+  });
+
+  it.each([
+    ["unique claims", uniqueGraph, "Person", false, false, false],
+    ["disjointness claims", disjointGraph, "Person", false, false, false],
+    [
+      "search projections",
+      searchableGraph,
+      "SearchDocument",
+      false,
+      false,
+      false,
+    ],
+    [
+      "embedding projections",
+      embeddingGraph,
+      "VectorDocument",
+      false,
+      false,
+      false,
+    ],
+    ["Operational Identity", graph, "Person", true, false, false],
+    ["history", graph, "Person", false, true, false],
+    ["revision tracking", graph, "Person", false, false, true],
+  ] as const)(
+    "refuses %s work that owes transactional cleanup",
+    (
+      _label,
+      candidateGraph,
+      kind,
+      identityEnabled,
+      historyEnabled,
+      revisionTrackingEnabled,
+    ) => {
+      const backend = rootBackend(true);
+      markAtomicDeleteRoot(backend);
+
+      expect(
+        resolveAtomicNodeDeleteBatchExecutor({
+          backend,
+          graph: candidateGraph,
+          registry: buildKindRegistry(candidateGraph),
+          kind,
+          ids: ["node-1"],
+          schemaVersion: 1,
+          identityEnabled,
+          historyEnabled,
+          revisionTrackingEnabled,
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  it("refuses empty, unknown-kind, unmarked, and derived inputs", () => {
+    const backend = rootBackend(true);
+    markAtomicDeleteRoot(backend);
+    const common = {
+      graph,
+      registry: buildKindRegistry(graph),
+      kind: "Person",
+      ids: ["person-1"],
+      schemaVersion: 1,
+      identityEnabled: false,
+      historyEnabled: false,
+      revisionTrackingEnabled: false,
+    } as const;
+
+    expect(
+      resolveAtomicNodeDeleteBatchExecutor({ ...common, backend, ids: [] }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicNodeDeleteBatchExecutor({
+        ...common,
+        backend,
+        kind: "Unknown",
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicNodeDeleteBatchExecutor({
+        ...common,
+        backend: rootBackend(true),
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAtomicNodeDeleteBatchExecutor({
+        ...common,
+        backend: deriveBackend(backend, {}),
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe("atomic node batch store consumer", () => {
+  it("keeps disjoint claim cleanup on the transactional delete path", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [store] = await createStoreWithSchema(disjointGraph, backend);
+      const sharedId = "released-disjoint-id";
+      const person = await store.nodes.Person.create(
+        { name: "Person" },
+        { id: sharedId },
+      );
+
+      await store.nodes.Person.bulkDelete([person.id]);
+
+      await expect(
+        store.nodes.Rival.create({ name: "Rival" }, { id: person.id }),
+      ).resolves.toMatchObject({ id: sharedId });
+    } finally {
+      await backend.close();
+    }
+  });
+
   it("uses the exact-root native batch without opening an outer transaction", async () => {
     const { backend } = createLocalSqliteBackend();
     let calls = 0;

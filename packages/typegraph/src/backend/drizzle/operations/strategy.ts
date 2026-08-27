@@ -7,9 +7,11 @@ import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
 import { isPresent } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type {
+  AtomicEdgeDeleteBatchInput,
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
-} from "../../capabilities/atomic-node-batch";
+  AtomicNodeDeleteBatchInput,
+} from "../../capabilities/atomic-mutation-program";
 import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -88,6 +90,7 @@ import {
 } from "./edge-claims";
 import type { ConvergeEdgeCreateParams } from "./edges";
 import {
+  buildAtomicEdgeDeleteBatchWithSchemaFence,
   buildConvergeEdgeCreate,
   buildCountEdgesFrom,
   buildDeleteEdge,
@@ -115,6 +118,7 @@ import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
 import { buildInsertNodeWithProjections } from "./node-projections";
 import {
   buildAtomicNodeBatchWithSchemaFence,
+  buildAtomicNodeDeleteBatchWithSchemaFence,
   buildDeleteNode,
   buildGetNode,
   buildGetNodes,
@@ -135,6 +139,7 @@ import {
   buildGetSchemaVersion,
   buildInsertSchema,
   buildLockSchemaVersionAndGraphWrite,
+  buildSchemaFenceProbe,
   buildSetActiveSchema,
 } from "./schema";
 import {
@@ -171,10 +176,12 @@ export type CommonOperationStrategy = Readonly<{
    */
   atomicEdgeRefusalConstraints: Readonly<{
     cardinality: Readonly<{ table: string; column: string }>;
+    deleteIdentity: Readonly<{ table: string; column: string }>;
     durableIdentity: Readonly<{ table: string; column: string }>;
     endpoint: Readonly<{ table: string; column: string }>;
   }>;
   atomicNodeRefusalConstraints: Readonly<{
+    deleteRestricted: Readonly<{ table: string; column: string }>;
     liveIdentity: Readonly<{ table: string; column: string }>;
   }>;
   /**
@@ -283,6 +290,15 @@ export type CommonOperationStrategy = Readonly<{
   buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
   buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
+  buildAtomicNodeDeleteBatchWithSchemaFence: (
+    input: AtomicNodeDeleteBatchInput,
+    timestamp: string,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildSchemaFenceProbe: (
+    params: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
   buildHardDeleteNode: (params: HardDeleteNodeParams) => SQL;
   buildInsertEdge: (params: InsertEdgeParams, timestamp: string) => SQL;
   buildInsertEdgeIfEndpointsLive: (
@@ -354,6 +370,11 @@ export type CommonOperationStrategy = Readonly<{
   buildDeleteEdgesBatch: (
     params: DeleteEdgesBatchParams,
     timestamp: string,
+  ) => SQL;
+  buildAtomicEdgeDeleteBatchWithSchemaFence: (
+    input: AtomicEdgeDeleteBatchInput,
+    timestamp: string,
+    schemaLockClause: SQL,
   ) => SQL;
   buildHardDeleteEdge: (params: HardDeleteEdgeParams) => SQL;
   buildHardDeleteEdgesBatch: (params: DeleteEdgesBatchParams) => SQL;
@@ -758,6 +779,10 @@ function createCommonOperationStrategy(
         table: getTableName(tables.edgeClaims),
         column: tables.edgeClaims.axis.name,
       },
+      deleteIdentity: {
+        table: getTableName(tables.edges),
+        column: tables.edges.kind.name,
+      },
       durableIdentity: {
         table: getTableName(tables.edges),
         column: tables.edges.createdAt.name,
@@ -767,12 +792,40 @@ function createCommonOperationStrategy(
         column: tables.edges.id.name,
       },
     },
+    buildAtomicEdgeDeleteBatchWithSchemaFence: (
+      input,
+      timestamp,
+      schemaLockClause,
+    ) =>
+      buildAtomicEdgeDeleteBatchWithSchemaFence(
+        tables,
+        input,
+        timestamp,
+        schemaLockClause,
+      ),
     atomicNodeRefusalConstraints: {
+      deleteRestricted: {
+        table: getTableName(tables.nodes),
+        column: tables.nodes.props.name,
+      },
       liveIdentity: {
         table: getTableName(tables.nodes),
         column: tables.nodes.props.name,
       },
     },
+    buildAtomicNodeDeleteBatchWithSchemaFence: (
+      input,
+      timestamp,
+      schemaLockClause,
+    ) =>
+      buildAtomicNodeDeleteBatchWithSchemaFence(
+        tables,
+        input,
+        timestamp,
+        schemaLockClause,
+      ),
+    buildSchemaFenceProbe: (params, schemaLockClause) =>
+      buildSchemaFenceProbe(tables, params, schemaLockClause),
     buildDeleteStaleAtomicEdgeClaims: (
       entries,
       schemaFence,

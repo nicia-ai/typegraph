@@ -75,7 +75,8 @@
 import {
   AtomicEdgeBatchCardinalityRefusalError,
   AtomicEdgeBatchEndpointRefusalError,
-} from "../../backend/capabilities/atomic-edge-batch";
+  AtomicEdgeDeleteIdentityRefusalError,
+} from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
@@ -156,6 +157,7 @@ import {
   edgeWriteNeedsConstraintFence,
 } from "../constraints";
 import { classifyDurableEdgeBatchOutcomes } from "../durable-edge-batch";
+import { getEdgeRowsByIds } from "../edge-fetch";
 import {
   buildEdgeMatchKey,
   canonicalPersistedJsonValue,
@@ -181,7 +183,8 @@ import { withAlreadyExistsTranslation } from "./already-exists";
 import {
   type AtomicEdgeBatchExecutor,
   resolveAtomicEdgeBatchExecutor,
-} from "./atomic-edge-batch";
+  resolveAtomicEdgeDeleteBatchExecutor,
+} from "./atomic-mutation-program";
 import {
   AutocommitWriteRequiresTransaction,
   canFuseSchemaFenceInFirstWrite,
@@ -2173,14 +2176,72 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
   ids: readonly string[],
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
+  const atomicExecutor = resolveAtomicEdgeDeleteBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    expectedKind,
+    ids,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (atomicExecutor !== undefined) {
+    try {
+      const result = await atomicExecutor({
+        graphId: ctx.graphId,
+        expectedKind,
+        ids,
+        schemaFence: {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        },
+      });
+      if (!result.schemaFenceMatched) {
+        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+      }
+      return;
+    } catch (error) {
+      if (!(error instanceof AtomicEdgeDeleteIdentityRefusalError)) throw error;
+      const rowsById = await getEdgeRowsByIds(
+        backend,
+        ctx.batchPointRead,
+        ctx.graphId,
+        ids,
+      );
+      for (const id of ids) {
+        const current = rowsById.get(id);
+        if (current === undefined) continue;
+        assertEdgeIdentityMatches(
+          id,
+          { kind: expectedKind },
+          edgeIdentityFromRow(current),
+          "delete",
+        );
+      }
+      throw new DatabaseOperationError(
+        "Atomic edge delete refused an identity mismatch, but no current " +
+          "foreign collection row could be diagnosed.",
+        { operation: "delete", entity: "edge" },
+        { cause: error.cause },
+      );
+    }
+  }
+
   await runWritePlan(
     ctx,
     edgeWritePlan(undefined),
     backend,
     async (session, target) => {
-      let affectedCount = 0;
+      const rowsById = await getEdgeRowsByIds(
+        target,
+        ctx.batchPointRead,
+        ctx.graphId,
+        ids,
+      );
+      const retirements: { id: string; kind: string }[] = [];
+      const scheduledIds = new Set<string>();
       for (const id of ids) {
-        const current = await target.getEdge(ctx.graphId, id);
+        const current = rowsById.get(id);
         if (!current) continue;
         assertEdgeIdentityMatches(
           id,
@@ -2189,14 +2250,16 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
           "delete",
         );
         if (current.deleted_at) continue;
-        // The read above is this path's identity GATE (a batch has none
-        // outside the transaction), so it stays; the statement still carries
-        // the expected kind so the row it tombstones is the row that was
-        // judged.
-        await session.retireEdge({ id, kind: expectedKind });
-        affectedCount += 1;
+        if (scheduledIds.has(id)) continue;
+        scheduledIds.add(id);
+        retirements.push({ id, kind: expectedKind });
       }
-      return affectedCount;
+      // Resolution and execution share the same transaction target. The batch
+      // read is the identity gate; update operations cannot change an edge's
+      // kind or id, so the id-keyed batch update applies exactly that closed
+      // set while preserving the former absent/tombstoned skip semantics.
+      await session.retireEdges(retirements);
+      return retirements.length;
     },
     { didWrite: (affectedCount) => affectedCount > 0 },
   );

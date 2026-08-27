@@ -159,6 +159,32 @@ export function applyEdgeSoftDelete(
   });
 }
 
+/** Applies one resolved soft-delete set through the backend's batch port. */
+export async function applyEdgeSoftDeleteBatch(
+  ctx: EdgeWriteContext,
+  work: readonly EdgeDeleteWork[],
+  backend: Backend,
+): Promise<void> {
+  if (work.length === 0) return;
+  const deleteEdgesBatch = backend.deleteEdgesBatch;
+  const kind = work[0]?.kind;
+  if (
+    deleteEdgesBatch === undefined ||
+    kind === undefined ||
+    work.some((item) => item.kind !== kind)
+  ) {
+    for (const item of work) {
+      await applyEdgeSoftDelete(ctx, item, backend);
+    }
+    return;
+  }
+  await deleteEdgesBatch({
+    graphId: ctx.graphId,
+    ids: work.map((item) => item.id),
+    kind,
+  });
+}
+
 /**
  * One edge hard delete: the row, plus whether this kind holds a cardinality
  * claim to give back.

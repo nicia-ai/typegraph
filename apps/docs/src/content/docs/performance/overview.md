@@ -163,12 +163,34 @@ claims at the write boundary. It rolls back the whole call when any
 bind-budget chunk or constraint sidecar fails and restores `bulkCreate()`
 results to input order.
 
+Eligible `bulkDelete()` calls use the same mutation-program boundary. Direct
+edge batches on bundled roots submit one schema-fenced atomic exchange; the
+statement refuses an ID owned by another edge collection and rolls back every
+chunk. Plain node batches also submit one exchange when the node has no unique
+or disjointness claims, Operational Identity, search projections, history, or
+revision capture and its delete behavior is `restrict` (or omitted). The node
+statement rechecks connected live edges at the write boundary, so a restricted
+delete cannot race an earlier application-side probe. Cascade, disconnect,
+sidecar, captured, derived/custom-backend, and caller-transaction shapes keep
+the interactive path.
+
+These operations are registered through one exact-root mutation execution
+profile. Create and delete are **closed programs**: validation and arbitration
+can be expressed by the submitted SQL itself. `bulkUpsertById()` is deliberately
+different. It must read authoritative stored properties, merge and validate
+them, and preserve repeated-ID ordering before its write set is known, so it
+remains a resolved mutation set on the interactive path.
+
 Measured at the libSQL transport boundary, eligible plain node
 `bulkInsert()` and `bulkCreate()` calls each submit one exchange for generated,
 caller-supplied, and mixed ID batches. A one-chunk unconstrained edge
 batch remains 1 exchange, a durable-match batch drops from 6 transport
 submissions to 1 atomic exchange, and a cardinality-constrained batch drops
-from 8 transport submissions to 1 atomic exchange. The native exchange still
+from 8 transport submissions to 1 atomic exchange. Eligible one-chunk node and
+edge `bulkDelete()` calls likewise submit 1 atomic exchange instead of a
+transaction plus per-row probes/writes. On the portable edge path, one batched
+authoritative read plus one set-based soft delete replaces the former two
+statements per input. The native exchange still
 contains the SQL statements needed for inserts and sidecars; it submits them as
 one transaction so they do not each pay network latency. The exact previous
 count varies by driver and endpoint shape.
@@ -215,7 +237,8 @@ You don't need to chunk manually — pass arrays of any size and TypeGraph handl
 
 On a transaction-capable backend, each bulk method call is atomic across all of its bind-budget
 chunks. Eligible plain `nodes.bulkInsert()` and `nodes.bulkCreate()` calls,
-plus direct `edges.bulkInsert()` / `edges.bulkCreate()` calls, also provide
+eligible plain node `bulkDelete()` calls, and direct edge
+`bulkInsert()` / `bulkCreate()` / `bulkDelete()` calls also provide
 whole-call atomicity on bundled transactionless roots through one native
 atomic exchange, including durable-match and cardinality-constrained edge
 batches. Other

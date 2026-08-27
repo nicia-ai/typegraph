@@ -11,11 +11,7 @@
 import { bindExtraIfReachable } from "../backend/capabilities/bind";
 import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
-import {
-  type EdgeRow,
-  type GraphBackend,
-  type TransactionBackend,
-} from "../backend/types";
+import { type EdgeRow, type GraphBackend } from "../backend/types";
 import { getRowsByIds } from "./row-fetch";
 
 /**
@@ -26,7 +22,7 @@ import { getRowsByIds } from "./row-fetch";
  * off `backend`, the port the call executes on, never re-resolved here.
  */
 export async function getEdgeRowsByIds(
-  backend: GraphBackend | TransactionBackend,
+  backend: Readonly<Pick<GraphBackend, "getEdge" | "getEdges">>,
   verdict: BundleVerdictOf<typeof BATCH_POINT_READ>,
   graphId: string,
   ids: readonly string[],

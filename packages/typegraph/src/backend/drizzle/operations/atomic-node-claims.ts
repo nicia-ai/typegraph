@@ -5,7 +5,7 @@ import {
   type ClaimOwnerColumnNames,
   claimOwnerMatchesSql,
 } from "../../../store/claims/axis";
-import type { AtomicNodeBatchEntry } from "../../capabilities/atomic-node-batch";
+import type { AtomicNodeBatchEntry } from "../../capabilities/atomic-mutation-program";
 import type {
   InsertNodeParams,
   NodeInsertClaim,

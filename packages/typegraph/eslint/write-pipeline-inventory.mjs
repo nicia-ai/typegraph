@@ -352,9 +352,14 @@ export const WRITE_PIPELINE_EXEMPTIONS = [
   {
     path: "src/store/operations/edge-write-pipeline.ts",
     reason:
-      "The edge step bodies themselves (updateEdge, deleteEdge, hardDeleteEdge), reachable only through the session.",
+      "The edge step bodies themselves (updateEdge, deleteEdge/deleteEdgesBatch, hardDeleteEdge), reachable only through the session.",
     permanent: true,
-    allowedMembers: ["updateEdge", "deleteEdge", "hardDeleteEdge"],
+    allowedMembers: [
+      "updateEdge",
+      "deleteEdge",
+      "deleteEdgesBatch",
+      "hardDeleteEdge",
+    ],
   },
   {
     path: "src/store/operations/write-session.ts",

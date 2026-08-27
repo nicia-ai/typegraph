@@ -40,17 +40,22 @@ import {
 } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
+  type AtomicDeleteBatchResult,
   AtomicEdgeBatchCardinalityRefusalError,
   type AtomicEdgeBatchCountInput,
   AtomicEdgeBatchEndpointRefusalError,
   type AtomicEdgeBatchExecutor,
   type AtomicEdgeBatchRowsInput,
-} from "../capabilities/atomic-edge-batch";
-import type {
-  AtomicNodeBatchEntry,
-  AtomicNodeBatchExecutor,
-  AtomicNodeBatchInput,
-} from "../capabilities/atomic-node-batch";
+  type AtomicEdgeDeleteBatchExecutor,
+  type AtomicEdgeDeleteBatchInput,
+  AtomicEdgeDeleteIdentityRefusalError,
+  type AtomicNodeBatchEntry,
+  type AtomicNodeBatchExecutor,
+  type AtomicNodeBatchInput,
+  type AtomicNodeDeleteBatchExecutor,
+  type AtomicNodeDeleteBatchInput,
+  AtomicNodeDeleteRestrictedRefusalError,
+} from "../capabilities/atomic-mutation-program";
 import type {
   AtomicSqlProgram,
   AtomicSqlProgramExecutor,
@@ -305,7 +310,9 @@ export type CommonOperationBackend = Pick<
 > &
   Readonly<{
     executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
+    executeAtomicNodeDeleteBatch?: AtomicNodeDeleteBatchExecutor;
     executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
+    executeAtomicEdgeDeleteBatch?: AtomicEdgeDeleteBatchExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
      * diagnostic the store runs at the top-level backend, and nothing inside a
@@ -538,6 +545,53 @@ async function withAtomicEdgeCardinalityRefusalClassification<T>(
   }
 }
 
+async function withAtomicEdgeDeleteIdentityRefusalClassification<T>(
+  run: () => Promise<T>,
+  constraint: Readonly<{ table: string; column: string }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isNotNullColumnViolation(error, constraint)) {
+      throw new AtomicEdgeDeleteIdentityRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+async function withAtomicNodeDeleteRestrictionClassification<T>(
+  run: () => Promise<T>,
+  constraint: Readonly<{ table: string; column: string }>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (isNotNullColumnViolation(error, constraint)) {
+      throw new AtomicNodeDeleteRestrictedRefusalError(error);
+    }
+    throw error;
+  }
+}
+
+type AtomicDeleteSlotResult =
+  | Readonly<{ kind: "affected"; count: number }>
+  | Readonly<{ kind: "fence"; matched: boolean }>;
+
+function assembleAtomicDeleteBatchResult(
+  results: readonly AtomicDeleteSlotResult[],
+): AtomicDeleteBatchResult {
+  const fenceResult = results.at(-1);
+  let affectedCount = 0;
+  for (const result of results) {
+    if (result.kind === "affected") affectedCount += result.count;
+  }
+  return {
+    affectedCount,
+    schemaFenceMatched:
+      fenceResult?.kind === "fence" && fenceResult.matched,
+  };
+}
+
 async function withAtomicEdgeDurableRefusalClassification<T>(
   run: () => Promise<T>,
   relation: PrimaryKeyRelation,
@@ -723,9 +777,7 @@ function throwEdgeInsertStorageUnavailable(
   if (!isEdgeMatchIdentityStorageUnavailableError(error)) throw error;
 
   const firstParams = requireDefined(params[0]);
-  const durableParams = params.find(
-    (item) => item.matchIdentity !== undefined,
-  );
+  const durableParams = params.find((item) => item.matchIdentity !== undefined);
   const identityName =
     durableIdentityName ?? durableParams?.matchIdentity?.name;
   if (identityName !== undefined) {
@@ -1723,6 +1775,159 @@ export function createCommonOperationBackend(
         }>;
       })();
 
+  const atomicNodeDeleteBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // Fence graph/version, timestamp, graph id and kind are the five
+        // fixed binds repeated beside each id chunk.
+        const chunkSize = Math.max(1, maxBindParameters - 5);
+
+        async function executeAtomicNodeDeleteBatch(
+          input: AtomicNodeDeleteBatchInput,
+        ): Promise<AtomicDeleteBatchResult> {
+          if (input.ids.length === 0) {
+            return { affectedCount: 0, schemaFenceMatched: true };
+          }
+          if (input.graphId !== input.schemaFence.graphId) {
+            throw new CompilerInvariantError(
+              "Atomic node delete batch crossed its schema fence graph.",
+              {
+                graphId: input.graphId,
+                fenceGraphId: input.schemaFence.graphId,
+              },
+            );
+          }
+          const timestamp = nowIso();
+          const deleteSlots = chunkArray(input.ids, chunkSize).map((ids) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeDeleteBatchWithSchemaFence(
+                { ...input, ids },
+                timestamp,
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+              ({ kind: "affected", count: rows.length }) as const,
+          }));
+          const program = {
+            slots: [
+              ...deleteSlots,
+              {
+                statement: execution.compile(
+                  operationStrategy.buildSchemaFenceProbe(
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                  ({ kind: "fence", matched: rows.length === 1 }) as const,
+              },
+            ],
+            assemble: (results: readonly AtomicDeleteSlotResult[]) =>
+              assembleAtomicDeleteBatchResult(results),
+          } satisfies AtomicSqlProgram<
+            AtomicDeleteSlotResult,
+            AtomicDeleteBatchResult
+          >;
+
+          return withAtomicNodeDeleteRestrictionClassification(
+            () => atomicExecutor.execute(program),
+            operationStrategy.atomicNodeRefusalConstraints.deleteRestricted,
+          );
+        }
+
+        return { executeAtomicNodeDeleteBatch } satisfies Readonly<{
+          executeAtomicNodeDeleteBatch: AtomicNodeDeleteBatchExecutor;
+        }>;
+      })();
+
+  const atomicEdgeDeleteBatchMembers =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        // Per chunk: fence graph/version (2), timestamp (1), expected kind
+        // in both SET arms and the live-row predicate (3), graph id (1), ids.
+        const chunkSize = Math.max(1, maxBindParameters - 7);
+
+        async function executeAtomicEdgeDeleteBatch(
+          input: AtomicEdgeDeleteBatchInput,
+        ): Promise<AtomicDeleteBatchResult> {
+          if (input.ids.length === 0) {
+            return { affectedCount: 0, schemaFenceMatched: true };
+          }
+          if (input.graphId !== input.schemaFence.graphId) {
+            throw new CompilerInvariantError(
+              "Atomic edge delete batch crossed its schema fence graph.",
+              {
+                graphId: input.graphId,
+                fenceGraphId: input.schemaFence.graphId,
+              },
+            );
+          }
+          const timestamp = nowIso();
+          const chunks = chunkArray(input.ids, chunkSize);
+          const deleteSlots = chunks.map((ids) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicEdgeDeleteBatchWithSchemaFence(
+                { ...input, ids },
+                timestamp,
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+              ({ kind: "affected", count: rows.length }) as const,
+          }));
+          const program = {
+            slots: [
+              ...deleteSlots,
+              {
+                statement: execution.compile(
+                  operationStrategy.buildSchemaFenceProbe(
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "many" as const,
+                decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
+                  ({ kind: "fence", matched: rows.length === 1 }) as const,
+              },
+            ],
+            assemble: (results: readonly AtomicDeleteSlotResult[]) =>
+              assembleAtomicDeleteBatchResult(results),
+          } satisfies AtomicSqlProgram<
+            AtomicDeleteSlotResult,
+            AtomicDeleteBatchResult
+          >;
+
+          return withAtomicEdgeDeleteIdentityRefusalClassification(
+            () => atomicExecutor.execute(program),
+            operationStrategy.atomicEdgeRefusalConstraints.deleteIdentity,
+          );
+        }
+
+        return { executeAtomicEdgeDeleteBatch } satisfies Readonly<{
+          executeAtomicEdgeDeleteBatch: AtomicEdgeDeleteBatchExecutor;
+        }>;
+      })();
+
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
   const buildLockSchemaVersionAndGraphWrite =
     operationStrategy.buildLockSchemaVersionAndGraphWrite;
@@ -2170,7 +2375,9 @@ export function createCommonOperationBackend(
           },
         ),
       [params],
-      command.match.kind === "durable" ? command.match.identity.name : undefined,
+      command.match.kind === "durable" ?
+        command.match.identity.name
+      : undefined,
     );
     if (row === undefined) {
       return { outcome: "rejected", entity: "edge", reason: "unknown" };
@@ -2255,6 +2462,8 @@ export function createCommonOperationBackend(
     ...schemaFenceMembers,
     ...atomicNodeBatchMembers,
     ...atomicEdgeBatchMembers,
+    ...atomicNodeDeleteBatchMembers,
+    ...atomicEdgeDeleteBatchMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,
 
@@ -2652,18 +2861,19 @@ export function createCommonOperationBackend(
     async deleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
       if (params.ids.length === 0) return;
       const timestamp = nowIso();
-      // The soft-delete UPDATE binds one extra parameter (the `deleted_at`
-      // timestamp) on top of the graphId + id-list that `getEdgesChunkSize`
-      // is budgeted for, so a full chunk would overflow the bind limit by 1.
-      // Reserve a slot for the timestamp. The hard-delete batch below has no
-      // such extra bind and keeps the full chunk size.
+      // `getEdgesChunkSize` budgets graphId + ids. Soft delete additionally
+      // binds the tombstone timestamp and, when stated, the asserted kind.
       const softDeleteChunkSize = Math.max(
         1,
-        batchConfig.getEdgesChunkSize - 1,
+        batchConfig.getEdgesChunkSize - 1 - (params.kind === undefined ? 0 : 1),
       );
       for (const chunk of chunkArray(params.ids, softDeleteChunkSize)) {
         const query = operationStrategy.buildDeleteEdgesBatch(
-          { graphId: params.graphId, ids: chunk },
+          {
+            graphId: params.graphId,
+            ids: chunk,
+            ...(params.kind === undefined ? {} : { kind: params.kind }),
+          },
           timestamp,
         );
         await execution.execRun(query);
@@ -2672,13 +2882,15 @@ export function createCommonOperationBackend(
 
     async hardDeleteEdgesBatch(params: DeleteEdgesBatchParams): Promise<void> {
       if (params.ids.length === 0) return;
-      for (const chunk of chunkArray(
-        params.ids,
-        batchConfig.getEdgesChunkSize,
-      )) {
+      const hardDeleteChunkSize = Math.max(
+        1,
+        batchConfig.getEdgesChunkSize - (params.kind === undefined ? 0 : 1),
+      );
+      for (const chunk of chunkArray(params.ids, hardDeleteChunkSize)) {
         const query = operationStrategy.buildHardDeleteEdgesBatch({
           graphId: params.graphId,
           ids: chunk,
+          ...(params.kind === undefined ? {} : { kind: params.kind }),
         });
         await execution.execRun(query);
       }

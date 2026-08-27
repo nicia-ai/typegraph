@@ -1270,6 +1270,7 @@ export type DeleteEdgeParams = Readonly<{
 export type DeleteEdgesBatchParams = Readonly<{
     graphId: string;
     ids: readonly string[];
+    kind?: string;
 }>;
 
 // @public
@@ -3560,7 +3561,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "batchEntityWrite";
-        readonly ceiling: 5;
+        readonly ceiling: 6;
     };
     readonly deleteEmbedding: {
         readonly kind: "deferred";

@@ -858,6 +858,8 @@ export type HardDeleteEdgeParams = Readonly<{
 export type DeleteEdgesBatchParams = Readonly<{
   graphId: string;
   ids: readonly string[];
+  /** See {@link UpdateEdgeParams.kind}. */
+  kind?: string;
 }>;
 
 // ============================================================
@@ -2149,8 +2151,8 @@ export type GraphBackend = Readonly<{
   /**
    * Batched {@link deleteEdge}: one soft-delete statement per bind-budget
    * chunk instead of one per edge. Optional — cascade deletes fall back to
-   * the per-edge form when unset. Same per-row semantics (idempotent on
-   * already-tombstoned rows).
+   * the per-edge form when unset. Same per-row semantics, including an
+   * optional asserted kind and idempotence on already-tombstoned rows.
    */
   deleteEdgesBatch?: (
     this: void,

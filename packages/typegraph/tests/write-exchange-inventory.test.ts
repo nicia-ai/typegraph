@@ -73,6 +73,14 @@ describe("managed write exchange inventory", () => {
       const [store] = await createStoreWithSchema(graph, backend);
       const from = await store.nodes.Person.create({ name: "Alice" });
       const to = await store.nodes.Company.create({ name: "Acme" });
+      const deletableEdges = await store.edges.unconstrained.bulkCreate([
+        { from, to, props: { role: "Delete A" } },
+        { from, to, props: { role: "Delete B" } },
+      ]);
+      const deletableNodes = await store.nodes.Person.bulkCreate([
+        { props: { name: "Delete Node A" } },
+        { props: { name: "Delete Node B" } },
+      ]);
       const execute = vi.spyOn(client, "execute");
       const batch = vi.spyOn(client, "batch");
 
@@ -156,6 +164,14 @@ describe("managed write exchange inventory", () => {
             { from, to, props: { role: "D2" } },
           ]),
         ),
+        await measure("edge-delete-batch", () =>
+          store.edges.unconstrained.bulkDelete(
+            deletableEdges.map((edge) => edge.id),
+          ),
+        ),
+        await measure("node-delete-batch", () =>
+          store.nodes.Person.bulkDelete(deletableNodes.map((node) => node.id)),
+        ),
       ];
 
       expect(measurements).toMatchInlineSnapshot(`
@@ -214,6 +230,16 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "durable-edge-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "edge-delete-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "node-delete-batch",
           },
         ]
       `);

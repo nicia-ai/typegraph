@@ -15,12 +15,19 @@
  * chunk, one under, one over, and an exact multiple) so a boundary regression
  * has nowhere to hide.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { type SQL } from "drizzle-orm";
+import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
+import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
-import { type GraphBackend } from "../src/backend/types";
+import {
+  D1_MAX_BIND_PARAMETERS,
+  type GraphBackend,
+} from "../src/backend/types";
 import { createInitializedStore } from "./test-utils";
 
 const GRAPH_ID = "edge_delete_bind_budget";
@@ -182,6 +189,55 @@ describe("cascade edge delete honors the bind budget", () => {
 
         await expectAllEdgesGone(backend, hubId, edgeIds);
       });
+    }
+  });
+});
+
+describe("kind-scoped edge delete honors the D1 bind budget", () => {
+  it("reserves and carries the asserted kind for soft and hard chunks", async () => {
+    const dialect = new SQLiteSyncDialect();
+    const run = vi.fn((_query: SQL) => Promise.resolve());
+    const db = {
+      $client: {},
+      session: { constructor: { name: "SQLiteD1Session" } },
+      dialect: {
+        sqlToQuery(query: SQL) {
+          return dialect.sqlToQuery(query);
+        },
+      },
+      all: vi.fn(() => Promise.resolve([])),
+      get: vi.fn(() => Promise.resolve(undefined)),
+      run,
+    } as unknown as AnySqliteDatabase;
+    const backend = createSqliteBackend(db);
+    const ids = Array.from(
+      { length: D1_MAX_BIND_PARAMETERS - 1 },
+      (_, index) => `edge-${index}`,
+    );
+    const deleteEdgesBatch = backend.deleteEdgesBatch;
+    const hardDeleteEdgesBatch = backend.hardDeleteEdgesBatch;
+    if (deleteEdgesBatch === undefined || hardDeleteEdgesBatch === undefined) {
+      throw new Error("D1 backend must expose both edge delete batch ports");
+    }
+
+    await deleteEdgesBatch({
+      graphId: GRAPH_ID,
+      ids,
+      kind: "knows",
+    });
+    await hardDeleteEdgesBatch({
+      graphId: GRAPH_ID,
+      ids,
+      kind: "knows",
+    });
+
+    expect(run).toHaveBeenCalledTimes(4);
+    for (const [query] of run.mock.calls) {
+      const compiled = dialect.sqlToQuery(query);
+      expect(compiled.params.length).toBeLessThanOrEqual(
+        D1_MAX_BIND_PARAMETERS,
+      );
+      expect(compiled.sql).toContain('"kind" = ?');
     }
   });
 });

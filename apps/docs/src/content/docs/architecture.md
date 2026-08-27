@@ -595,6 +595,30 @@ nearest neighbor search efficiently.
 4. **Index JSON paths**: For frequently-filtered properties, add expression indexes
 5. **Batch writes**: Use transactions to reduce disk syncs and round-trips
 
+### Mutation execution classes
+
+TypeGraph classifies bulk writes by what must be known before SQL can be
+submitted:
+
+- A **closed mutation program** carries every input, fence, and refusal rule
+  needed for the database to decide the write. Eligible node/edge creates and
+  soft deletes use one exact-root execution profile and can run as one native
+  atomic exchange on bundled serverless transports. The profile is attached to
+  the exact backend object; derived and transaction-scoped backends do not
+  inherit it accidentally.
+- A **resolved mutation set** requires an authoritative database preimage and
+  application computation before its writes are known. `bulkUpsertById()` is
+  the canonical example: stored props are merged and Zod-validated, temporal
+  decisions are derived, and repeated IDs observe earlier batch items. These
+  operations resolve and execute inside one transaction and may use set-based
+  backend ports, but they are not mislabeled as read-free programs.
+
+This boundary keeps transport optimization subordinate to Store semantics. A
+new bulk optimization must either prove its mutation is closed or name the
+authoritative resolution phase it preserves; it cannot read on one connection
+and write on another, silently discard sidecars, or duplicate an eligibility
+predicate beside the profile owner.
+
 ## Why These Tradeoffs?
 
 ### Why Not a Native Graph Database?

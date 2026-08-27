@@ -104,6 +104,7 @@ import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statemen
 import {
   applyEdgeHardDelete,
   applyEdgeSoftDelete,
+  applyEdgeSoftDeleteBatch,
   applyEdgeUpdate,
   createEdgeWriteContext,
   type EdgeDeleteWork,
@@ -443,6 +444,8 @@ export type EdgeWriteSession = Readonly<{
     fences: EdgeUpdateFences,
   ) => Promise<EdgeRow>;
   retireEdge: (work: EdgeDeleteWork) => Promise<void>;
+  /** Applies one already-resolved soft-delete set through the batch port. */
+  retireEdges: (work: readonly EdgeDeleteWork[]) => Promise<void>;
   purgeEdge: (work: EdgeHardDeleteWork) => Promise<void>;
 }>;
 
@@ -831,6 +834,8 @@ export function createWriteSession(
     },
 
     retireEdge: (work) => applyEdgeSoftDelete(edgeContext, work, target),
+
+    retireEdges: (work) => applyEdgeSoftDeleteBatch(edgeContext, work, target),
 
     purgeEdge: (work) => applyEdgeHardDelete(edgeContext, work, target),
   };

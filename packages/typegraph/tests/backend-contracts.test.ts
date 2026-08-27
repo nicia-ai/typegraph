@@ -1576,12 +1576,12 @@ type EdgeWriteCall = Readonly<{
 const KIND_PREDICATED_EDGE_WRITES = new Set([
   "updateEdge",
   "deleteEdge",
+  "deleteEdgesBatch",
   "hardDeleteEdge",
 ]);
 
 /** Edge write members that are deliberately kind-blind. */
 const KIND_BLIND_EDGE_WRITES = new Set([
-  "deleteEdgesBatch",
   "hardDeleteEdgesBatch",
 ]);
 
@@ -1649,17 +1649,17 @@ function paramsFor(
 /**
  * The contract a CUSTOM backend has to honor, asserted from the store side.
  *
- * `UpdateEdgeParams` / `DeleteEdgeParams` / `HardDeleteEdgeParams` carry an
- * optional `kind`, and a backend that receives it MUST put it in the write
- * statement's own `WHERE` — `... AND kind = ?`. Edge ids are graph-global while
- * collections are kind-scoped, so a write keyed on `(graph_id, id)` alone can
- * land on a row a concurrent `hardDelete` + recreate re-pointed the id at, and
- * a backend that silently drops the predicate re-opens exactly the window the
- * store stated it to close. A backend that ignores it looks correct until it is
- * raced, which is why the built-in backends' behavior is pinned separately in
- * `tests/edge-write-self-verification.test.ts` — what THIS file pins is the
- * other half: that the store actually supplies the kind, so a custom backend
- * has something to honor.
+ * Scalar update/delete params and collection-scoped `DeleteEdgesBatchParams`
+ * carry an optional `kind`, and a backend that receives it MUST put it in the
+ * write statement's own `WHERE` — `... AND kind = ?`. Edge ids are graph-global
+ * while collections are kind-scoped, so a write keyed on `(graph_id, id)` alone
+ * can land on a row a concurrent `hardDelete` + recreate re-pointed the id at,
+ * and a backend that silently drops the predicate re-opens exactly the window
+ * the store stated it to close. A backend that ignores it looks correct until
+ * it is raced, which is why the built-in backends' behavior is pinned
+ * separately in `tests/edge-write-self-verification.test.ts` — what THIS file
+ * pins is the other half: that the store actually supplies the kind, so a
+ * custom backend has something to honor.
  *
  * The cascade is the deliberate exception and is asserted alongside: it removes
  * every connected edge whatever its kind, so it must state none.
@@ -1702,7 +1702,7 @@ describe("edge-identity contract: kind-scoped writes state their expected kind",
   it("passes the collection's kind on the batch delete path", async () => {
     const { calls, store, edgeId } = await seedEdge();
     await store.edges.knows.bulkDelete([edgeId]);
-    expect(paramsFor(calls, "deleteEdge")["kind"]).toBe("knows");
+    expect(paramsFor(calls, "deleteEdgesBatch")["kind"]).toBe("knows");
   });
 
   it("states NO kind on the node delete cascade", async () => {

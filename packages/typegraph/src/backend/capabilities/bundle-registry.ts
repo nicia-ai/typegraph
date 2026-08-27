@@ -1042,7 +1042,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "batchEntityWrite",
-    ceiling: 5,
+    ceiling: 6,
   },
   deleteEmbedding: {
     kind: "deferred",
