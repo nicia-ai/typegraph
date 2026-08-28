@@ -1810,9 +1810,13 @@ outgoing edges for client-side filtering. For a schema-declared durable
 `matchIdentity` with `cardinality: "many"`, the declaration's match fields,
 default `ifExists: "return"`, and no temporal mutation, bundled roots use one
 closed native atomic exchange. That program owns endpoint validation, durable
-identity arbitration, tombstone resurrection, and ordered results, so it does
+identity arbitration and ordered live results, so it does
 not perform a probe or open a separate interactive transaction. Other shapes
-retain the set-oriented read plus transactional write path.
+retain the set-oriented read plus transactional write path. Tombstoned winners
+roll the native attempt back and refuse transactionless convergence with the
+typed `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error;
+use a transaction-capable backend when resurrection must preserve schema-aware
+partial updates.
 
 ```typescript
 store.edges.worksAt.bulkGetOrCreateByEndpoints(

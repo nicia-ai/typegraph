@@ -6,6 +6,7 @@ import {
   resolveStatedValidityLowerBound,
 } from "../../../utils/date";
 import type {
+  AtomicEdgeConvergenceEntry,
   AtomicEdgeDeleteBatchInput,
   AtomicEdgeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
@@ -51,6 +52,13 @@ export type ConvergeEdgeCreateParams = Readonly<{
   timestamp: string;
   schemaFence?: SchemaWriteFenceParams;
   schemaLockClause?: SQL;
+}>;
+
+export type AtomicConvergeEdgesParams = Readonly<{
+  entries: readonly AtomicEdgeConvergenceEntry[];
+  timestamp: string;
+  schemaFence: SchemaWriteFenceParams;
+  schemaLockClause: SQL;
 }>;
 
 function qualifiedColumn(
@@ -340,19 +348,19 @@ export function buildConvergeEdgeCreate(
  * input therefore carries an explicit NULL-primary-key sentinel for a stale
  * endpoint, while the identity arbiter uses a NOT NULL created_at sentinel
  * for the impossible same-id conflict.  A conflict with another id is a
- * no-op update and returns that incumbent row.  Tombstones are returned
- * unchanged; the paired resurrection statement in the executor performs the
- * endpoint-guarded revival.
+ * no-op update and returns that incumbent row. Tombstones are returned
+ * unchanged; the paired refusal statement rolls the whole program back so the
+ * Store can run its schema-aware resurrection path.
  */
-export function buildAtomicConvergeEdgeCreate(
+export function buildAtomicConvergeEdges(
   tables: Tables,
-  input: ConvergeEdgeCreateParams,
+  input: AtomicConvergeEdgesParams,
 ): SQL {
   const { edges, nodes, schemaVersions } = tables;
-  const { params, match, timestamp, schemaFence, schemaLockClause } = input;
-  if (match.kind !== "durable" || schemaFence === undefined) {
+  const { entries, timestamp, schemaFence, schemaLockClause } = input;
+  if (entries.length === 0 || entries.some((entry) => entry.match.kind !== "durable")) {
     throw new CompilerInvariantError(
-      "An atomic edge convergence statement requires durable identity and a schema fence.",
+      "Atomic edge convergence requires at least one durable identity.",
     );
   }
   const columns = edgeColumnList(edges);
@@ -377,27 +385,38 @@ export function buildAtomicConvergeEdgeCreate(
       .map((column) => `"${column.name.replaceAll('"', '""')}"`)
       .join(", "),
   );
-  const values = sql`
-    (
-      ${castBoundValueForColumn(edges.graphId, params.graphId)},
-      ${castBoundValueForColumn(edges.id, params.id)},
-      ${castBoundValueForColumn(edges.kind, params.kind)},
-      ${castBoundValueForColumn(edges.fromKind, params.fromKind)},
-      ${castBoundValueForColumn(edges.fromId, params.fromId)},
-      ${castBoundValueForColumn(edges.toKind, params.toKind)},
-      ${castBoundValueForColumn(edges.toId, params.toId)},
-      ${castBoundValueForColumn(edges.props, JSON.stringify(params.props))},
-      ${castBoundValueForColumn(edges.matchIdentityName, match.identity.name)},
-      ${castBoundValueForColumn(edges.matchIdentityKey, match.identity.key)},
-      ${castBoundValueForColumn(edges.validFrom, sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp)))},
-      ${castBoundValueForColumn(edges.validTo, sqlNull(params.validTo))},
-      ${castBoundValueForColumn(edges.createdAt, timestamp)},
-      ${castBoundValueForColumn(edges.updatedAt, timestamp)}
-    )
-  `;
+  const values = sql.join(
+    entries.map((entry) => {
+      const { params, match } = entry;
+      if (match.kind !== "durable") {
+        throw new CompilerInvariantError(
+          "Atomic edge convergence received a dynamic match key.",
+        );
+      }
+      return sql`
+        (
+                ${castBoundValueForColumn(edges.graphId, params.graphId)},
+                ${castBoundValueForColumn(edges.id, params.id)},
+                ${castBoundValueForColumn(edges.kind, params.kind)},
+                ${castBoundValueForColumn(edges.fromKind, params.fromKind)},
+                ${castBoundValueForColumn(edges.fromId, params.fromId)},
+                ${castBoundValueForColumn(edges.toKind, params.toKind)},
+                ${castBoundValueForColumn(edges.toId, params.toId)},
+                ${castBoundValueForColumn(edges.props, JSON.stringify(params.props))},
+                ${castBoundValueForColumn(edges.matchIdentityName, match.identity.name)},
+                ${castBoundValueForColumn(edges.matchIdentityKey, match.identity.key)},
+                ${castBoundValueForColumn(edges.validFrom, sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp)))},
+                ${castBoundValueForColumn(edges.validTo, sqlNull(params.validTo))},
+                ${castBoundValueForColumn(edges.createdAt, timestamp)},
+                ${castBoundValueForColumn(edges.updatedAt, timestamp)}
+              )
+      `;
+    }),
+    sql`, `,
+  );
   const inputSelect = sql.join(
     inputColumns.map((column) =>
-      sql.raw(`"input_rows"."${column.name.replaceAll('"', '""')}"`),
+      sql.raw(`"write_rows"."${column.name.replaceAll('"', '""')}"`),
     ),
     sql`, `,
   );
@@ -409,12 +428,28 @@ export function buildAtomicConvergeEdgeCreate(
     ),
     sql`, `,
   );
-  const nodeTable = quotedTableName(getTableName(nodes));
   const endpointPredicate = sql`
     EXISTS (
-      SELECT 1 FROM ${nodeTable} AS "from_node"
-      CROSS JOIN ${nodeTable} AS "to_node"
-      WHERE ${buildLiveEndpointPredicate(nodes, params)}
+      SELECT 1 FROM ${nodes} AS "from_node"
+      CROSS JOIN ${nodes} AS "to_node"
+      WHERE ${qualifiedColumn("from_node", nodes.graphId)} = ${qualifiedColumn("input_rows", edges.graphId)}
+        AND ${qualifiedColumn("from_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.fromKind)}
+        AND ${qualifiedColumn("from_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.fromId)}
+        AND ${qualifiedColumn("from_node", nodes.deletedAt)} IS NULL
+        AND ${qualifiedColumn("to_node", nodes.graphId)} = ${qualifiedColumn("input_rows", edges.graphId)}
+        AND ${qualifiedColumn("to_node", nodes.kind)} = ${qualifiedColumn("input_rows", edges.toKind)}
+        AND ${qualifiedColumn("to_node", nodes.id)} = ${qualifiedColumn("input_rows", edges.toId)}
+        AND ${qualifiedColumn("to_node", nodes.deletedAt)} IS NULL
+    )
+  `;
+  const identityOwnerPredicate = sql`
+    EXISTS (
+      SELECT 1
+      FROM ${edges} AS "identity_owner"
+      WHERE ${qualifiedColumn("identity_owner", edges.graphId)} = ${qualifiedColumn("input_rows", edges.graphId)}
+        AND ${qualifiedColumn("identity_owner", edges.kind)} = ${qualifiedColumn("input_rows", edges.kind)}
+        AND ${qualifiedColumn("identity_owner", edges.matchIdentityName)} = ${qualifiedColumn("input_rows", edges.matchIdentityName)}
+        AND ${qualifiedColumn("identity_owner", edges.matchIdentityKey)} = ${qualifiedColumn("input_rows", edges.matchIdentityKey)}
     )
   `;
   const fence = sql`
@@ -423,7 +458,7 @@ export function buildAtomicConvergeEdgeCreate(
     WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
       AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
       AND ${schemaVersions.isActive} = TRUE
-    ${schemaLockClause ?? sql``}
+    ${schemaLockClause}
   `;
   return sql`
     WITH "schema_fence" AS (${fence}),
@@ -432,19 +467,18 @@ export function buildAtomicConvergeEdgeCreate(
       SELECT "input_rows".*
       FROM "input_rows"
       CROSS JOIN "schema_fence"
-      WHERE ${endpointPredicate}
+      WHERE ${endpointPredicate} OR ${identityOwnerPredicate}
     ),
-    "invalid_endpoint" AS (
-      SELECT 1 AS "present"
+    "invalid_rows" AS (
+      SELECT "input_rows".*
       FROM "input_rows"
       CROSS JOIN "schema_fence"
-      WHERE NOT EXISTS (SELECT 1 FROM "valid_rows")
+      WHERE NOT (${endpointPredicate} OR ${identityOwnerPredicate})
     ), "write_rows" AS (
       SELECT * FROM "valid_rows"
       UNION ALL
       SELECT ${sentinelSelect}
-      FROM "input_rows"
-      CROSS JOIN "invalid_endpoint"
+      FROM "invalid_rows" AS "input_rows"
     )
     INSERT INTO ${edges} (${columns})
     SELECT ${inputSelect} FROM "write_rows"
@@ -457,49 +491,69 @@ export function buildAtomicConvergeEdgeCreate(
     ) DO UPDATE SET
       ${sql.identifier(edges.matchIdentityKey.name)} = excluded.${sql.identifier(edges.matchIdentityKey.name)},
       ${sql.identifier(edges.createdAt.name)} = CASE
-        WHEN ${edges.id} = ${params.id} THEN NULL
+        WHEN ${edges.id} = excluded.${sql.identifier(edges.id.name)} THEN NULL
         ELSE ${edges.createdAt}
       END
-    RETURNING *, CASE WHEN ${edges.id} = ${params.id} THEN 1 ELSE 0 END AS write_discriminator
+    RETURNING *
   `;
 }
 
-/** Endpoint-guarded tombstone revival paired with an atomic convergence slot. */
-export function buildAtomicConvergeEdgeResurrect(
+/**
+ * Forces a tombstoned winner to roll the native program back.
+ *
+ * Resurrection merges a partial input through the edge's Zod update schema.
+ * SQL cannot reproduce arbitrary user transforms without first returning the
+ * incumbent to the Store, so the closed path refuses that state and lets the
+ * complete portable path own it.
+ */
+export function buildAtomicConvergeEdgesTombstoneRefusal(
   tables: Tables,
-  input: ConvergeEdgeCreateParams,
+  input: Omit<AtomicConvergeEdgesParams, "timestamp">,
 ): SQL {
-  const { edges, nodes } = tables;
-  const { params, match, timestamp } = input;
-  if (match.kind !== "durable") {
+  const { edges, schemaVersions } = tables;
+  const { entries, schemaFence, schemaLockClause } = input;
+  if (entries.length === 0 || entries.some((entry) => entry.match.kind !== "durable")) {
     throw new CompilerInvariantError(
-      "An atomic edge resurrection statement requires durable identity.",
+      "Atomic edge tombstone refusal requires at least one durable identity.",
     );
   }
+  const requested = sql.join(
+    entries.map((entry) => {
+      if (entry.match.kind !== "durable") {
+        throw new CompilerInvariantError(
+          "Atomic edge tombstone refusal received a dynamic match key.",
+        );
+      }
+      return sql`
+        (
+                ${entry.params.graphId}, ${entry.params.kind},
+                ${entry.match.identity.name}, ${entry.match.identity.key}
+              )
+      `;
+    }),
+    sql`, `,
+  );
   return sql`
+    WITH "requested" ("graph_id", "kind", "identity_name", "identity_key")
+    AS (VALUES ${requested})
     UPDATE ${edges}
-    SET
-      ${edges.props} = ${JSON.stringify(params.props)},
-      ${edges.fromKind} = ${params.fromKind},
-      ${edges.fromId} = ${params.fromId},
-      ${edges.toKind} = ${params.toKind},
-      ${edges.toId} = ${params.toId},
-      ${edges.deletedAt} = ${sqlNull(undefined)},
-      ${edges.validFrom} = ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))},
-      ${edges.validTo} = ${sqlNull(params.validTo)},
-      ${edges.updatedAt} = ${timestamp}
-    WHERE ${edges.graphId} = ${params.graphId}
-      AND ${edges.kind} = ${params.kind}
-      AND ${edges.matchIdentityName} = ${match.identity.name}
-      AND ${edges.matchIdentityKey} = ${match.identity.key}
-      AND ${edges.deletedAt} IS NOT NULL
+    SET ${sql.identifier(edges.updatedAt.name)} = NULL
+    WHERE ${edges.deletedAt} IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM "requested"
+        WHERE "requested"."graph_id" = ${edges.graphId}
+          AND "requested"."kind" = ${edges.kind}
+          AND "requested"."identity_name" = ${edges.matchIdentityName}
+          AND "requested"."identity_key" = ${edges.matchIdentityKey}
+      )
       AND EXISTS (
         SELECT 1
-        FROM ${nodes} AS "from_node"
-        CROSS JOIN ${nodes} AS "to_node"
-        WHERE ${buildLiveEndpointPredicate(nodes, params)}
+        FROM ${schemaVersions}
+        WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+          AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+          AND ${schemaVersions.isActive} = TRUE
+        ${schemaLockClause}
       )
-    RETURNING *, 2 AS write_discriminator
   `;
 }
 

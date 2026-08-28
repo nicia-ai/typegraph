@@ -685,7 +685,7 @@ cannot fence constrained writes" is unusable advice while "your
 | `details.constraint` | The write it describes |
 | --- | --- |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` is `one`, `unique`, or `oneActive`. |
-| `edgeMatchKeyConvergence` | Single-item `getOrCreateByEndpoints` using an undeclared dynamic `matchOn` key, plus the bulk method while its batch arbitration remains transaction-scoped. A schema-declared `matchIdentity` removes this fence from the single-item create/found path. |
+| `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
 | `nodeUniquenessScope` | Creating **or updating** a node under a `scope: "kindWithSubClasses"` unique that actually expands past the node's own kind. A `scope: "kind"` unique is backed by the uniques primary key and needs no fence. |
 

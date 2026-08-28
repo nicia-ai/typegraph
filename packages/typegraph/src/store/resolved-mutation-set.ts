@@ -1,5 +1,5 @@
 import {
-  type AtomicEdgeResolvedMutationSetExecutor,
+  type AtomicEdgeMutationProgramExecutor,
   type AtomicNodeResolvedMutationSetExecutor,
   resolveBundledRootAtomicMutationPrograms,
 } from "../backend/capabilities/atomic-mutation-program";
@@ -7,7 +7,7 @@ import type { GraphBackend, TransactionBackend } from "../backend/types";
 import { DatabaseOperationError } from "../errors";
 
 type ResolvedMutationSetExecutor =
-  AtomicNodeResolvedMutationSetExecutor | AtomicEdgeResolvedMutationSetExecutor;
+  AtomicNodeResolvedMutationSetExecutor | AtomicEdgeMutationProgramExecutor;
 
 /**
  * Internal retry signal for a resolved mutation set whose authoritative

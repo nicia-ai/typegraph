@@ -56,14 +56,16 @@ const COLUMN_MENTION = /validFrom|valid_from/;
  * same ownership because their admission predicates do not choose the write
  * instant.
  *
- * `operations/edges.ts` has seven and ONE pass-through: an edge resurrection that
- * names no `validFrom` retains the stored window instead of stamping, so its
+ * `operations/edges.ts` has eight and ONE pass-through: the multi-row durable
+ * convergence builder is a separate writer and owns one stamped lower-bound
+ * site for all of its input rows. An edge resurrection that names no
+ * `validFrom` retains the stored window instead of stamping, so its
  * window-writing leg only runs when the caller stated a bound.
  */
 const WRITER_INVENTORY = {
   "drizzle/operations/nodes.ts": { stamping: 10, stated: 0 },
   "drizzle/operations/node-projections.ts": { stamping: 1, stated: 0 },
-  "drizzle/operations/edges.ts": { stamping: 7, stated: 1 },
+  "drizzle/operations/edges.ts": { stamping: 8, stated: 1 },
   "drizzle/operations/edge-claims.ts": { stamping: 1, stated: 0 },
   "drizzle/trusted-import.ts": { stamping: 4, stated: 0 },
 } as const satisfies Readonly<
@@ -145,7 +147,7 @@ const BACKEND_COLUMN_FILES: Readonly<Record<string, string>> = {
   "drizzle/operations/node-projections.ts":
     "writer — one planned node insert after unified admission gating",
   "drizzle/operations/edges.ts":
-    "writer — seven stamping sites, one pass-through",
+    "writer — eight stamping sites, one pass-through",
   "drizzle/trusted-import.ts":
     "writer — four stamping sites (native per-dialect INSERT)",
   "drizzle/operations/shared.ts":

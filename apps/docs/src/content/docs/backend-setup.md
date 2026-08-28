@@ -1441,6 +1441,10 @@ matches the narrow native durable-convergence envelope: schema-declared
 closed atomic exchange; dynamic match fields, update mode, constrained
 cardinality, temporal options, and all transaction-scoped or derived roots
 retain the refusal or fallback path required by their contracts.
+An otherwise eligible tombstoned winner cannot use the native path: the native
+attempt rolls back and transactionless convergence refuses with the typed
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
+transaction-capable backend when schema-aware resurrection is required.
 
 ### Claim relations, and what they do not promise
 

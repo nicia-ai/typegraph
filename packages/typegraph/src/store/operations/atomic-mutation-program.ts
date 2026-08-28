@@ -7,9 +7,8 @@
  */
 import {
   type AtomicEdgeBatchExecutor as BackendAtomicEdgeBatchExecutor,
-  type AtomicEdgeConvergenceExecutor as BackendAtomicEdgeConvergenceExecutor,
   type AtomicEdgeDeleteBatchExecutor,
-  type AtomicEdgeResolvedMutationSetExecutor,
+  type AtomicEdgeMutationProgramExecutor,
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicNodeBatchExecutor as BackendAtomicNodeBatchExecutor,
   type AtomicNodeDeleteBatchExecutor,
@@ -131,16 +130,14 @@ export type AtomicEdgeConvergenceEligibilityInput =
         clearValidTo?: true;
         onImmutableLowerBound?: "preserve" | "refuse";
       }>[];
+      uniqueEntryCount: number;
       ifExists: "return" | "update";
     }>;
-
-export type AtomicEdgeConvergenceExecutor =
-  BackendAtomicEdgeConvergenceExecutor;
 
 /** The one owner of the static proof for durable bulk edge convergence. */
 export function resolveAtomicEdgeConvergenceExecutor(
   input: AtomicEdgeConvergenceEligibilityInput,
-): BackendAtomicEdgeConvergenceExecutor | undefined {
+): AtomicEdgeMutationProgramExecutor | undefined {
   if (input.inputs.length === 0 || input.ifExists !== "return") return;
   if (
     input.inputs.some(
@@ -155,7 +152,7 @@ export function resolveAtomicEdgeConvergenceExecutor(
   }
   if (!hasOwnKey(input.graph.edges, input.kind)) return;
   const registration = input.graph.edges[input.kind];
-  if (registration === undefined || registration.matchIdentity === undefined) {
+  if (registration?.matchIdentity === undefined) {
     return;
   }
   if ((registration.cardinality ?? "many") !== "many") return;
@@ -166,7 +163,14 @@ export function resolveAtomicEdgeConvergenceExecutor(
   ) {
     return;
   }
-  return resolveAtomicMutationProfile(input)?.convergeEdges;
+  const executor = resolveAtomicMutationProfile(input)?.mutateEdges;
+  if (
+    executor === undefined ||
+    input.uniqueEntryCount > executor.maxEntries.durableConvergence
+  ) {
+    return;
+  }
+  return executor;
 }
 
 /** The one owner of the static store proof for atomic edge creates. */
@@ -345,7 +349,7 @@ export type AtomicEdgeResolvedMutationSetEligibilityInput =
 /** The one owner of the static proof for mixed resolved edge mutations. */
 export function resolveAtomicEdgeResolvedMutationSetExecutor(
   input: AtomicEdgeResolvedMutationSetEligibilityInput,
-): AtomicEdgeResolvedMutationSetExecutor | undefined {
+): AtomicEdgeMutationProgramExecutor | undefined {
   const entryCount = input.creates.length + input.updateCount;
   if (entryCount === 0 || !isAtomicResolvedEdgeKindEligible(input)) return;
   if (
@@ -356,6 +360,8 @@ export function resolveAtomicEdgeResolvedMutationSetExecutor(
     return;
   }
   const executor = resolveAtomicMutationProfile(input)?.mutateEdges;
-  if (executor === undefined || entryCount > executor.maxEntries) return;
+  if (executor === undefined || entryCount > executor.maxEntries.resolvedSet) {
+    return;
+  }
   return executor;
 }

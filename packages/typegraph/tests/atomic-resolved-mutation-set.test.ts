@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  type AtomicEdgeConvergenceInput,
+  type AtomicEdgeResolvedMutationSetInput,
   markBundledRootAtomicMutationPrograms,
   resolveBundledRootAtomicMutationPrograms,
 } from "../src/backend/capabilities/atomic-mutation-program";
@@ -222,6 +224,7 @@ describe("atomic resolved mutation sets", () => {
     ).rejects.toBeInstanceOf(CompilerInvariantError);
     await expect(
       requireDefined(profile.mutateEdges)({
+        kind: "resolved-set",
         creates: [],
         updates: [{ existing: edge, props: { label: "Updated" } }],
         schemaFence: { graphId: graph.id, expectedVersion: 1 },
@@ -248,6 +251,7 @@ describe("atomic resolved mutation sets", () => {
     );
 
     const result = await executor({
+      kind: "resolved-set",
       creates: [
         {
           graphId: graph.id,
@@ -380,14 +384,17 @@ describe("atomic resolved mutation sets", () => {
     );
     const original = requireDefined(profile.mutateEdges);
     let attempts = 0;
-    const retrying = Object.assign(
-      vi.fn(async (input: Parameters<typeof original>[0]) => {
-        attempts += 1;
-        if (attempts === 1) return { created: [], updated: [] };
-        return original(input);
-      }),
-      { maxEntries: original.maxEntries },
-    ) satisfies typeof original;
+    async function retryingImplementation(
+      input: AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+    ) {
+      if (input.kind === "durable-convergence") return original(input);
+      attempts += 1;
+      if (attempts === 1) return { created: [], updated: [] };
+      return original(input);
+    }
+    const retrying = Object.assign(vi.fn(retryingImplementation), {
+      maxEntries: original.maxEntries,
+    }) as typeof original;
     markBundledRootAtomicMutationPrograms(transactionlessBackend, {
       ...profile,
       mutateEdges: retrying,

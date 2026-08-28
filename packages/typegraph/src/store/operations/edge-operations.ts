@@ -75,6 +75,7 @@
 import {
   AtomicEdgeBatchCardinalityRefusalError,
   AtomicEdgeBatchEndpointRefusalError,
+  AtomicEdgeConvergenceTombstoneRefusalError,
   AtomicEdgeDeleteIdentityRefusalError,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
@@ -187,7 +188,6 @@ import { withAlreadyExistsTranslation } from "./already-exists";
 import {
   assertAtomicDeleteSchemaFenceMatched,
   type AtomicEdgeBatchExecutor,
-  type AtomicEdgeConvergenceExecutor,
   resolveAtomicEdgeBatchExecutor,
   resolveAtomicEdgeConvergenceExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
@@ -2216,6 +2216,7 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
   const result = await withAlreadyExistsTranslation("edge", async () => {
     try {
       return await executor({
+        kind: "resolved-set",
         creates: createParams,
         updates: resolvedUpdates,
         schemaFence: {
@@ -3237,6 +3238,11 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
 
   const registration = getEdgeRegistration(ctx.graph, kind);
   const edgeKind = registration.type;
+  assertEdgeMatchIdentityBackendSupport(
+    registration.matchIdentity,
+    backend.capabilities,
+    kind,
+  );
   const matchOn = resolveEdgeMatchFields(
     kind,
     registration.matchIdentity?.fields,
@@ -3339,6 +3345,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     kind,
     matchOn,
     inputs: items,
+    uniqueEntryCount: new Set(validated.map((entry) => entry.compositeKey))
+      .size,
     ifExists,
   });
   if (atomicConvergenceExecutor !== undefined) {
@@ -3398,34 +3406,41 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       });
     }
 
-    if (nativeEntries.length <= atomicConvergenceExecutor.maxEntries) {
-      const schemaFence = {
-        graphId: ctx.graphId,
-        expectedVersion: requireDefined(ctx.schemaVersion),
-      };
-      let nativeResults: readonly {
-        readonly row: BackendEdgeRow;
-        readonly outcome: "created" | "found" | "resurrected";
-      }[];
-      try {
-        nativeResults = await atomicConvergenceExecutor({
-          entries: nativeEntries.map((entry) => ({
-            params: entry.params,
-            match: entry.match,
-          })),
-          schemaFence,
-        });
-      } catch (error) {
-        if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
-          await assertAtomicEdgeBatchEndpoints(
-            ctx,
-            nativeEntries.map((entry) => entry.params),
-            backend,
-          );
-          throw error.cause;
-        }
+    const schemaFence = {
+      graphId: ctx.graphId,
+      expectedVersion: requireDefined(ctx.schemaVersion),
+    };
+    let nativeResults:
+      | readonly {
+          readonly row: BackendEdgeRow;
+          readonly outcome: "created" | "found";
+        }[]
+      | undefined;
+    try {
+      nativeResults = await atomicConvergenceExecutor({
+        kind: "durable-convergence",
+        entries: nativeEntries.map((entry) => ({
+          params: entry.params,
+          match: entry.match,
+        })),
+        schemaFence,
+      });
+    } catch (error) {
+      if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
+        await assertAtomicEdgeBatchEndpoints(
+          ctx,
+          nativeEntries.map((entry) => entry.params),
+          backend,
+        );
+        throw error.cause;
+      }
+      if (error instanceof AtomicEdgeConvergenceTombstoneRefusalError) {
+        nativeResults = undefined;
+      } else {
         throw error;
       }
+    }
+    if (nativeResults !== undefined) {
       if (nativeResults.length !== nativeEntries.length) {
         await diagnoseFusedSchemaFenceNoRow(ctx, backend);
         throw new DatabaseOperationError(
@@ -3457,6 +3472,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       }
       return results;
     }
+    // The native program rolled back before any logical write. A
+    // transaction-capable fallback below owns schema-aware resurrection;
+    // transactionless roots refuse because they cannot preserve whole-call
+    // atomicity while running that merge in application code.
   }
 
   // Step 2: Group by unique endpoint pair

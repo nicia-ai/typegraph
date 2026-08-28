@@ -857,6 +857,61 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(transactionReads).toBe(2);
   });
 
+  it("does not return a stale-positive bulk endpoint hint", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const staleRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "stale-positive-bulk",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    await raw.hardDeleteEdge({ graphId: graph.id, id: staleRow.id });
+
+    let rootReads = 0;
+    let transactionReads = 0;
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        findEdgesByHeterogeneousEndpointSet: () => {
+          rootReads += 1;
+          return Promise.resolve([staleRow]);
+        },
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  findEdgesByHeterogeneousEndpointSet: async (params) => {
+                    transactionReads += 1;
+                    return requireDefined(
+                      target.findEdgesByHeterogeneousEndpointSet,
+                    )(params);
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const [result] = await store.edges.knows.bulkGetOrCreateByEndpoints([
+      { from: alice, to: bob, props: { since: "requested" } },
+    ]);
+
+    expect(result?.action).toBe("created");
+    expect(result?.edge.id).not.toBe(staleRow.id);
+    expect(rootReads).toBe(1);
+    expect(transactionReads).toBe(2);
+  });
+
   it("leaves the uncontended paths on their existing verdicts", async () => {
     const store = createStore(graph, raw);
     const alice = await store.nodes.Person.create({ name: "Alice" });

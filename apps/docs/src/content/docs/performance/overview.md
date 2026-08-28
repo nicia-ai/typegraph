@@ -128,7 +128,7 @@ Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
 stores, caller-owned transactions, and custom backends retain the transactional
 path required by their additional contracts. Eligible durable bulk endpoint
 convergence now submits one closed native atomic exchange: the durable identity
-arbiter, endpoint validation, tombstone resurrection, and ordered created/found
+arbiter, endpoint validation, and ordered created/found
 results are all resolved by the program. This removes the outside probe, the
 transaction open/commit, and the per-item write legs for the eligible shape.
 The fallback bulk path still discovers exact directed endpoint pairs in
@@ -155,6 +155,11 @@ multi-item eligible call; this is a submission-count measurement, not a
 wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
 cardinality, temporal options, caller transactions, derived/custom backends,
 and history/revision stores intentionally retain the fallback path.
+If an otherwise eligible batch resolves a tombstoned identity, the native
+attempt rolls back and transactionless convergence refuses with the typed
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
+transaction-capable backend when resurrection must merge partial properties
+through the graph's Zod update schema.
 
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
 programs for eligible ingestion calls. Plain schema-managed

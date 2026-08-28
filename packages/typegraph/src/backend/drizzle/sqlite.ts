@@ -2626,7 +2626,7 @@ export function createSqliteBackend(
     updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
     updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
     mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
-    mutateEdges: operations.executeAtomicEdgeResolvedMutationSet,
+    mutateEdges: operations.executeAtomicEdgeMutationProgram,
   });
 
   return backend;
