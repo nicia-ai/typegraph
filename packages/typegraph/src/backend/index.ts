@@ -202,6 +202,21 @@ export {
   normalizeGraphCommandIsolation,
 } from "./command-contract";
 export type {
+  AtomicMutationProgramConformanceCase,
+  AtomicMutationProgramConformanceFixture,
+  AtomicMutationProgramConformancePreparation,
+  AtomicMutationProgramConformanceReport,
+  AtomicMutationProgramRefusalCase,
+  AtomicMutationProgramRefusalPreparation,
+  AtomicMutationProgramSuccessCase,
+  AtomicMutationProgramVariant,
+} from "./conformance/atomic-mutation-program";
+export {
+  ATOMIC_MUTATION_PROGRAM_VARIANTS,
+  AtomicMutationProgramConformanceError,
+  runAtomicMutationProgramConformance,
+} from "./conformance/atomic-mutation-program";
+export type {
   AtomicTransportConformanceFixture,
   AtomicTransportConformanceReport,
   AtomicTransportEquality,
