@@ -485,7 +485,12 @@ export function resolveAtomicMutationPrograms(
   return ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
 }
 
-/** @internal Called only by bundled root backend factories. */
+/**
+ * @internal Test-only compatibility seam.
+ *
+ * Production factories must use registerAtomicMutationPrograms() so transport,
+ * declaration, shape, and duplicate-registration validation cannot be skipped.
+ */
 export function markBundledRootAtomicMutationPrograms<T extends object>(
   target: T,
   executor: Readonly<{

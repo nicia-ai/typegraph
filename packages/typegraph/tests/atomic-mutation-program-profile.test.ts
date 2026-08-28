@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -112,6 +113,29 @@ function assertRefusalSentinelsAreNotNull(
 }
 
 describe("atomic mutation program execution profile", () => {
+  it("keeps the unvalidated compatibility mark inside its test-seam owner", () => {
+    const productionFiles = execFileSync(
+      "git",
+      [
+        "grep",
+        "-l",
+        "markBundledRootAtomicMutationPrograms",
+        "--",
+        "packages/typegraph/src",
+      ],
+      {
+        cwd: path.resolve(import.meta.dirname, "../../.."),
+        encoding: "utf8",
+      },
+    )
+      .trim()
+      .split("\n");
+
+    expect(productionFiles).toEqual([
+      "packages/typegraph/src/backend/capabilities/atomic-mutation-program.ts",
+    ]);
+  });
+
   it("binds every refusal classifier to a NOT NULL schema column", () => {
     assertRefusalSentinelsAreNotNull(
       createSqliteOperationStrategy(sqliteTables, fts5Strategy),
