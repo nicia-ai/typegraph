@@ -337,4 +337,30 @@ describe("atomic durable bulk edge convergence", () => {
       });
     });
   });
+
+  it.each([
+    ["history", true, false],
+    ["revision tracking", false, true],
+  ] as const)(
+    "refuses durable convergence when %s is enabled",
+    async (_label, historyEnabled, revisionTrackingEnabled) => {
+      await withLibsqlStore((_store, _client, backend) => {
+        expect(
+          resolveAtomicEdgeConvergenceExecutor({
+            backend,
+            graph: durableGraph,
+            schemaVersion: 1,
+            historyEnabled,
+            revisionTrackingEnabled,
+            kind: "worksAt",
+            matchOn: ["role"],
+            inputs: [{}],
+            uniqueEntryCount: 1,
+            ifExists: "return",
+          }),
+        ).toBeUndefined();
+        return Promise.resolve();
+      });
+    },
+  );
 });

@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { createClient } from "@libsql/client";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -15,6 +20,8 @@ import {
   runAtomicTransportConformance,
 } from "../src/backend/conformance/atomic-transport";
 import { deriveBackend } from "../src/backend/derive-backend";
+import { createSqliteExecutionAdapter } from "../src/backend/drizzle/execution";
+import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import {
   type GraphBackend,
   supportsRootAtomicBatch,
@@ -221,5 +228,172 @@ describe("atomic transport conformance runner", () => {
   it("retains the row type at the fixture boundary", () => {
     const row: AtomicSqlRow = { marker: "fixture" };
     expect(row["marker"]).toBe("fixture");
+  });
+});
+
+type LibsqlSnapshot = Readonly<{
+  primary: readonly string[];
+  sidecar: readonly string[];
+}>;
+
+function idsFromLibsqlRows(rows: readonly unknown[]): readonly string[] {
+  return rows.map((row) => {
+    if (typeof row !== "object" || row === null) {
+      throw new TypeError("libSQL returned a non-object row");
+    }
+    const id = (row as Readonly<Record<string, unknown>>)["id"];
+    if (typeof id !== "string") {
+      throw new TypeError("libSQL returned a non-string conformance id");
+    }
+    return id;
+  });
+}
+
+async function readLibsqlSnapshot(
+  client: ReturnType<typeof createClient>,
+): Promise<LibsqlSnapshot> {
+  const [primary, sidecar] = await Promise.all([
+    client.execute("SELECT id FROM atomic_transport_primary ORDER BY id"),
+    client.execute("SELECT id FROM atomic_transport_sidecar ORDER BY id"),
+  ]);
+  return {
+    primary: idsFromLibsqlRows(primary.rows),
+    sidecar: idsFromLibsqlRows(sidecar.rows),
+  };
+}
+
+describe("atomic transport conformance: libSQL file client", () => {
+  it("proves the production batch adapter contract end to end", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-transport-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "conformance.db")}`,
+    });
+
+    try {
+      const { backend, db } = await createLibsqlBackend(client);
+      await client.execute(
+        "CREATE TABLE atomic_transport_primary (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      );
+      await client.execute(
+        "CREATE TABLE atomic_transport_sidecar (id TEXT PRIMARY KEY, primary_id TEXT NOT NULL)",
+      );
+
+      const adapter = createSqliteExecutionAdapter(db);
+      const executeAtomicBatch = adapter.executeAtomicBatch;
+      if (executeAtomicBatch === undefined) {
+        throw new Error(
+          "libSQL file client did not expose atomic batch execution",
+        );
+      }
+      let observedStatements: readonly CompiledAtomicSqlStatement[] | undefined;
+      const observedExecutor: AtomicSqlBatchExecutor = <TRow>(
+        statements: readonly CompiledAtomicSqlStatement[],
+      ) => {
+        observedStatements = statements.map((statement) => ({
+          ...statement,
+          params: [...statement.params],
+        }));
+        return executeAtomicBatch<TRow>(statements);
+      };
+
+      let transactionBackend: TransactionBackend | undefined;
+      await backend.transaction((transaction) => {
+        transactionBackend = transaction;
+        return Promise.resolve();
+      });
+      const certifiedTransactionBackend = transactionBackend;
+      if (certifiedTransactionBackend === undefined) {
+        throw new Error(
+          "libSQL backend did not expose its transaction backend",
+        );
+      }
+      const derivedBackend = deriveBackend(backend, {});
+
+      const report = await runAtomicTransportConformance<LibsqlSnapshot>({
+        executeAtomicBatch: observedExecutor,
+        equal,
+        orderedResults: {
+          statements: [
+            { sql: "SELECT ? AS slot", params: ["first"] },
+            { sql: "SELECT ? AS slot", params: ["second"] },
+          ],
+          expected: [[{ slot: "first" }], [{ slot: "second" }]],
+        },
+        parameterPreservation: {
+          statements: [
+            {
+              sql: "SELECT ? AS first, ? AS second, ? AS third",
+              params: ["alpha", 7, "gamma"],
+            },
+          ],
+          expected: [
+            {
+              sql: "SELECT ? AS first, ? AS second, ? AS third",
+              params: ["alpha", 7, "gamma"],
+            },
+          ],
+          observe: () => observedStatements,
+        },
+        rollback: {
+          prepare: async () => {
+            await client.execute("DELETE FROM atomic_transport_sidecar");
+            await client.execute("DELETE FROM atomic_transport_primary");
+          },
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES (?, ?)",
+              params: ["primary-1", "value"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES (?, ?)",
+              params: ["sidecar-1", "primary-1"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES (?, ?)",
+              params: ["sidecar-1", "primary-1"],
+            },
+          ],
+          observe: () => readLibsqlSnapshot(client),
+          expectedBefore: { primary: [], sidecar: [] },
+        },
+        emptyBatch: {
+          prepare: async () => {
+            await client.execute("DELETE FROM atomic_transport_sidecar");
+            await client.execute("DELETE FROM atomic_transport_primary");
+          },
+          observe: () => readLibsqlSnapshot(client),
+          expected: { primary: [], sidecar: [] },
+        },
+        provenance: {
+          exactRootRegistration: () =>
+            supportsRootAtomicBatch(backend) &&
+            hasAtomicSqlProgramRegistration(backend),
+          derivedBackendIsolation: () =>
+            !supportsRootAtomicBatch(derivedBackend) &&
+            !hasAtomicSqlProgramRegistration(derivedBackend),
+          transactionBackendIsolation: () =>
+            !hasAtomicSqlProgramRegistration(certifiedTransactionBackend),
+        },
+      });
+
+      expect(report.passed).toEqual([
+        "ordered result slots",
+        "parameter preservation",
+        "later-statement rollback",
+        "empty batch",
+        "provenance: exact root registration",
+        "provenance: derived backend isolation",
+        "provenance: transaction backend isolation",
+      ]);
+      expect(observedStatements).toEqual([]);
+
+      await backend.close();
+      client.close();
+    } finally {
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 });

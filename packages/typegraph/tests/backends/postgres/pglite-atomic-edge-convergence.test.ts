@@ -9,10 +9,13 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  EndpointNotFoundError,
+  StaleVersionError,
 } from "../../../src";
 import { generatePostgresDDL } from "../../../src/backend/drizzle/ddl";
 import type { AnyPgDatabase } from "../../../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import { migrateSchema } from "../../../src/schema";
 import { createStoreWithSchema } from "../../../src/store";
 
 const Person = defineNode("Person", {
@@ -39,6 +42,18 @@ const graph = defineGraph({
 });
 
 const reconciled = { graph, version: 1, hash: undefined } as const;
+const evolvedGraph = defineGraph({
+  id: graph.id,
+  nodes: {
+    Person: {
+      type: defineNode("Person", {
+        schema: z.object({ name: z.string(), nickname: z.string().optional() }),
+      }),
+    },
+    Company: { type: Company },
+  },
+  edges: graph.edges,
+});
 
 type PendingQuery = Readonly<{
   sql: string;
@@ -102,6 +117,7 @@ function createAtomicPgliteDatabase(client: PGlite): Readonly<{
 async function setupClient(): Promise<
   Readonly<{
     client: PGlite;
+    backend: ReturnType<typeof createPostgresBackend>;
     seedStore: Awaited<
       ReturnType<typeof createStoreWithSchema<typeof graph>>
     >[0];
@@ -113,7 +129,7 @@ async function setupClient(): Promise<
     vector: false,
   });
   const [seedStore] = await createStoreWithSchema(graph, backend);
-  return { client, seedStore };
+  return { client, backend, seedStore };
 }
 
 describe("PostgreSQL atomic edge convergence", () => {
@@ -185,6 +201,71 @@ describe("PostgreSQL atomic edge convergence", () => {
       expect(rows.rows[0]?.id).toBe(tombstone.id);
       expect(rows.rows[0]?.role).toBe("tombstoned");
       expect(rows.rows[0]?.deleted_at).not.toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("rolls back valid PostgreSQL convergence members when an endpoint is missing", async () => {
+    const { client, seedStore } = await setupClient();
+    try {
+      const from = await seedStore.nodes.Person.create({ name: "Alice" });
+      const to = await seedStore.nodes.Company.create({ name: "Acme" });
+      const { db, transaction } = createAtomicPgliteDatabase(client);
+      const backend = createPostgresBackend(db, { vector: false });
+      const store = createAdapterStore(graph, backend, { reconciled });
+
+      await expect(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints([
+          { from, to, props: { role: "valid" } },
+          {
+            from,
+            to: { id: "missing-company", kind: "Company" },
+            props: { role: "invalid" },
+          },
+        ]),
+      ).rejects.toBeInstanceOf(EndpointNotFoundError);
+      expect(transaction).toHaveBeenCalledOnce();
+      expect(transaction.mock.calls[0]?.[0]).toHaveLength(2);
+
+      const rows = await client.query<{ id: string }>(
+        'SELECT "id" FROM "typegraph_edges" WHERE "graph_id" = $1',
+        [graph.id],
+      );
+      expect(rows.rows).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("diagnoses a stale PostgreSQL schema fence without writing", async () => {
+    const {
+      client,
+      backend: migrationBackend,
+      seedStore,
+    } = await setupClient();
+    try {
+      const from = await seedStore.nodes.Person.create({ name: "Alice" });
+      const to = await seedStore.nodes.Company.create({ name: "Acme" });
+      await migrateSchema(migrationBackend, evolvedGraph, 1);
+
+      const { db, transaction } = createAtomicPgliteDatabase(client);
+      const backend = createPostgresBackend(db, { vector: false });
+      const store = createAdapterStore(graph, backend, { reconciled });
+
+      await expect(
+        store.edges.worksAt.bulkGetOrCreateByEndpoints([
+          { from, to, props: { role: "stale" } },
+        ]),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      expect(transaction).toHaveBeenCalledOnce();
+      expect(transaction.mock.calls[0]?.[0]).toHaveLength(2);
+
+      const rows = await client.query<{ id: string }>(
+        'SELECT "id" FROM "typegraph_edges" WHERE "graph_id" = $1',
+        [graph.id],
+      );
+      expect(rows.rows).toEqual([]);
     } finally {
       await client.close();
     }

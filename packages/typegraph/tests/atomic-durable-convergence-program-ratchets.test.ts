@@ -9,7 +9,7 @@ import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it, type Mock, vi } from "vitest";
 import { z } from "zod";
 
-import { StaleVersionError } from "../src";
+import { CompilerInvariantError, StaleVersionError } from "../src";
 import {
   type AtomicEdgeConvergenceEntry,
   resolveBundledRootAtomicMutationPrograms,
@@ -268,6 +268,70 @@ describe("durable convergence program ratchets", () => {
       "created",
     ]);
     expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      name: "partial",
+      rows: (
+        first: AtomicEdgeConvergenceEntry,
+        _second: AtomicEdgeConvergenceEntry,
+      ) => [edgeResultRow(first, "postgres")],
+    },
+    {
+      name: "identityless",
+      rows: (
+        first: AtomicEdgeConvergenceEntry,
+        second: AtomicEdgeConvergenceEntry,
+      ) => [
+        {
+          ...edgeResultRow(first, "postgres"),
+          match_identity_name: undefined,
+        },
+        edgeResultRow(second, "postgres"),
+      ],
+    },
+    {
+      name: "duplicate identity",
+      rows: (
+        first: AtomicEdgeConvergenceEntry,
+        _second: AtomicEdgeConvergenceEntry,
+      ) => [
+        edgeResultRow(first, "postgres"),
+        { ...edgeResultRow(first, "postgres"), id: "duplicate-row" },
+      ],
+    },
+    {
+      name: "omitted identity",
+      rows: (
+        first: AtomicEdgeConvergenceEntry,
+        second: AtomicEdgeConvergenceEntry,
+      ) => [
+        edgeResultRow(first, "postgres"),
+        {
+          ...edgeResultRow(second, "postgres"),
+          match_identity_key: "unexpected-identity",
+        },
+      ],
+    },
+  ])("rejects a $name convergence postimage", async ({ rows }) => {
+    const first = convergenceEntry("edge-a", 0);
+    const second = convergenceEntry("edge-b", 1);
+    const { db } = makeNeonDatabase((sqlText) =>
+      sqlText.includes("INSERT INTO") ? rows(first, second) : [],
+    );
+    const backend = createPostgresBackend(db, { vector: false });
+    const executor = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(backend),
+    ).mutateEdges;
+
+    await expect(
+      requireDefined(executor)({
+        kind: "durable-convergence",
+        entries: [first, second],
+        schemaFence,
+      }),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
   });
 
   it("pins the exact D1 ceiling and keeps every compiled slot within it", async () => {
