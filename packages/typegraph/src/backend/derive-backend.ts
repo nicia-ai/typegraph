@@ -23,6 +23,7 @@
  * `Backend` denotes a whole backend object; a members fragment is named
  * `*Members`.
  */
+import { downgradeRootAtomicBatch } from "./capabilities/execution";
 import { carrySchemaFencedInsertEligibility } from "./capabilities/schema-fenced-insert";
 import { carryFirstPartyFactoryMark } from "./capabilities/write-fence";
 import { carryGraphCommandPortSessionMetadata } from "./command-contract";
@@ -33,6 +34,7 @@ import {
 import { carryBackendResourceAudit } from "./transaction-resource";
 import {
   type AdapterBackend,
+  type BackendCapabilities,
   type GraphBackend,
   type GraphCommandPort,
 } from "./types";
@@ -65,10 +67,7 @@ function downgradeDerivedAtomicBatch(capabilities: unknown): unknown {
   if (typeof execution !== "object" || execution === null) return;
   const executionMembers = execution as Readonly<Record<PropertyKey, unknown>>;
   if (!("atomicBatch" in executionMembers)) return;
-  return {
-    ...capabilityMembers,
-    execution: { ...executionMembers, atomicBatch: "none" },
-  };
+  return downgradeRootAtomicBatch(capabilityMembers as BackendCapabilities);
 }
 
 function deriveExecutionCapabilities(base: object, overrides: object): unknown {
@@ -163,7 +162,12 @@ export function deriveBackend<
         const source = hasOverlayProperty(property) ? overrides : base;
         const descriptor = Reflect.getOwnPropertyDescriptor(source, property);
         return descriptor === undefined ? undefined : (
-            { ...descriptor, value: derivedCapabilities, configurable: true }
+            {
+              configurable: true,
+              enumerable: descriptor.enumerable ?? false,
+              value: derivedCapabilities,
+              writable: "writable" in descriptor ? descriptor.writable : false,
+            }
           );
       }
       if (hasOverlayProperty(property)) {

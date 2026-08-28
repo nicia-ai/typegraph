@@ -7,6 +7,7 @@
  * transport. Keeping every mutation family in one exact-root registration
  * prevents each new operation from inventing another provenance WeakMap.
  */
+import { ConfigurationError } from "../../errors";
 import type {
   ClaimEdgeCardinalityParams,
   EdgeConvergenceMatch,
@@ -19,10 +20,15 @@ import type {
   SchemaWriteFenceParams,
   TransactionBackend,
 } from "../types";
+import { supportsRootAtomicBatch } from "../types";
+import { hasAtomicSqlProgramRegistration } from "./atomic-sql-program";
 
-type AtomicNodeBatchIdSource = "generated" | "caller";
+/** How a node batch member obtained the identifier stored by its program. */
+export type AtomicNodeBatchIdSource = "generated" | "caller";
+/** Whether a node batch returns only its count or its ordered postimages. */
 export type AtomicNodeBatchResultMode = "count" | "rows";
 
+/** One normalized node-create member supplied to a semantic executor. */
 export type AtomicNodeBatchEntry = Readonly<{
   idSource: AtomicNodeBatchIdSource;
   params: InsertNodeParams;
@@ -30,12 +36,14 @@ export type AtomicNodeBatchEntry = Readonly<{
   claim?: NodeInsertClaim;
 }>;
 
+/** Complete schema-fenced input to an atomic node-create family. */
 export type AtomicNodeBatchInput = Readonly<{
   entries: readonly AtomicNodeBatchEntry[];
   resultMode: AtomicNodeBatchResultMode;
   schemaFence: SchemaWriteFenceParams;
 }>;
 
+/** Executes the complete eligible node-create family for one exact root. */
 export interface AtomicNodeBatchExecutor {
   /** Maximum constrained members the backend can gate in one statement. */
   readonly maxClaimedEntries?: number;
@@ -47,6 +55,7 @@ export interface AtomicNodeBatchExecutor {
   ): Promise<readonly NodeRow[]>;
 }
 
+/** Count-returning input to an atomic direct edge-create family. */
 export type AtomicEdgeBatchCountInput = Readonly<{
   claims: readonly ClaimEdgeCardinalityParams[];
   params: readonly InsertEdgeParams[];
@@ -54,6 +63,7 @@ export type AtomicEdgeBatchCountInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
+/** Postimage-returning input to an atomic direct edge-create family. */
 export type AtomicEdgeBatchRowsInput = Readonly<{
   claims: readonly ClaimEdgeCardinalityParams[];
   params: readonly InsertEdgeParams[];
@@ -61,27 +71,32 @@ export type AtomicEdgeBatchRowsInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
+/** Executes complete eligible direct edge creates for one exact root. */
 export interface AtomicEdgeBatchExecutor {
   (input: AtomicEdgeBatchCountInput): Promise<number>;
   (input: AtomicEdgeBatchRowsInput): Promise<readonly EdgeRow[]>;
 }
 
+/** One normalized durable edge-convergence member. */
 export type AtomicEdgeConvergenceEntry = Readonly<{
   params: InsertEdgeParams;
   match: EdgeConvergenceMatch;
 }>;
 
+/** Authoritative row and outcome returned by durable convergence. */
 export type AtomicEdgeConvergenceResult = Readonly<{
   row: EdgeRow;
   outcome: "created" | "found";
 }>;
 
+/** Complete schema-fenced durable edge-convergence input. */
 export type AtomicEdgeConvergenceInput = Readonly<{
   kind: "durable-convergence";
   entries: readonly AtomicEdgeConvergenceEntry[];
   schemaFence: SchemaWriteFenceParams;
 }>;
 
+/** Complete schema-fenced direct edge-delete input. */
 export type AtomicEdgeDeleteBatchInput = Readonly<{
   graphId: string;
   expectedKind: string;
@@ -89,15 +104,18 @@ export type AtomicEdgeDeleteBatchInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
+/** Delete count plus explicit evidence that the schema fence matched. */
 export type AtomicDeleteBatchResult = Readonly<{
   affectedCount: number;
   schemaFenceMatched: boolean;
 }>;
 
+/** Executes complete eligible direct edge deletes for one exact root. */
 export type AtomicEdgeDeleteBatchExecutor = (
   input: AtomicEdgeDeleteBatchInput,
 ) => Promise<AtomicDeleteBatchResult>;
 
+/** Complete schema-fenced direct node-delete input. */
 export type AtomicNodeDeleteBatchInput = Readonly<{
   graphId: string;
   kind: string;
@@ -105,10 +123,12 @@ export type AtomicNodeDeleteBatchInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
+/** Executes complete eligible direct node deletes for one exact root. */
 export type AtomicNodeDeleteBatchExecutor = (
   input: AtomicNodeDeleteBatchInput,
 ) => Promise<AtomicDeleteBatchResult>;
 
+/** One authoritative node preimage and replacement used by a resolved set. */
 export type AtomicNodeResolvedUpdateEntry = Readonly<{
   graphId: string;
   kind: string;
@@ -117,6 +137,7 @@ export type AtomicNodeResolvedUpdateEntry = Readonly<{
   expectedVersion: number;
 }>;
 
+/** Executes a complete eligible resolved node update set. */
 export interface AtomicNodeResolvedUpdateBatchExecutor {
   readonly maxEntries: number;
   (
@@ -127,11 +148,13 @@ export interface AtomicNodeResolvedUpdateBatchExecutor {
   ): Promise<readonly NodeRow[]>;
 }
 
+/** One authoritative edge preimage and replacement used by a resolved set. */
 export type AtomicEdgeResolvedUpdateEntry = Readonly<{
   existing: EdgeRow;
   props: Readonly<Record<string, unknown>>;
 }>;
 
+/** Executes a complete eligible resolved edge update set. */
 export interface AtomicEdgeResolvedUpdateBatchExecutor {
   readonly maxEntries: number;
   (
@@ -142,11 +165,13 @@ export interface AtomicEdgeResolvedUpdateBatchExecutor {
   ): Promise<readonly EdgeRow[]>;
 }
 
-type AtomicNodeResolvedMutationSetResult = Readonly<{
+/** Ordered node postimages returned by a mixed resolved mutation set. */
+export type AtomicNodeResolvedMutationSetResult = Readonly<{
   created: readonly NodeRow[];
   updated: readonly NodeRow[];
 }>;
 
+/** Executes a complete eligible mixed node create/update set. */
 export interface AtomicNodeResolvedMutationSetExecutor {
   /** Maximum total members the terminal postimage assertion can prove. */
   readonly maxEntries: number;
@@ -159,11 +184,13 @@ export interface AtomicNodeResolvedMutationSetExecutor {
   ): Promise<AtomicNodeResolvedMutationSetResult>;
 }
 
+/** Ordered edge postimages returned by a mixed resolved mutation set. */
 export type AtomicEdgeResolvedMutationSetResult = Readonly<{
   created: readonly EdgeRow[];
   updated: readonly EdgeRow[];
 }>;
 
+/** Complete schema-fenced input to a mixed resolved edge mutation set. */
 export type AtomicEdgeResolvedMutationSetInput = Readonly<{
   kind: "resolved-set";
   creates: readonly InsertEdgeParams[];
@@ -171,7 +198,7 @@ export type AtomicEdgeResolvedMutationSetInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
-/** One callable edge-mutation family with explicit semantic variants. */
+/** Executes resolved edge sets and durable convergence for one exact root. */
 export interface AtomicEdgeMutationProgramExecutor {
   readonly maxEntries: Readonly<{
     resolvedSet: number;
@@ -240,12 +267,230 @@ export type AtomicMutationProgramExecutor = Readonly<{
   mutateEdges?: AtomicEdgeMutationProgramExecutor;
 }>;
 
+/**
+ * Semantic mutation families implemented by one exact backend root.
+ *
+ * Registering this profile is an explicit claim about TypeGraph write
+ * semantics, not merely transport mechanics. Each optional member authorizes
+ * only that family; omitted families retain the complete portable path.
+ */
+export type AtomicMutationProgramRegistration = Readonly<{
+  createNodes?: AtomicNodeBatchExecutor | undefined;
+  createEdges?: AtomicEdgeBatchExecutor | undefined;
+  deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
+  deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
+  updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
+  updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor | undefined;
+  mutateNodes?: AtomicNodeResolvedMutationSetExecutor | undefined;
+  mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
+}>;
+
 const ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
   object,
   AtomicMutationProgramExecutor
 >();
 
-/** @internal Called only by bundled root backend factories. */
+const ATOMIC_MUTATION_PROGRAM_FAMILIES = [
+  "createNodes",
+  "createEdges",
+  "deleteNodes",
+  "deleteEdges",
+  "updateNodes",
+  "updateEdges",
+  "mutateNodes",
+  "mutateEdges",
+] as const satisfies readonly (keyof AtomicMutationProgramRegistration)[];
+
+function assertNonnegativeIntegerLimit(
+  family: keyof AtomicMutationProgramRegistration,
+  name: string,
+  value: unknown,
+): void {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) {
+    return;
+  }
+  throw new ConfigurationError(
+    `Atomic mutation program family ${family} requires a nonnegative integer ${name}.`,
+    {
+      code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+      family,
+      limit: name,
+      value,
+    },
+  );
+}
+
+function assertAtomicMutationProgramLimits(
+  family: keyof AtomicMutationProgramRegistration,
+  executor: AtomicMutationProgramRegistration[typeof family],
+): void {
+  if (executor === undefined) return;
+  if (family === "createNodes") {
+    const maxClaimedEntries = (executor as AtomicNodeBatchExecutor)
+      .maxClaimedEntries;
+    if (maxClaimedEntries !== undefined) {
+      assertNonnegativeIntegerLimit(
+        family,
+        "maxClaimedEntries",
+        maxClaimedEntries,
+      );
+    }
+    return;
+  }
+  if (
+    family === "updateNodes" ||
+    family === "updateEdges" ||
+    family === "mutateNodes"
+  ) {
+    assertNonnegativeIntegerLimit(
+      family,
+      "maxEntries",
+      (executor as Readonly<{ maxEntries: unknown }>).maxEntries,
+    );
+    return;
+  }
+  if (family === "mutateEdges") {
+    const limits: unknown = (executor as AtomicEdgeMutationProgramExecutor)
+      .maxEntries;
+    if (typeof limits !== "object" || limits === null) {
+      throw new ConfigurationError(
+        "Atomic mutation program family mutateEdges requires maxEntries limits.",
+        {
+          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+          family,
+          limit: "maxEntries",
+          value: limits,
+        },
+      );
+    }
+    const edgeLimits = limits as Readonly<Record<PropertyKey, unknown>>;
+    assertNonnegativeIntegerLimit(
+      family,
+      "maxEntries.resolvedSet",
+      edgeLimits["resolvedSet"],
+    );
+    assertNonnegativeIntegerLimit(
+      family,
+      "maxEntries.durableConvergence",
+      edgeLimits["durableConvergence"],
+    );
+  }
+}
+
+function normalizeAtomicMutationProgramRegistration(
+  registration: AtomicMutationProgramRegistration,
+): AtomicMutationProgramExecutor {
+  const uncheckedRegistration: unknown = registration;
+  if (
+    typeof uncheckedRegistration !== "object" ||
+    uncheckedRegistration === null
+  ) {
+    throw new ConfigurationError(
+      "An atomic mutation program registration must be an object.",
+      { code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH" },
+    );
+  }
+  const entries: [
+    keyof AtomicMutationProgramRegistration,
+    NonNullable<
+      AtomicMutationProgramRegistration[keyof AtomicMutationProgramRegistration]
+    >,
+  ][] = [];
+  for (const family of ATOMIC_MUTATION_PROGRAM_FAMILIES) {
+    const executor = registration[family];
+    if (executor === undefined) continue;
+    if (typeof executor !== "function") {
+      throw new ConfigurationError(
+        `Atomic mutation program family ${family} must be callable.`,
+        {
+          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+          family,
+        },
+      );
+    }
+    assertAtomicMutationProgramLimits(family, executor);
+    entries.push([family, executor]);
+  }
+  if (entries.length === 0) {
+    throw new ConfigurationError(
+      "An atomic mutation program registration must implement at least one semantic family.",
+      { code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH" },
+    );
+  }
+  return Object.freeze(
+    Object.fromEntries(entries) as AtomicMutationProgramExecutor,
+  );
+}
+
+function throwAtomicMutationProgramRegistrationMismatch(
+  target: GraphBackend,
+): never {
+  throw new ConfigurationError(
+    "Atomic mutation programs require an exact root backend with a registered atomic SQL transport.",
+    {
+      code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+      atomicBatch: target.capabilities.execution.atomicBatch,
+      transportRegistered: hasAtomicSqlProgramRegistration(target),
+    },
+    {
+      suggestion:
+        "Register and validate the root atomic SQL transport before registering only the TypeGraph mutation families this backend implements.",
+    },
+  );
+}
+
+/**
+ * Registers TypeGraph semantic mutation programs for one exact backend root.
+ *
+ * Transport registration proves atomic statement dispatch only. This second,
+ * explicit profile declares which graph mutation families preserve their
+ * complete schema-fence, validation, side-effect, refusal, and result-ordering
+ * contracts. Object-identity registration prevents derived, projected, and
+ * transaction-scoped backends from inheriting root execution evidence.
+ */
+export function registerAtomicMutationPrograms<T extends GraphBackend>(
+  target: T,
+  registration: AtomicMutationProgramRegistration,
+): T {
+  if (
+    !supportsRootAtomicBatch(target) ||
+    !hasAtomicSqlProgramRegistration(target)
+  ) {
+    throwAtomicMutationProgramRegistrationMismatch(target);
+  }
+  if (ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.has(target)) {
+    throw new ConfigurationError(
+      "Atomic mutation programs are already registered for this exact backend root.",
+      { code: "ATOMIC_MUTATION_PROGRAM_ALREADY_REGISTERED" },
+    );
+  }
+  ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
+    target,
+    normalizeAtomicMutationProgramRegistration(registration),
+  );
+  return target;
+}
+
+/** Returns whether this exact root owns a semantic program profile. */
+export function hasAtomicMutationProgramRegistration(
+  target: GraphBackend | TransactionBackend,
+): boolean {
+  return ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.has(target);
+}
+
+/** Resolves semantic mutation programs only for their exact registered root. */
+export function resolveAtomicMutationPrograms(
+  target: GraphBackend | TransactionBackend,
+): AtomicMutationProgramExecutor | undefined {
+  return ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+}
+
+/**
+ * @internal Test-only compatibility seam.
+ *
+ * Production factories must use registerAtomicMutationPrograms() so transport,
+ * declaration, shape, and duplicate-registration validation cannot be skipped.
+ */
 export function markBundledRootAtomicMutationPrograms<T extends object>(
   target: T,
   executor: Readonly<{
@@ -296,11 +541,11 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
   return target;
 }
 
-/** Resolves semantic mutation programs only for their exact bundled root. */
+/** @internal Compatibility seam for bundled-factory and backend tests. */
 export function resolveBundledRootAtomicMutationPrograms(
   target: GraphBackend | TransactionBackend,
 ): AtomicMutationProgramExecutor | undefined {
-  return ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+  return resolveAtomicMutationPrograms(target);
 }
 
 /** @internal Narrow test seam over the single mutation-program registry. */
@@ -331,12 +576,12 @@ export function markBundledRootAtomicEdgeBatch<T extends object>(
 export function resolveBundledRootAtomicNodeBatch(
   target: GraphBackend | TransactionBackend,
 ): AtomicNodeBatchExecutor | undefined {
-  return resolveBundledRootAtomicMutationPrograms(target)?.createNodes;
+  return resolveAtomicMutationPrograms(target)?.createNodes;
 }
 
 /** @internal Narrow test seam over the single mutation-program registry. */
 export function resolveBundledRootAtomicEdgeBatch(
   target: GraphBackend | TransactionBackend,
 ): AtomicEdgeBatchExecutor | undefined {
-  return resolveBundledRootAtomicMutationPrograms(target)?.createEdges;
+  return resolveAtomicMutationPrograms(target)?.createEdges;
 }

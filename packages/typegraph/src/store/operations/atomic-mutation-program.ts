@@ -14,9 +14,8 @@ import {
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
-  resolveBundledRootAtomicMutationPrograms,
+  resolveAtomicMutationPrograms,
 } from "../../backend/capabilities/atomic-mutation-program";
-import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import {
   type GraphBackend,
   supportsRootAtomicBatch,
@@ -40,11 +39,10 @@ type CommonAtomicMutationEligibility = Readonly<{
 }>;
 
 function resolveAtomicMutationProfile(input: CommonAtomicMutationEligibility) {
-  if (!isBundledRootAutocommitEligible(input.backend)) return;
   if (!supportsRootAtomicBatch(input.backend)) return;
   if (input.schemaVersion === undefined) return;
   if (input.historyEnabled || input.revisionTrackingEnabled) return;
-  return resolveBundledRootAtomicMutationPrograms(input.backend);
+  return resolveAtomicMutationPrograms(input.backend);
 }
 
 /**

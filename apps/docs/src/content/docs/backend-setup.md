@@ -1414,6 +1414,7 @@ the earned declaration with the exact root transport in its factory:
 
 ```typescript
 import {
+  registerAtomicMutationPrograms,
   registerAtomicSqlProgram,
   runAtomicTransportConformance,
 } from "@nicia-ai/typegraph/backend";
@@ -1427,22 +1428,55 @@ const backend = createCustomBackend({
   },
 });
 registerAtomicSqlProgram(backend, { executeAtomicBatch });
+registerAtomicMutationPrograms(backend, {
+  createNodes: executeAtomicNodeBatch,
+  createEdges: executeAtomicEdgeBatch,
+});
 ```
 
-Registration is exact-root evidence only: a derived or transaction-scoped
-backend does not inherit it. The conformance fixture's mandatory provenance
-checks prove all three facts against the real registered objects: the exact
-root resolves the registration, a backend produced by `deriveBackend()` does
-not, and a transaction-scoped backend does not. Registration certifies
-transport mechanics, not graph semantics, and therefore does not by itself opt
-a custom backend into bundled node or edge mutation programs. Those programs
-remain governed by their separate semantic eligibility profiles.
+Transport registration is exact-root evidence only: a derived or
+transaction-scoped backend does not inherit it. The conformance fixture's
+mandatory provenance checks prove all three facts against the real registered
+objects. Transport registration certifies mechanics, not graph semantics, and
+therefore does not by itself opt a custom backend into any Store mutation
+program.
 
-The registration API is transport infrastructure, not a Store plug-in point:
-built-in Store mutation eligibility does not resolve a custom registration in
-this release. A custom backend can use the registered protocol for its own
-closed programs, but certifying and registering a transport alone does not make
-TypeGraph's bundled node or edge fast paths select it.
+The separate `registerAtomicMutationPrograms()` call is the semantic boundary:
+each member declares one complete TypeGraph mutation family implemented by that
+exact root. Omitted families retain the portable path, and an empty profile or
+a profile registered before its atomic transport is refused with
+`ConfigurationError`.
+
+The semantic executors must preserve the same schema fence, validation,
+side-effect, refusal classification, rollback, postimage correlation, result
+ordering, and bind-ceiling contracts as the bundled implementation. Registering
+one family is not evidence for another. Derived, projected, and
+transaction-scoped backends inherit neither root registration. Run the shared
+cross-backend Store integration cases for every family the custom backend
+registers; the transport conformance runner alone cannot prove graph semantics.
+
+The profile is family-scoped:
+
+| Member                        | Store operations authorized                                                               |
+| ----------------------------- | ----------------------------------------------------------------------------------------- |
+| `createNodes` / `createEdges` | Eligible direct `bulkInsert()` and `bulkCreate()` programs                                |
+| `deleteNodes` / `deleteEdges` | Eligible direct `bulkDelete()` programs                                                   |
+| `updateNodes` / `updateEdges` | Eligible resolved update-only sets                                                        |
+| `mutateNodes` / `mutateEdges` | Eligible mixed create/update sets; the edge family also owns durable endpoint convergence |
+
+Executor limits such as `maxEntries`, `maxClaimedEntries`, and the two edge
+mutation ceilings are part of the registration contract and must be
+nonnegative integers; zero honestly declares that the backend's bind budget
+cannot admit one member of that shape. TypeGraph validates those declarations
+before publishing the exact-root profile. Backend authors implementing edge
+refusal paths use the exported
+`AtomicEdgeBatchEndpointRefusalError`,
+`AtomicEdgeBatchCardinalityRefusalError`,
+`AtomicEdgeConvergenceTombstoneRefusalError`, and
+`AtomicEdgeDeleteIdentityRefusalError` signals; restricted node deletion uses
+`AtomicNodeDeleteRestrictedRefusalError`. This preserves the Store's existing
+typed diagnostic classification rather than exposing driver-specific sentinel
+errors.
 
 Execution support is intentionally not collapsed into one ordered “tier.” An
 interactive transaction and an exact-root atomic batch are independent facts:
@@ -1588,7 +1622,7 @@ TypeGraph choosing separate query semantics per backend:
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
 | Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on certified neon-http roots; otherwise `none` | `root` is an exact-backend declaration paired with a registered executor. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
-| Eligible bundled-root managed autocommit              | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative statement. Plain, projection-free generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches and direct edge batches without history/revision capture use one schema-fenced native atomic exchange; edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same exact-root mutation profile. Derived wrappers, adopted caller transactions, constrained/projected/identity-enabled node deletes, cascade/disconnect deletes, custom backends, and other managed writes retain the existing path |
+| Eligible exact-root managed autocommit                | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative statement. Plain, projection-free generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches and direct edge batches without history/revision capture use one schema-fenced native atomic exchange; edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same exact-root mutation profile. A custom backend may opt in per family only after registering its exact-root atomic transport and semantic executor. Derived wrappers, adopted caller transactions, unregistered or otherwise ineligible families, constrained/projected/identity-enabled node deletes, cascade/disconnect deletes, and other managed writes retain the existing path |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |

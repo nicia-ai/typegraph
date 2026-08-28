@@ -81,7 +81,7 @@ import {
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
-import { markBundledRootAtomicMutationPrograms } from "../capabilities/atomic-mutation-program";
+import { registerAtomicMutationPrograms } from "../capabilities/atomic-mutation-program";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -92,6 +92,7 @@ import {
   assertBundledCapabilityDeclarations,
   assertNoLegacyTransactionCapability,
 } from "../capabilities/declarations";
+import { downgradeRootAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
@@ -829,8 +830,7 @@ export function createPostgresBackend(
       ...declaredCapabilities,
       execution: {
         ...declaredCapabilities.execution,
-        atomicBatch:
-          atomicSqlProgramExecutor === undefined ? "none" : "root",
+        atomicBatch: atomicSqlProgramExecutor === undefined ? "none" : "root",
       },
       contributions: {
         supported: true,
@@ -1459,9 +1459,7 @@ export function createPostgresBackend(
     async bootstrapTables(): Promise<void> {
       const startingBaseSchemaVersion =
         await baseSchemaLifecycle.prepareBootstrap();
-      await baseSchemaLifecycle.adoptBeforeBootstrap(
-        startingBaseSchemaVersion,
-      );
+      await baseSchemaLifecycle.adoptBeforeBootstrap(startingBaseSchemaVersion);
       const statements = generatePostgresDDL(tables, fulltextStrategy);
       for (const statement of statements) {
         // Cold boot is the single most contended DDL path there is — two
@@ -2114,17 +2112,17 @@ export function createPostgresBackend(
   markBundledRootAutocommitEligible(backend);
   if (atomicSqlProgramExecutor !== undefined) {
     registerAtomicSqlProgram(backend, executionAdapter);
+    registerAtomicMutationPrograms(backend, {
+      createNodes: operations.executeAtomicNodeBatch,
+      createEdges: operations.executeAtomicEdgeBatch,
+      deleteNodes: operations.executeAtomicNodeDeleteBatch,
+      deleteEdges: operations.executeAtomicEdgeDeleteBatch,
+      updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
+      updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
+      mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
+      mutateEdges: operations.executeAtomicEdgeMutationProgram,
+    });
   }
-  markBundledRootAtomicMutationPrograms(backend, {
-    createNodes: operations.executeAtomicNodeBatch,
-    createEdges: operations.executeAtomicEdgeBatch,
-    deleteNodes: operations.executeAtomicNodeDeleteBatch,
-    deleteEdges: operations.executeAtomicEdgeDeleteBatch,
-    updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
-    updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
-    mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
-    mutateEdges: operations.executeAtomicEdgeMutationProgram,
-  });
   return backend;
 }
 
@@ -3281,13 +3279,7 @@ function createTransactionBackend(
       adapterOptions: options.adapterOptions,
       operationStrategy: options.operationStrategy,
       tableNames: options.tableNames,
-      capabilities: {
-        ...options.capabilities,
-        execution: {
-          ...options.capabilities.execution,
-          atomicBatch: "none",
-        },
-      },
+      capabilities: downgradeRootAtomicBatch(options.capabilities),
       fulltextStrategy: options.fulltextStrategy,
       vectorStrategy: options.vectorStrategy,
       contributionMaterializer: options.contributionMaterializer,

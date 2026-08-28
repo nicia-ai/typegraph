@@ -158,6 +158,36 @@ describe("deriveBackend over frozen inputs", () => {
       enumerable: true,
     });
   });
+
+  it("reports derived capabilities as a data descriptor over an accessor", () => {
+    const base = {
+      get capabilities() {
+        return {
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "root" as const,
+          },
+        };
+      },
+    };
+
+    const derived = deriveBackend(base, {});
+    const descriptor = Object.getOwnPropertyDescriptor(derived, "capabilities");
+
+    expect(descriptor).toMatchObject({
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: {
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+        },
+      },
+    });
+    expect(descriptor).not.toHaveProperty("get");
+    expect(descriptor).not.toHaveProperty("set");
+  });
 });
 
 describe("a backend's resource verdict is written once", () => {
