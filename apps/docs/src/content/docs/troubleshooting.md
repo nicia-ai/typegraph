@@ -466,7 +466,7 @@ This is expected when the operation needs an interactive transaction. Static
 adapter batches are not a public transaction, and a sequence of independent
 requests cannot safely implement Operational Identity, claim/cardinality
 checks, or undeclared dynamic `matchOn` convergence. Use a backend with
-`capabilities.transactions === true` and call `store.transaction(...)` for
+`capabilities.execution.interactiveTransactions === true` and call `store.transaction(...)` for
 those operations.
 
 A declared edge `matchIdentity` is the exception for the eligible root

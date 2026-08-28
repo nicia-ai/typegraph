@@ -747,6 +747,12 @@ Keep these guarantees distinct:
 - A **static internal adapter batch** is a backend implementation detail, such
   as a D1 batch or a bind-budgeted multi-row insert. It is not a Store API and
   does not make arbitrary Store calls atomic.
+- A **certified atomic SQL program** is a closed, ordered sequence submitted to
+  a backend transport that has passed the framework conformance runner. The
+  runner checks ordered result slots, exact parameter forwarding, empty-batch
+  no-op behavior, and rollback of primary and sidecar writes after a later
+  statement fails. This transport capability is separate from the semantic
+  proof that makes a particular mutation eligible.
 - An **authoritative one-statement command** is the semantic `commands` port;
   its statement returns the created/found decision it owns. Durable
   `matchIdentity` convergence can qualify for this root path because the
@@ -1806,10 +1812,19 @@ Batch version of `getOrCreateByEndpoints`. Returns results in input order.
 The bundled backends read all candidate endpoint pairs with set-oriented
 statements rather than one lookup per item. These are exact directed-pair
 joins, so a high-fan-out source does not materialize all of its unrelated
-outgoing edges for client-side filtering. Bulk convergence still uses one
-transaction and an authoritative in-transaction set read in this release; the
-single-statement durable arbiter described above applies to the single-item
-method, not yet to this batch method.
+outgoing edges for client-side filtering. For a schema-declared durable
+`matchIdentity` with `cardinality: "many"`, the declaration's match fields,
+default `ifExists: "return"`, and no temporal mutation, bundled roots use one
+closed native atomic exchange. That program owns endpoint validation, durable
+identity arbitration and ordered live results, so it does
+not perform a probe or open a separate interactive transaction. An all-live
+default-`"return"` batch outside that envelope is also read-only and returns
+from one set-oriented root read. Other outcomes retain the set-oriented read
+plus transactional write path. Tombstoned winners
+roll the native attempt back and refuse transactionless convergence with the
+typed `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error;
+use a transaction-capable backend when resurrection must preserve schema-aware
+partial updates.
 
 ```typescript
 store.edges.worksAt.bulkGetOrCreateByEndpoints(
@@ -1957,11 +1972,10 @@ adopted-commit path for history stores — returns the same `TransactionOutcome`
 so the exactly-once cursor pattern gets a receipt too (see
 [Recorded time](/queries/temporal/#raw-sql-under-history-capture)); only
 `withTransaction`, whose commit belongs entirely to the caller with no flush
-point, produces no receipt. On a raw Store backed by a non-transactional driver,
-a receipt describes operations that individually committed; if the callback
-rejects there, no receipt is returned even though earlier operations committed.
-A schema-managed Store instead fails closed on its first write because it cannot
-hold the schema-version fence.
+point, produces no receipt. On a Store backed by a non-transactional driver,
+`transactionWithReceipt()` refuses before invoking the callback, so it cannot
+produce a receipt. Ordinary Store writes remain available when the application
+deliberately owns non-atomic coordination.
 
 ##### Scoped receipts: `tx.measure()`
 
@@ -2023,19 +2037,18 @@ context through your call chain.
 
 Not all backends support atomic transactions. Cloudflare D1 and
 `drizzle-orm/neon-http` cannot hold a multi-statement session and report
-`capabilities.transactions: false`. A schema-managed Store fails closed before
+`capabilities.execution.interactiveTransactions: false`. A schema-managed Store fails closed before
 writing on these backends because it cannot hold the schema fence. On a raw
-Store, `store.transaction(fn)` still runs — `fn` executes against the same
-backend used outside `transaction()`, sequentially — **but writes are applied
-as they happen and a thrown error does not roll back earlier writes inside the
-callback**. If you require atomicity or version fencing, branch on the
-capability:
+Store, `store.transaction(fn)` refuses because no interactive transaction is
+available. Eligible operations backed by a certified atomic SQL program remain
+separate from this interactive capability. If you require atomicity or version
+fencing, branch on the capability:
 
 ```typescript
-if (store.capabilities.transactions) {
+if (store.capabilities.execution.interactiveTransactions) {
   await store.transaction(async (tx) => { /* atomic */ });
 } else {
-  // Raw Store only: sequential, non-atomic, and not schema-fenced.
+  // Use individual operations or an eligible certified atomic operation.
 }
 ```
 
@@ -2083,7 +2096,7 @@ falls back re-runs as a full fetch, and that fallback is detected *after* the se
 has already executed. It clears the fast path, so a reused query instance pays the double only
 once — but the builder is immutable, so a query rebuilt per request pays it every request.
 
-With `backend.capabilities.transactions` the queries share one transaction; how that reaches the
+With `backend.capabilities.execution.interactiveTransactions` the queries share one transaction; how that reaches the
 wire is the adapter's business. A SQL backend frames them with `begin`/`commit`, putting a networked
 one at N+2 round trips **at best**, while Durable Objects use an ambient storage transaction with no
 framing statements. Without transactions there is no framing. Connection reuse is a separate
@@ -2097,7 +2110,7 @@ isolation, so a later query in the batch can observe a commit the earlier ones d
 there is no public way to run a fluent query or a batch inside a transaction, so a snapshot across
 fluent queries is **not available today**. Collection reads can have one —
 `store.transaction(fn, { isolationLevel: "repeatable_read" })` reading through `tx.nodes` /
-`tx.edges` — but only where the backend has transactions (others ignore the option entirely), and a
+`tx.edges` — but only where the backend has transactions (other backends refuse before invoking the callback), and a
 history-enabled store on PostgreSQL additionally requires `accessMode: "read_only"` or the call
 throws.
 

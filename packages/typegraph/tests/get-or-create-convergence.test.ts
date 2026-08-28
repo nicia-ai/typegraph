@@ -857,6 +857,66 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(transactionReads).toBe(2);
   });
 
+  it("does not let a stale-positive root read authorize a bulk write", async () => {
+    const setup = createStore(graph, raw);
+    const alice = await setup.nodes.Person.create({ name: "Alice" });
+    const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const carol = await setup.nodes.Person.create({ name: "Carol" });
+    const staleRow = requireDefined(
+      await raw.insertEdge({
+        graphId: graph.id,
+        id: "stale-positive-bulk",
+        kind: "knows",
+        fromKind: "Person",
+        fromId: alice.id,
+        toKind: "Person",
+        toId: bob.id,
+        props: { since: "requested" },
+      }),
+    );
+    await raw.hardDeleteEdge({ graphId: graph.id, id: staleRow.id });
+
+    let rootReads = 0;
+    let transactionReads = 0;
+    const store = createStore(
+      graph,
+      deriveBackend(raw, {
+        findEdgesByHeterogeneousEndpointSet: () => {
+          rootReads += 1;
+          return Promise.resolve([staleRow]);
+        },
+        transaction: (fn, options) =>
+          raw.transaction(
+            (target) =>
+              fn(
+                deriveBackend(target, {
+                  findEdgesByHeterogeneousEndpointSet: async (params) => {
+                    transactionReads += 1;
+                    return requireDefined(
+                      target.findEdgesByHeterogeneousEndpointSet,
+                    )(params);
+                  },
+                }),
+              ),
+            options,
+          ),
+      }),
+    );
+
+    const results = await store.edges.knows.bulkGetOrCreateByEndpoints([
+      { from: alice, to: bob, props: { since: "requested" } },
+      { from: alice, to: carol, props: { since: "requested" } },
+    ]);
+
+    expect(results.map((result) => result.action)).toEqual([
+      "created",
+      "created",
+    ]);
+    expect(results.map((result) => result.edge.id)).not.toContain(staleRow.id);
+    expect(rootReads).toBe(1);
+    expect(transactionReads).toBe(1);
+  });
+
   it("leaves the uncontended paths on their existing verdicts", async () => {
     const store = createStore(graph, raw);
     const alice = await store.nodes.Person.create({ name: "Alice" });

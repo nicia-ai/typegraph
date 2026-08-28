@@ -126,12 +126,13 @@ cache.
 
 Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
 stores, caller-owned transactions, and custom backends retain the transactional
-path required by their additional contracts. Eligible direct edge batches can
-instead carry their cardinality claims inside the native atomic program
-described below. Bulk endpoint convergence still
-uses one transaction in this release, but bundled backends discover exact
-directed endpoint pairs in set-oriented bind-budget chunks instead of issuing a
-candidate read per item. See
+path required by their additional contracts. Eligible durable bulk endpoint
+convergence now submits one closed native atomic exchange: the durable identity
+arbiter, endpoint validation, and ordered created/found
+results are all resolved by the program. This removes the outside probe, the
+transaction open/commit, and the per-item write legs for the eligible shape.
+The fallback bulk path still discovers exact directed endpoint pairs in
+set-oriented bind-budget chunks and retains its transactional contract. See
 [`getOrCreateByEndpoints`](/schemas-stores#getorcreatebyendpointsfrom-to-props-options)
 for field restrictions, migration rules, and PostgreSQL retry guidance.
 
@@ -144,6 +145,34 @@ operations—including claims, Operational Identity, history, or revision
 sidecars—must commit together. Undeclared dynamic `matchOn` convergence keeps
 that interactive-transaction requirement; only a schema-declared durable
 `matchIdentity` can qualify for the one-statement root command.
+
+Bulk endpoint convergence has a narrower native envelope than direct edge
+inserts. A schema-declared durable `matchIdentity` with `cardinality: "many"`,
+the declaration's match fields, default `ifExists: "return"`, and no temporal
+mutation qualifies on an exact bundled root. The libSQL transport inventory
+records one client `batch` submission and zero client `execute` calls for a
+multi-item eligible call; this is a submission-count measurement, not a
+wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
+cardinality, temporal options, caller transactions, derived/custom backends,
+and history/revision stores intentionally retain the fallback path.
+An all-live `ifExists: "return"` batch is the read-only exception: because it
+writes nothing, every backend may return that result from its single
+set-oriented root read without opening a confirmation transaction. Any batch
+that may create, resurrect, or update still requires the native program or the
+complete transactional fallback.
+If an otherwise eligible batch resolves a tombstoned identity, the native
+attempt rolls back and transactionless convergence refuses with the typed
+`CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
+transaction-capable backend when resurrection must merge partial properties
+through the graph's Zod update schema.
+
+Cloudflare D1's 100-parameter budget admits at most seven **unique durable
+identities** in the native convergence program; duplicate inputs reuse their
+first identity and do not consume another program entry. Above that ceiling,
+an all-live return still completes as the one-read path described above. A
+batch that needs a write uses the portable fallback on a transaction-capable
+backend and refuses on a transactionless D1 root rather than splitting one
+atomic convergence contract across multiple submissions.
 
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
 programs for eligible ingestion calls. Plain schema-managed
@@ -259,8 +288,11 @@ whole-call atomicity on bundled transactionless roots through one native
 atomic exchange, including durable-match and cardinality-constrained edge
 batches. Other
 bulk shapes on a transactionless root either refuse when their contract requires a fence or use
-sequential fallback, which can leave earlier chunks committed if a later one fails.
-`store.transaction()` cannot add atomicity to a backend that does not support transactions.
+their documented non-atomic path. A certified atomic SQL program is available only to operations
+whose closed statement contract has been proven by the backend conformance runner; it does not
+make arbitrary Store calls atomic.
+`store.transaction()` refuses before
+invoking its callback on a transactionless root; it never presents sequential writes as atomic.
 
 To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a
 transaction:

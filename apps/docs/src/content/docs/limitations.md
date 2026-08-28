@@ -17,12 +17,12 @@ cannot offer atomic transactions:
 
 Cloudflare **Durable Objects** SQLite is *not* in this list: a store backed
 by `drizzle(ctx.storage)` is auto-detected as `transactionMode: "do-sqlite"`,
-reports `capabilities.transactions: true`, and is fully atomic. An
+reports `capabilities.execution.interactiveTransactions: true`, and is fully atomic. An
 `AdapterStore` created from that backend also exposes the adapter-only
 `store.withTransaction` and `tx.sql` surfaces. See
 [Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite).
 
-These backends report `capabilities.transactions: false`. Read-only
+These backends report `capabilities.execution.interactiveTransactions: false`. Read-only
 `store.batch(...)` still runs, but each query may use an independent connection
 and observe a different database snapshot. (Whether the queries nonetheless
 reuse one connection is up to the adapter — the no-transaction path hands each
@@ -34,33 +34,33 @@ Write behavior depends on how the Store was constructed. A schema-managed Store
 fails closed for writes that need the transaction-scoped schema or constraint
 fence, but eligible plain node batches and `cardinality: "many"` edges can use
 the authoritative one-statement command. A raw `createStore()` /
-`createAdapterStore()` without a reconciled snapshot still uses the sequential fallback:
-`store.transaction(fn)` invokes `fn` against the same backend, writes are applied
-as they happen, and a thrown error does not roll back earlier writes. Direct
-backend writes are raw as well.
+`createAdapterStore()` without a reconciled snapshot still has no interactive
+transaction boundary. `store.transaction(fn)` refuses with a typed capability
+error rather than pretending to provide rollback; direct backend writes remain
+raw. Eligible operations that use a certified atomic SQL program can still be
+available on these roots, but that transport guarantee is separate from the
+interactive transaction capability.
 
-These backends also ignore the `isolationLevel` option on
-`store.transaction(...)`, so the collection-read snapshot recipe documented
-elsewhere does nothing here.
+These backends cannot honor the `isolationLevel` option on
+`store.transaction(...)`; the method refuses before invoking its callback, so
+the collection-read snapshot recipe documented elsewhere does not apply here.
 
 ```typescript
-// On a raw D1 / neon-http Store: every successful create persists immediately.
-// If the throw fires after Alice is created, Alice stays in the database.
+// On a raw D1 / neon-http Store, this refuses before the callback runs.
 await store.transaction(async (tx) => {
   await tx.nodes.Person.create({ name: "Alice" });
-  throw new Error("boom"); // does NOT roll back the create above
 });
 ```
 
 **If you require atomicity or schema-version fencing, branch on the capability:**
 
 ```typescript
-if (store.capabilities.transactions) {
+if (store.capabilities.execution.interactiveTransactions) {
   await store.transaction(async (tx) => {
     /* atomic */
   });
 } else {
-  // Raw Store only: sequential, non-atomic, and not schema-fenced.
+  // Use independent operations, or a supported certified atomic operation.
   const person = await store.nodes.Person.create({ name: "Alice" });
   const company = await store.nodes.Company.create({ name: "Acme" });
   await store.edges.worksAt.create(person, company, { role: "Engineer" });
@@ -71,20 +71,24 @@ If you need atomic writes from an edge runtime, use
 `drizzle-orm/neon-serverless` (WebSocket-backed Pool) instead of
 `drizzle-orm/neon-http`.
 
-### Three kinds of write atomicity
+### Four kinds of write atomicity
 
-TypeGraph distinguishes an interactive transaction, a static adapter batch,
-and an authoritative one-statement command. `store.transaction(...)` is the
+TypeGraph distinguishes an interactive transaction, a static adapter batch, a
+certified atomic SQL program, and an authoritative one-statement command. `store.transaction(...)` is the
 interactive Store API: it pins a session and groups the callback's operations.
 A static batch is adapter-internal (such as D1 `batch()` or a multi-row
 insert); it is not a public Store transaction and cannot make arbitrary Store
-calls atomic. An authoritative command is a single `commands.execute` write
+calls atomic. A certified atomic SQL program is a closed ordered statement
+sequence whose transport preserves result slots and parameters and rolls back
+primary and sidecar writes when a later statement fails. An authoritative command is a single `commands.execute` write
 whose database statement returns the decision it made. It can provide a safe
 transactionless create/found path only when the backend has a durable arbiter.
 
-Operational Identity, single-edge claim/cardinality enforcement, and
-undeclared dynamic `matchOn` convergence still require an interactive
-transaction and fail closed on a backend that cannot provide one. Eligible
+Operational Identity, single-edge claim/cardinality enforcement, and any
+undeclared dynamic `matchOn` convergence that may write still require an
+interactive transaction and fail closed on a backend that cannot provide one.
+An all-live `ifExists: "return"` endpoint batch is read-only and can return
+from its set-oriented root read without a transaction. Eligible
 direct edge batches on bundled roots are the narrow exception: their closed
 native program carries the claim sidecars inside one atomic exchange. A
 declared edge `matchIdentity` persists

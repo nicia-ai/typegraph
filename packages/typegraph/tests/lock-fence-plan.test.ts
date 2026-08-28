@@ -933,7 +933,7 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "sqlite",
         capabilities: {
-          transactions: true,
+          execution: { interactiveTransactions: true, atomicBatch: "none" },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: false,
@@ -955,7 +955,7 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          transactions: true,
+          execution: { interactiveTransactions: true, atomicBatch: "none" },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: true,
@@ -977,7 +977,7 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          transactions: true,
+          execution: { interactiveTransactions: true, atomicBatch: "none" },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: false,
@@ -1004,7 +1004,7 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          transactions: true,
+          execution: { interactiveTransactions: true, atomicBatch: "none" },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: true,
@@ -1031,7 +1031,10 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
     const deps = mockContributionDeps(
       {
         dialect: "postgres",
-        capabilities: { transactions: true, windowFunctions: true },
+        capabilities: {
+          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          windowFunctions: true,
+        },
       },
       statements,
     );

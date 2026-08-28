@@ -2168,10 +2168,10 @@ export async function commitPlan<G extends GraphDef>(
   plan: MergePlan<G>,
   expectedBaseVersion?: BaseVersion,
 ): Promise<MergedCounts> {
-  if (!storeBackend(target).capabilities.transactions) {
+  if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
     throw new MergeError(
       "merge() requires a transaction-capable target backend. The merged plan (canonical upserts, soft-deletes, edge upserts) must commit atomically; a non-transactional fallback would leave a partially-merged graph on a mid-commit failure. (mergeIncremental() enforces the same requirement.)",
-      { details: { capability: "transactions" } },
+      { details: { capability: "execution.interactiveTransactions" } },
     );
   }
   return runMergeCommit(() =>
@@ -2507,10 +2507,10 @@ type ResolvedMerge<G extends GraphDef> = Readonly<{
 function assertPublicPlanCapability<G extends GraphDef>(
   target: Store<G>,
 ): void {
-  if (!storeBackend(target).capabilities.transactions) {
+  if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
     throw new MergePlanCapabilityError(
       "Public merge plans require a transaction-capable target backend.",
-      { details: { capability: "transactions" } },
+      { details: { capability: "execution.interactiveTransactions" } },
     );
   }
   if (!target.revisionTrackingEnabled) {
@@ -4827,10 +4827,10 @@ async function commitIncrementalPlan<G extends GraphDef>(
   plan: MergePlan<G>,
   guard: IncrementalCommitGuard<G>,
 ): Promise<MergedCounts> {
-  if (!storeBackend(target).capabilities.transactions) {
+  if (!storeBackend(target).capabilities.execution.interactiveTransactions) {
     throw new MergeError(
       "mergeIncremental() requires a transaction-capable target backend. Incremental writes must preflight existing rows and commit atomically; non-transactional fallback would allow partial graph writes.",
-      { details: { capability: "transactions" } },
+      { details: { capability: "execution.interactiveTransactions" } },
     );
   }
 

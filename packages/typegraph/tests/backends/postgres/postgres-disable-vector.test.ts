@@ -63,7 +63,7 @@ describe("createPostgresBackend({ vector: false })", () => {
     const backend = backendWith(true);
 
     // Disabling vector must not disturb the rest of the capability surface.
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
     expect(backend.capabilities.fulltext?.supported).toBe(true);
   });
 });

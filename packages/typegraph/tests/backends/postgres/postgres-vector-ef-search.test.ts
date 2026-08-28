@@ -10,7 +10,7 @@
  *   `SET LOCAL`. Issued in autocommit it would roll off with the
  *   statement and the next pooled query would see the session default.
  * - The transactional path still returns correct nearest-neighbor rows.
- * - A transaction-less backend (`transactions: false`) warns once and
+ * - A backend without interactive transactions warns once and
  *   ignores the option rather than emitting an unscoped `SET`.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
@@ -299,7 +299,7 @@ describe("Postgres efSearch — transaction-less backend", () => {
     await seed(pool, "ef_txless");
 
     const noTxBackend = createPostgresBackend(drizzle(pool), {
-      capabilities: { transactions: false },
+      capabilities: { execution: { interactiveTransactions: false } },
     });
     const params = {
       graphId: "ef_txless",
@@ -318,7 +318,7 @@ describe("Postgres efSearch — transaction-less backend", () => {
     ).rejects.toMatchObject({
       code: "UNSUPPORTED_BACKEND_CAPABILITY",
       details: {
-        capability: "transactions",
+        capability: "execution.interactiveTransactions",
         efSearch: 256,
       },
     });

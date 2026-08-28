@@ -43,8 +43,76 @@ export function assertVectorSearchLimit(limit: number): void;
 export function assumeRecursiveTraversalSupported(reason: string): RecursiveTraversalVerdict;
 
 // @public
+export type AtomicSqlBatchExecutor = <TRow>(statements: readonly CompiledAtomicSqlStatement[]) => Promise<readonly (readonly TRow[])[]>;
+
+// @public (undocumented)
+export type AtomicSqlProgramAdapter = Readonly<{
+    executeAtomicBatch?: AtomicSqlBatchExecutor;
+}>;
+
+// @public
+export type AtomicSqlProgramRegistration = AtomicSqlBatchExecutor | AtomicSqlProgramAdapter;
+
+// @public (undocumented)
+export type AtomicSqlRow = Readonly<Record<string, unknown>>;
+
+// @public (undocumented)
+export class AtomicTransportConformanceError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>);
+}
+
+// @public (undocumented)
+export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
+    executeAtomicBatch: AtomicSqlBatchExecutor;
+    equal: AtomicTransportEquality;
+    orderedResults: Readonly<{
+        statements: readonly CompiledAtomicSqlStatement[];
+        expected: readonly (readonly AtomicSqlRow[])[];
+    }>;
+    parameterPreservation: Readonly<{
+        statements: readonly CompiledAtomicSqlStatement[];
+        expected: readonly CompiledAtomicSqlStatement[];
+        observe: () => readonly CompiledAtomicSqlStatement[] | undefined | PromiseLike<readonly CompiledAtomicSqlStatement[] | undefined>;
+    }>;
+    rollback: AtomicTransportRollbackCase<TSnapshot>;
+    emptyBatch: Readonly<{
+        prepare?: () => void | PromiseLike<void>;
+        observe: () => TSnapshot | PromiseLike<TSnapshot>;
+        expected: TSnapshot;
+    }>;
+    provenance: AtomicTransportProvenanceChecks;
+}>;
+
+// @public (undocumented)
+export type AtomicTransportConformanceReport = Readonly<{
+    passed: readonly string[];
+}>;
+
+// @public
+export type AtomicTransportEquality = (actual: unknown, expected: unknown) => boolean;
+
+// @public (undocumented)
+export type AtomicTransportProvenanceChecks = Readonly<{
+    exactRootRegistration: () => boolean | PromiseLike<boolean>;
+    derivedBackendIsolation: () => boolean | PromiseLike<boolean>;
+    transactionBackendIsolation: () => boolean | PromiseLike<boolean>;
+}>;
+
+// @public (undocumented)
+export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
+    prepare: () => void | PromiseLike<void>;
+    statements: readonly CompiledAtomicSqlStatement[];
+    observe: () => TSnapshot | PromiseLike<TSnapshot>;
+    expectedBefore: TSnapshot;
+    errorMatches?: (error: unknown) => boolean;
+}>;
+
+// @public
 export type BackendCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
@@ -60,6 +128,9 @@ export type BackendCapabilities = Readonly<{
     pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
+
+// @public (undocumented)
+export type BackendExecutionCapabilities = BackendCapabilities["execution"];
 
 // @public (undocumented)
 export type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
@@ -242,6 +313,13 @@ const BUNDLE_BINDING: unique symbol;
 // @public
 export type BundleBinding<M extends OptionalGraphBackendMember> = Required<Pick<GraphBackend, M>> & Readonly<{
     [BUNDLE_BINDING]: true;
+}>;
+
+// @public
+export type BundledBackendCapabilityOverrides = Readonly<Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+        interactiveTransactions?: boolean;
+    }>;
 }>;
 
 // @public
@@ -947,6 +1025,12 @@ export type CommitSchemaVersionParams = Readonly<{
     version: number;
     schemaHash: string;
     schemaDoc: SerializedSchema;
+}>;
+
+// @public
+export type CompiledAtomicSqlStatement = Readonly<{
+    params: readonly unknown[];
+    sql: string;
 }>;
 
 // @public (undocumented)
@@ -2180,6 +2264,9 @@ export type HardDeleteUniquesByNodeIdsParams = Readonly<{
 }>;
 
 // @public
+export function hasAtomicSqlProgramRegistration(target: GraphBackend | TransactionBackend): boolean;
+
+// @public
 export type HybridSearchParams = Readonly<{
     graphId: string;
     nodeKind: string;
@@ -2825,6 +2912,9 @@ export type RecursiveTraversalVerdict = Readonly<{
 })>;
 
 // @public
+export function registerAtomicSqlProgram<T extends GraphBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
+
+// @public
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
 
 // @public
@@ -2941,6 +3031,9 @@ export function rowPropsToJsonText(props: RowProps): string;
 
 // @public
 export function rowPropsToObject(props: RowProps): Record<string, unknown>;
+
+// @public
+export function runAtomicTransportConformance<TSnapshot = unknown>(fixture: AtomicTransportConformanceFixture<TSnapshot>): Promise<AtomicTransportConformanceReport>;
 
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
@@ -3304,6 +3397,16 @@ export function statementExecutionVerdict(backend: GraphBackend): BundleVerdictO
 
 // @public
 export type StrategyTableContribution = TableContribution;
+
+// @public
+export function supportsInteractiveTransactions(backendOrCapabilities: BackendCapabilities | Readonly<{
+    capabilities: BackendCapabilities;
+}>): boolean;
+
+// @public
+export function supportsRootAtomicBatch(backendOrCapabilities: BackendCapabilities | Readonly<{
+    capabilities: BackendCapabilities;
+}>): boolean;
 
 // @public (undocumented)
 export type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "to_kind" | "to_id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";

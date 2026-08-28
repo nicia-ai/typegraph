@@ -238,7 +238,7 @@ export function rawWriteGuards(
 }
 
 export function assertCapturableBackend(backend: GraphBackend): void {
-  if (!backend.capabilities.transactions) {
+  if (!backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
       "history: true requires a backend with transaction support.",
       { dialect: backend.dialect },
@@ -286,7 +286,7 @@ export function assertCapturableBackend(backend: GraphBackend): void {
  * and therefore does not require `UPDATE … RETURNING`.
  */
 export function assertRevisionTrackableBackend(backend: GraphBackend): void {
-  if (!backend.capabilities.transactions) {
+  if (!backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
       "revisionTracking: true requires a backend with transaction support.",
       { dialect: backend.dialect },

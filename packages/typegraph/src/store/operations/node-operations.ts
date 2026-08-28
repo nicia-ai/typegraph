@@ -2143,7 +2143,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       const directInteractiveAutocommit =
         autocommitSingleStatement &&
         transactionMode === "none" &&
-        targetBackend.capabilities.transactions;
+        targetBackend.capabilities.execution.interactiveTransactions;
       if (directInteractiveAutocommit) {
         throw new AutocommitWriteRequiresTransaction();
       }
@@ -2612,7 +2612,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
   const schema = registration.type.schema;
   const uniqueConstraints = registration.unique ?? [];
 
-  if (!backend.capabilities.transactions) {
+  if (!backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
       "updateWhere() requires a transactional backend so validation and sidecars are atomic",
       { code: "SET_UPDATE_TRANSACTIONS_REQUIRED", kind },
@@ -3051,7 +3051,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
     async (session, target) => {
       const resolvedRows =
         (
-          target.capabilities.transactions &&
+          target.capabilities.execution.interactiveTransactions &&
           distinctIds.size === entries.length
         ) ?
           await getNodeRowsByIds(

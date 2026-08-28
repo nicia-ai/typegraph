@@ -263,7 +263,7 @@ observe a commit the earlier ones did not. There is no way to fix that for fluen
 `store.transaction()` accepts an `isolationLevel`, but its context exposes only `nodes` / `edges`,
 so a query builder cannot run inside it. Collection reads can get a snapshot via
 `store.transaction(fn, { isolationLevel: "repeatable_read" })` and `tx.nodes` / `tx.edges` — but
-only where the backend has transactions (others ignore the option), and a history-enabled store on
+only where the backend has transactions (other backends refuse before invoking `fn`), and a history-enabled store on
 PostgreSQL additionally requires `accessMode: "read_only"` or the call throws.
 
 ```typescript

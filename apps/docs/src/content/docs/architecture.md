@@ -625,6 +625,13 @@ authoritative resolution phase it preserves; it cannot read on one connection
 and write on another, silently discard sidecars, or duplicate an eligibility
 predicate beside the profile owner.
 
+Backend authors can certify the transport boundary independently of mutation
+eligibility with the framework-agnostic atomic transport conformance runner.
+The runner supplies no dialect assumptions: the author provides statements,
+state observers, and exact-root provenance checks, while the shared checks
+verify ordered result slots, bound-parameter preservation, empty programs, and
+all-or-nothing rollback across primary and sidecar writes.
+
 ## Why These Tradeoffs?
 
 ### Why Not a Native Graph Database?

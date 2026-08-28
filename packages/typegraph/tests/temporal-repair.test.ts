@@ -719,7 +719,13 @@ describe("repairInvertedValidityWindows", () => {
     it("runs both modes and says the call was not atomic", async () => {
       await seedGraph(backend);
       const nonTransactional: GraphBackend = deriveBackend(backend, {
-        capabilities: { ...backend.capabilities, transactions: false },
+        capabilities: {
+          ...backend.capabilities,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
+        },
       });
 
       const report = await repairInvertedValidityWindows({

@@ -8,7 +8,7 @@
 import {
   type AtomicEdgeBatchExecutor as BackendAtomicEdgeBatchExecutor,
   type AtomicEdgeDeleteBatchExecutor,
-  type AtomicEdgeResolvedMutationSetExecutor,
+  type AtomicEdgeMutationProgramExecutor,
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicNodeBatchExecutor as BackendAtomicNodeBatchExecutor,
   type AtomicNodeDeleteBatchExecutor,
@@ -17,7 +17,11 @@ import {
   resolveBundledRootAtomicMutationPrograms,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
-import type { GraphBackend, TransactionBackend } from "../../backend/types";
+import {
+  type GraphBackend,
+  supportsRootAtomicBatch,
+  type TransactionBackend,
+} from "../../backend/types";
 import type { GraphDef } from "../../core/define-graph";
 import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
@@ -37,6 +41,7 @@ type CommonAtomicMutationEligibility = Readonly<{
 
 function resolveAtomicMutationProfile(input: CommonAtomicMutationEligibility) {
   if (!isBundledRootAutocommitEligible(input.backend)) return;
+  if (!supportsRootAtomicBatch(input.backend)) return;
   if (input.schemaVersion === undefined) return;
   if (input.historyEnabled || input.revisionTrackingEnabled) return;
   return resolveBundledRootAtomicMutationPrograms(input.backend);
@@ -118,6 +123,60 @@ export type AtomicEdgeBatchEligibilityInput = CommonAtomicMutationEligibility &
   Readonly<{ inputs: readonly CreateEdgeInput[] }>;
 
 export type AtomicEdgeBatchExecutor = BackendAtomicEdgeBatchExecutor;
+
+export type AtomicEdgeConvergenceEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{
+      kind: string;
+      matchOn: readonly string[];
+      inputs: readonly Readonly<{
+        validFrom?: string;
+        validTo?: string;
+        clearValidTo?: true;
+        onImmutableLowerBound?: "preserve" | "refuse";
+      }>[];
+      uniqueEntryCount: number;
+      ifExists: "return" | "update";
+    }>;
+
+/** The one owner of the static proof for durable bulk edge convergence. */
+export function resolveAtomicEdgeConvergenceExecutor(
+  input: AtomicEdgeConvergenceEligibilityInput,
+): AtomicEdgeMutationProgramExecutor | undefined {
+  if (input.inputs.length === 0 || input.ifExists !== "return") return;
+  if (
+    input.inputs.some(
+      (item) =>
+        item.validFrom !== undefined ||
+        item.validTo !== undefined ||
+        item.clearValidTo === true ||
+        item.onImmutableLowerBound !== undefined,
+    )
+  ) {
+    return;
+  }
+  if (!hasOwnKey(input.graph.edges, input.kind)) return;
+  const registration = input.graph.edges[input.kind];
+  if (registration?.matchIdentity === undefined) {
+    return;
+  }
+  if ((registration.cardinality ?? "many") !== "many") return;
+  const declaredFields = registration.matchIdentity.fields;
+  if (
+    declaredFields.length !== input.matchOn.length ||
+    declaredFields.some((field, index) => field !== input.matchOn[index])
+  ) {
+    return;
+  }
+  const executor = resolveAtomicMutationProfile(input)?.mutateEdges;
+  if (
+    executor === undefined ||
+    input.uniqueEntryCount > executor.maxEntries.durableConvergence
+  ) {
+    return;
+  }
+  return executor;
+}
 
 /** The one owner of the static store proof for atomic edge creates. */
 export function resolveAtomicEdgeBatchExecutor(
@@ -295,7 +354,7 @@ export type AtomicEdgeResolvedMutationSetEligibilityInput =
 /** The one owner of the static proof for mixed resolved edge mutations. */
 export function resolveAtomicEdgeResolvedMutationSetExecutor(
   input: AtomicEdgeResolvedMutationSetEligibilityInput,
-): AtomicEdgeResolvedMutationSetExecutor | undefined {
+): AtomicEdgeMutationProgramExecutor | undefined {
   const entryCount = input.creates.length + input.updateCount;
   if (entryCount === 0 || !isAtomicResolvedEdgeKindEligible(input)) return;
   if (
@@ -306,6 +365,8 @@ export function resolveAtomicEdgeResolvedMutationSetExecutor(
     return;
   }
   const executor = resolveAtomicMutationProfile(input)?.mutateEdges;
-  if (executor === undefined || entryCount > executor.maxEntries) return;
+  if (executor === undefined || entryCount > executor.maxEntries.resolvedSet) {
+    return;
+  }
   return executor;
 }

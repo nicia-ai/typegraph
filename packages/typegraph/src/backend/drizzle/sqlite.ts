@@ -67,10 +67,13 @@ import { markBundledRootAtomicMutationPrograms } from "../capabilities/atomic-mu
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
-  markBundledRootAtomicSqlProgram,
+  registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
-import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import {
+  assertBundledCapabilityDeclarations,
+  assertNoLegacyTransactionCapability,
+} from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -78,6 +81,7 @@ import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type BundledBackendCapabilityOverrides,
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
   type ContributionDiagnostic,
@@ -265,7 +269,7 @@ export type SqliteBackendOptions = Readonly<{
    * or tests that need to simulate an engine-level capability gap. Overrides
    * may lower, but cannot raise, a hosted platform's hard parameter ceiling.
    */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
   /**
    * Declare the connection this backend serializes every statement onto, when
    * TypeGraph's driver predicates cannot see it (`expo-sqlite`, `op-sqlite`,
@@ -575,8 +579,8 @@ function runWithSerializedQueue<T>(
 function throwSqliteTransactionsDisabled(message: string): never {
   throw new ConfigurationError(message, {
     backend: "sqlite",
-    capability: "transactions",
-    supportsTransactions: false,
+    capability: "execution.interactiveTransactions",
+    supportsInteractiveTransactions: false,
   });
 }
 
@@ -592,7 +596,10 @@ function buildSqliteCapabilities(
     options.transactionMode === "none" ?
       {
         ...SQLITE_CAPABILITIES,
-        transactions: false,
+        execution: {
+          ...SQLITE_CAPABILITIES.execution,
+          interactiveTransactions: false,
+        },
         graphAnalytics: {
           ...(SQLITE_CAPABILITIES.graphAnalytics ?? {
             mathFunctions: false,
@@ -918,7 +925,7 @@ function createSqliteOperationBackend(
             efSearch: params.efSearch,
             indexType: params.indexType,
             tuning: vectorSearchFrontierTuning(vectorStrategy),
-            transactions: capabilities.transactions,
+            interactiveTransactions: capabilities.execution.interactiveTransactions,
             dialect: "SQLite",
             engine: vectorStrategy.name,
           });
@@ -980,7 +987,7 @@ function createSqliteOperationBackend(
                 efSearch: params.vector.efSearch,
                 indexType: params.vector.indexType,
                 tuning: vectorSearchFrontierTuning(vectorStrategy),
-                transactions: capabilities.transactions,
+                interactiveTransactions: capabilities.execution.interactiveTransactions,
                 dialect: "SQLite",
                 engine: vectorStrategy.name,
               });
@@ -1280,7 +1287,7 @@ export { isLocalLibsqlClient } from "./libsql-client";
  *   `transactionMode: "do-sqlite"` binds the OUTER `db`). A second wrapper's
  *   writes therefore land inside the first
  *   wrapper's open export snapshot, and because the DO backend reports
- *   `capabilities.transactions: true` nothing else abstains for it. Identified by
+ *   `capabilities.execution.interactiveTransactions: true` nothing else abstains for it. Identified by
  *   {@link getDurableObjectStorageClient}, the same full-shape evidence the
  *   transaction runner requires, so the framing and the mark cannot drift apart.
  * - **a local `@libsql/client`**: also one stable connection — which is exactly
@@ -1331,6 +1338,7 @@ export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
+  assertNoLegacyTransactionCapability(options.capabilities);
   // Resolved before the backend exists so marking below is a lookup, never
   // work that could fail after wrappers already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
@@ -1353,14 +1361,19 @@ export function createSqliteBackend(
   // extension loads); absent for plain SQLite drivers with no extension.
   const vectorStrategy = options.vector;
   const capabilityOverrides = options.capabilities ?? {};
-  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
-    ...buildSqliteCapabilities({
+  const baseCapabilities = buildSqliteCapabilities({
       fulltextStrategy,
       vectorStrategy,
       transactionMode,
       maxBindParameters: executionAdapter.profile.maxBindParameters,
-    }),
+    });
+  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
+    ...baseCapabilities,
     ...capabilityOverrides,
+    execution: {
+      ...baseCapabilities.execution,
+      ...capabilityOverrides.execution,
+    },
     maxBindParameters: resolveMaxBindParametersCapability(
       executionAdapter.profile,
       capabilityOverrides.maxBindParameters,
@@ -1384,8 +1397,13 @@ export function createSqliteBackend(
         rebuild: contributionRebuildSupported(
           fulltextStrategy,
           tables.fulltextTableName,
-          declaredCapabilities.transactions,
+          declaredCapabilities.execution.interactiveTransactions,
         ),
+      },
+      execution: {
+        ...declaredCapabilities.execution,
+        atomicBatch:
+          atomicSqlProgramExecutor === undefined ? "none" : ("root" as const),
       },
     },
   );
@@ -1610,7 +1628,7 @@ export function createSqliteBackend(
     // the absent fence, matching `capabilities.contributions.rebuild`.
     // The graph id the materializer passes is unused — this backend's
     // schema lock is per connection, not per graph.
-    ...(capabilities.transactions ?
+    ...(capabilities.execution.interactiveTransactions ?
       {
         schemaWriteTransaction: <T>(
           _graphId: string,
@@ -2485,7 +2503,7 @@ export function createSqliteBackend(
         throwSqliteTransactionsDisabled(
           "This SQLite backend does not support atomic transactions. " +
             "Operations within a transaction are not rolled back on failure. " +
-            "Use backend.capabilities.transactions to check for transaction support, " +
+            "Use backend.capabilities.execution.interactiveTransactions to check for transaction support, " +
             "or use individual operations with manual error handling.",
         );
       }
@@ -2617,7 +2635,9 @@ export function createSqliteBackend(
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
-  markBundledRootAtomicSqlProgram(backend, atomicSqlProgramExecutor);
+  if (atomicSqlProgramExecutor !== undefined) {
+    registerAtomicSqlProgram(backend, executionAdapter);
+  }
   markBundledRootAtomicMutationPrograms(backend, {
     createNodes: operations.executeAtomicNodeBatch,
     createEdges: operations.executeAtomicEdgeBatch,
@@ -2626,7 +2646,7 @@ export function createSqliteBackend(
     updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
     updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
     mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
-    mutateEdges: operations.executeAtomicEdgeResolvedMutationSet,
+    mutateEdges: operations.executeAtomicEdgeMutationProgram,
   });
 
   return backend;
@@ -2649,7 +2669,13 @@ function createTransactionBackend(
   // confirmed once stays a pure `Set.has` inside every later transaction.
   return markFirstPartyFactory(
     createSqliteOperationBackend({
-      capabilities: options.capabilities,
+      capabilities: {
+        ...options.capabilities,
+        execution: {
+          ...options.capabilities.execution,
+          atomicBatch: "none",
+        },
+      },
       db: options.db,
       executionAdapter: txExecutionAdapter,
       operationStrategy: options.operationStrategy,

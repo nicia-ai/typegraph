@@ -22,7 +22,10 @@ export type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 // @public
 type BackendCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
@@ -49,6 +52,13 @@ type BackendValidityEndMutation = Readonly<{
 }> | Readonly<{
     validTo?: never;
     clearValidTo: true;
+}>;
+
+// @public
+export type BundledBackendCapabilityOverrides = Readonly<Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+        interactiveTransactions?: boolean;
+    }>;
 }>;
 
 // @public
@@ -4495,7 +4505,7 @@ export type LocalSqliteBackendOptions = Readonly<{
     path?: string;
     pragmas?: LocalSqlitePragmaOptions | false;
     tables?: SqliteTables;
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
 }>;
 
 // @public

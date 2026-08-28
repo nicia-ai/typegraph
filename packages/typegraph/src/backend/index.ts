@@ -133,6 +133,17 @@ export {
   WS5B_SEED_BUNDLES,
   type Ws5bBundleId,
 } from "./capabilities";
+export type {
+  AtomicSqlBatchExecutor,
+  AtomicSqlProgramAdapter,
+  AtomicSqlProgramRegistration,
+  AtomicSqlRow,
+  CompiledAtomicSqlStatement,
+} from "./capabilities/atomic-sql-program";
+export {
+  hasAtomicSqlProgramRegistration,
+  registerAtomicSqlProgram,
+} from "./capabilities/atomic-sql-program";
 export type { RecursiveTraversalVerdict } from "./capabilities/recursive-traversal";
 export {
   assertRecursiveTraversal,
@@ -153,6 +164,17 @@ export {
   graphCommandExecutionContext,
   normalizeGraphCommandIsolation,
 } from "./command-contract";
+export type {
+  AtomicTransportConformanceFixture,
+  AtomicTransportConformanceReport,
+  AtomicTransportEquality,
+  AtomicTransportProvenanceChecks,
+  AtomicTransportRollbackCase,
+} from "./conformance/atomic-transport";
+export {
+  AtomicTransportConformanceError,
+  runAtomicTransportConformance,
+} from "./conformance/atomic-transport";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,
@@ -181,10 +203,12 @@ export type {
   AdapterBackend,
   AdapterBackendTransactions,
   BackendCapabilities,
+  BackendExecutionCapabilities,
   BackendIdentity,
   BackendLifecycle,
   BackendMaintenance,
   BackendTransactions,
+  BundledBackendCapabilityOverrides,
   CheckUniqueBatchParams,
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,
@@ -348,6 +372,8 @@ export {
   rowPropsToObject,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
+  supportsInteractiveTransactions,
+  supportsRootAtomicBatch,
 } from "./types";
 
 // Supporting vocabulary referenced by the authoring contracts above. Keeping

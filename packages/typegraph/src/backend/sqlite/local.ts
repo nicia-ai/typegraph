@@ -46,6 +46,7 @@ import {
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
+import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import {
   createSqliteBackend,
   type SqliteTables,
@@ -64,8 +65,11 @@ export {
   type LocalSqlitePragmaOptions,
   type LocalSqliteSynchronousMode,
 } from "./local-options";
-import { type AdapterBackend, type BackendCapabilities } from "../types";
-
+import {
+  type AdapterBackend,
+  type BundledBackendCapabilityOverrides,
+} from "../types";
+export type { BundledBackendCapabilityOverrides } from "../types";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -328,7 +332,7 @@ export type LocalSqliteBackendOptions = Readonly<{
    * gap like missing SQL window functions in tests. Forwarded to
    * createSqliteBackend.
    */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
 }>;
 
 /**
@@ -378,6 +382,7 @@ export type LocalSqliteBackendResult = Readonly<{
 export function createLocalSqliteBackend(
   options: LocalSqliteBackendOptions = {},
 ): LocalSqliteBackendResult {
+  assertNoLegacyTransactionCapability(options.capabilities);
   const path = options.path ?? ":memory:";
   const tables = options.tables ?? defaultTables;
 
@@ -410,7 +415,7 @@ export function createLocalSqliteBackend(
         graphAnalytics: {
           supported:
             options.capabilities?.graphAnalytics?.supported ??
-            options.capabilities?.transactions !== false,
+            options.capabilities?.execution?.interactiveTransactions !== false,
           mathFunctions:
             options.capabilities?.graphAnalytics?.mathFunctions ?? true,
         },

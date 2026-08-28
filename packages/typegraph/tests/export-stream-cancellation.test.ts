@@ -454,7 +454,7 @@ describe("Export stream cancellation", () => {
     const backend = createSqliteBackend(drizzle(database), {
       executionProfile: { transactionMode: "none", isSync: true },
     });
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
     const source = createStore(sourceGraph, backend);
     await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-abort" });
     const controller = new AbortController();

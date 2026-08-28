@@ -632,7 +632,7 @@ export class GraphObject {
 
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
 so `store.transaction()` / `store.withTransaction()` are fully atomic
-(`capabilities.transactions: true`). See
+(`capabilities.execution.interactiveTransactions: true`). See
 [Backend Setup](/backend-setup#cloudflare-durable-objects-sqlite) and the
 [Cross-Store Transactions recipe](/recipes#cross-store-transactions-drizzle--typegraph).
 

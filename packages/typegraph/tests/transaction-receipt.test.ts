@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, type GraphBackend } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  type GraphBackend,
+  UnsupportedBackendCapabilityError,
+} from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type TransactionBackend,
@@ -126,23 +132,18 @@ async function writeFixture(
 }
 
 describe("transaction receipts", () => {
-  it("returns counts on non-transactional backends", async () => {
+  it("refuses on non-transactional backends", async () => {
     const backend = disableTransactions(createTestBackend());
     const store = await createRawInitializedStore(receiptGraph, backend);
+    let invoked = false;
 
-    const outcome = await store.transactionWithReceipt(async (tx) => {
-      const person = await tx.nodes.Person.create({ name: "Alice" });
-      const company = await tx.nodes.Company.create({ name: "Acme" });
-      await tx.edges.worksAt.create(person, company, { role: "Engineer" });
-      return person.id;
-    });
-
-    expect(outcome.receipt.writes.nodes).toEqual({ Person: 1, Company: 1 });
-    expect(outcome.receipt.writes.edges).toEqual({ worksAt: 1 });
-    expect(outcome.receipt.writes.total).toBe(3);
     await expect(
-      store.nodes.Person.getById(outcome.result),
-    ).resolves.toMatchObject({ name: "Alice" });
+      store.transactionWithReceipt(() => {
+        invoked = true;
+        return Promise.resolve("unreachable");
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedBackendCapabilityError);
+    expect(invoked).toBe(false);
   });
 
   it("does not add backend write calls when receipt counting is requested", async () => {

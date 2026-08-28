@@ -9,6 +9,7 @@
  */
 import type {
   ClaimEdgeCardinalityParams,
+  EdgeConvergenceMatch,
   EdgeRow,
   GraphBackend,
   InsertEdgeParams,
@@ -64,6 +65,22 @@ export interface AtomicEdgeBatchExecutor {
   (input: AtomicEdgeBatchCountInput): Promise<number>;
   (input: AtomicEdgeBatchRowsInput): Promise<readonly EdgeRow[]>;
 }
+
+export type AtomicEdgeConvergenceEntry = Readonly<{
+  params: InsertEdgeParams;
+  match: EdgeConvergenceMatch;
+}>;
+
+export type AtomicEdgeConvergenceResult = Readonly<{
+  row: EdgeRow;
+  outcome: "created" | "found";
+}>;
+
+export type AtomicEdgeConvergenceInput = Readonly<{
+  kind: "durable-convergence";
+  entries: readonly AtomicEdgeConvergenceEntry[];
+  schemaFence: SchemaWriteFenceParams;
+}>;
 
 export type AtomicEdgeDeleteBatchInput = Readonly<{
   graphId: string;
@@ -142,21 +159,30 @@ export interface AtomicNodeResolvedMutationSetExecutor {
   ): Promise<AtomicNodeResolvedMutationSetResult>;
 }
 
-type AtomicEdgeResolvedMutationSetResult = Readonly<{
+export type AtomicEdgeResolvedMutationSetResult = Readonly<{
   created: readonly EdgeRow[];
   updated: readonly EdgeRow[];
 }>;
 
-export interface AtomicEdgeResolvedMutationSetExecutor {
-  /** Maximum total members the terminal postimage assertion can prove. */
-  readonly maxEntries: number;
+export type AtomicEdgeResolvedMutationSetInput = Readonly<{
+  kind: "resolved-set";
+  creates: readonly InsertEdgeParams[];
+  updates: readonly AtomicEdgeResolvedUpdateEntry[];
+  schemaFence: SchemaWriteFenceParams;
+}>;
+
+/** One callable edge-mutation family with explicit semantic variants. */
+export interface AtomicEdgeMutationProgramExecutor {
+  readonly maxEntries: Readonly<{
+    resolvedSet: number;
+    durableConvergence: number;
+  }>;
   (
-    input: Readonly<{
-      creates: readonly InsertEdgeParams[];
-      updates: readonly AtomicEdgeResolvedUpdateEntry[];
-      schemaFence: SchemaWriteFenceParams;
-    }>,
+    input: AtomicEdgeResolvedMutationSetInput,
   ): Promise<AtomicEdgeResolvedMutationSetResult>;
+  (
+    input: AtomicEdgeConvergenceInput,
+  ): Promise<readonly AtomicEdgeConvergenceResult[]>;
 }
 
 /** Internal proof that the closed SQL program rejected a missing endpoint. */
@@ -172,6 +198,14 @@ export class AtomicEdgeBatchCardinalityRefusalError extends Error {
   constructor(cause: unknown) {
     super("Atomic edge batch cardinality validation failed", { cause });
     this.name = "AtomicEdgeBatchCardinalityRefusalError";
+  }
+}
+
+/** Internal proof that native convergence encountered a tombstoned winner. */
+export class AtomicEdgeConvergenceTombstoneRefusalError extends Error {
+  constructor(cause: unknown) {
+    super("Atomic edge convergence requires portable resurrection", { cause });
+    this.name = "AtomicEdgeConvergenceTombstoneRefusalError";
   }
 }
 
@@ -203,7 +237,7 @@ export type AtomicMutationProgramExecutor = Readonly<{
   updateNodes?: AtomicNodeResolvedUpdateBatchExecutor;
   updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor;
   mutateNodes?: AtomicNodeResolvedMutationSetExecutor;
-  mutateEdges?: AtomicEdgeResolvedMutationSetExecutor;
+  mutateEdges?: AtomicEdgeMutationProgramExecutor;
 }>;
 
 const ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
@@ -222,7 +256,7 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
     updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor | undefined;
     mutateNodes?: AtomicNodeResolvedMutationSetExecutor | undefined;
-    mutateEdges?: AtomicEdgeResolvedMutationSetExecutor | undefined;
+    mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
   }>,
 ): T {
   ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(target, {

@@ -71,14 +71,14 @@ function canUseSchemaFenceAtExecutionBoundary(
   rootAutocommitAllowed: boolean,
 ): boolean {
   if (backend.commands.session === "transaction") return true;
-  if (backend.capabilities.transactions) return true;
+  if (backend.capabilities.execution.interactiveTransactions) return true;
   return rootAutocommitAllowed && isBundledRootAutocommitEligible(backend);
 }
 
 /**
  * The operation-independent proof that the schema fence may be carried by
  * the first INSERT. SQL statement atomicity is the relevant guarantee here;
- * `capabilities.transactions` describes interactive transaction support and
+ * `capabilities.execution.interactiveTransactions` describes interactive transaction support and
  * is one valid boundary, but is not required for a proven bundled-root write.
  */
 export function canFuseSchemaFenceInFirstWrite(

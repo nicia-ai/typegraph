@@ -384,7 +384,7 @@ export const ExportOptionsSchema = z.object({
   identityMode: IdentityInterchangeModeSchema.default("state"),
   /**
    * Cancels the export: whatever it had opened is settled — on a backend with
-   * `capabilities.transactions` that means its repeatable-read snapshot is
+   * `capabilities.execution.interactiveTransactions` that means its repeatable-read snapshot is
    * rolled back and the serialized connection's stream lease released; on one
    * without, there is no transaction and no lease, and the remaining reads are
    * simply abandoned. Either way the consumer is rejected with an

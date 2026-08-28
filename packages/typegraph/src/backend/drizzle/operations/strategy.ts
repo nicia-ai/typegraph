@@ -90,9 +90,14 @@ import {
   buildTakeOverEdgeClaim,
   buildTakeOverEdgeClaimGuarded,
 } from "./edge-claims";
-import type { ConvergeEdgeCreateParams } from "./edges";
+import type {
+  AtomicConvergeEdgesParams,
+  ConvergeEdgeCreateParams,
+} from "./edges";
 import {
   buildAssertAtomicEdgeMutationPostimages,
+  buildAtomicConvergeEdges,
+  buildAtomicConvergeEdgesTombstoneRefusal,
   buildAtomicEdgeDeleteBatchWithSchemaFence,
   buildAtomicEdgeResolvedUpdateBatch,
   buildConvergeEdgeCreate,
@@ -189,6 +194,7 @@ export type CommonOperationStrategy = Readonly<{
     durableIdentity: Readonly<{ table: string; column: string }>;
     endpoint: Readonly<{ table: string; column: string }>;
     mutationPostimage: Readonly<{ table: string; column: string }>;
+    tombstoneConvergence: Readonly<{ table: string; column: string }>;
   }>;
   atomicNodeRefusalConstraints: Readonly<{
     deleteRestricted: Readonly<{ table: string; column: string }>;
@@ -342,6 +348,11 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   /** Single-statement match-key convergence. */
   buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
+  /** Closed-program durable convergence and its tombstone revival leg. */
+  buildAtomicConvergeEdges?: (params: AtomicConvergeEdgesParams) => SQL;
+  buildAtomicConvergeEdgesTombstoneRefusal?: (
+    params: Omit<AtomicConvergeEdgesParams, "timestamp">,
+  ) => SQL;
   /** Whether the builder may inspect dynamic JSON match fields. */
   dynamicEdgeConvergence: boolean;
   /** PostgreSQL transaction-only claim + endpoint + edge write. */
@@ -828,6 +839,10 @@ function createCommonOperationStrategy(
     ...fulltextBuilders,
     buildConvergeEdgeCreate: (params) =>
       buildConvergeEdgeCreate(tables, params),
+    buildAtomicConvergeEdges: (params) =>
+      buildAtomicConvergeEdges(tables, params),
+    buildAtomicConvergeEdgesTombstoneRefusal: (params) =>
+      buildAtomicConvergeEdgesTombstoneRefusal(tables, params),
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
     dynamicEdgeConvergence: dialect === "postgres",
@@ -851,6 +866,10 @@ function createCommonOperationStrategy(
       mutationPostimage: {
         table: getTableName(tables.edges),
         column: tables.edges.kind.name,
+      },
+      tombstoneConvergence: {
+        table: getTableName(tables.edges),
+        column: tables.edges.updatedAt.name,
       },
     },
     buildAtomicEdgeDeleteBatchWithSchemaFence: (

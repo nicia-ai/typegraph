@@ -94,7 +94,8 @@ describe("SQLite Backend - Adapter Specific", () => {
       const backend = createSqliteBackend(db);
 
       expect(backend.dialect).toBe("sqlite");
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+      expect(backend.capabilities.execution.atomicBatch).toBe("none");
       expect(backend.capabilities.graphAnalytics).toEqual({
         supported: true,
         mathFunctions: false,
@@ -521,14 +522,16 @@ describe("SQLite Backend - Transaction Modes", () => {
 
   it("defaults to 'raw' transaction mode for better-sqlite3", () => {
     const backend = createSqliteBackend(db);
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
   });
 
   it("throws ConfigurationError when transactionMode is 'none'", async () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { transactionMode: "none" },
     });
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
     expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
 
     await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(
@@ -550,7 +553,7 @@ describe("SQLite Backend - Transaction Modes", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { transactionMode: "sql" },
     });
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
 
     const store = createStore(testGraph, backend);
     const person = await store.transaction(async (tx) => {
@@ -566,7 +569,7 @@ describe("SQLite Backend - Transaction Modes", () => {
     const backend = createSqliteBackend(db, {
       executionProfile: { transactionMode: "drizzle" },
     });
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
 
     // better-sqlite3 rejects async callbacks in db.transaction(), so this
     // verifies the "drizzle" path is reached (not the "sql" BEGIN/COMMIT path).

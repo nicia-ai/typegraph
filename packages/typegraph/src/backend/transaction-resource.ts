@@ -67,7 +67,7 @@
  *   only sees a stream that still names its own source backend — and an
  *   export/import pair interleaved on such a connection can still wedge. Closing
  *   that requires recognizing the driver, not more bookkeeping here.
- * - RESIDUAL GAP: a `transactions: false` export abstains entirely — it opens no
+ * - RESIDUAL GAP: an export without interactive transactions abstains entirely — it opens no
  *   snapshot transaction, so `exportGraphStream` neither claims the lease nor
  *   consults it: such an export is never refused and never refuses anyone.
  *   A streaming import claims the lease whatever its backend reports,
@@ -76,7 +76,7 @@
  *   streaming imports through a MARKED but deliberately `transactionMode:
  *   "none"` connection frame nothing and would in fact interleave harmlessly,
  *   yet the second is refused. That is the deliberate trade — the alternative
- *   (gating the import's claim on `capabilities.transactions` too) would stop a
+ *   (gating the import's claim on `capabilities.execution.interactiveTransactions` too) would stop a
  *   real snapshot export from being refused mid-import on a mixed-profile
  *   connection, which is the far likelier pairing.
  * - RESIDUAL GAP: the lease's population is INTERCHANGE STREAMS. Ordinary
@@ -140,7 +140,7 @@
  *   transaction. The storage transaction frame is AMBIENT on the storage object
  *   (no tx handle exists on DO), so a second wrapper's writes land inside the
  *   first wrapper's export snapshot; nothing else abstains, since the DO backend
- *   reports `capabilities.transactions: true`.
+ *   reports `capabilities.execution.interactiveTransactions: true`.
  *
  * DELIBERATELY UNMARKED, by class — marking these would refuse work that
  * succeeds:
@@ -150,7 +150,7 @@
  *   independent connection.
  * - Session-less HTTP drivers: `neon-http`, Cloudflare D1, RDS Data API. Nothing
  *   is held between statements, and the two that report
- *   `capabilities.transactions: false` are additionally short-circuited by
+ *   `capabilities.execution.interactiveTransactions: false` are additionally short-circuited by
  *   {@link snapshotExportContention} before marking is consulted.
  * - Remote `@libsql/client` (`http` / `ws`): an independent stream per
  *   transaction.
@@ -563,7 +563,7 @@ export type SnapshotExportContention =
  * import guard, and the working-copy cloner that exists to pre-empt it, both
  * ask here rather than re-deriving the arms.
  *
- * - A `transactions: false` source (SQLite `transactionMode: "none"`, HTTP-only
+ * - A source without interactive transactions (SQLite `transactionMode: "none"`, HTTP-only
  *   Postgres drivers) exports statement by statement with nothing held open, so
  *   sharing its connection is merely interleaving and is never contention.
  * - Object identity on a SQLite backend is checked FIRST, so a marked
@@ -574,7 +574,7 @@ export function snapshotExportContention(
   source: GraphBackend,
   target: GraphBackend,
 ): SnapshotExportContention | undefined {
-  if (!source.capabilities.transactions) return undefined;
+  if (!source.capabilities.execution.interactiveTransactions) return undefined;
   if (source === target && source.dialect === "sqlite") {
     return "same-sqlite-backend";
   }
@@ -620,7 +620,7 @@ function streamLeaseResource(backend: GraphBackend): object | undefined {
     audit?.kind === "independent" &&
     audit.identityLeaseResource !== undefined &&
     backend.dialect === "sqlite" &&
-    backend.capabilities.transactions
+    backend.capabilities.execution.interactiveTransactions
   ) {
     return audit.identityLeaseResource;
   }

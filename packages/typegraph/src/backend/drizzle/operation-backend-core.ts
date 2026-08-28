@@ -46,10 +46,15 @@ import {
   AtomicEdgeBatchEndpointRefusalError,
   type AtomicEdgeBatchExecutor,
   type AtomicEdgeBatchRowsInput,
+  type AtomicEdgeConvergenceInput,
+  type AtomicEdgeConvergenceResult,
+  AtomicEdgeConvergenceTombstoneRefusalError,
   type AtomicEdgeDeleteBatchExecutor,
   type AtomicEdgeDeleteBatchInput,
   AtomicEdgeDeleteIdentityRefusalError,
-  type AtomicEdgeResolvedMutationSetExecutor,
+  type AtomicEdgeMutationProgramExecutor,
+  type AtomicEdgeResolvedMutationSetInput,
+  type AtomicEdgeResolvedMutationSetResult,
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicEdgeResolvedUpdateEntry,
   type AtomicNodeBatchEntry,
@@ -156,6 +161,8 @@ import {
 // fields as well as the source fields. Chunk every cardinality to that ceiling
 // so a mixed batch cannot cross the driver's per-statement bind budget.
 const ATOMIC_EDGE_CLAIM_PARAM_COUNT = 18;
+const ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT = 14;
+const ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT = 2;
 
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
@@ -483,7 +490,7 @@ export type CommonOperationBackend = Pick<
     executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
     executeAtomicEdgeDeleteBatch?: AtomicEdgeDeleteBatchExecutor;
     executeAtomicEdgeResolvedUpdateBatch?: AtomicEdgeResolvedUpdateBatchExecutor;
-    executeAtomicEdgeResolvedMutationSet?: AtomicEdgeResolvedMutationSetExecutor;
+    executeAtomicEdgeMutationProgram?: AtomicEdgeMutationProgramExecutor;
     /**
      * The read-only fence audit. Not a `TransactionBackend` member — it is a
      * diagnostic the store runs at the top-level backend, and nothing inside a
@@ -615,6 +622,20 @@ type AttemptedEdgeMatchIdentity = Readonly<{
   identityName: string;
   kind: string;
 }>;
+
+type AtomicEdgeConvergenceLowerer = Readonly<{
+  maxEntries: number;
+}> &
+  ((
+    input: Omit<AtomicEdgeConvergenceInput, "kind">,
+  ) => Promise<readonly AtomicEdgeConvergenceResult[]>);
+
+type AtomicEdgeResolvedMutationSetLowerer = Readonly<{
+  maxEntries: number;
+}> &
+  ((
+    input: Omit<AtomicEdgeResolvedMutationSetInput, "kind">,
+  ) => Promise<AtomicEdgeResolvedMutationSetResult>);
 
 function duplicateKeyOperationError(
   entity: "node" | "edge",
@@ -2090,6 +2111,203 @@ export function createCommonOperationBackend(
         }>;
       })();
 
+  const atomicEdgeConvergenceMembers: Readonly<{
+    executeAtomicEdgeConvergence?: AtomicEdgeConvergenceLowerer;
+  }> =
+    (
+      atomicSqlProgramExecutor === undefined ||
+      schemaFenceLockClause === undefined ||
+      operationStrategy.buildAtomicConvergeEdges === undefined ||
+      operationStrategy.buildAtomicConvergeEdgesTombstoneRefusal === undefined
+    ) ?
+      {}
+    : (() => {
+        const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+        const atomicSchemaFenceLockClause = requireDefined(
+          schemaFenceLockClause,
+        );
+        const buildCreate = requireDefined(
+          operationStrategy.buildAtomicConvergeEdges,
+        );
+        const buildTombstoneRefusal = requireDefined(
+          operationStrategy.buildAtomicConvergeEdgesTombstoneRefusal,
+        );
+        // The INSERT is the widest constant-size slot. Derive the public
+        // ceiling from that exact row shape so eligibility cannot outrun the
+        // transport's bind budget.
+        const maxEntries = Math.max(
+          0,
+          Math.floor(
+            (maxBindParameters - ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT) /
+              ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT,
+          ),
+        );
+
+        const executeAtomicEdgeConvergence = Object.assign(
+          async (
+            input: Omit<AtomicEdgeConvergenceInput, "kind">,
+          ): Promise<readonly AtomicEdgeConvergenceResult[]> => {
+            if (input.entries.length === 0) return [];
+            if (input.entries.length > maxEntries) {
+              throw new CompilerInvariantError(
+                "Atomic edge convergence exceeded its declared program budget.",
+                { entries: input.entries.length, maxEntries },
+              );
+            }
+            const inputIdentityKeys = new Set<string>();
+            for (const entry of input.entries) {
+              if (
+                entry.params.graphId !== input.schemaFence.graphId ||
+                entry.match.kind !== "durable" ||
+                entry.params.matchIdentity?.name !== entry.match.identity.name ||
+                entry.params.matchIdentity.key !== entry.match.identity.key
+              ) {
+                throw new CompilerInvariantError(
+                  "Atomic edge convergence input crossed its durable identity or schema fence.",
+                  { graphId: entry.params.graphId, id: entry.params.id },
+                );
+              }
+              const identityKey = encodeTupleKey([
+                entry.params.graphId,
+                entry.params.kind,
+                entry.match.identity.name,
+                entry.match.identity.key,
+              ]);
+              if (inputIdentityKeys.has(identityKey)) {
+                throw new CompilerInvariantError(
+                  "Atomic edge convergence received a duplicate durable identity.",
+                  { graphId: entry.params.graphId, id: entry.params.id },
+                );
+              }
+              inputIdentityKeys.add(identityKey);
+            }
+
+            const timestamp = nowIso();
+            const builderInput = {
+              entries: input.entries,
+              timestamp,
+              schemaFence: input.schemaFence,
+              schemaLockClause: atomicSchemaFenceLockClause,
+            };
+            const program = {
+              slots: [
+                {
+                  statement: execution.compile(buildCreate(builderInput)),
+                  cardinality: "many" as const,
+                  decode: (
+                    rows: readonly Readonly<Record<string, unknown>>[],
+                  ) => rows.map((row) => rowMappers.toEdgeRow(row)),
+                },
+                {
+                  statement: execution.compile(
+                    buildTombstoneRefusal({
+                      entries: builderInput.entries,
+                      schemaFence: builderInput.schemaFence,
+                      schemaLockClause: builderInput.schemaLockClause,
+                    }),
+                  ),
+                  cardinality: "none" as const,
+                  decode: decodeNoEdgeRows,
+                },
+              ],
+              assemble(
+                results: readonly (readonly EdgeRow[])[],
+              ): readonly AtomicEdgeConvergenceResult[] {
+                const rows = requireDefined(results[0]);
+                if (rows.length === 0) return [];
+                if (rows.length !== input.entries.length) {
+                  throw new CompilerInvariantError(
+                    "Atomic edge convergence returned a partial result set.",
+                    { expected: input.entries.length, actual: rows.length },
+                  );
+                }
+                const rowsByIdentity = new Map<string, EdgeRow>();
+                for (const row of rows) {
+                  if (
+                    row.match_identity_name === undefined ||
+                    row.match_identity_key === undefined ||
+                    row.deleted_at !== undefined
+                  ) {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence returned an invalid live identity.",
+                      { id: row.id, kind: row.kind },
+                    );
+                  }
+                  const key = encodeTupleKey([
+                    row.graph_id,
+                    row.kind,
+                    row.match_identity_name,
+                    row.match_identity_key,
+                  ]);
+                  if (rowsByIdentity.has(key)) {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence returned a duplicate identity.",
+                      { id: row.id, kind: row.kind },
+                    );
+                  }
+                  rowsByIdentity.set(key, row);
+                }
+                return input.entries.map((entry) => {
+                  if (entry.match.kind !== "durable") {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence result mapping received a dynamic identity.",
+                    );
+                  }
+                  const key = encodeTupleKey([
+                    entry.params.graphId,
+                    entry.params.kind,
+                    entry.match.identity.name,
+                    entry.match.identity.key,
+                  ]);
+                  const row = rowsByIdentity.get(key);
+                  if (row === undefined) {
+                    throw new CompilerInvariantError(
+                      "Atomic edge convergence omitted a durable identity.",
+                      { id: entry.params.id, kind: entry.params.kind },
+                    );
+                  }
+                  return {
+                    row,
+                    outcome:
+                      row.id === entry.params.id ? "created" : "found",
+                  };
+                });
+              },
+            } satisfies AtomicSqlProgram<
+              readonly EdgeRow[],
+              readonly AtomicEdgeConvergenceResult[]
+            >;
+
+            try {
+              return await executeClassifiedAtomicEdgeBatch(
+                atomicExecutor,
+                program,
+                operationStrategy.primaryKeyConstraints.edges,
+                operationStrategy.atomicEdgeRefusalConstraints,
+                input.entries.map((entry) => entry.params),
+                [],
+              );
+            } catch (error) {
+              if (
+                isNotNullColumnViolation(
+                  error,
+                  operationStrategy.atomicEdgeRefusalConstraints
+                    .tombstoneConvergence,
+                )
+              ) {
+                throw new AtomicEdgeConvergenceTombstoneRefusalError(error);
+              }
+              throw error;
+            }
+          },
+          { maxEntries },
+        );
+
+        return { executeAtomicEdgeConvergence } satisfies Readonly<{
+          executeAtomicEdgeConvergence: AtomicEdgeConvergenceLowerer;
+        }>;
+      })();
+
   const atomicNodeDeleteBatchMembers =
     (
       atomicSqlProgramExecutor === undefined ||
@@ -2487,7 +2705,9 @@ export function createCommonOperationBackend(
         return { executeAtomicEdgeResolvedUpdateBatch };
       })();
 
-  const atomicEdgeResolvedMutationSetMembers =
+  const atomicEdgeResolvedMutationSetMembers: Readonly<{
+    executeAtomicEdgeResolvedMutationSet?: AtomicEdgeResolvedMutationSetLowerer;
+  }> =
     (
       atomicSqlProgramExecutor === undefined ||
       schemaFenceLockClause === undefined
@@ -2510,8 +2730,8 @@ export function createCommonOperationBackend(
 
         const executeAtomicEdgeResolvedMutationSet = Object.assign(
           async (
-            input: Parameters<AtomicEdgeResolvedMutationSetExecutor>[0],
-          ) => {
+            input: Omit<AtomicEdgeResolvedMutationSetInput, "kind">,
+          ): Promise<AtomicEdgeResolvedMutationSetResult> => {
             const entryCount = input.creates.length + input.updates.length;
             if (entryCount === 0) return { created: [], updated: [] };
             assertResolvedEdgeMutationSetInput(
@@ -2608,9 +2828,71 @@ export function createCommonOperationBackend(
             }
           },
           { maxEntries },
-        ) satisfies AtomicEdgeResolvedMutationSetExecutor;
+        );
 
-        return { executeAtomicEdgeResolvedMutationSet };
+        return { executeAtomicEdgeResolvedMutationSet } satisfies Readonly<{
+          executeAtomicEdgeResolvedMutationSet: AtomicEdgeResolvedMutationSetLowerer;
+        }>;
+      })();
+
+  const atomicEdgeMutationProgramMembers =
+    (
+      atomicEdgeConvergenceMembers.executeAtomicEdgeConvergence === undefined ||
+      atomicEdgeResolvedMutationSetMembers.executeAtomicEdgeResolvedMutationSet ===
+        undefined
+    ) ?
+      {}
+    : (() => {
+        const convergence = requireDefined(
+          atomicEdgeConvergenceMembers.executeAtomicEdgeConvergence,
+        );
+        const resolvedSet = requireDefined(
+          atomicEdgeResolvedMutationSetMembers.executeAtomicEdgeResolvedMutationSet,
+        );
+        async function executeAtomicEdgeMutation(
+          input: AtomicEdgeResolvedMutationSetInput,
+        ): Promise<AtomicEdgeResolvedMutationSetResult>;
+        async function executeAtomicEdgeMutation(
+          input: AtomicEdgeConvergenceInput,
+        ): Promise<readonly AtomicEdgeConvergenceResult[]>;
+        async function executeAtomicEdgeMutation(
+          input: AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+        ): Promise<
+          | AtomicEdgeResolvedMutationSetResult
+          | readonly AtomicEdgeConvergenceResult[]
+        > {
+          switch (input.kind) {
+            case "resolved-set": {
+              return resolvedSet({
+                creates: input.creates,
+                updates: input.updates,
+                schemaFence: input.schemaFence,
+              });
+            }
+            case "durable-convergence": {
+              return convergence({
+                entries: input.entries,
+                schemaFence: input.schemaFence,
+              });
+            }
+            default: {
+              input satisfies never;
+              throw new CompilerInvariantError(
+                "Atomic edge mutation program received an unknown variant.",
+              );
+            }
+          }
+        }
+        const executeAtomicEdgeMutationProgram = Object.assign(
+          executeAtomicEdgeMutation,
+          {
+            maxEntries: {
+              resolvedSet: resolvedSet.maxEntries,
+              durableConvergence: convergence.maxEntries,
+            },
+          },
+        ) satisfies AtomicEdgeMutationProgramExecutor;
+        return { executeAtomicEdgeMutationProgram };
       })();
 
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
@@ -3152,7 +3434,7 @@ export function createCommonOperationBackend(
     ...atomicNodeResolvedMutationSetMembers,
     ...atomicEdgeDeleteBatchMembers,
     ...atomicEdgeResolvedUpdateBatchMembers,
-    ...atomicEdgeResolvedMutationSetMembers,
+    ...atomicEdgeMutationProgramMembers,
     ...schemaGraphWriteFenceMembers,
     commands: commandsPort,
 

@@ -263,7 +263,10 @@ async function lockSchemaVersionForStoreWriteUncached(
   const expectedVersion = ctx.schemaVersion;
   if (expectedVersion === undefined) return;
 
-  if ("transaction" in backend && !backend.capabilities.transactions) {
+  if (
+    "transaction" in backend &&
+    !backend.capabilities.execution.interactiveTransactions
+  ) {
     throw new ConfigurationError(
       "Schema-managed Store writes require a transactional backend so schema " +
         "changes and entity writes can share one fence.",
@@ -361,7 +364,9 @@ function resolveWriteTransactionMode(
   backend: GraphBackend | TransactionBackend,
 ): WriteTransactionMode {
   if (!("transaction" in backend)) return "existing";
-  return backend.capabilities.transactions ? "opened" : "none";
+  return backend.capabilities.execution.interactiveTransactions ?
+      "opened"
+    : "none";
 }
 
 /** What a caller must change to make each refused constraint class writable. */
@@ -415,7 +420,10 @@ export function constraintFenceRefusal(
   backend: GraphBackend | TransactionBackend,
   reason: ConstraintFenceReason,
 ): ConfigurationError | undefined {
-  if (!("transaction" in backend) || backend.capabilities.transactions) {
+  if (
+    !("transaction" in backend) ||
+    backend.capabilities.execution.interactiveTransactions
+  ) {
     return undefined;
   }
 

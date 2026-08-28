@@ -1583,7 +1583,7 @@ export class TrustedImportError extends TypeGraphError {
  *
  * Raised only after the export has given back everything it took, so receiving
  * it means the connection is already usable again. WHAT it took depends on the
- * backend: an export on one reporting `capabilities.transactions` holds a
+ * backend: an export on one reporting `capabilities.execution.interactiveTransactions` holds a
  * repeatable-read snapshot (and, on a serialized connection, that connection's
  * stream lease), and both are settled before this is thrown; an export on a
  * backend without transactions holds neither, and its remaining reads are

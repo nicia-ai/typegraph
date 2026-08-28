@@ -161,7 +161,7 @@ describe("Postgres pg_trgm extension prerequisite", () => {
       },
     } as unknown as AnyPgDatabase;
     const backend = createPostgresBackend(db, {
-      capabilities: { transactions: false },
+      capabilities: { execution: { interactiveTransactions: false } },
       vector: false,
     });
 

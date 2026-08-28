@@ -161,9 +161,27 @@ async function createChunkedLibsqlBackend(
   });
 }
 
+function declareAtomicBatchForTest(backend: GraphBackend): void {
+  Object.defineProperty(backend, "capabilities", {
+    configurable: true,
+    enumerable: true,
+    value: {
+      ...backend.capabilities,
+      execution: {
+        ...backend.capabilities.execution,
+        atomicBatch: "root",
+      },
+    },
+  });
+}
+
 describe("generated edge batch store consumer", () => {
   it("selects edge delete only for a valid exact-root input", () => {
-    const backend = { capabilities: { transactions: false } } as GraphBackend;
+    const backend = {
+      capabilities: {
+        execution: { interactiveTransactions: false, atomicBatch: "root" },
+      },
+    } as GraphBackend;
     markBundledRootAutocommitEligible(backend);
     markBundledRootAtomicMutationPrograms(backend, {
       deleteEdges: (deleteInput) =>
@@ -221,7 +239,11 @@ describe("generated edge batch store consumer", () => {
   });
 
   it("selects the atomic executor only for the exact marked root", async () => {
-    const backend = { capabilities: { transactions: false } } as GraphBackend;
+    const backend = {
+      capabilities: {
+        execution: { interactiveTransactions: false, atomicBatch: "root" },
+      },
+    } as GraphBackend;
     const executor = vi.fn(() =>
       Promise.resolve(1),
     ) as unknown as AtomicEdgeBatchExecutor;
@@ -259,6 +281,7 @@ describe("generated edge batch store consumer", () => {
 
     const { backend: realBackend } = createLocalSqliteBackend();
     try {
+      declareAtomicBatchForTest(realBackend);
       markBundledRootAutocommitEligible(realBackend);
       markBundledRootAtomicEdgeBatch(realBackend, executor);
       await realBackend.transaction(async (transactionBackend) => {
@@ -289,11 +312,16 @@ describe("generated edge batch store consumer", () => {
   ] as const)(
     "selects the atomic executor for %s",
     (_label, constrainedGraph) => {
-      const backend = { capabilities: { transactions: false } } as GraphBackend;
+      const backend = {
+        capabilities: {
+          execution: { interactiveTransactions: false, atomicBatch: "root" },
+        },
+      } as GraphBackend;
       const executor = vi.fn(() =>
         Promise.resolve(1),
       ) as unknown as AtomicEdgeBatchExecutor;
       markBundledRootAutocommitEligible(backend);
+      declareAtomicBatchForTest(backend);
       markBundledRootAtomicEdgeBatch(backend, executor);
 
       expect(
@@ -912,7 +940,13 @@ describe("generated edge batch store consumer", () => {
   });
 
   it("does not replace an unrelated executor failure with endpoint diagnostics", async () => {
-    const { backend } = createLocalSqliteBackend();
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-driver-failure-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
     try {
       const [store] = await createStoreWithSchema(graph, backend);
       const driverFailure = new Error("connection closed");
@@ -932,6 +966,8 @@ describe("generated edge batch store consumer", () => {
       ).rejects.toBe(driverFailure);
     } finally {
       await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
 

@@ -326,7 +326,10 @@ describe("atomic resolved update batches", () => {
     expect(requireDefined(profile.updateNodes).maxEntries).toBe(17);
     expect(requireDefined(profile.updateEdges).maxEntries).toBe(6);
     expect(requireDefined(profile.mutateNodes).maxEntries).toBe(17);
-    expect(requireDefined(profile.mutateEdges).maxEntries).toBe(6);
+    expect(requireDefined(profile.mutateEdges).maxEntries).toEqual({
+      durableConvergence: 7,
+      resolvedSet: 6,
+    });
 
     const common = {
       backend: budgetedBackend,

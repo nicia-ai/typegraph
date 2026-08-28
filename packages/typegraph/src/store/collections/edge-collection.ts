@@ -1104,7 +1104,7 @@ export function createEdgeCollection<
       // `runOptionallyInTransaction` is the one owner of "open a transaction if
       // this backend has one": already inside `store.transaction(...)` the
       // target IS the caller's transaction and no nested one opens, and on a
-      // backend that reports `transactions: false` there is nothing to open, so
+      // backend without interactive transactions there is nothing to open, so
       // the decision is exactly as fenced as that backend's writes are — which
       // is to say not at all, matching the atomicity it already cannot offer.
       const { results, mutations } = await runResolvedMutationSetConverging(
@@ -1261,11 +1261,10 @@ export function createEdgeCollection<
         }));
       };
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
-        return backend.transaction(async (txBackend) =>
-          getOrCreateAll(txBackend),
-        );
-      }
+      // The operation owns its transaction boundary. This lets exact-root
+      // atomic convergence dispatch before a derived transaction target hides
+      // the bundled backend proof; the portable implementation still enters
+      // `runWritePlan` and receives the same all-or-nothing boundary.
       return getOrCreateAll(backend);
     },
   };

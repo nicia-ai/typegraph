@@ -140,6 +140,7 @@ export type {
   AdapterBackend,
   AdapterBackendTransactions,
   BackendCapabilities,
+  BackendExecutionCapabilities,
   BackendIdentity,
   BackendLifecycle,
   BackendMaintenance,
@@ -233,6 +234,8 @@ export {
   type RowProps,
   rowPropsToJsonText,
   rowPropsToObject,
+  supportsInteractiveTransactions,
+  supportsRootAtomicBatch,
 } from "./backend/types";
 export type { FulltextStrategy } from "./query/dialect/fulltext-strategy";
 export {

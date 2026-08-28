@@ -199,7 +199,7 @@ export type ImportTarget<G extends GraphDef> =
  * transaction inside the export's open snapshot.
  *
  * Also refused, with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, when the backend
- * reports `transactions: false` AND the graph owes a claim that must be written
+ * reports `execution.interactiveTransactions: false` AND the graph owes a claim that must be written
  * before the row it gates — any unique constraint of any scope, any node kind
  * with a `disjointWith` partner, or any edge kind whose cardinality is not
  * `many`. An import writes those reservations like every other writer and takes
@@ -520,7 +520,7 @@ export async function importGraphStream<G extends GraphDef>(
   const targetBackend = storeBackend(store);
   // Whether this export would hold the connection the import writes through is
   // decided by the single owner of that predicate — including the
-  // `transactions: false` abstention, where nothing is held open and refusing
+  // `execution.interactiveTransactions: false` abstention, where nothing is held open and refusing
   // would refuse work that succeeds.
   const contention =
     sourceBackend === undefined ? undefined : (

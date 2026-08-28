@@ -398,7 +398,7 @@ describe("snapshot export contention", () => {
       // guard does not short-circuit before the identity check; and the pool is
       // deliberately unmarked, so the shared-resource arm cannot be what
       // answers.
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
       // Not marked because a pool is genuinely concurrent — the correct
       // classification for this driver, not an unidentified one.
       expect(sharesSerializedTransactionResource(backend, backend)).toBe(false);
@@ -959,7 +959,7 @@ describe("serialized SQLite client detection", () => {
     // Preconditions for the gap: transactions are on, so the interchange guard
     // does not short-circuit, and the two wrappers are distinct objects, so the
     // identity pre-flight cannot answer either.
-    expect(first.capabilities.transactions).toBe(true);
+    expect(first.capabilities.execution.interactiveTransactions).toBe(true);
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
     expect(snapshotExportContention(first, second)).toBe("shared-resource");
   });
@@ -970,7 +970,7 @@ describe("serialized SQLite client detection", () => {
     const first = createSqliteBackend(createClientDatabase(client));
     const second = createSqliteBackend(createClientDatabase(client));
 
-    expect(first.capabilities.transactions).toBe(true);
+    expect(first.capabilities.execution.interactiveTransactions).toBe(true);
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
     expect(snapshotExportContention(first, second)).toBe("shared-resource");
   });
@@ -1122,7 +1122,7 @@ function createDurableObjectDatabase(storage: object): AnySqliteDatabase {
  * whose transaction frame is ambient on the storage object, so a second
  * wrapper's import writes land inside the first wrapper's open export snapshot.
  * Nothing else abstains for it: the DO backend reports
- * `capabilities.transactions: true`, so the interchange guard reaches the
+ * `capabilities.execution.interactiveTransactions: true`, so the interchange guard reaches the
  * shared-resource question and needs an answer.
  *
  * A real Durable Object cannot run here (no workerd), so the storage client is
@@ -1140,7 +1140,7 @@ describe("Durable Object storage serialized-resource detection", () => {
     expect(first).not.toBe(second);
     // Precondition for the gap: transactions are on, so the guard does not
     // short-circuit and the mark is the only thing that can refuse the import.
-    expect(first.capabilities.transactions).toBe(true);
+    expect(first.capabilities.execution.interactiveTransactions).toBe(true);
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
     expect(snapshotExportContention(first, second)).toBe("shared-resource");
   });

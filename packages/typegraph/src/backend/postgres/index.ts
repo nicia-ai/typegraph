@@ -64,6 +64,7 @@ export {
 } from "../drizzle/postgres";
 export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
+  BundledBackendCapabilityOverrides,
   ContributionDiagnostic,
   ContributionDiagnosticState,
   ContributionRepairEntry,

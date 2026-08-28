@@ -164,7 +164,8 @@ function assertFactoryContracts(
 ): void {
   const portableStore = createStore(graph, portableBackend);
   const portableCapabilities: BackendCapabilities = portableStore.capabilities;
-  void portableCapabilities.transactions;
+  void portableCapabilities.execution.interactiveTransactions;
+  void portableCapabilities.execution.atomicBatch;
   void portableCapabilities.vector?.metrics;
   const portableView = new StoreView(portableStore, {
     valid: { mode: "current" },
@@ -437,7 +438,8 @@ export async function exerciseStrictLocalConsumers(): Promise<
     schemaManagement: { systemIndexes: "skip" },
     store: { schema: localSchema },
   });
-  void sqliteStore.capabilities.transactions;
+  void sqliteStore.capabilities.execution.interactiveTransactions;
+  void sqliteStore.capabilities.execution.atomicBatch;
   void sqliteStore.capabilities.vector?.metrics;
   if (false) {
     // @ts-expect-error Managed stores omit caller-owned transaction adoption.
@@ -452,7 +454,8 @@ export async function exerciseStrictLocalConsumers(): Promise<
     store: { schema: localSchema },
     vector: false,
   });
-  void pgliteStore.capabilities.transactions;
+  void pgliteStore.capabilities.execution.interactiveTransactions;
+  void pgliteStore.capabilities.execution.atomicBatch;
   void pgliteStore.capabilities.vector?.metrics;
   if (false) {
     // @ts-expect-error Managed stores omit caller-owned transaction adoption.

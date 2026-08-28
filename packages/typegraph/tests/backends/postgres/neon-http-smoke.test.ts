@@ -18,7 +18,7 @@
  *
  *   1. Driver detection identifies neon-http (callable + `.transaction`,
  *      no `.begin`) and skips the broken pg fast path.
- *   2. `capabilities.transactions` is auto-set to `false` so callers'
+ *   2. `capabilities.execution.interactiveTransactions` is auto-set to `false` so callers'
  *      transaction-aware code paths fall through to non-transactional
  *      execution rather than throwing.
  *   3. The explicit `capabilities` override option still wins over the
@@ -85,12 +85,10 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
     const backend = createPostgresBackend(db);
 
     expect(backend.dialect).toBe("postgres");
-    // The headline behavior: HTTP can't hold a session, so transactions
-    // are off. Callers like `store.transaction` check this capability
-    // and fall through to sequential execution when it's false.
-    // `commitSchemaVersion` is the exception — it requires atomicity
-    // and refuses with a typed ConfigurationError on this backend.
-    expect(backend.capabilities.transactions).toBe(false);
+    // HTTP cannot hold an interactive session, but Neon certifies its
+    // closed transaction(query[]) transport as one root atomic batch.
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("root");
     expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
     // Other capabilities are unchanged.
     expect(backend.capabilities.windowFunctions).toBe(true);
@@ -107,7 +105,7 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
         name: "ConfigurationError",
         details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-          transactions: false,
+          interactiveTransactions: false,
         }),
       }),
     );
@@ -166,16 +164,19 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
   });
 
   it("respects an explicit capabilities override", () => {
-    // The auto-detection sets `transactions: false`, but if the user
+    // The auto-detection sets interactive transactions to false, but if the user
     // explicitly opts back in (e.g. via a wsproxy that does support
     // sessions, or for testing), the override wins.
     const sql = neon("postgresql://test:test@invalid.neon.tech/test");
     const db = drizzleNeonHttp({ client: sql });
     const backend = createPostgresBackend(db, {
-      capabilities: { transactions: true, windowFunctions: false },
+      capabilities: {
+        execution: { interactiveTransactions: true },
+        windowFunctions: false,
+      },
     });
 
-    expect(backend.capabilities.transactions).toBe(true);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
     expect(backend.capabilities.windowFunctions).toBe(false);
   });
 });

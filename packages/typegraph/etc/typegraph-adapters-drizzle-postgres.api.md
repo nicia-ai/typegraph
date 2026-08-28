@@ -27,7 +27,10 @@ export type AnyPgTransaction = PgTransaction<PgQueryResultHKT, Record<string, un
 
 // @public
 type BackendCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
@@ -54,6 +57,13 @@ type BackendValidityEndMutation = Readonly<{
 }> | Readonly<{
     validTo?: never;
     clearValidTo: true;
+}>;
+
+// @public
+export type BundledBackendCapabilityOverrides = Readonly<Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+        interactiveTransactions?: boolean;
+    }>;
 }>;
 
 // @public
@@ -5203,7 +5213,7 @@ export type PostgresBackendOptions = Readonly<{
     tables?: PostgresTables;
     fulltext?: FulltextStrategy;
     vector?: VectorStrategy | false;
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
     prepareStatements?: boolean;
     preparedStatementCacheMax?: number;
     serializedResource?: SerializedResourceDeclaration;

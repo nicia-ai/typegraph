@@ -202,7 +202,7 @@ to recognize a history-store guard when you catch one.
 ### At-least-once with a separate cursor store
 
 When the runtime already owns checkpointing, or the backend cannot provide atomic
-transactions (`backend.capabilities.transactions === false` — Cloudflare D1,
+transactions (`backend.capabilities.execution.interactiveTransactions === false` — Cloudflare D1,
 `drizzle-orm/neon-http`), keep the cursor outside the graph transaction. The
 pattern is at-least-once plus idempotence: a crash after the graph writes but
 before the cursor write replays the batch, which is safe precisely because the
@@ -214,11 +214,10 @@ transactional driver, or deliberately construct a raw Store and own schema/write
 coordination yourself.
 
 ```typescript
-await store.transaction(async (tx) => {
-  for (const change of batch.changes) {
-    await projectChange(tx, change);
-  }
-});
+for (const change of batch.changes) {
+  // Each successful projection may commit before a later projection or cursor write fails.
+  await projectChange(store, change);
+}
 
 await cursorStore.save({
   sourceId: batch.sourceId,

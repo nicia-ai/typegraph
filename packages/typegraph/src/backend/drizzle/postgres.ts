@@ -85,10 +85,13 @@ import { markBundledRootAtomicMutationPrograms } from "../capabilities/atomic-mu
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
-  markBundledRootAtomicSqlProgram,
+  registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
-import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import {
+  assertBundledCapabilityDeclarations,
+  assertNoLegacyTransactionCapability,
+} from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
@@ -111,6 +114,7 @@ import {
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type BundledBackendCapabilityOverrides,
   type ClaimIndexMaterializationParams,
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
@@ -292,15 +296,17 @@ export type PostgresBackendOptions = Readonly<{
    * Override specific backend capabilities. Useful when the underlying
    * driver doesn't support a feature TypeGraph would otherwise assume —
    * for example, an HTTP-only Postgres driver that can't hold a session
-   * across statements would need `{ transactions: false }` so
-   * TypeGraph falls through to non-transactional execution paths.
+   * across statements would need
+   * `{ execution: { interactiveTransactions: false } }` so TypeGraph refuses
+   * paths that require an interactive transaction. Root atomic-batch support
+   * is transport-derived and cannot be overridden here.
    *
-   * `drizzle-orm/neon-http` is auto-detected and has `transactions`
+   * `drizzle-orm/neon-http` is auto-detected and has interactive transactions
    * disabled without an explicit override; this option exists for
    * other HTTP-style drivers and for tests that need to simulate a
    * capability gap.
    */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
   /**
    * Use server-side prepared statements (named statements cached per
    * pg connection) on the node-postgres / neon-serverless fast path.
@@ -711,6 +717,7 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
+  assertNoLegacyTransactionCapability(options.capabilities);
   // Resolved before the backend exists so marking it below is a lookup, never
   // work that could fail after a wrapper already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
@@ -744,7 +751,11 @@ export function createPostgresBackend(
   const httpOnlyOverrides =
     isNeonHttpClient(db) ?
       {
-        transactions: false,
+        execution: {
+          ...POSTGRES_CAPABILITIES.execution,
+          interactiveTransactions: false,
+          atomicBatch: "root" as const,
+        },
         graphAnalytics: {
           ...(baseCapabilities.graphAnalytics ?? { mathFunctions: true }),
           supported: false,
@@ -785,6 +796,11 @@ export function createPostgresBackend(
     ...baseCapabilities,
     ...httpOnlyOverrides,
     ...options.capabilities,
+    execution: {
+      ...baseCapabilities.execution,
+      ...httpOnlyOverrides.execution,
+      ...options.capabilities?.execution,
+    },
     ...driverBindParameterOverrides,
     pessimisticLocks,
   });
@@ -795,20 +811,6 @@ export function createPostgresBackend(
   // rebuild this backend cannot perform would be advertising a lie. The
   // HTTP-only drivers land on `rebuild: false` here because they cannot
   // hold a session across statements, so there is no fence to run under.
-  const capabilities: BackendCapabilities = assertBundledCapabilityDeclarations(
-    {
-      ...declaredCapabilities,
-      contributions: {
-        supported: true,
-        probe: true,
-        rebuild: contributionRebuildSupported(
-          fulltextStrategy,
-          tables.fulltextTableName,
-          declaredCapabilities.transactions,
-        ),
-      },
-    },
-  );
   const adapterOptions: PostgresExecutionAdapterOptions = {
     ...(options.prepareStatements === undefined ?
       {}
@@ -817,11 +819,30 @@ export function createPostgresBackend(
       {}
     : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
     maxBindParameters:
-      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+      declaredCapabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
+  const capabilities: BackendCapabilities = assertBundledCapabilityDeclarations(
+    {
+      ...declaredCapabilities,
+      execution: {
+        ...declaredCapabilities.execution,
+        atomicBatch:
+          atomicSqlProgramExecutor === undefined ? "none" : "root",
+      },
+      contributions: {
+        supported: true,
+        probe: true,
+        rebuild: contributionRebuildSupported(
+          fulltextStrategy,
+          tables.fulltextTableName,
+          declaredCapabilities.execution.interactiveTransactions,
+        ),
+      },
+    },
+  );
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -937,7 +958,7 @@ export function createPostgresBackend(
    *    extension so installing `vector` does not queue behind `pg_trgm`;
    *  - {@link withConcurrentCreateRetry} clears the 23505 an installer that did
    *    NOT take this lock can still hand us — a peer on an older version, whose
-   *    lock key differs, or a `capabilities.transactions: false` backend which
+   *    lock key differs, or a `capabilities.execution.interactiveTransactions: false` backend which
    *    has no transaction to hang a `pg_advisory_xact_lock` on (#446).
    *
    * The lock runs in its own transaction on purpose: a 23505 poisons an
@@ -963,7 +984,7 @@ export function createPostgresBackend(
       );
     }
     const ddl = `CREATE EXTENSION IF NOT EXISTS "${validated}";`;
-    if (!capabilities.transactions) {
+    if (!capabilities.execution.interactiveTransactions) {
       await executeConcurrentCreateDdl(ddl);
       return;
     }
@@ -1136,7 +1157,7 @@ export function createPostgresBackend(
     // Withheld rather than wired-and-throwing when the driver cannot hold
     // a session: the rebuild must refuse with its own typed error naming
     // the absent fence, matching `capabilities.contributions.rebuild`.
-    ...(capabilities.transactions ?
+    ...(capabilities.execution.interactiveTransactions ?
       {
         schemaWriteTransaction: <T>(
           graphId: string,
@@ -1180,7 +1201,7 @@ export function createPostgresBackend(
     graphId: string,
     fn: (tx: InternalOperationBackend) => Promise<T>,
   ): Promise<T> {
-    if (!capabilities.transactions) {
+    if (!capabilities.execution.interactiveTransactions) {
       throw new ConfigurationError(
         "Schema writes and removal cleanup require atomic transactions, " +
           "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
@@ -1188,8 +1209,8 @@ export function createPostgresBackend(
           "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
         {
           backend: "postgres",
-          capability: "transactions",
-          supportsTransactions: false,
+          capability: "execution.interactiveTransactions",
+          supportsInteractiveTransactions: false,
         },
       );
     }
@@ -1385,7 +1406,7 @@ export function createPostgresBackend(
     assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
 
     ...((
-      capabilities.transactions &&
+      capabilities.execution.interactiveTransactions &&
       executionAdapter.executeCompiled !== undefined
     ) ?
       {
@@ -2042,7 +2063,7 @@ export function createPostgresBackend(
       // the caller's relational write on `externalTx` *would* still
       // commit even though the graph write could not be undone. Refuse
       // loudly rather than silently degrade.
-      if (!capabilities.transactions) {
+      if (!capabilities.execution.interactiveTransactions) {
         throw new ConfigurationError(
           "Cross-store atomicity is unavailable on this Postgres backend: " +
             "its driver does not support transactions (drizzle-orm/neon-http, " +
@@ -2052,8 +2073,8 @@ export function createPostgresBackend(
             "(Pool/WebSocket) connection for cross-store transactions.",
           {
             backend: "postgres",
-            capability: "transactions",
-            supportsTransactions: false,
+            capability: "execution.interactiveTransactions",
+            supportsInteractiveTransactions: false,
           },
         );
       }
@@ -2091,7 +2112,9 @@ export function createPostgresBackend(
   markFirstPartyFactory(backend);
   markSchemaFencedInsertEligible(backend);
   markBundledRootAutocommitEligible(backend);
-  markBundledRootAtomicSqlProgram(backend, atomicSqlProgramExecutor);
+  if (atomicSqlProgramExecutor !== undefined) {
+    registerAtomicSqlProgram(backend, executionAdapter);
+  }
   markBundledRootAtomicMutationPrograms(backend, {
     createNodes: operations.executeAtomicNodeBatch,
     createEdges: operations.executeAtomicEdgeBatch,
@@ -2100,7 +2123,7 @@ export function createPostgresBackend(
     updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
     updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
     mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
-    mutateEdges: operations.executeAtomicEdgeResolvedMutationSet,
+    mutateEdges: operations.executeAtomicEdgeMutationProgram,
   });
   return backend;
 }
@@ -2483,7 +2506,7 @@ function createPostgresOperationBackend(
       efSearch: params.efSearch,
       indexType: params.indexType,
       tuning: vectorSearchFrontierTuning(vectorStrategy),
-      transactions: capabilities.transactions,
+      interactiveTransactions: capabilities.execution.interactiveTransactions,
       dialect: "PostgreSQL",
       engine: vectorStrategy?.name ?? "this backend",
     });
@@ -2495,14 +2518,14 @@ function createPostgresOperationBackend(
     }
     if (
       params.indexType === "hnsw" &&
-      capabilities.transactions &&
+      capabilities.execution.interactiveTransactions &&
       (await pgvectorIterativeScanSupported())
     ) {
       overrides.push({ name: "hnsw.iterative_scan", value: "strict_order" });
     }
     if (
       params.indexType === "ivfflat" &&
-      capabilities.transactions &&
+      capabilities.execution.interactiveTransactions &&
       (await pgvectorIterativeScanSupported())
     ) {
       overrides.push({
@@ -3258,7 +3281,13 @@ function createTransactionBackend(
       adapterOptions: options.adapterOptions,
       operationStrategy: options.operationStrategy,
       tableNames: options.tableNames,
-      capabilities: options.capabilities,
+      capabilities: {
+        ...options.capabilities,
+        execution: {
+          ...options.capabilities.execution,
+          atomicBatch: "none",
+        },
+      },
       fulltextStrategy: options.fulltextStrategy,
       vectorStrategy: options.vectorStrategy,
       contributionMaterializer: options.contributionMaterializer,

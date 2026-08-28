@@ -1,0 +1,7 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+Execute eligible durable `bulkGetOrCreateByEndpoints()` calls as one schema-fenced native atomic exchange on bundled Neon HTTP, Cloudflare D1, and libSQL roots. The eligible envelope is a schema-declared `matchIdentity` with `cardinality: "many"`, the declaration's match fields, default `ifExists: "return"`, and no temporal mutation. The program owns endpoint validation, identity arbitration, input-order restoration, and whole-call rollback. A tombstoned winner rolls the native attempt back and refuses transactionless convergence with the typed `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error; use a transactional backend when schema-aware resurrection is required. Dynamic match fields, update mode, constrained cardinality, temporal options, caller-owned transactions, derived/custom backends, and history/revision stores retain their existing path. The existing read-only fast path remains available to every backend: an all-live default-`"return"` batch completes from one set-oriented root read without opening a confirmation transaction.
+
+The libSQL transport inventory measures one `batch` submission and zero `execute` calls for a multi-item eligible call. This is a transport submission-count measurement, not a wall-clock RTT benchmark.
