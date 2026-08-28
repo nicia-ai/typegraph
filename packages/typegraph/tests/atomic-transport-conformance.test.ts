@@ -27,6 +27,7 @@ import {
   supportsRootAtomicBatch,
   type TransactionBackend,
 } from "../src/backend/types";
+import { TypeGraphError } from "../src/errors";
 
 type FakeState = Readonly<{
   primary: readonly string[];
@@ -155,10 +156,13 @@ describe("atomic transport conformance runner", () => {
   });
 
   it("catches a transport that leaks primary and sidecar writes", async () => {
-    await expect(
-      runAtomicTransportConformance(createFixture(false)),
-    ).rejects.toMatchObject({
+    const attempt = runAtomicTransportConformance(createFixture(false));
+
+    await expect(attempt).rejects.toBeInstanceOf(TypeGraphError);
+    await expect(attempt).rejects.toMatchObject({
       name: "AtomicTransportConformanceError",
+      code: "ATOMIC_TRANSPORT_CONFORMANCE_ERROR",
+      category: "system",
       details: { check: "later-statement rollback" },
     });
   });

@@ -57,10 +57,8 @@ export type AtomicSqlProgramRegistration = AtomicSqlBatchExecutor | AtomicSqlPro
 export type AtomicSqlRow = Readonly<Record<string, unknown>>;
 
 // @public (undocumented)
-export class AtomicTransportConformanceError extends Error {
+export class AtomicTransportConformanceError extends TypeGraphError {
     constructor(message: string, details?: Readonly<Record<string, unknown>>);
-    // (undocumented)
-    readonly details: Readonly<Record<string, unknown>>;
 }
 
 // @public (undocumented)

@@ -100,6 +100,7 @@ async function withTransactionlessLibsqlStore<T>(
   });
   const { backend: installer, db } = await createLibsqlBackend(client);
   const backend = createSqliteBackend(db, {
+    capabilities: { maxBindParameters: 100 },
     executionProfile: { isSync: false, transactionMode: "none" },
   });
   try {
@@ -190,6 +191,39 @@ describe("atomic durable bulk edge convergence", () => {
         expect(persistedTombstone).toBeDefined();
         expect(persistedTombstone?.deleted_at).not.toBeUndefined();
         await expect(store.edges.worksAt.find()).resolves.toEqual([]);
+      },
+    );
+  });
+
+  it("returns an all-found batch above the D1 native ceiling from one root read", async () => {
+    await withTransactionlessLibsqlStore(
+      async (store, _backend, client, seedStore) => {
+        const from = await seedStore.nodes.Person.create({ name: "Alice" });
+        const to = await seedStore.nodes.Company.create({ name: "Acme" });
+        const inputs = Array.from({ length: 8 }, (_, index) => ({
+          from,
+          to,
+          props: { role: `role-${String(index)}` },
+        }));
+        const seeded = await Promise.all(
+          inputs.map((input) =>
+            seedStore.edges.worksAt.create(input.from, input.to, input.props),
+          ),
+        );
+        const execute = vi.spyOn(client, "execute");
+        const batch = vi.spyOn(client, "batch");
+
+        const results =
+          await store.edges.worksAt.bulkGetOrCreateByEndpoints(inputs);
+
+        expect(results.map((result) => result.action)).toEqual(
+          Array.from({ length: 8 }, () => "found"),
+        );
+        expect(results.map((result) => result.edge.id)).toEqual(
+          seeded.map((edge) => edge.id),
+        );
+        expect(execute).toHaveBeenCalledOnce();
+        expect(batch).not.toHaveBeenCalled();
       },
     );
   });

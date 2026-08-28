@@ -1,7 +1,7 @@
 /**
  * Tests for getOrCreateBy* APIs on NodeCollection and EdgeCollection.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
@@ -15,7 +15,7 @@ import {
 } from "../src/errors";
 import { createStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, disableTransactions } from "./test-utils";
 
 // ============================================================
 // Test Schema
@@ -875,6 +875,66 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     expect(requireDefined(results[0]).edge.role).toBe("manager");
     expect(requireDefined(results[1]).action).toBe("found");
     expect(requireDefined(results[1]).edge.id).toBe(existing.id);
+  });
+
+  it("returns an all-found dynamic batch from one root read without a transaction", async () => {
+    const seedStore = createStore(edgeGraph, backend);
+    const alice = await seedStore.nodes.Person.create({ name: "Alice" });
+    const acme = await seedStore.nodes.Company.create({ name: "Acme" });
+    const existing = await seedStore.edges.worksAt.create(alice, acme, {
+      role: "eng",
+      since: 2020,
+    });
+    const transaction = vi.spyOn(backend, "transaction");
+    const endpointRead = vi.spyOn(
+      backend,
+      "findEdgesByHeterogeneousEndpointSet",
+    );
+    const transactionlessStore = createStore(
+      edgeGraph,
+      disableTransactions(backend),
+    );
+
+    const results =
+      await transactionlessStore.edges.worksAt.bulkGetOrCreateByEndpoints(
+        [
+          { from: alice, to: acme, props: { role: "eng", since: 2024 } },
+          { from: alice, to: acme, props: { role: "eng", since: 2025 } },
+        ],
+        { matchOn: ["role"] },
+      );
+
+    expect(results.map((result) => result.action)).toEqual(["found", "found"]);
+    expect(results.map((result) => result.edge.id)).toEqual([
+      existing.id,
+      existing.id,
+    ]);
+    expect(endpointRead).toHaveBeenCalledOnce();
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("does not confirm an all-found dynamic batch in a read-only transaction", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+    const existing = await store.edges.worksAt.create(alice, acme, {
+      role: "eng",
+      since: 2020,
+    });
+    const transaction = vi.spyOn(backend, "transaction");
+    const endpointRead = vi.spyOn(
+      backend,
+      "findEdgesByHeterogeneousEndpointSet",
+    );
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+      [{ from: alice, to: acme, props: { role: "eng", since: 2024 } }],
+      { matchOn: ["role"] },
+    );
+
+    expect(results).toEqual([{ edge: existing, action: "found" }]);
+    expect(endpointRead).toHaveBeenCalledOnce();
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   it("within-batch duplicates (same endpoint + matchOn key)", async () => {

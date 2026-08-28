@@ -238,6 +238,20 @@ describe("durable convergence program ratchets", () => {
         ifExists: "return",
       }),
     ).toBe(executor);
+    expect(
+      resolveAtomicEdgeConvergenceExecutor({
+        backend,
+        graph: durableGraph,
+        schemaVersion: 1,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+        kind: "worksAt",
+        matchOn: ["role"],
+        inputs: Array.from({ length: 8 }, () => ({})),
+        uniqueEntryCount: 8,
+        ifExists: "return",
+      }),
+    ).toBeUndefined();
   });
 
   it("maps durable rows back to input order when SQL returns them reversed", async () => {

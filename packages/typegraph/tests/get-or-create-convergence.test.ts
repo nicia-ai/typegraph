@@ -857,10 +857,11 @@ describe("getOrCreateByEndpoints convergence", () => {
     expect(transactionReads).toBe(2);
   });
 
-  it("does not return a stale-positive bulk endpoint hint", async () => {
+  it("does not let a stale-positive root read authorize a bulk write", async () => {
     const setup = createStore(graph, raw);
     const alice = await setup.nodes.Person.create({ name: "Alice" });
     const bob = await setup.nodes.Person.create({ name: "Bob" });
+    const carol = await setup.nodes.Person.create({ name: "Carol" });
     const staleRow = requireDefined(
       await raw.insertEdge({
         graphId: graph.id,
@@ -902,14 +903,18 @@ describe("getOrCreateByEndpoints convergence", () => {
       }),
     );
 
-    const [result] = await store.edges.knows.bulkGetOrCreateByEndpoints([
+    const results = await store.edges.knows.bulkGetOrCreateByEndpoints([
       { from: alice, to: bob, props: { since: "requested" } },
+      { from: alice, to: carol, props: { since: "requested" } },
     ]);
 
-    expect(result?.action).toBe("created");
-    expect(result?.edge.id).not.toBe(staleRow.id);
+    expect(results.map((result) => result.action)).toEqual([
+      "created",
+      "created",
+    ]);
+    expect(results.map((result) => result.edge.id)).not.toContain(staleRow.id);
     expect(rootReads).toBe(1);
-    expect(transactionReads).toBe(2);
+    expect(transactionReads).toBe(1);
   });
 
   it("leaves the uncontended paths on their existing verdicts", async () => {

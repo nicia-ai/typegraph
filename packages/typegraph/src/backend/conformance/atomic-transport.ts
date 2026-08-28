@@ -9,6 +9,7 @@
  * checks and the failure vocabulary without depending on a test framework or
  * a database client.
  */
+import { TypeGraphError } from "../../errors";
 import type {
   AtomicSqlBatchExecutor,
   AtomicSqlRow,
@@ -75,16 +76,16 @@ export type AtomicTransportConformanceReport = Readonly<{
   passed: readonly string[];
 }>;
 
-export class AtomicTransportConformanceError extends Error {
-  readonly details: Readonly<Record<string, unknown>>;
-
+export class AtomicTransportConformanceError extends TypeGraphError {
   constructor(
     message: string,
     details: Readonly<Record<string, unknown>> = {},
   ) {
-    super(message);
+    super(message, "ATOMIC_TRANSPORT_CONFORMANCE_ERROR", {
+      category: "system",
+      details,
+    });
     this.name = "AtomicTransportConformanceError";
-    this.details = details;
   }
 }
 

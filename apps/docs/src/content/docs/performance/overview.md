@@ -155,11 +155,24 @@ multi-item eligible call; this is a submission-count measurement, not a
 wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
 cardinality, temporal options, caller transactions, derived/custom backends,
 and history/revision stores intentionally retain the fallback path.
+An all-live `ifExists: "return"` batch is the read-only exception: because it
+writes nothing, every backend may return that result from its single
+set-oriented root read without opening a confirmation transaction. Any batch
+that may create, resurrect, or update still requires the native program or the
+complete transactional fallback.
 If an otherwise eligible batch resolves a tombstoned identity, the native
 attempt rolls back and transactionless convergence refuses with the typed
 `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
 transaction-capable backend when resurrection must merge partial properties
 through the graph's Zod update schema.
+
+Cloudflare D1's 100-parameter budget admits at most seven **unique durable
+identities** in the native convergence program; duplicate inputs reuse their
+first identity and do not consume another program entry. Above that ceiling,
+an all-live return still completes as the one-read path described above. A
+batch that needs a write uses the portable fallback on a transaction-capable
+backend and refuses on a transactionless D1 root rather than splitting one
+atomic convergence contract across multiple submissions.
 
 Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
 programs for eligible ingestion calls. Plain schema-managed

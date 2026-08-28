@@ -1479,9 +1479,11 @@ and an undeclared `getOrCreateByEndpoints` that *finds* an existing edge in the 
 id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
 enabled, confirming that a single `ifExists: "update"` endpoint replay is
 unchanged requires the endpoint match-key convergence fence and therefore
-refuses on these backends. The bulk `getOrCreateByEndpoints` form fences its
-whole batch, so it retains that refusal on transactionless roots unless it
-matches the narrow native durable-convergence envelope: schema-declared
+refuses on these backends. The bulk `getOrCreateByEndpoints` form returns an
+all-live default-`"return"` batch from one set-oriented root read because that
+outcome writes nothing. If any member may write, the whole batch retains that
+refusal on transactionless roots unless it matches the narrow native
+durable-convergence envelope: schema-declared
 `matchIdentity`, `cardinality: "many"`, declared match fields, default
 `ifExists: "return"`, and no temporal mutation. That eligible form is one
 closed atomic exchange; dynamic match fields, update mode, constrained

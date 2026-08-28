@@ -84,9 +84,11 @@ primary and sidecar writes when a later statement fails. An authoritative comman
 whose database statement returns the decision it made. It can provide a safe
 transactionless create/found path only when the backend has a durable arbiter.
 
-Operational Identity, single-edge claim/cardinality enforcement, and
-undeclared dynamic `matchOn` convergence still require an interactive
-transaction and fail closed on a backend that cannot provide one. Eligible
+Operational Identity, single-edge claim/cardinality enforcement, and any
+undeclared dynamic `matchOn` convergence that may write still require an
+interactive transaction and fail closed on a backend that cannot provide one.
+An all-live `ifExists: "return"` endpoint batch is read-only and can return
+from its set-oriented root read without a transaction. Eligible
 direct edge batches on bundled roots are the narrow exception: their closed
 native program carries the claim sidecars inside one atomic exchange. A
 declared edge `matchIdentity` persists

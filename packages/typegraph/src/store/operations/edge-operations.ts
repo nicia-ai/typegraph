@@ -3685,43 +3685,40 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     return { toCreate, toFetch, duplicateOf };
   }
 
-  // A root read is only a dispatcher hint. A caching transport can replay a
-  // stale positive, so it cannot by itself justify returning a found row.
-  // Confirm the positive through a transaction-scoped target before taking
-  // the no-write fast path. Transactionless roots deliberately skip this
-  // optimization and use the complete fenced fallback below.
-  if (ifExists === "return") {
-    const probe = partitionEntries(await fetchRowsByEndpoint(backend));
-    const allFoundLive =
-      probe.toCreate.length === 0 &&
-      probe.toFetch.every((entry) => !entry.isDeleted);
+  function restoreAllFoundResults(
+    partition: ReturnType<typeof partitionEntries>,
+  ): Result[] | undefined {
     if (
-      allFoundLive &&
-      "transaction" in backend &&
-      backend.capabilities.execution.interactiveTransactions
+      partition.toCreate.length > 0 ||
+      partition.toFetch.some((entry) => entry.isDeleted)
     ) {
-      const authoritativeProbe = await backend.transaction(
-        async (target) => partitionEntries(await fetchRowsByEndpoint(target)),
-        { accessMode: "read_only" },
-      );
-      const authoritativeAllFoundLive =
-        authoritativeProbe.toCreate.length === 0 &&
-        authoritativeProbe.toFetch.every((entry) => !entry.isDeleted);
-      if (authoritativeAllFoundLive) {
-        const found: Result[] = Array.from({ length: items.length });
-        for (const entry of authoritativeProbe.toFetch) {
-          assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
-          found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
-        }
-        for (const { index, sourceIndex } of authoritativeProbe.duplicateOf) {
-          found[index] = {
-            edge: requireDefined(found[sourceIndex]).edge,
-            action: "found",
-          };
-        }
-        return found;
-      }
+      return;
     }
+
+    const found: Result[] = Array.from({ length: items.length });
+    for (const entry of partition.toFetch) {
+      assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
+      found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
+    }
+    for (const { index, sourceIndex } of partition.duplicateOf) {
+      found[index] = {
+        edge: requireDefined(found[sourceIndex]).edge,
+        action: "found",
+      };
+    }
+    return found;
+  }
+
+  // An all-live `ifExists: "return"` result is a read-only observation: it
+  // writes nothing and therefore needs no write fence or transaction-owned
+  // create-vs-fetch decision. A caching transport can return a stale positive,
+  // but that has the same semantics as any other read through that transport;
+  // only a partition that may write is re-derived inside the fenced session.
+  if (ifExists === "return") {
+    const found = restoreAllFoundResults(
+      partitionEntries(await fetchRowsByEndpoint(backend)),
+    );
+    if (found !== undefined) return found;
   }
 
   // The partition that decides create-vs-fetch is re-derived from `target`
