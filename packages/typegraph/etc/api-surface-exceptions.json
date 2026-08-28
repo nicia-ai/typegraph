@@ -1,1 +1,330 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.atomicBatch",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution.interactiveTransactions",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "execution",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "transactions",
+    "kind": "member-removed",
+    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
+    "issue": "#533"
+  }
+]
