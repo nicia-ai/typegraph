@@ -326,5 +326,69 @@
     "kind": "member-removed",
     "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
     "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicEdgeDeleteBatchInput",
+    "member": "graphId",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicEdgeDeleteBatchInput",
+    "member": "expectedKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicEdgeDeleteBatchInput",
+    "member": "ids",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicEdgeDeleteBatchInput",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicNodeDeleteBatchInput",
+    "member": "graphId",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicNodeDeleteBatchInput",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicNodeDeleteBatchInput",
+    "member": "ids",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "AtomicNodeDeleteBatchInput",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
+    "issue": "#533"
   }
 ]

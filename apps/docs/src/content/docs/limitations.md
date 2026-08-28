@@ -340,8 +340,9 @@ use one schema-fenced native exchange when history and revision capture are
 disabled. Declared durable match identities and `one`, `unique`, or
 `oneActive` cardinality are maintained inside that exchange; any endpoint,
 identity, or cardinality refusal rolls the whole call back. Transaction-scoped
-stores, derived/custom backends, and dynamic get-or-create convergence retain
-the interactive path.
+stores, derived backends, custom backends without the corresponding exact-root
+semantic registration, and dynamic get-or-create convergence retain the
+interactive path.
 
 Direct edge `bulkDelete()` calls use the same exact-root exchange and refuse a
 foreign-kind ID atomically. Plain node `bulkDelete()` qualifies when no unique,

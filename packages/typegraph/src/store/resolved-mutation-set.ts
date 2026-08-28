@@ -1,7 +1,7 @@
 import {
   type AtomicEdgeMutationProgramExecutor,
   type AtomicNodeResolvedMutationSetExecutor,
-  resolveBundledRootAtomicMutationPrograms,
+  resolveAtomicMutationPrograms,
 } from "../backend/capabilities/atomic-mutation-program";
 import type { GraphBackend, TransactionBackend } from "../backend/types";
 import { DatabaseOperationError } from "../errors";
@@ -30,7 +30,7 @@ export class ResolvedMutationSetMoved extends Error {
     entity: "node" | "edge",
     backend: GraphBackend | TransactionBackend,
   ): boolean {
-    const profile = resolveBundledRootAtomicMutationPrograms(backend);
+    const profile = resolveAtomicMutationPrograms(backend);
     return (
       (entity === "node" ? profile?.mutateNodes : profile?.mutateEdges) ===
       this.executor

@@ -340,6 +340,13 @@ describe("atomic durable bulk edge convergence", () => {
         resolveAtomicEdgeConvergenceExecutor({
           ...common,
           graph: durableGraph,
+          matchOn: ["role", "unexpected"],
+        }),
+      ).toBeUndefined();
+      expect(
+        resolveAtomicEdgeConvergenceExecutor({
+          ...common,
+          graph: durableGraph,
           ifExists: "update",
           inputs: [{ validTo: "2025-01-01T00:00:00.000Z" }],
         }),

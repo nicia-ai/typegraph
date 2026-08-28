@@ -63,7 +63,7 @@ import {
   isSqliteDuplicateEdgeMatchIdentityColumnError,
   isSqliteNotAuthorizedError,
 } from "../../utils/sql-errors";
-import { markBundledRootAtomicMutationPrograms } from "../capabilities/atomic-mutation-program";
+import { registerAtomicMutationPrograms } from "../capabilities/atomic-mutation-program";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -74,6 +74,7 @@ import {
   assertBundledCapabilityDeclarations,
   assertNoLegacyTransactionCapability,
 } from "../capabilities/declarations";
+import { downgradeRootAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -925,7 +926,8 @@ function createSqliteOperationBackend(
             efSearch: params.efSearch,
             indexType: params.indexType,
             tuning: vectorSearchFrontierTuning(vectorStrategy),
-            interactiveTransactions: capabilities.execution.interactiveTransactions,
+            interactiveTransactions:
+              capabilities.execution.interactiveTransactions,
             dialect: "SQLite",
             engine: vectorStrategy.name,
           });
@@ -987,7 +989,8 @@ function createSqliteOperationBackend(
                 efSearch: params.vector.efSearch,
                 indexType: params.vector.indexType,
                 tuning: vectorSearchFrontierTuning(vectorStrategy),
-                interactiveTransactions: capabilities.execution.interactiveTransactions,
+                interactiveTransactions:
+                  capabilities.execution.interactiveTransactions,
                 dialect: "SQLite",
                 engine: vectorStrategy.name,
               });
@@ -1362,11 +1365,11 @@ export function createSqliteBackend(
   const vectorStrategy = options.vector;
   const capabilityOverrides = options.capabilities ?? {};
   const baseCapabilities = buildSqliteCapabilities({
-      fulltextStrategy,
-      vectorStrategy,
-      transactionMode,
-      maxBindParameters: executionAdapter.profile.maxBindParameters,
-    });
+    fulltextStrategy,
+    vectorStrategy,
+    transactionMode,
+    maxBindParameters: executionAdapter.profile.maxBindParameters,
+  });
   const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
     ...baseCapabilities,
     ...capabilityOverrides,
@@ -2637,17 +2640,17 @@ export function createSqliteBackend(
   markBundledRootAutocommitEligible(backend);
   if (atomicSqlProgramExecutor !== undefined) {
     registerAtomicSqlProgram(backend, executionAdapter);
+    registerAtomicMutationPrograms(backend, {
+      createNodes: operations.executeAtomicNodeBatch,
+      createEdges: operations.executeAtomicEdgeBatch,
+      deleteNodes: operations.executeAtomicNodeDeleteBatch,
+      deleteEdges: operations.executeAtomicEdgeDeleteBatch,
+      updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
+      updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
+      mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
+      mutateEdges: operations.executeAtomicEdgeMutationProgram,
+    });
   }
-  markBundledRootAtomicMutationPrograms(backend, {
-    createNodes: operations.executeAtomicNodeBatch,
-    createEdges: operations.executeAtomicEdgeBatch,
-    deleteNodes: operations.executeAtomicNodeDeleteBatch,
-    deleteEdges: operations.executeAtomicEdgeDeleteBatch,
-    updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
-    updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
-    mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
-    mutateEdges: operations.executeAtomicEdgeMutationProgram,
-  });
 
   return backend;
 }
@@ -2669,13 +2672,7 @@ function createTransactionBackend(
   // confirmed once stays a pure `Set.has` inside every later transaction.
   return markFirstPartyFactory(
     createSqliteOperationBackend({
-      capabilities: {
-        ...options.capabilities,
-        execution: {
-          ...options.capabilities.execution,
-          atomicBatch: "none",
-        },
-      },
+      capabilities: downgradeRootAtomicBatch(options.capabilities),
       db: options.db,
       executionAdapter: txExecutionAdapter,
       operationStrategy: options.operationStrategy,

@@ -125,8 +125,9 @@ and can create write amplification, so it is not a substitute for a hot read
 cache.
 
 Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
-stores, caller-owned transactions, and custom backends retain the transactional
-path required by their additional contracts. Eligible durable bulk endpoint
+stores, caller-owned transactions, and custom backends without the matching
+semantic program retain the transactional path required by their additional
+contracts. Eligible durable bulk endpoint
 convergence now submits one closed native atomic exchange: the durable identity
 arbiter, endpoint validation, and ordered created/found
 results are all resolved by the program. This removes the outside probe, the
@@ -153,8 +154,9 @@ mutation qualifies on an exact bundled root. The libSQL transport inventory
 records one client `batch` submission and zero client `execute` calls for a
 multi-item eligible call; this is a submission-count measurement, not a
 wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
-cardinality, temporal options, caller transactions, derived/custom backends,
-and history/revision stores intentionally retain the fallback path.
+cardinality, temporal options, caller transactions, derived backends, custom
+backends without a registered durable-convergence family, and history/revision
+stores intentionally retain the fallback path.
 An all-live `ifExists: "return"` batch is the read-only exception: because it
 writes nothing, every backend may return that result from its single
 set-oriented root read without opening a confirmation transaction. Any batch
@@ -200,8 +202,8 @@ or disjointness claims, Operational Identity, search projections, history, or
 revision capture and its delete behavior is `restrict` (or omitted). The node
 statement rechecks connected live edges at the write boundary, so a restricted
 delete cannot race an earlier application-side probe. Cascade, disconnect,
-sidecar, captured, derived/custom-backend, and caller-transaction shapes keep
-the interactive path.
+sidecar, captured, derived-backend, unregistered custom-backend, and
+caller-transaction shapes keep the interactive path.
 
 These operations are registered through one exact-root mutation execution
 profile. Create and delete are **closed programs**: validation and arbitration

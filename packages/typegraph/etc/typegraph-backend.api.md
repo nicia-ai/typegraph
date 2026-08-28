@@ -43,6 +43,228 @@ export function assertVectorSearchLimit(limit: number): void;
 export function assumeRecursiveTraversalSupported(reason: string): RecursiveTraversalVerdict;
 
 // @public
+export type AtomicDeleteBatchResult = Readonly<{
+    affectedCount: number;
+    schemaFenceMatched: boolean;
+}>;
+
+// @public
+export class AtomicEdgeBatchCardinalityRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export type AtomicEdgeBatchCountInput = Readonly<{
+    claims: readonly ClaimEdgeCardinalityParams[];
+    params: readonly InsertEdgeParams[];
+    resultMode: "count";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export class AtomicEdgeBatchEndpointRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export interface AtomicEdgeBatchExecutor {
+    // (undocumented)
+    (input: AtomicEdgeBatchCountInput): Promise<number>;
+    // (undocumented)
+    (input: AtomicEdgeBatchRowsInput): Promise<readonly EdgeRow[]>;
+}
+
+// @public
+export type AtomicEdgeBatchRowsInput = Readonly<{
+    claims: readonly ClaimEdgeCardinalityParams[];
+    params: readonly InsertEdgeParams[];
+    resultMode: "rows";
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicEdgeConvergenceEntry = Readonly<{
+    params: InsertEdgeParams;
+    match: EdgeConvergenceMatch;
+}>;
+
+// @public
+export type AtomicEdgeConvergenceInput = Readonly<{
+    kind: "durable-convergence";
+    entries: readonly AtomicEdgeConvergenceEntry[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicEdgeConvergenceResult = Readonly<{
+    row: EdgeRow;
+    outcome: "created" | "found";
+}>;
+
+// @public
+export class AtomicEdgeConvergenceTombstoneRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export type AtomicEdgeDeleteBatchExecutor = (input: AtomicEdgeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>;
+
+// @public
+export type AtomicEdgeDeleteBatchInput = Readonly<{
+    graphId: string;
+    expectedKind: string;
+    ids: readonly string[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export class AtomicEdgeDeleteIdentityRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export interface AtomicEdgeMutationProgramExecutor {
+    // (undocumented)
+    (input: AtomicEdgeResolvedMutationSetInput): Promise<AtomicEdgeResolvedMutationSetResult>;
+    // (undocumented)
+    (input: AtomicEdgeConvergenceInput): Promise<readonly AtomicEdgeConvergenceResult[]>;
+    // (undocumented)
+    readonly maxEntries: Readonly<{
+        resolvedSet: number;
+        durableConvergence: number;
+    }>;
+}
+
+// @public
+export type AtomicEdgeResolvedMutationSetInput = Readonly<{
+    kind: "resolved-set";
+    creates: readonly InsertEdgeParams[];
+    updates: readonly AtomicEdgeResolvedUpdateEntry[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicEdgeResolvedMutationSetResult = Readonly<{
+    created: readonly EdgeRow[];
+    updated: readonly EdgeRow[];
+}>;
+
+// @public
+export interface AtomicEdgeResolvedUpdateBatchExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        entries: readonly AtomicEdgeResolvedUpdateEntry[];
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<readonly EdgeRow[]>;
+    // (undocumented)
+    readonly maxEntries: number;
+}
+
+// @public
+export type AtomicEdgeResolvedUpdateEntry = Readonly<{
+    existing: EdgeRow;
+    props: Readonly<Record<string, unknown>>;
+}>;
+
+// @public
+export type AtomicMutationProgramRegistration = Readonly<{
+    createNodes?: AtomicNodeBatchExecutor | undefined;
+    createEdges?: AtomicEdgeBatchExecutor | undefined;
+    deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
+    deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
+    updateNodes?: AtomicNodeResolvedUpdateBatchExecutor | undefined;
+    updateEdges?: AtomicEdgeResolvedUpdateBatchExecutor | undefined;
+    mutateNodes?: AtomicNodeResolvedMutationSetExecutor | undefined;
+    mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
+}>;
+
+// @public
+export type AtomicNodeBatchEntry = Readonly<{
+    idSource: AtomicNodeBatchIdSource;
+    params: InsertNodeParams;
+    claim?: NodeInsertClaim;
+}>;
+
+// @public
+export interface AtomicNodeBatchExecutor {
+    // (undocumented)
+    (input: AtomicNodeBatchInput & Readonly<{
+        resultMode: "count";
+    }>): Promise<number>;
+    // (undocumented)
+    (input: AtomicNodeBatchInput & Readonly<{
+        resultMode: "rows";
+    }>): Promise<readonly NodeRow[]>;
+    readonly maxClaimedEntries?: number;
+}
+
+// @public
+export type AtomicNodeBatchIdSource = "generated" | "caller";
+
+// @public
+export type AtomicNodeBatchInput = Readonly<{
+    entries: readonly AtomicNodeBatchEntry[];
+    resultMode: AtomicNodeBatchResultMode;
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export type AtomicNodeBatchResultMode = "count" | "rows";
+
+// @public
+export type AtomicNodeDeleteBatchExecutor = (input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>;
+
+// @public
+export type AtomicNodeDeleteBatchInput = Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+    schemaFence: SchemaWriteFenceParams;
+}>;
+
+// @public
+export class AtomicNodeDeleteRestrictedRefusalError extends Error {
+    constructor(cause: unknown);
+}
+
+// @public
+export interface AtomicNodeResolvedMutationSetExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        creates: readonly AtomicNodeBatchEntry[];
+        updates: readonly AtomicNodeResolvedUpdateEntry[];
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<AtomicNodeResolvedMutationSetResult>;
+    readonly maxEntries: number;
+}
+
+// @public
+export type AtomicNodeResolvedMutationSetResult = Readonly<{
+    created: readonly NodeRow[];
+    updated: readonly NodeRow[];
+}>;
+
+// @public
+export interface AtomicNodeResolvedUpdateBatchExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        entries: readonly AtomicNodeResolvedUpdateEntry[];
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<readonly NodeRow[]>;
+    // (undocumented)
+    readonly maxEntries: number;
+}
+
+// @public
+export type AtomicNodeResolvedUpdateEntry = Readonly<{
+    graphId: string;
+    kind: string;
+    id: string;
+    props: Readonly<Record<string, unknown>>;
+    expectedVersion: number;
+}>;
+
+// @public
 export type AtomicSqlBatchExecutor = <TRow>(statements: readonly CompiledAtomicSqlStatement[]) => Promise<readonly (readonly TRow[])[]>;
 
 // @public (undocumented)
@@ -2264,6 +2486,9 @@ export type HardDeleteUniquesByNodeIdsParams = Readonly<{
 }>;
 
 // @public
+export function hasAtomicMutationProgramRegistration(target: GraphBackend | TransactionBackend): boolean;
+
+// @public
 export function hasAtomicSqlProgramRegistration(target: GraphBackend | TransactionBackend): boolean;
 
 // @public
@@ -2910,6 +3135,9 @@ export type RecursiveTraversalVerdict = Readonly<{
     supported: false;
     reason: string;
 })>;
+
+// @public
+export function registerAtomicMutationPrograms<T extends GraphBackend>(target: T, registration: AtomicMutationProgramRegistration): T;
 
 // @public
 export function registerAtomicSqlProgram<T extends GraphBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
