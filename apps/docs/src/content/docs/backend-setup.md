@@ -1416,6 +1416,7 @@ the earned declaration with the exact root transport in its factory:
 import {
   registerAtomicMutationPrograms,
   registerAtomicSqlProgram,
+  runAtomicMutationProgramConformance,
   runAtomicTransportConformance,
 } from "@nicia-ai/typegraph/backend";
 
@@ -1428,9 +1429,12 @@ const backend = createCustomBackend({
   },
 });
 registerAtomicSqlProgram(backend, { executeAtomicBatch });
-registerAtomicMutationPrograms(backend, {
-  createNodes: executeAtomicNodeBatch,
-  createEdges: executeAtomicEdgeBatch,
+registerAtomicMutationPrograms(backend, mutationPrograms);
+
+await runAtomicMutationProgramConformance({
+  backend,
+  equal: deepEqual,
+  cases: semanticCases,
 });
 ```
 
@@ -1451,9 +1455,38 @@ The semantic executors must preserve the same schema fence, validation,
 side-effect, refusal classification, rollback, postimage correlation, result
 ordering, and bind-ceiling contracts as the bundled implementation. Registering
 one family is not evidence for another. Derived, projected, and
-transaction-scoped backends inherit neither root registration. Run the shared
-cross-backend Store integration cases for every family the custom backend
-registers; the transport conformance runner alone cannot prove graph semantics.
+transaction-scoped backends inherit neither root registration.
+
+`runAtomicMutationProgramConformance()` is the executable semantic boundary.
+For every positive-limit variant in `mutationPrograms`, the fixture supplies
+three real Store-level cases:
+
+1. an ordered success whose return value and independently read committed state
+   both match their oracles;
+2. a stale-schema-fence refusal that leaves the database unchanged; and
+3. a family-specific typed refusal that rolls back every sibling write.
+
+The runner resolves the profile from `backend`; it does not accept a detached
+profile description or caller-supplied provenance verdict. Each case resolves
+the exact registered backend root it exercises and observes that root's
+semantic executor dispatch count. Before any operation runs, the runner proves
+that root registration does not leak through projections or transaction
+sessions. It then refuses a success that silently used the portable fallback,
+a case bound to a different family claim, a missing or duplicate family case,
+and a case that claims an unregistered family. A zero entry limit is an honest
+opt-out and does not require an unreachable case. `mutateEdges` has separate
+`resolvedSet` and `durableConvergence` variants because proving one does not
+prove the other.
+
+The fixture callbacks should invoke public Store methods and inspect committed
+rows through an independent database read. Each case's `resolveBackend()` must
+return the same exact root used by that Store. Instrument the registered
+executor, or a transport hook unique to that family program, only to count
+dispatches; do not use executor return rows as the state oracle. Match
+Store-level typed errors rather than raw driver sentinels. The runner is
+framework-agnostic, so the same fixture runs in the custom backend's own test
+suite. Pair it with the shared cross-backend Store integration suite; transport
+conformance alone cannot prove graph semantics.
 
 The profile is family-scoped:
 

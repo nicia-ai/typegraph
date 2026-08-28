@@ -43,6 +43,9 @@ export function assertVectorSearchLimit(limit: number): void;
 export function assumeRecursiveTraversalSupported(reason: string): RecursiveTraversalVerdict;
 
 // @public
+export const ATOMIC_MUTATION_PROGRAM_VARIANTS: readonly ["createNodes", "createEdges", "deleteNodes", "deleteEdges", "updateNodes", "updateEdges", "mutateNodes", "mutateEdges.resolvedSet", "mutateEdges.durableConvergence"];
+
+// @public
 export type AtomicDeleteBatchResult = Readonly<{
     affectedCount: number;
     schemaFenceMatched: boolean;
@@ -167,6 +170,56 @@ export type AtomicEdgeResolvedUpdateEntry = Readonly<{
 }>;
 
 // @public
+export type AtomicMutationProgramConformanceCase = Readonly<{
+    variant: AtomicMutationProgramVariant;
+    orderedSuccess: AtomicMutationProgramSuccessCase;
+    staleFenceNoWrite: AtomicMutationProgramRefusalCase;
+    semanticRefusalRollback: AtomicMutationProgramRefusalCase;
+}>;
+
+// @public
+export class AtomicMutationProgramConformanceError extends TypeGraphError {
+    constructor(message: string, details?: Readonly<Record<string, unknown>>);
+}
+
+// @public
+export type AtomicMutationProgramConformanceFixture = Readonly<{
+    backend: GraphBackend;
+    equal: (actual: unknown, expected: unknown) => boolean;
+    cases: readonly AtomicMutationProgramConformanceCase[];
+}>;
+
+// @public
+export type AtomicMutationProgramConformancePreparation = Readonly<{
+    expectedResult: unknown;
+    expectedState: unknown;
+}>;
+
+// @public
+export type AtomicMutationProgramConformanceReport = Readonly<{
+    variants: readonly Readonly<{
+        variant: AtomicMutationProgramVariant;
+        passed: readonly string[];
+    }>[];
+    provenance: readonly string[];
+}>;
+
+// @public
+export type AtomicMutationProgramRefusalCase = Readonly<{
+    prepare: () => AtomicMutationProgramRefusalPreparation | PromiseLike<AtomicMutationProgramRefusalPreparation>;
+    resolveBackend: () => GraphBackend;
+    execute: () => unknown;
+    observeState: () => unknown;
+    observeDispatchCount: () => number | PromiseLike<number>;
+    errorMatches: (error: unknown) => boolean;
+}>;
+
+// @public
+export type AtomicMutationProgramRefusalPreparation = Readonly<{
+    expectedState: unknown;
+}>;
+
+// @public
 export type AtomicMutationProgramRegistration = Readonly<{
     createNodes?: AtomicNodeBatchExecutor | undefined;
     createEdges?: AtomicEdgeBatchExecutor | undefined;
@@ -177,6 +230,18 @@ export type AtomicMutationProgramRegistration = Readonly<{
     mutateNodes?: AtomicNodeResolvedMutationSetExecutor | undefined;
     mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
 }>;
+
+// @public
+export type AtomicMutationProgramSuccessCase = Readonly<{
+    prepare: () => AtomicMutationProgramConformancePreparation | PromiseLike<AtomicMutationProgramConformancePreparation>;
+    resolveBackend: () => GraphBackend;
+    execute: () => unknown;
+    observeState: () => unknown;
+    observeDispatchCount: () => number | PromiseLike<number>;
+}>;
+
+// @public
+export type AtomicMutationProgramVariant = (typeof ATOMIC_MUTATION_PROGRAM_VARIANTS)[number];
 
 // @public
 export type AtomicNodeBatchEntry = Readonly<{
@@ -3259,6 +3324,9 @@ export function rowPropsToJsonText(props: RowProps): string;
 
 // @public
 export function rowPropsToObject(props: RowProps): Record<string, unknown>;
+
+// @public
+export function runAtomicMutationProgramConformance(fixture: AtomicMutationProgramConformanceFixture): Promise<AtomicMutationProgramConformanceReport>;
 
 // @public
 export function runAtomicTransportConformance<TSnapshot = unknown>(fixture: AtomicTransportConformanceFixture<TSnapshot>): Promise<AtomicTransportConformanceReport>;

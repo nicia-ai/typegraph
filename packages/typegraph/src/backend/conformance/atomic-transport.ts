@@ -15,6 +15,7 @@ import type {
   AtomicSqlRow,
   CompiledAtomicSqlStatement,
 } from "../capabilities/atomic-sql-program";
+import { assertExactRootRegistrationProvenance } from "./exact-root-provenance";
 
 export type AtomicTransportEquality = (
   actual: unknown,
@@ -192,24 +193,15 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
   assertEqual(fixture.equal, emptyAfter, emptyBefore, "empty-batch no-op");
   passed.push("empty batch");
 
-  const provenanceChecks = [
-    ["exact root registration", fixture.provenance.exactRootRegistration],
-    ["derived backend isolation", fixture.provenance.derivedBackendIsolation],
-    [
-      "transaction backend isolation",
-      fixture.provenance.transactionBackendIsolation,
-    ],
-  ] as const;
-  for (const [name, check] of provenanceChecks) {
-    if (await check()) {
-      passed.push(`provenance: ${name}`);
-      continue;
-    }
-    throw new AtomicTransportConformanceError(
-      `Atomic transport provenance check failed: ${name}.`,
-      { check: `provenance: ${name}` },
-    );
-  }
+  const provenance = await assertExactRootRegistrationProvenance(
+    fixture.provenance,
+    (name) =>
+      new AtomicTransportConformanceError(
+        `Atomic transport provenance check failed: ${name}.`,
+        { check: `provenance: ${name}` },
+      ),
+  );
+  passed.push(...provenance.map((name) => `provenance: ${name}`));
 
   return { passed };
 }

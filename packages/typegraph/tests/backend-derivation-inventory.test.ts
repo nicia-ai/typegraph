@@ -93,6 +93,12 @@ const INVENTORY: readonly InventoryEntry[] = [
       "The seam composing itself: managed close is an overlay of one member, so the idempotent `close` decorates rather than copies.",
   },
   {
+    file: "backend/conformance/atomic-mutation-program.ts",
+    line: "projectGraphBackend(fixture.backend),",
+    reason:
+      "Semantic conformance deliberately probes a projected view of the registered root to prove exact-root mutation-program evidence does not leak through derivation.",
+  },
+  {
     file: "backend/drizzle/contribution-materializations.ts",
     line: "return deriveBackend<TransactionBackend>(",
     reason:
