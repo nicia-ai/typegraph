@@ -18,10 +18,7 @@ import {
   INVERTED_VALIDITY_WINDOW_CODE,
   ValidationError,
 } from "../src";
-import {
-  deriveBackend,
-  projectBackendWithout,
-} from "../src/backend/derive-backend";
+import { deriveBackend } from "../src/backend/derive-backend";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import type { SqliteTables } from "../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -414,7 +411,7 @@ export function withEdgeUpdateCounting(
     };
   }
   return {
-    backend: deriveBackend(unfrozenSeamCopy(base), {
+    backend: deriveBackend(base, {
       updateEdge: countingUpdateEdge(base),
       transaction: <T>(
         fn: (tx: TransactionBackend) => Promise<T>,
@@ -443,31 +440,6 @@ function toZonedTimestampText(value: string | undefined): string | undefined {
   return `${value.slice(0, -1)}+00:00`;
 }
 
-/**
- * A fresh, writable backend carrying the source's serialized-resource verdict.
- *
- * `store.backend` is a FROZEN projection (`createStore` freezes it), and a
- * Proxy may not answer a `get` for a non-configurable, non-writable own
- * property with anything other than the target's own value — so decorating a
- * frozen backend directly throws `TypeError: 'get' on proxy: property
- * 'transaction' is a read-only and non-configurable data property…`. Omitting
- * nothing copies through the seam into a fresh object, which carries the
- * verdict and is legal to decorate.
- *
- * Exported because every double that may be handed `store.backend` needs the
- * same re-box, and one owner for that decision is what keeps a caller from
- * discovering the Proxy invariant the hard way. A double over a factory-built
- * backend may decorate it directly; going through here costs one shallow copy
- * and is never wrong.
- */
-export function unfrozenSeamCopy(base: GraphBackend): GraphBackend;
-export function unfrozenSeamCopy(base: TransactionBackend): TransactionBackend;
-export function unfrozenSeamCopy(
-  base: GraphBackend | TransactionBackend,
-): GraphBackend | TransactionBackend {
-  return projectBackendWithout(base, []);
-}
-
 function withZonedWindow<T extends ValidityWindowRow>(row: T): T {
   return {
     ...row,
@@ -489,7 +461,7 @@ function withZonedWindowReads(target: TransactionBackend): TransactionBackend;
 function withZonedWindowReads(
   target: GraphBackend | TransactionBackend,
 ): GraphBackend | TransactionBackend {
-  return deriveBackend(unfrozenSeamCopy(target), {
+  return deriveBackend(target, {
     getNode: async (graphId: string, kind: string, id: string) => {
       const row = await target.getNode(graphId, kind, id);
       return row === undefined ? undefined : withZonedWindow(row);

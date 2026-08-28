@@ -62,7 +62,6 @@ import { requireDefined } from "../../../src/utils/presence";
 import {
   recordedInstantFromDriver,
   recordedRevisionFromDriver,
-  unfrozenSeamCopy,
 } from "../../test-utils";
 import { type HistoryIntegrationStore, integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -335,10 +334,7 @@ function withTransactionBindLimit(
 function withBindLimit(backend: GraphBackend, maxParams: number): GraphBackend {
   const executeStatement = backend.executeStatement;
   const executeRaw = backend.executeRaw;
-  // Re-boxed first: the callers hand this `store.backend`, which `createStore`
-  // FREEZES, and a Proxy may not answer a `get` for a non-configurable,
-  // non-writable own property with anything but the target's own value.
-  return deriveBackend(unfrozenSeamCopy(backend), {
+  return deriveBackend(backend, {
     // Advertise the simulated ceiling so recorded reads/writes chunk to it the
     // same way they chunk to a real engine's `maxBindParameters`; the execution
     // guards below then prove no top-level or transaction-scoped statement
@@ -398,7 +394,7 @@ function hideInsertBatchHelpers(
 function withoutTransactionInsertBatchHelpers(
   backend: GraphBackend,
 ): GraphBackend {
-  return deriveBackend(unfrozenSeamCopy(backend), {
+  return deriveBackend(backend, {
     async transaction(fn, options) {
       return backend.transaction(
         (target) => fn(hideInsertBatchHelpers(target)),
@@ -412,7 +408,7 @@ function withoutTransactionInsertBatchHelpers(
 // edge capture must fall back to per-id `getEdge` when reading after-images —
 // the path a minimal custom backend that implements only `getEdge` would hit.
 function withoutTransactionGetEdges(backend: GraphBackend): GraphBackend {
-  return deriveBackend(unfrozenSeamCopy(backend), {
+  return deriveBackend(backend, {
     async transaction(fn, options) {
       return backend.transaction((target) => {
         const { getEdges: _getEdges, ...rest } = target;
@@ -427,7 +423,7 @@ function rejectUniqueFinalization(): Promise<never> {
 }
 
 function withFailingUniqueFinalization(backend: GraphBackend): GraphBackend {
-  return deriveBackend(unfrozenSeamCopy(backend), {
+  return deriveBackend(backend, {
     capabilities: {
       ...backend.capabilities,
       atomicNodeInsertClaims: false,

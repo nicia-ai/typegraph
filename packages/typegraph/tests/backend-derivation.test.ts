@@ -125,6 +125,41 @@ describe("recordedTableDdl", () => {
   });
 });
 
+describe("deriveBackend over frozen inputs", () => {
+  it("overlays members without violating proxy invariants", () => {
+    const base: Readonly<{
+      capabilities: Readonly<{
+        execution: Readonly<{
+          interactiveTransactions: boolean;
+          atomicBatch: "root";
+        }>;
+      }>;
+      run: () => string;
+    }> = Object.freeze({
+      capabilities: Object.freeze({
+        execution: Object.freeze({
+          interactiveTransactions: true,
+          atomicBatch: "root" as const,
+        }),
+      }),
+      run: () => "base",
+    });
+
+    const derived = deriveBackend(base, { run: () => "overlay" });
+
+    expect(derived.run()).toBe("overlay");
+    expect(derived.capabilities.execution).toEqual({
+      interactiveTransactions: true,
+      atomicBatch: "none",
+    });
+    expect(Reflect.ownKeys(derived)).toEqual(["capabilities", "run"]);
+    expect(Object.getOwnPropertyDescriptor(derived, "run")).toMatchObject({
+      configurable: true,
+      enumerable: true,
+    });
+  });
+});
+
 describe("a backend's resource verdict is written once", () => {
   it("keeps a derived backend unaudited when its base is audited afterwards", () => {
     // The lease reads this value and closes over the resource it claimed. A

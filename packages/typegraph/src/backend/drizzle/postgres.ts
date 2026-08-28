@@ -88,7 +88,10 @@ import {
   registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
-import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import {
+  assertBundledCapabilityDeclarations,
+  assertNoLegacyTransactionCapability,
+} from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
@@ -714,6 +717,7 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
+  assertNoLegacyTransactionCapability(options.capabilities);
   // Resolved before the backend exists so marking it below is a lookup, never
   // work that could fail after a wrapper already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused

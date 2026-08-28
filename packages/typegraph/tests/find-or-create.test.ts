@@ -1070,6 +1070,41 @@ describe("store.edges.*.bulkGetOrCreateByEndpoints()", () => {
     expect(requireDefined(results[0]).edge.meta.deletedAt).toBeUndefined();
   });
 
+  it("returns live matches alongside batched tombstone resurrection", async () => {
+    const store = createStore(edgeGraph, backend);
+    const alice = await store.nodes.Person.create({ name: "Alice" });
+    const acme = await store.nodes.Company.create({ name: "Acme" });
+    const live = await store.edges.worksAt.create(alice, acme, {
+      role: "live",
+      since: 2020,
+    });
+    const tombstone = await store.edges.worksAt.create(alice, acme, {
+      role: "tombstone",
+      since: 2021,
+    });
+    await store.edges.worksAt.delete(tombstone.id);
+
+    const results = await store.edges.worksAt.bulkGetOrCreateByEndpoints(
+      [
+        { from: alice, to: acme, props: { role: "live", since: 2024 } },
+        {
+          from: alice,
+          to: acme,
+          props: { role: "tombstone", since: 2025 },
+        },
+      ],
+      { matchOn: ["role"] },
+    );
+
+    expect(results.map((result) => result.action)).toEqual([
+      "found",
+      "resurrected",
+    ]);
+    expect(requireDefined(results[0]).edge).toEqual(live);
+    expect(requireDefined(results[1]).edge.id).toBe(tombstone.id);
+    expect(requireDefined(results[1]).edge.since).toBe(2025);
+  });
+
   it("duplicate inputs with ifExists: update → first creates, second updates", async () => {
     const store = createStore(edgeGraph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });

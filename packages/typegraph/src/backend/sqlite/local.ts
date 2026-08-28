@@ -46,6 +46,7 @@ import {
 } from "../drizzle/ddl";
 import { type AnySqliteDatabase } from "../drizzle/execution";
 export type { AnySqliteDatabase } from "../drizzle/execution";
+import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import {
   createSqliteBackend,
   type SqliteTables,
@@ -381,6 +382,7 @@ export type LocalSqliteBackendResult = Readonly<{
 export function createLocalSqliteBackend(
   options: LocalSqliteBackendOptions = {},
 ): LocalSqliteBackendResult {
+  assertNoLegacyTransactionCapability(options.capabilities);
   const path = options.path ?? ":memory:";
   const tables = options.tables ?? defaultTables;
 

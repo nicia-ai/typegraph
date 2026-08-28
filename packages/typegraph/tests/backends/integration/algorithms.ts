@@ -32,7 +32,7 @@ import type {
   CompiledTemporaryStatementSql,
 } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
-import { TEMPORAL_ANCHORS, unfrozenSeamCopy } from "../../test-utils";
+import { TEMPORAL_ANCHORS } from "../../test-utils";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import { seedKnowsChain } from "./seed-helpers";
 import { type IntegrationTestContext } from "./test-context";
@@ -162,10 +162,7 @@ function withBindLimit(
   maxBindParameters: number,
   onTemporaryStatement?: (statement: CompiledStatement) => void,
 ) {
-  // Re-boxed first: the callers hand this `store.backend`, which `createStore`
-  // FREEZES, and a Proxy may not answer a `get` for a non-configurable,
-  // non-writable own property with anything but the target's own value.
-  return deriveBackend(unfrozenSeamCopy(backend), {
+  return deriveBackend(backend, {
     capabilities: { ...backend.capabilities, maxBindParameters },
     transaction<T>(
       fn: (tx: TransactionBackend) => Promise<T>,

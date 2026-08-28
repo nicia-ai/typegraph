@@ -19,6 +19,43 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
+ * Refuses the pre-execution-profile transaction override at bundled factory
+ * boundaries. JavaScript and previously compiled callers can still supply the
+ * removed member even though the current TypeScript surface excludes it; a
+ * shallow capability merge would preserve it as inert data while leaving
+ * interactive transactions enabled.
+ *
+ * Mapping it silently would also be dishonest: the old boolean cannot state
+ * the independent root atomic-batch capability introduced by the replacement
+ * execution profile.
+ *
+ * @internal
+ */
+export function assertNoLegacyTransactionCapability(
+  capabilities: unknown,
+): void {
+  if (
+    typeof capabilities !== "object" ||
+    capabilities === null ||
+    !Object.hasOwn(capabilities, "transactions")
+  ) {
+    return;
+  }
+  throw new ConfigurationError(
+    "The capabilities.transactions override was removed; use capabilities.execution.interactiveTransactions instead.",
+    {
+      code: "LEGACY_CAPABILITY_OVERRIDE",
+      member: "transactions",
+      replacement: "execution.interactiveTransactions",
+    },
+    {
+      suggestion:
+        "Move the transaction availability override under `capabilities.execution.interactiveTransactions`; declare root atomic batching separately through a supported backend transport.",
+    },
+  );
+}
+
+/**
  * Refuses a bundled capability declaration that contradicts its own shape,
  * then returns a deep-frozen, backend-owned clone.
  *

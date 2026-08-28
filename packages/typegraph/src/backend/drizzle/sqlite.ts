@@ -70,7 +70,10 @@ import {
   registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
-import { assertBundledCapabilityDeclarations } from "../capabilities/declarations";
+import {
+  assertBundledCapabilityDeclarations,
+  assertNoLegacyTransactionCapability,
+} from "../capabilities/declarations";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -1335,6 +1338,7 @@ export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
+  assertNoLegacyTransactionCapability(options.capabilities);
   // Resolved before the backend exists so marking below is a lookup, never
   // work that could fail after wrappers already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused

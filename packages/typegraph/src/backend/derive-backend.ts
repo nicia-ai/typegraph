@@ -125,40 +125,42 @@ export function deriveBackend<
   const O extends Partial<T> = Partial<T>,
 >(base: T, overrides: ExactBackendOverlay<T, O>): T {
   const derivedCapabilities = deriveExecutionCapabilities(base, overrides);
+  // A Proxy may not report a different value for a non-writable,
+  // non-configurable data property on its target. Bundled backends are often
+  // frozen at public boundaries, so proxying `base` directly makes a valid
+  // overlay throw before it can forward anything. The extensible shell owns
+  // no backend members; every operation below still delegates to `base` or
+  // `overrides`, preserving getters and the no-copy decoration contract.
+  const decorationShell = Object.create(Reflect.getPrototypeOf(base)) as T;
 
   function hasOverlayProperty(property: PropertyKey): boolean {
     return Object.hasOwn(overrides, property);
   }
 
-  const decoratedBackend = new Proxy(base, {
-    get(targetObject, property) {
+  const decoratedBackend = new Proxy(decorationShell, {
+    get(_targetObject, property) {
       if (property === "capabilities" && derivedCapabilities !== undefined) {
         return derivedCapabilities;
       }
       if (hasOverlayProperty(property)) {
         return Reflect.get(overrides, property, overrides);
       }
-      return Reflect.get(targetObject, property, targetObject);
+      return Reflect.get(base, property, base);
     },
 
-    has(targetObject, property) {
-      return (
-        hasOverlayProperty(property) || Reflect.has(targetObject, property)
-      );
+    has(_targetObject, property) {
+      return hasOverlayProperty(property) || Reflect.has(base, property);
     },
 
-    ownKeys(targetObject) {
+    ownKeys() {
       return [
-        ...new Set([
-          ...Reflect.ownKeys(targetObject),
-          ...Reflect.ownKeys(overrides),
-        ]),
+        ...new Set([...Reflect.ownKeys(base), ...Reflect.ownKeys(overrides)]),
       ];
     },
 
-    getOwnPropertyDescriptor(targetObject, property) {
+    getOwnPropertyDescriptor(_targetObject, property) {
       if (property === "capabilities" && derivedCapabilities !== undefined) {
-        const source = hasOverlayProperty(property) ? overrides : targetObject;
+        const source = hasOverlayProperty(property) ? overrides : base;
         const descriptor = Reflect.getOwnPropertyDescriptor(source, property);
         return descriptor === undefined ? undefined : (
             { ...descriptor, value: derivedCapabilities, configurable: true }
@@ -172,28 +174,31 @@ export function deriveBackend<
         if (descriptor === undefined) return;
         return { ...descriptor, configurable: true };
       }
-      return Reflect.getOwnPropertyDescriptor(targetObject, property);
+      const descriptor = Reflect.getOwnPropertyDescriptor(base, property);
+      return descriptor === undefined ? undefined : (
+          { ...descriptor, configurable: true }
+        );
     },
 
-    set(targetObject, property, value) {
+    set(_targetObject, property, value) {
       if (hasOverlayProperty(property)) {
         return Reflect.set(overrides, property, value, overrides);
       }
-      return Reflect.set(targetObject, property, value, targetObject);
+      return Reflect.set(base, property, value, base);
     },
 
-    defineProperty(targetObject, property, attributes) {
+    defineProperty(_targetObject, property, attributes) {
       if (hasOverlayProperty(property)) {
         return Reflect.defineProperty(overrides, property, attributes);
       }
-      return Reflect.defineProperty(targetObject, property, attributes);
+      return Reflect.defineProperty(base, property, attributes);
     },
 
-    deleteProperty(targetObject, property) {
+    deleteProperty(_targetObject, property) {
       if (hasOverlayProperty(property)) {
         return Reflect.deleteProperty(overrides, property);
       }
-      return Reflect.deleteProperty(targetObject, property);
+      return Reflect.deleteProperty(base, property);
     },
   });
   carryBackendResourceAudit(decoratedBackend, base);

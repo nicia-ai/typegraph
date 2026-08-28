@@ -1205,6 +1205,14 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `pessimisticLocks?.{advisoryLocks,tableLocks,serializedWriters}`           | How this engine serializes concurrent writers, if at all — see [Write fence declaration](#write-fence-declaration-pessimisticlocks) |
 | `recordedTimeOwnership?`                                                  | Who allocates recorded-time revisions — see [Recorded-time ownership](#recorded-time-ownership-recordedtimeownership) |
 
+The former top-level `capabilities.transactions` override is not interpreted
+as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,
+including for JavaScript and already-compiled callers, because transaction
+availability and root atomic batching are now independent facts. Move the
+value to `capabilities.execution.interactiveTransactions`; root
+`atomicBatch` support is discovered from the bundled transport and cannot be
+claimed through factory overrides.
+
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
 still reject the working-table transaction that the iterative graph algorithms
@@ -1429,6 +1437,12 @@ not, and a transaction-scoped backend does not. Registration certifies
 transport mechanics, not graph semantics, and therefore does not by itself opt
 a custom backend into bundled node or edge mutation programs. Those programs
 remain governed by their separate semantic eligibility profiles.
+
+The registration API is transport infrastructure, not a Store plug-in point:
+built-in Store mutation eligibility does not resolve a custom registration in
+this release. A custom backend can use the registered protocol for its own
+closed programs, but certifying and registering a transport alone does not make
+TypeGraph's bundled node or edge fast paths select it.
 
 Execution support is intentionally not collapsed into one ordered “tier.” An
 interactive transaction and an exact-root atomic batch are independent facts:

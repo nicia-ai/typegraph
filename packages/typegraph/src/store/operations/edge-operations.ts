@@ -3843,6 +3843,23 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             };
             writes += 1;
           }
+
+          // The write batch contains only rows that need mutation. A live
+          // `ifExists: "return"` match deliberately stays out of that batch,
+          // but it still owns a result slot in the caller's input order.
+          // Complete those read-only outcomes here, at the same seam that
+          // correlates the mutated postimages, before duplicate resolution
+          // consumes any source result.
+          if (ifExists === "return") {
+            for (const entry of toFetch) {
+              if (entry.isDeleted) continue;
+              assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
+              results[entry.index] = {
+                edge: rowToEdge(entry.row),
+                action: "found",
+              };
+            }
+          }
         } else {
           for (const [entryIndex, entry] of toFetch.entries()) {
             const input = requireDefined(updateEntries[entryIndex]).input;
