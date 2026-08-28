@@ -16,6 +16,7 @@ import {
   type AtomicEdgeBatchExecutor,
   markBundledRootAtomicEdgeBatch,
   markBundledRootAtomicMutationPrograms,
+  resolveBundledRootAtomicEdgeBatch,
 } from "../src/backend/capabilities/atomic-mutation-program";
 import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import { deriveBackend } from "../src/backend/derive-backend";
@@ -249,6 +250,8 @@ describe("generated edge batch store consumer", () => {
     ) as unknown as AtomicEdgeBatchExecutor;
     markBundledRootAutocommitEligible(backend);
     markBundledRootAtomicEdgeBatch(backend, executor);
+    const registeredExecutor = resolveBundledRootAtomicEdgeBatch(backend);
+    expect(registeredExecutor).not.toBe(executor);
 
     const input = {
       kind: "worksAt",
@@ -267,7 +270,7 @@ describe("generated edge batch store consumer", () => {
         historyEnabled: false,
         revisionTrackingEnabled: false,
       }),
-    ).toBe(executor);
+    ).toBe(registeredExecutor);
     expect(
       resolveAtomicEdgeBatchExecutor({
         backend: deriveBackend(backend, {}),
@@ -323,6 +326,8 @@ describe("generated edge batch store consumer", () => {
       markBundledRootAutocommitEligible(backend);
       declareAtomicBatchForTest(backend);
       markBundledRootAtomicEdgeBatch(backend, executor);
+      const registeredExecutor = resolveBundledRootAtomicEdgeBatch(backend);
+      expect(registeredExecutor).not.toBe(executor);
 
       expect(
         resolveAtomicEdgeBatchExecutor({
@@ -342,7 +347,7 @@ describe("generated edge batch store consumer", () => {
           historyEnabled: false,
           revisionTrackingEnabled: false,
         }),
-      ).toBe(executor);
+      ).toBe(registeredExecutor);
     },
   );
 

@@ -1420,8 +1420,6 @@ import {
   runAtomicTransportConformance,
 } from "@nicia-ai/typegraph/backend";
 
-await runAtomicTransportConformance(fixture);
-
 const backend = createCustomBackend({
   execution: {
     interactiveTransactions: false,
@@ -1429,10 +1427,19 @@ const backend = createCustomBackend({
   },
 });
 registerAtomicSqlProgram(backend, { executeAtomicBatch });
+
+await runAtomicTransportConformance({
+  ...transportCases,
+  backend,
+  derivedBackends: [authorCreatedWrapper],
+  executeAtomicBatch,
+});
+
 registerAtomicMutationPrograms(backend, mutationPrograms);
 
 await runAtomicMutationProgramConformance({
   backend,
+  derivedBackends: [authorCreatedWrapper],
   equal: deepEqual,
   cases: semanticCases,
 });
@@ -1441,7 +1448,9 @@ await runAtomicMutationProgramConformance({
 Transport registration is exact-root evidence only: a derived or
 transaction-scoped backend does not inherit it. The conformance fixture's
 mandatory provenance checks prove all three facts against the real registered
-objects. Transport registration certifies mechanics, not graph semantics, and
+objects supplied by the backend author. A non-interactive root reports the
+transaction-isolation check as skipped rather than claiming evidence it could
+not obtain. Transport registration certifies mechanics, not graph semantics, and
 therefore does not by itself opt a custom backend into any Store mutation
 program.
 
@@ -1458,20 +1467,21 @@ one family is not evidence for another. Derived, projected, and
 transaction-scoped backends inherit neither root registration.
 
 `runAtomicMutationProgramConformance()` is the executable semantic boundary.
-For every positive-limit variant in `mutationPrograms`, the fixture supplies
+For every reachable positive-limit variant in `mutationPrograms`, the fixture supplies
 three real Store-level cases:
 
 1. an ordered success whose return value and independently read committed state
    both match their oracles;
 2. a stale-schema-fence refusal that leaves the database unchanged; and
-3. a family-specific typed refusal that rolls back every sibling write.
+3. a family-specific typed refusal that either rolls back every sibling write
+   after native dispatch or explicitly refuses before dispatch without writing.
 
 The runner resolves the profile from `backend`; it does not accept a detached
-profile description or caller-supplied provenance verdict. Each case resolves
-the exact registered backend root it exercises and observes that root's
-semantic executor dispatch count. Before any operation runs, the runner proves
-that root registration does not leak through projections or transaction
-sessions. It then refuses a success that silently used the portable fallback,
+profile description, caller-supplied provenance verdict, or fixture-owned
+dispatch counter. Before any fixture preparation can write, it validates the
+complete case inventory and probes the author's actual derived backend objects.
+It observes dispatch inside the exact registered executors and therefore refuses
+a success that silently used the portable fallback,
 a case bound to a different family claim, a missing or duplicate family case,
 and a case that claims an unregistered family. A zero entry limit is an honest
 opt-out and does not require an unreachable case. `mutateEdges` has separate
@@ -1479,10 +1489,13 @@ opt-out and does not require an unreachable case. `mutateEdges` has separate
 prove the other.
 
 The fixture callbacks should invoke public Store methods and inspect committed
-rows through an independent database read. Each case's `resolveBackend()` must
-return the same exact root used by that Store. Instrument the registered
-executor, or a transport hook unique to that family program, only to count
-dispatches; do not use executor return rows as the state oracle. Match
+rows through an independent database read. Supply at least one real wrapper or
+derived backend created by the backend's own derivation path; the runner does
+not manufacture a projection and mistake that tautology for author evidence.
+Do not instrument or replace the registered executors—the runner owns dispatch
+evidence. Mark each refusal's `dispatch` as `"required"` or `"pre-dispatch"`
+according to the Store contract, and do not use executor return rows as the
+state oracle. Match
 Store-level typed errors rather than raw driver sentinels. The runner is
 framework-agnostic, so the same fixture runs in the custom backend's own test
 suite. Pair it with the shared cross-backend Store integration suite; transport
@@ -1501,7 +1514,10 @@ Executor limits such as `maxEntries`, `maxClaimedEntries`, and the two edge
 mutation ceilings are part of the registration contract and must be
 nonnegative integers; zero honestly declares that the backend's bind budget
 cannot admit one member of that shape. TypeGraph validates those declarations
-before publishing the exact-root profile. Backend authors implementing edge
+before publishing the exact-root profile. An update-only variant shadowed by a
+mixed-mutation executor with an equal or larger ceiling is not separately
+reachable and therefore does not demand duplicate conformance evidence.
+Backend authors implementing edge
 refusal paths use the exported
 `AtomicEdgeBatchEndpointRefusalError`,
 `AtomicEdgeBatchCardinalityRefusalError`,

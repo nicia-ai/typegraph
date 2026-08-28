@@ -207,6 +207,7 @@ export type {
   AtomicMutationProgramConformancePreparation,
   AtomicMutationProgramConformanceReport,
   AtomicMutationProgramRefusalCase,
+  AtomicMutationProgramRefusalDispatch,
   AtomicMutationProgramRefusalPreparation,
   AtomicMutationProgramSuccessCase,
   AtomicMutationProgramVariant,
@@ -220,13 +221,16 @@ export type {
   AtomicTransportConformanceFixture,
   AtomicTransportConformanceReport,
   AtomicTransportEquality,
-  AtomicTransportProvenanceChecks,
   AtomicTransportRollbackCase,
 } from "./conformance/atomic-transport";
 export {
   AtomicTransportConformanceError,
   runAtomicTransportConformance,
 } from "./conformance/atomic-transport";
+export type {
+  ExactRootRegistrationProvenanceFixture,
+  ExactRootRegistrationProvenanceReport,
+} from "./conformance/exact-root-provenance";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,

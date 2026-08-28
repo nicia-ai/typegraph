@@ -1,35 +1,54 @@
-/** Exact-root registration checks shared by transport and semantic conformance. */
-export type ExactRootRegistrationProvenanceChecks = Readonly<{
-  exactRootRegistration: () => boolean | PromiseLike<boolean>;
-  derivedBackendIsolation: () => boolean | PromiseLike<boolean>;
-  transactionBackendIsolation: () => boolean | PromiseLike<boolean>;
+import type { GraphBackend, TransactionBackend } from "../types";
+
+/** Actual author-created derived backends whose registrations must be probed. */
+export type ExactRootRegistrationProvenanceFixture = Readonly<{
+  derivedBackends: readonly [
+    GraphBackend | TransactionBackend,
+    ...(GraphBackend | TransactionBackend)[],
+  ];
 }>;
 
-const EXACT_ROOT_PROVENANCE_CHECKS = [
-  ["exact root registration", "exactRootRegistration"],
-  ["derived backend isolation", "derivedBackendIsolation"],
-  ["transaction backend isolation", "transactionBackendIsolation"],
-] as const satisfies readonly Readonly<
-  [string, keyof ExactRootRegistrationProvenanceChecks]
->[];
+/** Honest result of provenance checks that ran or were inapplicable. */
+export type ExactRootRegistrationProvenanceReport = Readonly<{
+  passed: readonly string[];
+  skipped: readonly string[];
+}>;
+
+type ExactRootRegistrationPredicate = (
+  target: GraphBackend | TransactionBackend,
+) => boolean;
 
 /**
- * Owns the shared exact-root provenance verdict for conformance runners.
+ * Owns exact-root registration checks shared by transport and semantics.
  *
- * The caller supplies its boundary-specific error vocabulary while this seam
- * owns which registrations must be present or isolated.
+ * Derived targets come from the backend author rather than from a projection
+ * this runner manufactures. Transaction isolation is checked on a real
+ * session when the backend exposes one and reported as skipped otherwise.
  */
 export async function assertExactRootRegistrationProvenance(
-  checks: ExactRootRegistrationProvenanceChecks,
+  backend: GraphBackend,
+  fixture: ExactRootRegistrationProvenanceFixture,
+  isRegistered: ExactRootRegistrationPredicate,
   createError: (check: string) => Error,
-): Promise<readonly string[]> {
+): Promise<ExactRootRegistrationProvenanceReport> {
   const passed: string[] = [];
-  for (const [name, member] of EXACT_ROOT_PROVENANCE_CHECKS) {
-    if (await checks[member]()) {
-      passed.push(name);
-      continue;
-    }
-    throw createError(name);
+  const skipped: string[] = [];
+  if (!isRegistered(backend)) throw createError("exact root registration");
+  passed.push("exact root registration");
+
+  for (const derived of fixture.derivedBackends) {
+    if (isRegistered(derived)) throw createError("derived backend isolation");
   }
-  return passed;
+  passed.push("derived backend isolation");
+
+  if (!backend.capabilities.execution.interactiveTransactions) {
+    skipped.push("transaction backend isolation");
+    return { passed, skipped };
+  }
+  const isolated = await backend.transaction((transaction) =>
+    Promise.resolve(!isRegistered(transaction)),
+  );
+  if (!isolated) throw createError("transaction backend isolation");
+  passed.push("transaction backend isolation");
+  return { passed, skipped };
 }

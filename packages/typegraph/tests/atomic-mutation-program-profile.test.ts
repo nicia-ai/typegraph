@@ -200,7 +200,9 @@ describe("atomic mutation program execution profile", () => {
     registerAtomicMutationPrograms(backend, { createNodes });
 
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(true);
-    expect(resolveAtomicMutationPrograms(backend)).toEqual({ createNodes });
+    const registered = resolveAtomicMutationPrograms(backend);
+    expect(typeof registered?.createNodes).toBe("function");
+    expect(registered?.createNodes).not.toBe(createNodes);
     expect(
       resolveAtomicNodeBatchExecutor({
         backend,
@@ -212,7 +214,7 @@ describe("atomic mutation program execution profile", () => {
         historyEnabled: false,
         revisionTrackingEnabled: false,
       }),
-    ).toBe(createNodes);
+    ).toBe(registered?.createNodes);
     expect(resolveAtomicMutationPrograms(deriveBackend(backend, {}))).toBe(
       undefined,
     );

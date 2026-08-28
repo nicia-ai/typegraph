@@ -10,10 +10,7 @@ import type {
   AtomicSqlRow,
   CompiledAtomicSqlStatement,
 } from "../src/backend/capabilities/atomic-sql-program";
-import {
-  hasAtomicSqlProgramRegistration,
-  registerAtomicSqlProgram,
-} from "../src/backend/capabilities/atomic-sql-program";
+import { registerAtomicSqlProgram } from "../src/backend/capabilities/atomic-sql-program";
 import {
   type AtomicTransportConformanceFixture,
   type AtomicTransportEquality,
@@ -22,11 +19,7 @@ import {
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createSqliteExecutionAdapter } from "../src/backend/drizzle/execution";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
-import {
-  type GraphBackend,
-  supportsRootAtomicBatch,
-  type TransactionBackend,
-} from "../src/backend/types";
+import type { GraphBackend } from "../src/backend/types";
 import { TypeGraphError } from "../src/errors";
 
 type FakeState = Readonly<{
@@ -95,10 +88,10 @@ function createFixture(
     capabilities: { execution: { atomicBatch: "root" } },
   } as GraphBackend;
   registerAtomicSqlProgram(root, executeAtomicBatch);
-  const derived = deriveBackend(root, {});
-  const transaction = {} as TransactionBackend;
 
   return {
+    backend: root,
+    derivedBackends: [deriveBackend(root, {})],
     executeAtomicBatch,
     equal,
     orderedResults: {
@@ -128,15 +121,6 @@ function createFixture(
       observe: () => snapshotState(state),
       expected: { primary: [], sidecar: [] },
     },
-    provenance: {
-      exactRootRegistration: () =>
-        supportsRootAtomicBatch(root) && hasAtomicSqlProgramRegistration(root),
-      derivedBackendIsolation: () =>
-        !supportsRootAtomicBatch(derived) &&
-        !hasAtomicSqlProgramRegistration(derived),
-      transactionBackendIsolation: () =>
-        !hasAtomicSqlProgramRegistration(transaction),
-    },
   };
 }
 
@@ -151,6 +135,8 @@ describe("atomic transport conformance runner", () => {
       "empty batch",
       "provenance: exact root registration",
       "provenance: derived backend isolation",
+    ]);
+    expect(report.skipped).toEqual([
       "provenance: transaction backend isolation",
     ]);
   });
@@ -182,6 +168,10 @@ describe("atomic transport conformance runner", () => {
         return fixture.executeAtomicBatch<TRow>(alteredStatements);
       },
     } satisfies AtomicTransportConformanceFixture<FakeState>;
+    registerAtomicSqlProgram(
+      invalidFixture.backend,
+      invalidFixture.executeAtomicBatch,
+    );
 
     await expect(
       runAtomicTransportConformance(invalidFixture),
@@ -191,21 +181,19 @@ describe("atomic transport conformance runner", () => {
     });
   });
 
-  it("rejects a provenance check that does not prove its boundary", async () => {
+  it("rejects a batch function borrowed from another registered root", async () => {
     const fixture = createFixture(true);
+    const foreign = createFixture(true);
     const invalidFixture = {
       ...fixture,
-      provenance: {
-        ...fixture.provenance,
-        derivedBackendIsolation: () => false,
-      },
+      backend: foreign.backend,
     } satisfies AtomicTransportConformanceFixture<FakeState>;
 
     await expect(
       runAtomicTransportConformance(invalidFixture),
     ).rejects.toMatchObject({
       name: "AtomicTransportConformanceError",
-      details: { check: "provenance: derived backend isolation" },
+      details: { check: "provenance: exact root registration" },
     });
   });
 
@@ -220,6 +208,10 @@ describe("atomic transport conformance runner", () => {
           [[{ unexpected: true }] as unknown as readonly TRow[]]
         : fixture.executeAtomicBatch<TRow>(statements),
     } satisfies AtomicTransportConformanceFixture<FakeState>;
+    registerAtomicSqlProgram(
+      invalidFixture.backend,
+      invalidFixture.executeAtomicBatch,
+    );
 
     await expect(
       runAtomicTransportConformance(invalidFixture),
@@ -302,20 +294,11 @@ describe("atomic transport conformance: libSQL file client", () => {
         return executeAtomicBatch<TRow>(statements);
       };
 
-      let transactionBackend: TransactionBackend | undefined;
-      await backend.transaction((transaction) => {
-        transactionBackend = transaction;
-        return Promise.resolve();
-      });
-      const certifiedTransactionBackend = transactionBackend;
-      if (certifiedTransactionBackend === undefined) {
-        throw new Error(
-          "libSQL backend did not expose its transaction backend",
-        );
-      }
-      const derivedBackend = deriveBackend(backend, {});
+      registerAtomicSqlProgram(backend, observedExecutor);
 
       const report = await runAtomicTransportConformance<LibsqlSnapshot>({
+        backend,
+        derivedBackends: [deriveBackend(backend, {})],
         executeAtomicBatch: observedExecutor,
         equal,
         orderedResults: {
@@ -370,16 +353,6 @@ describe("atomic transport conformance: libSQL file client", () => {
           observe: () => readLibsqlSnapshot(client),
           expected: { primary: [], sidecar: [] },
         },
-        provenance: {
-          exactRootRegistration: () =>
-            supportsRootAtomicBatch(backend) &&
-            hasAtomicSqlProgramRegistration(backend),
-          derivedBackendIsolation: () =>
-            !supportsRootAtomicBatch(derivedBackend) &&
-            !hasAtomicSqlProgramRegistration(derivedBackend),
-          transactionBackendIsolation: () =>
-            !hasAtomicSqlProgramRegistration(certifiedTransactionBackend),
-        },
       });
 
       expect(report.passed).toEqual([
@@ -391,6 +364,7 @@ describe("atomic transport conformance: libSQL file client", () => {
         "provenance: derived backend isolation",
         "provenance: transaction backend isolation",
       ]);
+      expect(report.skipped).toEqual([]);
       expect(observedStatements).toEqual([]);
 
       await backend.close();

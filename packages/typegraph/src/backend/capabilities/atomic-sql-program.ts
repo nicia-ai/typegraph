@@ -57,9 +57,14 @@ export type AtomicSqlProgramExecutor = Readonly<{
   ) => Promise<TResult>;
 }>;
 
+type RegisteredAtomicSqlProgram = Readonly<{
+  executeAtomicBatch: AtomicSqlBatchExecutor;
+  executor: AtomicSqlProgramExecutor;
+}>;
+
 const ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS = new WeakMap<
   object,
-  AtomicSqlProgramExecutor
+  RegisteredAtomicSqlProgram
 >();
 
 function assertResultCardinality(
@@ -158,17 +163,21 @@ export function createAtomicSqlProgramExecutor(
 
 function normalizeAtomicSqlProgramRegistration(
   registration: AtomicSqlProgramRegistration,
-): AtomicSqlProgramExecutor | undefined {
+): RegisteredAtomicSqlProgram | undefined {
   const adapter: AtomicSqlProgramAdapter =
     typeof registration === "function" ?
       { executeAtomicBatch: registration }
     : registration;
-  return createAtomicSqlProgramExecutor(adapter);
+  const executeAtomicBatch = adapter.executeAtomicBatch;
+  const executor = createAtomicSqlProgramExecutor(adapter);
+  return executeAtomicBatch === undefined || executor === undefined ?
+      undefined
+    : { executeAtomicBatch, executor };
 }
 
 function throwAtomicSqlProgramRegistrationMismatch(
   declaration: GraphBackend["capabilities"]["execution"]["atomicBatch"],
-  registration: AtomicSqlProgramExecutor | undefined,
+  registration: RegisteredAtomicSqlProgram | undefined,
 ): never {
   throw new ConfigurationError(
     'An atomic SQL program requires `capabilities.execution.atomicBatch: "root"` and a usable atomic batch executor.',
@@ -213,7 +222,14 @@ export function registerAtomicSqlProgram<T extends GraphBackend>(
 export function resolveAtomicSqlProgramExecutor(
   target: GraphBackend | TransactionBackend,
 ): AtomicSqlProgramExecutor | undefined {
-  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target);
+  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target)?.executor;
+}
+
+/** @internal Resolves the exact batch function registered on one root. */
+export function resolveRegisteredAtomicSqlBatchExecutor(
+  target: GraphBackend | TransactionBackend,
+): AtomicSqlBatchExecutor | undefined {
+  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target)?.executeAtomicBatch;
 }
 
 /** Returns whether this exact object owns a registered atomic SQL transport. */
