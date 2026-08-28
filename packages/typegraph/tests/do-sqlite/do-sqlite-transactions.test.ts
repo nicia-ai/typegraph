@@ -6,7 +6,7 @@
  * `backend.transaction()` / `adoptTransaction()` paths — no
  * `executionProfile` hint. `drizzle(ctx.storage)` must be detected as
  * `transactionMode: "do-sqlite"` and advertise
- * `capabilities.transactions: true`.
+ * `capabilities.execution.interactiveTransactions: true`.
  *
  * The async storage runner `ctx.storage.transaction(async () => ...)`
  * (surfaced by Drizzle as `db.$client.transaction`) rolls back SQL
@@ -290,11 +290,11 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
     );
   });
 
-  it("auto-detects do-sqlite and advertises capabilities.transactions:true", async () => {
+  it("auto-detects do-sqlite and advertises interactive transactions", async () => {
     await inObject("detect", async ({ db, backend }, storage) => {
       expect(db.$client).toBe(storage);
       expect(typeof storage.transaction).toBe("function");
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
       expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
       expect(backend.capabilities.maxBindParameters).toBe(
         DURABLE_OBJECT_MAX_BIND_PARAMETERS,
@@ -307,7 +307,7 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
         executionProfile: { isSync: false, transactionMode: "none" },
         tables: defaultTables,
       });
-      expect(staleHintBackend.capabilities.transactions).toBe(true);
+      expect(staleHintBackend.capabilities.execution.interactiveTransactions).toBe(true);
       expect(staleHintBackend.capabilities.graphAnalytics?.supported).toBe(
         false,
       );

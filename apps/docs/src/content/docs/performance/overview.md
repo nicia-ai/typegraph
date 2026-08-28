@@ -275,7 +275,9 @@ whole-call atomicity on bundled transactionless roots through one native
 atomic exchange, including durable-match and cardinality-constrained edge
 batches. Other
 bulk shapes on a transactionless root either refuse when their contract requires a fence or use
-sequential fallback, which can leave earlier chunks committed if a later one fails.
+their documented non-atomic path. A certified atomic SQL program is available only to operations
+whose closed statement contract has been proven by the backend conformance runner; it does not
+make arbitrary Store calls atomic.
 `store.transaction()` cannot add atomicity to a backend that does not support transactions.
 
 To commit several bulk calls as one unit on a transaction-capable backend, wrap them in a

@@ -410,7 +410,7 @@ export function createLocalSqliteBackend(
         graphAnalytics: {
           supported:
             options.capabilities?.graphAnalytics?.supported ??
-            options.capabilities?.transactions !== false,
+            options.capabilities?.execution?.interactiveTransactions !== false,
           mathFunctions:
             options.capabilities?.graphAnalytics?.mathFunctions ?? true,
         },

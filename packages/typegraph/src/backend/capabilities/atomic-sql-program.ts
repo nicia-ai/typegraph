@@ -1,13 +1,14 @@
 /**
  * Internal execution boundary for a closed, precompiled SQL write program.
  *
- * This is deliberately an out-of-band root capability. The exact bundled
- * backend object is marked by its factory; derived backends and transaction
- * backends do not inherit the mark. A static batch is therefore never
- * confused with an interactive transaction or forwarded through a wrapper
- * whose behavior has not been audited for the program contract.
+ * This is deliberately an out-of-band root capability. An author registers
+ * the exact root backend object after its transport has earned the root
+ * execution declaration; derived backends and transaction backends do not
+ * inherit the registration. A static batch is therefore never confused with
+ * an interactive transaction or forwarded through a wrapper whose behavior
+ * has not been audited for the program contract.
  */
-import { CompilerInvariantError } from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import type { GraphBackend, TransactionBackend } from "../types";
 
 export type AtomicSqlRow = Readonly<Record<string, unknown>>;
@@ -26,6 +27,11 @@ export type AtomicSqlBatchExecutor = <TRow>(
 export type AtomicSqlProgramAdapter = Readonly<{
   executeAtomicBatch?: AtomicSqlBatchExecutor;
 }>;
+
+/** The transport forms accepted by an atomic program author. */
+export type AtomicSqlProgramRegistration =
+  | AtomicSqlBatchExecutor
+  | AtomicSqlProgramAdapter;
 
 type AtomicSqlResultCardinality = "none" | "one" | "many";
 
@@ -138,23 +144,81 @@ export function createAtomicSqlProgramExecutor(
     );
 }
 
-/** @internal Called only by bundled root backend factories. */
-export function markBundledRootAtomicSqlProgram<T extends object>(
+type AtomicBatchDeclaration = "root" | "none";
+
+type BackendWithAtomicBatchDeclaration = GraphBackend &
+  Readonly<{
+    capabilities: GraphBackend["capabilities"] &
+      Readonly<{
+        execution?: Readonly<{
+          atomicBatch?: AtomicBatchDeclaration;
+        }>;
+      }>;
+  }>;
+
+function resolveAtomicBatchDeclaration(
+  target: GraphBackend,
+): AtomicBatchDeclaration | undefined {
+  return (
+    target as BackendWithAtomicBatchDeclaration
+  ).capabilities.execution?.atomicBatch;
+}
+
+function normalizeAtomicSqlProgramRegistration(
+  registration: AtomicSqlProgramRegistration,
+): AtomicSqlProgramExecutor | undefined {
+  const adapter: AtomicSqlProgramAdapter =
+    typeof registration === "function" ?
+      { executeAtomicBatch: registration }
+    : registration;
+  return createAtomicSqlProgramExecutor(adapter);
+}
+
+function throwAtomicSqlProgramRegistrationMismatch(
+  declaration: AtomicBatchDeclaration | undefined,
+  registration: AtomicSqlProgramExecutor | undefined,
+): never {
+  throw new ConfigurationError(
+    "An atomic SQL program requires `capabilities.execution.atomicBatch: \"root\"` and a usable atomic batch executor.",
+    {
+      code: "ATOMIC_SQL_PROGRAM_REGISTRATION_MISMATCH",
+      declared: declaration,
+      registered: registration !== undefined,
+    },
+    {
+      suggestion:
+        "Declare `capabilities.execution.atomicBatch: \"root\"` only on an exact root backend whose executor submits the complete statement sequence atomically.",
+    },
+  );
+}
+
+/**
+ * Registers an atomic SQL program executor for one exact GraphBackend root.
+ *
+ * The declaration and executable transport are checked together so a backend
+ * cannot claim root atomic execution while omitting the executor, nor expose
+ * an executor without declaring the session on which it is valid. The
+ * registration is keyed by object identity; derived and transaction-scoped
+ * backends therefore do not resolve this root-only program.
+ */
+export function registerAtomicSqlProgram<T extends GraphBackend>(
   target: T,
-  executor: AtomicSqlProgramExecutor | undefined,
+  registration: AtomicSqlProgramRegistration,
 ): T {
-  ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.delete(target);
-  if (executor !== undefined) {
-    ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.set(target, executor);
+  const executor = normalizeAtomicSqlProgramRegistration(registration);
+  const declaration = resolveAtomicBatchDeclaration(target);
+  if (declaration !== "root" || executor === undefined) {
+    throwAtomicSqlProgramRegistrationMismatch(declaration, executor);
   }
+  ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.set(target, executor);
   return target;
 }
 
 /**
- * Resolves the static program executor for an exact bundled root.
+ * Resolves the static program executor for an exact registered root.
  * Transaction-scoped and derived/projected backends return `undefined`.
  */
-export function resolveBundledRootAtomicSqlProgramExecutor(
+export function resolveAtomicSqlProgramExecutor(
   target: GraphBackend | TransactionBackend,
 ): AtomicSqlProgramExecutor | undefined {
   return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target);

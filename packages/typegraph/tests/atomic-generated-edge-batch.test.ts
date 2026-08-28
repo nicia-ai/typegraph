@@ -163,7 +163,7 @@ async function createChunkedLibsqlBackend(
 
 describe("generated edge batch store consumer", () => {
   it("selects edge delete only for a valid exact-root input", () => {
-    const backend = { capabilities: { transactions: false } } as GraphBackend;
+    const backend = { capabilities: { execution: { interactiveTransactions: false, atomicBatch: "none" } } } as GraphBackend;
     markBundledRootAutocommitEligible(backend);
     markBundledRootAtomicMutationPrograms(backend, {
       deleteEdges: (deleteInput) =>
@@ -221,7 +221,7 @@ describe("generated edge batch store consumer", () => {
   });
 
   it("selects the atomic executor only for the exact marked root", async () => {
-    const backend = { capabilities: { transactions: false } } as GraphBackend;
+    const backend = { capabilities: { execution: { interactiveTransactions: false, atomicBatch: "none" } } } as GraphBackend;
     const executor = vi.fn(() =>
       Promise.resolve(1),
     ) as unknown as AtomicEdgeBatchExecutor;
@@ -289,7 +289,7 @@ describe("generated edge batch store consumer", () => {
   ] as const)(
     "selects the atomic executor for %s",
     (_label, constrainedGraph) => {
-      const backend = { capabilities: { transactions: false } } as GraphBackend;
+      const backend = { capabilities: { execution: { interactiveTransactions: false, atomicBatch: "none" } } } as GraphBackend;
       const executor = vi.fn(() =>
         Promise.resolve(1),
       ) as unknown as AtomicEdgeBatchExecutor;

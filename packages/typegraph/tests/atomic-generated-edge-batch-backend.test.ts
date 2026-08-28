@@ -304,7 +304,7 @@ describe("bundled root atomic edge batch", () => {
       throw new Error("Expected D1 atomic edge batch capability");
     }
 
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
     expect(backend.capabilities.maxBindParameters).toBe(D1_MAX_BIND_PARAMETERS);
     await expect(
       executeAtomicEdgeBatch({

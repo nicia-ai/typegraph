@@ -71,7 +71,7 @@ type ExtractionStores = Readonly<{
   recursive: Store<typeof weightedExtractionGraph>;
   /** Predecessor-walk fallback: a recursion-absent declaration. */
   walk: Store<typeof weightedExtractionGraph>;
-  /** Inline (no temporary tables) path: `transactions: false`. */
+  /** Inline (no temporary tables) path: no interactive transaction support. */
   inline: Store<typeof weightedExtractionGraph>;
 }>;
 
@@ -95,7 +95,13 @@ async function createExtractionStores(
   const inline = createStore(
     weightedExtractionGraph,
     deriveBackend(projectGraphBackend(base), {
-      capabilities: { ...base.capabilities, transactions: false },
+      capabilities: {
+        ...base.capabilities,
+        execution: {
+          ...base.capabilities.execution,
+          interactiveTransactions: false,
+        },
+      },
     }),
   );
   return { recursive, walk, inline };

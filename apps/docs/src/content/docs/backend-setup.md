@@ -255,8 +255,9 @@ Both Neon drivers work with TypeGraph. They have different tradeoffs:
 
 - **`drizzle-orm/neon-http`** uses HTTP per statement. Lowest cold-start cost; survives Workers'
   per-request isolation. **Cannot hold a session across statements**, so multi-statement transactions
-  are unavailable — TypeGraph auto-detects this driver and sets `capabilities.transactions = false`,
-  so `store.transaction(...)` on a raw Store falls through to non-transactional sequential execution.
+  are unavailable — TypeGraph auto-detects this driver and sets `capabilities.execution.interactiveTransactions = false`,
+  so `store.transaction(...)` refuses rather than pretending to provide rollback. Eligible
+  atomic-batch operations remain available when the transport is certified for them.
   A schema-managed Store may attach for reads, but its first write fails closed because the driver
   cannot hold the schema-version fence.
 - **`drizzle-orm/neon-serverless`** uses a WebSocket Pool. Holds a session, supports full transactional
@@ -372,9 +373,9 @@ Edge runtimes expose `WebSocket` globally and need no extra setup.
 
 For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
-to manage. TypeGraph auto-detects this driver and sets `capabilities.transactions`
-to `false`. On a raw Store, `store.transaction(...)` falls through to sequential
-execution rather than throwing. Eligible plain node batches and
+to manage. TypeGraph auto-detects this driver and sets `capabilities.execution.interactiveTransactions`
+to `false`. On a raw Store, `store.transaction(...)` refuses rather than silently
+falling through to sequential execution. Eligible plain node batches and
 `cardinality: "many"` edge creates use the authoritative one-statement command
 even on a schema-managed Store; other managed writes fail closed when they
 need an interactive schema or constraint fence.
@@ -404,7 +405,7 @@ const sql = neon(env.NEON_DATABASE_URL);
 const db = drizzle({ client: sql });
 const backend = createPostgresBackend(db);
 const store = createStore(graph, backend);
-// backend.capabilities.transactions === false (auto-detected)
+// backend.capabilities.execution.interactiveTransactions === false (auto-detected)
 ```
 
 Use `neon-http` for reads and explicitly raw, unfenced single upserts. Run
@@ -641,7 +642,7 @@ decorating a first-party backend with `deriveBackend`, a same-session
 session or forwards to a different connection is a new command boundary and
 cannot reuse a token from the original port.
 
-These are three different execution guarantees; do not use “atomic” as a
+These are four different execution guarantees; do not use “atomic” as a
 catch-all:
 
 - **Interactive transaction** (`store.transaction(...)`) pins one session and
@@ -653,6 +654,13 @@ catch-all:
   example, a D1 batch or a bind-budgeted multi-row insert). It may make one
   precompiled set of statements atomic, but it is not a public Store
   transaction and does not make an arbitrary sequence of Store calls atomic.
+- **Certified atomic SQL program** is the backend-authoring transport seam for
+  a closed, ordered sequence of statements. A backend earns this capability by
+  passing the framework-agnostic conformance runner: result slots and bound
+  parameters must be preserved, a failure in a later statement must leave no
+  primary or sidecar writes, and an empty program must be a no-op. Certification
+  is separate from semantic mutation eligibility; a transport alone does not
+  authorize a mutation family.
 - **Authoritative one-statement command** is the `commands.execute` port. A
   command returns a created/found/rejected/unsupported result after the
   database statement itself owns the decision and mutation. It is the
@@ -703,7 +711,7 @@ Creates a PostgreSQL backend adapter. Accepts any Drizzle PostgreSQL database
 instance, regardless of the underlying driver. Tested with `drizzle-orm/node-postgres`,
 `drizzle-orm/postgres-js`, `drizzle-orm/neon-serverless`,
 `drizzle-orm/neon-http`, and `drizzle-orm/pglite`. The neon-http driver is auto-detected and
-`capabilities.transactions` is set to `false` (HTTP can't hold a session); use
+`capabilities.execution.interactiveTransactions` is set to `false` (HTTP can't hold a session); use
 `drizzle-orm/neon-serverless` if you need transactional writes.
 
 ```typescript
@@ -720,9 +728,10 @@ function createPostgresBackend(
     vector?: VectorStrategy | false;
     /**
      * Override specific backend capabilities. Useful for HTTP-style
-     * drivers or test scenarios. neon-http already has `transactions:
-     * false` auto-applied — pass this to override that or to disable
-     * other capabilities for custom drivers.
+     * drivers or test scenarios. neon-http already has
+     * `execution.interactiveTransactions: false` auto-applied — pass
+     * this to override that or to disable other capabilities for custom
+     * drivers.
      */
     capabilities?: Partial<BackendCapabilities>;
     /**
@@ -1098,13 +1107,13 @@ For the same reason, a write guarded by a **declared constraint** — edge
 cardinality other than `many`, a `disjointWith` axiom, a shared-scope unique, or
 dynamic `getOrCreateByEndpoints` convergence — is refused on D1 with
 `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` rather than committed unfenced. See
-[Declared constraints require `transactions`](#declared-constraints-require-transactions).
+[Declared constraints require an interactive transaction](#declared-constraints-require-an-interactive-transaction).
 
 ## Cloudflare Durable Objects (SQLite)
 
 A store backed by `drizzle(ctx.storage)` inside a Durable Object is
 **auto-detected** as `transactionMode: "do-sqlite"` and reports
-`capabilities.transactions: true` — no `executionProfile` hint needed.
+`capabilities.execution.interactiveTransactions: true` — no `executionProfile` hint needed.
 Unlike D1, Durable Objects expose an interactive storage transaction runner,
 so adapter stores can provide fully atomic `store.transaction()` and
 `store.withTransaction()` operations.
@@ -1166,7 +1175,7 @@ Check what features a backend supports:
 const backend = createSqliteBackend(db);
 const store = createStore(graph, backend);
 
-if (store.capabilities.transactions) {
+if (store.capabilities.execution.interactiveTransactions) {
   await store.transaction(async (tx) => {
     /* ... */
   });
@@ -1184,7 +1193,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 
 | Field                                                                      | Meaning                                                                                             |
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `transactions`                                                             | Atomic transactions available (see note below)                                                      |
+| `execution`                                                                | Execution boundaries: `interactiveTransactions` and exact-root `atomicBatch` support                |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
 | `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
@@ -1383,14 +1392,15 @@ their members keep working exactly as before, unbundled, with an access-count ce
 prevents new scattered checks from accumulating ahead of that follow-up.
 
 A backend author does not need to do anything for these six bundles today: both bundled backends
-already carry every core member each bundle's `dialects` scope requires. A future conformance kit
-will certify a **third-party** backend by resolving every bundle's verdict against the declared
-capabilities and the object the calls actually execute on, and asserting the disposition-keyed
-port-mismatch rule above holds — a backend author preparing for that kit should make sure a
-declared capability (`constraintClaims`, `contributions`, …) is truthful about which members the
-backend object actually implements, not just which capability fields it sets.
+already carry every core member each bundle's `dialects` scope requires. The atomic transport
+conformance runner is the foundation for certifying a **third-party** backend: the author supplies
+engine-specific statements, state observers, and exact-root provenance checks, while the runner
+asserts the shared transport contract. Bundle verdicts remain a separate check against the declared
+capabilities and the object the calls actually execute on. A backend must therefore make every
+declared capability (`constraintClaims`, `contributions`, and execution support) truthful about
+what the active backend object implements, not just which fields it sets.
 
-### Declared constraints require `transactions`
+### Declared constraints require an interactive transaction
 
 A **constrained write** — one whose correctness rests on a check-then-write that
 no database key repeats at write time — runs its probe and its write under one
@@ -1398,7 +1408,7 @@ per-graph mutual exclusion. That fence is a transaction-scoped construct on both
 dialects: SQLite's `BEGIN IMMEDIATE` writer slot, PostgreSQL's
 `pg_advisory_xact_lock` (which outside a transaction is taken and dropped inside
 its own implicit single-statement one, excluding nothing). A backend reporting
-`capabilities.transactions: false` can supply neither, so such a write is
+`capabilities.execution.interactiveTransactions: false` can supply neither, so such a write is
 **refused** rather than run unfenced — a constraint enforced only when nothing
 races is the defect the fence exists to close.
 
@@ -1422,7 +1432,7 @@ what decides it.
 
 This affects **Cloudflare D1**, **`drizzle-orm/neon-http`**, and any SQLite
 backend built with `transactionMode: "none"`. Durable Objects are unaffected —
-`do-sqlite` reports `capabilities.transactions: true` and fences normally.
+`do-sqlite` reports `capabilities.execution.interactiveTransactions: true` and fences normally.
 
 Unconstrained writes on those backends are untouched and keep working exactly as
 before: a `cardinality: "many"` edge created, updated and deleted; any node
@@ -1525,6 +1535,7 @@ TypeGraph choosing separate query semantics per backend:
 | Managed node projection fusion                        | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite                        | SQLite writes the node and fulltext/vector sidecars through the portable transaction path. PostgreSQL can compile them into one managed statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
+| Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on certified neon-http roots; otherwise `none` | `root` is an exact-backend declaration paired with a registered executor. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
 | Eligible bundled-root managed autocommit              | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative statement. Plain, projection-free generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches and direct edge batches without history/revision capture use one schema-fenced native atomic exchange; edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same exact-root mutation profile. Derived wrappers, adopted caller transactions, constrained/projected/identity-enabled node deletes, cascade/disconnect deletes, custom backends, and other managed writes retain the existing path |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
@@ -1602,12 +1613,12 @@ SQLite those run as `json_each()` scans — correct results, just not index-acce
 :::
 
 :::note[Transactions are driver-dependent, not backend-dependent]
-Both backends report `transactions: true` by default. The exception is symmetric and lives in specific drivers:
+Both backends report `execution.interactiveTransactions: true` by default. The exception is symmetric and lives in specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
-`transactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`, Operational
+`execution.interactiveTransactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`, Operational
 Identity) throw on those drivers regardless of backend. Schema-managed Store writes also fail closed because they
-cannot hold the transaction-scoped schema fence; only raw Store or direct-backend writes retain the sequential,
-non-atomic fallback.
+cannot hold the transaction-scoped schema fence; `store.transaction()` refuses on those roots. Eligible operations
+with a certified atomic SQL program remain available independently of this interactive transaction capability.
 :::
 
 :::note[Aggregate set operations are a builder limitation, not a parity gap]
@@ -1871,7 +1882,7 @@ error rather than returning something that looks like success.
 (`schemaWriteTransaction`) to run the sequence under. The HTTP-only
 PostgreSQL drivers cannot hold a session across statements, so they have
 no fence — the same reason they already report
-`capabilities.transactions === false`. A third-party strategy predating
+`capabilities.execution.interactiveTransactions === false`. A third-party strategy predating
 `dropDdl` keeps working for every other operation and is reported as not
 rebuildable rather than being dropped through a synthesized statement
 TypeGraph guessed at. Vector contributions are never rebuildable on any

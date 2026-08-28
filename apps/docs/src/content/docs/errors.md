@@ -673,7 +673,7 @@ typed refusal on the document path, silent data loss on the typed one.
 A write guarded by a declared constraint runs its probe and its write under one
 per-graph mutual exclusion. That fence is transaction-scoped on both dialects
 (SQLite's `BEGIN IMMEDIATE`, PostgreSQL's `pg_advisory_xact_lock`), so a backend
-reporting `capabilities.transactions: false` — Cloudflare D1, `drizzle-orm/neon-http`,
+reporting `capabilities.execution.interactiveTransactions: false` — Cloudflare D1, `drizzle-orm/neon-http`,
 any SQLite backend built with `transactionMode: "none"` — cannot hold it, and the
 write is refused rather than run unfenced. Durable Objects are unaffected.
 
@@ -691,7 +691,7 @@ cannot fence constrained writes" is unusable advice while "your
 
 `details.graphId` names the graph. Unconstrained writes on the same backend are
 untouched — see
-[Declared constraints require `transactions`](/backend-setup#declared-constraints-require-transactions)
+[Declared constraints require an interactive transaction](/backend-setup#declared-constraints-require-an-interactive-transaction)
 for what still works there.
 
 #### Write-fence declaration codes

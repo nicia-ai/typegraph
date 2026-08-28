@@ -455,7 +455,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       const backend = createPostgresBackend(db);
 
       expect(backend.dialect).toBe("postgres");
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
     });
 
     it("runs non-vector CRUD with vector disabled (vector: false)", async (ctx) => {

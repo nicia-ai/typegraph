@@ -983,13 +983,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const statementExecution = statementExecutionVerdict(backend);
     if (
       graph.identity !== undefined &&
-      (!backend.capabilities.transactions || !statementExecution.supported)
+      (!backend.capabilities.execution.interactiveTransactions || !statementExecution.supported)
     ) {
       throw new ConfigurationError(
         "Operational Identity requires an atomic transactional backend with statement execution support.",
         {
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-          transactions: backend.capabilities.transactions,
+          interactiveTransactions: backend.capabilities.execution.interactiveTransactions,
           statementExecution: statementExecution.supported,
         },
         {
@@ -2478,7 +2478,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * double only once — but the builder is immutable, so a query rebuilt per
    * request pays it every request.
    *
-   * With `backend.capabilities.transactions` the queries share one
+   * With `backend.capabilities.execution.interactiveTransactions` the queries share one
    * transaction; how that reaches the wire is the adapter's business. A SQL
    * backend frames them with `begin`/`commit`, putting a networked one at
    * N+2 round trips *at best*, while Durable Objects use an ambient storage
@@ -2839,17 +2839,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * cannot police this: it never sees the raw handle's traffic, so it also
    * cannot drain a raw statement still in flight when the transaction commits.
    *
-   * **Backends without transactions.** When `backend.capabilities.transactions`
+   * **Backends without transactions.** When `backend.capabilities.execution.interactiveTransactions`
    * is `false` (Cloudflare D1, `drizzle-orm/neon-http`), a raw Store runs the
    * callback against the same backend used outside `transaction()` — writes
    * are applied as they happen and a thrown error does **not** roll back
    * earlier writes inside the callback. A schema-managed Store may run a
    * read-only callback, but its first write fails closed because the backend
    * cannot hold the schema-version fence. Branch on
-   * `backend.capabilities.transactions` if you require atomicity:
+   * `backend.capabilities.execution.interactiveTransactions` if you require atomicity:
    *
    * ```typescript
-   * if (backend.capabilities.transactions) {
+   * if (backend.capabilities.execution.interactiveTransactions) {
    *   await store.transaction(async (tx) => { ... });
    * } else {
    *   // sequential, non-atomic — handle partial-failure recovery yourself
@@ -2992,7 +2992,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // bound to the same backend as this.nodes/this.edges and exposing
     // the cached versions avoids rebuilding the proxies on every call.
     // An isolation-level request in the options is equally meaningless here.
-    if (!this.#backend.capabilities.transactions) {
+    if (!this.#backend.capabilities.execution.interactiveTransactions) {
       let nodes = this.nodes;
       let edges = this.edges;
       if (receiptRecorder !== undefined) {
@@ -3228,7 +3228,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * @throws {ConfigurationError} when the store has history capture enabled
    *   (use {@link AdapterStore.withRecordedTransaction} instead), or when the backend
    *   cannot adopt an external transaction — either it is not a Drizzle
-   *   Postgres/SQLite backend, or `backend.capabilities.transactions` is `false`
+   *   Postgres/SQLite backend, or `backend.capabilities.execution.interactiveTransactions` is `false`
    *   (`drizzle-orm/neon-http`, Cloudflare D1, SQLite
    *   `transactionMode: "none"`). A non-atomic fallback is deliberately
    *   not offered here: the caller's relational write *would* still
@@ -3251,7 +3251,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         "This backend cannot adopt an external transaction for cross-store " +
           "atomicity. adoptTransaction is provided only by the Drizzle " +
           "Postgres/SQLite backends with transaction support. Check " +
-          "backend.capabilities.transactions, or run the relational and " +
+          "backend.capabilities.execution.interactiveTransactions, or run the relational and " +
           "graph writes as separate transactions with manual compensation.",
         { capability: "adoptTransaction" },
       );
@@ -3720,13 +3720,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           target,
           this.#sqlSchema(),
           this.graphId,
-          this.#baseBackend.capabilities.transactions,
+          this.#baseBackend.capabilities.execution.interactiveTransactions,
           previousRevision,
         );
       }
     };
 
-    await (this.#baseBackend.capabilities.transactions ?
+    await (this.#baseBackend.capabilities.execution.interactiveTransactions ?
       this.#baseBackend.transaction(async (tx) => doClear(tx))
     : doClear(this.#baseBackend));
 

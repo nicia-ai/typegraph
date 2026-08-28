@@ -413,7 +413,7 @@ export type EfSearchApplicability = Readonly<{
   /** The active strategy's declaration. See {@link VectorSearchFrontierTuning}. */
   tuning: VectorSearchFrontierTuning;
   /** Whether the backend can open the frame a scoped override needs. */
-  transactions: boolean;
+  interactiveTransactions: boolean;
   /**
    * Dialect name used in the refusal message (`"PostgreSQL"` / `"SQLite"`) —
    * the only dialect-specific token in the decision, so both backends read
@@ -446,7 +446,7 @@ export type EfSearchApplicability = Readonly<{
  * - slot is not the tunable index type — `ConfigurationError` (the caller can
  *   fix this by declaring the index, so it is configuration, not capability).
  * - the override needs a transaction to be scoped to and the backend has none
- *   — `UnsupportedBackendCapabilityError` on `transactions`.
+ *   — `UnsupportedBackendCapabilityError` on `execution.interactiveTransactions`.
  *
  * Range validation (pgvector's 1..1000) stays with the engine that has the
  * range; this predicate answers only whether the knob exists here at all.
@@ -454,8 +454,14 @@ export type EfSearchApplicability = Readonly<{
 export function resolveEfSearchOverride(
   applicability: EfSearchApplicability,
 ): string | undefined {
-  const { efSearch, indexType, tuning, transactions, dialect, engine } =
-    applicability;
+  const {
+    efSearch,
+    indexType,
+    tuning,
+    interactiveTransactions,
+    dialect,
+    engine,
+  } = applicability;
   if (efSearch === undefined) return undefined;
   if (!tuning.tunable) {
     throw new UnsupportedBackendCapabilityError(
@@ -476,10 +482,10 @@ export function resolveEfSearchOverride(
       },
     );
   }
-  if (tuning.requiresTransactionScope && !transactions) {
+  if (tuning.requiresTransactionScope && !interactiveTransactions) {
     throw new UnsupportedBackendCapabilityError(
       `${dialect} efSearch override`,
-      "transactions",
+      "execution.interactiveTransactions",
       { efSearch, engine, parameter: tuning.parameter },
       `Use a transactional ${dialect} driver: ${tuning.parameter} is scoped to the search's own transaction, and a session-wide setting would leak into concurrent searches.`,
     );

@@ -131,7 +131,7 @@ export type VectorSearchFrontierTuning =
       indexType: VectorIndexType;
       /**
        * `true` when applying the parameter needs a transaction to scope it to
-       * the one search. A backend that reports `transactions: false` refuses
+       * the one search. A backend without interactive transactions refuses
        * `efSearch` rather than leaking a session-wide setting.
        */
       requiresTransactionScope: boolean;
@@ -286,13 +286,16 @@ export type { PessimisticLockCapabilities } from "./capabilities/write-fence";
 /**
  * Backend capabilities that vary by dialect.
  */
+export type BackendExecutionCapabilities = Readonly<{
+  /** Whether the backend can hold an interactive callback/session transaction. */
+  interactiveTransactions: boolean;
+  /** Whether the exact root backend exposes a conformance-earned atomic batch. */
+  atomicBatch: "none" | "root";
+}>;
+
 export type BackendCapabilities = Readonly<{
-  /**
-   * Whether the backend can hold an interactive callback/session transaction
-   * across awaited statements. This does not describe one-statement atomicity
-   * or a static native adapter batch (D1 does not provide this capability).
-   */
-  transactions: boolean;
+  /** How this backend executes work and establishes atomicity. */
+  execution: BackendExecutionCapabilities;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
   /**
@@ -407,13 +410,29 @@ export type BackendCapabilities = Readonly<{
   recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
+/**
+ * Capability overrides accepted by bundled backend factories.
+ *
+ * Root atomic-batch support is deliberately absent: bundled factories derive
+ * it from the transport they actually discover and register. Callers may
+ * override interactive transaction availability for an otherwise unknown
+ * driver, but cannot advertise an executor the factory did not find.
+ */
+export type BundledBackendCapabilityOverrides = Readonly<
+  Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+      interactiveTransactions?: boolean;
+    }>;
+  }
+>;
+
 /** Keeps session-scoped analytics honest when a required SQL feature is absent. */
 export function normalizeGraphAnalyticsCapabilities(
   capabilities: BackendCapabilities,
 ): BackendCapabilities {
   if (
     capabilities.graphAnalytics?.supported !== true ||
-    (capabilities.transactions &&
+    (capabilities.execution.interactiveTransactions &&
       capabilities.windowFunctions &&
       capabilities.returning !== false)
   ) {
@@ -423,6 +442,37 @@ export function normalizeGraphAnalyticsCapabilities(
     ...capabilities,
     graphAnalytics: { ...capabilities.graphAnalytics, supported: false },
   };
+}
+
+/**
+ * Returns whether the supplied backend or capability declaration can keep an
+ * interactive transaction open across awaited statements.
+ */
+export function supportsInteractiveTransactions(
+  backendOrCapabilities:
+    | BackendCapabilities
+    | Readonly<{ capabilities: BackendCapabilities }>,
+): boolean {
+  return "capabilities" in backendOrCapabilities
+    ? backendOrCapabilities.capabilities.execution.interactiveTransactions
+    : backendOrCapabilities.execution.interactiveTransactions;
+}
+
+/**
+ * Resolves the strongest execution tier declared by a backend. Atomic batches
+ * are preferred for root backends because they preserve multi-statement
+ * atomicity without requiring a held session; interactive transactions remain
+ * the stronger general-purpose fallback when available.
+ */
+export function supportsRootAtomicBatch(
+  backendOrCapabilities:
+    | BackendCapabilities
+    | Readonly<{ capabilities: BackendCapabilities }>,
+): boolean {
+  const capabilities = "capabilities" in backendOrCapabilities
+    ? backendOrCapabilities.capabilities
+    : backendOrCapabilities;
+  return capabilities.execution.atomicBatch === "root";
 }
 
 // ============================================================
@@ -1199,7 +1249,7 @@ export type VectorSearchParams = Readonly<{
    * - a slot whose index type is not the tunable one (pgvector IVFFlat or
    *   brute-force): `ConfigurationError`.
    * - `requiresTransactionScope` on a backend reporting
-   *   `transactions: false` (for example `drizzle-orm/neon-http`):
+   *   `execution.interactiveTransactions: false` (for example `drizzle-orm/neon-http`):
    *   `UnsupportedBackendCapabilityError`, because `SET LOCAL` has no frame
    *   to be local to.
    */
@@ -2383,7 +2433,7 @@ export type GraphBackend = Readonly<{
    * - If a row already exists at `params.version` with a different
    *   `schemaHash`, throws `SchemaContentConflictError`.
    *
-   * Requires `capabilities.transactions === true`. On non-transactional
+   * Requires `capabilities.execution.interactiveTransactions === true`. On non-transactional
    * backends (e.g. Cloudflare D1, drizzle-orm/neon-http) this method
    * throws `ConfigurationError` rather than running with degraded
    * atomicity that would silently re-introduce the orphan-row crash
@@ -3685,7 +3735,7 @@ export type RunOptionallyInTransactionOptions = Readonly<{
    * issues `BEGIN … READ ONLY`).
    *
    * Scopes the transaction and nothing else, so it is not honored on the
-   * fallthrough path: a backend reporting `transactions: false` opens no
+   * fallthrough path: a backend without interactive transactions opens no
    * transaction to configure. The callback receives an explicit execution
    * mode (`interactive-transaction` or `sequential`), so callers never infer
    * the execution boundary from backend object identity.
@@ -3711,7 +3761,7 @@ export type OptionalTransactionExecution =
  * backends that don't (Cloudflare D1, `drizzle-orm/neon-http` over HTTP), and
  * avoids opening nested transactions when the caller already holds a
  * transaction-scoped backend. The single-statement race window is already
- * implicit on any backend that reports `transactions: false`; callers that
+ * implicit on any backend without interactive transactions; callers that
  * cannot tolerate it must branch on the capability themselves.
  */
 export async function runOptionallyInTransaction<T>(
@@ -3722,7 +3772,7 @@ export async function runOptionallyInTransaction<T>(
   ) => Promise<T>,
   options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
-  if ("transaction" in backend && backend.capabilities.transactions) {
+  if ("transaction" in backend && backend.capabilities.execution.interactiveTransactions) {
     return backend.transaction(
       (tx) => fn(tx, { mode: "interactive-transaction" }),
       options?.transaction,
@@ -4291,7 +4341,10 @@ export const POSTGRES_MAX_BIND_PARAMETERS = 65_533;
  * Default capabilities for SQLite.
  */
 export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
-  transactions: true, // SQLite supports transactions
+  execution: Object.freeze({
+    interactiveTransactions: true,
+    atomicBatch: "none",
+  }),
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   clearValidTo: true,
   returning: true, // SQLite has supported RETURNING since 3.35.0
@@ -4315,7 +4368,10 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
  * Default capabilities for PostgreSQL.
  */
 export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
-  transactions: true, // PostgreSQL supports transactions
+  execution: Object.freeze({
+    interactiveTransactions: true,
+    atomicBatch: "none",
+  }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   clearValidTo: true,
   returning: true, // PostgreSQL has supported RETURNING since 8.2

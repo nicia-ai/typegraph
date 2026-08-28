@@ -238,7 +238,7 @@ either omit `validFrom` from the update document, export with
 
 ### Cancelling an export
 
-On a backend reporting `capabilities.transactions`, an export holds one
+On a backend reporting `capabilities.execution.interactiveTransactions`, an export holds one
 repeatable-read snapshot transaction for its whole life, and on a
 single-connection backend it holds that connection's exclusive
 interchange-stream lease with it. (A backend without transactions — SQLite

@@ -688,7 +688,7 @@ interleave other async work that writes to the same connection inside the
 
 **Cloudflare Durable Objects (`do-sqlite`).** A store backed by
 `drizzle(ctx.storage)` is auto-detected as `transactionMode: "do-sqlite"`
-and advertises `capabilities.transactions: true`. Drizzle's own
+and advertises `capabilities.execution.interactiveTransactions: true`. Drizzle's own
 `db.transaction()` here is `ctx.storage.transactionSync` and cannot span an
 `await`; TypeGraph instead delegates to the async storage runner
 `ctx.storage.transaction(async …)` (surfaced by Drizzle as
@@ -723,7 +723,7 @@ fulltext-backed writes find their durable materialization marker; an uninitializ
 throws `StoreNotInitializedError` instead of migrating mid-transaction.
 
 `withTransaction` throws `ConfigurationError` on backends that cannot provide
-real rollback (`backend.capabilities.transactions === false`:
+real rollback (`backend.capabilities.execution.interactiveTransactions === false`:
 `drizzle-orm/neon-http`, Cloudflare D1, SQLite `transactionMode: "none"`) —
 it never silently degrades to a non-atomic fallback, because the relational
 write would still commit.

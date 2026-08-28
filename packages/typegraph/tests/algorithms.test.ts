@@ -912,7 +912,13 @@ describe("store.algorithms", () => {
       const inlineStore = createStore(
         testGraph,
         deriveBackend(backend, {
-          capabilities: { ...backend.capabilities, transactions: false },
+          capabilities: {
+            ...backend.capabilities,
+            execution: {
+              ...backend.capabilities.execution,
+              interactiveTransactions: false,
+            },
+          },
         }),
       );
       const inlinePath = await inlineStore.algorithms.weightedShortestPath(
@@ -951,7 +957,13 @@ describe("store.algorithms", () => {
     it("produces identical results through the inline fallback", async () => {
       const roads = await seedRoads();
       const inlineBackend: GraphBackend = deriveBackend(backend, {
-        capabilities: { ...backend.capabilities, transactions: false },
+        capabilities: {
+          ...backend.capabilities,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
+        },
       });
       const inlineStore = createStore(testGraph, inlineBackend);
 
@@ -1043,7 +1055,13 @@ describe("store.algorithms", () => {
     it("uses bounded frontier queries and stops when the frontier is empty", async () => {
       const statements: string[] = [];
       const observedBackend: GraphBackend = deriveBackend(backend, {
-        capabilities: { ...backend.capabilities, transactions: false },
+        capabilities: {
+          ...backend.capabilities,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
+        },
         execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
           statements.push(requireDefined(backend.compileSql)(query).sql);
           return backend.execute<T>(query);
@@ -1107,7 +1125,10 @@ describe("store.algorithms", () => {
       const constrainedBackend: GraphBackend = deriveBackend(backend, {
         capabilities: {
           ...backend.capabilities,
-          transactions: false,
+          execution: {
+            ...backend.capabilities.execution,
+            interactiveTransactions: false,
+          },
           maxBindParameters: 100,
         },
       });

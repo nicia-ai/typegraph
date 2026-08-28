@@ -5,7 +5,7 @@
  * authorizes commit under one mutual exclusion (see
  * {@link file://../src/store/constraints.ts}). Both halves of that fence are
  * TRANSACTION-SCOPED constructs — SQLite's `BEGIN IMMEDIATE`, PostgreSQL's
- * `pg_advisory_xact_lock` — so a backend that reports `transactions: false`
+ * `pg_advisory_xact_lock` — so a backend that reports no interactive transactions
  * (Cloudflare D1, `drizzle-orm/neon-http`, any `transactionMode: "none"` SQLite
  * driver) can supply neither.
  *

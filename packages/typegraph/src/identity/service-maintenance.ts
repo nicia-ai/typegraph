@@ -68,7 +68,7 @@ export type IdentityRebuildContext<G extends GraphDef> = Pick<
 >;
 
 function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
-  if (!backend.capabilities.transactions) {
+  if (!backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
       "Operational Identity requires atomic transaction support.",
       { code: "IDENTITY_REQUIRES_ATOMIC_BACKEND", graphId },

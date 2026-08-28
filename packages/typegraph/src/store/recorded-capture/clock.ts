@@ -478,7 +478,7 @@ async function writeRecordedClock(
  * would be vacuous on a backend with no transactions — but such a backend can
  * never reach here: `assertRevisionTrackableBackend` refuses
  * `revisionTracking` (and therefore `history`, which implies it) at Store
- * construction unless `capabilities.transactions` is set. Adding the re-read to
+ * construction unless `capabilities.execution.interactiveTransactions` is set. Adding the re-read to
  * that arm would put an unfalsifiable extra SELECT on every captured write.
  */
 async function assertRecordedClockAdvanced(

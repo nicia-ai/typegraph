@@ -114,7 +114,7 @@ export type RepairInvertedWindowsReport = Readonly<{
   nonCanonical: Readonly<Record<RepairRelation, number | undefined>>;
   /**
    * Whether every statement of this call ran in ONE transaction. `false` on a
-   * backend that reports `capabilities.transactions === false`, where the call
+   * backend that reports `capabilities.execution.interactiveTransactions === false`, where the call
    * degrades to per-relation statements.
    *
    * Reported by the seam, not inferred from backend object identity:

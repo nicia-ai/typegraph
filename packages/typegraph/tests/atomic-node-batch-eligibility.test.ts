@@ -152,9 +152,9 @@ const input: CreateNodeInput = {
   props: { name: "Alice" },
 };
 
-function rootBackend(transactions: boolean): GraphBackend {
+function rootBackend(interactiveTransactions: boolean): GraphBackend {
   return {
-    capabilities: { transactions },
+    capabilities: { execution: { interactiveTransactions, atomicBatch: "none" } },
   } as GraphBackend;
 }
 

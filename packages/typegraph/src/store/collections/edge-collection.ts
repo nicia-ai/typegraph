@@ -1104,7 +1104,7 @@ export function createEdgeCollection<
       // `runOptionallyInTransaction` is the one owner of "open a transaction if
       // this backend has one": already inside `store.transaction(...)` the
       // target IS the caller's transaction and no nested one opens, and on a
-      // backend that reports `transactions: false` there is nothing to open, so
+      // backend without interactive transactions there is nothing to open, so
       // the decision is exactly as fenced as that backend's writes are — which
       // is to say not at all, matching the atomicity it already cannot offer.
       const { results, mutations } = await runResolvedMutationSetConverging(

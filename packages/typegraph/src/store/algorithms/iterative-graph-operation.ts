@@ -323,7 +323,7 @@ export async function withInlineIterativeGraphOperation<T>(
   options: InternalTraversalOptions,
   run: (operation: IterativeGraphOperation) => Promise<T>,
 ): Promise<T> {
-  if (ctx.backend.capabilities.transactions) {
+  if (ctx.backend.capabilities.execution.interactiveTransactions) {
     return ctx.backend.transaction(
       async (backend) => run(createOperation(ctx, options, backend)),
       {
@@ -349,7 +349,7 @@ export async function runIterativeGraphOperation<
   options: InternalTraversalOptions,
   plan: IterativeGraphPlan<State, Result>,
 ): Promise<Result> {
-  if (!ctx.backend.capabilities.transactions) {
+  if (!ctx.backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
       "Temporary-table graph iteration requires a transactional backend.",
       { dialect: ctx.backend.dialect },
@@ -975,7 +975,7 @@ function compileWeightExpression(
  */
 export function supportsTemporaryIteration(ctx: AlgorithmContext): boolean {
   return (
-    ctx.backend.capabilities.transactions &&
+    ctx.backend.capabilities.execution.interactiveTransactions &&
     ctx.backend.capabilities.graphAnalytics?.supported !== false &&
     ctx.backend.capabilities.returning !== false &&
     ctx.backend.executeTemporaryStatement !== undefined

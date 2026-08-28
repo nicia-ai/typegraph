@@ -2706,7 +2706,7 @@ describe("Serialized-connection snapshot streaming guards", () => {
     // so these two would in fact interleave harmlessly on the one handle — and
     // the second is refused anyway, because the import side claims the
     // connection whatever its backend reports. Gating that claim on
-    // `capabilities.transactions` would buy this case back at the price of
+    // `capabilities.execution.interactiveTransactions` would buy this case back at the price of
     // letting a REAL export snapshot open mid-import on a mixed-profile
     // connection, which is the far likelier pairing. See the residual note in
     // `backend/transaction-resource.ts`.
@@ -2722,7 +2722,7 @@ describe("Serialized-connection snapshot streaming guards", () => {
     const secondTargetBackend = createSqliteBackend(drizzle(database), {
       executionProfile,
     });
-    expect(firstTargetBackend.capabilities.transactions).toBe(false);
+    expect(firstTargetBackend.capabilities.execution.interactiveTransactions).toBe(false);
     const firstTarget = createStore(sameHandleTargetGraph, firstTargetBackend);
     const secondTarget = createStore(
       secondSameHandleTargetGraph,
@@ -2768,7 +2768,7 @@ describe("Serialized-connection snapshot streaming guards", () => {
     const backend = createSqliteBackend(drizzle(database), {
       executionProfile: { transactionMode: "none", isSync: true },
     });
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
     const source = createStore(testGraph, backend);
     const target = createStore(sameHandleTargetGraph, backend);
     await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-lease" });
@@ -2837,7 +2837,7 @@ describe("Serialized-connection snapshot streaming guards", () => {
     const backend = createSqliteBackend(drizzle(database), {
       executionProfile: { transactionMode: "none", isSync: true },
     });
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
     const source = createStore(testGraph, backend);
     const target = createStore(sameHandleTargetGraph, backend);
     await source.nodes.Person.create({ name: "Alice" }, { id: "no-tx-alice" });

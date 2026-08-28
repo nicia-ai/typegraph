@@ -747,6 +747,12 @@ Keep these guarantees distinct:
 - A **static internal adapter batch** is a backend implementation detail, such
   as a D1 batch or a bind-budgeted multi-row insert. It is not a Store API and
   does not make arbitrary Store calls atomic.
+- A **certified atomic SQL program** is a closed, ordered sequence submitted to
+  a backend transport that has passed the framework conformance runner. The
+  runner checks ordered result slots, exact parameter forwarding, empty-batch
+  no-op behavior, and rollback of primary and sidecar writes after a later
+  statement fails. This transport capability is separate from the semantic
+  proof that makes a particular mutation eligible.
 - An **authoritative one-statement command** is the semantic `commands` port;
   its statement returns the created/found decision it owns. Durable
   `matchIdentity` convergence can qualify for this root path because the
@@ -2030,19 +2036,18 @@ context through your call chain.
 
 Not all backends support atomic transactions. Cloudflare D1 and
 `drizzle-orm/neon-http` cannot hold a multi-statement session and report
-`capabilities.transactions: false`. A schema-managed Store fails closed before
+`capabilities.execution.interactiveTransactions: false`. A schema-managed Store fails closed before
 writing on these backends because it cannot hold the schema fence. On a raw
-Store, `store.transaction(fn)` still runs — `fn` executes against the same
-backend used outside `transaction()`, sequentially — **but writes are applied
-as they happen and a thrown error does not roll back earlier writes inside the
-callback**. If you require atomicity or version fencing, branch on the
-capability:
+Store, `store.transaction(fn)` refuses because no interactive transaction is
+available. Eligible operations backed by a certified atomic SQL program remain
+separate from this interactive capability. If you require atomicity or version
+fencing, branch on the capability:
 
 ```typescript
-if (store.capabilities.transactions) {
+if (store.capabilities.execution.interactiveTransactions) {
   await store.transaction(async (tx) => { /* atomic */ });
 } else {
-  // Raw Store only: sequential, non-atomic, and not schema-fenced.
+  // Use individual operations or an eligible certified atomic operation.
 }
 ```
 
@@ -2090,7 +2095,7 @@ falls back re-runs as a full fetch, and that fallback is detected *after* the se
 has already executed. It clears the fast path, so a reused query instance pays the double only
 once — but the builder is immutable, so a query rebuilt per request pays it every request.
 
-With `backend.capabilities.transactions` the queries share one transaction; how that reaches the
+With `backend.capabilities.execution.interactiveTransactions` the queries share one transaction; how that reaches the
 wire is the adapter's business. A SQL backend frames them with `begin`/`commit`, putting a networked
 one at N+2 round trips **at best**, while Durable Objects use an ambient storage transaction with no
 framing statements. Without transactions there is no framing. Connection reuse is a separate

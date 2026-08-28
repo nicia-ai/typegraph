@@ -3,16 +3,16 @@ import { describe, expect, it } from "vitest";
 import {
   type AtomicSqlProgram,
   type AtomicSqlRow,
-  createAtomicSqlProgramExecutor,
-  markBundledRootAtomicSqlProgram,
-  resolveBundledRootAtomicSqlProgramExecutor,
+  registerAtomicSqlProgram,
+  resolveAtomicSqlProgramExecutor,
 } from "../src/backend/capabilities/atomic-sql-program";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   type CompiledSqlQuery,
   type SqlExecutionAdapter,
 } from "../src/backend/drizzle/execution/types";
-import type { GraphBackend } from "../src/backend/types";
+import type { GraphBackend, TransactionBackend } from "../src/backend/types";
+import { ConfigurationError } from "../src/errors";
 
 type TestResult = Readonly<{ value: number }>;
 
@@ -73,6 +73,28 @@ function createCountingBatch(): Readonly<{
   };
 }
 
+function createRoot(): GraphBackend {
+  return {
+    capabilities: {
+      execution: { atomicBatch: "root" },
+    },
+  } as GraphBackend;
+}
+
+function expectRegistrationMismatch(action: () => unknown): void {
+  let thrown: unknown;
+  try {
+    action();
+  } catch (error) {
+    thrown = error;
+  }
+  expect(thrown).toBeInstanceOf(ConfigurationError);
+  if (!(thrown instanceof ConfigurationError)) return;
+  expect(thrown.details["code"]).toBe(
+    "ATOMIC_SQL_PROGRAM_REGISTRATION_MISMATCH",
+  );
+}
+
 describe("atomic SQL program executor", () => {
   it("dispatches closed slots through one native batch and decodes them", async () => {
     const calls: CompiledSqlQuery[][] = [];
@@ -82,13 +104,10 @@ describe("atomic SQL program executor", () => {
       calls.push([...statements]);
       return oneRowBatch<TRow>(statements);
     };
-    const root = {} as GraphBackend;
-    markBundledRootAtomicSqlProgram(
-      root,
-      createAtomicSqlProgramExecutor(createAdapter(executeAtomicBatch)),
-    );
+    const root = createRoot();
+    registerAtomicSqlProgram(root, executeAtomicBatch);
 
-    const executor = resolveBundledRootAtomicSqlProgramExecutor(root);
+    const executor = resolveAtomicSqlProgramExecutor(root);
     expect(executor).toBeDefined();
     if (executor === undefined) throw new Error("Expected root executor");
 
@@ -109,15 +128,12 @@ describe("atomic SQL program executor", () => {
   });
 
   it("enforces result-slot and per-slot cardinality contracts", async () => {
-    const root = {} as GraphBackend;
+    const root = createRoot();
     const executeAtomicBatch: NonNullable<
       SqlExecutionAdapter["executeAtomicBatch"]
     > = oneValueBatch;
-    markBundledRootAtomicSqlProgram(
-      root,
-      createAtomicSqlProgramExecutor(createAdapter(executeAtomicBatch)),
-    );
-    const executor = resolveBundledRootAtomicSqlProgramExecutor(root);
+    registerAtomicSqlProgram(root, { executeAtomicBatch });
+    const executor = resolveAtomicSqlProgramExecutor(root);
     if (executor === undefined) throw new Error("Expected root executor");
 
     await expect(
@@ -138,16 +154,13 @@ describe("atomic SQL program executor", () => {
       }),
     ).rejects.toThrow(/returned 1 result slots, expected 2/);
 
-    const emptyRowsRoot = {} as GraphBackend;
+    const emptyRowsRoot = createRoot();
     const emptyRowsExecutor: NonNullable<
       SqlExecutionAdapter["executeAtomicBatch"]
     > = noRowsBatch;
-    markBundledRootAtomicSqlProgram(
-      emptyRowsRoot,
-      createAtomicSqlProgramExecutor(createAdapter(emptyRowsExecutor)),
-    );
+    registerAtomicSqlProgram(emptyRowsRoot, emptyRowsExecutor);
     const emptyRowsRootExecutor =
-      resolveBundledRootAtomicSqlProgramExecutor(emptyRowsRoot);
+      resolveAtomicSqlProgramExecutor(emptyRowsRoot);
     if (emptyRowsRootExecutor === undefined) {
       throw new Error("Expected empty-row root executor");
     }
@@ -166,7 +179,7 @@ describe("atomic SQL program executor", () => {
   });
 
   it("delegates bind validation and driver errors to the native adapter", async () => {
-    const root = {} as GraphBackend;
+    const root = createRoot();
     const executeAtomicBatch: NonNullable<
       SqlExecutionAdapter["executeAtomicBatch"]
     > = <TRow>(statements: readonly CompiledSqlQuery[]) => {
@@ -177,11 +190,8 @@ describe("atomic SQL program executor", () => {
         statements.map(() => [{ value: 1 }] as unknown as readonly TRow[]),
       );
     };
-    markBundledRootAtomicSqlProgram(
-      root,
-      createAtomicSqlProgramExecutor(createAdapter(executeAtomicBatch)),
-    );
-    const executor = resolveBundledRootAtomicSqlProgramExecutor(root);
+    registerAtomicSqlProgram(root, executeAtomicBatch);
+    const executor = resolveAtomicSqlProgramExecutor(root);
     if (executor === undefined) throw new Error("Expected root executor");
 
     await expect(
@@ -192,25 +202,38 @@ describe("atomic SQL program executor", () => {
   });
 
   it("does not inherit through derived backends or roots without native batch", () => {
-    const root = {} as GraphBackend;
-    markBundledRootAtomicSqlProgram(
-      root,
-      createAtomicSqlProgramExecutor(createAdapter()),
-    );
-    expect(resolveBundledRootAtomicSqlProgramExecutor(root)).toBeUndefined();
+    const root = createRoot();
+    registerAtomicSqlProgram(root, createAdapter(oneValueBatch));
+    expect(resolveAtomicSqlProgramExecutor(root)).toBeDefined();
     expect(
-      resolveBundledRootAtomicSqlProgramExecutor(deriveBackend(root, {})),
+      resolveAtomicSqlProgramExecutor(deriveBackend(root, {})),
     ).toBeUndefined();
+    expect(
+      resolveAtomicSqlProgramExecutor({} as TransactionBackend),
+    ).toBeUndefined();
+
+    const noBatch = createRoot();
+    expectRegistrationMismatch(() => registerAtomicSqlProgram(noBatch, {}));
+  });
+
+  it("requires the root atomic-batch declaration", () => {
+    const undeclared = {
+      capabilities: { execution: { atomicBatch: "none" } },
+    } as GraphBackend;
+
+    expectRegistrationMismatch(() =>
+      registerAtomicSqlProgram(undeclared, oneValueBatch),
+    );
+    expect(() => registerAtomicSqlProgram(undeclared, oneValueBatch)).toThrow(
+      /atomicBatch: "root"/,
+    );
   });
 
   it("assembles an empty program without contacting the driver", async () => {
     const countingBatch = createCountingBatch();
-    const root = {} as GraphBackend;
-    markBundledRootAtomicSqlProgram(
-      root,
-      createAtomicSqlProgramExecutor(createAdapter(countingBatch.execute)),
-    );
-    const executor = resolveBundledRootAtomicSqlProgramExecutor(root);
+    const root = createRoot();
+    registerAtomicSqlProgram(root, countingBatch.execute);
+    const executor = resolveAtomicSqlProgramExecutor(root);
     if (executor === undefined) throw new Error("Expected root executor");
 
     await expect(

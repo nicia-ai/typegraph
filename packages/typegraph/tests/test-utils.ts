@@ -343,7 +343,7 @@ export function explainQueryPlan(
 
 /**
  * Wraps a real backend so any unconditional `transaction(...)` rejects and it
- * reports `capabilities.transactions: false` — the shape of
+ * reports `capabilities.execution.interactiveTransactions: false` — the shape of
  * `drizzle-orm/neon-http` and Cloudflare D1. Use it to exercise the
  * non-transactional sequential fall-through.
  *
@@ -351,7 +351,7 @@ export function explainQueryPlan(
  * reason is a contradiction rather than an oversight. This double models a
  * driver that is NOT a serialized resource, so it must not read as one: a
  * marked non-transactional double used as an import TARGET would claim the
- * stream lease (`capabilities.transactions: false` short-circuits
+ * stream lease (`capabilities.execution.interactiveTransactions: false` short-circuits
  * `snapshotExportContention`'s source arm only, never
  * `acquireSerializedStreamLease`) and start refusing work that succeeds today.
  * But `deriveBackend` carries the base's verdict, and a backend's verdict is
@@ -372,7 +372,13 @@ export function disableTransactions(backend: GraphBackend): GraphBackend {
   return {
     // eslint-disable-next-line no-restricted-syntax -- A fresh object is the point: see this function's doc comment. Deriving through the seam would carry the base's serialized verdict onto a double that models a driver which is NOT a serialized resource, and the write-once audit refuses to overwrite it with `independent`.
     ...backend,
-    capabilities: { ...backend.capabilities, transactions: false },
+    capabilities: {
+      ...backend.capabilities,
+      execution: {
+        ...backend.capabilities.execution,
+        interactiveTransactions: false,
+      },
+    },
     transaction: () =>
       Promise.reject(new Error("synthetic backend has transactions disabled")),
     ...("transactionWithNative" in backend ?

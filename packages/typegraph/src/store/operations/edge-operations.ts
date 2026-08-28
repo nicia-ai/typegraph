@@ -723,7 +723,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         const directInteractiveAutocommit =
           autocommitSingleStatement &&
           transactionMode === "none" &&
-          targetBackend.capabilities.transactions;
+          targetBackend.capabilities.execution.interactiveTransactions;
         if (directInteractiveAutocommit) {
           throw new AutocommitWriteRequiresTransaction();
         }
@@ -2392,7 +2392,7 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
     async (session, target) => {
       const resolvedRows =
         (
-          target.capabilities.transactions &&
+          target.capabilities.execution.interactiveTransactions &&
           distinctIds.size === entries.length
         ) ?
           await getEdgeRowsByIds(target, ctx.batchPointRead, ctx.graphId, [
@@ -3698,7 +3698,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     if (
       allFoundLive &&
       "transaction" in backend &&
-      backend.capabilities.transactions
+      backend.capabilities.execution.interactiveTransactions
     ) {
       const authoritativeProbe = await backend.transaction(
         async (target) => partitionEntries(await fetchRowsByEndpoint(target)),

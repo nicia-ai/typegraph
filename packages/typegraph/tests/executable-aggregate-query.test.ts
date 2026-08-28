@@ -41,7 +41,7 @@ const graph = defineGraph({
 
 const registry = buildKindRegistry(graph);
 const MOCK_BACKEND_CAPABILITIES = {
-  transactions: true,
+  execution: { interactiveTransactions: true, atomicBatch: "none" },
   windowFunctions: true,
 } as const;
 

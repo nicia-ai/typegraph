@@ -227,7 +227,7 @@ function assertPortableNodeFallbackCanRun(
 ): void {
   if (projections.length === 0 || !("transaction" in unfencedTarget(target)))
     return;
-  if (target.capabilities.transactions) {
+  if (target.capabilities.execution.interactiveTransactions) {
     throw new AutocommitWriteRequiresTransaction();
   }
   throw new ConfigurationError(

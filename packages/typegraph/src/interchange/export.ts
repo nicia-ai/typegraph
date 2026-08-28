@@ -112,7 +112,7 @@ export async function exportGraph<G extends GraphDef>(
  *
  * ## One snapshot, WHERE THE BACKEND HAS TRANSACTIONS
  *
- * On a backend reporting `capabilities.transactions`, the whole export —
+ * On a backend reporting `capabilities.execution.interactiveTransactions`, the whole export —
  * header, every node page, every edge page, every identity page — is read
  * inside ONE `repeatable_read` / `read_only` transaction, so a slow consumer
  * still gets one point in time rather than a mixture of the graph as it was at
@@ -224,7 +224,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
         new ExportStreamIdleTimeoutError(
           store.graphId,
           idleTimeoutMs,
-          backend.capabilities.transactions,
+          backend.capabilities.execution.interactiveTransactions,
         ),
       );
     }, idleTimeoutMs);
@@ -237,7 +237,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
         "mid-stream",
         store.graphId,
         signal,
-        backend.capabilities.transactions,
+        backend.capabilities.execution.interactiveTransactions,
       ),
     );
   }
@@ -268,7 +268,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       "before-open",
       store.graphId,
       signal,
-      backend.capabilities.transactions,
+      backend.capabilities.execution.interactiveTransactions,
     );
   }
   const produce = async (
@@ -305,7 +305,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
   const beginProducer = (): Promise<void> => {
     try {
       const releaseSnapshotExport =
-        backend.capabilities.transactions ?
+        backend.capabilities.execution.interactiveTransactions ?
           claimSnapshotExportLeaseOrRefuse(store.graphId, backend)
         : () => {
             // No snapshot transaction is opened here, so nothing was claimed:
@@ -314,7 +314,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
           };
       try {
         const started =
-          backend.capabilities.transactions ?
+          backend.capabilities.execution.interactiveTransactions ?
             backend.transaction((target) => produce(target), {
               isolationLevel: "repeatable_read",
               accessMode: "read_only",
@@ -396,7 +396,7 @@ type ExportAbortPhase = "before-open" | "mid-stream";
  * same vocabulary — one code, the signal's own reason as `cause`, and a message
  * that is true of the phase AND of the backend it describes.
  *
- * `framed` is `backend.capabilities.transactions`. A non-transactional export
+ * `framed` is `backend.capabilities.execution.interactiveTransactions`. A non-transactional export
  * opened no snapshot and claimed no lease, so telling its consumer that a
  * snapshot was rolled back and a connection released would describe work that
  * never happened — and would hide the thing that consumer actually needs to

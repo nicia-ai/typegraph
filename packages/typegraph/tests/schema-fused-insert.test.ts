@@ -796,7 +796,13 @@ describe("single-statement autocommit eligibility", () => {
     const { backend } = createLocalSqliteBackend();
     const plainSchema = z.object({ name: z.string() });
     const derivedNoninteractive = deriveBackend(backend, {
-      capabilities: { ...backend.capabilities, transactions: false },
+      capabilities: {
+        ...backend.capabilities,
+        execution: {
+          ...backend.capabilities.execution,
+          interactiveTransactions: false,
+        },
+      },
     });
     const nodeCandidate: NodeAutocommitSingleStatementCandidate = {
       backend,

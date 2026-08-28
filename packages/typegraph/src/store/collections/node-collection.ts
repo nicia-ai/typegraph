@@ -1156,7 +1156,7 @@ export function createNodeCollection<
         return results as NodeGetOrCreateByConstraintResult<N>[];
       };
 
-      if (backend.capabilities.transactions && "transaction" in backend) {
+      if (backend.capabilities.execution.interactiveTransactions && "transaction" in backend) {
         return backend.transaction(async (txBackend) =>
           getOrCreateAll(txBackend),
         );

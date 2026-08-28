@@ -141,6 +141,17 @@ export {
   resolveRecursiveTraversal,
 } from "./capabilities/recursive-traversal";
 export type {
+  AtomicSqlBatchExecutor,
+  AtomicSqlProgramAdapter,
+  AtomicSqlProgramRegistration,
+  AtomicSqlRow,
+  CompiledAtomicSqlStatement,
+} from "./capabilities/atomic-sql-program";
+export {
+  registerAtomicSqlProgram,
+  resolveAtomicSqlProgramExecutor,
+} from "./capabilities/atomic-sql-program";
+export type {
   GraphCommandCoordination,
   GraphCommandExecutionContext,
   GraphCommandIsolation,
@@ -153,6 +164,17 @@ export {
   graphCommandExecutionContext,
   normalizeGraphCommandIsolation,
 } from "./command-contract";
+export type {
+  AtomicTransportConformanceFixture,
+  AtomicTransportConformanceReport,
+  AtomicTransportEquality,
+  AtomicTransportProvenanceCheck,
+  AtomicTransportRollbackCase,
+} from "./conformance/atomic-transport";
+export {
+  AtomicTransportConformanceError,
+  runAtomicTransportConformance,
+} from "./conformance/atomic-transport";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,
@@ -181,6 +203,8 @@ export type {
   AdapterBackend,
   AdapterBackendTransactions,
   BackendCapabilities,
+  BackendExecutionCapabilities,
+  BundledBackendCapabilityOverrides,
   BackendIdentity,
   BackendLifecycle,
   BackendMaintenance,
@@ -348,6 +372,8 @@ export {
   rowPropsToObject,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
+  supportsInteractiveTransactions,
+  supportsRootAtomicBatch,
 } from "./types";
 
 // Supporting vocabulary referenced by the authoring contracts above. Keeping

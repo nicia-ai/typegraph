@@ -18,7 +18,10 @@ export function createFixtureBackend(capabilities: FixtureCapabilities): Fixture
 
 // @public
 export type FixtureCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     internal?: FixtureInternalOptions;
     mandatory: FixtureMandatoryOptions;
 }>;

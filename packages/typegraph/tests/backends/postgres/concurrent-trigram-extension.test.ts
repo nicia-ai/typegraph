@@ -21,7 +21,7 @@
  *    all, so the common case never raises (#475);
  *  - **retry tolerance** — the one-shot retry clears the 23505 an installer
  *    that did NOT take that lock can still hand us: a peer on an older release
- *    whose lock key differs, or a `transactions: false` backend with no
+ *    whose lock key differs, or a backend without interactive transactions with no
  *    transaction to hang the lock on (#446).
  *
  * Keeping them apart matters for what a failure means. The first case ends its
@@ -490,7 +490,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
           await holderClient.query("BEGIN");
           // Raw `CREATE EXTENSION` with no advisory lock: the mixed-version
           // peer the fence cannot reach — an older release keyed
-          // differently, or a `transactions: false` backend with no
+          // differently, or a backend without interactive transactions with no
           // transaction to hold a lock in.
           await holderClient.query("CREATE EXTENSION IF NOT EXISTS pg_trgm");
           const pending = trackWork(retryStore.materializeIndexes());

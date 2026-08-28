@@ -72,7 +72,7 @@ export type QueryCoordinateState = "open" | "sealed";
  * each query as its own statement (sometimes two — see `ExecutableQuery`'s
  * `executeOn`), so it does not fold these into a single round trip. Whether
  * they share one connection is up to the adapter, not to
- * `backend.capabilities.transactions` — see `store.batch()` for the full cost
+ * `backend.capabilities.execution.interactiveTransactions` — see `store.batch()` for the full cost
  * model.
  */
 export type BatchableQuery<R = unknown> = Readonly<{

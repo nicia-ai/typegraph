@@ -50,7 +50,13 @@ function postgresLikeBackend(): GraphBackend {
 function backendWithoutTransactions(): GraphBackend {
   const base = createTestBackend();
   return deriveBackend(base, {
-    capabilities: { ...base.capabilities, transactions: false },
+    capabilities: {
+      ...base.capabilities,
+      execution: {
+        ...base.capabilities.execution,
+        interactiveTransactions: false,
+      },
+    },
   });
 }
 

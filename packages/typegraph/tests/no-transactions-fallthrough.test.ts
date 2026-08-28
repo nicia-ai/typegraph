@@ -1,8 +1,8 @@
 /**
- * Pins the contract for backends that report `transactions: false`
+ * Pins the contract for backends that report no interactive transactions
  * (e.g. `drizzle-orm/neon-http`, Cloudflare D1).
  *
- * Wraps a real in-memory SQLite backend, flips `capabilities.transactions`
+ * Wraps a real in-memory SQLite backend, disables `execution.interactiveTransactions`
  * off, and makes `backend.transaction(...)` throw — then walks every
  * code path that historically wrapped its work in a transaction and
  * asserts it now completes via the sequential fall-through instead of
@@ -78,7 +78,7 @@ const identityGraph = defineGraph({
   identity: { sameIdAcrossKinds: "fold" },
 });
 
-describe("backends with transactions: false fall through to sequential execution", () => {
+describe("backends without interactive transactions fall through to sequential execution", () => {
   let backend: GraphBackend;
 
   beforeEach(() => {
@@ -91,7 +91,7 @@ describe("backends with transactions: false fall through to sequential execution
     await expect(
       backend.transaction(() => Promise.resolve("unreachable")),
     ).rejects.toThrow(TRANSACTIONS_DISABLED_MESSAGE);
-    expect(backend.capabilities.transactions).toBe(false);
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
   });
 
   it("schema-managed Store writes fail closed before the sequential fallback", async () => {
@@ -198,7 +198,7 @@ describe("backends with transactions: false fall through to sequential execution
   it("store.search.rebuildFulltext completes via sequential page writes", async () => {
     // The fulltext rebuild path used to wrap each page's upserts/deletes
     // in backend.transaction(...). Verify it now runs the writes
-    // sequentially when the backend reports transactions: false.
+    // sequentially when the backend reports no interactive transactions.
     const Document = defineNode("Document", {
       schema: z.object({
         title: searchable({ language: "english" }),
@@ -229,7 +229,7 @@ describe("backends with transactions: false fall through to sequential execution
   });
 });
 
-describe("backends with transactions: false refuse schema commits", () => {
+describe("backends without interactive transactions refuse schema commits", () => {
   // Genuine non-transactional configuration via the SQLite execution
   // profile, so the closure-scoped transactionMode inside the backend
   // observes "none" — the production code path for D1 / DurableObjects.
@@ -257,7 +257,7 @@ describe("backends with transactions: false refuse schema commits", () => {
         name: "ConfigurationError",
         details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-          transactions: false,
+          execution: { interactiveTransactions: false, atomicBatch: "none" },
         }),
       }),
     );

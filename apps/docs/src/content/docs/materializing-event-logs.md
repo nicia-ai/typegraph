@@ -202,7 +202,7 @@ to recognize a history-store guard when you catch one.
 ### At-least-once with a separate cursor store
 
 When the runtime already owns checkpointing, or the backend cannot provide atomic
-transactions (`backend.capabilities.transactions === false` — Cloudflare D1,
+transactions (`backend.capabilities.execution.interactiveTransactions === false` — Cloudflare D1,
 `drizzle-orm/neon-http`), keep the cursor outside the graph transaction. The
 pattern is at-least-once plus idempotence: a crash after the graph writes but
 before the cursor write replays the batch, which is safe precisely because the

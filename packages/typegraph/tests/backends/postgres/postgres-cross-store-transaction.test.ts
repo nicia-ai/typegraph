@@ -221,7 +221,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
     it("exposes adoptTransaction with transactions capability", () => {
       const backend = createPostgresBackend(requireDefined(db));
-      expect(backend.capabilities.transactions).toBe(true);
+      expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
       expect(backend.adoptTransaction).toBeTypeOf("function");
     });
 
@@ -244,7 +244,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       // A backend whose driver reports no transaction support must not
       // silently degrade — the relational write would still commit.
       const backend = createPostgresBackend(requireDefined(db), {
-        capabilities: { transactions: false },
+        capabilities: { execution: { interactiveTransactions: false } },
       });
       const store = createAdapterStore(PlainGraph, backend);
       const rootDatabaseAsTransaction = requireDefined(
