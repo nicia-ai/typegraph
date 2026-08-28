@@ -30,8 +30,7 @@ export type AtomicSqlProgramAdapter = Readonly<{
 
 /** The transport forms accepted by an atomic program author. */
 export type AtomicSqlProgramRegistration =
-  | AtomicSqlBatchExecutor
-  | AtomicSqlProgramAdapter;
+  AtomicSqlBatchExecutor | AtomicSqlProgramAdapter;
 
 type AtomicSqlResultCardinality = "none" | "one" | "many";
 
@@ -96,6 +95,12 @@ function assertResultSlotCount(
   );
 }
 
+function isAtomicSqlResultSlots(
+  value: unknown,
+): value is readonly (readonly AtomicSqlRow[])[] {
+  return Array.isArray(value) && value.every((slot) => Array.isArray(slot));
+}
+
 /** Executes the one canonical closed-program protocol. */
 async function executeAtomicSqlProgram<TRowResult, TResult>(
   executeAtomicBatch: AtomicSqlBatchExecutor,
@@ -104,7 +109,14 @@ async function executeAtomicSqlProgram<TRowResult, TResult>(
   if (program.slots.length === 0) return program.assemble([]);
 
   const statements = program.slots.map((slot) => slot.statement);
-  const rows = await executeAtomicBatch<AtomicSqlRow>(statements);
+  const result: unknown = await executeAtomicBatch<AtomicSqlRow>(statements);
+  if (!isAtomicSqlResultSlots(result)) {
+    throw new CompilerInvariantError(
+      "Atomic SQL program executor returned malformed result slots.",
+      { resultType: typeof result },
+    );
+  }
+  const rows = result;
 
   assertResultSlotCount(program.slots.length, rows);
   const decoded = program.slots.map((slot, index) => {
@@ -139,29 +151,9 @@ export function createAtomicSqlProgramExecutor(
   adapter: AtomicSqlProgramAdapter,
 ): AtomicSqlProgramExecutor | undefined {
   const executeAtomicBatch = adapter.executeAtomicBatch;
-  return executeAtomicBatch === undefined ? undefined : (
+  return typeof executeAtomicBatch === "function" ?
       createExecutor(executeAtomicBatch)
-    );
-}
-
-type AtomicBatchDeclaration = "root" | "none";
-
-type BackendWithAtomicBatchDeclaration = GraphBackend &
-  Readonly<{
-    capabilities: GraphBackend["capabilities"] &
-      Readonly<{
-        execution?: Readonly<{
-          atomicBatch?: AtomicBatchDeclaration;
-        }>;
-      }>;
-  }>;
-
-function resolveAtomicBatchDeclaration(
-  target: GraphBackend,
-): AtomicBatchDeclaration | undefined {
-  return (
-    target as BackendWithAtomicBatchDeclaration
-  ).capabilities.execution?.atomicBatch;
+    : undefined;
 }
 
 function normalizeAtomicSqlProgramRegistration(
@@ -175,11 +167,11 @@ function normalizeAtomicSqlProgramRegistration(
 }
 
 function throwAtomicSqlProgramRegistrationMismatch(
-  declaration: AtomicBatchDeclaration | undefined,
+  declaration: GraphBackend["capabilities"]["execution"]["atomicBatch"],
   registration: AtomicSqlProgramExecutor | undefined,
 ): never {
   throw new ConfigurationError(
-    "An atomic SQL program requires `capabilities.execution.atomicBatch: \"root\"` and a usable atomic batch executor.",
+    'An atomic SQL program requires `capabilities.execution.atomicBatch: "root"` and a usable atomic batch executor.',
     {
       code: "ATOMIC_SQL_PROGRAM_REGISTRATION_MISMATCH",
       declared: declaration,
@@ -187,7 +179,7 @@ function throwAtomicSqlProgramRegistrationMismatch(
     },
     {
       suggestion:
-        "Declare `capabilities.execution.atomicBatch: \"root\"` only on an exact root backend whose executor submits the complete statement sequence atomically.",
+        'Declare `capabilities.execution.atomicBatch: "root"` only on an exact root backend whose executor submits the complete statement sequence atomically.',
     },
   );
 }
@@ -206,7 +198,7 @@ export function registerAtomicSqlProgram<T extends GraphBackend>(
   registration: AtomicSqlProgramRegistration,
 ): T {
   const executor = normalizeAtomicSqlProgramRegistration(registration);
-  const declaration = resolveAtomicBatchDeclaration(target);
+  const declaration = target.capabilities.execution.atomicBatch;
   if (declaration !== "root" || executor === undefined) {
     throwAtomicSqlProgramRegistrationMismatch(declaration, executor);
   }
@@ -222,4 +214,11 @@ export function resolveAtomicSqlProgramExecutor(
   target: GraphBackend | TransactionBackend,
 ): AtomicSqlProgramExecutor | undefined {
   return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target);
+}
+
+/** Returns whether this exact object owns a registered atomic SQL transport. */
+export function hasAtomicSqlProgramRegistration(
+  target: GraphBackend | TransactionBackend,
+): boolean {
+  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.has(target);
 }

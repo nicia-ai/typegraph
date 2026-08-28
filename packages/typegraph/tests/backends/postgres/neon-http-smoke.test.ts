@@ -85,12 +85,10 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
     const backend = createPostgresBackend(db);
 
     expect(backend.dialect).toBe("postgres");
-    // The headline behavior: HTTP can't hold a session, so transactions
-    // are off. Callers like `store.transaction` check this capability
-    // and fall through to sequential execution when it's false.
-    // `commitSchemaVersion` is the exception — it requires atomicity
-    // and refuses with a typed ConfigurationError on this backend.
+    // HTTP cannot hold an interactive session, but Neon certifies its
+    // closed transaction(query[]) transport as one root atomic batch.
     expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("root");
     expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
     // Other capabilities are unchanged.
     expect(backend.capabilities.windowFunctions).toBe(true);
@@ -107,7 +105,7 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless (HTTP)", () => {
         name: "ConfigurationError",
         details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-          execution: { interactiveTransactions: false, atomicBatch: "none" },
+          interactiveTransactions: false,
         }),
       }),
     );

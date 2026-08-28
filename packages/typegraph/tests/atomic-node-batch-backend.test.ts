@@ -352,6 +352,7 @@ describe("bundled root atomic node batch", () => {
     }
 
     expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("root");
     expect(backend.capabilities.maxBindParameters).toBe(D1_MAX_BIND_PARAMETERS);
     await expect(
       executeAtomicNodeBatch({

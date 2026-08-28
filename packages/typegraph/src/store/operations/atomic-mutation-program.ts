@@ -17,7 +17,11 @@ import {
   resolveBundledRootAtomicMutationPrograms,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
-import type { GraphBackend, TransactionBackend } from "../../backend/types";
+import {
+  type GraphBackend,
+  supportsRootAtomicBatch,
+  type TransactionBackend,
+} from "../../backend/types";
 import type { GraphDef } from "../../core/define-graph";
 import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
@@ -37,6 +41,7 @@ type CommonAtomicMutationEligibility = Readonly<{
 
 function resolveAtomicMutationProfile(input: CommonAtomicMutationEligibility) {
   if (!isBundledRootAutocommitEligible(input.backend)) return;
+  if (!supportsRootAtomicBatch(input.backend)) return;
   if (input.schemaVersion === undefined) return;
   if (input.historyEnabled || input.revisionTrackingEnabled) return;
   return resolveBundledRootAtomicMutationPrograms(input.backend);

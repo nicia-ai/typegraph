@@ -125,7 +125,7 @@ describe("backends without interactive transactions fail closed at Store transac
       name: "UnsupportedBackendCapabilityError",
       details: {
         graphId: graph.id,
-        capability: "transactions",
+        capability: "execution.interactiveTransactions",
       },
     });
     expect(invoked).toBe(false);
@@ -145,7 +145,7 @@ describe("backends without interactive transactions fail closed at Store transac
       name: "UnsupportedBackendCapabilityError",
       details: {
         graphId: graph.id,
-        capability: "transactions",
+        capability: "execution.interactiveTransactions",
       },
     });
     expect(invoked).toBe(false);
@@ -235,7 +235,7 @@ describe("backends without interactive transactions refuse schema commits", () =
         name: "ConfigurationError",
         details: matchingObject({
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-          execution: { interactiveTransactions: false, atomicBatch: "none" },
+          interactiveTransactions: false,
         }),
       }),
     );

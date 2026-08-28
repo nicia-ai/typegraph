@@ -201,7 +201,7 @@ function createSqliteBackend(
   options?: {
     tables?: SqliteTables;
     vector?: VectorStrategy;
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
   },
 ): GraphBackend;
 ```
@@ -733,7 +733,7 @@ function createPostgresBackend(
      * this to override that or to disable other capabilities for custom
      * drivers.
      */
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
     /**
      * Use server-side prepared statements on the node-postgres /
      * neon-serverless fast path. Default `true`. Set to `false` when
@@ -1401,6 +1401,41 @@ capabilities and the object the calls actually execute on. A backend must theref
 declared capability (`constraintClaims`, `contributions`, and execution support) truthful about
 what the active backend object implements, not just which fields it sets.
 
+Run the conformance fixture in the custom backend's own test suite, then pair
+the earned declaration with the exact root transport in its factory:
+
+```typescript
+import {
+  registerAtomicSqlProgram,
+  runAtomicTransportConformance,
+} from "@nicia-ai/typegraph/backend";
+
+await runAtomicTransportConformance(fixture);
+
+const backend = createCustomBackend({
+  execution: {
+    interactiveTransactions: false,
+    atomicBatch: "root",
+  },
+});
+registerAtomicSqlProgram(backend, { executeAtomicBatch });
+```
+
+Registration is exact-root evidence only: a derived or transaction-scoped
+backend does not inherit it. The conformance fixture's mandatory provenance
+checks prove all three facts against the real registered objects: the exact
+root resolves the registration, a backend produced by `deriveBackend()` does
+not, and a transaction-scoped backend does not. Registration certifies
+transport mechanics, not graph semantics, and therefore does not by itself opt
+a custom backend into bundled node or edge mutation programs. Those programs
+remain governed by their separate semantic eligibility profiles.
+
+Execution support is intentionally not collapsed into one ordered “tier.” An
+interactive transaction and an exact-root atomic batch are independent facts:
+a backend may provide either, both, or neither. Each Store operation selects
+the boundary its own semantics require instead of treating one mechanism as a
+universal substitute for the other.
+
 ### Declared constraints require an interactive transaction
 
 A **constrained write** — one whose correctness rests on a check-then-write that
@@ -1614,10 +1649,12 @@ SQLite those run as `json_each()` scans — correct results, just not index-acce
 :::
 
 :::note[Transactions are driver-dependent, not backend-dependent]
-Both backends report `execution.interactiveTransactions: true` by default. The exception is symmetric and lives in specific drivers:
+Both backends report `execution.interactiveTransactions: true` by default. The exception is symmetric and lives in
+specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
-`execution.interactiveTransactions: false`. Operations that require atomicity (`commitSchemaVersion`, `setActiveVersion`, Operational
-Identity) throw on those drivers regardless of backend. Schema-managed Store writes also fail closed because they
+`execution.interactiveTransactions: false`. Operations that require atomicity (`commitSchemaVersion`,
+`setActiveVersion`, Operational Identity) throw on those drivers regardless of backend. Schema-managed Store writes also
+fail closed because they
 cannot hold the transaction-scoped schema fence; `store.transaction()` refuses on those roots. Eligible operations
 with a certified atomic SQL program remain available independently of this interactive transaction capability.
 :::

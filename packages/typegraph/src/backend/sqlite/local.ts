@@ -64,8 +64,11 @@ export {
   type LocalSqlitePragmaOptions,
   type LocalSqliteSynchronousMode,
 } from "./local-options";
-import { type AdapterBackend, type BackendCapabilities } from "../types";
-
+import {
+  type AdapterBackend,
+  type BundledBackendCapabilityOverrides,
+} from "../types";
+export type { BundledBackendCapabilityOverrides } from "../types";
 export type {
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -328,7 +331,7 @@ export type LocalSqliteBackendOptions = Readonly<{
    * gap like missing SQL window functions in tests. Forwarded to
    * createSqliteBackend.
    */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
 }>;
 
 /**

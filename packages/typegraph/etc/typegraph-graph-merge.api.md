@@ -106,7 +106,10 @@ export function asBranchId(value: string): BranchId;
 
 // @public
 type BackendCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
     returning?: boolean;

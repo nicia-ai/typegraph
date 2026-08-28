@@ -2722,7 +2722,9 @@ describe("Serialized-connection snapshot streaming guards", () => {
     const secondTargetBackend = createSqliteBackend(drizzle(database), {
       executionProfile,
     });
-    expect(firstTargetBackend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(
+      firstTargetBackend.capabilities.execution.interactiveTransactions,
+    ).toBe(false);
     const firstTarget = createStore(sameHandleTargetGraph, firstTargetBackend);
     const secondTarget = createStore(
       secondSameHandleTargetGraph,

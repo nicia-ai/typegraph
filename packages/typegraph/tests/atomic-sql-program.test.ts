@@ -2,17 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   type AtomicSqlProgram,
+  type AtomicSqlProgramAdapter,
   type AtomicSqlRow,
   registerAtomicSqlProgram,
   resolveAtomicSqlProgramExecutor,
 } from "../src/backend/capabilities/atomic-sql-program";
-import { deriveBackend } from "../src/backend/derive-backend";
+import { deriveBackend, projectBackend } from "../src/backend/derive-backend";
 import {
   type CompiledSqlQuery,
   type SqlExecutionAdapter,
 } from "../src/backend/drizzle/execution/types";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
-import { ConfigurationError } from "../src/errors";
+import { CompilerInvariantError, ConfigurationError } from "../src/errors";
 
 type TestResult = Readonly<{ value: number }>;
 
@@ -205,15 +206,42 @@ describe("atomic SQL program executor", () => {
     const root = createRoot();
     registerAtomicSqlProgram(root, createAdapter(oneValueBatch));
     expect(resolveAtomicSqlProgramExecutor(root)).toBeDefined();
-    expect(
-      resolveAtomicSqlProgramExecutor(deriveBackend(root, {})),
-    ).toBeUndefined();
+    const derived = deriveBackend(root, {});
+    expect(derived.capabilities.execution.atomicBatch).toBe("none");
+    expect(resolveAtomicSqlProgramExecutor(derived)).toBeUndefined();
+    const projected = projectBackend(root, ["capabilities"]);
+    expect(projected.capabilities.execution.atomicBatch).toBe("none");
     expect(
       resolveAtomicSqlProgramExecutor({} as TransactionBackend),
     ).toBeUndefined();
 
     const noBatch = createRoot();
     expectRegistrationMismatch(() => registerAtomicSqlProgram(noBatch, {}));
+  });
+
+  it("refuses a malformed adapter instead of recording unusable evidence", () => {
+    const malformed = {
+      executeAtomicBatch: "not a function",
+    } as unknown as AtomicSqlProgramAdapter;
+
+    expectRegistrationMismatch(() =>
+      registerAtomicSqlProgram(createRoot(), malformed),
+    );
+  });
+
+  it("refuses malformed executor results at the program boundary", async () => {
+    const malformedBatch = (() =>
+      Promise.resolve(undefined)) as unknown as NonNullable<
+      SqlExecutionAdapter["executeAtomicBatch"]
+    >;
+    const root = createRoot();
+    registerAtomicSqlProgram(root, malformedBatch);
+    const executor = resolveAtomicSqlProgramExecutor(root);
+    if (executor === undefined) throw new Error("Expected root executor");
+
+    await expect(
+      executor.execute(oneRowProgram([{ sql: "SELECT 1", params: [] }])),
+    ).rejects.toBeInstanceOf(CompilerInvariantError);
   });
 
   it("requires the root atomic-batch declaration", () => {

@@ -307,7 +307,9 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
         executionProfile: { isSync: false, transactionMode: "none" },
         tables: defaultTables,
       });
-      expect(staleHintBackend.capabilities.execution.interactiveTransactions).toBe(true);
+      expect(
+        staleHintBackend.capabilities.execution.interactiveTransactions,
+      ).toBe(true);
       expect(staleHintBackend.capabilities.graphAnalytics?.supported).toBe(
         false,
       );

@@ -6,20 +6,30 @@ import type {
   CompiledAtomicSqlStatement,
 } from "../src/backend/capabilities/atomic-sql-program";
 import {
+  hasAtomicSqlProgramRegistration,
+  registerAtomicSqlProgram,
+} from "../src/backend/capabilities/atomic-sql-program";
+import {
   type AtomicTransportConformanceFixture,
   type AtomicTransportEquality,
   runAtomicTransportConformance,
 } from "../src/backend/conformance/atomic-transport";
+import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  type GraphBackend,
+  supportsRootAtomicBatch,
+  type TransactionBackend,
+} from "../src/backend/types";
 
 type FakeState = Readonly<{
   primary: readonly string[];
   sidecar: readonly string[];
 }>;
 
-type MutableFakeState = {
+interface MutableFakeState {
   primary: string[];
   sidecar: string[];
-};
+}
 
 const equal: AtomicTransportEquality = (actual, expected) =>
   JSON.stringify(actual) === JSON.stringify(expected);
@@ -30,7 +40,7 @@ const ORDERED_STATEMENTS: readonly CompiledAtomicSqlStatement[] = [
 ];
 
 const PARAMETER_STATEMENTS: readonly CompiledAtomicSqlStatement[] = [
-  { sql: "PARAMETERS", params: ["alpha", 7, undefined] },
+  { sql: "PARAMETERS", params: ["alpha", 7, undefined, new Date(0)] },
 ];
 
 const ROLLBACK_STATEMENTS: readonly CompiledAtomicSqlStatement[] = [
@@ -50,6 +60,7 @@ function createFixture(
   const executeAtomicBatch: AtomicSqlBatchExecutor = async <TRow>(
     statements: readonly CompiledAtomicSqlStatement[],
   ) => {
+    await Promise.resolve();
     receivedStatements = structuredClone(statements);
     if (statements.length === 0) return [];
     if (statements[0]?.sql.startsWith("ORDERED")) {
@@ -58,8 +69,9 @@ function createFixture(
       ]) as unknown as readonly (readonly TRow[])[];
     }
     if (statements[0]?.sql === "PARAMETERS") {
-      return [[{ params: [...(statements[0].params ?? [])] }]] as unknown as
-        readonly (readonly TRow[])[];
+      return [
+        [{ params: [...statements[0].params] }],
+      ] as unknown as readonly (readonly TRow[])[];
     }
 
     const before = snapshotState(state);
@@ -71,6 +83,12 @@ function createFixture(
     }
     return statements.map(() => [] as readonly TRow[]);
   };
+  const root = {
+    capabilities: { execution: { atomicBatch: "root" } },
+  } as GraphBackend;
+  registerAtomicSqlProgram(root, executeAtomicBatch);
+  const derived = deriveBackend(root, {});
+  const transaction = {} as TransactionBackend;
 
   return {
     executeAtomicBatch,
@@ -81,6 +99,7 @@ function createFixture(
     },
     parameterPreservation: {
       statements: PARAMETER_STATEMENTS,
+      expected: structuredClone(PARAMETER_STATEMENTS),
       observe: () => receivedStatements,
     },
     rollback: {
@@ -101,14 +120,15 @@ function createFixture(
       observe: () => snapshotState(state),
       expected: { primary: [], sidecar: [] },
     },
-    provenance: [
-      { name: "certified root registration", check: () => true },
-      { name: "derived root does not inherit registration", check: () => true },
-      {
-        name: "transaction root does not inherit registration",
-        check: () => true,
-      },
-    ],
+    provenance: {
+      exactRootRegistration: () =>
+        supportsRootAtomicBatch(root) && hasAtomicSqlProgramRegistration(root),
+      derivedBackendIsolation: () =>
+        !supportsRootAtomicBatch(derived) &&
+        !hasAtomicSqlProgramRegistration(derived),
+      transactionBackendIsolation: () =>
+        !hasAtomicSqlProgramRegistration(transaction),
+    },
   };
 }
 
@@ -121,9 +141,9 @@ describe("atomic transport conformance runner", () => {
       "parameter preservation",
       "later-statement rollback",
       "empty batch",
-      "provenance: certified root registration",
-      "provenance: derived root does not inherit registration",
-      "provenance: transaction root does not inherit registration",
+      "provenance: exact root registration",
+      "provenance: derived backend isolation",
+      "provenance: transaction backend isolation",
     ]);
   });
 
@@ -145,43 +165,57 @@ describe("atomic transport conformance runner", () => {
       ) => {
         const alteredStatements = statements.map((statement) =>
           statement.sql === "PARAMETERS" ?
-            { ...statement, params: ["mutated"] } :
-            statement,
+            { ...statement, params: ["mutated"] }
+          : statement,
         );
         return fixture.executeAtomicBatch<TRow>(alteredStatements);
       },
     } satisfies AtomicTransportConformanceFixture<FakeState>;
 
-    await expect(runAtomicTransportConformance(invalidFixture)).rejects.toThrow(
-      "parameter preservation",
-    );
+    await expect(
+      runAtomicTransportConformance(invalidFixture),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "parameter preservation" },
+    });
   });
 
   it("rejects a provenance check that does not prove its boundary", async () => {
     const fixture = createFixture(true);
     const invalidFixture = {
       ...fixture,
-      provenance: [
-        { name: "derived root", check: () => false },
-      ],
+      provenance: {
+        ...fixture.provenance,
+        derivedBackendIsolation: () => false,
+      },
     } satisfies AtomicTransportConformanceFixture<FakeState>;
 
-    await expect(runAtomicTransportConformance(invalidFixture)).rejects.toThrow(
-      "provenance: derived root",
-    );
+    await expect(
+      runAtomicTransportConformance(invalidFixture),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "provenance: derived backend isolation" },
+    });
   });
 
   it("requires the transport to return an empty slot list for an empty batch", async () => {
     const fixture = createFixture(true);
     const invalidFixture = {
       ...fixture,
-      executeAtomicBatch: async <TRow>() =>
-        [[{ unexpected: true }] as unknown as readonly TRow[]],
+      executeAtomicBatch: async <TRow>(
+        statements: readonly CompiledAtomicSqlStatement[],
+      ) =>
+        statements.length === 0 ?
+          [[{ unexpected: true }] as unknown as readonly TRow[]]
+        : fixture.executeAtomicBatch<TRow>(statements),
     } satisfies AtomicTransportConformanceFixture<FakeState>;
 
-    await expect(runAtomicTransportConformance(invalidFixture)).rejects.toThrow(
-      "empty-batch result",
-    );
+    await expect(
+      runAtomicTransportConformance(invalidFixture),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "empty-batch result" },
+    });
   });
 
   it("retains the row type at the fixture boundary", () => {

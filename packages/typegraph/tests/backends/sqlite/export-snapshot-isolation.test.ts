@@ -192,7 +192,9 @@ describe("SQLite export snapshot isolation across two WAL connections", () => {
     const readerBackend = createSqliteBackend(drizzle(readerDatabase), {
       executionProfile: { transactionMode: "none", isSync: true },
     });
-    expect(readerBackend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(readerBackend.capabilities.execution.interactiveTransactions).toBe(
+      false,
+    );
     const reader = createStore(graph, readerBackend);
     const writer = createStore(
       graph,

@@ -56,6 +56,29 @@ function isGraphCommandPort(value: unknown): value is GraphCommandPort {
   );
 }
 
+function downgradeDerivedAtomicBatch(capabilities: unknown): unknown {
+  if (typeof capabilities !== "object" || capabilities === null) return;
+  const capabilityMembers = capabilities as Readonly<
+    Record<PropertyKey, unknown>
+  >;
+  const execution = capabilityMembers["execution"];
+  if (typeof execution !== "object" || execution === null) return;
+  const executionMembers = execution as Readonly<Record<PropertyKey, unknown>>;
+  if (!("atomicBatch" in executionMembers)) return;
+  return {
+    ...capabilityMembers,
+    execution: { ...executionMembers, atomicBatch: "none" },
+  };
+}
+
+function deriveExecutionCapabilities(base: object, overrides: object): unknown {
+  const capabilities =
+    Object.hasOwn(overrides, "capabilities") ?
+      (Reflect.get(overrides, "capabilities", overrides) as unknown)
+    : (Reflect.get(base, "capabilities", base) as unknown);
+  return downgradeDerivedAtomicBatch(capabilities);
+}
+
 /**
  * A same-session command-port wrapper preserves the underlying transaction's
  * coordination and isolation evidence. A root-to-transaction override is a
@@ -101,12 +124,17 @@ export function deriveBackend<
   T extends object,
   const O extends Partial<T> = Partial<T>,
 >(base: T, overrides: ExactBackendOverlay<T, O>): T {
+  const derivedCapabilities = deriveExecutionCapabilities(base, overrides);
+
   function hasOverlayProperty(property: PropertyKey): boolean {
     return Object.hasOwn(overrides, property);
   }
 
   const decoratedBackend = new Proxy(base, {
     get(targetObject, property) {
+      if (property === "capabilities" && derivedCapabilities !== undefined) {
+        return derivedCapabilities;
+      }
       if (hasOverlayProperty(property)) {
         return Reflect.get(overrides, property, overrides);
       }
@@ -129,6 +157,13 @@ export function deriveBackend<
     },
 
     getOwnPropertyDescriptor(targetObject, property) {
+      if (property === "capabilities" && derivedCapabilities !== undefined) {
+        const source = hasOverlayProperty(property) ? overrides : targetObject;
+        const descriptor = Reflect.getOwnPropertyDescriptor(source, property);
+        return descriptor === undefined ? undefined : (
+            { ...descriptor, value: derivedCapabilities, configurable: true }
+          );
+      }
       if (hasOverlayProperty(property)) {
         const descriptor = Reflect.getOwnPropertyDescriptor(
           overrides,
@@ -183,7 +218,12 @@ export function projectBackend<
 >(base: TBackend, keys: readonly TKey[]): Readonly<Pick<TBackend, TKey>> {
   const entries = keys.flatMap((key) => {
     if (!Reflect.has(base, key)) return [];
-    return [[key, Reflect.get(base, key)] as const];
+    const value = Reflect.get(base, key) as unknown;
+    const projectedValue =
+      key === "capabilities" ?
+        (downgradeDerivedAtomicBatch(value) ?? value)
+      : value;
+    return [[key, projectedValue] as const];
   });
 
   // Keys are constrained to TBackend and values are copied from that same

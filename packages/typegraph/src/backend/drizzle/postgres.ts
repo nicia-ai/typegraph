@@ -294,8 +294,9 @@ export type PostgresBackendOptions = Readonly<{
    * driver doesn't support a feature TypeGraph would otherwise assume —
    * for example, an HTTP-only Postgres driver that can't hold a session
    * across statements would need
-   * `{ execution: { interactiveTransactions: false, atomicBatch: "none" } }`
-   * so TypeGraph refuses paths that require an interactive transaction.
+   * `{ execution: { interactiveTransactions: false } }` so TypeGraph refuses
+   * paths that require an interactive transaction. Root atomic-batch support
+   * is transport-derived and cannot be overridden here.
    *
    * `drizzle-orm/neon-http` is auto-detected and has interactive transactions
    * disabled without an explicit override; this option exists for

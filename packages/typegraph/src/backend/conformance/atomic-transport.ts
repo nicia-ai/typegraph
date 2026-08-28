@@ -15,18 +15,16 @@ import type {
   CompiledAtomicSqlStatement,
 } from "../capabilities/atomic-sql-program";
 
-type Awaitable<T> = T | PromiseLike<T>;
-
 export type AtomicTransportEquality = (
   actual: unknown,
   expected: unknown,
 ) => boolean;
 
 export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
-  /** Prepare a primary row and its sidecar before the failing program. */
-  prepare: () => Awaitable<void>;
+  /** Prepare the baseline state that the failing program must preserve. */
+  prepare: () => void | PromiseLike<void>;
   statements: readonly CompiledAtomicSqlStatement[];
-  observe: () => Awaitable<TSnapshot>;
+  observe: () => TSnapshot | PromiseLike<TSnapshot>;
   expectedBefore: TSnapshot;
   /** Optional check for the backend's native error shape. */
   errorMatches?: (error: unknown) => boolean;
@@ -43,15 +41,20 @@ export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
   /** A program whose SQL and bound values must reach the transport unchanged. */
   parameterPreservation: Readonly<{
     statements: readonly CompiledAtomicSqlStatement[];
+    /** An independent snapshot of the exact sequence the transport must see. */
+    expected: readonly CompiledAtomicSqlStatement[];
     /** Observe the sequence received by the engine-specific transport. */
-    observe: () => Awaitable<readonly CompiledAtomicSqlStatement[] | undefined>;
+    observe: () =>
+      | readonly CompiledAtomicSqlStatement[]
+      | undefined
+      | PromiseLike<readonly CompiledAtomicSqlStatement[] | undefined>;
   }>;
   /** A later failure must roll back both the primary row and its sidecar. */
   rollback: AtomicTransportRollbackCase<TSnapshot>;
   /** Empty programs are successful no-ops and return no result slots. */
   emptyBatch: Readonly<{
-    prepare?: () => Awaitable<void>;
-    observe: () => Awaitable<TSnapshot>;
+    prepare?: () => void | PromiseLike<void>;
+    observe: () => TSnapshot | PromiseLike<TSnapshot>;
     expected: TSnapshot;
   }>;
   /**
@@ -59,12 +62,13 @@ export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
    * Typical checks resolve a certified root, then assert that a derived or
    * transaction-scoped object does not inherit the registration.
    */
-  provenance?: readonly AtomicTransportProvenanceCheck[];
+  provenance: AtomicTransportProvenanceChecks;
 }>;
 
-export type AtomicTransportProvenanceCheck = Readonly<{
-  name: string;
-  check: () => Awaitable<boolean>;
+export type AtomicTransportProvenanceChecks = Readonly<{
+  exactRootRegistration: () => boolean | PromiseLike<boolean>;
+  derivedBackendIsolation: () => boolean | PromiseLike<boolean>;
+  transactionBackendIsolation: () => boolean | PromiseLike<boolean>;
 }>;
 
 export type AtomicTransportConformanceReport = Readonly<{
@@ -84,36 +88,6 @@ export class AtomicTransportConformanceError extends Error {
   }
 }
 
-function isRecord(
-  value: unknown,
-): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null;
-}
-
-function valuesEqual(left: unknown, right: unknown): boolean {
-  if (Object.is(left, right)) return true;
-  if (Array.isArray(left) || Array.isArray(right)) {
-    if (!Array.isArray(left) || !Array.isArray(right)) return false;
-    return (
-      left.length === right.length &&
-      left.every((value, index) => valuesEqual(value, right[index]))
-    );
-  }
-  if (isRecord(left) || isRecord(right)) {
-    if (!isRecord(left) || !isRecord(right)) return false;
-    const leftKeys = Object.keys(left);
-    const rightKeys = Object.keys(right);
-    return (
-      leftKeys.length === rightKeys.length &&
-      leftKeys.every(
-        (key) =>
-          Object.hasOwn(right, key) && valuesEqual(left[key], right[key]),
-      )
-    );
-  }
-  return false;
-}
-
 function assertEqual(
   equal: AtomicTransportEquality,
   actual: unknown,
@@ -124,17 +98,6 @@ function assertEqual(
   throw new AtomicTransportConformanceError(
     `Atomic transport conformance check failed: ${check}.`,
     { check, actual, expected },
-  );
-}
-
-function assertStatementsEqual(
-  actual: readonly CompiledAtomicSqlStatement[] | undefined,
-  expected: readonly CompiledAtomicSqlStatement[],
-): void {
-  if (actual !== undefined && valuesEqual(actual, expected)) return;
-  throw new AtomicTransportConformanceError(
-    "Atomic transport did not preserve the submitted statement sequence.",
-    { check: "parameter preservation", actual, expected },
   );
 }
 
@@ -155,13 +118,12 @@ async function invoke(
 export async function runAtomicTransportConformance<TSnapshot = unknown>(
   fixture: AtomicTransportConformanceFixture<TSnapshot>,
 ): Promise<AtomicTransportConformanceReport> {
-  const execute: AtomicSqlBatchExecutor = async <TRow>(
-    statements: readonly CompiledAtomicSqlStatement[],
-  ) =>
-    fixture.executeAtomicBatch<TRow>(statements);
   const passed: string[] = [];
 
-  const orderedRows = await invoke(execute, fixture.orderedResults.statements);
+  const orderedRows = await invoke(
+    fixture.executeAtomicBatch,
+    fixture.orderedResults.statements,
+  );
   assertEqual(
     fixture.equal,
     orderedRows,
@@ -170,13 +132,15 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
   );
   passed.push("ordered result slots");
 
-  const expectedStatements = structuredClone(
+  await invoke(
+    fixture.executeAtomicBatch,
     fixture.parameterPreservation.statements,
   );
-  await invoke(execute, fixture.parameterPreservation.statements);
-  assertStatementsEqual(
+  assertEqual(
+    fixture.equal,
     await fixture.parameterPreservation.observe(),
-    expectedStatements,
+    fixture.parameterPreservation.expected,
+    "parameter preservation",
   );
   passed.push("parameter preservation");
 
@@ -190,7 +154,7 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
   );
   let rollbackError: unknown;
   try {
-    await invoke(execute, fixture.rollback.statements);
+    await invoke(fixture.executeAtomicBatch, fixture.rollback.statements);
   } catch (error) {
     rollbackError = error;
   }
@@ -210,12 +174,7 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
     );
   }
   const after = await fixture.rollback.observe();
-  assertEqual(
-    fixture.equal,
-    after,
-    before,
-    "later-statement rollback",
-  );
+  assertEqual(fixture.equal, after, before, "later-statement rollback");
   passed.push("later-statement rollback");
 
   await fixture.emptyBatch.prepare?.();
@@ -226,25 +185,28 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
     fixture.emptyBatch.expected,
     "empty-batch precondition",
   );
-  const emptyRows = await invoke(execute, []);
+  const emptyRows = await invoke(fixture.executeAtomicBatch, []);
   assertEqual(fixture.equal, emptyRows, [], "empty-batch result");
   const emptyAfter = await fixture.emptyBatch.observe();
-  assertEqual(
-    fixture.equal,
-    emptyAfter,
-    fixture.emptyBatch.expected,
-    "empty-batch no-op",
-  );
+  assertEqual(fixture.equal, emptyAfter, emptyBefore, "empty-batch no-op");
   passed.push("empty batch");
 
-  for (const provenance of fixture.provenance ?? []) {
-    if (await provenance.check()) {
-      passed.push(`provenance: ${provenance.name}`);
+  const provenanceChecks = [
+    ["exact root registration", fixture.provenance.exactRootRegistration],
+    ["derived backend isolation", fixture.provenance.derivedBackendIsolation],
+    [
+      "transaction backend isolation",
+      fixture.provenance.transactionBackendIsolation,
+    ],
+  ] as const;
+  for (const [name, check] of provenanceChecks) {
+    if (await check()) {
+      passed.push(`provenance: ${name}`);
       continue;
     }
     throw new AtomicTransportConformanceError(
-      `Atomic transport provenance check failed: ${provenance.name}.`,
-      { check: `provenance: ${provenance.name}` },
+      `Atomic transport provenance check failed: ${name}.`,
+      { check: `provenance: ${name}` },
     );
   }
 

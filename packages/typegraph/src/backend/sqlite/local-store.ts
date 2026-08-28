@@ -19,7 +19,8 @@ import {
   type UnboundLiveStoreOptions,
 } from "../../store/types";
 import { loadDrizzleBackedModule } from "../missing-peer-ledger";
-import { type BackendCapabilities } from "../types";
+import { type BundledBackendCapabilityOverrides } from "../types";
+export type { BundledBackendCapabilityOverrides } from "../types";
 import { type LocalSqlitePragmaOptions } from "./local-options";
 
 export type { GraphIdentityConfig } from "../../core/define-graph";
@@ -56,7 +57,7 @@ export type LocalSqliteStoreOptions<
   /** Connection pragmas applied when the owned database is opened. */
   pragmas?: LocalSqlitePragmaOptions | false;
   /** Optional backend capability overrides, primarily for controlled hosts. */
-  capabilities?: Partial<BackendCapabilities>;
+  capabilities?: BundledBackendCapabilityOverrides;
   /** Store behavior, including hooks, history, and custom table names. */
   store?: TStoreOptions;
   /**

@@ -286,16 +286,14 @@ export type { PessimisticLockCapabilities } from "./capabilities/write-fence";
 /**
  * Backend capabilities that vary by dialect.
  */
-export type BackendExecutionCapabilities = Readonly<{
-  /** Whether the backend can hold an interactive callback/session transaction. */
-  interactiveTransactions: boolean;
-  /** Whether the exact root backend exposes a conformance-earned atomic batch. */
-  atomicBatch: "none" | "root";
-}>;
-
 export type BackendCapabilities = Readonly<{
   /** How this backend executes work and establishes atomicity. */
-  execution: BackendExecutionCapabilities;
+  execution: Readonly<{
+    /** Whether the backend can hold an interactive callback/session transaction. */
+    interactiveTransactions: boolean;
+    /** Whether the exact root backend exposes a conformance-earned atomic batch. */
+    atomicBatch: "none" | "root";
+  }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
   /**
@@ -410,6 +408,8 @@ export type BackendCapabilities = Readonly<{
   recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
+export type BackendExecutionCapabilities = BackendCapabilities["execution"];
+
 /**
  * Capability overrides accepted by bundled backend factories.
  *
@@ -450,27 +450,21 @@ export function normalizeGraphAnalyticsCapabilities(
  */
 export function supportsInteractiveTransactions(
   backendOrCapabilities:
-    | BackendCapabilities
-    | Readonly<{ capabilities: BackendCapabilities }>,
+    BackendCapabilities | Readonly<{ capabilities: BackendCapabilities }>,
 ): boolean {
-  return "capabilities" in backendOrCapabilities
-    ? backendOrCapabilities.capabilities.execution.interactiveTransactions
+  return "capabilities" in backendOrCapabilities ?
+      backendOrCapabilities.capabilities.execution.interactiveTransactions
     : backendOrCapabilities.execution.interactiveTransactions;
 }
 
-/**
- * Resolves the strongest execution tier declared by a backend. Atomic batches
- * are preferred for root backends because they preserve multi-statement
- * atomicity without requiring a held session; interactive transactions remain
- * the stronger general-purpose fallback when available.
- */
+/** Returns whether this exact root declares certified atomic batch support. */
 export function supportsRootAtomicBatch(
   backendOrCapabilities:
-    | BackendCapabilities
-    | Readonly<{ capabilities: BackendCapabilities }>,
+    BackendCapabilities | Readonly<{ capabilities: BackendCapabilities }>,
 ): boolean {
-  const capabilities = "capabilities" in backendOrCapabilities
-    ? backendOrCapabilities.capabilities
+  const capabilities =
+    "capabilities" in backendOrCapabilities ?
+      backendOrCapabilities.capabilities
     : backendOrCapabilities;
   return capabilities.execution.atomicBatch === "root";
 }
@@ -3772,7 +3766,10 @@ export async function runOptionallyInTransaction<T>(
   ) => Promise<T>,
   options?: RunOptionallyInTransactionOptions,
 ): Promise<T> {
-  if ("transaction" in backend && backend.capabilities.execution.interactiveTransactions) {
+  if (
+    "transaction" in backend &&
+    backend.capabilities.execution.interactiveTransactions
+  ) {
     return backend.transaction(
       (tx) => fn(tx, { mode: "interactive-transaction" }),
       options?.transaction,

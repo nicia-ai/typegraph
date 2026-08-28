@@ -97,7 +97,10 @@ type ArrayPredicate = Readonly<{
 
 // @public
 type BackendCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
@@ -330,6 +333,13 @@ type BulkOperationHookContext = HookContext & Readonly<{
     operation: "updateWhere";
     entity: "node";
     kind: string;
+}>;
+
+// @public
+export type BundledBackendCapabilityOverrides = Readonly<Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+        interactiveTransactions?: boolean;
+    }>;
 }>;
 
 // @public
@@ -2833,7 +2843,7 @@ export type LocalSqlitePragmaOptions = Readonly<{
 export type LocalSqliteStoreOptions<TStoreOptions extends StoreOptions = StoreOptions> = Readonly<{
     path?: string;
     pragmas?: LocalSqlitePragmaOptions | false;
-    capabilities?: Partial<BackendCapabilities>;
+    capabilities?: BundledBackendCapabilityOverrides;
     store?: TStoreOptions;
     schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;

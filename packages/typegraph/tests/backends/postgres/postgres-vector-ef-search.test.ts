@@ -318,7 +318,7 @@ describe("Postgres efSearch — transaction-less backend", () => {
     ).rejects.toMatchObject({
       code: "UNSUPPORTED_BACKEND_CAPABILITY",
       details: {
-        capability: "transactions",
+        capability: "execution.interactiveTransactions",
         efSearch: 256,
       },
     });

@@ -133,13 +133,6 @@ export {
   WS5B_SEED_BUNDLES,
   type Ws5bBundleId,
 } from "./capabilities";
-export type { RecursiveTraversalVerdict } from "./capabilities/recursive-traversal";
-export {
-  assertRecursiveTraversal,
-  assumeRecursiveTraversalSupported,
-  recursiveTraversalUnsupportedError,
-  resolveRecursiveTraversal,
-} from "./capabilities/recursive-traversal";
 export type {
   AtomicSqlBatchExecutor,
   AtomicSqlProgramAdapter,
@@ -148,9 +141,16 @@ export type {
   CompiledAtomicSqlStatement,
 } from "./capabilities/atomic-sql-program";
 export {
+  hasAtomicSqlProgramRegistration,
   registerAtomicSqlProgram,
-  resolveAtomicSqlProgramExecutor,
 } from "./capabilities/atomic-sql-program";
+export type { RecursiveTraversalVerdict } from "./capabilities/recursive-traversal";
+export {
+  assertRecursiveTraversal,
+  assumeRecursiveTraversalSupported,
+  recursiveTraversalUnsupportedError,
+  resolveRecursiveTraversal,
+} from "./capabilities/recursive-traversal";
 export type {
   GraphCommandCoordination,
   GraphCommandExecutionContext,
@@ -168,7 +168,7 @@ export type {
   AtomicTransportConformanceFixture,
   AtomicTransportConformanceReport,
   AtomicTransportEquality,
-  AtomicTransportProvenanceCheck,
+  AtomicTransportProvenanceChecks,
   AtomicTransportRollbackCase,
 } from "./conformance/atomic-transport";
 export {
@@ -204,11 +204,11 @@ export type {
   AdapterBackendTransactions,
   BackendCapabilities,
   BackendExecutionCapabilities,
-  BundledBackendCapabilityOverrides,
   BackendIdentity,
   BackendLifecycle,
   BackendMaintenance,
   BackendTransactions,
+  BundledBackendCapabilityOverrides,
   CheckUniqueBatchParams,
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,

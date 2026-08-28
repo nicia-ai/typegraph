@@ -202,7 +202,10 @@ describe("efSearch applicability (resolveEfSearchOverride)", () => {
       ),
     ).toMatchObject({
       code: "UNSUPPORTED_BACKEND_CAPABILITY",
-      details: { capability: "execution.interactiveTransactions", efSearch: 256 },
+      details: {
+        capability: "execution.interactiveTransactions",
+        efSearch: 256,
+      },
     });
   });
 

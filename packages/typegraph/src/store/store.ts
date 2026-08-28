@@ -984,13 +984,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const statementExecution = statementExecutionVerdict(backend);
     if (
       graph.identity !== undefined &&
-      (!backend.capabilities.execution.interactiveTransactions || !statementExecution.supported)
+      (!backend.capabilities.execution.interactiveTransactions ||
+        !statementExecution.supported)
     ) {
       throw new ConfigurationError(
         "Operational Identity requires an atomic transactional backend with statement execution support.",
         {
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-          interactiveTransactions: backend.capabilities.execution.interactiveTransactions,
+          interactiveTransactions:
+            backend.capabilities.execution.interactiveTransactions,
           statementExecution: statementExecution.supported,
         },
         {
@@ -2992,7 +2994,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (!this.#backend.capabilities.execution.interactiveTransactions) {
       throw new UnsupportedBackendCapabilityError(
         operation,
-        "transactions",
+        "execution.interactiveTransactions",
         { graphId: this.graphId, dialect: this.#backend.dialect },
         "Use a backend with transaction support, or call ordinary Store write methods when non-atomic work is intentional.",
       );

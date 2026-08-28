@@ -235,9 +235,8 @@ export function isPostgresJsClient(
  * the fast path can't drive them safely — Drizzle's neon-http session
  * handles them correctly via the `db.execute` slow path.
  *
- * Exported so the backend factory can auto-disable the `transactions`
- * capability when this driver is detected (HTTP can't hold a session,
- * so multi-statement transactions are not available regardless).
+ * Exported so the backend factory can refuse interactive transactions when
+ * this driver is detected (HTTP cannot hold a multi-statement session).
  */
 export function isNeonHttpClient(db: AnyPgDatabase): boolean {
   const candidate = (db as PgClientCarrier).$client;

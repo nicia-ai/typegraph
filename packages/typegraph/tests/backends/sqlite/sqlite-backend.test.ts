@@ -95,6 +95,7 @@ describe("SQLite Backend - Adapter Specific", () => {
 
       expect(backend.dialect).toBe("sqlite");
       expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+      expect(backend.capabilities.execution.atomicBatch).toBe("none");
       expect(backend.capabilities.graphAnalytics).toEqual({
         supported: true,
         mathFunctions: false,
@@ -522,6 +523,7 @@ describe("SQLite Backend - Transaction Modes", () => {
   it("defaults to 'raw' transaction mode for better-sqlite3", () => {
     const backend = createSqliteBackend(db);
     expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
   });
 
   it("throws ConfigurationError when transactionMode is 'none'", async () => {
@@ -529,6 +531,7 @@ describe("SQLite Backend - Transaction Modes", () => {
       executionProfile: { transactionMode: "none" },
     });
     expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
     expect(backend.capabilities.graphAnalytics?.supported).toBe(false);
 
     await expect(backend.transaction(() => Promise.resolve())).rejects.toThrow(

@@ -196,7 +196,10 @@ export function avg(alias: string, field: string): AggregateExpr;
 
 // @public
 export type BackendCapabilities = Readonly<{
-    transactions: boolean;
+    execution: Readonly<{
+        interactiveTransactions: boolean;
+        atomicBatch: "none" | "root";
+    }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
@@ -219,6 +222,9 @@ export class BackendDisposedError extends TypeGraphError {
         cause?: unknown;
     });
 }
+
+// @public (undocumented)
+export type BackendExecutionCapabilities = BackendCapabilities["execution"];
 
 // @public (undocumented)
 export type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
@@ -6903,6 +6909,16 @@ export type SubsetNode<G extends GraphDef, K extends NodeKinds<G>> = {
 
 // @public
 export function sum(alias: string, field: string): AggregateExpr;
+
+// @public
+export function supportsInteractiveTransactions(backendOrCapabilities: BackendCapabilities | Readonly<{
+    capabilities: BackendCapabilities;
+}>): boolean;
+
+// @public
+export function supportsRootAtomicBatch(backendOrCapabilities: BackendCapabilities | Readonly<{
+    capabilities: BackendCapabilities;
+}>): boolean;
 
 // @public (undocumented)
 export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[];

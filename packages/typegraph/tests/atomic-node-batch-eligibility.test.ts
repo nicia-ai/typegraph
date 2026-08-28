@@ -154,8 +154,24 @@ const input: CreateNodeInput = {
 
 function rootBackend(interactiveTransactions: boolean): GraphBackend {
   return {
-    capabilities: { execution: { interactiveTransactions, atomicBatch: "none" } },
+    capabilities: {
+      execution: { interactiveTransactions, atomicBatch: "root" },
+    },
   } as GraphBackend;
+}
+
+function declareAtomicBatchForTest(backend: GraphBackend): void {
+  Object.defineProperty(backend, "capabilities", {
+    configurable: true,
+    enumerable: true,
+    value: {
+      ...backend.capabilities,
+      execution: {
+        ...backend.capabilities.execution,
+        atomicBatch: "root",
+      },
+    },
+  });
 }
 
 function createFakeAtomicNodeBatch(onCall?: () => void) {
@@ -177,11 +193,13 @@ function createFakeAtomicNodeBatch(onCall?: () => void) {
 }
 
 function markAtomicRoot(backend: GraphBackend): void {
+  declareAtomicBatchForTest(backend);
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicNodeBatch(backend, createFakeAtomicNodeBatch());
 }
 
 function markAtomicDeleteRoot(backend: GraphBackend): void {
+  declareAtomicBatchForTest(backend);
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicMutationPrograms(backend, {
     deleteNodes: (deleteInput) =>
@@ -581,7 +599,13 @@ describe("atomic node batch store consumer", () => {
   });
 
   it("uses the exact-root native batch without opening an outer transaction", async () => {
-    const { backend } = createLocalSqliteBackend();
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-node-root-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
     let calls = 0;
     try {
       const [store] = await createStoreWithSchema(graph, backend);
@@ -599,6 +623,8 @@ describe("atomic node batch store consumer", () => {
       expect(calls).toBe(1);
     } finally {
       await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
     }
   });
 
@@ -607,6 +633,7 @@ describe("atomic node batch store consumer", () => {
     let nativeCalls = 0;
     try {
       const [store] = await createStoreWithSchema(uniqueGraph, backend);
+      declareAtomicBatchForTest(backend);
       markBundledRootAtomicNodeBatch(
         backend,
         createFakeAtomicNodeBatch(() => {
@@ -648,6 +675,7 @@ describe("atomic node batch store consumer", () => {
     let calls = 0;
     try {
       const [store] = await createStoreWithSchema(graph, backend);
+      declareAtomicBatchForTest(backend);
       markBundledRootAtomicNodeBatch(
         backend,
         createFakeAtomicNodeBatch(() => {
