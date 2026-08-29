@@ -213,7 +213,9 @@ import {
 } from "./edge-write-fences";
 import { type EdgeUpdateWork } from "./edge-write-pipeline";
 import {
+  atomicResolvedUpdateAttemptBudget,
   type OverlaidSessionMint,
+  runAtomicProgramWithHooks,
   runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
@@ -1972,9 +1974,6 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
   throw new EdgeNotFoundError(input.identity.kind, input.id);
 }
 
-/**
- * Executes an edge update operation.
- */
 function resolveAtomicEdgeUpdateExecutor<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   entries: readonly EdgeUpsertUpdateBatchEntry[],
@@ -2006,6 +2005,7 @@ function resolveAtomicEdgeUpdateExecutor<G extends GraphDef>(
   });
 }
 
+/** Executes an edge update operation. */
 export async function executeEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: {
@@ -2051,7 +2051,8 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     backend,
   );
   if (atomicExecutor !== undefined) {
-    return ctx.withOperationHooks(
+    return runAtomicProgramWithHooks(
+      ctx,
       opContext,
       async () => {
         const edges = await executeAtomicEdgeResolvedUpdates(
@@ -2385,6 +2386,10 @@ async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   atomicExecutor: AtomicEdgeResolvedUpdateBatchExecutor,
 ): Promise<readonly Edge[]> {
+  const maxAttempts = atomicResolvedUpdateAttemptBudget(
+    entries.length,
+    EDGE_UPDATE_ATTEMPTS,
+  );
   const first = requireDefined(entries[0]);
   const distinctIds = new Set(entries.map((entry) => entry.input.id));
   const supplied = entries.flatMap((entry) =>
@@ -2397,7 +2402,7 @@ async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
         ...distinctIds,
       ]);
   let existing = fetched === undefined ? supplied : [...fetched.values()];
-  for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const byId = new Map(existing.map((row) => [row.id, row]));
     const missing = entries.find((entry) => {
       const row = byId.get(entry.input.id);
@@ -2446,9 +2451,9 @@ async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
       );
     }
     await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    if (attempt === EDGE_UPDATE_ATTEMPTS) {
+    if (attempt === maxAttempts) {
       throw new DatabaseOperationError(
-        `Atomic edge upsert batch could not be applied to stable rows after ${EDGE_UPDATE_ATTEMPTS} attempts.`,
+        `Atomic edge update could not be applied to stable rows after ${maxAttempts} attempts.`,
         {
           operation: "update",
           entity: "edge",
@@ -2507,7 +2512,7 @@ export async function executeEdgeDelete<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    await ctx.withOperationHooks(opContext, () =>
+    await runAtomicProgramWithHooks(ctx, opContext, () =>
       executeAtomicEdgeDeletes(
         ctx,
         expectedKind,

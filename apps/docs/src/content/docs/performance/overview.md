@@ -216,6 +216,10 @@ and then submits one guarded atomic delete. Missing or tombstoned deletes remain
 hook-free read-only no-ops. Temporal mutations, node cascade/disconnect,
 history/revision capture, derived backends, caller transactions, and
 unregistered custom families retain the complete portable transaction path.
+The guarded update converges optimistically rather than holding a transaction
+lock across its read and write. A one-row update gets four attempts; sustained
+same-row contention can still end in `DatabaseOperationError`, while larger
+resolved batches retain their two-attempt budget to bound retry cost.
 
 These operations are registered through one exact-root mutation execution
 profile. Create and delete are **closed programs**: validation and arbitration

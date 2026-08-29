@@ -201,9 +201,11 @@ import {
 } from "./autocommit-single-statement";
 import { type NodeInsertSyncItem } from "./node-write-pipeline";
 import {
+  atomicResolvedUpdateAttemptBudget,
   booleanWriteResultChanges,
   type HookedWritePlanContext,
   type OverlaidSessionMint,
+  runAtomicProgramWithHooks,
   runAutocommitSingleStatementWritePlan,
   runHookedWritePlan,
   runWritePlan,
@@ -2596,7 +2598,8 @@ export async function executeNodeUpdate<G extends GraphDef>(
     input.id,
   );
   if (atomicExecutor !== undefined) {
-    return ctx.withOperationHooks(
+    return runAtomicProgramWithHooks(
+      ctx,
       opContext,
       async () => {
         const nodes = await executeAtomicNodeResolvedUpdates(
@@ -3052,6 +3055,10 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
   backend: GraphBackend | TransactionBackend,
   atomicExecutor: AtomicNodeResolvedUpdateBatchExecutor,
 ): Promise<readonly Node[]> {
+  const maxAttempts = atomicResolvedUpdateAttemptBudget(
+    entries.length,
+    NODE_UPDATE_ATTEMPTS,
+  );
   const first = requireDefined(entries[0]);
   const distinctIds = new Set(entries.map((entry) => entry.input.id));
   const supplied = entries.flatMap((entry) =>
@@ -3068,7 +3075,7 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
         [...distinctIds],
       );
   let existing = fetched === undefined ? supplied : [...fetched.values()];
-  for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const byId = new Map(existing.map((row) => [row.id, row]));
     const missing = entries.find((entry) => {
       const row = byId.get(entry.input.id);
@@ -3117,9 +3124,9 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
       );
     }
     await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-    if (attempt === NODE_UPDATE_ATTEMPTS) {
+    if (attempt === maxAttempts) {
       throw new DatabaseOperationError(
-        `Atomic node upsert batch could not be applied to stable rows after ${NODE_UPDATE_ATTEMPTS} attempts.`,
+        `Atomic node update could not be applied to stable rows after ${maxAttempts} attempts.`,
         {
           operation: "update",
           entity: "node",
@@ -3177,7 +3184,8 @@ export async function executeNodeDelete<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    await ctx.withOperationHooks(
+    await runAtomicProgramWithHooks(
+      ctx,
       opContext,
       () => executeAtomicNodeDeletes(ctx, kind, [id], backend, atomicExecutor),
       (affectedCount) => affectedCount > 0,

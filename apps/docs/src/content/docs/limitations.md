@@ -371,6 +371,16 @@ transaction transport from the eligible shape; it does not turn sidecar,
 temporal, captured, derived-backend, or caller-transaction writes into
 autocommit operations.
 
+That singleton update path uses optimistic convergence: the mutation asserts
+the row preimage it read and retries a moved preimage up to four times. Under
+sustained same-row contention it can throw `DatabaseOperationError` where an
+interactive transaction would have waited to serialize the writers. This
+applies to eligible `update()` calls and the live-row leg of `upsertById()` on
+registered exact-root atomic transports. Caller transactions and other
+ineligible shapes continue to use the serialized transaction path. Applications
+using an atomic root should retry the operation when sustained contention can
+move the row throughout all four attempts.
+
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 
 `bulkUpsertById` applies items in order for the purpose of deciding each row's
