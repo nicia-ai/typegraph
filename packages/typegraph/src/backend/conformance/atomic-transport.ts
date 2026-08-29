@@ -10,12 +10,18 @@
  * a database client.
  */
 import { TypeGraphError } from "../../errors";
-import type {
-  AtomicSqlBatchExecutor,
-  AtomicSqlRow,
-  CompiledAtomicSqlStatement,
+import {
+  type AtomicSqlBatchExecutor,
+  type AtomicSqlRow,
+  type CompiledAtomicSqlStatement,
+  hasAtomicSqlProgramRegistration,
+  resolveRegisteredAtomicSqlBatchExecutor,
 } from "../capabilities/atomic-sql-program";
-import { assertExactRootRegistrationProvenance } from "./exact-root-provenance";
+import type { GraphBackend } from "../types";
+import {
+  assertExactRootRegistrationProvenance,
+  type ExactRootRegistrationProvenanceFixture,
+} from "./exact-root-provenance";
 
 export type AtomicTransportEquality = (
   actual: unknown,
@@ -32,7 +38,12 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
   errorMatches?: (error: unknown) => boolean;
 }>;
 
-export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
+export type AtomicTransportConformanceFixture<
+  TSnapshot = unknown,
+  TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined,
+> = Readonly<{
+  /** Exact root that registered the batch function under test. */
+  backend: GraphBackend;
   executeAtomicBatch: AtomicSqlBatchExecutor;
   equal: AtomicTransportEquality;
   /** A multi-statement program whose result slots identify their positions. */
@@ -43,13 +54,13 @@ export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
   /** A program whose SQL and bound values must reach the transport unchanged. */
   parameterPreservation: Readonly<{
     statements: readonly CompiledAtomicSqlStatement[];
-    /** An independent snapshot of the exact sequence the transport must see. */
-    expected: readonly CompiledAtomicSqlStatement[];
-    /** Observe the sequence received by the engine-specific transport. */
+    /** Independent evidence that SQL and bound values reached the engine. */
+    expected: TParameterSnapshot;
+    /** Observe engine state or transport input attributable to this program. */
     observe: () =>
-      | readonly CompiledAtomicSqlStatement[]
-      | undefined
-      | PromiseLike<readonly CompiledAtomicSqlStatement[] | undefined>;
+      | TParameterSnapshot
+      | PromiseLike<TParameterSnapshot | undefined>
+      | undefined;
   }>;
   /** A later failure must roll back both the primary row and its sidecar. */
   rollback: AtomicTransportRollbackCase<TSnapshot>;
@@ -59,22 +70,12 @@ export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
     observe: () => TSnapshot | PromiseLike<TSnapshot>;
     expected: TSnapshot;
   }>;
-  /**
-   * Caller-supplied checks for exact-root registration and provenance.
-   * Typical checks resolve a certified root, then assert that a derived or
-   * transaction-scoped object does not inherit the registration.
-   */
-  provenance: AtomicTransportProvenanceChecks;
-}>;
-
-export type AtomicTransportProvenanceChecks = Readonly<{
-  exactRootRegistration: () => boolean | PromiseLike<boolean>;
-  derivedBackendIsolation: () => boolean | PromiseLike<boolean>;
-  transactionBackendIsolation: () => boolean | PromiseLike<boolean>;
-}>;
+}> &
+  ExactRootRegistrationProvenanceFixture;
 
 export type AtomicTransportConformanceReport = Readonly<{
   passed: readonly string[];
+  skipped: readonly string[];
 }>;
 
 export class AtomicTransportConformanceError extends TypeGraphError {
@@ -111,16 +112,40 @@ async function invoke(
 }
 
 /**
- * Runs the mandatory transport checks and caller-supplied provenance checks.
+ * Runs the mandatory transport checks and exact-root provenance checks.
  *
  * This runner deliberately does not manufacture SQL or inspect a catalog.
  * The fixture owns those engine-specific details; the runner verifies the
  * transport protocol around them.
  */
-export async function runAtomicTransportConformance<TSnapshot = unknown>(
-  fixture: AtomicTransportConformanceFixture<TSnapshot>,
+export async function runAtomicTransportConformance<
+  TSnapshot = unknown,
+  TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined,
+>(
+  fixture: AtomicTransportConformanceFixture<TSnapshot, TParameterSnapshot>,
 ): Promise<AtomicTransportConformanceReport> {
   const passed: string[] = [];
+
+  if (
+    resolveRegisteredAtomicSqlBatchExecutor(fixture.backend) !==
+    fixture.executeAtomicBatch
+  ) {
+    throw new AtomicTransportConformanceError(
+      "Atomic transport conformance is not bound to the exact registered batch function.",
+      { check: "registration binding" },
+    );
+  }
+
+  const provenance = await assertExactRootRegistrationProvenance(
+    fixture.backend,
+    fixture,
+    (target) => hasAtomicSqlProgramRegistration(target),
+    (name) =>
+      new AtomicTransportConformanceError(
+        `Atomic transport provenance check failed: ${name}.`,
+        { check: `provenance: ${name}` },
+      ),
+  );
 
   const orderedRows = await invoke(
     fixture.executeAtomicBatch,
@@ -191,17 +216,13 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
   assertEqual(fixture.equal, emptyRows, [], "empty-batch result");
   const emptyAfter = await fixture.emptyBatch.observe();
   assertEqual(fixture.equal, emptyAfter, emptyBefore, "empty-batch no-op");
-  passed.push("empty batch");
-
-  const provenance = await assertExactRootRegistrationProvenance(
-    fixture.provenance,
-    (name) =>
-      new AtomicTransportConformanceError(
-        `Atomic transport provenance check failed: ${name}.`,
-        { check: `provenance: ${name}` },
-      ),
+  passed.push(
+    "empty batch",
+    ...provenance.passed.map((name) => `provenance: ${name}`),
   );
-  passed.push(...provenance.map((name) => `provenance: ${name}`));
 
-  return { passed };
+  return {
+    passed,
+    skipped: provenance.skipped.map((name) => `provenance: ${name}`),
+  };
 }

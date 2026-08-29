@@ -54,12 +54,15 @@ const SOURCE_ROOT = path.resolve(
  * backend, and therefore every function that carries the audit.
  */
 const SEAM_CONSTRUCTORS = [
+  "decorateBackend",
   "deriveBackend",
   "projectBackend",
   "projectBackendWithout",
   "projectGraphBackend",
   "wrapWithManagedClose",
 ] as const;
+
+const SEAM_QUERIES = ["isBackendDerivedFrom"] as const;
 
 type SeamConstructor = (typeof SEAM_CONSTRUCTORS)[number];
 
@@ -74,6 +77,12 @@ type InventoryEntry = Readonly<{
 }>;
 
 const INVENTORY: readonly InventoryEntry[] = [
+  {
+    file: "backend/derive-backend.ts",
+    line: "return deriveBackend(base, overrides);",
+    reason:
+      "The public custom-backend decorator delegates to the same internal construction seam so provenance lineage and every carried backend proof have one owner.",
+  },
   {
     file: "backend/derive-backend.ts",
     line: "return projectBackend(base, retained);",
@@ -91,12 +100,6 @@ const INVENTORY: readonly InventoryEntry[] = [
     line: "return deriveBackend(backend, closeOverlay);",
     reason:
       "The seam composing itself: managed close is an overlay of one member, so the idempotent `close` decorates rather than copies.",
-  },
-  {
-    file: "backend/conformance/atomic-mutation-program.ts",
-    line: "projectGraphBackend(fixture.backend),",
-    reason:
-      "Semantic conformance deliberately probes a projected view of the registered root to prove exact-root mutation-program evidence does not leak through derivation.",
   },
   {
     file: "backend/drizzle/contribution-materializations.ts",
@@ -384,7 +387,7 @@ describe("derived-backend inventory ratchet", () => {
       );
 
     expect(exportedFunctions.toSorted()).toEqual(
-      [...SEAM_CONSTRUCTORS].toSorted(),
+      [...SEAM_CONSTRUCTORS, ...SEAM_QUERIES].toSorted(),
     );
   });
 

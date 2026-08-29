@@ -1,117 +1,74 @@
-/**
- * Framework-agnostic conformance checks for semantic mutation programs.
- *
- * Transport conformance proves that a backend can dispatch a closed SQL
- * program atomically. This runner proves the next boundary: each registered
- * TypeGraph mutation family preserves its Store-visible result, schema fence,
- * refusal, rollback, and exact-root contracts. Backend authors supply real
- * Store operations and database observers; the runner owns the required case
- * inventory and every verdict.
- */
+/** Framework-agnostic conformance checks for semantic mutation programs. */
 import { TypeGraphError } from "../../errors";
 import {
   type AtomicMutationProgramExecutor,
+  type AtomicMutationProgramVariant,
   hasAtomicMutationProgramRegistration,
+  reachableAtomicMutationProgramVariants,
   resolveAtomicMutationPrograms,
+  withAtomicMutationProgramDispatchObserver,
 } from "../capabilities/atomic-mutation-program";
-import { projectGraphBackend } from "../derive-backend";
 import type { GraphBackend } from "../types";
 import {
   assertExactRootRegistrationProvenance,
-  type ExactRootRegistrationProvenanceChecks,
+  type ExactRootRegistrationProvenanceFixture,
+  type ExactRootRegistrationProvenanceReport,
 } from "./exact-root-provenance";
 
-/** Every independently provable semantic variant in a mutation profile. */
-export const ATOMIC_MUTATION_PROGRAM_VARIANTS = [
-  "createNodes",
-  "createEdges",
-  "deleteNodes",
-  "deleteEdges",
-  "updateNodes",
-  "updateEdges",
-  "mutateNodes",
-  "mutateEdges.resolvedSet",
-  "mutateEdges.durableConvergence",
-] as const;
+export {
+  ATOMIC_MUTATION_PROGRAM_VARIANTS,
+  type AtomicMutationProgramVariant,
+} from "../capabilities/atomic-mutation-program";
 
-/** One independently provable semantic variant in a mutation profile. */
-export type AtomicMutationProgramVariant =
-  (typeof ATOMIC_MUTATION_PROGRAM_VARIANTS)[number];
-
-/** Independently derived success oracles returned by fixture preparation. */
 export type AtomicMutationProgramConformancePreparation = Readonly<{
   expectedResult: unknown;
   expectedState: unknown;
 }>;
-
-/** Independently derived no-write oracle returned by fixture preparation. */
 export type AtomicMutationProgramRefusalPreparation = Readonly<{
   expectedState: unknown;
 }>;
-
-/** One successful Store operation and its independent state observers. */
 export type AtomicMutationProgramSuccessCase = Readonly<{
-  /** Establishes isolated state and returns independently derived oracles. */
   prepare: () =>
     | AtomicMutationProgramConformancePreparation
     | PromiseLike<AtomicMutationProgramConformancePreparation>;
-  /** Resolves the exact registered backend root used by this case. */
-  resolveBackend: () => GraphBackend;
-  /** Invokes the public Store operation whose registered family is claimed. */
   execute: () => unknown;
-  /** Reads committed database state without trusting the returned postimages. */
   observeState: () => unknown;
-  /** Counts invocations of the exact registered semantic executor. */
-  observeDispatchCount: () => number | PromiseLike<number>;
 }>;
-
-/** One refusing Store operation and its independent state observers. */
+export type AtomicMutationProgramRefusalDispatch = "required" | "pre-dispatch";
 export type AtomicMutationProgramRefusalCase = Readonly<{
-  /** Establishes isolated state and returns its no-write oracle. */
   prepare: () =>
     | AtomicMutationProgramRefusalPreparation
     | PromiseLike<AtomicMutationProgramRefusalPreparation>;
-  /** Resolves the exact registered backend root used by this case. */
-  resolveBackend: () => GraphBackend;
-  /** Invokes the public Store operation that must refuse atomically. */
   execute: () => unknown;
-  /** Reads committed database state after the refusal. */
   observeState: () => unknown;
-  /** Counts invocations of the exact registered semantic executor. */
-  observeDispatchCount: () => number | PromiseLike<number>;
-  /** Matches the Store-level typed error, never a driver sentinel alone. */
   errorMatches: (error: unknown) => boolean;
+  /** Makes a legitimate Store-level precondition refusal explicit. */
+  dispatch: AtomicMutationProgramRefusalDispatch;
 }>;
-
-/** The three mandatory checks for one semantic mutation variant. */
 export type AtomicMutationProgramConformanceCase = Readonly<{
+  /** Exact root used by every callback in this case. */
+  backend: GraphBackend;
   variant: AtomicMutationProgramVariant;
-  /** Proves ordered results and independently observed committed state. */
   orderedSuccess: AtomicMutationProgramSuccessCase;
-  /** Proves a stale schema fence cannot leave any write behind. */
-  staleFenceNoWrite: AtomicMutationProgramRefusalCase;
-  /** Proves the family's semantic refusal rolls back every sibling write. */
+  staleFenceNoWrite: AtomicMutationProgramRefusalCase &
+    Readonly<{ dispatch: "required" }>;
   semanticRefusalRollback: AtomicMutationProgramRefusalCase;
 }>;
-
-/** Complete caller-owned fixture for the framework-agnostic runner. */
 export type AtomicMutationProgramConformanceFixture = Readonly<{
-  /** A representative exact root registered by the backend factory. */
+  /** Exact root reserved exclusively for this conformance run. */
   backend: GraphBackend;
   equal: (actual: unknown, expected: unknown) => boolean;
   cases: readonly AtomicMutationProgramConformanceCase[];
-}>;
-
-/** Passed checks grouped by semantic variant and exact-root provenance. */
+}> &
+  ExactRootRegistrationProvenanceFixture;
 export type AtomicMutationProgramConformanceReport = Readonly<{
   variants: readonly Readonly<{
     variant: AtomicMutationProgramVariant;
     passed: readonly string[];
   }>[];
-  provenance: readonly string[];
+  provenance: ExactRootRegistrationProvenanceReport;
 }>;
 
-/** A failed semantic mutation program conformance verdict. */
 export class AtomicMutationProgramConformanceError extends TypeGraphError {
   constructor(
     message: string,
@@ -125,81 +82,13 @@ export class AtomicMutationProgramConformanceError extends TypeGraphError {
   }
 }
 
-const VARIANTS_BY_FAMILY = {
-  createNodes: ["createNodes"],
-  createEdges: ["createEdges"],
-  deleteNodes: ["deleteNodes"],
-  deleteEdges: ["deleteEdges"],
-  updateNodes: ["updateNodes"],
-  updateEdges: ["updateEdges"],
-  mutateNodes: ["mutateNodes"],
-  mutateEdges: ["mutateEdges.resolvedSet", "mutateEdges.durableConvergence"],
-} as const satisfies Readonly<
-  Record<
-    keyof AtomicMutationProgramExecutor,
-    readonly AtomicMutationProgramVariant[]
-  >
->;
+type DispatchCounts = ReadonlyMap<AtomicMutationProgramVariant, number>;
 
-const ATOMIC_MUTATION_PROGRAM_FAMILIES = Object.keys(
-  VARIANTS_BY_FAMILY,
-) as readonly (keyof typeof VARIANTS_BY_FAMILY)[];
-
-function expectedVariants(
-  registration: AtomicMutationProgramExecutor,
-): readonly AtomicMutationProgramVariant[] {
-  const variants: AtomicMutationProgramVariant[] = [];
-  for (const family of ATOMIC_MUTATION_PROGRAM_FAMILIES) {
-    if (family === "updateNodes") {
-      if ((registration.updateNodes?.maxEntries ?? 0) > 0) {
-        variants.push("updateNodes");
-      }
-      continue;
-    }
-    if (family === "updateEdges") {
-      if ((registration.updateEdges?.maxEntries ?? 0) > 0) {
-        variants.push("updateEdges");
-      }
-      continue;
-    }
-    if (family === "mutateNodes") {
-      if ((registration.mutateNodes?.maxEntries ?? 0) > 0) {
-        variants.push("mutateNodes");
-      }
-      continue;
-    }
-    if (family === "mutateEdges") {
-      const executor = registration.mutateEdges;
-      if (executor === undefined) continue;
-      if (executor.maxEntries.resolvedSet > 0) {
-        variants.push("mutateEdges.resolvedSet");
-      }
-      if (executor.maxEntries.durableConvergence > 0) {
-        variants.push("mutateEdges.durableConvergence");
-      }
-      continue;
-    }
-    if (registration[family] === undefined) continue;
-    variants.push(...VARIANTS_BY_FAMILY[family]);
-  }
-  return variants;
-}
-
-function assertCaseBackendMatchesProfile(
-  fixtureBackend: GraphBackend,
-  profile: AtomicMutationProgramExecutor,
-  backend: GraphBackend,
+function countDispatches(
+  counts: DispatchCounts,
   variant: AtomicMutationProgramVariant,
-  check: string,
-): void {
-  const registered = resolveAtomicMutationPrograms(backend);
-  if (backend === fixtureBackend && registered === profile) {
-    return;
-  }
-  throw new AtomicMutationProgramConformanceError(
-    `Atomic mutation program conformance case is not bound to the exact registered ${variant} root during ${check}.`,
-    { variant, check },
-  );
+): number {
+  return counts.get(variant) ?? 0;
 }
 
 function assertEqual(
@@ -216,42 +105,38 @@ function assertEqual(
   );
 }
 
-function assertDispatched(
+function assertDispatchVerdict(
   before: number,
   after: number,
+  expected: AtomicMutationProgramRefusalDispatch,
   variant: AtomicMutationProgramVariant,
   check: string,
 ): void {
-  if (
-    Number.isSafeInteger(before) &&
-    Number.isSafeInteger(after) &&
-    after > before
-  ) {
-    return;
-  }
+  const matched = expected === "required" ? after > before : after === before;
+  if (matched) return;
   throw new AtomicMutationProgramConformanceError(
-    `Atomic mutation program conformance did not dispatch ${variant} during ${check}.`,
-    { variant, check, before, after },
+    expected === "required" ?
+      `Atomic mutation program conformance did not dispatch ${variant} during ${check}.`
+    : `Atomic mutation program conformance unexpectedly dispatched ${variant} during ${check}.`,
+    { variant, check, before, after, expected },
   );
 }
 
 async function runSuccessCase(
   fixture: AtomicMutationProgramConformanceFixture,
+  profile: AtomicMutationProgramExecutor,
+  counts: DispatchCounts,
   variant: AtomicMutationProgramVariant,
   conformanceCase: AtomicMutationProgramSuccessCase,
 ): Promise<void> {
+  assertProfileBinding(fixture, profile, variant);
   const expected = await conformanceCase.prepare();
-  assertCaseBackendMatchesProfile(
-    fixture.backend,
-    fixtureProfile(fixture),
-    conformanceCase.resolveBackend(),
-    variant,
-    "ordered success",
-  );
-  const before = await conformanceCase.observeDispatchCount();
+  assertProfileBinding(fixture, profile, variant);
+  const before = countDispatches(counts, variant);
   const result = await conformanceCase.execute();
-  const after = await conformanceCase.observeDispatchCount();
-  assertDispatched(before, after, variant, "ordered success");
+  assertProfileBinding(fixture, profile, variant);
+  const after = countDispatches(counts, variant);
+  assertDispatchVerdict(before, after, "required", variant, "ordered success");
   assertEqual(
     fixture,
     result,
@@ -270,27 +155,26 @@ async function runSuccessCase(
 
 async function runRefusalCase(
   fixture: AtomicMutationProgramConformanceFixture,
+  profile: AtomicMutationProgramExecutor,
+  counts: DispatchCounts,
   variant: AtomicMutationProgramVariant,
   check: string,
   conformanceCase: AtomicMutationProgramRefusalCase,
+  expectedDispatch: AtomicMutationProgramRefusalDispatch,
 ): Promise<void> {
+  assertProfileBinding(fixture, profile, variant);
   const expected = await conformanceCase.prepare();
-  assertCaseBackendMatchesProfile(
-    fixture.backend,
-    fixtureProfile(fixture),
-    conformanceCase.resolveBackend(),
-    variant,
-    check,
-  );
-  const before = await conformanceCase.observeDispatchCount();
+  assertProfileBinding(fixture, profile, variant);
+  const before = countDispatches(counts, variant);
   let refusal: unknown;
   try {
     await conformanceCase.execute();
   } catch (error) {
     refusal = error;
   }
-  const after = await conformanceCase.observeDispatchCount();
-  assertDispatched(before, after, variant, check);
+  assertProfileBinding(fixture, profile, variant);
+  const after = countDispatches(counts, variant);
+  assertDispatchVerdict(before, after, expectedDispatch, variant, check);
   if (refusal === undefined || !conformanceCase.errorMatches(refusal)) {
     throw new AtomicMutationProgramConformanceError(
       `Atomic mutation program conformance returned an unexpected refusal for ${variant} ${check}.`,
@@ -317,6 +201,29 @@ function fixtureProfile(
   );
 }
 
+function assertProfileBinding(
+  fixture: AtomicMutationProgramConformanceFixture,
+  profile: AtomicMutationProgramExecutor,
+  variant: AtomicMutationProgramVariant,
+): void {
+  if (resolveAtomicMutationPrograms(fixture.backend) === profile) return;
+  throw new AtomicMutationProgramConformanceError(
+    `Atomic mutation program conformance lost its registered profile while proving ${variant}.`,
+    { check: "profile binding", variant },
+  );
+}
+
+function assertCaseBinding(
+  fixture: AtomicMutationProgramConformanceFixture,
+  conformanceCase: AtomicMutationProgramConformanceCase,
+): void {
+  if (conformanceCase.backend === fixture.backend) return;
+  throw new AtomicMutationProgramConformanceError(
+    `Atomic mutation program conformance case ${conformanceCase.variant} is bound to a different backend root.`,
+    { check: "case binding", variant: conformanceCase.variant },
+  );
+}
+
 function indexCases(
   cases: readonly AtomicMutationProgramConformanceCase[],
 ): ReadonlyMap<
@@ -339,19 +246,10 @@ function indexCases(
   return indexed;
 }
 
-/**
- * Runs every mandatory semantic check for the profile the backend registers.
- *
- * Zero entry limits are honest opt-outs and therefore do not require an
- * unreachable case. Any positive registered variant requires exactly one
- * case, while a case for an unregistered variant is refused as misleading.
- */
-export async function runAtomicMutationProgramConformance(
-  fixture: AtomicMutationProgramConformanceFixture,
-): Promise<AtomicMutationProgramConformanceReport> {
-  const profile = fixtureProfile(fixture);
-  const required = expectedVariants(profile);
-  const indexedCases = indexCases(fixture.cases);
+function assertCompleteCaseInventory(
+  required: readonly AtomicMutationProgramVariant[],
+  indexedCases: ReadonlyMap<AtomicMutationProgramVariant, unknown>,
+): void {
   for (const variant of required) {
     if (indexedCases.has(variant)) continue;
     throw new AtomicMutationProgramConformanceError(
@@ -366,24 +264,27 @@ export async function runAtomicMutationProgramConformance(
       { variant },
     );
   }
+}
 
+/** Runs every mandatory semantic check for the exact registered profile. */
+export async function runAtomicMutationProgramConformance(
+  fixture: AtomicMutationProgramConformanceFixture,
+): Promise<AtomicMutationProgramConformanceReport> {
+  // Finish every binding and inventory verdict before preparation can write.
+  const profile = fixtureProfile(fixture);
+  const required = reachableAtomicMutationProgramVariants(
+    profile,
+    fixture.backend.capabilities.execution,
+  );
+  const indexedCases = indexCases(fixture.cases);
+  assertCompleteCaseInventory(required, indexedCases);
+  for (const conformanceCase of indexedCases.values()) {
+    assertCaseBinding(fixture, conformanceCase);
+  }
   const provenance = await assertExactRootRegistrationProvenance(
-    {
-      exactRootRegistration: () =>
-        hasAtomicMutationProgramRegistration(fixture.backend),
-      derivedBackendIsolation: () =>
-        !hasAtomicMutationProgramRegistration(
-          projectGraphBackend(fixture.backend),
-        ),
-      transactionBackendIsolation: () => {
-        if (!fixture.backend.capabilities.execution.interactiveTransactions) {
-          return true;
-        }
-        return fixture.backend.transaction((transaction) =>
-          Promise.resolve(!hasAtomicMutationProgramRegistration(transaction)),
-        );
-      },
-    } satisfies ExactRootRegistrationProvenanceChecks,
+    fixture.backend,
+    fixture,
+    (target) => hasAtomicMutationProgramRegistration(target),
     (name) =>
       new AtomicMutationProgramConformanceError(
         `Atomic mutation program provenance check failed: ${name}.`,
@@ -391,33 +292,57 @@ export async function runAtomicMutationProgramConformance(
       ),
   );
 
-  const variants: AtomicMutationProgramConformanceReport["variants"][number][] =
-    [];
-  for (const variant of required) {
-    const conformanceCase = indexedCases.get(variant);
-    if (conformanceCase === undefined) continue;
-    await runSuccessCase(fixture, variant, conformanceCase.orderedSuccess);
-    await runRefusalCase(
-      fixture,
-      variant,
-      "stale fence",
-      conformanceCase.staleFenceNoWrite,
-    );
-    await runRefusalCase(
-      fixture,
-      variant,
-      "semantic refusal",
-      conformanceCase.semanticRefusalRollback,
-    );
-    variants.push({
-      variant,
-      passed: [
-        "ordered result and committed state",
-        "stale fence no-write",
-        "semantic refusal rollback",
-      ],
-    });
-  }
+  const dispatchCounts = new Map<AtomicMutationProgramVariant, number>();
+  const variants = await withAtomicMutationProgramDispatchObserver(
+    fixture.backend,
+    (variant) => {
+      dispatchCounts.set(variant, countDispatches(dispatchCounts, variant) + 1);
+    },
+    async () => {
+      const reports: AtomicMutationProgramConformanceReport["variants"][number][] =
+        [];
+      for (const variant of required) {
+        const conformanceCase = indexedCases.get(variant);
+        if (conformanceCase === undefined) continue;
+        await runSuccessCase(
+          fixture,
+          profile,
+          dispatchCounts,
+          variant,
+          conformanceCase.orderedSuccess,
+        );
+        await runRefusalCase(
+          fixture,
+          profile,
+          dispatchCounts,
+          variant,
+          "stale fence",
+          conformanceCase.staleFenceNoWrite,
+          "required",
+        );
+        await runRefusalCase(
+          fixture,
+          profile,
+          dispatchCounts,
+          variant,
+          "semantic refusal",
+          conformanceCase.semanticRefusalRollback,
+          conformanceCase.semanticRefusalRollback.dispatch,
+        );
+        reports.push({
+          variant,
+          passed: [
+            "ordered result and committed state",
+            "stale fence no-write",
+            conformanceCase.semanticRefusalRollback.dispatch === "required" ?
+              "semantic refusal rollback after native dispatch"
+            : "semantic refusal no-write before native dispatch",
+          ],
+        });
+      }
+      return reports;
+    },
+  );
 
   return { variants, provenance };
 }

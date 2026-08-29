@@ -267,6 +267,86 @@ export type AtomicMutationProgramExecutor = Readonly<{
   mutateEdges?: AtomicEdgeMutationProgramExecutor;
 }>;
 
+/** Every independently enabled semantic variant in a mutation profile. */
+export const ATOMIC_MUTATION_PROGRAM_VARIANTS = [
+  "createNodes",
+  "createEdges",
+  "deleteNodes",
+  "deleteEdges",
+  "updateNodes",
+  "updateEdges",
+  "mutateNodes",
+  "mutateEdges.resolvedSet",
+  "mutateEdges.durableConvergence",
+] as const;
+
+/** One independently enabled semantic variant in a mutation profile. */
+export type AtomicMutationProgramVariant =
+  (typeof ATOMIC_MUTATION_PROGRAM_VARIANTS)[number];
+
+/** One owner for the overloaded edge-mutation input/variant correlation. */
+export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND = {
+  "durable-convergence": "mutateEdges.durableConvergence",
+  "resolved-set": "mutateEdges.resolvedSet",
+} as const satisfies Readonly<
+  Record<
+    | AtomicEdgeConvergenceInput["kind"]
+    | AtomicEdgeResolvedMutationSetInput["kind"],
+    Extract<AtomicMutationProgramVariant, `mutateEdges.${string}`>
+  >
+>;
+
+/**
+ * Owns which semantic variants a normalized profile can reach independently.
+ *
+ * A zero limit is an honest opt-out. Update-only and mixed resolved sets run
+ * directly on transactionless roots; an interactive root first moves their
+ * collection-level read/partition/write unit into a transaction, where exact
+ * root registration deliberately does not follow. Conformance consumes this
+ * owner instead of independently re-spelling either decision.
+ */
+export function reachableAtomicMutationProgramVariants(
+  profile: AtomicMutationProgramExecutor,
+  execution: Pick<
+    GraphBackend["capabilities"]["execution"],
+    "interactiveTransactions"
+  >,
+): readonly AtomicMutationProgramVariant[] {
+  const variants: AtomicMutationProgramVariant[] = [];
+  if (profile.createNodes !== undefined) variants.push("createNodes");
+  if (profile.createEdges !== undefined) variants.push("createEdges");
+  if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
+  if (profile.deleteEdges !== undefined) variants.push("deleteEdges");
+  if (
+    !execution.interactiveTransactions &&
+    (profile.updateNodes?.maxEntries ?? 0) > 0
+  ) {
+    variants.push("updateNodes");
+  }
+  if (
+    !execution.interactiveTransactions &&
+    (profile.updateEdges?.maxEntries ?? 0) > 0
+  ) {
+    variants.push("updateEdges");
+  }
+  if (
+    !execution.interactiveTransactions &&
+    (profile.mutateNodes?.maxEntries ?? 0) > 0
+  ) {
+    variants.push("mutateNodes");
+  }
+  if (
+    !execution.interactiveTransactions &&
+    (profile.mutateEdges?.maxEntries.resolvedSet ?? 0) > 0
+  ) {
+    variants.push("mutateEdges.resolvedSet");
+  }
+  if ((profile.mutateEdges?.maxEntries.durableConvergence ?? 0) > 0) {
+    variants.push("mutateEdges.durableConvergence");
+  }
+  return variants;
+}
+
 /**
  * Semantic mutation families implemented by one exact backend root.
  *
@@ -289,6 +369,109 @@ const ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
   object,
   AtomicMutationProgramExecutor
 >();
+
+type AtomicMutationProgramDispatchObserver = (
+  variant: AtomicMutationProgramVariant,
+) => void;
+
+const ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS = new WeakMap<
+  object,
+  AtomicMutationProgramDispatchObserver
+>();
+const INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS = new WeakMap<
+  object,
+  object
+>();
+
+function reportAtomicMutationProgramDispatch(
+  target: object,
+  variant: AtomicMutationProgramVariant,
+): void {
+  ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.get(target)?.(variant);
+}
+
+function instrumentAtomicMutationProgramExecutors(
+  target: object,
+  profile: AtomicMutationProgramRegistration,
+): AtomicMutationProgramExecutor {
+  type Descriptor = Readonly<{
+    variant: (input: unknown) => AtomicMutationProgramVariant;
+  }>;
+  const descriptors = {
+    createEdges: { variant: () => "createEdges" },
+    createNodes: { variant: () => "createNodes" },
+    deleteEdges: { variant: () => "deleteEdges" },
+    deleteNodes: { variant: () => "deleteNodes" },
+    mutateEdges: {
+      variant: (input: unknown) =>
+        ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND[
+          (
+            input as
+              AtomicEdgeConvergenceInput | AtomicEdgeResolvedMutationSetInput
+          ).kind
+        ],
+    },
+    mutateNodes: { variant: () => "mutateNodes" },
+    updateEdges: { variant: () => "updateEdges" },
+    updateNodes: { variant: () => "updateNodes" },
+  } as const satisfies Record<
+    keyof AtomicMutationProgramRegistration,
+    Descriptor
+  >;
+
+  function instrument<TExecutor extends object>(
+    source: TExecutor,
+    descriptor: Descriptor,
+  ): TExecutor {
+    if (INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS.get(source) === target) {
+      return source;
+    }
+    const callable = source as unknown as (
+      ...arguments_: readonly unknown[]
+    ) => unknown;
+    const instrumented = new Proxy(callable, {
+      apply(sourceExecutor, thisArgument, argumentsList) {
+        reportAtomicMutationProgramDispatch(
+          target,
+          descriptor.variant(argumentsList[0]),
+        );
+        return Reflect.apply(sourceExecutor, thisArgument, argumentsList);
+      },
+    });
+    INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS.set(instrumented, target);
+    return instrumented as unknown as TExecutor;
+  }
+
+  const entries = ATOMIC_MUTATION_PROGRAM_FAMILIES.flatMap((family) => {
+    const executor = profile[family];
+    return executor === undefined ?
+        []
+      : [[family, instrument(executor, descriptors[family])] as const];
+  });
+  return Object.freeze(
+    Object.fromEntries(entries) as AtomicMutationProgramExecutor,
+  );
+}
+
+/** @internal Runs work while observing dispatches from this exact root. */
+export async function withAtomicMutationProgramDispatchObserver<TResult>(
+  target: object,
+  observer: AtomicMutationProgramDispatchObserver,
+  run: () => TResult | PromiseLike<TResult>,
+): Promise<TResult> {
+  if (ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.has(target)) {
+    throw new ConfigurationError(
+      "Atomic mutation program dispatch observation is already active for this exact root.",
+      { code: "ATOMIC_MUTATION_PROGRAM_OBSERVER_ALREADY_ACTIVE" },
+    );
+  }
+  ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.set(target, observer);
+  try {
+    return await run();
+  } finally {
+    ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.delete(target);
+  }
+}
 
 const ATOMIC_MUTATION_PROGRAM_FAMILIES = [
   "createNodes",
@@ -466,7 +649,10 @@ export function registerAtomicMutationPrograms<T extends GraphBackend>(
   }
   ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
     target,
-    normalizeAtomicMutationProgramRegistration(registration),
+    instrumentAtomicMutationProgramExecutors(
+      target,
+      normalizeAtomicMutationProgramRegistration(registration),
+    ),
   );
   return target;
 }
@@ -504,40 +690,10 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
   }>,
 ): T {
-  ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(target, {
-    ...(executor.createNodes === undefined ?
-      {}
-    : {
-        createNodes: executor.createNodes,
-      }),
-    ...(executor.createEdges === undefined ?
-      {}
-    : {
-        createEdges: executor.createEdges,
-      }),
-    ...(executor.deleteNodes === undefined ?
-      {}
-    : {
-        deleteNodes: executor.deleteNodes,
-      }),
-    ...(executor.deleteEdges === undefined ?
-      {}
-    : {
-        deleteEdges: executor.deleteEdges,
-      }),
-    ...(executor.updateNodes === undefined ?
-      {}
-    : { updateNodes: executor.updateNodes }),
-    ...(executor.updateEdges === undefined ?
-      {}
-    : { updateEdges: executor.updateEdges }),
-    ...(executor.mutateNodes === undefined ?
-      {}
-    : { mutateNodes: executor.mutateNodes }),
-    ...(executor.mutateEdges === undefined ?
-      {}
-    : { mutateEdges: executor.mutateEdges }),
-  });
+  ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
+    target,
+    instrumentAtomicMutationProgramExecutors(target, executor),
+  );
   return target;
 }
 
