@@ -205,6 +205,22 @@ delete cannot race an earlier application-side probe. Cascade, disconnect,
 sidecar, captured, derived-backend, unregistered custom-backend, and
 caller-transaction shapes keep the interactive path.
 
+The same exact-root programs serve eligible singleton `update()` and
+`delete()` calls without changing their per-operation hook contract. A node
+update with no unique/disjoint/identity/projection sidecars, or a
+`cardinality: "many"` edge update with no durable match identity, performs one
+authoritative preimage read, validates and merges properties in TypeGraph, then
+submits one guarded atomic update. Every direct edge delete, and a restricted
+node delete owing none of those sidecars, performs its existing live-row gate
+and then submits one guarded atomic delete. Missing or tombstoned deletes remain
+hook-free read-only no-ops. Temporal mutations, node cascade/disconnect,
+history/revision capture, derived backends, caller transactions, and
+unregistered custom families retain the complete portable transaction path.
+The guarded update converges optimistically rather than holding a transaction
+lock across its read and write. A one-row update gets four attempts; sustained
+same-row contention can still end in `DatabaseOperationError`, while larger
+resolved batches retain their two-attempt budget to bound retry cost.
+
 These operations are registered through one exact-root mutation execution
 profile. Create and delete are **closed programs**: validation and arbitration
 can be expressed by the submitted SQL itself. `bulkUpsertById()` is deliberately

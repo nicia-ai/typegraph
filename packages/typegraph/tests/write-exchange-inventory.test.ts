@@ -109,6 +109,20 @@ describe("managed write exchange inventory", () => {
         { from, to, props: { role: "Upsert Edge A" } },
         { from, to, props: { role: "Upsert Edge B" } },
       ]);
+      const singletonNode = await store.nodes.Person.create({
+        name: "Singleton Node",
+      });
+      const singletonEdge = await store.edges.unconstrained.create(from, to, {
+        role: "Singleton Edge",
+      });
+      const singletonDeletableNode = await store.nodes.Person.create({
+        name: "Singleton Delete Node",
+      });
+      const singletonDeletableEdge = await store.edges.unconstrained.create(
+        from,
+        to,
+        { role: "Singleton Delete Edge" },
+      );
       const execute = vi.spyOn(client, "execute");
       const batch = vi.spyOn(client, "batch");
 
@@ -197,6 +211,22 @@ describe("managed write exchange inventory", () => {
             { from, to, props: { role: "D3" } },
             { from, to, props: { role: "D4" } },
           ]),
+        ),
+        await measure("singleton-node-update", () =>
+          store.nodes.Person.update(singletonNode.id, {
+            name: "Updated Singleton Node",
+          }),
+        ),
+        await measure("singleton-edge-update", () =>
+          store.edges.unconstrained.update(singletonEdge.id, {
+            role: "Updated Singleton Edge",
+          }),
+        ),
+        await measure("singleton-edge-delete", () =>
+          store.edges.unconstrained.delete(singletonDeletableEdge.id),
+        ),
+        await measure("singleton-node-delete", () =>
+          store.nodes.Person.delete(singletonDeletableNode.id),
         ),
         await measure("edge-delete-batch", () =>
           store.edges.unconstrained.bulkDelete(
@@ -312,6 +342,26 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "durable-edge-bulk-get-or-create",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "singleton-node-update",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "singleton-edge-update",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "singleton-edge-delete",
+          },
+          {
+            "batch": 1,
+            "execute": 1,
+            "name": "singleton-node-delete",
           },
           {
             "batch": 1,

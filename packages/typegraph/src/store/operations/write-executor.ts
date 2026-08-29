@@ -93,6 +93,22 @@ export function booleanWriteResultChanges(result: boolean): boolean {
 }
 
 /**
+ * Selects the optimistic update budget without duplicating singleton routing.
+ *
+ * A one-row update gets two more chances than a bulk partition. Eligible
+ * remote roots no longer hold a write transaction across the read and write,
+ * where latency makes a race more likely but another singleton retry remains
+ * cheap. Bulk partitions keep their smaller budget so contention cannot
+ * multiply that cost by an arbitrarily large row set.
+ */
+export function atomicResolvedUpdateAttemptBudget(
+  entryCount: number,
+  bulkAttemptBudget: number,
+): number {
+  return entryCount === 1 ? 4 : bulkAttemptBudget;
+}
+
+/**
  * Mints a second session for THIS write frame over a READ OVERLAY of its
  * target: the frame's own handle, answering some reads from a pending-aware
  * cache and delegating everything else, which is what
@@ -234,6 +250,23 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
     planFrame(ctx, plan, rowWork),
     planTransactionOptions(plan, options),
   );
+}
+
+/**
+ * Runs a closed exact-root atomic program inside the ordinary operation-hook
+ * boundary.
+ *
+ * Eligibility and the program's database semantics remain operation-owned.
+ * This helper owns only the common composition: hooks begin before dispatch,
+ * and `onOperationEnd` observes a program that has already committed.
+ */
+export function runAtomicProgramWithHooks<T>(
+  ctx: HookedWriteOperationContext,
+  opContext: OperationHookContext,
+  program: () => Promise<T>,
+  didWrite?: (result: T) => boolean,
+): Promise<T> {
+  return ctx.withOperationHooks(opContext, program, didWrite);
 }
 
 /**

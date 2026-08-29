@@ -361,6 +361,26 @@ path. On D1's 100-parameter budget the native ceiling is 17 total node mutations
 or 6 total edge mutations; larger batches return to the interactive path rather
 than splitting the all-or-nothing guard across autocommit statements.
 
+Eligible singleton `update()` and `delete()` calls reuse those same registered
+families. Plain node updates, unconstrained non-durable-identity edge updates,
+all direct edge deletes, and plain restricted node deletes remain two-exchange
+operations—one authoritative read/gate and one atomic mutation—because
+TypeGraph must validate merged update properties and must preserve the rule
+that a missing delete fires no operation hooks. This removes explicit
+transaction transport from the eligible shape; it does not turn sidecar,
+temporal, captured, derived-backend, or caller-transaction writes into
+autocommit operations.
+
+That singleton update path uses optimistic convergence: the mutation asserts
+the row preimage it read and retries a moved preimage up to four times. Under
+sustained same-row contention it can throw `DatabaseOperationError` where an
+interactive transaction would have waited to serialize the writers. This
+applies to eligible `update()` calls and the live-row leg of `upsertById()` on
+registered exact-root atomic transports. Caller transactions and other
+ineligible shapes continue to use the serialized transaction path. Applications
+using an atomic root should retry the operation when sustained contention can
+move the row throughout all four attempts.
+
 ### One `bulkUpsertById` batch cannot hand a constrained value between rows
 
 `bulkUpsertById` applies items in order for the purpose of deciding each row's

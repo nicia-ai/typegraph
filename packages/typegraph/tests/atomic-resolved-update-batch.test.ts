@@ -34,6 +34,7 @@ import {
   resolveAtomicNodeResolvedMutationSetExecutor,
   resolveAtomicNodeResolvedUpdateBatchExecutor,
 } from "../src/store/operations/atomic-mutation-program";
+import { atomicResolvedUpdateAttemptBudget } from "../src/store/operations/write-executor";
 import {
   ResolvedMutationSetMoved,
   runResolvedMutationSetConverging,
@@ -87,6 +88,11 @@ describe("atomic resolved update batches", () => {
     );
     return { backend, db, profile, store };
   }
+
+  it("gives singleton convergence two additional attempts", () => {
+    expect(atomicResolvedUpdateAttemptBudget(1, 2)).toBe(4);
+    expect(atomicResolvedUpdateAttemptBudget(2, 2)).toBe(2);
+  });
 
   it("updates distinct nodes as one guarded set", async () => {
     const { backend, profile, store } = await fixture();
