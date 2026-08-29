@@ -87,10 +87,14 @@ transactionless create/found path only when the backend has a durable arbiter.
 Operational Identity, single-edge claim/cardinality enforcement, and any
 undeclared dynamic `matchOn` convergence that may write still require an
 interactive transaction and fail closed on a backend that cannot provide one.
-An all-live `ifExists: "return"` endpoint batch is read-only and can return
-from its set-oriented root read without a transaction. Eligible
-direct edge batches on bundled roots are the narrow exception: their closed
-native program carries the claim sidecars inside one atomic exchange. A
+Outside the native durable-convergence envelope, an all-live
+`ifExists: "return"` endpoint batch is read-only and can return from its
+set-oriented root read without a transaction. Inside the native envelope, the
+authoritative upsert program runs before the Store knows every identity is
+live. It preserves the logical `"found"` result in one exchange, but may take
+incumbent-row locks and produce write amplification. Eligible direct edge
+batches on bundled roots are a separate exception: their closed native program
+carries the claim sidecars inside one atomic exchange. A
 declared edge `matchIdentity` persists
 a canonical endpoint/property key and has a unique database arbiter; eligible
 root `getOrCreateByEndpoints` calls can therefore use the authoritative

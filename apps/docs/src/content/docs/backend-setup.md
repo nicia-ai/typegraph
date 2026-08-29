@@ -17,7 +17,8 @@ SQLite is ideal for development, testing, single-server deployments, and embedde
 
 ### Quick Setup
 
-For development and testing, use the convenience function that handles everything:
+For development and testing, use the convenience function that owns the
+connection and provisions TypeGraph's base tables:
 
 ```typescript
 import { createLocalSqliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite/local";
@@ -1598,10 +1599,13 @@ and an undeclared `getOrCreateByEndpoints` that *finds* an existing edge in the 
 id-keyed `UPDATE` that re-derives nothing. With `coalesceUnchangedUpserts`
 enabled, confirming that a single `ifExists: "update"` endpoint replay is
 unchanged requires the endpoint match-key convergence fence and therefore
-refuses on these backends. The bulk `getOrCreateByEndpoints` form returns an
-all-live default-`"return"` batch from one set-oriented root read because that
-outcome writes nothing. If any member may write, the whole batch retains that
-refusal on transactionless roots unless it matches the narrow native
+refuses on these backends. Outside the native durable-convergence envelope,
+the bulk `getOrCreateByEndpoints` form returns an all-live default-`"return"`
+batch from one set-oriented root read because that outcome writes nothing.
+Inside the native envelope, the authoritative upsert runs first; it preserves
+the logical `"found"` outcome in one exchange but may take incumbent-row locks
+and produce write amplification. If any member may write, the whole batch
+retains that refusal on transactionless roots unless it matches the narrow native
 durable-convergence envelope: schema-declared
 `matchIdentity`, `cardinality: "many"`, declared match fields, default
 `ifExists: "return"`, and no temporal mutation. That eligible form is one

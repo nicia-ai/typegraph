@@ -13,6 +13,10 @@
  * repo-wide, and a literal, unbroken occurrence here would inflate its own
  * recorded count.
  */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { scanClaimSites } from "../scripts/drizzle-claim-inventory";
@@ -132,6 +136,32 @@ function matchesRecordedSite(
 }
 
 describe("drizzle claim-site inventory", () => {
+  it("does not inventory mutation-testing workspaces", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "typegraph-claim-inventory-"));
+    const mutationDirectory = path.join(root, ".stryker-tmp", "sandbox");
+    try {
+      mkdirSync(mutationDirectory, { recursive: true });
+      writeFileSync(
+        path.join(root, "visible.md"),
+        "A " + CLAIM_WORD + "-free public contract.\n",
+      );
+      writeFileSync(
+        path.join(mutationDirectory, "copied.md"),
+        "A " + CLAIM_WORD + "-free copied contract.\n",
+      );
+
+      expect(scanClaimSites(root)).toEqual([
+        {
+          file: "visible.md",
+          line: 1,
+          text: "A " + CLAIM_WORD + "-free public contract.",
+        },
+      ]);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it("has the recorded shape: 13 occurrences across 11 files", () => {
     expect(RECORDED_CLAIM_SITES.length).toBe(13);
     expect(new Set(RECORDED_CLAIM_SITES.map((site) => site.file)).size).toBe(

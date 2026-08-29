@@ -116,7 +116,7 @@ describe("atomic singleton write programs", () => {
         "start:update:edge",
         "end:update:edge:written",
         "start:delete:edge",
-        "end:delete:edge:unknown",
+        "end:delete:edge:written",
         "start:delete:node",
         "end:delete:node:written",
       ]);
