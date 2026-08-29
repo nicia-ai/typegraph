@@ -299,11 +299,11 @@ export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND = {
 /**
  * Owns which semantic variants a normalized profile can reach independently.
  *
- * A zero limit is an honest opt-out. Update-only and mixed resolved sets run
- * directly on transactionless roots; an interactive root first moves their
- * collection-level read/partition/write unit into a transaction, where exact
- * root registration deliberately does not follow. Conformance consumes this
- * owner instead of independently re-spelling either decision.
+ * A zero limit is an honest opt-out. Singleton updates reach the update-only
+ * families directly on every exact root. Mixed resolved sets still move their
+ * collection-level read/partition/write unit into an interactive transaction,
+ * where exact-root registration deliberately does not follow. Conformance
+ * consumes this owner instead of independently re-spelling either decision.
  */
 export function reachableAtomicMutationProgramVariants(
   profile: AtomicMutationProgramExecutor,
@@ -317,16 +317,10 @@ export function reachableAtomicMutationProgramVariants(
   if (profile.createEdges !== undefined) variants.push("createEdges");
   if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
   if (profile.deleteEdges !== undefined) variants.push("deleteEdges");
-  if (
-    !execution.interactiveTransactions &&
-    (profile.updateNodes?.maxEntries ?? 0) > 0
-  ) {
+  if ((profile.updateNodes?.maxEntries ?? 0) > 0) {
     variants.push("updateNodes");
   }
-  if (
-    !execution.interactiveTransactions &&
-    (profile.updateEdges?.maxEntries ?? 0) > 0
-  ) {
+  if ((profile.updateEdges?.maxEntries ?? 0) > 0) {
     variants.push("updateEdges");
   }
   if (

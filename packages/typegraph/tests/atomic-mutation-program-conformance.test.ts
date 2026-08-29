@@ -275,12 +275,14 @@ describe("atomic mutation program conformance runner", () => {
     ]);
   });
 
-  it("owns the interactive-root routing exclusion for resolved variants", async () => {
+  it("owns the interactive-root routing exclusion for mixed resolved variants", async () => {
     const reachable = [
       "createNodes",
       "createEdges",
       "deleteNodes",
       "deleteEdges",
+      "updateNodes",
+      "updateEdges",
       "mutateEdges.durableConvergence",
     ] as const;
     const reachableSet = new Set<AtomicMutationProgramVariant>(reachable);

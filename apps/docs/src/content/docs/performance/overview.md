@@ -176,26 +176,30 @@ batch that needs a write uses the portable fallback on a transaction-capable
 backend and refuses on a transactionless D1 root rather than splitting one
 atomic convergence contract across multiple submissions.
 
-Bundled Neon HTTP, Cloudflare D1, and libSQL roots also expose native write
-programs for eligible ingestion calls. Plain schema-managed
-`nodes.bulkInsert(items)` and `nodes.bulkCreate(items)` use one schema-fenced
-atomic exchange when the node has no claims, Operational Identity, history,
-revision, or projections. The batch may use generated IDs, caller-supplied IDs,
-or a mixture of both; `bulkCreate()` restores its rows to input order.
+Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
+Cloudflare D1, and libSQL also expose native write programs for eligible
+ingestion calls. Plain schema-managed `nodes.bulkInsert(items)` and
+`nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
+no claims, Operational Identity, history, revision, or projections. Neon HTTP,
+D1, and libSQL submit that program as one transport batch. Session-capable
+PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
+statement per bind-budget chunk. The batch may use generated IDs,
+caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
+input order.
 Claimed, projected, identity-enabled, history/revision-tracked, constrained,
 and other unsupported node shapes retain their existing transaction or
 fallback path.
 
-Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use one
-schema-fenced atomic exchange when the store has no history or revision
-capture. The program validates live endpoints, arbitrates declared durable
+Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
+schema-fenced atomic program when the store has no history or revision capture.
+The program validates live endpoints, arbitrates declared durable
 `matchIdentity`, and maintains `one`, `unique`, and `oneActive` cardinality
 claims at the write boundary. It rolls back the whole call when any
 bind-budget chunk or constraint sidecar fails and restores `bulkCreate()`
 results to input order.
 
 Eligible `bulkDelete()` calls use the same mutation-program boundary. Direct
-edge batches on bundled roots submit one schema-fenced atomic exchange; the
+edge batches on bundled roots submit one schema-fenced atomic program; the
 statement refuses an ID owned by another edge collection and rolls back every
 chunk. Plain node batches also submit one exchange when the node has no unique
 or disjointness claims, Operational Identity, search projections, history, or
@@ -206,7 +210,9 @@ sidecar, captured, derived-backend, unregistered custom-backend, and
 caller-transaction shapes keep the interactive path.
 
 The same exact-root programs serve eligible singleton `update()` and
-`delete()` calls without changing their per-operation hook contract. A node
+`delete()` calls without changing their per-operation hook contract. On an
+interactive PostgreSQL root, the guarded mutation owns a short transaction;
+on the single-submission transports it remains one batch. A node
 update with no unique/disjoint/identity/projection sidecars, or a
 `cardinality: "many"` edge update with no durable match identity, performs one
 authoritative preimage read, validates and merges properties in TypeGraph, then

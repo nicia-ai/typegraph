@@ -821,6 +821,9 @@ export function createPostgresBackend(
     : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
     maxBindParameters:
       declaredCapabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+    interactiveAtomicBatch:
+      declaredCapabilities.execution.interactiveTransactions &&
+      (resourceAudit.kind === "independent" || isPgliteDatabase(db)),
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const atomicSqlProgramExecutor =

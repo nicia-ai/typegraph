@@ -352,6 +352,30 @@ describe("atomic mutation program execution profile", () => {
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
   });
 
+  it("refuses infinite family limits before publishing the profile", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    const updateNodes = (() =>
+      Promise.resolve([])) as unknown as AtomicNodeResolvedUpdateBatchExecutor;
+    Object.defineProperty(updateNodes, "maxEntries", {
+      configurable: true,
+      value: Number.POSITIVE_INFINITY,
+    });
+
+    const error = captureThrown(() =>
+      registerAtomicMutationPrograms(backend, { updateNodes }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect(error).toMatchObject({
+      details: {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family: "updateNodes",
+        limit: "maxEntries",
+      },
+    });
+    expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
+  });
+
   it("refuses malformed edge mutation limits before publishing the profile", () => {
     const backend = createCustomAtomicRoot();
     registerAtomicSqlProgram(backend, emptyAtomicBatch);

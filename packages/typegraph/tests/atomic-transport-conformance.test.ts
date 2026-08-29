@@ -20,6 +20,8 @@ import {
   runAtomicTransportConformance,
 } from "../src/backend/conformance/atomic-transport";
 import { deriveBackend } from "../src/backend/derive-backend";
+import { createPostgresBackend } from "../src/backend/drizzle/postgres";
+import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import type { GraphBackend } from "../src/backend/types";
 import { TypeGraphError } from "../src/errors";
@@ -366,6 +368,118 @@ describe("atomic transport conformance: libSQL file client", () => {
     } finally {
       client.close();
       rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+});
+
+async function readPgliteSnapshot(
+  query: <T extends Record<string, unknown>>(
+    sqlText: string,
+  ) => Promise<Readonly<{ rows: readonly T[] }>>,
+): Promise<LibsqlSnapshot> {
+  const [primary, sidecar] = await Promise.all([
+    query<{ id: string }>(
+      "SELECT id FROM atomic_transport_primary ORDER BY id",
+    ),
+    query<{ id: string }>(
+      "SELECT id FROM atomic_transport_sidecar ORDER BY id",
+    ),
+  ]);
+  return {
+    primary: primary.rows.map((row) => row.id),
+    sidecar: sidecar.rows.map((row) => row.id),
+  };
+}
+
+describe("atomic transport conformance: interactive PGlite", () => {
+  it("proves the transaction-backed production adapter contract end to end", async () => {
+    const local = await createLocalPgliteBackend({ vector: false });
+    const backend = createPostgresBackend(local.db, { vector: false });
+    try {
+      await local.client.exec(
+        "CREATE TABLE atomic_transport_primary (id TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      );
+      await local.client.exec(
+        "CREATE TABLE atomic_transport_sidecar (id TEXT PRIMARY KEY, primary_id TEXT NOT NULL)",
+      );
+      const executeAtomicBatch =
+        resolveRegisteredAtomicSqlBatchExecutor(backend);
+      if (executeAtomicBatch === undefined) {
+        throw new Error("PGlite did not expose atomic batch execution");
+      }
+      const observe = () =>
+        readPgliteSnapshot(
+          <T extends Record<string, unknown>>(sqlText: string) =>
+            local.client.query<T>(sqlText),
+        );
+      const clear = async () => {
+        await local.client.exec("DELETE FROM atomic_transport_sidecar");
+        await local.client.exec("DELETE FROM atomic_transport_primary");
+      };
+      const report = await runAtomicTransportConformance<
+        LibsqlSnapshot,
+        LibsqlSnapshot
+      >({
+        backend,
+        derivedBackends: [deriveBackend(backend, {})],
+        executeAtomicBatch,
+        equal,
+        orderedResults: {
+          statements: [
+            { sql: "SELECT $1::text AS slot", params: ["first"] },
+            { sql: "SELECT $1::text AS slot", params: ["second"] },
+          ],
+          expected: [[{ slot: "first" }], [{ slot: "second" }]],
+        },
+        parameterPreservation: {
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES ($1, $2)",
+              params: ["parameter-id", "parameter-value"],
+            },
+          ],
+          expected: { primary: ["parameter-id"], sidecar: [] },
+          observe,
+        },
+        rollback: {
+          prepare: clear,
+          statements: [
+            {
+              sql: "INSERT INTO atomic_transport_primary (id, value) VALUES ($1, $2)",
+              params: ["primary-1", "value"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES ($1, $2)",
+              params: ["sidecar-1", "primary-1"],
+            },
+            {
+              sql: "INSERT INTO atomic_transport_sidecar (id, primary_id) VALUES ($1, $2)",
+              params: ["sidecar-1", "primary-1"],
+            },
+          ],
+          observe,
+          expectedBefore: { primary: [], sidecar: [] },
+        },
+        emptyBatch: {
+          prepare: clear,
+          observe,
+          expected: { primary: [], sidecar: [] },
+        },
+      });
+
+      expect(report.passed).toEqual([
+        "ordered result slots",
+        "parameter preservation",
+        "later-statement rollback",
+        "empty batch",
+        "provenance: exact root registration",
+        "provenance: derived backend lineage",
+        "provenance: derived backend isolation",
+        "provenance: transaction backend isolation",
+      ]);
+      expect(report.skipped).toEqual([]);
+    } finally {
+      await local.backend.close();
     }
   });
 });

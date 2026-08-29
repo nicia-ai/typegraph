@@ -719,14 +719,17 @@ identities are still arbitrated by the durable key inside that transaction.
 Undeclared dynamic matches retain the fenced portable path and fail closed when
 a backend cannot provide it.
 
-For ingestion, bundled Neon HTTP, Cloudflare D1, and libSQL roots have a
-narrower native path for plain schema-managed `nodes.bulkInsert()` and
-`nodes.bulkCreate()`: generated, caller-supplied, or mixed IDs can run as one
-schema-fenced atomic exchange when there are no claims, Operational Identity,
-history, revision, or projections. `bulkCreate()` restores rows to input order.
-This is an internal implementation detail, not a general Store batch surface.
-Constrained, projected, identity-enabled, history/revision-tracked, and other
-unsupported shapes keep the existing transaction or fallback path.
+For ingestion, bundled PostgreSQL roots using a recognized session-capable
+driver, Neon HTTP, Cloudflare D1, and libSQL roots have a narrower native path
+for plain schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()`:
+generated, caller-supplied, or mixed IDs can run as one schema-fenced atomic
+program when there are no claims, Operational Identity, history, revision, or
+projections. Session-capable PostgreSQL pins the program to one transaction;
+Neon HTTP, D1, and libSQL submit one transport batch. `bulkCreate()` restores
+rows to input order. This is an internal implementation detail, not a general
+Store batch surface. Constrained, projected, identity-enabled,
+history/revision-tracked, and other unsupported shapes keep the existing
+transaction or fallback path.
 
 The same bundled roots execute eligible node and edge `bulkDelete()` calls as
 closed schema-fenced mutation programs. Edge collection identity and node

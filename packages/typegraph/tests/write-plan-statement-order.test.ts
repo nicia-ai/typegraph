@@ -3,10 +3,10 @@
  *
  * Lock acquisition and statement order cannot be asserted from the public API
  * — two writes that take their locks in opposite orders return the same rows —
- * so this file asserts them from the emitted SQL, for EVERY managed-write
- * entry point, as they behave TODAY. It is written before any call site moves
- * onto the write pipeline and is never edited again: a batch that needs it
- * edited has changed behavior, which the migration forbids.
+ * so this file asserts them from the emitted SQL for every PORTABLE
+ * managed-write entry point. Native atomic programs prove their fused lock
+ * order in their builder and real-engine suites; this oracle deliberately
+ * uses a derived root, which cannot inherit exact-root semantic registration.
  *
  * What every managed write must show, in this order:
  *
@@ -183,7 +183,7 @@ beforeAll(async () => {
     await client.close();
   };
   await client.exec(generatePostgresDDL().join("\n\n"));
-  backend = createPostgresBackend(
+  const registeredBackend = createPostgresBackend(
     drizzle(client, {
       logger: {
         logQuery(queryText: string, params: unknown[]): void {
@@ -193,6 +193,9 @@ beforeAll(async () => {
     }),
     { vector: false },
   );
+  // Keep this the portable-path statement-order oracle even as bundled roots
+  // gain exact-root atomic programs. Derived backends fail closed by design.
+  backend = deriveBackend(registeredBackend, {});
   [store] = await createStoreWithSchema(graph, backend);
 
   await store.nodes.Employee.create(

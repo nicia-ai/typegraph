@@ -1,4 +1,4 @@
-import { type SQL as DrizzleSql } from "drizzle-orm";
+import { entityKind, type SQL as DrizzleSql } from "drizzle-orm";
 import {
   type PgDatabase,
   type PgQueryResultHKT,
@@ -110,6 +110,24 @@ type PgClientCarrier = Readonly<{
     session?: PgSessionCarrier;
   }>;
 }>;
+
+const INTERACTIVE_POSTGRES_DATABASE_KINDS = new Set([
+  "NeonServerlessDatabase",
+  "NodePgDatabase",
+  "PgliteDatabase",
+  "PostgresJsDatabase",
+]);
+
+function isRecognizedInteractivePostgresDatabase(db: AnyPgDatabase): boolean {
+  const constructor = (
+    db as unknown as Readonly<{
+      constructor?: Readonly<Record<PropertyKey, unknown>>;
+    }>
+  ).constructor;
+  return INTERACTIVE_POSTGRES_DATABASE_KINDS.has(
+    String(constructor?.[entityKind]),
+  );
+}
 
 export type AnyPgDatabase = PgDatabase<
   PgQueryResultHKT,
@@ -605,6 +623,11 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    */
   maxBindParameters?: number;
   /**
+   * @internal Affirmative factory authorization for a root interactive atomic
+   * program. The adapter must not infer transaction isolation from methods.
+   */
+  interactiveAtomicBatch?: boolean;
+  /**
    * @internal Resolve Drizzle's pinned transaction client. Trusted import uses
    * this on its private adapter; ordinary transaction backends deliberately do
    * not expose a new raw-execution surface that would change routing behavior.
@@ -627,6 +650,13 @@ export function createPostgresExecutionAdapter(
     cacheMax,
     options.useTransactionClient ?? false,
   );
+  const canOpenInteractiveAtomicBatch =
+    options.interactiveAtomicBatch === true &&
+    neonHttpClient === undefined &&
+    pgClient !== undefined &&
+    options.useTransactionClient !== true &&
+    isRecognizedInteractivePostgresDatabase(db) &&
+    hasFunctionProperty(db, "transaction");
 
   function compile(query: ExecutableSql): CompiledSqlQuery {
     return compileQueryWithDialect(db, query, "PostgreSQL");
@@ -641,7 +671,7 @@ export function createPostgresExecutionAdapter(
     );
   }
 
-  const executeAtomicBatch =
+  const executeNeonAtomicBatch =
     neonHttpClient === undefined ? undefined : (
       async function executeNeonAtomicBatch<TRow>(
         statements: readonly CompiledSqlQuery[],
@@ -671,6 +701,42 @@ export function createPostgresExecutionAdapter(
         });
       }
     );
+
+  const executeInteractiveAtomicBatch =
+    canOpenInteractiveAtomicBatch ?
+      async function executeInteractiveAtomicBatch<TRow>(
+        statements: readonly CompiledSqlQuery[],
+      ): Promise<readonly (readonly TRow[])[]> {
+        for (const statement of statements) {
+          assertCompiledWithinBindParameterLimit(statement);
+        }
+        if (statements.length === 0) return [];
+        return db.transaction(async (tx) => {
+          const transactionAdapter = createPostgresExecutionAdapter(tx, {
+            ...options,
+            useTransactionClient: true,
+          });
+          const executeCompiled = transactionAdapter.executeCompiled;
+          if (executeCompiled === undefined) {
+            throw new ConfigurationError(
+              "PostgreSQL atomic batch execution could not bind to its transaction client.",
+              {
+                capability: "execution.atomicBatch",
+                driver: transactionSession(tx as PgClientCarrier)?.constructor
+                  ?.name,
+              },
+            );
+          }
+          const results: (readonly TRow[])[] = [];
+          for (const statement of statements) {
+            results.push(await executeCompiled<TRow>(statement));
+          }
+          return results;
+        });
+      }
+    : undefined;
+  const executeAtomicBatch =
+    executeNeonAtomicBatch ?? executeInteractiveAtomicBatch;
 
   if (pgClient === undefined) {
     return {

@@ -638,20 +638,24 @@ function buildCases(
         errorMatches: (error) => error instanceof ValidationError,
       },
     },
-    ...buildResolvedCases(client, {
-      mutateEdgesRefusal,
-      mutateEdgesStale,
-      mutateEdgesSuccess,
-      mutateNodesRefusal,
-      mutateNodesStale,
-      mutateNodesSuccess,
-      updateEdgesRefusal,
-      updateEdgesStale,
-      updateEdgesSuccess,
-      updateNodesRefusal,
-      updateNodesStale,
-      updateNodesSuccess,
-    }),
+    ...buildResolvedCases(
+      client,
+      {
+        mutateEdgesRefusal,
+        mutateEdgesStale,
+        mutateEdgesSuccess,
+        mutateNodesRefusal,
+        mutateNodesStale,
+        mutateNodesSuccess,
+        updateEdgesRefusal,
+        updateEdgesStale,
+        updateEdgesSuccess,
+        updateNodesRefusal,
+        updateNodesStale,
+        updateNodesSuccess,
+      },
+      backend.capabilities.execution.interactiveTransactions,
+    ),
     buildConvergenceCase(convergeSuccess, convergeStale, convergeRefusal),
   ];
   return cases.map((conformanceCase) => ({ ...conformanceCase, backend }));
@@ -675,6 +679,7 @@ function buildResolvedCases(
     updateNodesStale: Scenario;
     updateNodesSuccess: Scenario;
   }>,
+  singletonUpdateRoute: boolean,
 ): readonly UnboundConformanceCase[] {
   return [
     buildNodeResolvedCase(
@@ -684,6 +689,7 @@ function buildResolvedCases(
       scenarios.updateNodesStale,
       scenarios.updateNodesRefusal,
       false,
+      singletonUpdateRoute,
     ),
     buildEdgeResolvedCase(
       "updateEdges",
@@ -692,6 +698,7 @@ function buildResolvedCases(
       scenarios.updateEdgesStale,
       scenarios.updateEdgesRefusal,
       false,
+      singletonUpdateRoute,
     ),
     buildNodeResolvedCase(
       "mutateNodes",
@@ -700,6 +707,7 @@ function buildResolvedCases(
       scenarios.mutateNodesStale,
       scenarios.mutateNodesRefusal,
       true,
+      singletonUpdateRoute,
     ),
     buildEdgeResolvedCase(
       "mutateEdges.resolvedSet",
@@ -708,6 +716,7 @@ function buildResolvedCases(
       scenarios.mutateEdgesStale,
       scenarios.mutateEdgesRefusal,
       true,
+      singletonUpdateRoute,
     ),
   ];
 }
@@ -719,6 +728,7 @@ function buildNodeResolvedCase(
   stale: Scenario,
   refusal: Scenario,
   mixed: boolean,
+  singletonUpdateRoute: boolean,
 ): UnboundConformanceCase {
   return {
     variant,
@@ -757,6 +767,22 @@ function buildNodeResolvedCase(
         };
       },
       execute: async () => {
+        if (!mixed && singletonUpdateRoute) {
+          const collection = success.requireStore().nodes.Person;
+          const second = await collection.update(`${variant}-b` as never, {
+            name: "Updated B",
+            score: 20,
+          });
+          const first = await collection.update(`${variant}-a` as never, {
+            name: "Updated A",
+            score: 10,
+          });
+          return [second, first].map((node) => [
+            node.id,
+            node.name,
+            node.score,
+          ]);
+        }
         const inputs =
           mixed ?
             [
@@ -804,25 +830,30 @@ function buildNodeResolvedCase(
         return { expectedState: await stale.observe() };
       },
       execute: () =>
-        stale.requireStore().nodes.Person.bulkUpsertById(
-          mixed ?
-            [
-              {
-                id: `${variant}-stale-new`,
-                props: { name: "New", score: 2 },
-              },
-              {
-                id: `${variant}-stale-existing`,
-                props: { name: "Updated", score: 3 },
-              },
-            ]
-          : [
-              {
-                id: `${variant}-stale-existing`,
-                props: { name: "Updated", score: 3 },
-              },
-            ],
-        ),
+        mixed ?
+          stale.requireStore().nodes.Person.bulkUpsertById([
+            {
+              id: `${variant}-stale-new`,
+              props: { name: "New", score: 2 },
+            },
+            {
+              id: `${variant}-stale-existing`,
+              props: { name: "Updated", score: 3 },
+            },
+          ])
+        : singletonUpdateRoute ?
+          stale
+            .requireStore()
+            .nodes.Person.update(`${variant}-stale-existing` as never, {
+              name: "Updated",
+              score: 3,
+            })
+        : stale.requireStore().nodes.Person.bulkUpsertById([
+            {
+              id: `${variant}-stale-existing`,
+              props: { name: "Updated", score: 3 },
+            },
+          ]),
       observeState: stale.observe,
       errorMatches: (error) => error instanceof StaleVersionError,
     },
@@ -848,25 +879,30 @@ function buildNodeResolvedCase(
         return { expectedState: await refusal.observe() };
       },
       execute: () =>
-        refusal.requireStore().nodes.Person.bulkUpsertById(
-          mixed ?
-            [
-              {
-                id: `${variant}-refusal-new`,
-                props: { name: "New", score: 2 },
-              },
-              {
-                id: `${variant}-refusal-existing`,
-                props: { name: "Updated", score: 3 },
-              },
-            ]
-          : [
-              {
-                id: `${variant}-refusal-existing`,
-                props: { name: "Updated", score: 3 },
-              },
-            ],
-        ),
+        mixed ?
+          refusal.requireStore().nodes.Person.bulkUpsertById([
+            {
+              id: `${variant}-refusal-new`,
+              props: { name: "New", score: 2 },
+            },
+            {
+              id: `${variant}-refusal-existing`,
+              props: { name: "Updated", score: 3 },
+            },
+          ])
+        : singletonUpdateRoute ?
+          refusal
+            .requireStore()
+            .nodes.Person.update(`${variant}-refusal-existing` as never, {
+              name: "Updated",
+              score: 3,
+            })
+        : refusal.requireStore().nodes.Person.bulkUpsertById([
+            {
+              id: `${variant}-refusal-existing`,
+              props: { name: "Updated", score: 3 },
+            },
+          ]),
       observeState: refusal.observe,
       errorMatches: (error) => error instanceof DatabaseOperationError,
     },
@@ -880,6 +916,7 @@ function buildEdgeResolvedCase(
   stale: Scenario,
   refusal: Scenario,
   mixed: boolean,
+  singletonUpdateRoute: boolean,
 ): UnboundConformanceCase {
   return {
     variant,
@@ -987,6 +1024,17 @@ function buildEdgeResolvedCase(
       },
       execute: async () => {
         const store = success.requireStore();
+        if (!mixed && singletonUpdateRoute) {
+          const second = await store.edges.relates.update(
+            `${variant}-success-second` as never,
+            { label: "Updated Second" },
+          );
+          const first = await store.edges.relates.update(
+            `${variant}-success-existing` as never,
+            { label: "Updated Existing" },
+          );
+          return [second, first].map((edge) => [edge.id, edge.label]);
+        }
         const from = requireDefined(
           await store.nodes.Person.getById(`${variant}-success-from` as never),
         );
@@ -1038,6 +1086,12 @@ function buildEdgeResolvedCase(
       },
       execute: async () => {
         const store = stale.requireStore();
+        if (!mixed && singletonUpdateRoute) {
+          return store.edges.relates.update(
+            `${variant}-stale-existing` as never,
+            { label: "Updated" },
+          );
+        }
         const from = requireDefined(
           await store.nodes.Person.getById(`${variant}-stale-from` as never),
         );
@@ -1087,6 +1141,12 @@ function buildEdgeResolvedCase(
       },
       execute: async () => {
         const store = refusal.requireStore();
+        if (!mixed && singletonUpdateRoute) {
+          return store.edges.relates.update(
+            `${variant}-refusal-existing` as never,
+            { label: "Updated" },
+          );
+        }
         const from = requireDefined(
           await store.nodes.Person.getById(`${variant}-refusal-from` as never),
         );
@@ -1257,6 +1317,8 @@ describe("bundled atomic mutation program semantic conformance: libSQL", () => {
         "createEdges",
         "deleteNodes",
         "deleteEdges",
+        "updateNodes",
+        "updateEdges",
         "mutateEdges.durableConvergence",
       ]);
       const report = await runAtomicMutationProgramConformance({
