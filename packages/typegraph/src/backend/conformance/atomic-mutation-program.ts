@@ -46,6 +46,8 @@ export type AtomicMutationProgramRefusalCase = Readonly<{
   dispatch: AtomicMutationProgramRefusalDispatch;
 }>;
 export type AtomicMutationProgramConformanceCase = Readonly<{
+  /** Exact root used by every callback in this case. */
+  backend: GraphBackend;
   variant: AtomicMutationProgramVariant;
   orderedSuccess: AtomicMutationProgramSuccessCase;
   staleFenceNoWrite: AtomicMutationProgramRefusalCase &
@@ -53,6 +55,7 @@ export type AtomicMutationProgramConformanceCase = Readonly<{
   semanticRefusalRollback: AtomicMutationProgramRefusalCase;
 }>;
 export type AtomicMutationProgramConformanceFixture = Readonly<{
+  /** Exact root reserved exclusively for this conformance run. */
   backend: GraphBackend;
   equal: (actual: unknown, expected: unknown) => boolean;
   cases: readonly AtomicMutationProgramConformanceCase[];
@@ -121,13 +124,17 @@ function assertDispatchVerdict(
 
 async function runSuccessCase(
   fixture: AtomicMutationProgramConformanceFixture,
+  profile: AtomicMutationProgramExecutor,
   counts: DispatchCounts,
   variant: AtomicMutationProgramVariant,
   conformanceCase: AtomicMutationProgramSuccessCase,
 ): Promise<void> {
+  assertProfileBinding(fixture, profile, variant);
   const expected = await conformanceCase.prepare();
+  assertProfileBinding(fixture, profile, variant);
   const before = countDispatches(counts, variant);
   const result = await conformanceCase.execute();
+  assertProfileBinding(fixture, profile, variant);
   const after = countDispatches(counts, variant);
   assertDispatchVerdict(before, after, "required", variant, "ordered success");
   assertEqual(
@@ -148,12 +155,16 @@ async function runSuccessCase(
 
 async function runRefusalCase(
   fixture: AtomicMutationProgramConformanceFixture,
+  profile: AtomicMutationProgramExecutor,
   counts: DispatchCounts,
   variant: AtomicMutationProgramVariant,
   check: string,
   conformanceCase: AtomicMutationProgramRefusalCase,
+  expectedDispatch: AtomicMutationProgramRefusalDispatch,
 ): Promise<void> {
+  assertProfileBinding(fixture, profile, variant);
   const expected = await conformanceCase.prepare();
+  assertProfileBinding(fixture, profile, variant);
   const before = countDispatches(counts, variant);
   let refusal: unknown;
   try {
@@ -161,14 +172,9 @@ async function runRefusalCase(
   } catch (error) {
     refusal = error;
   }
+  assertProfileBinding(fixture, profile, variant);
   const after = countDispatches(counts, variant);
-  assertDispatchVerdict(
-    before,
-    after,
-    conformanceCase.dispatch,
-    variant,
-    check,
-  );
+  assertDispatchVerdict(before, after, expectedDispatch, variant, check);
   if (refusal === undefined || !conformanceCase.errorMatches(refusal)) {
     throw new AtomicMutationProgramConformanceError(
       `Atomic mutation program conformance returned an unexpected refusal for ${variant} ${check}.`,
@@ -192,6 +198,29 @@ function fixtureProfile(
   throw new AtomicMutationProgramConformanceError(
     "Atomic mutation program conformance requires an exact registered backend root.",
     { check: "exact root registration" },
+  );
+}
+
+function assertProfileBinding(
+  fixture: AtomicMutationProgramConformanceFixture,
+  profile: AtomicMutationProgramExecutor,
+  variant: AtomicMutationProgramVariant,
+): void {
+  if (resolveAtomicMutationPrograms(fixture.backend) === profile) return;
+  throw new AtomicMutationProgramConformanceError(
+    `Atomic mutation program conformance lost its registered profile while proving ${variant}.`,
+    { check: "profile binding", variant },
+  );
+}
+
+function assertCaseBinding(
+  fixture: AtomicMutationProgramConformanceFixture,
+  conformanceCase: AtomicMutationProgramConformanceCase,
+): void {
+  if (conformanceCase.backend === fixture.backend) return;
+  throw new AtomicMutationProgramConformanceError(
+    `Atomic mutation program conformance case ${conformanceCase.variant} is bound to a different backend root.`,
+    { check: "case binding", variant: conformanceCase.variant },
   );
 }
 
@@ -243,9 +272,15 @@ export async function runAtomicMutationProgramConformance(
 ): Promise<AtomicMutationProgramConformanceReport> {
   // Finish every binding and inventory verdict before preparation can write.
   const profile = fixtureProfile(fixture);
-  const required = reachableAtomicMutationProgramVariants(profile);
+  const required = reachableAtomicMutationProgramVariants(
+    profile,
+    fixture.backend.capabilities.execution,
+  );
   const indexedCases = indexCases(fixture.cases);
   assertCompleteCaseInventory(required, indexedCases);
+  for (const conformanceCase of indexedCases.values()) {
+    assertCaseBinding(fixture, conformanceCase);
+  }
   const provenance = await assertExactRootRegistrationProvenance(
     fixture.backend,
     fixture,
@@ -271,23 +306,28 @@ export async function runAtomicMutationProgramConformance(
         if (conformanceCase === undefined) continue;
         await runSuccessCase(
           fixture,
+          profile,
           dispatchCounts,
           variant,
           conformanceCase.orderedSuccess,
         );
         await runRefusalCase(
           fixture,
+          profile,
           dispatchCounts,
           variant,
           "stale fence",
           conformanceCase.staleFenceNoWrite,
+          "required",
         );
         await runRefusalCase(
           fixture,
+          profile,
           dispatchCounts,
           variant,
           "semantic refusal",
           conformanceCase.semanticRefusalRollback,
+          conformanceCase.semanticRefusalRollback.dispatch,
         );
         reports.push({
           variant,

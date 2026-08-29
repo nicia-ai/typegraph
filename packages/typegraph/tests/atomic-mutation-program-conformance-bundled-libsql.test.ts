@@ -4,7 +4,11 @@ import { createClient } from "@libsql/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { ATOMIC_MUTATION_PROGRAM_VARIANTS } from "../src/backend/capabilities/atomic-mutation-program";
+import {
+  ATOMIC_MUTATION_PROGRAM_VARIANTS,
+  reachableAtomicMutationProgramVariants,
+  resolveAtomicMutationPrograms,
+} from "../src/backend/capabilities/atomic-mutation-program";
 import {
   type AtomicMutationProgramConformanceCase,
   runAtomicMutationProgramConformance,
@@ -87,6 +91,10 @@ type ConformanceGraph = ReturnType<typeof defineConformanceGraph>;
 type ConformanceStore = Awaited<
   ReturnType<typeof createStoreWithSchema<ConformanceGraph>>
 >[0];
+type UnboundConformanceCase = Omit<
+  AtomicMutationProgramConformanceCase,
+  "backend"
+>;
 
 type NodeSnapshot = readonly [id: string, name: string, score: number];
 type EdgeSnapshot = readonly [
@@ -136,8 +144,6 @@ async function readGraphSnapshot(
           json_extract(props, '$.score') AS score
         FROM typegraph_nodes
         WHERE graph_id = ? AND deleted_at IS NULL
-          AND id NOT LIKE '%-filler%'
-          AND id NOT LIKE '%-third%'
         ORDER BY id
       `,
       args: [graphId],
@@ -148,8 +154,6 @@ async function readGraphSnapshot(
           json_extract(props, '$.label') AS label
         FROM typegraph_edges
         WHERE graph_id = ? AND deleted_at IS NULL
-          AND id NOT LIKE '%-filler%'
-          AND id NOT LIKE '%-third%'
         ORDER BY id
       `,
       args: [graphId],
@@ -281,7 +285,7 @@ function buildCases(
   const convergeStale = scenario(client, backend, "converge-stale");
   const convergeRefusal = scenario(client, backend, "converge-refusal");
 
-  return [
+  const cases: readonly UnboundConformanceCase[] = [
     {
       variant: "createNodes",
       orderedSuccess: {
@@ -650,6 +654,7 @@ function buildCases(
     }),
     buildConvergenceCase(convergeSuccess, convergeStale, convergeRefusal),
   ];
+  return cases.map((conformanceCase) => ({ ...conformanceCase, backend }));
 }
 
 type Scenario = ReturnType<typeof scenario>;
@@ -670,7 +675,7 @@ function buildResolvedCases(
     updateNodesStale: Scenario;
     updateNodesSuccess: Scenario;
   }>,
-): readonly AtomicMutationProgramConformanceCase[] {
+): readonly UnboundConformanceCase[] {
   return [
     buildNodeResolvedCase(
       "updateNodes",
@@ -714,7 +719,7 @@ function buildNodeResolvedCase(
   stale: Scenario,
   refusal: Scenario,
   mixed: boolean,
-): AtomicMutationProgramConformanceCase {
+): UnboundConformanceCase {
   return {
     variant,
     orderedSuccess: {
@@ -875,7 +880,7 @@ function buildEdgeResolvedCase(
   stale: Scenario,
   refusal: Scenario,
   mixed: boolean,
-): AtomicMutationProgramConformanceCase {
+): UnboundConformanceCase {
   return {
     variant,
     orderedSuccess: {
@@ -933,6 +938,13 @@ function buildEdgeResolvedCase(
                     "Updated",
                   ],
                   [
+                    `${variant}-success-filler`,
+                    "relates",
+                    `${variant}-success-from`,
+                    `${variant}-success-to`,
+                    "Filler",
+                  ],
+                  [
                     `${variant}-success-new`,
                     "relates",
                     `${variant}-success-from`,
@@ -949,11 +961,25 @@ function buildEdgeResolvedCase(
                     "Updated Existing",
                   ],
                   [
+                    `${variant}-success-filler`,
+                    "relates",
+                    `${variant}-success-from`,
+                    `${variant}-success-to`,
+                    "Filler",
+                  ],
+                  [
                     `${variant}-success-second`,
                     "relates",
                     `${variant}-success-from`,
                     `${variant}-success-to`,
                     "Updated Second",
+                  ],
+                  [
+                    `${variant}-success-third`,
+                    "relates",
+                    `${variant}-success-from`,
+                    `${variant}-success-to`,
+                    "Third",
                   ],
                 ],
           },
@@ -1103,7 +1129,7 @@ function buildConvergenceCase(
   success: Scenario,
   stale: Scenario,
   refusal: Scenario,
-): AtomicMutationProgramConformanceCase {
+): UnboundConformanceCase {
   const variant = "mutateEdges.durableConvergence" as const;
   async function durableState(target: Scenario) {
     const state = await target.observe();
@@ -1218,6 +1244,48 @@ describe("bundled atomic mutation program semantic conformance: libSQL", () => {
   it("certifies every reachable family variant against one exact bundled root", async () => {
     const client = createClient({ url: "file::memory:" });
     clients.push(client);
+    const { backend } = await createLibsqlBackend(client);
+    PRIVILEGED_SCHEMA_BACKENDS.set(backend, backend);
+
+    try {
+      const required = reachableAtomicMutationProgramVariants(
+        requireDefined(resolveAtomicMutationPrograms(backend)),
+        backend.capabilities.execution,
+      );
+      expect(required).toEqual([
+        "createNodes",
+        "createEdges",
+        "deleteNodes",
+        "deleteEdges",
+        "mutateEdges.durableConvergence",
+      ]);
+      const report = await runAtomicMutationProgramConformance({
+        backend,
+        cases: buildCases(client, backend).filter((conformanceCase) =>
+          required.includes(conformanceCase.variant),
+        ),
+        derivedBackends: [deriveBackend(backend, {})],
+        equal,
+      });
+
+      expect(report.variants.map((entry) => entry.variant)).toEqual(required);
+      expect(report.provenance).toEqual({
+        passed: [
+          "exact root registration",
+          "derived backend lineage",
+          "derived backend isolation",
+          "transaction backend isolation",
+        ],
+        skipped: [],
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  it("certifies update-only and mixed variants on a transactionless bundled root", async () => {
+    const client = createClient({ url: "file::memory:" });
+    clients.push(client);
     const { backend: schemaBackend, db } = await createLibsqlBackend(client);
     const backend = createSqliteBackend(db, {
       executionProfile: { isSync: false, transactionMode: "none" },
@@ -1235,6 +1303,14 @@ describe("bundled atomic mutation program semantic conformance: libSQL", () => {
       expect(report.variants.map((entry) => entry.variant)).toEqual(
         ATOMIC_MUTATION_PROGRAM_VARIANTS,
       );
+      expect(report.provenance).toEqual({
+        passed: [
+          "exact root registration",
+          "derived backend lineage",
+          "derived backend isolation",
+        ],
+        skipped: ["transaction backend isolation"],
+      });
     } finally {
       await backend.close();
     }

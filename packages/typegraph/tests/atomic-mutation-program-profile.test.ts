@@ -13,6 +13,7 @@ import {
   type AtomicMutationProgramRegistration,
   type AtomicNodeBatchExecutor,
   type AtomicNodeBatchInput,
+  type AtomicNodeResolvedUpdateBatchExecutor,
   hasAtomicMutationProgramRegistration,
   registerAtomicMutationPrograms,
   resolveAtomicMutationPrograms,
@@ -225,6 +226,36 @@ describe("atomic mutation program execution profile", () => {
     ).toMatchObject({
       details: { code: "ATOMIC_MUTATION_PROGRAM_ALREADY_REGISTERED" },
     });
+  });
+
+  it("instruments executors without snapshotting or dropping their properties", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    let maxEntries = 1;
+    const marker = Symbol("custom executor property");
+    const updateNodes = (() =>
+      Promise.resolve([])) as unknown as AtomicNodeResolvedUpdateBatchExecutor;
+    Object.defineProperties(updateNodes, {
+      maxEntries: {
+        configurable: true,
+        enumerable: true,
+        get: () => maxEntries,
+      },
+      [marker]: { value: "preserved" },
+    });
+
+    registerAtomicMutationPrograms(backend, { updateNodes });
+    const instrumented = resolveAtomicMutationPrograms(backend)?.updateNodes;
+    if (instrumented === undefined) {
+      throw new Error("Expected an instrumented updateNodes executor.");
+    }
+    expect(instrumented.maxEntries).toBe(1);
+    maxEntries = 2;
+    expect(instrumented.maxEntries).toBe(2);
+    expect(Reflect.get(instrumented, marker)).toBe("preserved");
+    expect(Object.getOwnPropertyDescriptor(instrumented, "maxEntries")).toEqual(
+      Object.getOwnPropertyDescriptor(updateNodes, "maxEntries"),
+    );
   });
 
   it("refuses semantic registration without exact-root transport evidence", () => {

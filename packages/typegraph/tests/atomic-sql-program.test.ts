@@ -257,6 +257,23 @@ describe("atomic SQL program executor", () => {
     );
   });
 
+  it("refuses to overwrite an exact root transport registration", () => {
+    const root = createRoot();
+    registerAtomicSqlProgram(root, oneValueBatch);
+
+    let thrown: unknown;
+    try {
+      registerAtomicSqlProgram(root, noRowsBatch);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    if (!(thrown instanceof ConfigurationError)) return;
+    expect(thrown.details["code"]).toBe(
+      "ATOMIC_SQL_PROGRAM_ALREADY_REGISTERED",
+    );
+  });
+
   it("assembles an empty program without contacting the driver", async () => {
     const countingBatch = createCountingBatch();
     const root = createRoot();

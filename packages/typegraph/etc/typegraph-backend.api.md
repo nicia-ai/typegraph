@@ -43,6 +43,12 @@ export function assertVectorSearchLimit(limit: number): void;
 export function assumeRecursiveTraversalSupported(reason: string): RecursiveTraversalVerdict;
 
 // @public
+export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND: {
+    readonly "durable-convergence": "mutateEdges.durableConvergence";
+    readonly "resolved-set": "mutateEdges.resolvedSet";
+};
+
+// @public
 export const ATOMIC_MUTATION_PROGRAM_VARIANTS: readonly ["createNodes", "createEdges", "deleteNodes", "deleteEdges", "updateNodes", "updateEdges", "mutateNodes", "mutateEdges.resolvedSet", "mutateEdges.durableConvergence"];
 
 // @public
@@ -171,6 +177,7 @@ export type AtomicEdgeResolvedUpdateEntry = Readonly<{
 
 // @public (undocumented)
 export type AtomicMutationProgramConformanceCase = Readonly<{
+    backend: GraphBackend;
     variant: AtomicMutationProgramVariant;
     orderedSuccess: AtomicMutationProgramSuccessCase;
     staleFenceNoWrite: AtomicMutationProgramRefusalCase & Readonly<{
@@ -351,7 +358,7 @@ export class AtomicTransportConformanceError extends TypeGraphError {
 }
 
 // @public (undocumented)
-export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
+export type AtomicTransportConformanceFixture<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined> = Readonly<{
     backend: GraphBackend;
     executeAtomicBatch: AtomicSqlBatchExecutor;
     equal: AtomicTransportEquality;
@@ -361,8 +368,8 @@ export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
     }>;
     parameterPreservation: Readonly<{
         statements: readonly CompiledAtomicSqlStatement[];
-        expected: readonly CompiledAtomicSqlStatement[];
-        observe: () => readonly CompiledAtomicSqlStatement[] | undefined | PromiseLike<readonly CompiledAtomicSqlStatement[] | undefined>;
+        expected: TParameterSnapshot;
+        observe: () => TParameterSnapshot | PromiseLike<TParameterSnapshot | undefined> | undefined;
     }>;
     rollback: AtomicTransportRollbackCase<TSnapshot>;
     emptyBatch: Readonly<{
@@ -1616,6 +1623,9 @@ export const DATABASE_EXTENSION_NAMES: readonly ["pg_trgm", "vector"];
 export type DatabaseExtensionName = (typeof DATABASE_EXTENSION_NAMES)[number];
 
 // @public
+export function decorateBackend<T extends object, const O extends Partial<T> = Partial<T>>(base: T, overrides: ExactBackendOverlay<T, O>): T;
+
+// @public
 export type DeferredUnbundledMember = Readonly<{
     kind: "deferred";
     workstream: "WS5b";
@@ -1914,11 +1924,11 @@ export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 type ErrorCategory = "user" | "constraint" | "system";
 
 // @public
+export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O & Readonly<Record<Exclude<keyof O, keyof T>, never>>;
+
+// @public
 export type ExactRootRegistrationProvenanceFixture = Readonly<{
-    derivedBackends: readonly [
-    GraphBackend | TransactionBackend,
-    ...(GraphBackend | TransactionBackend)[]
-    ];
+    derivedBackends: readonly [GraphBackend, ...GraphBackend[]];
 }>;
 
 // @public
@@ -3339,7 +3349,7 @@ export function rowPropsToObject(props: RowProps): Record<string, unknown>;
 export function runAtomicMutationProgramConformance(fixture: AtomicMutationProgramConformanceFixture): Promise<AtomicMutationProgramConformanceReport>;
 
 // @public
-export function runAtomicTransportConformance<TSnapshot = unknown>(fixture: AtomicTransportConformanceFixture<TSnapshot>): Promise<AtomicTransportConformanceReport>;
+export function runAtomicTransportConformance<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined>(fixture: AtomicTransportConformanceFixture<TSnapshot, TParameterSnapshot>): Promise<AtomicTransportConformanceReport>;
 
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;

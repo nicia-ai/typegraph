@@ -1,11 +1,9 @@
+import { isBackendDerivedFrom } from "../derive-backend";
 import type { GraphBackend, TransactionBackend } from "../types";
 
 /** Actual author-created derived backends whose registrations must be probed. */
 export type ExactRootRegistrationProvenanceFixture = Readonly<{
-  derivedBackends: readonly [
-    GraphBackend | TransactionBackend,
-    ...(GraphBackend | TransactionBackend)[],
-  ];
+  derivedBackends: readonly [GraphBackend, ...GraphBackend[]];
 }>;
 
 /** Honest result of provenance checks that ran or were inapplicable. */
@@ -35,6 +33,13 @@ export async function assertExactRootRegistrationProvenance(
   const skipped: string[] = [];
   if (!isRegistered(backend)) throw createError("exact root registration");
   passed.push("exact root registration");
+
+  for (const derived of fixture.derivedBackends) {
+    if (!isBackendDerivedFrom(derived, backend)) {
+      throw createError("derived backend lineage");
+    }
+  }
+  passed.push("derived backend lineage");
 
   for (const derived of fixture.derivedBackends) {
     if (isRegistered(derived)) throw createError("derived backend isolation");

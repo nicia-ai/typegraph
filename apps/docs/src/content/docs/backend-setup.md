@@ -1414,6 +1414,7 @@ the earned declaration with the exact root transport in its factory:
 
 ```typescript
 import {
+  decorateBackend,
   registerAtomicMutationPrograms,
   registerAtomicSqlProgram,
   runAtomicMutationProgramConformance,
@@ -1427,6 +1428,7 @@ const backend = createCustomBackend({
   },
 });
 registerAtomicSqlProgram(backend, { executeAtomicBatch });
+const authorCreatedWrapper = decorateBackend(backend, {});
 
 await runAtomicTransportConformance({
   ...transportCases,
@@ -1436,6 +1438,7 @@ await runAtomicTransportConformance({
 });
 
 registerAtomicMutationPrograms(backend, mutationPrograms);
+const semanticCases = buildSemanticCases({ backend });
 
 await runAtomicMutationProgramConformance({
   backend,
@@ -1446,9 +1449,14 @@ await runAtomicMutationProgramConformance({
 ```
 
 Transport registration is exact-root evidence only: a derived or
-transaction-scoped backend does not inherit it. The conformance fixture's
-mandatory provenance checks prove all three facts against the real registered
-objects supplied by the backend author. A non-interactive root reports the
+transaction-scoped backend does not inherit it, and a second registration on
+the same root is refused rather than replacing the function production uses.
+Create wrappers with the exported `decorateBackend()` seam so the runner can
+verify their lineage back to the registered root instead of accepting an
+unrelated object as derivation evidence. The conformance fixture's mandatory
+provenance checks prove registration, lineage, derived isolation, and—when
+applicable—transaction isolation against the real objects supplied by the
+backend author. A non-interactive root reports the
 transaction-isolation check as skipped rather than claiming evidence it could
 not obtain. Transport registration certifies mechanics, not graph semantics, and
 therefore does not by itself opt a custom backend into any Store mutation
@@ -1488,14 +1496,21 @@ opt-out and does not require an unreachable case. `mutateEdges` has separate
 `resolvedSet` and `durableConvergence` variants because proving one does not
 prove the other.
 
-The fixture callbacks should invoke public Store methods and inspect committed
+Every semantic case identifies the exact `backend` its callbacks use. The
+runner checks that binding and the registered profile identity before any
+preparation, again between preparation and execution, and after execution, so
+a pre-dispatch refusal or a mid-run registry replacement cannot borrow another
+root's certificate. The fixture callbacks should invoke public Store methods and inspect committed
 rows through an independent database read. Supply at least one real wrapper or
-derived backend created by the backend's own derivation path; the runner does
-not manufacture a projection and mistake that tautology for author evidence.
-Do not instrument or replace the registered executors—the runner owns dispatch
-evidence. Mark each refusal's `dispatch` as `"required"` or `"pre-dispatch"`
+derived backend created with `decorateBackend()`; the runner does not manufacture
+a projection and mistake that tautology for author evidence. Do not instrument
+or replace the registered executors—the runner owns dispatch evidence. Run
+conformance with exclusive use of that exact root: unrelated same-variant writes
+during the observation window cannot be distinguished from fixture traffic.
+Mark each semantic refusal's `dispatch` as `"required"` or `"pre-dispatch"`
 according to the Store contract, and do not use executor return rows as the
-state oracle. Match
+state oracle. Stale-fence cases always require native dispatch regardless of a
+fixture value supplied by untyped JavaScript. Match
 Store-level typed errors rather than raw driver sentinels. The runner is
 framework-agnostic, so the same fixture runs in the custom backend's own test
 suite. Pair it with the shared cross-backend Store integration suite; transport
@@ -1514,9 +1529,14 @@ Executor limits such as `maxEntries`, `maxClaimedEntries`, and the two edge
 mutation ceilings are part of the registration contract and must be
 nonnegative integers; zero honestly declares that the backend's bind budget
 cannot admit one member of that shape. TypeGraph validates those declarations
-before publishing the exact-root profile. Dedicated update-only and mixed
-mutation executors are independently reachable Store families even when their
-entry ceilings are equal, so each requires its own conformance evidence.
+before publishing the exact-root profile. On a transactionless root, dedicated
+update-only and mixed mutation executors are independently reachable Store
+families even when their entry ceilings are equal, so each requires its own
+conformance evidence. On an interactive root, the collection-level
+read/partition/write unit moves into a transaction and exact-root registration
+does not follow; the conformance inventory therefore excludes those four root
+variants while continuing to require direct create, delete, and durable
+convergence evidence.
 Backend authors implementing edge
 refusal paths use the exported
 `AtomicEdgeBatchEndpointRefusalError`,

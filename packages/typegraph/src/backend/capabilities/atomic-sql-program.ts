@@ -206,6 +206,12 @@ export function registerAtomicSqlProgram<T extends GraphBackend>(
   target: T,
   registration: AtomicSqlProgramRegistration,
 ): T {
+  if (ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.has(target)) {
+    throw new ConfigurationError(
+      "An atomic SQL program is already registered for this exact backend root.",
+      { code: "ATOMIC_SQL_PROGRAM_ALREADY_REGISTERED" },
+    );
+  }
   const executor = normalizeAtomicSqlProgramRegistration(registration);
   const declaration = target.capabilities.execution.atomicBatch;
   if (declaration !== "root" || executor === undefined) {

@@ -38,7 +38,10 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
   errorMatches?: (error: unknown) => boolean;
 }>;
 
-export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
+export type AtomicTransportConformanceFixture<
+  TSnapshot = unknown,
+  TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined,
+> = Readonly<{
   /** Exact root that registered the batch function under test. */
   backend: GraphBackend;
   executeAtomicBatch: AtomicSqlBatchExecutor;
@@ -51,13 +54,13 @@ export type AtomicTransportConformanceFixture<TSnapshot = unknown> = Readonly<{
   /** A program whose SQL and bound values must reach the transport unchanged. */
   parameterPreservation: Readonly<{
     statements: readonly CompiledAtomicSqlStatement[];
-    /** An independent snapshot of the exact sequence the transport must see. */
-    expected: readonly CompiledAtomicSqlStatement[];
-    /** Observe the sequence received by the engine-specific transport. */
+    /** Independent evidence that SQL and bound values reached the engine. */
+    expected: TParameterSnapshot;
+    /** Observe engine state or transport input attributable to this program. */
     observe: () =>
-      | readonly CompiledAtomicSqlStatement[]
-      | undefined
-      | PromiseLike<readonly CompiledAtomicSqlStatement[] | undefined>;
+      | TParameterSnapshot
+      | PromiseLike<TParameterSnapshot | undefined>
+      | undefined;
   }>;
   /** A later failure must roll back both the primary row and its sidecar. */
   rollback: AtomicTransportRollbackCase<TSnapshot>;
@@ -115,8 +118,11 @@ async function invoke(
  * The fixture owns those engine-specific details; the runner verifies the
  * transport protocol around them.
  */
-export async function runAtomicTransportConformance<TSnapshot = unknown>(
-  fixture: AtomicTransportConformanceFixture<TSnapshot>,
+export async function runAtomicTransportConformance<
+  TSnapshot = unknown,
+  TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined,
+>(
+  fixture: AtomicTransportConformanceFixture<TSnapshot, TParameterSnapshot>,
 ): Promise<AtomicTransportConformanceReport> {
   const passed: string[] = [];
 

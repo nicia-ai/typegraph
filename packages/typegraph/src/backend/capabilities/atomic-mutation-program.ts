@@ -284,30 +284,61 @@ export const ATOMIC_MUTATION_PROGRAM_VARIANTS = [
 export type AtomicMutationProgramVariant =
   (typeof ATOMIC_MUTATION_PROGRAM_VARIANTS)[number];
 
+/** One owner for the overloaded edge-mutation input/variant correlation. */
+export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND = {
+  "durable-convergence": "mutateEdges.durableConvergence",
+  "resolved-set": "mutateEdges.resolvedSet",
+} as const satisfies Readonly<
+  Record<
+    | AtomicEdgeConvergenceInput["kind"]
+    | AtomicEdgeResolvedMutationSetInput["kind"],
+    Extract<AtomicMutationProgramVariant, `mutateEdges.${string}`>
+  >
+>;
+
 /**
  * Owns which semantic variants a normalized profile can reach independently.
  *
- * A zero limit is an honest opt-out. Conformance consumes this owner instead
- * of independently re-spelling limit semantics.
+ * A zero limit is an honest opt-out. Update-only and mixed resolved sets run
+ * directly on transactionless roots; an interactive root first moves their
+ * collection-level read/partition/write unit into a transaction, where exact
+ * root registration deliberately does not follow. Conformance consumes this
+ * owner instead of independently re-spelling either decision.
  */
 export function reachableAtomicMutationProgramVariants(
   profile: AtomicMutationProgramExecutor,
+  execution: Pick<
+    GraphBackend["capabilities"]["execution"],
+    "interactiveTransactions"
+  >,
 ): readonly AtomicMutationProgramVariant[] {
   const variants: AtomicMutationProgramVariant[] = [];
   if (profile.createNodes !== undefined) variants.push("createNodes");
   if (profile.createEdges !== undefined) variants.push("createEdges");
   if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
   if (profile.deleteEdges !== undefined) variants.push("deleteEdges");
-  if ((profile.updateNodes?.maxEntries ?? 0) > 0) {
+  if (
+    !execution.interactiveTransactions &&
+    (profile.updateNodes?.maxEntries ?? 0) > 0
+  ) {
     variants.push("updateNodes");
   }
-  if ((profile.updateEdges?.maxEntries ?? 0) > 0) {
+  if (
+    !execution.interactiveTransactions &&
+    (profile.updateEdges?.maxEntries ?? 0) > 0
+  ) {
     variants.push("updateEdges");
   }
-  if ((profile.mutateNodes?.maxEntries ?? 0) > 0) {
+  if (
+    !execution.interactiveTransactions &&
+    (profile.mutateNodes?.maxEntries ?? 0) > 0
+  ) {
     variants.push("mutateNodes");
   }
-  if ((profile.mutateEdges?.maxEntries.resolvedSet ?? 0) > 0) {
+  if (
+    !execution.interactiveTransactions &&
+    (profile.mutateEdges?.maxEntries.resolvedSet ?? 0) > 0
+  ) {
     variants.push("mutateEdges.resolvedSet");
   }
   if ((profile.mutateEdges?.maxEntries.durableConvergence ?? 0) > 0) {
@@ -363,140 +394,63 @@ function instrumentAtomicMutationProgramExecutors(
   target: object,
   profile: AtomicMutationProgramRegistration,
 ): AtomicMutationProgramExecutor {
-  function alreadyInstrumented<T extends object>(executor: T): boolean {
-    return (
-      INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS.get(executor) === target
-    );
+  type Descriptor = Readonly<{
+    variant: (input: unknown) => AtomicMutationProgramVariant;
+  }>;
+  const descriptors = {
+    createEdges: { variant: () => "createEdges" },
+    createNodes: { variant: () => "createNodes" },
+    deleteEdges: { variant: () => "deleteEdges" },
+    deleteNodes: { variant: () => "deleteNodes" },
+    mutateEdges: {
+      variant: (input: unknown) =>
+        ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND[
+          (
+            input as
+              AtomicEdgeConvergenceInput | AtomicEdgeResolvedMutationSetInput
+          ).kind
+        ],
+    },
+    mutateNodes: { variant: () => "mutateNodes" },
+    updateEdges: { variant: () => "updateEdges" },
+    updateNodes: { variant: () => "updateNodes" },
+  } as const satisfies Record<
+    keyof AtomicMutationProgramRegistration,
+    Descriptor
+  >;
+
+  function instrument<TExecutor extends object>(
+    source: TExecutor,
+    descriptor: Descriptor,
+  ): TExecutor {
+    if (INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS.get(source) === target) {
+      return source;
+    }
+    const callable = source as unknown as (
+      ...arguments_: readonly unknown[]
+    ) => unknown;
+    const instrumented = new Proxy(callable, {
+      apply(sourceExecutor, thisArgument, argumentsList) {
+        reportAtomicMutationProgramDispatch(
+          target,
+          descriptor.variant(argumentsList[0]),
+        );
+        return Reflect.apply(sourceExecutor, thisArgument, argumentsList);
+      },
+    });
+    INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS.set(instrumented, target);
+    return instrumented as unknown as TExecutor;
   }
 
-  function remember<T extends object>(executor: T): T {
-    INSTRUMENTED_ATOMIC_MUTATION_EXECUTOR_TARGETS.set(executor, target);
-    return executor;
-  }
-
-  const sourceCreateNodes = profile.createNodes;
-  const createNodes =
-    sourceCreateNodes === undefined ? undefined
-    : alreadyInstrumented(sourceCreateNodes) ? sourceCreateNodes
-    : (remember(
-        Object.assign(
-          async (input: AtomicNodeBatchInput) => {
-            reportAtomicMutationProgramDispatch(target, "createNodes");
-            const invoke = sourceCreateNodes as unknown as (
-              value: AtomicNodeBatchInput,
-            ) => Promise<number | readonly NodeRow[]>;
-            return invoke(input);
-          },
-          { maxClaimedEntries: sourceCreateNodes.maxClaimedEntries },
-        ),
-      ) as AtomicNodeBatchExecutor);
-  const sourceCreateEdges = profile.createEdges;
-  const createEdges =
-    sourceCreateEdges === undefined ? undefined
-    : alreadyInstrumented(sourceCreateEdges) ? sourceCreateEdges
-    : (remember(
-        async (input: AtomicEdgeBatchCountInput | AtomicEdgeBatchRowsInput) => {
-          reportAtomicMutationProgramDispatch(target, "createEdges");
-          const invoke = sourceCreateEdges as unknown as (
-            value: AtomicEdgeBatchCountInput | AtomicEdgeBatchRowsInput,
-          ) => Promise<number | readonly EdgeRow[]>;
-          return invoke(input);
-        },
-      ) as AtomicEdgeBatchExecutor);
-  const sourceDeleteNodes = profile.deleteNodes;
-  const deleteNodes =
-    sourceDeleteNodes === undefined ? undefined
-    : alreadyInstrumented(sourceDeleteNodes) ? sourceDeleteNodes
-    : remember(async (input: AtomicNodeDeleteBatchInput) => {
-        reportAtomicMutationProgramDispatch(target, "deleteNodes");
-        return sourceDeleteNodes(input);
-      });
-  const sourceDeleteEdges = profile.deleteEdges;
-  const deleteEdges =
-    sourceDeleteEdges === undefined ? undefined
-    : alreadyInstrumented(sourceDeleteEdges) ? sourceDeleteEdges
-    : remember(async (input: AtomicEdgeDeleteBatchInput) => {
-        reportAtomicMutationProgramDispatch(target, "deleteEdges");
-        return sourceDeleteEdges(input);
-      });
-  const sourceUpdateNodes = profile.updateNodes;
-  const updateNodes =
-    sourceUpdateNodes === undefined ? undefined
-    : alreadyInstrumented(sourceUpdateNodes) ? sourceUpdateNodes
-    : remember(
-        Object.assign(
-          async (
-            input: Parameters<AtomicNodeResolvedUpdateBatchExecutor>[0],
-          ) => {
-            reportAtomicMutationProgramDispatch(target, "updateNodes");
-            return sourceUpdateNodes(input);
-          },
-          { maxEntries: sourceUpdateNodes.maxEntries },
-        ),
-      );
-  const sourceUpdateEdges = profile.updateEdges;
-  const updateEdges =
-    sourceUpdateEdges === undefined ? undefined
-    : alreadyInstrumented(sourceUpdateEdges) ? sourceUpdateEdges
-    : remember(
-        Object.assign(
-          async (
-            input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0],
-          ) => {
-            reportAtomicMutationProgramDispatch(target, "updateEdges");
-            return sourceUpdateEdges(input);
-          },
-          { maxEntries: sourceUpdateEdges.maxEntries },
-        ),
-      );
-  const sourceMutateNodes = profile.mutateNodes;
-  const mutateNodes =
-    sourceMutateNodes === undefined ? undefined
-    : alreadyInstrumented(sourceMutateNodes) ? sourceMutateNodes
-    : remember(
-        Object.assign(
-          async (
-            input: Parameters<AtomicNodeResolvedMutationSetExecutor>[0],
-          ) => {
-            reportAtomicMutationProgramDispatch(target, "mutateNodes");
-            return sourceMutateNodes(input);
-          },
-          { maxEntries: sourceMutateNodes.maxEntries },
-        ),
-      );
-  const sourceMutateEdges = profile.mutateEdges;
-  const mutateEdges =
-    sourceMutateEdges === undefined ? undefined
-    : alreadyInstrumented(sourceMutateEdges) ? sourceMutateEdges
-    : (remember(
-        Object.assign(
-          async (
-            input:
-              AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
-          ) => {
-            const variant =
-              input.kind === "resolved-set" ?
-                "mutateEdges.resolvedSet"
-              : "mutateEdges.durableConvergence";
-            reportAtomicMutationProgramDispatch(target, variant);
-            return input.kind === "resolved-set" ?
-                sourceMutateEdges(input)
-              : sourceMutateEdges(input);
-          },
-          { maxEntries: sourceMutateEdges.maxEntries },
-        ),
-      ) as AtomicEdgeMutationProgramExecutor);
-
-  return Object.freeze({
-    ...(createNodes === undefined ? {} : { createNodes }),
-    ...(createEdges === undefined ? {} : { createEdges }),
-    ...(deleteNodes === undefined ? {} : { deleteNodes }),
-    ...(deleteEdges === undefined ? {} : { deleteEdges }),
-    ...(updateNodes === undefined ? {} : { updateNodes }),
-    ...(updateEdges === undefined ? {} : { updateEdges }),
-    ...(mutateNodes === undefined ? {} : { mutateNodes }),
-    ...(mutateEdges === undefined ? {} : { mutateEdges }),
+  const entries = ATOMIC_MUTATION_PROGRAM_FAMILIES.flatMap((family) => {
+    const executor = profile[family];
+    return executor === undefined ?
+        []
+      : [[family, instrument(executor, descriptors[family])] as const];
   });
+  return Object.freeze(
+    Object.fromEntries(entries) as AtomicMutationProgramExecutor,
+  );
 }
 
 /** @internal Runs work while observing dispatches from this exact root. */

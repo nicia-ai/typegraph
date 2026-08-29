@@ -162,6 +162,7 @@ export type {
   AtomicNodeResolvedUpdateEntry,
 } from "./capabilities/atomic-mutation-program";
 export {
+  ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND,
   AtomicEdgeBatchCardinalityRefusalError,
   AtomicEdgeBatchEndpointRefusalError,
   AtomicEdgeConvergenceTombstoneRefusalError,
@@ -231,6 +232,8 @@ export type {
   ExactRootRegistrationProvenanceFixture,
   ExactRootRegistrationProvenanceReport,
 } from "./conformance/exact-root-provenance";
+export type { ExactBackendOverlay } from "./derive-backend";
+export { decorateBackend } from "./derive-backend";
 export {
   deleteLegacyRecordedAnchorMap,
   type DeleteLegacyRecordedAnchorMapOptions,

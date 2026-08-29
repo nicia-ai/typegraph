@@ -39,11 +39,33 @@ import {
   type GraphCommandPort,
 } from "./types";
 
+const BACKEND_DERIVATION_SOURCES = new WeakMap<object, object>();
+
+function recordBackendDerivation(derived: object, source: object): void {
+  BACKEND_DERIVATION_SOURCES.set(derived, source);
+}
+
+/** Returns whether `candidate` was built from `source` through this seam. */
+export function isBackendDerivedFrom(
+  candidate: object,
+  source: object,
+): boolean {
+  const visited = new Set<object>();
+  let current: object | undefined = candidate;
+  while (current !== undefined && !visited.has(current)) {
+    if (current === source) return candidate !== source;
+    visited.add(current);
+    current = BACKEND_DERIVATION_SOURCES.get(current);
+  }
+  return false;
+}
+
 /**
  * Rejects overlay members that are not members of the decorated backend, so a
  * misspelled override cannot silently add a property nothing forwards to.
  *
- * @internal
+ * Public so custom backend wrappers can use the same audited decoration seam
+ * whose lineage the conformance runners verify.
  */
 export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
   Readonly<Record<Exclude<keyof O, keyof T>, never>>;
@@ -209,7 +231,16 @@ export function deriveBackend<
   carryFirstPartyFactoryMark(decoratedBackend, base);
   carrySchemaFencedInsertEligibility(decoratedBackend, base);
   carryDerivedCommandPortMetadata(base, overrides);
+  recordBackendDerivation(decoratedBackend, base);
   return decoratedBackend;
+}
+
+/** Public name for the audited, decoration-only backend derivation seam. */
+export function decorateBackend<
+  T extends object,
+  const O extends Partial<T> = Partial<T>,
+>(base: T, overrides: ExactBackendOverlay<T, O>): T {
+  return deriveBackend(base, overrides);
 }
 
 /**
@@ -249,6 +280,7 @@ export function projectBackend<
   carryBackendResourceAudit(projection, base);
   carryFirstPartyFactoryMark(projection, base);
   carrySchemaFencedInsertEligibility(projection, base);
+  recordBackendDerivation(projection, base);
   return projection;
 }
 
