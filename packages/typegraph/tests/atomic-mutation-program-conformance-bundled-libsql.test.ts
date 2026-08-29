@@ -261,6 +261,14 @@ function buildCases(
   const deleteEdgesStale = scenario(client, backend, "delete-edges-stale");
   const deleteEdgesRefusal = scenario(client, backend, "delete-edges-refusal");
 
+  const updateNodesSuccess = scenario(client, backend, "update-nodes-success");
+  const updateNodesStale = scenario(client, backend, "update-nodes-stale");
+  const updateNodesRefusal = scenario(client, backend, "update-nodes-refusal");
+
+  const updateEdgesSuccess = scenario(client, backend, "update-edges-success");
+  const updateEdgesStale = scenario(client, backend, "update-edges-stale");
+  const updateEdgesRefusal = scenario(client, backend, "update-edges-refusal");
+
   const mutateNodesSuccess = scenario(client, backend, "mutate-nodes-success");
   const mutateNodesStale = scenario(client, backend, "mutate-nodes-stale");
   const mutateNodesRefusal = scenario(client, backend, "mutate-nodes-refusal");
@@ -633,6 +641,12 @@ function buildCases(
       mutateNodesRefusal,
       mutateNodesStale,
       mutateNodesSuccess,
+      updateEdgesRefusal,
+      updateEdgesStale,
+      updateEdgesSuccess,
+      updateNodesRefusal,
+      updateNodesStale,
+      updateNodesSuccess,
     }),
     buildConvergenceCase(convergeSuccess, convergeStale, convergeRefusal),
   ];
@@ -649,9 +663,31 @@ function buildResolvedCases(
     mutateNodesRefusal: Scenario;
     mutateNodesStale: Scenario;
     mutateNodesSuccess: Scenario;
+    updateEdgesRefusal: Scenario;
+    updateEdgesStale: Scenario;
+    updateEdgesSuccess: Scenario;
+    updateNodesRefusal: Scenario;
+    updateNodesStale: Scenario;
+    updateNodesSuccess: Scenario;
   }>,
 ): readonly AtomicMutationProgramConformanceCase[] {
   return [
+    buildNodeResolvedCase(
+      "updateNodes",
+      client,
+      scenarios.updateNodesSuccess,
+      scenarios.updateNodesStale,
+      scenarios.updateNodesRefusal,
+      false,
+    ),
+    buildEdgeResolvedCase(
+      "updateEdges",
+      client,
+      scenarios.updateEdgesSuccess,
+      scenarios.updateEdgesStale,
+      scenarios.updateEdgesRefusal,
+      false,
+    ),
     buildNodeResolvedCase(
       "mutateNodes",
       client,
@@ -1197,9 +1233,7 @@ describe("bundled atomic mutation program semantic conformance: libSQL", () => {
       });
 
       expect(report.variants.map((entry) => entry.variant)).toEqual(
-        ATOMIC_MUTATION_PROGRAM_VARIANTS.filter(
-          (variant) => variant !== "updateNodes" && variant !== "updateEdges",
-        ),
+        ATOMIC_MUTATION_PROGRAM_VARIANTS,
       );
     } finally {
       await backend.close();

@@ -14,6 +14,7 @@ import {
   type AtomicSqlBatchExecutor,
   type AtomicSqlRow,
   type CompiledAtomicSqlStatement,
+  hasAtomicSqlProgramRegistration,
   resolveRegisteredAtomicSqlBatchExecutor,
 } from "../capabilities/atomic-sql-program";
 import type { GraphBackend } from "../types";
@@ -119,12 +120,20 @@ export async function runAtomicTransportConformance<TSnapshot = unknown>(
 ): Promise<AtomicTransportConformanceReport> {
   const passed: string[] = [];
 
+  if (
+    resolveRegisteredAtomicSqlBatchExecutor(fixture.backend) !==
+    fixture.executeAtomicBatch
+  ) {
+    throw new AtomicTransportConformanceError(
+      "Atomic transport conformance is not bound to the exact registered batch function.",
+      { check: "registration binding" },
+    );
+  }
+
   const provenance = await assertExactRootRegistrationProvenance(
     fixture.backend,
     fixture,
-    (target) =>
-      resolveRegisteredAtomicSqlBatchExecutor(target) ===
-      fixture.executeAtomicBatch,
+    (target) => hasAtomicSqlProgramRegistration(target),
     (name) =>
       new AtomicTransportConformanceError(
         `Atomic transport provenance check failed: ${name}.`,

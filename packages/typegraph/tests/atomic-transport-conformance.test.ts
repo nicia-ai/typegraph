@@ -193,7 +193,22 @@ describe("atomic transport conformance runner", () => {
       runAtomicTransportConformance(invalidFixture),
     ).rejects.toMatchObject({
       name: "AtomicTransportConformanceError",
-      details: { check: "provenance: exact root registration" },
+      details: { check: "registration binding" },
+    });
+  });
+
+  it("rejects a derived backend carrying a distinct transport registration", async () => {
+    const fixture = createFixture(true);
+    const derived = createFixture(true).backend;
+
+    await expect(
+      runAtomicTransportConformance({
+        ...fixture,
+        derivedBackends: [derived],
+      }),
+    ).rejects.toMatchObject({
+      name: "AtomicTransportConformanceError",
+      details: { check: "provenance: derived backend isolation" },
     });
   });
 

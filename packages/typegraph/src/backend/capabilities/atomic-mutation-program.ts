@@ -298,16 +298,10 @@ export function reachableAtomicMutationProgramVariants(
   if (profile.createEdges !== undefined) variants.push("createEdges");
   if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
   if (profile.deleteEdges !== undefined) variants.push("deleteEdges");
-  if (
-    (profile.updateNodes?.maxEntries ?? 0) >
-    (profile.mutateNodes?.maxEntries ?? 0)
-  ) {
+  if ((profile.updateNodes?.maxEntries ?? 0) > 0) {
     variants.push("updateNodes");
   }
-  if (
-    (profile.updateEdges?.maxEntries ?? 0) >
-    (profile.mutateEdges?.maxEntries.resolvedSet ?? 0)
-  ) {
+  if ((profile.updateEdges?.maxEntries ?? 0) > 0) {
     variants.push("updateEdges");
   }
   if ((profile.mutateNodes?.maxEntries ?? 0) > 0) {

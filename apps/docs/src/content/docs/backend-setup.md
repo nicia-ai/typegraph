@@ -1514,9 +1514,9 @@ Executor limits such as `maxEntries`, `maxClaimedEntries`, and the two edge
 mutation ceilings are part of the registration contract and must be
 nonnegative integers; zero honestly declares that the backend's bind budget
 cannot admit one member of that shape. TypeGraph validates those declarations
-before publishing the exact-root profile. An update-only variant shadowed by a
-mixed-mutation executor with an equal or larger ceiling is not separately
-reachable and therefore does not demand duplicate conformance evidence.
+before publishing the exact-root profile. Dedicated update-only and mixed
+mutation executors are independently reachable Store families even when their
+entry ceilings are equal, so each requires its own conformance evidence.
 Backend authors implementing edge
 refusal paths use the exported
 `AtomicEdgeBatchEndpointRefusalError`,

@@ -133,6 +133,8 @@ function completeCases(): readonly AtomicMutationProgramConformanceCase[] {
     "createEdges",
     "deleteNodes",
     "deleteEdges",
+    "updateNodes",
+    "updateEdges",
     "mutateNodes",
     "mutateEdges.resolvedSet",
     "mutateEdges.durableConvergence",
