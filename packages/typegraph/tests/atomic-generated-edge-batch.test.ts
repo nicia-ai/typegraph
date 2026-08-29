@@ -8,11 +8,13 @@ import { z } from "zod";
 
 import {
   CardinalityError,
+  DatabaseOperationError,
   EdgeMatchIdentityConflictError,
   StaleVersionError,
   ValidationError,
 } from "../src";
 import {
+  AtomicEdgeBatchEndpointRefusalError,
   type AtomicEdgeBatchExecutor,
   markBundledRootAtomicEdgeBatch,
   markBundledRootAtomicMutationPrograms,
@@ -28,7 +30,7 @@ import type { GraphBackend } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { migrateSchema } from "../src/schema";
 import type { Store } from "../src/store";
-import { createStoreWithSchema } from "../src/store";
+import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import {
   resolveAtomicEdgeBatchExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
@@ -842,17 +844,17 @@ describe("generated edge batch store consumer", () => {
     try {
       const [store] = await createStoreWithSchema(cardinalityGraph, backend);
       const people = await store.nodes.Person.bulkCreate(
-        Array.from({ length: 20 }, (_, index) => ({
+        Array.from({ length: 40 }, (_, index) => ({
           props: { name: `Person ${index}` },
         })),
       );
       const companies = await store.nodes.Company.bulkCreate(
-        Array.from({ length: 21 }, (_, index) => ({
+        Array.from({ length: 41 }, (_, index) => ({
           props: { name: `Company ${index}` },
         })),
       );
-      const conflictingPerson = people[19];
-      const incumbentCompany = companies[20];
+      const conflictingPerson = people[39];
+      const incumbentCompany = companies[40];
       if (conflictingPerson === undefined || incumbentCompany === undefined) {
         throw new Error(
           "Expected generated endpoints for chunk rollback test.",
@@ -969,6 +971,108 @@ describe("generated edge batch store consumer", () => {
           },
         ]),
       ).rejects.toBe(driverFailure);
+    } finally {
+      await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("uses set reads and a typed terminal for a stale endpoint refusal", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-stale-refusal-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
+    const getNodes = vi.spyOn(backend, "getNodes");
+    try {
+      const [store] = await createStoreWithSchema(graph, backend);
+      const { from, to } = await createEndpoints(store);
+      const driverFailure = new Error("stale endpoint refusal");
+      const executor = vi.fn(() => {
+        getNodes.mockClear();
+        return Promise.reject(
+          new AtomicEdgeBatchEndpointRefusalError(driverFailure),
+        );
+      }) as unknown as AtomicEdgeBatchExecutor;
+      markBundledRootAtomicEdgeBatch(backend, executor);
+
+      const caught = await store.edges.worksAt
+        .bulkInsert(
+          Array.from({ length: 80 }, (_, index) => ({
+            id: `stale-refusal-${index}`,
+            from,
+            to,
+            props: { role: `Role ${index}` },
+          })),
+        )
+        .catch((error: unknown) => error);
+
+      expect(caught).toBeInstanceOf(DatabaseOperationError);
+      expect(caught).not.toBe(driverFailure);
+      expect(caught).toMatchObject({ cause: driverFailure });
+      expect(getNodes).toHaveBeenCalledTimes(2);
+      expect(getNodes.mock.calls).toEqual(
+        expect.arrayContaining([
+          [graph.id, "Person", [from.id]],
+          [graph.id, "Company", [to.id]],
+        ]),
+      );
+      await expect(store.edges.worksAt.count()).resolves.toBe(0);
+    } finally {
+      await backend.close();
+      client.close();
+      rmSync(temporaryDirectory, { recursive: true, force: true });
+    }
+  });
+
+  it("diagnoses missing endpoints beyond the scalar fallback's first window", async () => {
+    const temporaryDirectory = mkdtempSync(
+      path.join(tmpdir(), "typegraph-atomic-edge-scalar-window-"),
+    );
+    const client = createClient({
+      url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+    });
+    const { backend } = await createLibsqlBackend(client);
+    try {
+      const [schemaStore] = await createStoreWithSchema(graph, backend);
+      const { from, to } = await createEndpoints(schemaStore);
+      Object.defineProperty(backend, "getNodes", {
+        configurable: true,
+        value: undefined,
+      });
+      const executor = vi.fn(() => Promise.resolve(0));
+      markBundledRootAtomicEdgeBatch(
+        backend,
+        executor as unknown as AtomicEdgeBatchExecutor,
+      );
+      const getNode = vi.spyOn(backend, "getNode");
+      const [store] = await createVerifiedStore(graph, backend);
+      const items = Array.from({ length: 40 }, (_, index) => ({
+        id: `scalar-window-${index}`,
+        from,
+        to:
+          index === 39 ?
+            ({ kind: "Company", id: "missing-target" } as const)
+          : to,
+        props: { role: `Role ${index}` },
+      }));
+
+      await expect(store.edges.worksAt.bulkInsert(items)).rejects.toMatchObject(
+        {
+          details: { endpoint: "to", nodeId: "missing-target" },
+        },
+      );
+
+      expect(executor).toHaveBeenCalledOnce();
+      expect(getNode).toHaveBeenCalledWith(
+        graph.id,
+        "Company",
+        "missing-target",
+      );
+      await expect(store.edges.worksAt.count()).resolves.toBe(0);
     } finally {
       await backend.close();
       client.close();

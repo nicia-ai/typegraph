@@ -1819,11 +1819,13 @@ outgoing edges for client-side filtering. For a schema-declared durable
 `matchIdentity` with `cardinality: "many"`, the declaration's match fields,
 default `ifExists: "return"`, and no temporal mutation, bundled roots use one
 closed native atomic exchange. That program owns endpoint validation, durable
-identity arbitration and ordered live results, so it does
-not perform a probe or open a separate interactive transaction. An all-live
-default-`"return"` batch outside that envelope is also read-only and returns
-from one set-oriented root read. Other outcomes retain the set-oriented read
-plus transactional write path. Tombstoned winners
+identity arbitration and ordered live results, so it does not perform an
+outside probe or open a separate interactive transaction. Its authoritative
+upsert establishes an all-live `"found"` result in the same exchange, but can
+take incumbent-row locks and produce write amplification. An all-live
+default-`"return"` batch outside that envelope is read-only and returns from one
+set-oriented root read. Other outcomes retain the set-oriented read plus
+transactional write path. Tombstoned winners
 roll the native attempt back and refuse transactionless convergence with the
 typed `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error;
 use a transaction-capable backend when resurrection must preserve schema-aware

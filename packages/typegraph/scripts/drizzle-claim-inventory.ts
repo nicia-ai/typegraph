@@ -51,6 +51,7 @@ export const EXCLUDED_DIRECTORY_NAMES: readonly string[] = [
   ".turbo",
   "coverage",
   ".vitest-reports",
+  ".stryker-tmp",
   ".astro",
   "build",
 ];
@@ -106,12 +107,11 @@ function walk(root: string, directory: string, sites: ClaimSite[]): void {
 }
 
 /**
- * Every claim site in the repository matching {@link CLAIM_PHRASE_PATTERN},
- * sorted by file then line. Rooted at {@link repositoryRoot}, so it finds
- * sites this same search run from `packages/typegraph` would miss.
+ * Every claim site beneath `root` matching {@link CLAIM_PHRASE_PATTERN},
+ * sorted by file then line. The default {@link repositoryRoot} finds sites a
+ * search run from `packages/typegraph` would miss.
  */
-export function scanClaimSites(): readonly ClaimSite[] {
-  const root = repositoryRoot();
+export function scanClaimSites(root = repositoryRoot()): readonly ClaimSite[] {
   const sites: ClaimSite[] = [];
   walk(root, root, sites);
   return sites.toSorted(

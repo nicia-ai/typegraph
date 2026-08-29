@@ -157,11 +157,14 @@ wall-clock benchmark. Dynamic `matchOn`, `ifExists: "update"`, constrained
 cardinality, temporal options, caller transactions, derived backends, custom
 backends without a registered durable-convergence family, and history/revision
 stores intentionally retain the fallback path.
-An all-live `ifExists: "return"` batch is the read-only exception: because it
-writes nothing, every backend may return that result from its single
-set-oriented root read without opening a confirmation transaction. Any batch
-that may create, resurrect, or update still requires the native program or the
-complete transactional fallback.
+Outside the native envelope, an all-live `ifExists: "return"` batch is the
+read-only exception: every backend may return that result from its single
+set-oriented root read without opening a confirmation transaction. Inside the
+native envelope, the authoritative upsert program runs first. An all-live call
+still returns `"found"` in one exchange, but the conflict-update mechanism may
+take incumbent-row locks and produce write amplification. Any batch outside
+that envelope that may create, resurrect, or update requires the complete
+transactional fallback.
 If an otherwise eligible batch resolves a tombstoned identity, the native
 attempt rolls back and transactionless convergence refuses with the typed
 `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` (`edgeMatchKeyConvergence`) error. Use a
@@ -171,7 +174,8 @@ through the graph's Zod update schema.
 Cloudflare D1's 100-parameter budget admits at most seven **unique durable
 identities** in the native convergence program; duplicate inputs reuse their
 first identity and do not consume another program entry. Above that ceiling,
-an all-live return still completes as the one-read path described above. A
+an all-live return completes through the read-only one-read path described
+above. A
 batch that needs a write uses the portable fallback on a transaction-capable
 backend and refuses on a transactionless D1 root rather than splitting one
 atomic convergence contract across multiple submissions.

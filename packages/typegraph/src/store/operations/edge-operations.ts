@@ -130,6 +130,7 @@ import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
+import { chunk } from "../../utils/array";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -498,22 +499,26 @@ async function assertLiveEdgeEndpoints<G extends GraphDef>(
   backend: WriteTarget,
 ): Promise<void> {
   const fromNode = await backend.getNode(ctx.graphId, fromKind, fromId);
-  if (!fromNode || fromNode.deleted_at) {
-    throw new EndpointNotFoundError({
-      edgeKind: edgeKindName,
-      endpoint: "from",
-      nodeKind: fromKind,
-      nodeId: fromId,
-    });
-  }
+  assertEndpointRowLive(edgeKindName, "from", fromKind, fromId, fromNode);
 
   const toNode = await backend.getNode(ctx.graphId, toKind, toId);
-  if (!toNode || toNode.deleted_at) {
+  assertEndpointRowLive(edgeKindName, "to", toKind, toId, toNode);
+}
+
+/** The single owner of an edge endpoint row's live/refusal verdict. */
+function assertEndpointRowLive(
+  edgeKind: string,
+  endpoint: "from" | "to",
+  nodeKind: string,
+  nodeId: string,
+  row: Awaited<ReturnType<GraphBackend["getNode"]>>,
+): void {
+  if (!row || row.deleted_at) {
     throw new EndpointNotFoundError({
-      edgeKind: edgeKindName,
-      endpoint: "to",
-      nodeKind: toKind,
-      nodeId: toId,
+      edgeKind,
+      endpoint,
+      nodeKind,
+      nodeId,
     });
   }
 }
@@ -1122,6 +1127,24 @@ export async function executeEdgeCreateNoReturn<G extends GraphDef>(
  * from/to endpoint in the batch, instead of a `getNode` probe per edge.
  * Mirrors `primeBatchValidationCaches`'s node-existence priming.
  */
+type BoundBatchNodeRead = (
+  kind: string,
+  ids: readonly string[],
+) => ReturnType<NonNullable<GraphBackend["getNodes"]>>;
+
+function bindBatchNodeRead<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  backend: WriteTarget,
+): BoundBatchNodeRead | undefined {
+  const bound = bindExtraIfReachable(
+    backend,
+    ctx.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  if (bound === undefined) return;
+  return (kind, ids) => bound.getNodes(ctx.graphId, kind, ids);
+}
+
 async function primeEdgeBatchValidationCache<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
@@ -1133,27 +1156,14 @@ async function primeEdgeBatchValidationCache<G extends GraphDef>(
     row: Awaited<ReturnType<GraphBackend["getNode"]>>,
   ) => void,
 ): Promise<void> {
-  const bound = bindExtraIfReachable(
-    backend,
-    ctx.batchPointRead.extras.getNodes,
-    BATCH_POINT_READ.id,
-  );
-  if (bound === undefined) return;
+  const readNodes = bindBatchNodeRead(ctx, backend);
+  if (readNodes === undefined) return;
 
-  const idsByKind = new Map<string, Set<string>>();
-  const addEndpoint = (kind: string, id: string): void => {
-    const ids = idsByKind.get(kind) ?? new Set<string>();
-    ids.add(id);
-    idsByKind.set(kind, ids);
-  };
-  for (const input of inputs) {
-    addEndpoint(input.fromKind, input.fromId);
-    addEndpoint(input.toKind, input.toId);
-  }
+  const idsByKind = collectEdgeEndpointIdsByKind(inputs);
 
   for (const [kind, ids] of idsByKind) {
     const orderedIds = [...ids];
-    const rows = await bound.getNodes(ctx.graphId, kind, orderedIds);
+    const rows = await readNodes(kind, orderedIds);
     const rowsById = new Map(rows.map((row) => [row.id, row]));
     for (const id of orderedIds) {
       seedEndpointRow(ctx.graphId, kind, id, rowsById.get(id));
@@ -1277,22 +1287,141 @@ type EdgeEndpointInput = Readonly<{
   toId: string;
 }>;
 
+/** Bounds concurrent scalar custom-backend reads on an exceptional path. */
+const ATOMIC_EDGE_SCALAR_DIAGNOSTIC_WINDOW_SIZE = 32;
+
+function edgeEndpointRowKey(kind: string, id: string): string {
+  return encodeTupleKey([kind, id]);
+}
+
+function collectEdgeEndpointIdsByKind(
+  inputs: readonly Pick<
+    EdgeEndpointInput,
+    "fromKind" | "fromId" | "toKind" | "toId"
+  >[],
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const idsByKind = new Map<string, Set<string>>();
+  for (const input of inputs) {
+    for (const [kind, id] of [
+      [input.fromKind, input.fromId],
+      [input.toKind, input.toId],
+    ] as const) {
+      const ids = idsByKind.get(kind) ?? new Set<string>();
+      ids.add(id);
+      idsByKind.set(kind, ids);
+    }
+  }
+  return idsByKind;
+}
+
+/**
+ * Reads every endpoint a bundled batch named in one set-oriented request per
+ * kind. A custom backend without the batch-point-read extra gets
+ * bounded-concurrency scalar windows that still cover the complete input:
+ * refusal diagnosis must never trade semantic coverage for fan-out control.
+ */
+async function readAtomicEdgeBatchEndpointRows<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly EdgeEndpointInput[],
+  backend: WriteTarget,
+  readNodes: BoundBatchNodeRead | undefined,
+): Promise<
+  Readonly<{
+    rowsByEndpoint: ReadonlyMap<
+      string,
+      Awaited<ReturnType<GraphBackend["getNode"]>>
+    >;
+  }>
+> {
+  const idsByKind = collectEdgeEndpointIdsByKind(inputs);
+
+  const rowsByEndpoint = new Map<
+    string,
+    Awaited<ReturnType<GraphBackend["getNode"]>>
+  >();
+  await Promise.all(
+    [...idsByKind].map(async ([kind, ids]) => {
+      const orderedIds = [...ids];
+      if (readNodes !== undefined) {
+        const rows = await readNodes(kind, orderedIds);
+        const rowsById = new Map(rows.map((row) => [row.id, row]));
+        for (const id of orderedIds) {
+          rowsByEndpoint.set(edgeEndpointRowKey(kind, id), rowsById.get(id));
+        }
+        return;
+      }
+      const rows = await Promise.all(
+        orderedIds.map((id) => backend.getNode(ctx.graphId, kind, id)),
+      );
+      for (const [index, id] of orderedIds.entries()) {
+        rowsByEndpoint.set(edgeEndpointRowKey(kind, id), rows[index]);
+      }
+    }),
+  );
+  return { rowsByEndpoint };
+}
+
+function assertEndpointRowsLive(
+  inputs: readonly EdgeEndpointInput[],
+  rowsByEndpoint: ReadonlyMap<
+    string,
+    Awaited<ReturnType<GraphBackend["getNode"]>>
+  >,
+): void {
+  for (const input of inputs) {
+    assertEndpointRowLive(
+      input.kind,
+      "from",
+      input.fromKind,
+      input.fromId,
+      rowsByEndpoint.get(edgeEndpointRowKey(input.fromKind, input.fromId)),
+    );
+    assertEndpointRowLive(
+      input.kind,
+      "to",
+      input.toKind,
+      input.toId,
+      rowsByEndpoint.get(edgeEndpointRowKey(input.toKind, input.toId)),
+    );
+  }
+}
+
 async function assertAtomicEdgeBatchEndpoints<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly EdgeEndpointInput[],
   backend: WriteTarget,
 ): Promise<void> {
-  for (const input of inputs) {
-    await assertLiveEdgeEndpoints(
+  const readNodes = bindBatchNodeRead(ctx, backend);
+  const windows =
+    readNodes === undefined ?
+      chunk(inputs, ATOMIC_EDGE_SCALAR_DIAGNOSTIC_WINDOW_SIZE)
+    : [inputs];
+  for (const window of windows) {
+    const { rowsByEndpoint } = await readAtomicEdgeBatchEndpointRows(
       ctx,
-      input.kind,
-      input.fromKind,
-      input.fromId,
-      input.toKind,
-      input.toId,
+      window,
       backend,
+      readNodes,
     );
+    assertEndpointRowsLive(window, rowsByEndpoint);
   }
+}
+
+/** Owns the typed terminal when a rolled-back endpoint refusal went stale. */
+async function diagnoseAtomicEdgeBatchEndpointRefusal<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  inputs: readonly EdgeEndpointInput[],
+  backend: WriteTarget,
+  cause: unknown,
+): Promise<never> {
+  await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
+  throw new DatabaseOperationError(
+    "Atomic edge batch refused endpoint liveness, but no current missing " +
+      "endpoint could be diagnosed. Endpoint state may have changed after " +
+      "the atomic program rolled back.",
+    { operation: "insert", entity: "edge" },
+    { cause },
+  );
 }
 
 async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
@@ -1305,17 +1434,32 @@ async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
     registry: ctx.registry,
     backend,
   };
-  for (const input of inputs) {
-    await checkCardinalityConstraint(
-      constraintContext,
-      input.kind,
-      edgeCardinality(ctx, input.kind),
-      input.fromKind,
-      input.fromId,
-      input.toKind,
-      input.toId,
-      input.validTo,
+  for (const window of chunk(
+    inputs,
+    ATOMIC_EDGE_SCALAR_DIAGNOSTIC_WINDOW_SIZE,
+  )) {
+    const errors = await Promise.all(
+      window.map(async (input) => {
+        try {
+          await checkCardinalityConstraint(
+            constraintContext,
+            input.kind,
+            edgeCardinality(ctx, input.kind),
+            input.fromKind,
+            input.fromId,
+            input.toKind,
+            input.toId,
+            input.validTo,
+          );
+          return;
+        } catch (error) {
+          return error;
+        }
+      }),
     );
+    for (const error of errors) {
+      if (error !== undefined) throw error;
+    }
   }
 }
 
@@ -1369,8 +1513,12 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
       });
     } catch (error) {
       if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
-        await assertAtomicEdgeBatchEndpoints(ctx, inputs, backend);
-        throw error.cause;
+        await diagnoseAtomicEdgeBatchEndpointRefusal(
+          ctx,
+          inputs,
+          backend,
+          error.cause,
+        );
       }
       if (error instanceof AtomicEdgeBatchCardinalityRefusalError) {
         await assertAtomicEdgeBatchCardinality(ctx, inputs, backend);
@@ -2283,8 +2431,12 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
       });
     } catch (error) {
       if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
-        await assertAtomicEdgeBatchEndpoints(ctx, creates, backend);
-        throw error.cause;
+        await diagnoseAtomicEdgeBatchEndpointRefusal(
+          ctx,
+          creates,
+          backend,
+          error.cause,
+        );
       }
       throw error;
     }
@@ -2512,14 +2664,18 @@ export async function executeEdgeDelete<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    await runAtomicProgramWithHooks(ctx, opContext, () =>
-      executeAtomicEdgeDeletes(
-        ctx,
-        expectedKind,
-        [id],
-        backend,
-        atomicExecutor,
-      ),
+    await runAtomicProgramWithHooks(
+      ctx,
+      opContext,
+      () =>
+        executeAtomicEdgeDeletes(
+          ctx,
+          expectedKind,
+          [id],
+          backend,
+          atomicExecutor,
+        ),
+      (affectedCount) => affectedCount > 0,
     );
     return;
   }
@@ -3525,12 +3681,12 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       });
     } catch (error) {
       if (error instanceof AtomicEdgeBatchEndpointRefusalError) {
-        await assertAtomicEdgeBatchEndpoints(
+        await diagnoseAtomicEdgeBatchEndpointRefusal(
           ctx,
           nativeEntries.map((entry) => entry.params),
           backend,
+          error.cause,
         );
-        throw error.cause;
       }
       if (error instanceof AtomicEdgeConvergenceTombstoneRefusalError) {
         nativeResults = undefined;
