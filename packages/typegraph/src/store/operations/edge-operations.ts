@@ -76,7 +76,9 @@ import {
   AtomicEdgeBatchCardinalityRefusalError,
   AtomicEdgeBatchEndpointRefusalError,
   AtomicEdgeConvergenceTombstoneRefusalError,
+  type AtomicEdgeDeleteBatchExecutor,
   AtomicEdgeDeleteIdentityRefusalError,
+  type AtomicEdgeResolvedUpdateBatchExecutor,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
@@ -1973,6 +1975,37 @@ async function performEdgeUpdateConverging<G extends GraphDef>(
 /**
  * Executes an edge update operation.
  */
+function resolveAtomicEdgeUpdateExecutor<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+): AtomicEdgeResolvedUpdateBatchExecutor | undefined {
+  const first = entries[0];
+  if (first === undefined) return;
+  const distinctIds = new Set(entries.map((entry) => entry.input.id));
+  if (
+    distinctIds.size !== entries.length ||
+    entries.some(
+      (entry) =>
+        entry.clearDeleted ||
+        entry.input.validFrom !== undefined ||
+        entry.input.validTo !== undefined ||
+        entry.input.clearValidTo === true,
+    )
+  ) {
+    return;
+  }
+  return resolveAtomicEdgeResolvedUpdateBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind: first.input.identity.kind,
+    entryCount: entries.length,
+  });
+}
+
 export async function executeEdgeUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: {
@@ -1986,13 +2019,11 @@ export async function executeEdgeUpdate<G extends GraphDef>(
 ): Promise<Edge> {
   const id = input.id;
 
-  // Read outside the transaction: the hook context needs the edge kind, and
-  // hooks must WRAP the transaction (matching node operations and edge
-  // create) so onOperationEnd reports success only after COMMIT — a hook
-  // that fires inside the transaction would report success for a write that
-  // a failed commit then rolls back. An absent edge also never opens an empty
-  // transaction. The body re-reads inside the transaction, so a concurrent
-  // delete between this gate and the write lock is still handled correctly.
+  // Read outside execution: the hook context needs the edge kind, and an
+  // absent edge must not fire hooks or submit a write. Eligible plain updates
+  // bind this preimage to one guarded atomic program. The portable body
+  // re-reads inside its transaction, so a concurrent delete between this gate
+  // and the write lock is still handled correctly.
   const gate = await backend.getEdge(ctx.graphId, id);
   if (!gate || gate.deleted_at) {
     throw new EdgeNotFoundError(input.identity.kind, id);
@@ -2008,6 +2039,31 @@ export async function executeEdgeUpdate<G extends GraphDef>(
 
   if (input.clearValidTo === true) {
     assertClearValidToSupported(backend, "edge");
+  }
+  const atomicEntry = {
+    input,
+    clearDeleted: false,
+    existing: gate,
+  } satisfies EdgeUpsertUpdateBatchEntry;
+  const atomicExecutor = resolveAtomicEdgeUpdateExecutor(
+    ctx,
+    [atomicEntry],
+    backend,
+  );
+  if (atomicExecutor !== undefined) {
+    return ctx.withOperationHooks(
+      opContext,
+      async () => {
+        const edges = await executeAtomicEdgeResolvedUpdates(
+          ctx,
+          [atomicEntry],
+          backend,
+          atomicExecutor,
+        );
+        return requireDefined(edges[0]);
+      },
+      writeResultAlwaysChanges,
+    );
   }
   return runHookedWritePlan(
     ctx,
@@ -2271,109 +2327,14 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
 
   const first = requireDefined(entries[0]);
   const distinctIds = new Set(entries.map((entry) => entry.input.id));
-  const atomicExecutor = resolveAtomicEdgeResolvedUpdateBatchExecutor({
-    backend,
-    graph: ctx.graph,
-    schemaVersion: ctx.schemaVersion,
-    historyEnabled: ctx.historyEnabled,
-    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-    kind: first.input.identity.kind,
-    entryCount: entries.length,
-  });
-  const atomicShape =
-    atomicExecutor !== undefined &&
-    distinctIds.size === entries.length &&
-    entries.every(
-      (entry) =>
-        !entry.clearDeleted &&
-        entry.input.validFrom === undefined &&
-        entry.input.validTo === undefined &&
-        entry.input.clearValidTo !== true,
+  const atomicExecutor = resolveAtomicEdgeUpdateExecutor(ctx, entries, backend);
+  if (atomicExecutor !== undefined) {
+    return executeAtomicEdgeResolvedUpdates(
+      ctx,
+      entries,
+      backend,
+      atomicExecutor,
     );
-  if (atomicShape) {
-    const supplied = entries.flatMap((entry) =>
-      entry.existing === undefined ? [] : [entry.existing],
-    );
-    const fetched =
-      supplied.length === entries.length ?
-        undefined
-      : await getEdgeRowsByIds(backend, ctx.batchPointRead, ctx.graphId, [
-          ...distinctIds,
-        ]);
-    let existing = fetched === undefined ? supplied : [...fetched.values()];
-    for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
-      const byId = new Map(existing.map((row) => [row.id, row]));
-      const missing = entries.find((entry) => {
-        const row = byId.get(entry.input.id);
-        return row === undefined || row.deleted_at !== undefined;
-      });
-      if (missing !== undefined) {
-        // This update-only partition was resolved from live rows. Once a
-        // refreshed preimage is absent or tombstoned, the requested update
-        // target no longer exists; do not reinterpret it as a create or fall
-        // through to a transactionless portable write.
-        throw new EdgeNotFoundError(
-          first.input.identity.kind,
-          missing.input.id,
-        );
-      }
-      const resolved = entries.map((entry) => {
-        const row = requireDefined(byId.get(entry.input.id));
-        assertEdgeIdentityMatches(
-          entry.input.id,
-          entry.input.identity,
-          edgeIdentityFromRow(row),
-          "update",
-        );
-        const { validatedProps } = resolveEdgeUpdateProps(
-          ctx,
-          row,
-          entry.input.props,
-        );
-        return { existing: row, props: validatedProps };
-      });
-      const rows = await atomicExecutor({
-        entries: resolved,
-        schemaFence: {
-          graphId: ctx.graphId,
-          expectedVersion: requireDefined(ctx.schemaVersion),
-        },
-      });
-      if (rows.length === entries.length) {
-        memoizeLeasedSchemaFence(ctx, backend);
-        const returned = new Map(rows.map((row) => [row.id, row]));
-        return entries.map((entry) =>
-          rowToEdge(requireDefined(returned.get(entry.input.id))),
-        );
-      }
-      if (rows.length > 0) {
-        throw new CompilerInvariantError(
-          "Atomic resolved edge update returned a partial result.",
-          { expected: entries.length, actual: rows.length },
-        );
-      }
-      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-      if (attempt === EDGE_UPDATE_ATTEMPTS) {
-        throw new DatabaseOperationError(
-          `Atomic edge upsert batch could not be applied to stable rows after ${EDGE_UPDATE_ATTEMPTS} attempts.`,
-          {
-            operation: "update",
-            entity: "edge",
-            attempted: entries.map((entry) => ({
-              kind: entry.input.identity.kind,
-              id: entry.input.id,
-            })),
-          },
-        );
-      }
-      const refreshed = await getEdgeRowsByIds(
-        backend,
-        ctx.batchPointRead,
-        ctx.graphId,
-        [...distinctIds],
-      );
-      existing = [...refreshed.values()];
-    }
   }
 
   const needsConstraintFence = entries.some(
@@ -2418,6 +2379,99 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
   );
 }
 
+async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  entries: readonly EdgeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicEdgeResolvedUpdateBatchExecutor,
+): Promise<readonly Edge[]> {
+  const first = requireDefined(entries[0]);
+  const distinctIds = new Set(entries.map((entry) => entry.input.id));
+  const supplied = entries.flatMap((entry) =>
+    entry.existing === undefined ? [] : [entry.existing],
+  );
+  const fetched =
+    supplied.length === entries.length ?
+      undefined
+    : await getEdgeRowsByIds(backend, ctx.batchPointRead, ctx.graphId, [
+        ...distinctIds,
+      ]);
+  let existing = fetched === undefined ? supplied : [...fetched.values()];
+  for (let attempt = 1; attempt <= EDGE_UPDATE_ATTEMPTS; attempt += 1) {
+    const byId = new Map(existing.map((row) => [row.id, row]));
+    const missing = entries.find((entry) => {
+      const row = byId.get(entry.input.id);
+      return row === undefined || row.deleted_at !== undefined;
+    });
+    if (missing !== undefined) {
+      // This update-only partition was resolved from live rows. Once a
+      // refreshed preimage is absent or tombstoned, the requested update
+      // target no longer exists; do not reinterpret it as a create or fall
+      // through to a transactionless portable write.
+      throw new EdgeNotFoundError(first.input.identity.kind, missing.input.id);
+    }
+    const resolved = entries.map((entry) => {
+      const row = requireDefined(byId.get(entry.input.id));
+      assertEdgeIdentityMatches(
+        entry.input.id,
+        entry.input.identity,
+        edgeIdentityFromRow(row),
+        "update",
+      );
+      const { validatedProps } = resolveEdgeUpdateProps(
+        ctx,
+        row,
+        entry.input.props,
+      );
+      return { existing: row, props: validatedProps };
+    });
+    const rows = await atomicExecutor({
+      entries: resolved,
+      schemaFence: {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      },
+    });
+    if (rows.length === entries.length) {
+      memoizeLeasedSchemaFence(ctx, backend);
+      const returned = new Map(rows.map((row) => [row.id, row]));
+      return entries.map((entry) =>
+        rowToEdge(requireDefined(returned.get(entry.input.id))),
+      );
+    }
+    if (rows.length > 0) {
+      throw new CompilerInvariantError(
+        "Atomic resolved edge update returned a partial result.",
+        { expected: entries.length, actual: rows.length },
+      );
+    }
+    await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    if (attempt === EDGE_UPDATE_ATTEMPTS) {
+      throw new DatabaseOperationError(
+        `Atomic edge upsert batch could not be applied to stable rows after ${EDGE_UPDATE_ATTEMPTS} attempts.`,
+        {
+          operation: "update",
+          entity: "edge",
+          attempted: entries.map((entry) => ({
+            kind: entry.input.identity.kind,
+            id: entry.input.id,
+          })),
+        },
+      );
+    }
+    const refreshed = await getEdgeRowsByIds(
+      backend,
+      ctx.batchPointRead,
+      ctx.graphId,
+      [...distinctIds],
+    );
+    existing = [...refreshed.values()];
+  }
+  throw new CompilerInvariantError(
+    "Atomic resolved edge update exhausted its retry loop.",
+  );
+}
+
 /**
  * Executes an edge delete operation.
  */
@@ -2427,10 +2481,10 @@ export async function executeEdgeDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
-  // Gate outside the transaction so an absent/tombstoned edge never opens an
-  // empty one; the gate row also supplies the kind for the hook context,
-  // because hooks must WRAP the transaction (matching node operations and
-  // edge create) so onOperationEnd reports success only after COMMIT.
+  // Gate outside execution so an absent/tombstoned edge never fires hooks or
+  // submits a write; the gate row also supplies and verifies the hook kind.
+  // Eligible deletes then carry that kind into one atomic program. Other
+  // shapes retain the ordinary transaction path.
   const gate = await backend.getEdge(ctx.graphId, id);
   if (!gate) return;
   assertEdgeIdentityMatches(
@@ -2442,6 +2496,28 @@ export async function executeEdgeDelete<G extends GraphDef>(
   if (gate.deleted_at) return;
 
   const opContext = ctx.createOperationContext("delete", "edge", gate.kind, id);
+
+  const atomicExecutor = resolveAtomicEdgeDeleteBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    expectedKind,
+    ids: [id],
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (atomicExecutor !== undefined) {
+    await ctx.withOperationHooks(opContext, () =>
+      executeAtomicEdgeDeletes(
+        ctx,
+        expectedKind,
+        [id],
+        backend,
+        atomicExecutor,
+      ),
+    );
+    return;
+  }
 
   return runHookedWritePlan(
     ctx,
@@ -2485,49 +2561,14 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    try {
-      const result = await atomicExecutor({
-        graphId: ctx.graphId,
-        expectedKind,
-        ids,
-        schemaFence: {
-          graphId: ctx.graphId,
-          expectedVersion: requireDefined(ctx.schemaVersion),
-        },
-      });
-      await assertAtomicDeleteSchemaFenceMatched(
-        result.schemaFenceMatched,
-        ctx,
-        backend,
-        "edge",
-      );
-      return;
-    } catch (error) {
-      if (!(error instanceof AtomicEdgeDeleteIdentityRefusalError)) throw error;
-      const rowsById = await getEdgeRowsByIds(
-        backend,
-        ctx.batchPointRead,
-        ctx.graphId,
-        ids,
-      );
-      for (const id of ids) {
-        const current = rowsById.get(id);
-        if (current === undefined) continue;
-        assertEdgeIdentityMatches(
-          id,
-          { kind: expectedKind },
-          edgeIdentityFromRow(current),
-          "delete",
-        );
-      }
-      throw new DatabaseOperationError(
-        "Atomic edge delete refused an identity mismatch, but no current " +
-          "foreign collection row could be diagnosed. The row identity may " +
-          "have changed concurrently after the atomic program aborted.",
-        { operation: "delete", entity: "edge" },
-        { cause: error.cause },
-      );
-    }
+    await executeAtomicEdgeDeletes(
+      ctx,
+      expectedKind,
+      ids,
+      backend,
+      atomicExecutor,
+    );
+    return;
   }
 
   await runWritePlan(
@@ -2566,6 +2607,58 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
     },
     { didWrite: (affectedCount) => affectedCount > 0 },
   );
+}
+
+async function executeAtomicEdgeDeletes<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  expectedKind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicEdgeDeleteBatchExecutor,
+): Promise<number> {
+  try {
+    const result = await atomicExecutor({
+      graphId: ctx.graphId,
+      expectedKind,
+      ids,
+      schemaFence: {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      },
+    });
+    await assertAtomicDeleteSchemaFenceMatched(
+      result.schemaFenceMatched,
+      ctx,
+      backend,
+      "edge",
+    );
+    return result.affectedCount;
+  } catch (error) {
+    if (!(error instanceof AtomicEdgeDeleteIdentityRefusalError)) throw error;
+    const rowsById = await getEdgeRowsByIds(
+      backend,
+      ctx.batchPointRead,
+      ctx.graphId,
+      ids,
+    );
+    for (const id of ids) {
+      const current = rowsById.get(id);
+      if (current === undefined) continue;
+      assertEdgeIdentityMatches(
+        id,
+        { kind: expectedKind },
+        edgeIdentityFromRow(current),
+        "delete",
+      );
+    }
+    throw new DatabaseOperationError(
+      "Atomic edge delete refused an identity mismatch, but no current " +
+        "foreign collection row could be diagnosed. The row identity may " +
+        "have changed concurrently after the atomic program aborted.",
+      { operation: "delete", entity: "edge" },
+      { cause: error.cause },
+    );
+  }
 }
 
 /**

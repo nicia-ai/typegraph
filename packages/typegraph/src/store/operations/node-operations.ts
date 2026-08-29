@@ -48,7 +48,9 @@ import { type z } from "zod";
 
 import {
   type AtomicNodeBatchEntry,
+  type AtomicNodeDeleteBatchExecutor,
   AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodeResolvedUpdateBatchExecutor,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
@@ -2532,6 +2534,39 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
 // Node Update Operations
 // ============================================================
 
+function resolveAtomicNodeUpdateExecutor<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  entries: readonly NodeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+): AtomicNodeResolvedUpdateBatchExecutor | undefined {
+  const first = entries[0];
+  if (first === undefined) return;
+  const distinctIds = new Set(entries.map((entry) => entry.input.id));
+  if (
+    distinctIds.size !== entries.length ||
+    entries.some(
+      (entry) =>
+        entry.clearDeleted ||
+        entry.input.validFrom !== undefined ||
+        entry.input.validTo !== undefined ||
+        entry.input.clearValidTo === true,
+    )
+  ) {
+    return;
+  }
+  return resolveAtomicNodeResolvedUpdateBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    schemaVersion: ctx.schemaVersion,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+    kind: first.input.kind,
+    entryCount: entries.length,
+    identityEnabled: ctx.identity !== undefined,
+    registry: ctx.registry,
+  });
+}
+
 export async function executeNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
@@ -2545,12 +2580,36 @@ export async function executeNodeUpdate<G extends GraphDef>(
   if (input.clearValidTo === true) {
     assertClearValidToSupported(backend, "node");
   }
+  const atomicEntry = {
+    input,
+    clearDeleted: options?.clearDeleted === true,
+  } satisfies NodeUpsertUpdateBatchEntry;
+  const atomicExecutor = resolveAtomicNodeUpdateExecutor(
+    ctx,
+    [atomicEntry],
+    backend,
+  );
   const opContext = ctx.createOperationContext(
     "update",
     "node",
     input.kind,
     input.id,
   );
+  if (atomicExecutor !== undefined) {
+    return ctx.withOperationHooks(
+      opContext,
+      async () => {
+        const nodes = await executeAtomicNodeResolvedUpdates(
+          ctx,
+          [atomicEntry],
+          backend,
+          atomicExecutor,
+        );
+        return requireDefined(nodes[0]);
+      },
+      writeResultAlwaysChanges,
+    );
+  }
   return runHookedWritePlan(
     nodeWritePlanContext(ctx),
     opContext,
@@ -2930,113 +2989,14 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
 
   const first = requireDefined(entries[0]);
   const distinctIds = new Set(entries.map((entry) => entry.input.id));
-  const atomicExecutor = resolveAtomicNodeResolvedUpdateBatchExecutor({
-    backend,
-    graph: ctx.graph,
-    schemaVersion: ctx.schemaVersion,
-    historyEnabled: ctx.historyEnabled,
-    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-    kind: first.input.kind,
-    entryCount: entries.length,
-    identityEnabled: ctx.identity !== undefined,
-    registry: ctx.registry,
-  });
-  const atomicShape =
-    atomicExecutor !== undefined &&
-    distinctIds.size === entries.length &&
-    entries.every(
-      (entry) =>
-        !entry.clearDeleted &&
-        entry.input.validFrom === undefined &&
-        entry.input.validTo === undefined &&
-        entry.input.clearValidTo !== true,
+  const atomicExecutor = resolveAtomicNodeUpdateExecutor(ctx, entries, backend);
+  if (atomicExecutor !== undefined) {
+    return executeAtomicNodeResolvedUpdates(
+      ctx,
+      entries,
+      backend,
+      atomicExecutor,
     );
-  if (atomicShape) {
-    const supplied = entries.flatMap((entry) =>
-      entry.existing === undefined ? [] : [entry.existing],
-    );
-    const fetched =
-      supplied.length === entries.length ?
-        undefined
-      : await getNodeRowsByIds(
-          backend,
-          ctx.batchPointRead,
-          ctx.graphId,
-          first.input.kind,
-          [...distinctIds],
-        );
-    let existing = fetched === undefined ? supplied : [...fetched.values()];
-    for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
-      const byId = new Map(existing.map((row) => [row.id, row]));
-      const missing = entries.find((entry) => {
-        const row = byId.get(entry.input.id);
-        return row === undefined || row.deleted_at !== undefined;
-      });
-      if (missing !== undefined) {
-        // This update-only partition was resolved from live rows. Once a
-        // refreshed preimage is absent or tombstoned, the requested update
-        // target no longer exists; do not reinterpret it as a create or fall
-        // through to a transactionless portable write.
-        throw new NodeNotFoundError(first.input.kind, missing.input.id);
-      }
-      const resolved = entries.map((entry) => {
-        const row = requireDefined(byId.get(entry.input.id));
-        const { validatedProps } = resolveNodeUpdateProps(
-          ctx,
-          row,
-          entry.input.props,
-        );
-        return {
-          graphId: ctx.graphId,
-          kind: entry.input.kind,
-          id: entry.input.id,
-          props: validatedProps,
-          expectedVersion: row.version,
-        };
-      });
-      const rows = await atomicExecutor({
-        entries: resolved,
-        schemaFence: {
-          graphId: ctx.graphId,
-          expectedVersion: requireDefined(ctx.schemaVersion),
-        },
-      });
-      if (rows.length === entries.length) {
-        memoizeLeasedSchemaFence(ctx, backend);
-        const returned = new Map(rows.map((row) => [row.id, row]));
-        return entries.map((entry) =>
-          rowToNode(requireDefined(returned.get(entry.input.id))),
-        );
-      }
-      if (rows.length > 0) {
-        throw new CompilerInvariantError(
-          "Atomic resolved node update returned a partial result.",
-          { expected: entries.length, actual: rows.length },
-        );
-      }
-      await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-      if (attempt === NODE_UPDATE_ATTEMPTS) {
-        throw new DatabaseOperationError(
-          `Atomic node upsert batch could not be applied to stable rows after ${NODE_UPDATE_ATTEMPTS} attempts.`,
-          {
-            operation: "update",
-            entity: "node",
-            attempted: entries.map((entry) => ({
-              kind: entry.input.kind,
-              id: entry.input.id,
-            })),
-          },
-        );
-      }
-      const refreshed = await getNodeRowsByIds(
-        backend,
-        ctx.batchPointRead,
-        ctx.graphId,
-        first.input.kind,
-        [...distinctIds],
-      );
-      existing = [...refreshed.values()];
-    }
   }
 
   return runWritePlan(
@@ -3086,6 +3046,104 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
   );
 }
 
+async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  entries: readonly NodeUpsertUpdateBatchEntry[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicNodeResolvedUpdateBatchExecutor,
+): Promise<readonly Node[]> {
+  const first = requireDefined(entries[0]);
+  const distinctIds = new Set(entries.map((entry) => entry.input.id));
+  const supplied = entries.flatMap((entry) =>
+    entry.existing === undefined ? [] : [entry.existing],
+  );
+  const fetched =
+    supplied.length === entries.length ?
+      undefined
+    : await getNodeRowsByIds(
+        backend,
+        ctx.batchPointRead,
+        ctx.graphId,
+        first.input.kind,
+        [...distinctIds],
+      );
+  let existing = fetched === undefined ? supplied : [...fetched.values()];
+  for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
+    const byId = new Map(existing.map((row) => [row.id, row]));
+    const missing = entries.find((entry) => {
+      const row = byId.get(entry.input.id);
+      return row === undefined || row.deleted_at !== undefined;
+    });
+    if (missing !== undefined) {
+      // This update-only partition was resolved from live rows. Once a
+      // refreshed preimage is absent or tombstoned, the requested update
+      // target no longer exists; do not reinterpret it as a create or fall
+      // through to a transactionless portable write.
+      throw new NodeNotFoundError(first.input.kind, missing.input.id);
+    }
+    const resolved = entries.map((entry) => {
+      const row = requireDefined(byId.get(entry.input.id));
+      const { validatedProps } = resolveNodeUpdateProps(
+        ctx,
+        row,
+        entry.input.props,
+      );
+      return {
+        graphId: ctx.graphId,
+        kind: entry.input.kind,
+        id: entry.input.id,
+        props: validatedProps,
+        expectedVersion: row.version,
+      };
+    });
+    const rows = await atomicExecutor({
+      entries: resolved,
+      schemaFence: {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      },
+    });
+    if (rows.length === entries.length) {
+      memoizeLeasedSchemaFence(ctx, backend);
+      const returned = new Map(rows.map((row) => [row.id, row]));
+      return entries.map((entry) =>
+        rowToNode(requireDefined(returned.get(entry.input.id))),
+      );
+    }
+    if (rows.length > 0) {
+      throw new CompilerInvariantError(
+        "Atomic resolved node update returned a partial result.",
+        { expected: entries.length, actual: rows.length },
+      );
+    }
+    await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+    if (attempt === NODE_UPDATE_ATTEMPTS) {
+      throw new DatabaseOperationError(
+        `Atomic node upsert batch could not be applied to stable rows after ${NODE_UPDATE_ATTEMPTS} attempts.`,
+        {
+          operation: "update",
+          entity: "node",
+          attempted: entries.map((entry) => ({
+            kind: entry.input.kind,
+            id: entry.input.id,
+          })),
+        },
+      );
+    }
+    const refreshed = await getNodeRowsByIds(
+      backend,
+      ctx.batchPointRead,
+      ctx.graphId,
+      first.input.kind,
+      [...distinctIds],
+    );
+    existing = [...refreshed.values()];
+  }
+  throw new CompilerInvariantError(
+    "Atomic resolved node update exhausted its retry loop.",
+  );
+}
+
 // ============================================================
 // Node Delete Operations
 // ============================================================
@@ -3096,15 +3154,36 @@ export async function executeNodeDelete<G extends GraphDef>(
   id: string,
   backend: GraphBackend | TransactionBackend,
 ): Promise<void> {
-  // Gate outside hooks and transaction (matching edge deletes): an absent or
-  // already-tombstoned node is a no-op, so it neither fires hooks nor opens a
-  // write transaction (empty transactions are costly on libsql). The cascade
-  // re-reads inside the transaction, so a node concurrently deleted between
-  // this gate and the write lock is still handled correctly.
+  // Gate outside hooks and execution (matching edge deletes): an absent or
+  // already-tombstoned node is a no-op, so it neither fires hooks nor submits
+  // a write. Eligible plain deletes carry the live/restrict/schema verdicts in
+  // one closed program. The portable cascade re-reads inside its transaction,
+  // so a node concurrently deleted between this gate and the write lock is
+  // still handled correctly.
   const gate = await backend.getNode(ctx.graphId, kind, id);
   if (!gate || gate.deleted_at) return;
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
+
+  const atomicExecutor = resolveAtomicNodeDeleteBatchExecutor({
+    backend,
+    graph: ctx.graph,
+    kind,
+    ids: [id],
+    schemaVersion: ctx.schemaVersion,
+    identityEnabled: ctx.identity !== undefined,
+    registry: ctx.registry,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (atomicExecutor !== undefined) {
+    await ctx.withOperationHooks(
+      opContext,
+      () => executeAtomicNodeDeletes(ctx, kind, [id], backend, atomicExecutor),
+      (affectedCount) => affectedCount > 0,
+    );
+    return;
+  }
 
   await runHookedWritePlan(
     nodeWritePlanContext(ctx),
@@ -3213,57 +3292,8 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
     revisionTrackingEnabled: ctx.revisionTrackingEnabled,
   });
   if (atomicExecutor !== undefined) {
-    try {
-      const result = await atomicExecutor({
-        graphId: ctx.graphId,
-        kind,
-        ids,
-        schemaFence: {
-          graphId: ctx.graphId,
-          expectedVersion: requireDefined(ctx.schemaVersion),
-        },
-      });
-      await assertAtomicDeleteSchemaFenceMatched(
-        result.schemaFenceMatched,
-        ctx,
-        backend,
-        "node",
-      );
-      return;
-    } catch (error) {
-      if (!(error instanceof AtomicNodeDeleteRestrictedRefusalError)) {
-        throw error;
-      }
-      const connectedById = await findConnectedEdgesForNodeBatch(
-        ctx,
-        kind,
-        ids,
-        backend,
-      );
-      for (const id of ids) {
-        const connectedEdges =
-          connectedById?.get(id) ??
-          (await backend.findEdgesConnectedTo({
-            graphId: ctx.graphId,
-            nodeKind: kind,
-            nodeId: id,
-          }));
-        if (connectedEdges.length === 0) continue;
-        throw new RestrictedDeleteError({
-          nodeKind: kind,
-          nodeId: id,
-          edgeCount: connectedEdges.length,
-          edgeKinds: [...new Set(connectedEdges.map((edge) => edge.kind))],
-        });
-      }
-      throw new DatabaseOperationError(
-        "Atomic node delete refused a connected edge, but no current " +
-          "restriction could be diagnosed. The connected edge may have " +
-          "changed concurrently after the atomic program aborted.",
-        { operation: "delete", entity: "node" },
-        { cause: error.cause },
-      );
-    }
+    await executeAtomicNodeDeletes(ctx, kind, ids, backend, atomicExecutor);
+    return;
   }
 
   await runWritePlan(
@@ -3298,6 +3328,64 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
     },
     { didWrite: (affectedCount) => affectedCount > 0 },
   );
+}
+
+async function executeAtomicNodeDeletes<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  backend: GraphBackend | TransactionBackend,
+  atomicExecutor: AtomicNodeDeleteBatchExecutor,
+): Promise<number> {
+  try {
+    const result = await atomicExecutor({
+      graphId: ctx.graphId,
+      kind,
+      ids,
+      schemaFence: {
+        graphId: ctx.graphId,
+        expectedVersion: requireDefined(ctx.schemaVersion),
+      },
+    });
+    await assertAtomicDeleteSchemaFenceMatched(
+      result.schemaFenceMatched,
+      ctx,
+      backend,
+      "node",
+    );
+    return result.affectedCount;
+  } catch (error) {
+    if (!(error instanceof AtomicNodeDeleteRestrictedRefusalError)) throw error;
+    const connectedById = await findConnectedEdgesForNodeBatch(
+      ctx,
+      kind,
+      ids,
+      backend,
+    );
+    for (const id of ids) {
+      const connectedEdges =
+        connectedById?.get(id) ??
+        (await backend.findEdgesConnectedTo({
+          graphId: ctx.graphId,
+          nodeKind: kind,
+          nodeId: id,
+        }));
+      if (connectedEdges.length === 0) continue;
+      throw new RestrictedDeleteError({
+        nodeKind: kind,
+        nodeId: id,
+        edgeCount: connectedEdges.length,
+        edgeKinds: [...new Set(connectedEdges.map((edge) => edge.kind))],
+      });
+    }
+    throw new DatabaseOperationError(
+      "Atomic node delete refused a connected edge, but no current " +
+        "restriction could be diagnosed. The connected edge may have " +
+        "changed concurrently after the atomic program aborted.",
+      { operation: "delete", entity: "node" },
+      { cause: error.cause },
+    );
+  }
 }
 
 /**
