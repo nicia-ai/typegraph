@@ -623,10 +623,10 @@ export type PostgresExecutionAdapterOptions = Readonly<{
    */
   maxBindParameters?: number;
   /**
-   * @internal Whether the owning backend declares interactive transactions.
-   * The atomic-program adapter must not infer authority from a method alone.
+   * @internal Affirmative factory authorization for a root interactive atomic
+   * program. The adapter must not infer transaction isolation from methods.
    */
-  interactiveTransactions?: boolean;
+  interactiveAtomicBatch?: boolean;
   /**
    * @internal Resolve Drizzle's pinned transaction client. Trusted import uses
    * this on its private adapter; ordinary transaction backends deliberately do
@@ -651,7 +651,7 @@ export function createPostgresExecutionAdapter(
     options.useTransactionClient ?? false,
   );
   const canOpenInteractiveAtomicBatch =
-    options.interactiveTransactions !== false &&
+    options.interactiveAtomicBatch === true &&
     neonHttpClient === undefined &&
     pgClient !== undefined &&
     options.useTransactionClient !== true &&

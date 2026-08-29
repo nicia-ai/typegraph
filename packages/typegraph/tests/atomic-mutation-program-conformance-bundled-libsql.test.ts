@@ -638,20 +638,24 @@ function buildCases(
         errorMatches: (error) => error instanceof ValidationError,
       },
     },
-    ...buildResolvedCases(client, {
-      mutateEdgesRefusal,
-      mutateEdgesStale,
-      mutateEdgesSuccess,
-      mutateNodesRefusal,
-      mutateNodesStale,
-      mutateNodesSuccess,
-      updateEdgesRefusal,
-      updateEdgesStale,
-      updateEdgesSuccess,
-      updateNodesRefusal,
-      updateNodesStale,
-      updateNodesSuccess,
-    }),
+    ...buildResolvedCases(
+      client,
+      {
+        mutateEdgesRefusal,
+        mutateEdgesStale,
+        mutateEdgesSuccess,
+        mutateNodesRefusal,
+        mutateNodesStale,
+        mutateNodesSuccess,
+        updateEdgesRefusal,
+        updateEdgesStale,
+        updateEdgesSuccess,
+        updateNodesRefusal,
+        updateNodesStale,
+        updateNodesSuccess,
+      },
+      backend.capabilities.execution.interactiveTransactions,
+    ),
     buildConvergenceCase(convergeSuccess, convergeStale, convergeRefusal),
   ];
   return cases.map((conformanceCase) => ({ ...conformanceCase, backend }));
@@ -675,6 +679,7 @@ function buildResolvedCases(
     updateNodesStale: Scenario;
     updateNodesSuccess: Scenario;
   }>,
+  singletonUpdateRoute: boolean,
 ): readonly UnboundConformanceCase[] {
   return [
     buildNodeResolvedCase(
@@ -684,6 +689,7 @@ function buildResolvedCases(
       scenarios.updateNodesStale,
       scenarios.updateNodesRefusal,
       false,
+      singletonUpdateRoute,
     ),
     buildEdgeResolvedCase(
       "updateEdges",
@@ -692,6 +698,7 @@ function buildResolvedCases(
       scenarios.updateEdgesStale,
       scenarios.updateEdgesRefusal,
       false,
+      singletonUpdateRoute,
     ),
     buildNodeResolvedCase(
       "mutateNodes",
@@ -700,6 +707,7 @@ function buildResolvedCases(
       scenarios.mutateNodesStale,
       scenarios.mutateNodesRefusal,
       true,
+      singletonUpdateRoute,
     ),
     buildEdgeResolvedCase(
       "mutateEdges.resolvedSet",
@@ -708,6 +716,7 @@ function buildResolvedCases(
       scenarios.mutateEdgesStale,
       scenarios.mutateEdgesRefusal,
       true,
+      singletonUpdateRoute,
     ),
   ];
 }
@@ -719,6 +728,7 @@ function buildNodeResolvedCase(
   stale: Scenario,
   refusal: Scenario,
   mixed: boolean,
+  singletonUpdateRoute: boolean,
 ): UnboundConformanceCase {
   return {
     variant,
@@ -757,7 +767,7 @@ function buildNodeResolvedCase(
         };
       },
       execute: async () => {
-        if (!mixed) {
+        if (!mixed && singletonUpdateRoute) {
           const collection = success.requireStore().nodes.Person;
           const second = await collection.update(`${variant}-b` as never, {
             name: "Updated B",
@@ -773,16 +783,28 @@ function buildNodeResolvedCase(
             node.score,
           ]);
         }
-        const inputs = [
-          {
-            id: `${variant}-new`,
-            props: { name: "New", score: 3 },
-          },
-          {
-            id: `${variant}-a`,
-            props: { name: "Updated", score: 4 },
-          },
-        ];
+        const inputs =
+          mixed ?
+            [
+              {
+                id: `${variant}-new`,
+                props: { name: "New", score: 3 },
+              },
+              {
+                id: `${variant}-a`,
+                props: { name: "Updated", score: 4 },
+              },
+            ]
+          : [
+              {
+                id: `${variant}-b`,
+                props: { name: "Updated B", score: 20 },
+              },
+              {
+                id: `${variant}-a`,
+                props: { name: "Updated A", score: 10 },
+              },
+            ];
         const nodes = await success
           .requireStore()
           .nodes.Person.bulkUpsertById(inputs);
@@ -819,12 +841,19 @@ function buildNodeResolvedCase(
               props: { name: "Updated", score: 3 },
             },
           ])
-        : stale
+        : singletonUpdateRoute ?
+          stale
             .requireStore()
             .nodes.Person.update(`${variant}-stale-existing` as never, {
               name: "Updated",
               score: 3,
-            }),
+            })
+        : stale.requireStore().nodes.Person.bulkUpsertById([
+            {
+              id: `${variant}-stale-existing`,
+              props: { name: "Updated", score: 3 },
+            },
+          ]),
       observeState: stale.observe,
       errorMatches: (error) => error instanceof StaleVersionError,
     },
@@ -861,12 +890,19 @@ function buildNodeResolvedCase(
               props: { name: "Updated", score: 3 },
             },
           ])
-        : refusal
+        : singletonUpdateRoute ?
+          refusal
             .requireStore()
             .nodes.Person.update(`${variant}-refusal-existing` as never, {
               name: "Updated",
               score: 3,
-            }),
+            })
+        : refusal.requireStore().nodes.Person.bulkUpsertById([
+            {
+              id: `${variant}-refusal-existing`,
+              props: { name: "Updated", score: 3 },
+            },
+          ]),
       observeState: refusal.observe,
       errorMatches: (error) => error instanceof DatabaseOperationError,
     },
@@ -880,6 +916,7 @@ function buildEdgeResolvedCase(
   stale: Scenario,
   refusal: Scenario,
   mixed: boolean,
+  singletonUpdateRoute: boolean,
 ): UnboundConformanceCase {
   return {
     variant,
@@ -987,7 +1024,7 @@ function buildEdgeResolvedCase(
       },
       execute: async () => {
         const store = success.requireStore();
-        if (!mixed) {
+        if (!mixed && singletonUpdateRoute) {
           const second = await store.edges.relates.update(
             `${variant}-success-second` as never,
             { label: "Updated Second" },
@@ -1004,20 +1041,36 @@ function buildEdgeResolvedCase(
         const to = requireDefined(
           await store.nodes.Person.getById(`${variant}-success-to` as never),
         );
-        const inputs = [
-          {
-            id: `${variant}-success-new` as never,
-            from,
-            to,
-            props: { label: "New" },
-          },
-          {
-            id: `${variant}-success-existing` as never,
-            from,
-            to,
-            props: { label: "Updated" },
-          },
-        ];
+        const inputs =
+          mixed ?
+            [
+              {
+                id: `${variant}-success-new` as never,
+                from,
+                to,
+                props: { label: "New" },
+              },
+              {
+                id: `${variant}-success-existing` as never,
+                from,
+                to,
+                props: { label: "Updated" },
+              },
+            ]
+          : [
+              {
+                id: `${variant}-success-second` as never,
+                from,
+                to,
+                props: { label: "Updated Second" },
+              },
+              {
+                id: `${variant}-success-existing` as never,
+                from,
+                to,
+                props: { label: "Updated Existing" },
+              },
+            ];
         const edges = await store.edges.relates.bulkUpsertById(inputs);
         return edges.map((edge) => [edge.id, edge.label]);
       },
@@ -1033,7 +1086,7 @@ function buildEdgeResolvedCase(
       },
       execute: async () => {
         const store = stale.requireStore();
-        if (!mixed) {
+        if (!mixed && singletonUpdateRoute) {
           return store.edges.relates.update(
             `${variant}-stale-existing` as never,
             { label: "Updated" },
@@ -1045,20 +1098,31 @@ function buildEdgeResolvedCase(
         const to = requireDefined(
           await store.nodes.Person.getById(`${variant}-stale-to` as never),
         );
-        return store.edges.relates.bulkUpsertById([
-          {
-            id: `${variant}-stale-new` as never,
-            from,
-            to,
-            props: { label: "New" },
-          },
-          {
-            id: `${variant}-stale-existing` as never,
-            from,
-            to,
-            props: { label: "Updated" },
-          },
-        ]);
+        return store.edges.relates.bulkUpsertById(
+          mixed ?
+            [
+              {
+                id: `${variant}-stale-new` as never,
+                from,
+                to,
+                props: { label: "New" },
+              },
+              {
+                id: `${variant}-stale-existing` as never,
+                from,
+                to,
+                props: { label: "Updated" },
+              },
+            ]
+          : [
+              {
+                id: `${variant}-stale-existing` as never,
+                from,
+                to,
+                props: { label: "Updated" },
+              },
+            ],
+        );
       },
       observeState: stale.observe,
       errorMatches: (error) => error instanceof StaleVersionError,
@@ -1077,7 +1141,7 @@ function buildEdgeResolvedCase(
       },
       execute: async () => {
         const store = refusal.requireStore();
-        if (!mixed) {
+        if (!mixed && singletonUpdateRoute) {
           return store.edges.relates.update(
             `${variant}-refusal-existing` as never,
             { label: "Updated" },
@@ -1089,20 +1153,31 @@ function buildEdgeResolvedCase(
         const to = requireDefined(
           await store.nodes.Person.getById(`${variant}-refusal-to` as never),
         );
-        return store.edges.relates.bulkUpsertById([
-          {
-            id: `${variant}-refusal-new` as never,
-            from,
-            to,
-            props: { label: "New" },
-          },
-          {
-            id: `${variant}-refusal-existing` as never,
-            from,
-            to,
-            props: { label: "Updated" },
-          },
-        ]);
+        return store.edges.relates.bulkUpsertById(
+          mixed ?
+            [
+              {
+                id: `${variant}-refusal-new` as never,
+                from,
+                to,
+                props: { label: "New" },
+              },
+              {
+                id: `${variant}-refusal-existing` as never,
+                from,
+                to,
+                props: { label: "Updated" },
+              },
+            ]
+          : [
+              {
+                id: `${variant}-refusal-existing` as never,
+                from,
+                to,
+                props: { label: "Updated" },
+              },
+            ],
+        );
       },
       observeState: refusal.observe,
       errorMatches: (error) => error instanceof DatabaseOperationError,

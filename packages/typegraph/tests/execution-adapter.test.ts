@@ -389,8 +389,9 @@ describe("postgres execution adapter", () => {
       dialect: { sqlToQuery: vi.fn() },
       transaction,
     }) as unknown as AnyPgDatabase;
-    const executeAtomicBatch =
-      createPostgresExecutionAdapter(db).executeAtomicBatch;
+    const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      interactiveAtomicBatch: true,
+    }).executeAtomicBatch;
     expect(executeAtomicBatch).toBeDefined();
     if (executeAtomicBatch === undefined) {
       throw new Error("Expected interactive PostgreSQL atomic batch support");
@@ -421,7 +422,7 @@ describe("postgres execution adapter", () => {
     ).toBeUndefined();
   });
 
-  it("honors an explicit interactive-transaction capability refusal", () => {
+  it("requires affirmative factory authorization for an interactive batch", () => {
     const db = Object.assign(new RecognizedNodePgDatabase(), {
       $client: { query: vi.fn() },
       dialect: { sqlToQuery: vi.fn() },
@@ -430,7 +431,7 @@ describe("postgres execution adapter", () => {
 
     expect(
       createPostgresExecutionAdapter(db, {
-        interactiveTransactions: false,
+        interactiveAtomicBatch: false,
       }).executeAtomicBatch,
     ).toBeUndefined();
   });
@@ -443,6 +444,7 @@ describe("postgres execution adapter", () => {
       transaction,
     }) as unknown as AnyPgDatabase;
     const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      interactiveAtomicBatch: true,
       maxBindParameters: 1,
     }).executeAtomicBatch;
     if (executeAtomicBatch === undefined) {
@@ -472,8 +474,9 @@ describe("postgres execution adapter", () => {
       dialect: { sqlToQuery: vi.fn() },
       transaction,
     }) as unknown as AnyPgDatabase;
-    const executeAtomicBatch =
-      createPostgresExecutionAdapter(db).executeAtomicBatch;
+    const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      interactiveAtomicBatch: true,
+    }).executeAtomicBatch;
     if (executeAtomicBatch === undefined) {
       throw new Error("Expected interactive PostgreSQL atomic batch support");
     }

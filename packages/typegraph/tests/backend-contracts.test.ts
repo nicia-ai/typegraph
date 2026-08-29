@@ -548,10 +548,14 @@ describe("serialized Postgres client detection", () => {
     return client;
   }
 
-  it("marks a bare pg Client", () => {
+  it("marks a bare pg Client and refuses root atomic batching", () => {
     const client = new Client({ connectionString: CONNECTION_STRING });
 
     expect(isSerializedPostgresClient(client)).toBe(true);
+    const backend = createPostgresBackend(drizzlePostgres(client), {
+      vector: false,
+    });
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
   });
 
   it("does not mark a default pg Pool", () => {
