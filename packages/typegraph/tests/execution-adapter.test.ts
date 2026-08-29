@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { entityKind, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -18,6 +18,11 @@ import {
 } from "../src/backend/types";
 import { sql as portableSql } from "../src/query/sql-fragment";
 import { createTestDatabase } from "./test-utils";
+
+class RecognizedNodePgDatabase {
+  static readonly [entityKind] = "NodePgDatabase";
+  readonly testFixture = true;
+}
 
 describe("sqlite execution adapter", () => {
   it("renders TypeGraph fragments without binding nested fragments as values", () => {
@@ -359,6 +364,130 @@ function makeMockPgDb(): { db: AnyPgDatabase; query: MockPgQueryFunction } {
 }
 
 describe("postgres execution adapter", () => {
+  it("runs compiled atomic programs on one pinned interactive transaction", async () => {
+    type QueryArgument =
+      string | Readonly<{ text: string; values: readonly unknown[] }>;
+    const transactionQuery = vi.fn(
+      (configOrSql: QueryArgument, positional?: readonly unknown[]) => {
+        const sqlText =
+          typeof configOrSql === "string" ? configOrSql : configOrSql.text;
+        const params =
+          typeof configOrSql === "string" ?
+            (positional ?? [])
+          : configOrSql.values;
+        return Promise.resolve({ rows: [{ params, sqlText }] });
+      },
+    );
+    const transaction = vi.fn(
+      async (run: (tx: AnyPgDatabase) => Promise<unknown>) =>
+        run({
+          session: { client: { query: transactionQuery } },
+        } as unknown as AnyPgDatabase),
+    );
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction,
+    }) as unknown as AnyPgDatabase;
+    const executeAtomicBatch =
+      createPostgresExecutionAdapter(db).executeAtomicBatch;
+    expect(executeAtomicBatch).toBeDefined();
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected interactive PostgreSQL atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch<{ params: readonly unknown[]; sqlText: string }>([
+        { sql: "SELECT $1 AS slot", params: ["first"] },
+        { sql: "SELECT $1 AS slot", params: ["second"] },
+      ]),
+    ).resolves.toEqual([
+      [{ params: ["first"], sqlText: "SELECT $1 AS slot" }],
+      [{ params: ["second"], sqlText: "SELECT $1 AS slot" }],
+    ]);
+    expect(transaction).toHaveBeenCalledOnce();
+    expect(transactionQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not infer atomic transaction authority from query-shaped methods", () => {
+    const db = {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction: vi.fn(),
+    } as unknown as AnyPgDatabase;
+
+    expect(
+      createPostgresExecutionAdapter(db).executeAtomicBatch,
+    ).toBeUndefined();
+  });
+
+  it("honors an explicit interactive-transaction capability refusal", () => {
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction: vi.fn(),
+    }) as unknown as AnyPgDatabase;
+
+    expect(
+      createPostgresExecutionAdapter(db, {
+        interactiveTransactions: false,
+      }).executeAtomicBatch,
+    ).toBeUndefined();
+  });
+
+  it("validates an interactive program before opening its transaction", async () => {
+    const transaction = vi.fn();
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction,
+    }) as unknown as AnyPgDatabase;
+    const executeAtomicBatch = createPostgresExecutionAdapter(db, {
+      maxBindParameters: 1,
+    }).executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected interactive PostgreSQL atomic batch support");
+    }
+
+    await expect(executeAtomicBatch([])).resolves.toEqual([]);
+    await expect(
+      executeAtomicBatch([{ params: [1, 2], sql: "SELECT $1, $2" }]),
+    ).rejects.toMatchObject({
+      details: {
+        capability: "maxBindParameters",
+        maxBindParameters: 1,
+        parameterCount: 2,
+      },
+    });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the transaction client cannot execute the program", async () => {
+    const transaction = vi.fn(
+      async (run: (tx: AnyPgDatabase) => Promise<unknown>) =>
+        run({ session: { client: {} } } as unknown as AnyPgDatabase),
+    );
+    const db = Object.assign(new RecognizedNodePgDatabase(), {
+      $client: { query: vi.fn() },
+      dialect: { sqlToQuery: vi.fn() },
+      transaction,
+    }) as unknown as AnyPgDatabase;
+    const executeAtomicBatch =
+      createPostgresExecutionAdapter(db).executeAtomicBatch;
+    if (executeAtomicBatch === undefined) {
+      throw new Error("Expected interactive PostgreSQL atomic batch support");
+    }
+
+    await expect(
+      executeAtomicBatch([{ params: [], sql: "SELECT 1" }]),
+    ).rejects.toMatchObject({
+      details: { capability: "execution.atomicBatch" },
+      message:
+        "PostgreSQL atomic batch execution could not bind to its transaction client.",
+    });
+    expect(transaction).toHaveBeenCalledOnce();
+  });
+
   it("uses Neon HTTP transaction batches when the client exposes query", async () => {
     type NeonQuery = Promise<readonly unknown[]>;
     const query = vi.fn<

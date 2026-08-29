@@ -46,6 +46,7 @@ describe("Drizzle Postgres adapter on @neondatabase/serverless", () => {
     // time and doesn't depend on a live connection. It's the same on
     // every PostgreSQL driver we support.
     expect(backend.capabilities.vector?.supported).toBe(true);
+    expect(backend.capabilities.execution.atomicBatch).toBe("root");
     expect(backend.tableNames?.nodes).toBe("typegraph_nodes");
 
     // Sanity: the fast path execute / prepare functions exist

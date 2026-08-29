@@ -313,10 +313,13 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 
 ### Native node bulk eligibility
 
-Bundled Neon HTTP, Cloudflare D1, and libSQL roots can use one schema-fenced
-native atomic exchange for plain schema-managed `nodes.bulkInsert()` and
-`nodes.bulkCreate()` calls when the node has no claims, Operational Identity,
-history, revision, or projections. If any batch member has a claim, every
+Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
+Cloudflare D1, and libSQL roots can use one schema-fenced native atomic program
+for plain schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()` calls
+when the node has no claims, Operational Identity, history, revision, or
+projections. Session-capable PostgreSQL executes that program on one pinned
+transaction; Neon HTTP, D1, and libSQL submit one transport batch. If any batch
+member has a claim, every
 claimed member must have exactly one `unique` constraint whose scope is the
 literal `kind`, every input ID must be generated, and the backend's
 claimed-member budget must accommodate the batch. Claim-free kinds may
@@ -336,7 +339,7 @@ claim. This is a measured submission count, not a wall-clock RTT benchmark;
 fallback paths are intentionally not assigned a latency claim.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
-use one schema-fenced native exchange when history and revision capture are
+use one schema-fenced native program when history and revision capture are
 disabled. Declared durable match identities and `one`, `unique`, or
 `oneActive` cardinality are maintained inside that exchange; any endpoint,
 identity, or cardinality refusal rolls the whole call back. Transaction-scoped

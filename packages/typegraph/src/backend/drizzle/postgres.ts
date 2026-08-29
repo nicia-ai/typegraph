@@ -821,6 +821,8 @@ export function createPostgresBackend(
     : { preparedStatementCacheMax: options.preparedStatementCacheMax }),
     maxBindParameters:
       declaredCapabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+    interactiveTransactions:
+      declaredCapabilities.execution.interactiveTransactions,
   };
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const atomicSqlProgramExecutor =

@@ -64,6 +64,18 @@ describe("createPostgresBackend({ vector: false })", () => {
 
     // Disabling vector must not disturb the rest of the capability surface.
     expect(backend.capabilities.execution.interactiveTransactions).toBe(true);
+    expect(backend.capabilities.execution.atomicBatch).toBe("root");
     expect(backend.capabilities.fulltext?.supported).toBe(true);
+  });
+
+  it("does not advertise an interactive atomic batch when transactions are refused", () => {
+    pool = new Pool({ connectionString: PLACEHOLDER_URL });
+    const backend = createPostgresBackend(drizzle(pool), {
+      capabilities: { execution: { interactiveTransactions: false } },
+      vector: false,
+    });
+
+    expect(backend.capabilities.execution.interactiveTransactions).toBe(false);
+    expect(backend.capabilities.execution.atomicBatch).toBe("none");
   });
 });
