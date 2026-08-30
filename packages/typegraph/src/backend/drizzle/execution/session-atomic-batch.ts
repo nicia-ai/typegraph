@@ -1,6 +1,6 @@
 import { CompilerInvariantError } from "../../../errors";
 import type {
-  AtomicSqlProgramAdapter,
+  AtomicSqlBatchExecutor,
   CompiledAtomicSqlStatement,
 } from "../../capabilities/atomic-sql-program";
 import type { SqlExecutionAdapter } from "./types";
@@ -8,6 +8,10 @@ import type { SqlExecutionAdapter } from "./types";
 type SessionAtomicBatchExecution = Readonly<{
   executeCompiled: NonNullable<SqlExecutionAdapter["executeCompiled"]>;
   runExclusive: NonNullable<SqlExecutionAdapter["runExclusive"]>;
+}>;
+
+type SessionAtomicBatchAdapter = Readonly<{
+  executeAtomicBatch: AtomicSqlBatchExecutor;
 }>;
 
 const ATOMIC_PROGRAM_SAVEPOINT = "typegraph_atomic_program";
@@ -37,7 +41,7 @@ const RELEASE_ATOMIC_PROGRAM = {
  */
 export function createSessionAtomicBatchAdapter(
   execution: SessionAtomicBatchExecution,
-): AtomicSqlProgramAdapter {
+): SessionAtomicBatchAdapter {
   const { executeCompiled, runExclusive } = execution;
 
   return {
