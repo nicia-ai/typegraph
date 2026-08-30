@@ -62,7 +62,7 @@ function atomicNodeClaimGateParameterCount(
   if (first === undefined) throw new Error("Expected a claimed member");
   const query = buildAtomicNodeBatchWithSchemaFence(
     sqliteTables,
-    [first.entry],
+    [...new Set(selected.map((entry) => entry.entry))],
     "2026-08-25T00:00:00.000Z",
     schemaFence,
     drizzleSql.empty(),
@@ -73,11 +73,23 @@ function atomicNodeClaimGateParameterCount(
 }
 
 describe("schema-fenced atomic node batch SQL", () => {
-  it("pins family-scoped D1 claim-gate ceilings", () => {
+  it("pins per-statement D1 claim-gate chunk ceilings", () => {
     const disjointEntries = Array.from({ length: 8 }, (_value, index) => {
       const id = `person-${index}`;
+      const claim = {
+        axis: "disjoint-axis",
+        constraintName: "disjoint-constraint",
+        key: id,
+        placement: "pre-insert",
+        verdict: {
+          kind: "disjointness",
+          conflictingKinds: ["Rival"],
+        },
+      } as const;
       return {
-        ordinal: index,
+        memberOrdinal: index,
+        claimOrdinal: 0,
+        claim,
         entry: {
           idSource: "caller",
           params: {
@@ -86,23 +98,27 @@ describe("schema-fenced atomic node batch SQL", () => {
             id,
             props: { name: `Person ${index}` },
           },
-          claim: {
-            axis: "disjoint-axis",
-            constraintName: "disjoint-constraint",
-            key: id,
-            placement: "pre-insert",
-            verdict: {
-              kind: "disjointness",
-              conflictingKinds: ["Rival"],
-            },
-          },
+          claims: [claim],
         },
       } as const satisfies AtomicNodeClaimEntry;
     });
     const uniquenessEntries = Array.from({ length: 15 }, (_value, index) => {
       const id = `unique-person-${index}`;
+      const claim = {
+        axis: "Person",
+        constraintName: "person-name",
+        key: `unique-name-${index}`,
+        placement: "pre-insert",
+        verdict: {
+          kind: "uniqueness",
+          fields: ["name"],
+          probeAxes: ["Person"],
+        },
+      } as const;
       return {
-        ordinal: index,
+        memberOrdinal: index,
+        claimOrdinal: 0,
+        claim,
         entry: {
           idSource: "generated",
           params: {
@@ -111,32 +127,22 @@ describe("schema-fenced atomic node batch SQL", () => {
             id,
             props: { name: `Unique Person ${index}` },
           },
-          claim: {
-            axis: "Person",
-            constraintName: "person-name",
-            key: `unique-name-${index}`,
-            placement: "pre-insert",
-            verdict: {
-              kind: "uniqueness",
-              fields: ["name"],
-              probeAxes: ["Person"],
-            },
-          },
+          claims: [claim],
         },
       } as const satisfies AtomicNodeClaimEntry;
     });
 
     expect(
-      atomicNodeClaimGateParameterCount(disjointEntries, 7),
+      atomicNodeClaimGateParameterCount(disjointEntries, 4),
     ).toBeLessThanOrEqual(100);
     expect(
-      atomicNodeClaimGateParameterCount(disjointEntries, 8),
+      atomicNodeClaimGateParameterCount(disjointEntries, 5),
     ).toBeGreaterThan(100);
     expect(
-      atomicNodeClaimGateParameterCount(uniquenessEntries, 14),
+      atomicNodeClaimGateParameterCount(uniquenessEntries, 6),
     ).toBeLessThanOrEqual(100);
     expect(
-      atomicNodeClaimGateParameterCount(uniquenessEntries, 15),
+      atomicNodeClaimGateParameterCount(uniquenessEntries, 7),
     ).toBeGreaterThan(100);
   });
 

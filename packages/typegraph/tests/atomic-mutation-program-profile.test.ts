@@ -347,7 +347,7 @@ describe("atomic mutation program execution profile", () => {
       executeCustomNodeBatch.bind(undefined);
     Object.defineProperty(createNodes, "claimSupport", {
       configurable: true,
-      value: { maxEntriesByFamily: { uniqueness: -1 } },
+      value: { families: ["uniqueness"], maxInputCostPerEntry: -1 },
     });
 
     const error = captureThrown(() =>
@@ -358,7 +358,7 @@ describe("atomic mutation program execution profile", () => {
       details: {
         code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
         family: "createNodes",
-        limit: "claimSupport.maxEntriesByFamily.uniqueness",
+        limit: "claimSupport.maxInputCostPerEntry",
       },
     });
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
@@ -371,7 +371,7 @@ describe("atomic mutation program execution profile", () => {
       executeCustomNodeBatch.bind(undefined);
     Object.defineProperty(createNodes, "claimSupport", {
       configurable: true,
-      value: { maxEntriesByFamily: { unknown: 1 } },
+      value: { families: ["unknown"], maxInputCostPerEntry: 1 },
     });
 
     const error = captureThrown(() =>
@@ -382,7 +382,7 @@ describe("atomic mutation program execution profile", () => {
       details: {
         code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
         family: "createNodes",
-        limit: "claimSupport.maxEntriesByFamily",
+        limit: "claimSupport.families",
       },
     });
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
@@ -395,7 +395,7 @@ describe("atomic mutation program execution profile", () => {
       executeCustomNodeBatch.bind(undefined);
     Object.defineProperty(createNodes, "claimSupport", {
       configurable: true,
-      value: { maxEntriesByFamily: {} },
+      value: { families: [], maxInputCostPerEntry: 0 },
     });
 
     expect(() =>
@@ -404,7 +404,7 @@ describe("atomic mutation program execution profile", () => {
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(true);
   });
 
-  it("applies pure and mixed claim-family ceilings independently", () => {
+  it("applies claim families and per-member input cost independently", () => {
     const uniquenessClaim = {
       axis: "Person",
       constraintName: "person-name",
@@ -424,31 +424,31 @@ describe("atomic mutation program execution profile", () => {
       verdict: { kind: "disjointness", conflictingKinds: ["Rival"] },
     } as const satisfies NodeInsertClaim;
     const support = {
-      maxEntriesByFamily: { uniqueness: 14, disjointness: 7 },
-      maxMixedEntries: 7,
+      families: ["uniqueness", "disjointness"],
+      maxInputCostPerEntry: 42,
     } as const;
 
     expect(
-      supportsAtomicNodeClaims(support, repeatClaim(uniquenessClaim, 14)),
+      supportsAtomicNodeClaims(support, repeatClaim(uniquenessClaim, 7)),
     ).toBe(true);
     expect(
-      supportsAtomicNodeClaims(support, repeatClaim(uniquenessClaim, 15)),
+      supportsAtomicNodeClaims(support, repeatClaim(uniquenessClaim, 8)),
     ).toBe(false);
     expect(
-      supportsAtomicNodeClaims(support, repeatClaim(disjointnessClaim, 7)),
+      supportsAtomicNodeClaims(support, repeatClaim(disjointnessClaim, 3)),
     ).toBe(true);
     expect(
-      supportsAtomicNodeClaims(support, repeatClaim(disjointnessClaim, 8)),
+      supportsAtomicNodeClaims(support, repeatClaim(disjointnessClaim, 4)),
     ).toBe(false);
     expect(
       supportsAtomicNodeClaims(support, [
-        ...repeatClaim(uniquenessClaim, 6),
+        ...repeatClaim(uniquenessClaim, 4),
         disjointnessClaim,
       ]),
     ).toBe(true);
     expect(
       supportsAtomicNodeClaims(support, [
-        ...repeatClaim(uniquenessClaim, 7),
+        ...repeatClaim(uniquenessClaim, 5),
         disjointnessClaim,
       ]),
     ).toBe(false);

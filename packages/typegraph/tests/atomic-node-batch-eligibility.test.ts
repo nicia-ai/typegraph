@@ -195,8 +195,8 @@ function createFakeAtomicNodeBatch(
   }
   return Object.assign(execute, {
     claimSupport: {
-      maxEntriesByFamily: { disjointness: 6, uniqueness: 6 },
-      maxMixedEntries: 6,
+      families: ["disjointness", "uniqueness"] as const,
+      maxInputCostPerEntry: 87,
     },
     ...(projectionFamilies === undefined ?
       {}
@@ -326,7 +326,7 @@ describe("atomic node batch eligibility", () => {
   it.each([
     ["caller id", [{ ...input, id: "person-1" }]],
     ["mixed ids", [input, { ...input, id: "person-2" }]],
-  ] as const)("refuses %s for constrained nodes", (_label, inputs) => {
+  ] as const)("accepts %s for constrained nodes", (_label, inputs) => {
     const backend = rootBackend(false);
     markAtomicRoot(backend);
     expect(
@@ -340,7 +340,27 @@ describe("atomic node batch eligibility", () => {
         historyEnabled: false,
         revisionTrackingEnabled: false,
       }),
-    ).toBeUndefined();
+    ).toBeDefined();
+  });
+
+  it.each([
+    ["multiple unique constraints", multipleUniqueGraph],
+    ["kindWithSubClasses unique constraint", subclassUniqueGraph],
+  ] as const)("accepts %s", (_label, candidateGraph) => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: candidateGraph,
+        registry: buildKindRegistry(candidateGraph),
+        inputs: [input],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
   });
 
   it("refuses a schema-less shape", () => {
@@ -447,22 +467,6 @@ describe("atomic node batch eligibility", () => {
   });
 
   it.each([
-    [
-      "multiple unique constraints",
-      multipleUniqueGraph,
-      input,
-      false,
-      false,
-      false,
-    ],
-    [
-      "kindWithSubClasses unique constraint",
-      subclassUniqueGraph,
-      input,
-      false,
-      false,
-      false,
-    ],
     [
       "search projection",
       searchableGraph,

@@ -112,7 +112,7 @@ export function rephaseNonTransactionalNodeClaimPlan(
 }
 
 /**
- * Normalizes the one-claim envelope accepted by an atomic node program.
+ * Normalizes the complete claim envelope accepted by an atomic node program.
  *
  * Unlike the ordinary root insert seam, a closed program can also prove a
  * disjoint claim because it carries the legacy live-node probe and cleanup in
@@ -125,28 +125,33 @@ export function rephaseAtomicNodeClaimPlan(
 ): ManagedNodeCreatePlan | undefined {
   if (
     plan.mode.kind !== "ordinary" ||
-    plan.projections.length > 0 ||
-    plan.claims.length !== 1 ||
+    plan.claims.length === 0 ||
     !supportsAtomicNodeClaims(support, plan.claims)
   ) {
     return;
   }
-  const claim = plan.claims[0];
-  if (claim === undefined) return;
-  const uniquenessSupported =
-    plan.idGenerated &&
-    claim.verdict.kind === "uniqueness" &&
-    claim.axis === plan.params.kind &&
-    claim.verdict.probeAxes.length === 1 &&
-    claim.verdict.probeAxes[0] === claim.axis;
-  const disjointnessSupported =
-    claim.verdict.kind === "disjointness" &&
-    claim.key === plan.params.id &&
-    claim.verdict.conflictingKinds.length === 1;
-  if (!uniquenessSupported && !disjointnessSupported) return;
+  const supported = plan.claims.every((claim) => {
+    if (claim.verdict.kind === "uniqueness") {
+      return (
+        claim.verdict.probeAxes.length > 0 &&
+        claim.verdict.probeAxes[0] === claim.axis &&
+        new Set(claim.verdict.probeAxes).size === claim.verdict.probeAxes.length
+      );
+    }
+    return (
+      claim.key === plan.params.id &&
+      claim.verdict.conflictingKinds.length > 0 &&
+      new Set(claim.verdict.conflictingKinds).size ===
+        claim.verdict.conflictingKinds.length
+    );
+  });
+  if (!supported) return;
   return {
     ...plan,
-    claims: [{ ...claim, placement: "pre-insert" }],
+    claims: plan.claims.map((claim) => ({
+      ...claim,
+      placement: "pre-insert",
+    })),
   };
 }
 

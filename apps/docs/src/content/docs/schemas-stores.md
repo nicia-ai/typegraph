@@ -724,14 +724,15 @@ driver, Neon HTTP, Cloudflare D1, and libSQL roots have a narrower native path
 for schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()`:
 generated, caller-supplied, or mixed IDs can run as one schema-fenced atomic
 program when there is no Operational Identity, history, or revision work. The
-program can carry fulltext/vector projections or its supported claim envelope,
-but not both yet. Session-capable PostgreSQL pins the program to one transaction;
+program composes fulltext/vector projections with its supported uniqueness and
+disjointness claim envelope. Session-capable PostgreSQL pins the program to one transaction;
 Neon HTTP, D1, and libSQL submit one transport batch. `bulkCreate()` restores
-rows to input order. The same program accepts one advertised same-kind
-uniqueness or disjointness claim per member; multiple claims, wider uniqueness
-scopes, claim-plus-projection work, identity, and history/revision capture keep the existing
-transaction or fallback path. This is an internal implementation detail, not a
-general Store batch surface.
+rows to input order. Multiple claims, hierarchy-wide uniqueness scopes,
+generated/caller ID mixtures, and claim-plus-projection work share the program;
+compatibility probes preserve legacy claim-axis rows. Identity,
+history/revision capture, or a member beyond the executor's claim-input budget
+keep the existing transaction or fallback path. This is an internal
+implementation detail, not a general Store batch surface.
 
 The same bundled roots execute eligible node and edge `bulkDelete()` calls as
 closed schema-fenced mutation programs. Edge collection identity and node

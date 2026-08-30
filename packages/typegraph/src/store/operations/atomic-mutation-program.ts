@@ -122,42 +122,14 @@ export function resolveAtomicNodeBatchExecutor(
   });
   if (registrations.includes(false)) return;
 
-  const hasDeclaredClaims = registrations.some(
-    (registration) =>
-      registration !== false && (registration.unique ?? []).length > 0,
-  );
-  const hasProjections = registrations.some(
-    (registration) =>
-      registration !== false &&
-      atomicNodeProjectionFamilies(registration).length > 0,
-  );
-  // Claim refusal and projection application are independently complete, but
-  // their composed create program is deliberately deferred to the multiple-
-  // claim fold. Until that owner exists, keep the combination portable.
   if (
-    hasProjections &&
-    (hasDeclaredClaims ||
-      input.inputs.some(
-        (item) => input.registry.getDisjointKinds(item.kind).length > 0,
-      ))
+    registrations.some(
+      (registration) =>
+        registration !== false && (registration.unique ?? []).length > 0,
+    ) &&
+    !supportsAtomicNodeClaimFamily(claimSupport, "uniqueness")
   ) {
     return;
-  }
-  if (hasDeclaredClaims) {
-    if (!supportsAtomicNodeClaimFamily(claimSupport, "uniqueness")) return;
-    if (input.inputs.some((item) => item.id !== undefined)) return;
-    if (
-      registrations.some(
-        (registration) =>
-          registration !== false &&
-          ((registration.unique ?? []).length > 1 ||
-            (registration.unique ?? []).some(
-              (constraint) => constraint.scope !== "kind",
-            )),
-      )
-    ) {
-      return;
-    }
   }
 
   return profile.createNodes;

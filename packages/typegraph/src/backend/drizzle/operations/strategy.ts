@@ -64,9 +64,9 @@ import {
   type AtomicNodeClaimEntry,
   buildAtomicDeletedNodeClaimReleaseWithSchemaFence,
   buildAtomicNodeClaimCleanupWithSchemaFence,
+  buildAtomicNodeClaimConflictsWithSchemaFence,
   buildAtomicNodeClaimGatePredicateWithSchemaFence,
   buildAtomicNodeClaimUpsertWithSchemaFence,
-  buildAtomicNodeDisjointConflictsWithSchemaFence,
 } from "./atomic-node-claims";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
@@ -315,7 +315,7 @@ export type CommonOperationStrategy = Readonly<{
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
-  buildAtomicNodeDisjointConflictsWithSchemaFence: (
+  buildAtomicNodeClaimConflictsWithSchemaFence: (
     entries: readonly AtomicNodeClaimEntry[],
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
@@ -344,6 +344,7 @@ export type CommonOperationStrategy = Readonly<{
     updates: readonly AtomicNodeResolvedUpdateEntry[],
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
+    acceptedWrite?: SQL,
   ) => SQL;
   buildReadAtomicNodeMutationPostimages: (
     graphId: string,
@@ -1066,12 +1067,12 @@ function createCommonOperationStrategy(
         schemaLockClause,
       );
     },
-    buildAtomicNodeDisjointConflictsWithSchemaFence(
+    buildAtomicNodeClaimConflictsWithSchemaFence(
       entries: readonly AtomicNodeClaimEntry[],
       schemaFence: SchemaWriteFenceParams,
       schemaLockClause: SQL,
     ): SQL {
-      return buildAtomicNodeDisjointConflictsWithSchemaFence(
+      return buildAtomicNodeClaimConflictsWithSchemaFence(
         tables,
         entries,
         schemaFence,

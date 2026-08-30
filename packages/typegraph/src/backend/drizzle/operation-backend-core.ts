@@ -61,6 +61,7 @@ import {
   type AtomicNodeBatchEntry,
   type AtomicNodeBatchExecutor,
   type AtomicNodeBatchInput,
+  atomicNodeClaimInputCost,
   type AtomicNodeClaimSupport,
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeDeleteBatchInput,
@@ -150,9 +151,9 @@ import type {
 import { edgeMatchIdentityUniqueIndexName } from "./ddl";
 import { type CompiledSqlQuery, type ExecutableSql } from "./execution/types";
 import type {
+  AtomicNodeClaimConflictRow,
   AtomicNodeClaimEntry,
   AtomicNodeClaimOwnerRow,
-  AtomicNodeDisjointConflictRow,
 } from "./operations/atomic-node-claims";
 import {
   type CommonOperationStrategy,
@@ -169,7 +170,6 @@ const ATOMIC_EDGE_CLAIM_PARAM_COUNT = 18;
 const ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT = 14;
 const ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT = 2;
 const ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT = 6;
-const ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT = 6;
 const ATOMIC_NODE_INSERT_PARAM_COUNT = 9;
 const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
 // The bundled fulltext lowering is the widest projection statement today.
@@ -186,6 +186,50 @@ function chunkAtomicNodeEntriesByIdSource(
     chunkArray(
       entries.filter((entry) => entry.idSource === idSource),
       chunkSize,
+    ),
+  );
+}
+
+function chunkByWeight<T>(
+  items: readonly T[],
+  maxWeight: number,
+  weightOf: (item: T) => number,
+): readonly (readonly T[])[] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let currentWeight = 0;
+  for (const item of items) {
+    const weight = weightOf(item);
+    if (weight > maxWeight) {
+      throw new CompilerInvariantError(
+        "An atomic program member exceeded its declared bind budget.",
+        { weight, maxWeight },
+      );
+    }
+    if (current.length > 0 && currentWeight + weight > maxWeight) {
+      chunks.push(current);
+      current = [];
+      currentWeight = 0;
+    }
+    current.push(item);
+    currentWeight += weight;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function chunkAtomicNodeEntriesByClaimWork(
+  entries: readonly AtomicNodeBatchEntry[],
+  maxBindParameters: number,
+): readonly (readonly AtomicNodeBatchEntry[])[] {
+  const available = maxBindParameters - ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT;
+  return (["generated", "caller"] as const).flatMap((idSource) =>
+    chunkByWeight(
+      entries.filter((entry) => entry.idSource === idSource),
+      available,
+      (entry) =>
+        ATOMIC_NODE_INSERT_PARAM_COUNT +
+        atomicNodeClaimInputCost(entry.claims ?? []),
     ),
   );
 }
@@ -383,7 +427,7 @@ function assertResolvedNodeMutationSetInput(
   }
   if (
     creates.some(
-      (entry) => entry.idSource !== "caller" || entry.claim !== undefined,
+      (entry) => entry.idSource !== "caller" || (entry.claims?.length ?? 0) > 0,
     )
   ) {
     throw new CompilerInvariantError(
@@ -1619,31 +1663,15 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : (() => {
-        const maxPureUniquenessEntries = Math.max(
+        const maxClaimInputCostPerEntry = Math.max(
           0,
-          Math.floor(
-            (options.maxBindParameters -
-              ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
-              ATOMIC_NODE_INSERT_PARAM_COUNT) /
-              ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
-          ),
-        );
-        const maxDisjointOrMixedEntries = Math.max(
-          0,
-          Math.floor(
-            (options.maxBindParameters -
-              ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
-              ATOMIC_NODE_INSERT_PARAM_COUNT) /
-              (ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT +
-                ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT),
-          ),
+          options.maxBindParameters -
+            ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
+            ATOMIC_NODE_INSERT_PARAM_COUNT,
         );
         const claimSupport = Object.freeze({
-          maxEntriesByFamily: Object.freeze({
-            disjointness: maxDisjointOrMixedEntries,
-            uniqueness: maxPureUniquenessEntries,
-          }),
-          maxMixedEntries: maxDisjointOrMixedEntries,
+          families: Object.freeze(["disjointness", "uniqueness"] as const),
+          maxInputCostPerEntry: maxClaimInputCostPerEntry,
         } satisfies AtomicNodeClaimSupport);
         const projectionSupport = Object.freeze({
           families: operationStrategy.atomicNodeProjectionFamilies,
@@ -1653,33 +1681,40 @@ export function createCommonOperationBackend(
           entries: readonly AtomicNodeBatchEntry[],
         ): readonly AtomicNodeClaimEntry[] {
           return entries
-            .map((entry, ordinal) => ({ ordinal, entry }))
-            .filter((item) => item.entry.claim !== undefined)
+            .flatMap((entry, memberOrdinal) =>
+              (entry.claims ?? []).map((claim, claimOrdinal) => ({
+                memberOrdinal,
+                claimOrdinal,
+                entry,
+                claim,
+              })),
+            )
             .toSorted((left, right) => {
-              const leftClaim = requireDefined(left.entry.claim);
-              const rightClaim = requireDefined(right.entry.claim);
               return compareClaimTargets(
                 {
                   relation: "uniques",
                   graphId: left.entry.params.graphId,
-                  axis: leftClaim.axis,
-                  constraintName: leftClaim.constraintName,
-                  key: leftClaim.key,
+                  axis: left.claim.axis,
+                  constraintName: left.claim.constraintName,
+                  key: left.claim.key,
                 },
                 {
                   relation: "uniques",
                   graphId: right.entry.params.graphId,
-                  axis: rightClaim.axis,
-                  constraintName: rightClaim.constraintName,
-                  key: rightClaim.key,
+                  axis: right.claim.axis,
+                  constraintName: right.claim.constraintName,
+                  key: right.claim.key,
                 },
               );
             });
         }
 
         function atomicNodeClaimTargetKey(entry: AtomicNodeClaimEntry): string {
-          const claim = requireDefined(entry.entry.claim);
-          return encodeTupleKey([claim.axis, claim.constraintName, claim.key]);
+          return encodeTupleKey([
+            entry.claim.axis,
+            entry.claim.constraintName,
+            entry.claim.key,
+          ]);
         }
 
         function atomicNodeClaimOwnerKey(row: AtomicNodeClaimOwnerRow): string {
@@ -1693,8 +1728,8 @@ export function createCommonOperationBackend(
               rows: readonly AtomicNodeClaimOwnerRow[];
             }>
           | Readonly<{
-              kind: "disjoint-conflicts";
-              rows: readonly AtomicNodeDisjointConflictRow[];
+              kind: "claim-conflicts";
+              rows: readonly AtomicNodeClaimConflictRow[];
             }>
           | Readonly<{ kind: "cleanup" }>
           | AtomicNodeProjectionSlot
@@ -1734,29 +1769,58 @@ export function createCommonOperationBackend(
             );
           }
 
-          const disjointConflicts = results
+          const conflicts = results
             .flatMap((result) =>
-              result.kind === "disjoint-conflicts" ? result.rows : [],
+              result.kind === "claim-conflicts" ? result.rows : [],
             )
-            .toSorted((left, right) => left.ordinal - right.ordinal);
-          const firstDisjointConflict = disjointConflicts[0];
-          if (firstDisjointConflict !== undefined) {
-            return new DisjointError({
-              nodeId: firstDisjointConflict.node_id,
-              attemptedKind: firstDisjointConflict.attempted_kind,
-              conflictingKind: firstDisjointConflict.conflicting_kind,
-            });
+            .toSorted(
+              (left, right) =>
+                left.member_ordinal - right.member_ordinal ||
+                left.claim_ordinal - right.claim_ordinal ||
+                left.probe_ordinal - right.probe_ordinal,
+            );
+          const firstConflict = conflicts[0];
+          if (firstConflict !== undefined) {
+            const item = claimEntries.find(
+              (candidate) =>
+                candidate.memberOrdinal === firstConflict.member_ordinal &&
+                candidate.claimOrdinal === firstConflict.claim_ordinal,
+            );
+            if (item === undefined) {
+              throw new CompilerInvariantError(
+                "Atomic node claim program returned a conflict outside its input set.",
+              );
+            }
+            return item.claim.verdict.kind === "disjointness" ?
+                new DisjointError({
+                  nodeId: item.entry.params.id,
+                  attemptedKind: item.entry.params.kind,
+                  conflictingKind: firstConflict.holder_kind,
+                })
+              : new UniquenessError({
+                  constraintName: item.claim.constraintName,
+                  kind: firstConflict.holder_kind,
+                  existingId: firstConflict.holder_id,
+                  newId: item.entry.params.id,
+                  fields: item.claim.verdict.fields,
+                  axis: firstConflict.axis,
+                });
           }
 
           for (const item of claimEntries.toSorted(
-            (left, right) => left.ordinal - right.ordinal,
+            (left, right) =>
+              left.memberOrdinal - right.memberOrdinal ||
+              left.claimOrdinal - right.claimOrdinal,
           )) {
-            const claim = requireDefined(item.entry.claim);
+            const claim = item.claim;
             const owner = ownerByTarget.get(atomicNodeClaimTargetKey(item));
             if (owner === undefined) {
               throw new CompilerInvariantError(
                 "Atomic node claim program omitted a claim target.",
-                { ordinal: item.ordinal },
+                {
+                  memberOrdinal: item.memberOrdinal,
+                  claimOrdinal: item.claimOrdinal,
+                },
               );
             }
             const proposedOwner = {
@@ -1835,20 +1899,21 @@ export function createCommonOperationBackend(
           );
           const claimEntries = orderedAtomicNodeClaims(input.entries);
           if (claimEntries.length > 0) {
-            const claims = claimEntries.map((item) =>
-              requireDefined(item.entry.claim),
-            );
-            if (!supportsAtomicNodeClaims(claimSupport, claims)) {
+            if (
+              input.entries.some(
+                (entry) =>
+                  !supportsAtomicNodeClaims(claimSupport, entry.claims ?? []),
+              )
+            ) {
               throw new CompilerInvariantError(
-                "Atomic node claim program exceeded its declared member budget.",
+                "Atomic node claim program exceeded its declared per-member budget.",
                 {
-                  claimedEntries: claimEntries.length,
                   claimSupport,
                 },
               );
             }
-            const disjointEntries = claimEntries.filter(
-              (item) => item.entry.claim?.verdict.kind === "disjointness",
+            const conflictEntries = claimEntries.filter(
+              (item) => atomicNodeClaimInputCost([item.claim]) > 6,
             );
             const claimChunkSize = Math.max(
               1,
@@ -1857,22 +1922,23 @@ export function createCommonOperationBackend(
                   ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
               ),
             );
-            const gateParameterCount =
-              ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT * claimEntries.length +
-              ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT * disjointEntries.length;
-            const nodeChunkSize = Math.max(
-              1,
-              Math.floor(
-                (options.maxBindParameters -
-                  ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
-                  gateParameterCount) /
-                  ATOMIC_NODE_INSERT_PARAM_COUNT,
-              ),
-            );
-            const nodeChunks = chunkAtomicNodeEntriesByIdSource(
+            const nodeChunks = chunkAtomicNodeEntriesByClaimWork(
               input.entries,
-              nodeChunkSize,
+              options.maxBindParameters,
             );
+            function claimGateForChunk(chunk: readonly AtomicNodeBatchEntry[]) {
+              const members = new Set(chunk);
+              const chunkClaims = claimEntries.filter((item) =>
+                members.has(item.entry),
+              );
+              return chunkClaims.length === 0 ?
+                  undefined
+                : operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
+                    chunkClaims,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  );
+            }
             const claimChunks = chunkArray(claimEntries, claimChunkSize);
             const claimSlots: AtomicSqlProgram<
               AtomicNodeProgramSlot,
@@ -1898,39 +1964,41 @@ export function createCommonOperationBackend(
                 })),
               }),
             }));
-            const disjointSlots: AtomicSqlProgram<
+            const conflictChunkBudget = Math.max(
+              1,
+              options.maxBindParameters - 2,
+            );
+            const conflictChunks = chunkByWeight(
+              conflictEntries,
+              conflictChunkBudget,
+              (entry) => atomicNodeClaimInputCost([entry.claim]) - 6,
+            );
+            const conflictSlots: AtomicSqlProgram<
               AtomicNodeProgramSlot,
               unknown
-            >["slots"] =
-              disjointEntries.length === 0 ?
-                []
-              : [
-                  {
-                    statement: execution.compile(
-                      operationStrategy.buildAtomicNodeDisjointConflictsWithSchemaFence(
-                        disjointEntries,
-                        input.schemaFence,
-                        atomicSchemaFenceLockClause,
-                      ),
-                    ),
-                    cardinality: "many" as const,
-                    decode: (rows) => ({
-                      kind: "disjoint-conflicts" as const,
-                      rows: rows.map((row) => ({
-                        ordinal: Number(row["ordinal"]),
-                        attempted_kind: String(row["attempted_kind"]),
-                        node_id: String(row["node_id"]),
-                        conflicting_kind: String(row["conflicting_kind"]),
-                      })),
-                    }),
-                  },
-                ];
-            const writeGate =
-              operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
-                claimEntries,
-                input.schemaFence,
-                atomicSchemaFenceLockClause,
-              );
+            >["slots"] = conflictChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicNodeClaimConflictsWithSchemaFence(
+                  chunk,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "many" as const,
+              decode: (rows) => ({
+                kind: "claim-conflicts" as const,
+                rows: rows.map((row) => ({
+                  member_ordinal: Number(row["member_ordinal"]),
+                  claim_ordinal: Number(row["claim_ordinal"]),
+                  probe_ordinal: Number(row["probe_ordinal"]),
+                  axis: String(row["axis"]),
+                  constraint_name: String(row["constraint_name"]),
+                  key: String(row["key"]),
+                  holder_id: String(row["holder_id"]),
+                  holder_kind: String(row["holder_kind"]),
+                })),
+              }),
+            }));
             const cleanupSlots: AtomicSqlProgram<
               AtomicNodeProgramSlot,
               unknown
@@ -1945,35 +2013,66 @@ export function createCommonOperationBackend(
               cardinality: "none" as const,
               decode: () => ({ kind: "cleanup" as const }),
             }));
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+            );
+            // A per-chunk gate can refuse one member while a different chunk
+            // remains eligible. Assert every postimage inside the atomic
+            // transport so no successful sibling can commit before the Store
+            // diagnoses the refused claim from the rolled-back state.
+            const assertionSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] = nodeChunks.map((chunk) => ({
+              statement: execution.compile(
+                operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                  chunk,
+                  [],
+                  timestamp,
+                  input.schemaFence,
+                ),
+              ),
+              cardinality: "none" as const,
+              decode: () => ({ kind: "assertion" as const }),
+            }));
 
             if (input.resultMode === "count") {
               const nodeSlots: AtomicSqlProgram<
                 AtomicNodeProgramSlot,
                 unknown
-              >["slots"] = nodeChunks.map((chunk) => ({
-                statement: execution.compile(
-                  operationStrategy.buildAtomicNodeBatchWithSchemaFence(
-                    chunk,
-                    timestamp,
-                    input.schemaFence,
-                    atomicSchemaFenceLockClause,
-                    "count",
-                    writeGate,
+              >["slots"] = nodeChunks.map((chunk) => {
+                return {
+                  statement: execution.compile(
+                    operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                      chunk,
+                      timestamp,
+                      input.schemaFence,
+                      atomicSchemaFenceLockClause,
+                      "count",
+                      claimGateForChunk(chunk),
+                    ),
                   ),
-                ),
-                cardinality: "many" as const,
-                decode: (rows) => ({
-                  kind: "counts" as const,
-                  chunk,
-                  count: rows.length,
-                }),
-              }));
+                  cardinality: "many" as const,
+                  decode: (rows) => ({
+                    kind: "counts" as const,
+                    chunk,
+                    count: rows.length,
+                  }),
+                };
+              });
               const program = {
                 slots: [
                   ...claimSlots,
-                  ...disjointSlots,
+                  ...conflictSlots,
                   ...nodeSlots,
                   ...cleanupSlots,
+                  ...projectionSlots,
+                  ...assertionSlots,
                 ],
                 assemble(results: readonly AtomicNodeProgramSlot[]): number {
                   const counts = results.flatMap((result) =>
@@ -1993,40 +2092,51 @@ export function createCommonOperationBackend(
                   return input.entries.length;
                 },
               } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
-              return withAtomicNodeBatchClassifications(
-                () => atomicExecutor.execute(program),
-                input.entries,
-                operationStrategy,
-              );
+              return runAtomicNodeProjectionProgram({
+                creates: input.entries,
+                updates: [],
+                hasProjections: projectionSlots.length > 0,
+                run: () =>
+                  withAtomicNodeBatchClassifications(
+                    () => atomicExecutor.execute(program),
+                    input.entries,
+                    operationStrategy,
+                  ),
+                postimageRefusal: () => 0,
+              });
             }
 
             const nodeSlots: AtomicSqlProgram<
               AtomicNodeProgramSlot,
               unknown
-            >["slots"] = nodeChunks.map((chunk) => ({
-              statement: execution.compile(
-                operationStrategy.buildAtomicNodeBatchWithSchemaFence(
-                  chunk,
-                  timestamp,
-                  input.schemaFence,
-                  atomicSchemaFenceLockClause,
-                  "rows",
-                  writeGate,
+            >["slots"] = nodeChunks.map((chunk) => {
+              return {
+                statement: execution.compile(
+                  operationStrategy.buildAtomicNodeBatchWithSchemaFence(
+                    chunk,
+                    timestamp,
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                    "rows",
+                    claimGateForChunk(chunk),
+                  ),
                 ),
-              ),
-              cardinality: "many" as const,
-              decode: (rows) => ({
-                kind: "rows" as const,
-                chunk,
-                rows: rows.map((row) => rowMappers.toNodeRow(row)),
-              }),
-            }));
+                cardinality: "many" as const,
+                decode: (rows) => ({
+                  kind: "rows" as const,
+                  chunk,
+                  rows: rows.map((row) => rowMappers.toNodeRow(row)),
+                }),
+              };
+            });
             const program = {
               slots: [
                 ...claimSlots,
-                ...disjointSlots,
+                ...conflictSlots,
                 ...nodeSlots,
                 ...cleanupSlots,
+                ...projectionSlots,
+                ...assertionSlots,
               ],
               assemble(
                 results: readonly AtomicNodeProgramSlot[],
@@ -2052,11 +2162,18 @@ export function createCommonOperationBackend(
               AtomicNodeProgramSlot,
               readonly NodeRow[]
             >;
-            return withAtomicNodeBatchClassifications(
-              () => atomicExecutor.execute(program),
-              input.entries,
-              operationStrategy,
-            );
+            return runAtomicNodeProjectionProgram({
+              creates: input.entries,
+              updates: [],
+              hasProjections: projectionSlots.length > 0,
+              run: () =>
+                withAtomicNodeBatchClassifications(
+                  () => atomicExecutor.execute(program),
+                  input.entries,
+                  operationStrategy,
+                ),
+              postimageRefusal: () => [],
+            });
           }
 
           if (input.resultMode === "count") {

@@ -184,22 +184,27 @@ Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL also expose native write programs for eligible
 ingestion calls. Schema-managed `nodes.bulkInsert(items)` and
 `nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
-no Operational Identity, history, or revision work. The program may carry
-either fulltext/vector projection transitions or at most one advertised
-same-kind uniqueness/disjointness claim per claimed member; claim and
-projection envelopes do not yet compose in one program.
+no Operational Identity, history, or revision work. The program composes each
+member's complete advertised uniqueness/disjointness claim set with its
+fulltext/vector projection transitions. Same-kind and hierarchy-wide
+uniqueness, generated and caller IDs, and mixed claim families share this one
+program boundary.
 Neon HTTP, D1, and libSQL submit that program as one transport batch. Session-capable
 PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
 statement per bind-budget chunk. The batch may use generated IDs,
 caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
-input order. Cloudflare D1's 100-parameter budget admits 14 pure same-kind
-uniqueness claims, seven pure disjointness claims, or seven claimed members in
-a mixed-family batch. Multiple claims per member, wider uniqueness scopes,
-multiple-claim, claim-plus-projection, identity-enabled,
-history/revision-tracked, and other unsupported
-node shapes retain their existing transaction or fallback path. These ceilings
-are distinct from the seven unique durable edge identities admitted by the
-convergence program above.
+input order. Claim work is chunked by member inside the same atomic submission,
+so Cloudflare D1 no longer has a batch-wide claimed-member ceiling. Its
+100-parameter budget leaves 87 claim-input binds per member after the row and
+fence: a canonical claim costs six and each legacy compatibility probe costs
+seven. A member beyond that complexity, identity-enabled and
+history/revision-tracked shapes, and other unsupported node work retain the
+existing transaction or fallback path. This per-member budget is distinct from
+the seven unique durable edge identities admitted by the convergence program
+above. A successful program needs no diagnostic reads. A refused claim first
+rolls the entire native batch back, then uses committed-state fence and claim
+reads to recover the same typed error as the portable path; those failure-only
+reads are not part of the successful-write RTT count.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
 schema-fenced atomic program when the store has no history or revision capture.
@@ -395,7 +400,7 @@ await trustedImportGraphStream(store, interchangeChunks);
 ### Batch sizing for large multi-call imports
 
 For a dataset too large for a single `bulkInsert`/`bulkCreate` call (e.g., streaming rows from a
-file in a loop), the *size* of each call matters, not just the total row count. Each call is its
+file in a loop), the _size_ of each call matters, not just the total row count. Each call is its
 own transaction, and — per the default
 [`autoRefreshStatistics`](/backend-setup#refreshing-planner-statistics-after-bulk-loads) — can
 trigger a planner-statistics refresh on its own. In a large-scale bulk-load benchmark, batches of
@@ -444,7 +449,7 @@ into one transaction — the statement count is unchanged either way. If the rou
 hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
 SQLite, 3 on PostgreSQL, however large the result).
 
-To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+To read the edges of a _set_ of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
 [Edge Collections](/schemas-stores#edge-collections)).
 Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
 itself to `from_id IN (...)` — one set-oriented statement per endpoint kind and bind-budget chunk,
@@ -823,8 +828,8 @@ Deep-recursive benchmark probes explicitly set `cyclePolicy: "allow"` to isolate
 expansion cost; the default `cyclePolicy: "prevent"` prioritizes cycle-safe semantics and is
 expected to be slower on long traversals.
 
-*Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
-and schema/data shape.*
+_Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
+and schema/data shape._
 
 <details>
 <summary>Benchmark configuration and guardrails</summary>

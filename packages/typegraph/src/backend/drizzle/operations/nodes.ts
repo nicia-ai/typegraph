@@ -748,10 +748,10 @@ export function buildAssertAtomicNodeMutationPostimages(
           ${nodes.id} = ${postimage.id}
           AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, postimage.propsJson)}
           ${
-          operation === "update" ?
-            sql`AND ${nodes.version} = ${postimage.version}`
-          : sql.empty()
-        }
+            operation === "update" ?
+              sql`AND ${nodes.version} = ${postimage.version}`
+            : sql.empty()
+          }
           AND ${nodes.updatedAt} = ${postimage.updatedAt}
         )
       `,

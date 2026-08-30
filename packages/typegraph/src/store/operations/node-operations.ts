@@ -1677,15 +1677,16 @@ function atomicNodeBatchEntries(
     Readonly<{ kind: string; id: string }>
   >();
   for (const prepared of preparedCreates) {
+    const projections = resolveAtomicNodeProjections(
+      prepared.nodeKind.schema,
+      prepared.validatedProps,
+      { omitEmbeddingDeletes: !prepared.idProvided },
+    );
     if (prepared.claimPlan.claims.length === 0) {
       entries.push({
         idSource: prepared.idProvided ? "caller" : "generated",
         params: prepared.insertParams,
-        projections: resolveAtomicNodeProjections(
-          prepared.nodeKind.schema,
-          prepared.validatedProps,
-          { omitEmbeddingDeletes: !prepared.idProvided },
-        ),
+        projections,
       });
       continue;
     }
@@ -1701,41 +1702,46 @@ function atomicNodeBatchEntries(
       },
       claimSupport,
     );
-    if (rephased?.claims.length !== 1) return;
-    const claim = rephased.claims[0];
-    if (claim === undefined) return;
-    const targetKey = encodeTupleKey([
-      prepared.insertParams.graphId,
-      claim.axis,
-      claim.constraintName,
-      claim.key,
-    ]);
-    const existingOwner = ownerByClaimTarget.get(targetKey);
-    if (existingOwner !== undefined) {
-      const error = new UniquenessError({
-        constraintName: claim.constraintName,
-        kind: existingOwner.kind,
-        existingId: existingOwner.id,
-        newId: prepared.id,
-        fields: claim.verdict.kind === "uniqueness" ? claim.verdict.fields : [],
-        axis: claim.axis,
+    if (rephased === undefined) return;
+    for (const claim of rephased.claims) {
+      const targetKey = encodeTupleKey([
+        prepared.insertParams.graphId,
+        claim.axis,
+        claim.constraintName,
+        claim.key,
+      ]);
+      const existingOwner = ownerByClaimTarget.get(targetKey);
+      if (existingOwner !== undefined) {
+        const error = new UniquenessError({
+          constraintName: claim.constraintName,
+          kind: existingOwner.kind,
+          existingId: existingOwner.id,
+          newId: prepared.id,
+          fields:
+            claim.verdict.kind === "uniqueness" ? claim.verdict.fields : [],
+          axis: claim.axis,
+        });
+        refuseNodeCreateClaimError(error, prepared.claimPlan);
+      }
+      ownerByClaimTarget.set(targetKey, {
+        kind: prepared.kind,
+        id: prepared.id,
       });
-      refuseNodeCreateClaimError(error, prepared.claimPlan);
     }
-    ownerByClaimTarget.set(targetKey, {
-      kind: prepared.kind,
-      id: prepared.id,
-    });
     entries.push({
       idSource: prepared.idProvided ? "caller" : "generated",
       params: prepared.insertParams,
-      claim,
+      claims: rephased.claims,
+      projections,
     });
   }
-  const claims = entries.flatMap((entry) =>
-    entry.claim === undefined ? [] : [entry.claim],
-  );
-  if (!supportsAtomicNodeClaims(claimSupport, claims)) return;
+  if (
+    entries.some(
+      (entry) => !supportsAtomicNodeClaims(claimSupport, entry.claims ?? []),
+    )
+  ) {
+    return;
+  }
   return entries;
 }
 
@@ -1755,6 +1761,48 @@ async function withAtomicNodeClaimTranslation<TResult>(
         (prepared) => prepared.claimPlan.verdicts,
       ),
     });
+  }
+}
+
+/**
+ * Diagnoses a database-enforced all-or-nothing claim refusal after rollback.
+ *
+ * The atomic program deliberately reports only the rollback sentinel: claim
+ * ownership is read again from committed state so a successful sibling chunk
+ * can never be mistaken for permission to commit. These are the same portable
+ * constraint probes used outside the native program, preserving their typed
+ * errors and input order on the failure-only path.
+ */
+async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  preparedCreates: readonly NodeCreatePrepared[],
+): Promise<void> {
+  await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+  const constraintContext: ConstraintContext = {
+    graphId: ctx.graphId,
+    registry: ctx.registry,
+    backend,
+  };
+  const uniquenessContext = createUniquenessContext(
+    ctx.graphId,
+    ctx.registry,
+    backend,
+    ctx.uniqueSidecarBatch,
+  );
+  for (const prepared of preparedCreates) {
+    await checkDisjointnessConstraint(
+      constraintContext,
+      prepared.kind,
+      prepared.id,
+    );
+    await checkUniquenessConstraints(
+      uniquenessContext,
+      prepared.kind,
+      prepared.id,
+      prepared.validatedProps,
+      prepared.uniqueConstraints,
+    );
   }
 }
 
@@ -2401,7 +2449,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
           ),
       );
       if (insertedCount === 0) {
-        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+        await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
       }
       if (insertedCount !== inputs.length) {
         throw new DatabaseOperationError(
@@ -2514,7 +2562,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           ),
       );
       if (returnedRows.length === 0) {
-        await diagnoseFusedSchemaFenceNoRow(ctx, backend);
+        await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
       }
       if (returnedRows.length !== preparedCreates.length) {
         throw new DatabaseOperationError(

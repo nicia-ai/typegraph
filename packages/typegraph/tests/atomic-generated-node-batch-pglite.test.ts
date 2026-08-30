@@ -32,8 +32,9 @@ import {
   DisjointError,
   RestrictedDeleteError,
   StaleVersionError,
+  UniquenessError,
 } from "../src/errors";
-import { disjointWith } from "../src/ontology";
+import { disjointWith, subClassOf } from "../src/ontology";
 import { vectorPhysicalName } from "../src/query/dialect/vector-strategy";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
@@ -113,6 +114,71 @@ const vectorProjectionGraph = defineGraph({
   nodes: { VectorDocument: { type: VectorDocument } },
   edges: {},
 });
+const ComposedDocument = defineNode("ComposedDocument", {
+  schema: z.object({
+    slug: z.string(),
+    tenant: z.string(),
+    title: searchable(),
+  }),
+});
+const composedGraph = defineGraph({
+  id: "atomic-node-composed-pglite",
+  nodes: {
+    ComposedDocument: {
+      type: ComposedDocument,
+      unique: [
+        {
+          name: "composed_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+        {
+          name: "composed_tenant_title",
+          fields: ["tenant", "title"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+const ScopedPerson = defineNode("ScopedPerson", {
+  schema: z.object({ email: z.string() }),
+});
+const ScopedEmployee = defineNode("ScopedEmployee", {
+  schema: z.object({ email: z.string() }),
+});
+const scopedGraph = defineGraph({
+  id: "atomic-node-scoped-pglite",
+  nodes: {
+    ScopedPerson: {
+      type: ScopedPerson,
+      unique: [
+        {
+          name: "scoped_email",
+          fields: ["email"],
+          scope: "kindWithSubClasses",
+          collation: "binary",
+        },
+      ],
+    },
+    ScopedEmployee: {
+      type: ScopedEmployee,
+      unique: [
+        {
+          name: "scoped_email",
+          fields: ["email"],
+          scope: "kindWithSubClasses",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [subClassOf(ScopedEmployee, ScopedPerson)],
+});
 
 const schemaFence = { graphId: graph.id, expectedVersion: 1 } as const;
 const timestamp = "2026-08-26T00:00:00.000Z";
@@ -131,8 +197,21 @@ function claimEntry(
   name: string,
   ordinal = 0,
 ): AtomicNodeClaimEntry {
+  const claim = {
+    axis: "UniquePerson",
+    constraintName: "unique_person_name",
+    key: computeUniqueKey({ name }, ["name"], "binary"),
+    placement: "pre-insert",
+    verdict: {
+      kind: "uniqueness",
+      probeAxes: ["UniquePerson"],
+      fields: ["name"],
+    },
+  } as const;
   return {
-    ordinal,
+    memberOrdinal: ordinal,
+    claimOrdinal: 0,
+    claim,
     entry: {
       idSource: "generated",
       params: {
@@ -141,17 +220,7 @@ function claimEntry(
         id,
         props: { name },
       },
-      claim: {
-        axis: "UniquePerson",
-        constraintName: "unique_person_name",
-        key: computeUniqueKey({ name }, ["name"], "binary"),
-        placement: "pre-insert",
-        verdict: {
-          kind: "uniqueness",
-          probeAxes: ["UniquePerson"],
-          fields: ["name"],
-        },
-      },
+      claims: [claim],
     },
   };
 }
@@ -241,7 +310,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
       {
         node_kind: "UniquePerson",
         constraint_name: "unique_person_name",
-        key: entries[0]?.entry.claim?.key,
+        key: entries[0]?.claim.key,
         node_id: "generated-success",
         concrete_kind: "UniquePerson",
       },
@@ -255,7 +324,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         graphId: graph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: entries[0]?.entry.claim?.key ?? "",
+        key: entries[0]?.claim.key ?? "",
       }),
     ).resolves.toMatchObject({ node_id: "generated-success" });
   });
@@ -289,8 +358,8 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
     const [store] = await createStoreWithSchema(disjointGraph, directBackend);
     expect(
       resolveBundledRootAtomicMutationPrograms(directBackend)?.createNodes
-        ?.claimSupport?.maxEntriesByFamily.disjointness,
-    ).toBeGreaterThan(0);
+        ?.claimSupport?.families,
+    ).toContain("disjointness");
     await directBackend.insertNode({
       graphId: disjointGraph.id,
       kind: Rival.kind,
@@ -398,6 +467,82 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
     }
   });
 
+  it("composes multiple claims and fulltext in one PostgreSQL program", async () => {
+    const directBackend = createPostgresBackend(backend.db, { vector: false });
+    const [store] = await createStoreWithSchema(composedGraph, directBackend);
+
+    await store.nodes.ComposedDocument.bulkInsert([
+      {
+        id: "incumbent",
+        props: { slug: "incumbent", tenant: "tenant", title: "Held title" },
+      },
+    ]);
+    await expect(
+      store.search.fulltext("ComposedDocument", {
+        query: "Held",
+        limit: 10,
+      }),
+    ).resolves.toHaveLength(1);
+
+    await expect(
+      store.nodes.ComposedDocument.bulkInsert([
+        {
+          id: "sibling",
+          props: { slug: "sibling", tenant: "tenant", title: "Sibling" },
+        },
+        {
+          id: "conflict",
+          props: { slug: "new", tenant: "tenant", title: "Held title" },
+        },
+      ]),
+    ).rejects.toMatchObject({
+      name: UniquenessError.name,
+      details: { constraintName: "composed_tenant_title" },
+    });
+    await expect(store.nodes.ComposedDocument.count()).resolves.toBe(1);
+    await expect(
+      store.search.fulltext("ComposedDocument", {
+        query: "Sibling",
+        limit: 10,
+      }),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("refuses a legacy cross-scope claim through the PostgreSQL program", async () => {
+    const directBackend = createPostgresBackend(backend.db, { vector: false });
+    const [store] = await createStoreWithSchema(scopedGraph, directBackend);
+    const key = computeUniqueKey(
+      { email: "legacy@example.com" },
+      ["email"],
+      "binary",
+    );
+    await directBackend.insertNode({
+      graphId: scopedGraph.id,
+      kind: ScopedPerson.kind,
+      id: "legacy-owner",
+      props: { email: "legacy@example.com" },
+    });
+    await directBackend.insertUnique({
+      graphId: scopedGraph.id,
+      nodeKind: ScopedPerson.kind,
+      constraintName: "scoped_email",
+      key,
+      nodeId: "legacy-owner",
+      concreteKind: ScopedPerson.kind,
+    });
+
+    await expect(
+      store.nodes.ScopedEmployee.bulkInsert([
+        { id: "sibling", props: { email: "sibling@example.com" } },
+        { id: "conflict", props: { email: "legacy@example.com" } },
+      ]),
+    ).rejects.toMatchObject({
+      name: UniquenessError.name,
+      details: { existingId: "legacy-owner" },
+    });
+    await expect(store.nodes.ScopedEmployee.count()).resolves.toBe(0);
+  });
+
   it("rolls projected PostgreSQL updates back behind a stale fence", async () => {
     const isolated = await createLocalPgliteBackend({ vector: false });
     try {
@@ -490,7 +635,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         graphId: graph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: entries[0]?.entry.claim?.key ?? "",
+        key: entries[0]?.claim.key ?? "",
       }),
     ).resolves.toMatchObject({ node_id: "generated-incumbent" });
   });
@@ -512,7 +657,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         graphId: graph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: entries[0]?.entry.claim?.key ?? "",
+        key: entries[0]?.claim.key ?? "",
       }),
     ).resolves.toBeDefined();
 
@@ -530,7 +675,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         graphId: graph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: entries[0]?.entry.claim?.key ?? "",
+        key: entries[0]?.claim.key ?? "",
       }),
     ).resolves.toBeUndefined();
   });
@@ -552,7 +697,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         graphId: graph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: entries[0]?.entry.claim?.key ?? "",
+        key: entries[0]?.claim.key ?? "",
       }),
     ).resolves.toBeUndefined();
   });
