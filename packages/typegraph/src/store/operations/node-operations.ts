@@ -84,7 +84,11 @@ import {
   type TransactionBackend,
   type UniqueRow,
 } from "../../backend/types";
-import { checkWherePredicate, computeUniqueKey } from "../../constraints";
+import {
+  checkDisjointness,
+  checkWherePredicate,
+  computeUniqueKey,
+} from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -128,6 +132,7 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { asCompiledRowsSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
+import { chunk } from "../../utils/array";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
@@ -144,11 +149,14 @@ import { type ClaimOwner, uniquenessProbeKinds } from "../claims/axis";
 import {
   checkUniquenessConstraints,
   createUniquenessContext,
+  groupNodeUniquenessProbes,
+  isUniquenessClaimEntry,
   nodeClaimEntries,
   type NodeClaimItem,
   type NodeCreateClaimPlan,
   planNodeCreateClaims,
   refuseNodeCreateClaimError,
+  uniquenessClaimRefusal,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
@@ -1504,58 +1512,29 @@ export async function primeBatchValidationCaches(
     UNIQUE_SIDECAR_BATCH.id,
   );
   if (boundCheckUniqueBatch !== undefined) {
-    interface ProbeGroup {
-      nodeKind: string;
-      constraintName: string;
-      keys: Set<string>;
-    }
-    const groups = new Map<string, ProbeGroup>();
-    for (const draft of drafts) {
-      for (const entry of nodeClaimEntries(
-        ctx.registry,
-        draft.kind,
-        draft.id,
-        draft.validatedProps,
-        draft.uniqueConstraints,
-        "create",
-      )) {
-        // Uniqueness entries only: this primes the reads the UNIQUENESS probe
-        // makes. A disjointness entry's verdict comes from the disjoint
-        // partner's node row, which no `checkUnique` read would supply.
-        if (entry.refusal.kind !== "uniqueness") continue;
-        const constraint = entry.refusal.constraint;
-        const key = entry.key;
-        // Seeded over exactly the kinds the per-row probe reads — the axis and
-        // the legacy kinds — so priming stays a batched substitute for those
-        // reads rather than a narrower set that sends them back to the
-        // database one row at a time.
-        const kindsToCheck = uniquenessProbeKinds(
-          draft.kind,
-          constraint.scope,
+    const groups = groupNodeUniquenessProbes(
+      ctx.registry,
+      drafts.map((draft) => ({
+        kind: draft.kind,
+        entries: nodeClaimEntries(
           ctx.registry,
-        );
-        for (const kindToCheck of kindsToCheck) {
-          const groupKey = encodeTupleKey([kindToCheck, constraint.name]);
-          const group = groups.get(groupKey) ?? {
-            nodeKind: kindToCheck,
-            constraintName: constraint.name,
-            keys: new Set<string>(),
-          };
-          group.keys.add(key);
-          groups.set(groupKey, group);
-        }
-      }
-    }
-    for (const group of groups.values()) {
-      const orderedKeys = [...group.keys];
+          draft.kind,
+          draft.id,
+          draft.validatedProps,
+          draft.uniqueConstraints,
+          "create",
+        ),
+      })),
+    );
+    for (const group of groups) {
       const rows = await boundCheckUniqueBatch.checkUniqueBatch({
         graphId: ctx.graphId,
         nodeKind: group.nodeKind,
         constraintName: group.constraintName,
-        keys: orderedKeys,
+        keys: group.keys,
       });
       const rowsByKey = new Map(rows.map((row) => [row.key, row]));
-      for (const key of orderedKeys) {
+      for (const key of group.keys) {
         seams.seedUniqueRow(
           group.nodeKind,
           group.constraintName,
@@ -1764,6 +1743,208 @@ async function withAtomicNodeClaimTranslation<TResult>(
   }
 }
 
+/** Bounds concurrent custom-backend reads on the exceptional diagnosis path. */
+const ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE = 32;
+
+type AtomicNodeClaimDiagnosticVerdict =
+  Readonly<{ kind: "clear" }> | Readonly<{ kind: "refusal"; error: unknown }>;
+
+const ATOMIC_NODE_CLAIM_CLEAR = { kind: "clear" } as const;
+
+async function captureAtomicNodeClaimDiagnosticVerdicts(
+  preparedCreates: readonly NodeCreatePrepared[],
+  diagnose: (prepared: NodeCreatePrepared) => Promise<void>,
+): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
+  const verdicts: AtomicNodeClaimDiagnosticVerdict[] = [];
+  for (const window of chunk(
+    preparedCreates,
+    ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE,
+  )) {
+    verdicts.push(
+      ...(await Promise.all(
+        window.map(async (prepared) => {
+          try {
+            await diagnose(prepared);
+            return ATOMIC_NODE_CLAIM_CLEAR;
+          } catch (error) {
+            return { kind: "refusal" as const, error };
+          }
+        }),
+      )),
+    );
+  }
+  return verdicts;
+}
+
+async function runAtomicNodeClaimDiagnosticGroups<T>(
+  groups: readonly T[],
+  read: (group: T) => Promise<void>,
+): Promise<void> {
+  for (const window of chunk(
+    groups,
+    ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE,
+  )) {
+    await Promise.all(window.map(async (group) => read(group)));
+  }
+}
+
+async function diagnoseAtomicNodeDisjointness<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  preparedCreates: readonly NodeCreatePrepared[],
+): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
+  const boundGetNodes = bindExtraIfReachable(
+    backend,
+    ctx.batchPointRead.extras.getNodes,
+    BATCH_POINT_READ.id,
+  );
+  const constraintContext: ConstraintContext = {
+    graphId: ctx.graphId,
+    registry: ctx.registry,
+    backend,
+  };
+  if (boundGetNodes === undefined) {
+    return captureAtomicNodeClaimDiagnosticVerdicts(
+      preparedCreates,
+      async (prepared) =>
+        checkDisjointnessConstraint(
+          constraintContext,
+          prepared.kind,
+          prepared.id,
+        ),
+    );
+  }
+
+  type DisjointReadGroup = Readonly<{ kind: string; ids: Set<string> }>;
+  const disjointKindsByInput = preparedCreates.map((prepared) =>
+    ctx.registry.getDisjointKinds(prepared.kind),
+  );
+  const groupsByKind = new Map<string, DisjointReadGroup>();
+  for (const [index, prepared] of preparedCreates.entries()) {
+    for (const kind of requireDefined(disjointKindsByInput[index])) {
+      const group = groupsByKind.get(kind) ?? { kind, ids: new Set<string>() };
+      group.ids.add(prepared.id);
+      groupsByKind.set(kind, group);
+    }
+  }
+
+  const rowsByReference = new Map<string, BackendNodeRow>();
+  await runAtomicNodeClaimDiagnosticGroups(
+    [...groupsByKind.values()],
+    async (group) => {
+      const rows = await boundGetNodes.getNodes(ctx.graphId, group.kind, [
+        ...group.ids,
+      ]);
+      for (const row of rows) {
+        rowsByReference.set(refKey({ kind: row.kind, id: row.id }), row);
+      }
+    },
+  );
+
+  return preparedCreates.map((prepared, index) => {
+    for (const conflictingKind of requireDefined(disjointKindsByInput[index])) {
+      const row = rowsByReference.get(
+        refKey({ kind: conflictingKind, id: prepared.id }),
+      );
+      if (row === undefined || !isLiveNodeRow(row)) continue;
+      const error = checkDisjointness(
+        prepared.id,
+        prepared.kind,
+        [conflictingKind],
+        ctx.registry,
+      );
+      if (error !== undefined) return { kind: "refusal" as const, error };
+    }
+    return ATOMIC_NODE_CLAIM_CLEAR;
+  });
+}
+
+async function diagnoseAtomicNodeUniqueness<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  backend: GraphBackend | TransactionBackend,
+  preparedCreates: readonly NodeCreatePrepared[],
+): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
+  const boundCheckUniqueBatch = bindExtraIfReachable(
+    backend,
+    ctx.uniqueSidecarBatch.extras.checkUniqueBatch,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  const uniquenessContext = createUniquenessContext(
+    ctx.graphId,
+    ctx.registry,
+    backend,
+    ctx.uniqueSidecarBatch,
+  );
+  if (boundCheckUniqueBatch === undefined) {
+    return captureAtomicNodeClaimDiagnosticVerdicts(
+      preparedCreates,
+      async (prepared) =>
+        checkUniquenessConstraints(
+          uniquenessContext,
+          prepared.kind,
+          prepared.id,
+          prepared.validatedProps,
+          prepared.uniqueConstraints,
+        ),
+    );
+  }
+
+  const probeItems = preparedCreates.map((prepared) => ({
+    kind: prepared.kind,
+    entries: nodeClaimEntries(
+      ctx.registry,
+      prepared.kind,
+      prepared.id,
+      prepared.validatedProps,
+      prepared.uniqueConstraints,
+      "create",
+    ),
+  }));
+  const groups = groupNodeUniquenessProbes(ctx.registry, probeItems);
+
+  const rowsByTarget = new Map<string, UniqueRow>();
+  await runAtomicNodeClaimDiagnosticGroups(groups, async (group) => {
+    const rows = await boundCheckUniqueBatch.checkUniqueBatch({
+      graphId: ctx.graphId,
+      nodeKind: group.nodeKind,
+      constraintName: group.constraintName,
+      keys: group.keys,
+    });
+    for (const row of rows) {
+      rowsByTarget.set(
+        encodeTupleKey([group.nodeKind, group.constraintName, row.key]),
+        row,
+      );
+    }
+  });
+
+  return preparedCreates.map((prepared, index) => {
+    for (const entry of requireDefined(probeItems[index]).entries) {
+      if (!isUniquenessClaimEntry(entry)) continue;
+      for (const nodeKind of uniquenessProbeKinds(
+        prepared.kind,
+        entry.refusal.constraint.scope,
+        ctx.registry,
+      )) {
+        const existing = rowsByTarget.get(
+          encodeTupleKey([nodeKind, entry.constraintName, entry.key]),
+        );
+        if (existing === undefined) continue;
+        const refusal = uniquenessClaimRefusal(
+          prepared.kind,
+          prepared.id,
+          entry,
+          existing,
+        );
+        if (refusal !== undefined) {
+          return { kind: "refusal" as const, error: refusal };
+        }
+      }
+    }
+    return ATOMIC_NODE_CLAIM_CLEAR;
+  });
+}
+
 /**
  * Diagnoses a database-enforced all-or-nothing claim refusal after rollback.
  *
@@ -1777,33 +1958,31 @@ async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   backend: GraphBackend | TransactionBackend,
   preparedCreates: readonly NodeCreatePrepared[],
-): Promise<void> {
+): Promise<never> {
   await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-  const constraintContext: ConstraintContext = {
-    graphId: ctx.graphId,
-    registry: ctx.registry,
-    backend,
-  };
-  const uniquenessContext = createUniquenessContext(
-    ctx.graphId,
-    ctx.registry,
-    backend,
-    ctx.uniqueSidecarBatch,
-  );
-  for (const prepared of preparedCreates) {
-    await checkDisjointnessConstraint(
-      constraintContext,
-      prepared.kind,
-      prepared.id,
-    );
-    await checkUniquenessConstraints(
-      uniquenessContext,
-      prepared.kind,
-      prepared.id,
-      prepared.validatedProps,
-      prepared.uniqueConstraints,
-    );
+  const [disjointnessVerdicts, uniquenessVerdicts] = await Promise.all([
+    diagnoseAtomicNodeDisjointness(ctx, backend, preparedCreates),
+    diagnoseAtomicNodeUniqueness(ctx, backend, preparedCreates),
+  ]);
+  for (const [index] of preparedCreates.entries()) {
+    const disjointness = requireDefined(disjointnessVerdicts[index]);
+    if (disjointness.kind === "refusal") throw disjointness.error;
+    const uniqueness = requireDefined(uniquenessVerdicts[index]);
+    if (uniqueness.kind === "refusal") throw uniqueness.error;
   }
+  throw new DatabaseOperationError(
+    "Atomic node batch returned no postimages, but current schema-fence and " +
+      "claim state do not explain the refusal. Database state may have " +
+      "changed after the atomic program rolled back.",
+    {
+      operation: "insert",
+      entity: "node",
+      attempted: preparedCreates.map((prepared) => ({
+        kind: prepared.kind,
+        id: prepared.id,
+      })),
+    },
+  );
 }
 
 /**

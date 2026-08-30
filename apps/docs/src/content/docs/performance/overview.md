@@ -205,8 +205,12 @@ existing transaction or fallback path. This per-member budget is distinct from
 the seven unique durable edge identities admitted by the convergence program
 above. A successful program needs no diagnostic reads. A refused claim first
 rolls the entire native batch back, then uses committed-state fence and claim
-reads to recover the same typed error as the portable path; those failure-only
-reads are not part of the successful-write RTT count.
+reads to recover the same typed error as the portable path. Bundled backends
+diagnose the complete refused input with set-oriented node and uniqueness reads
+rather than one probe per member; custom backends without those batch reads use
+32-member concurrency windows while still covering every input and selecting
+the error in input order. These failure-only reads are not part of the
+successful-write RTT count.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
 schema-fenced atomic program when the store has no history or revision capture.

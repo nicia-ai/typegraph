@@ -25,6 +25,7 @@ import {
   type NodeInsertClaim,
   type TransactionBackend,
   type UniqueConstraintBackend,
+  type UniqueRow,
 } from "../../backend/types";
 import { checkWherePredicate, computeUniqueKey } from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
@@ -35,6 +36,7 @@ import {
 } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
+import { encodeTupleKey } from "../../utils/tuple-key";
 import { constraintFenceRefusal } from "../operations/write-transaction";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
@@ -369,6 +371,60 @@ export function isUniquenessClaimEntry(
   return entry.refusal.kind === "uniqueness";
 }
 
+/** One set-oriented uniqueness read shared by every batch probe consumer. */
+export type NodeUniquenessProbeGroup = Readonly<{
+  nodeKind: string;
+  constraintName: string;
+  keys: readonly string[];
+}>;
+
+/**
+ * THE owner of grouping node uniqueness entries into backend batch reads.
+ *
+ * Preparation-cache priming and post-rollback diagnosis consume the same
+ * groups, including every canonical and legacy axis covered by a scoped claim.
+ * Keeping the grouping here prevents one path from silently probing a narrower
+ * hierarchy than the other.
+ */
+export function groupNodeUniquenessProbes(
+  registry: KindRegistry,
+  items: readonly Readonly<{
+    kind: string;
+    entries: readonly NodeClaimEntry[];
+  }>[],
+): readonly NodeUniquenessProbeGroup[] {
+  type MutableProbeGroup = Readonly<{
+    nodeKind: string;
+    constraintName: string;
+    keys: Set<string>;
+  }>;
+  const groups = new Map<string, MutableProbeGroup>();
+  for (const item of items) {
+    for (const entry of item.entries) {
+      if (!isUniquenessClaimEntry(entry)) continue;
+      for (const nodeKind of uniquenessProbeKinds(
+        item.kind,
+        entry.refusal.constraint.scope,
+        registry,
+      )) {
+        const identity = encodeTupleKey([nodeKind, entry.constraintName]);
+        const group = groups.get(identity) ?? {
+          nodeKind,
+          constraintName: entry.constraintName,
+          keys: new Set<string>(),
+        };
+        group.keys.add(entry.key);
+        groups.set(identity, group);
+      }
+    }
+  }
+  return [...groups.values()].map((group) => ({
+    nodeKind: group.nodeKind,
+    constraintName: group.constraintName,
+    keys: [...group.keys],
+  }));
+}
+
 /**
  * Probes ONE entry's key across every kind its scope covers, the axis first.
  *
@@ -398,8 +454,6 @@ async function probeUniqueKey(
   id: string,
   entry: UniquenessClaimEntry,
 ): Promise<boolean> {
-  const mine: ClaimOwner = { concreteKind: kind, nodeId: id };
-
   // `let` earns its place: the loop must visit EVERY kind in scope to reach its
   // refusal, so the ownership reading cannot be an early return.
   let heldByThisNode = false;
@@ -416,23 +470,42 @@ async function probeUniqueKey(
     });
 
     if (existing === undefined) continue;
-    if (
-      !isSameClaimOwner(
-        { concreteKind: existing.concrete_kind, nodeId: existing.node_id },
-        mine,
-      )
-    ) {
-      throw new UniquenessError({
-        constraintName: entry.constraintName,
-        kind: existing.concrete_kind,
-        existingId: existing.node_id,
-        newId: id,
-        fields: entry.refusal.constraint.fields,
-      });
-    }
+    const refusal = uniquenessClaimRefusal(kind, id, entry, existing);
+    if (refusal !== undefined) throw refusal;
     if (kindToCheck === entry.axis) heldByThisNode = true;
   }
   return heldByThisNode;
+}
+
+/**
+ * THE owner of the conflict verdict for one uniqueness probe result.
+ *
+ * The scalar probe and post-rollback batch diagnosis both call this function,
+ * so owner-pair equality and the public error payload cannot drift between the
+ * portable preflight and the native program's exceptional diagnostic path.
+ */
+export function uniquenessClaimRefusal(
+  kind: string,
+  id: string,
+  entry: UniquenessClaimEntry,
+  existing: UniqueRow,
+): UniquenessError | undefined {
+  const proposedOwner: ClaimOwner = { concreteKind: kind, nodeId: id };
+  if (
+    isSameClaimOwner(
+      { concreteKind: existing.concrete_kind, nodeId: existing.node_id },
+      proposedOwner,
+    )
+  ) {
+    return;
+  }
+  return new UniquenessError({
+    constraintName: entry.constraintName,
+    kind: existing.concrete_kind,
+    existingId: existing.node_id,
+    newId: id,
+    fields: entry.refusal.constraint.fields,
+  });
 }
 
 /**
