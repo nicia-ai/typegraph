@@ -22,11 +22,10 @@ function createSessionAdapter(
     exclusiveCalls += 1;
     return critical(connection);
   };
-  const adapter = {
-    ...connection,
-    runExclusive,
-  } satisfies SqlExecutionAdapter;
-  return { adapter, exclusiveCalls: () => exclusiveCalls };
+  return {
+    execution: { executeCompiled, runExclusive },
+    exclusiveCalls: () => exclusiveCalls,
+  };
 }
 
 describe("transaction-session atomic batches", () => {
@@ -40,9 +39,9 @@ describe("transaction-session atomic batches", () => {
         { sql: statement.sql },
       ] as unknown as readonly TRow[]);
     };
-    const { adapter, exclusiveCalls } = createSessionAdapter(executeCompiled);
+    const { execution, exclusiveCalls } = createSessionAdapter(executeCompiled);
     const batch = requireDefined(
-      createSessionAtomicBatchAdapter(adapter)?.executeAtomicBatch,
+      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
     );
 
     const result = await batch<{ sql: string }>([
@@ -73,9 +72,9 @@ describe("transaction-session atomic batches", () => {
       if (statement.sql === "BROKEN") return Promise.reject(refusal);
       return Promise.resolve([] as readonly TRow[]);
     };
-    const { adapter } = createSessionAdapter(executeCompiled);
+    const { execution } = createSessionAdapter(executeCompiled);
     const batch = requireDefined(
-      createSessionAtomicBatchAdapter(adapter)?.executeAtomicBatch,
+      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
     );
 
     await expect(batch([{ sql: "BROKEN", params: [] }])).rejects.toBe(refusal);
@@ -88,27 +87,37 @@ describe("transaction-session atomic batches", () => {
   });
 
   it("reports failed savepoint recovery instead of returning a poisoned session", async () => {
+    const refusal = new Error("sentinel refusal");
+    const recoveryFailure = new Error("savepoint recovery failed");
     const statements: string[] = [];
     const executeCompiled: NonNullable<
       SqlExecutionAdapter["executeCompiled"]
     > = <TRow>(statement: Readonly<{ sql: string }>) => {
       statements.push(statement.sql);
       if (statement.sql === "BROKEN") {
-        return Promise.reject(new Error("sentinel refusal"));
+        return Promise.reject(refusal);
       }
       if (statement.sql.startsWith("ROLLBACK TO")) {
-        return Promise.reject(new Error("savepoint recovery failed"));
+        return Promise.reject(recoveryFailure);
       }
       return Promise.resolve([] as readonly TRow[]);
     };
-    const { adapter } = createSessionAdapter(executeCompiled);
+    const { execution } = createSessionAdapter(executeCompiled);
     const batch = requireDefined(
-      createSessionAtomicBatchAdapter(adapter)?.executeAtomicBatch,
+      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
     );
 
-    await expect(batch([{ sql: "BROKEN", params: [] }])).rejects.toBeInstanceOf(
-      CompilerInvariantError,
+    const failure = await batch([{ sql: "BROKEN", params: [] }]).catch(
+      (error: unknown) => error,
     );
+    expect(failure).toBeInstanceOf(CompilerInvariantError);
+    const failures = (failure as Error).cause;
+    expect(failures).toBeInstanceOf(AggregateError);
+    expect((failures as AggregateError).cause).toBe(refusal);
+    expect((failures as AggregateError).errors).toEqual([
+      refusal,
+      recoveryFailure,
+    ]);
     expect(statements).toEqual([
       "SAVEPOINT typegraph_atomic_program",
       "BROKEN",
@@ -116,19 +125,15 @@ describe("transaction-session atomic batches", () => {
     ]);
   });
 
-  it("refuses adapters that cannot reserve and execute one session", () => {
-    const execute = vi.fn();
-    const base = {
-      compile: vi.fn(),
-      execute,
-    } as unknown as SqlExecutionAdapter;
+  it("returns an empty program without opening a savepoint or queue slot", async () => {
+    const executeCompiled = vi.fn().mockResolvedValue([]);
+    const { execution, exclusiveCalls } = createSessionAdapter(executeCompiled);
+    const batch = requireDefined(
+      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
+    );
 
-    expect(createSessionAtomicBatchAdapter(base)).toBeUndefined();
-    expect(
-      createSessionAtomicBatchAdapter({
-        ...base,
-        runExclusive: (critical) => critical(base),
-      }),
-    ).toBeUndefined();
+    await expect(batch([])).resolves.toEqual([]);
+    expect(exclusiveCalls()).toBe(0);
+    expect(executeCompiled).not.toHaveBeenCalled();
   });
 });

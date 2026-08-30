@@ -21,10 +21,13 @@ export function downgradeAtomicBatch(
 }
 
 /**
- * Rebinds root atomic authority to one already-open transaction session.
+ * Declares atomic authority for one already-open transaction session.
  *
- * The session must still register its own exact-resource transport and
- * semantic profile. This declaration alone never authorizes execution.
+ * Session authority is earned independently of the root verdict: a root may
+ * be unable to own a multi-statement atomic boundary while its transaction
+ * factory can still prove one pinned open session. The session must register
+ * its own exact-resource transport and semantic profile; this declaration
+ * alone never authorizes execution.
  */
 export function scopeAtomicBatchToSession(
   capabilities: BackendCapabilities,

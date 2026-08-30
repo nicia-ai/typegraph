@@ -1548,6 +1548,13 @@ variants while continuing to require direct create, delete, update, and durable
 convergence evidence. Bundled PostgreSQL binds the same reviewed lowering to the
 exact transaction session and exercises the mixed node and edge variants against
 a real engine, including typed refusal rollback.
+An exact `atomicBatch: "session"` conformance fixture includes those mixed
+variants even though `interactiveTransactions` is true; nested-transaction
+isolation is reported as inapplicable because the fixture resource is already
+the open transaction. The transport runner accepts the same exact-session
+resource and certifies its ordered slots, parameter preservation, rollback,
+and empty-program behavior. Generic derived session objects still lose both
+the declaration and the identity-bound registrations.
 Backend authors implementing edge
 refusal paths use the exported
 `AtomicEdgeBatchEndpointRefusalError`,

@@ -3322,12 +3322,13 @@ function createTransactionBackend(
   // bypass driver logging and other Drizzle session behavior merely because
   // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
-    executeCompiled === undefined ?
-      operationExecutionAdapter
-    : { ...operationExecutionAdapter, executeCompiled },
+    operationExecutionAdapter,
   );
+  const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =
-    createSessionAtomicBatchAdapter(txExecutionAdapter);
+    executeCompiled === undefined ? undefined : (
+      createSessionAtomicBatchAdapter({ executeCompiled, runExclusive })
+    );
   const sessionAtomicSqlProgramExecutor =
     sessionAtomicBatchAdapter === undefined ? undefined : (
       createAtomicSqlProgramExecutor(sessionAtomicBatchAdapter)

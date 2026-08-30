@@ -23,7 +23,7 @@ import { deriveBackend } from "../src/backend/derive-backend";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
-import type { GraphBackend } from "../src/backend/types";
+import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { TypeGraphError } from "../src/errors";
 
 type FakeState = Readonly<{
@@ -62,6 +62,7 @@ function createFixture(
   wrapExecutor?: (
     executeAtomicBatch: AtomicSqlBatchExecutor,
   ) => AtomicSqlBatchExecutor,
+  scope: "root" | "session" = "root",
 ): AtomicTransportConformanceFixture<FakeState> {
   let state: MutableFakeState = { primary: [], sidecar: [] };
   let receivedStatements: readonly CompiledAtomicSqlStatement[] | undefined;
@@ -92,18 +93,23 @@ function createFixture(
     return statements.map(() => [] as readonly TRow[]);
   };
   const executeAtomicBatch = wrapExecutor?.(baseExecutor) ?? baseExecutor;
-  const root = {
-    capabilities: { execution: { atomicBatch: "root" } },
+  const backend = {
+    capabilities: {
+      execution: {
+        atomicBatch: scope,
+        interactiveTransactions: scope === "session",
+      },
+    },
     commands: {
-      session: "root",
+      session: scope === "root" ? "root" : "transaction",
       execute: () => Promise.reject(new Error("unused command port")),
     },
-  } as unknown as GraphBackend;
-  registerAtomicSqlProgram(root, executeAtomicBatch);
+  } as unknown as GraphBackend | TransactionBackend;
+  registerAtomicSqlProgram(backend, executeAtomicBatch);
 
   return {
-    backend: root,
-    derivedBackends: [deriveBackend(root, {})],
+    backend,
+    derivedBackends: [deriveBackend(backend, {})],
     executeAtomicBatch,
     equal,
     orderedResults: {
@@ -149,6 +155,17 @@ describe("atomic transport conformance runner", () => {
       "provenance: derived backend lineage",
       "provenance: derived backend isolation",
     ]);
+    expect(report.skipped).toEqual([
+      "provenance: transaction backend isolation",
+    ]);
+  });
+
+  it("certifies an exact transaction-session transport", async () => {
+    const report = await runAtomicTransportConformance(
+      createFixture(true, undefined, "session"),
+    );
+
+    expect(report.passed).toContain("provenance: exact root registration");
     expect(report.skipped).toEqual([
       "provenance: transaction backend isolation",
     ]);

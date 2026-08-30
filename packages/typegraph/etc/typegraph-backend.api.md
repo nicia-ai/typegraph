@@ -177,7 +177,7 @@ export type AtomicEdgeResolvedUpdateEntry = Readonly<{
 
 // @public (undocumented)
 export type AtomicMutationProgramConformanceCase = Readonly<{
-    backend: GraphBackend;
+    backend: GraphBackend | TransactionBackend;
     variant: AtomicMutationProgramVariant;
     orderedSuccess: AtomicMutationProgramSuccessCase;
     staleFenceNoWrite: AtomicMutationProgramRefusalCase & Readonly<{
@@ -193,7 +193,7 @@ export class AtomicMutationProgramConformanceError extends TypeGraphError {
 
 // @public (undocumented)
 export type AtomicMutationProgramConformanceFixture = Readonly<{
-    backend: GraphBackend;
+    backend: GraphBackend | TransactionBackend;
     equal: (actual: unknown, expected: unknown) => boolean;
     cases: readonly AtomicMutationProgramConformanceCase[];
 }> & ExactRootRegistrationProvenanceFixture;
@@ -359,7 +359,7 @@ export class AtomicTransportConformanceError extends TypeGraphError {
 
 // @public (undocumented)
 export type AtomicTransportConformanceFixture<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined> = Readonly<{
-    backend: GraphBackend;
+    backend: GraphBackend | TransactionBackend;
     executeAtomicBatch: AtomicSqlBatchExecutor;
     equal: AtomicTransportEquality;
     orderedResults: Readonly<{
@@ -1928,7 +1928,10 @@ export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O & Re
 
 // @public
 export type ExactRootRegistrationProvenanceFixture = Readonly<{
-    derivedBackends: readonly [GraphBackend, ...GraphBackend[]];
+    derivedBackends: readonly [
+    GraphBackend | TransactionBackend,
+    ...(GraphBackend | TransactionBackend)[]
+    ];
 }>;
 
 // @public

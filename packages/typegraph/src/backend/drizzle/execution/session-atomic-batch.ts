@@ -5,6 +5,11 @@ import type {
 } from "../../capabilities/atomic-sql-program";
 import type { SqlExecutionAdapter } from "./types";
 
+type SessionAtomicBatchExecution = Readonly<{
+  executeCompiled: NonNullable<SqlExecutionAdapter["executeCompiled"]>;
+  runExclusive: NonNullable<SqlExecutionAdapter["runExclusive"]>;
+}>;
+
 const ATOMIC_PROGRAM_SAVEPOINT = "typegraph_atomic_program";
 const BEGIN_ATOMIC_PROGRAM = {
   sql: `SAVEPOINT ${ATOMIC_PROGRAM_SAVEPOINT}`,
@@ -31,24 +36,16 @@ const RELEASE_ATOMIC_PROGRAM = {
  * diagnostics can translate them to typed errors.
  */
 export function createSessionAtomicBatchAdapter(
-  adapter: SqlExecutionAdapter,
-): AtomicSqlProgramAdapter | undefined {
-  const runExclusive = adapter.runExclusive;
-  if (runExclusive === undefined || adapter.executeCompiled === undefined) {
-    return;
-  }
+  execution: SessionAtomicBatchExecution,
+): AtomicSqlProgramAdapter {
+  const { executeCompiled, runExclusive } = execution;
 
   return {
     async executeAtomicBatch<TRow>(
       statements: readonly CompiledAtomicSqlStatement[],
     ) {
-      return runExclusive(async (connection) => {
-        const executeCompiled = connection.executeCompiled;
-        if (executeCompiled === undefined) {
-          throw new CompilerInvariantError(
-            "An atomic transaction session lost compiled execution inside its exclusive boundary.",
-          );
-        }
+      if (statements.length === 0) return [];
+      return runExclusive(async () => {
         await executeCompiled(BEGIN_ATOMIC_PROGRAM);
         const results: (readonly TRow[])[] = [];
         try {
@@ -59,13 +56,21 @@ export function createSessionAtomicBatchAdapter(
           return results;
         } catch (error) {
           try {
+            // PostgreSQL protocol- and SQL-level prepared statements survive
+            // ROLLBACK TO SAVEPOINT (verified on PostgreSQL 18), so recovery
+            // restores data state without invalidating the session's cache.
             await executeCompiled(ROLLBACK_ATOMIC_PROGRAM);
             await executeCompiled(RELEASE_ATOMIC_PROGRAM);
           } catch (recoveryError) {
+            const failures = new AggregateError(
+              [error, recoveryError],
+              "The atomic program failed and its savepoint recovery also failed.",
+              { cause: error },
+            );
             throw new CompilerInvariantError(
               "An atomic transaction session could not restore its savepoint after a failed program.",
               {},
-              { cause: recoveryError },
+              { cause: failures },
             );
           }
           throw error;

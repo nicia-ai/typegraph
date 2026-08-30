@@ -2405,6 +2405,10 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
     return unsupportedResolvedMutationSet();
   }
 
+  // The eligibility owner above excludes every edge kind that can owe a
+  // cardinality claim. Preparation normalizes that proven shape; a claim here
+  // is contradictory evidence between the classifier and claim planner, not a
+  // late unsupported verdict that may silently enter another execution path.
   const preparation = await prepareAtomicEdgeBatchCreates(
     ctx,
     creates,

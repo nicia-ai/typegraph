@@ -306,18 +306,20 @@ export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND = {
  * A zero limit is an honest opt-out. Singleton updates reach the update-only
  * families directly on every exact root. Mixed resolved sets move their
  * collection-level read/partition/write unit into an interactive transaction;
- * the bundled PostgreSQL factory separately rebinds and tests those executors
- * on the exact session, but that does not make the root variants reachable.
- * Conformance consumes this owner instead of re-spelling either decision.
+ * an interactive root therefore cannot reach them, while an exact registered
+ * `atomicBatch: "session"` target can. Conformance consumes this owner instead
+ * of inferring session reachability from transaction availability.
  */
 export function reachableAtomicMutationProgramVariants(
   profile: AtomicMutationProgramExecutor,
   execution: Pick<
     GraphBackend["capabilities"]["execution"],
-    "interactiveTransactions"
+    "atomicBatch" | "interactiveTransactions"
   >,
 ): readonly AtomicMutationProgramVariant[] {
   const variants: AtomicMutationProgramVariant[] = [];
+  const resolvedMutationSetsReachable =
+    !execution.interactiveTransactions || execution.atomicBatch === "session";
   if (profile.createNodes !== undefined) variants.push("createNodes");
   if (profile.createEdges !== undefined) variants.push("createEdges");
   if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
@@ -329,13 +331,13 @@ export function reachableAtomicMutationProgramVariants(
     variants.push("updateEdges");
   }
   if (
-    !execution.interactiveTransactions &&
+    resolvedMutationSetsReachable &&
     (profile.mutateNodes?.maxEntries ?? 0) > 0
   ) {
     variants.push("mutateNodes");
   }
   if (
-    !execution.interactiveTransactions &&
+    resolvedMutationSetsReachable &&
     (profile.mutateEdges?.maxEntries.resolvedSet ?? 0) > 0
   ) {
     variants.push("mutateEdges.resolvedSet");

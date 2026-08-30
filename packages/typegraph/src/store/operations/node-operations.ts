@@ -2930,6 +2930,10 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     return unsupportedResolvedMutationSet();
   }
 
+  // The eligibility owner above excludes every node kind whose create planner
+  // can emit claims. Preparation is allowed to normalize that proven shape,
+  // not to reopen eligibility after the operation has committed to this
+  // executor. A claim here therefore means those two owners drifted.
   const preparedCreates = await prepareAtomicBatchCreates(
     ctx,
     creates,

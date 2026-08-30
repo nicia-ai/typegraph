@@ -176,6 +176,8 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
             expect(transactionBackend.capabilities.execution.atomicBatch).toBe(
               "session",
             );
+            expect("executeRaw" in transactionBackend).toBe(false);
+            expect(Object.hasOwn(transactionBackend, "executeRaw")).toBe(false);
             const sessionProfile = requireDefined(
               resolveAtomicMutationPrograms(transactionBackend),
             );
@@ -186,6 +188,12 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
             expect(
               sessionProfile.mutateEdges?.maxEntries.durableConvergence,
             ).toBe(0);
+            expect(
+              reachableAtomicMutationProgramVariants(
+                sessionProfile,
+                transactionBackend.capabilities.execution,
+              ),
+            ).toEqual(["mutateNodes", "mutateEdges.resolvedSet"]);
             const ordinaryWrapper = deriveBackend(transactionBackend, {});
             expect(ordinaryWrapper.capabilities.execution.atomicBatch).toBe(
               "none",
