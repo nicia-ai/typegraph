@@ -744,17 +744,17 @@ export function buildAssertAtomicNodeMutationPostimages(
   const expectedKinds = [...expectedByKind].map(([kind, expected]) => {
     const expectedRows = expected.map(
       ({ kind: operation, postimage }) => sql`
-      (
-        ${nodes.id} = ${postimage.id}
-        AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, postimage.propsJson)}
-        ${
+        (
+          ${nodes.id} = ${postimage.id}
+          AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, postimage.propsJson)}
+          ${
           operation === "update" ?
             sql`AND ${nodes.version} = ${postimage.version}`
           : sql.empty()
         }
-        AND ${nodes.updatedAt} = ${postimage.updatedAt}
-      )
-    `,
+          AND ${nodes.updatedAt} = ${postimage.updatedAt}
+        )
+      `,
     );
     return sql`(${nodes.kind} = ${kind} AND (${sql.join(expectedRows, sql` OR `)}))`;
   });
