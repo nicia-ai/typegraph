@@ -84,6 +84,8 @@ export type AtomicNodeClaimSupport = Readonly<{
   /**
    * Maximum compiled claim/probe bind cost one member may contribute to its
    * write gate.
+   * Compute a member's required value with {@link atomicNodeClaimInputCost};
+   * backend implementations must not reproduce the SQL cost formula.
    * Total batch size is deliberately absent: the executor chunks statements
    * inside one atomic transport submission.
    */
@@ -197,20 +199,28 @@ function atomicNodeClaimFamily(claim: NodeInsertClaim): AtomicNodeClaimFamily {
   return claim.verdict.kind;
 }
 
-/** Number of claim/probe input rows one member contributes to its write gate. */
+/** Bind cost of one canonical claim row in an atomic node write gate. */
+const ATOMIC_NODE_CANONICAL_CLAIM_INPUT_COST = 6;
+
+/** Bind cost of one legacy uniqueness compatibility probe. */
+const ATOMIC_NODE_UNIQUENESS_PROBE_INPUT_COST = 9;
+
+/** Bind cost of one legacy disjointness compatibility probe. */
+const ATOMIC_NODE_DISJOINTNESS_PROBE_INPUT_COST = 6;
+
+/** Exact compiled claim/probe bind cost one member contributes to its write gate. */
 export function atomicNodeClaimInputCost(
   claims: readonly NodeInsertClaim[],
 ): number {
   let cost = 0;
   for (const claim of claims) {
-    const probeCount =
+    cost += ATOMIC_NODE_CANONICAL_CLAIM_INPUT_COST;
+    cost +=
       claim.verdict.kind === "uniqueness" ?
+        ATOMIC_NODE_UNIQUENESS_PROBE_INPUT_COST *
         claim.verdict.probeAxes.filter((axis) => axis !== claim.axis).length
-      : claim.verdict.conflictingKinds.length;
-    // A canonical claim input binds six columns. Legacy uniqueness probes bind
-    // one extra repeated axis compared with the disjoint-node probe, so seven
-    // is the conservative shared unit for every compatibility read.
-    cost += 6 + 7 * probeCount;
+      : ATOMIC_NODE_DISJOINTNESS_PROBE_INPUT_COST *
+        claim.verdict.conflictingKinds.length;
   }
   return cost;
 }

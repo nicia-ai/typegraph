@@ -343,8 +343,11 @@ wall-clock RTT benchmark;
 fallback paths are intentionally not assigned a latency claim.
 On D1, claim work is chunked inside the same submission rather than imposing a
 batch-wide ceiling. Each member has 87 claim-input binds after its row and
-fence: a canonical claim costs six and each legacy compatibility probe costs
-seven. A member beyond that bound retains the portable behavior.
+fence: a canonical claim costs six, each legacy hierarchy-wide uniqueness
+probe costs nine, and each legacy disjointness probe costs six. Custom
+executors should call the exported `atomicNodeClaimInputCost()` owner rather
+than reproduce this formula. A member beyond that bound retains the portable
+behavior.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
 use one schema-fenced native program when history and revision capture are

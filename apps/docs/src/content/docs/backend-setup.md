@@ -1535,15 +1535,17 @@ The profile is family-scoped:
 | `mutateNodes` / `mutateEdges` | Eligible mixed create/update sets; the edge family also owns durable endpoint convergence |
 
 Executor limits such as `maxEntries`,
-`createNodes.claimSupport.maxEntriesByFamily`, the optional
-`maxMixedEntries`, and the two edge mutation ceilings are part of the
-registration contract and must be nonnegative integers; zero honestly declares
-that the backend's bind budget cannot admit one member of that shape. TypeGraph
-validates those declarations before publishing the exact-root profile. A key in
-`maxEntriesByFamily` explicitly advertises `uniqueness` or `disjointness`; an
-empty map honestly opts out of all claim work. A batch containing both families
-also requires `maxMixedEntries`, so one family's cheaper ceiling cannot
-authorize the other's SQL. `deleteNodes.releasedClaimFamilies` similarly
+`createNodes.claimSupport.maxInputCostPerEntry`, and the two edge mutation
+ceilings are part of the registration contract and must be nonnegative
+integers; zero honestly declares that the backend's bind budget cannot admit
+one member of that shape. TypeGraph validates those declarations before
+publishing the exact-root profile. `claimSupport.families` explicitly
+advertises `uniqueness` and/or `disjointness`; an empty list with a zero bound
+honestly opts out of all claim work. The Store calls the exported
+`atomicNodeClaimInputCost()` owner for each member and refuses the native path
+when its complete normalized claim set exceeds the executor's declared bound.
+Custom executors must use that same helper instead of reproducing its
+dialect-reviewed bind formula. `deleteNodes.releasedClaimFamilies` similarly
 declares which owner-side claim cleanup the delete program proves. Node
 create/update/mutation executors advertise derived-storage support separately
 through `projectionSupport.families`; omission or an empty list honestly opts

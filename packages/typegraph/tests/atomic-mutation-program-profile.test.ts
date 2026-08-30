@@ -13,6 +13,7 @@ import {
   type AtomicMutationProgramRegistration,
   type AtomicNodeBatchExecutor,
   type AtomicNodeBatchInput,
+  atomicNodeClaimInputCost,
   type AtomicNodeResolvedUpdateBatchExecutor,
   hasAtomicMutationProgramRegistration,
   registerAtomicMutationPrograms,
@@ -448,10 +449,37 @@ describe("atomic mutation program execution profile", () => {
     ).toBe(true);
     expect(
       supportsAtomicNodeClaims(support, [
-        ...repeatClaim(uniquenessClaim, 5),
+        ...repeatClaim(uniquenessClaim, 6),
         disjointnessClaim,
       ]),
     ).toBe(false);
+  });
+
+  it("prices uniqueness and disjointness compatibility probes by emitted binds", () => {
+    const uniquenessClaim = {
+      axis: "Person",
+      constraintName: "person-name",
+      key: "name",
+      placement: "pre-insert",
+      verdict: {
+        kind: "uniqueness",
+        fields: ["name"],
+        probeAxes: ["Person", "Employee", "Manager", "Director", "Founder"],
+      },
+    } as const satisfies NodeInsertClaim;
+    const disjointnessClaim = {
+      axis: "Person|Rival",
+      constraintName: "disjoint",
+      key: "id",
+      placement: "pre-insert",
+      verdict: {
+        kind: "disjointness",
+        conflictingKinds: ["Rival", "Enemy", "Competitor", "Opponent"],
+      },
+    } as const satisfies NodeInsertClaim;
+
+    expect(atomicNodeClaimInputCost([uniquenessClaim])).toBe(42);
+    expect(atomicNodeClaimInputCost([disjointnessClaim])).toBe(30);
   });
 
   it("refuses infinite family limits before publishing the profile", () => {

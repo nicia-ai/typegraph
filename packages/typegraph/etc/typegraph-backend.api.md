@@ -291,6 +291,9 @@ export type AtomicNodeBatchResultMode = "count" | "rows";
 export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
 
 // @public
+export function atomicNodeClaimInputCost(claims: readonly NodeInsertClaim[]): number;
+
+// @public
 export type AtomicNodeClaimSupport = Readonly<{
     families: readonly AtomicNodeClaimFamily[];
     maxInputCostPerEntry: number;

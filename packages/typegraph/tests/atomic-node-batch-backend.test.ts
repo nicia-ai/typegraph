@@ -206,6 +206,58 @@ describe("bundled root atomic node batch", () => {
     });
   });
 
+  it("classifies a claim-only postimage primary-key refusal", async () => {
+    const { db, query } = makeNeonDatabase([]);
+    const backend = createPostgresBackend(db, { vector: false });
+    const executor = resolveBundledRootAtomicNodeBatch(backend);
+    if (executor === undefined) {
+      throw new Error("Expected Neon atomic node batch capability");
+    }
+    query.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'duplicate key value violates unique constraint "typegraph_nodes_pkey"',
+        ),
+        {
+          code: "23505",
+          constraint: "typegraph_nodes_pkey",
+          schema: "public",
+          table: "typegraph_nodes",
+        },
+      ),
+    );
+    const claim = {
+      axis: "Person",
+      constraintName: "person-name",
+      key: "alice",
+      placement: "pre-insert",
+      verdict: {
+        kind: "uniqueness",
+        fields: ["name"],
+        probeAxes: ["Person"],
+      },
+    } as const;
+
+    await expect(
+      executor({
+        entries: [
+          {
+            idSource: "generated",
+            params: {
+              graphId: "graph-1",
+              kind: "Person",
+              id: "person-1",
+              props: { name: "Alice" },
+            },
+            claims: [claim],
+          },
+        ],
+        resultMode: "count",
+        schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+      }),
+    ).resolves.toBe(0);
+  });
+
   it("compiles, maps, and dispatches through one Neon atomic exchange", async () => {
     const { db, query, transaction } = makeNeonDatabase([{ inserted: 1 }]);
     const backend = createPostgresBackend(db, { vector: false });

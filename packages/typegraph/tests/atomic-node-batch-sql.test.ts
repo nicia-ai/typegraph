@@ -5,6 +5,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it } from "vitest";
 
+import { atomicNodeClaimInputCost } from "../src/backend";
 import {
   type AtomicNodeClaimEntry,
   buildAtomicNodeClaimGatePredicateWithSchemaFence,
@@ -72,7 +73,52 @@ function atomicNodeClaimGateParameterCount(
   return new SQLiteSyncDialect().sqlToQuery(query).params.length;
 }
 
+function atomicNodeClaimGateOnlyParameterCount(
+  entries: readonly AtomicNodeClaimEntry[],
+): number {
+  return new SQLiteSyncDialect().sqlToQuery(
+    buildAtomicNodeClaimGatePredicateWithSchemaFence(
+      sqliteTables,
+      entries,
+      schemaFence,
+      drizzleSql.empty(),
+    ),
+  ).params.length;
+}
+
 describe("schema-fenced atomic node batch SQL", () => {
+  it("keeps the public claim cost equal to the emitted uniqueness-probe binds", () => {
+    const claim = {
+      axis: "Person",
+      constraintName: "person-name",
+      key: "alice",
+      placement: "pre-insert",
+      verdict: {
+        kind: "uniqueness",
+        fields: ["name"],
+        probeAxes: ["Person", "Employee", "Manager", "Director", "Founder"],
+      },
+    } as const;
+    const entry = {
+      memberOrdinal: 0,
+      claimOrdinal: 0,
+      claim,
+      entry: {
+        idSource: "caller",
+        params: params[0],
+        claims: [claim],
+      },
+    } as const satisfies AtomicNodeClaimEntry;
+
+    expect(atomicNodeClaimInputCost([claim])).toBe(42);
+    expect(atomicNodeClaimGateOnlyParameterCount([entry])).toBe(
+      2 + atomicNodeClaimInputCost([claim]),
+    );
+    expect(atomicNodeClaimGateParameterCount([entry], 1)).toBeLessThanOrEqual(
+      13 + atomicNodeClaimInputCost([claim]),
+    );
+  });
+
   it("pins per-statement D1 claim-gate chunk ceilings", () => {
     const disjointEntries = Array.from({ length: 8 }, (_value, index) => {
       const id = `person-${index}`;

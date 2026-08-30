@@ -36,18 +36,6 @@ export type AtomicNodeClaimOwnerRow = Readonly<{
   concrete_kind: string;
 }>;
 
-/** Legacy live-node evidence returned for one disjoint proposal. */
-export type AtomicNodeClaimConflictRow = Readonly<{
-  member_ordinal: number;
-  claim_ordinal: number;
-  probe_ordinal: number;
-  axis: string;
-  constraint_name: string;
-  key: string;
-  holder_id: string;
-  holder_kind: string;
-}>;
-
 const CLAIM_INPUT_ALIAS = "atomic_node_claim_input";
 const SCHEMA_FENCE_ALIAS = "atomic_node_claim_schema_fence";
 
@@ -187,26 +175,30 @@ function claimConflictQueries(
     `;
     if (claim.verdict.kind === "uniqueness") {
       return claim.verdict.probeAxes.flatMap((probeAxis, probeOrdinal) =>
-        probeAxis === claim.axis ? [] : [sql`
-          SELECT
-            ${base},
-            ${ordinalLiteral(probeOrdinal)} AS probe_ordinal,
-            ${probeAxis} AS axis,
-            ${claim.constraintName} AS constraint_name,
-            ${claim.key} AS key,
-            ${tables.uniques.nodeId} AS holder_id,
-            ${tables.uniques.concreteKind} AS holder_kind
-          FROM ${tables.uniques}
-          WHERE ${tables.uniques.graphId} = ${schemaFence.graphId}
-            AND ${tables.uniques.nodeKind} = ${probeAxis}
-            AND ${tables.uniques.constraintName} = ${claim.constraintName}
-            AND ${tables.uniques.key} = ${claim.key}
-            AND ${tables.uniques.deletedAt} IS NULL
-            AND NOT (
-              ${tables.uniques.nodeId} = ${entry.params.id}
-              AND ${tables.uniques.concreteKind} = ${entry.params.kind}
-            )
-        `],
+        probeAxis === claim.axis ?
+          []
+        : [
+            sql`
+              SELECT
+                ${base},
+                ${ordinalLiteral(probeOrdinal)} AS probe_ordinal,
+                ${probeAxis} AS axis,
+                ${claim.constraintName} AS constraint_name,
+                ${claim.key} AS key,
+                ${tables.uniques.nodeId} AS holder_id,
+                ${tables.uniques.concreteKind} AS holder_kind
+              FROM ${tables.uniques}
+              WHERE ${tables.uniques.graphId} = ${schemaFence.graphId}
+                AND ${tables.uniques.nodeKind} = ${probeAxis}
+                AND ${tables.uniques.constraintName} = ${claim.constraintName}
+                AND ${tables.uniques.key} = ${claim.key}
+                AND ${tables.uniques.deletedAt} IS NULL
+                AND NOT (
+                  ${tables.uniques.nodeId} = ${entry.params.id}
+                  AND ${tables.uniques.concreteKind} = ${entry.params.kind}
+                )
+            `,
+          ],
       );
     }
     return claim.verdict.conflictingKinds.map(
@@ -227,29 +219,6 @@ function claimConflictQueries(
       `,
     );
   });
-}
-
-/** Reads legacy live disjoint rows under the same schema fence as the write. */
-export function buildAtomicNodeClaimConflictsWithSchemaFence(
-  tables: Tables,
-  entries: readonly AtomicNodeClaimEntry[],
-  schemaFence: SchemaWriteFenceParams,
-  schemaLockClause: SQL,
-): SQL {
-  assertClaimEntries(entries, schemaFence);
-  const conflicts = claimConflictQueries(tables, entries, schemaFence);
-  if (conflicts.length === 0) {
-    throw new CompilerInvariantError(
-      "An atomic claim conflict read requires a legacy probe.",
-    );
-  }
-  return sql`
-    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
-    SELECT conflict.*
-    FROM (${sql.join([...conflicts], sql` UNION ALL `)}) AS conflict
-    CROSS JOIN ${sql.identifier(SCHEMA_FENCE_ALIAS)}
-    ORDER BY conflict.member_ordinal, conflict.claim_ordinal, conflict.probe_ordinal
-  `;
 }
 
 function claimOf(item: AtomicNodeClaimEntry): NodeInsertClaim {
@@ -417,8 +386,9 @@ export function buildAtomicNodeClaimGatePredicateWithSchemaFence(
     sql`${target}.${quotedColumn(column)}`;
   const legacyConflicts = claimConflictQueries(tables, entries, schemaFence);
   const legacyGate =
-    legacyConflicts.length === 0 ? sql`` :
-      sql`AND NOT EXISTS (${sql.join([...legacyConflicts], sql` UNION ALL `)})`;
+    legacyConflicts.length === 0 ?
+      sql``
+    : sql`AND NOT EXISTS (${sql.join([...legacyConflicts], sql` UNION ALL `)})`;
 
   return sql`
     EXISTS (

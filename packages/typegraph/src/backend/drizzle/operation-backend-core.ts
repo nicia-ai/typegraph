@@ -151,7 +151,6 @@ import type {
 import { edgeMatchIdentityUniqueIndexName } from "./ddl";
 import { type CompiledSqlQuery, type ExecutableSql } from "./execution/types";
 import type {
-  AtomicNodeClaimConflictRow,
   AtomicNodeClaimEntry,
   AtomicNodeClaimOwnerRow,
 } from "./operations/atomic-node-claims";
@@ -1082,19 +1081,19 @@ function compileAtomicNodeProjectionSlots(
 function isAtomicNodePostimageRefusal(
   error: unknown,
   operationStrategy: CommonOperationStrategy,
-  hasProjectionAssertion: boolean,
+  hasPostimageAssertion: boolean,
 ): boolean {
   return (
     isNotNullColumnViolation(
       error,
       operationStrategy.atomicNodeRefusalConstraints.mutationPostimage,
     ) ||
-    (hasProjectionAssertion &&
+    (hasPostimageAssertion &&
       isDuplicatePrimaryKeyError(
         error,
         operationStrategy.primaryKeyConstraints.nodes,
       )) ||
-    (hasProjectionAssertion &&
+    (hasPostimageAssertion &&
       error instanceof DatabaseOperationError &&
       error.details.reason === "duplicate_key" &&
       isDuplicatePrimaryKeyError(
@@ -1412,11 +1411,12 @@ export function createCommonOperationBackend(
   } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
-  async function runAtomicNodeProjectionProgram<TResult>(
+  async function runAtomicNodeSidecarProgram<TResult>(
     input: Readonly<{
       creates: readonly AtomicNodeBatchEntry[];
       updates: readonly AtomicNodeResolvedUpdateEntry[];
       hasProjections: boolean;
+      hasPostimageAssertion: boolean;
       run: () => Promise<TResult>;
       postimageRefusal?: () => TResult;
     }>,
@@ -1435,7 +1435,7 @@ export function createCommonOperationBackend(
         isAtomicNodePostimageRefusal(
           error,
           operationStrategy,
-          input.hasProjections,
+          input.hasPostimageAssertion,
         )
       ) {
         return input.postimageRefusal();
@@ -1727,10 +1727,6 @@ export function createCommonOperationBackend(
               entries: readonly AtomicNodeClaimEntry[];
               rows: readonly AtomicNodeClaimOwnerRow[];
             }>
-          | Readonly<{
-              kind: "claim-conflicts";
-              rows: readonly AtomicNodeClaimConflictRow[];
-            }>
           | Readonly<{ kind: "cleanup" }>
           | AtomicNodeProjectionSlot
           | Readonly<{ kind: "assertion" }>
@@ -1767,44 +1763,6 @@ export function createCommonOperationBackend(
               "Atomic node claim program returned a partial claim result.",
               { expected: claimEntries.length, actual: returnedClaims },
             );
-          }
-
-          const conflicts = results
-            .flatMap((result) =>
-              result.kind === "claim-conflicts" ? result.rows : [],
-            )
-            .toSorted(
-              (left, right) =>
-                left.member_ordinal - right.member_ordinal ||
-                left.claim_ordinal - right.claim_ordinal ||
-                left.probe_ordinal - right.probe_ordinal,
-            );
-          const firstConflict = conflicts[0];
-          if (firstConflict !== undefined) {
-            const item = claimEntries.find(
-              (candidate) =>
-                candidate.memberOrdinal === firstConflict.member_ordinal &&
-                candidate.claimOrdinal === firstConflict.claim_ordinal,
-            );
-            if (item === undefined) {
-              throw new CompilerInvariantError(
-                "Atomic node claim program returned a conflict outside its input set.",
-              );
-            }
-            return item.claim.verdict.kind === "disjointness" ?
-                new DisjointError({
-                  nodeId: item.entry.params.id,
-                  attemptedKind: item.entry.params.kind,
-                  conflictingKind: firstConflict.holder_kind,
-                })
-              : new UniquenessError({
-                  constraintName: item.claim.constraintName,
-                  kind: firstConflict.holder_kind,
-                  existingId: firstConflict.holder_id,
-                  newId: item.entry.params.id,
-                  fields: item.claim.verdict.fields,
-                  axis: firstConflict.axis,
-                });
           }
 
           for (const item of claimEntries.toSorted(
@@ -1912,9 +1870,6 @@ export function createCommonOperationBackend(
                 },
               );
             }
-            const conflictEntries = claimEntries.filter(
-              (item) => atomicNodeClaimInputCost([item.claim]) > 6,
-            );
             const claimChunkSize = Math.max(
               1,
               Math.floor(
@@ -1961,41 +1916,6 @@ export function createCommonOperationBackend(
                   key: String(row["key"]),
                   node_id: String(row["node_id"]),
                   concrete_kind: String(row["concrete_kind"]),
-                })),
-              }),
-            }));
-            const conflictChunkBudget = Math.max(
-              1,
-              options.maxBindParameters - 2,
-            );
-            const conflictChunks = chunkByWeight(
-              conflictEntries,
-              conflictChunkBudget,
-              (entry) => atomicNodeClaimInputCost([entry.claim]) - 6,
-            );
-            const conflictSlots: AtomicSqlProgram<
-              AtomicNodeProgramSlot,
-              unknown
-            >["slots"] = conflictChunks.map((chunk) => ({
-              statement: execution.compile(
-                operationStrategy.buildAtomicNodeClaimConflictsWithSchemaFence(
-                  chunk,
-                  input.schemaFence,
-                  atomicSchemaFenceLockClause,
-                ),
-              ),
-              cardinality: "many" as const,
-              decode: (rows) => ({
-                kind: "claim-conflicts" as const,
-                rows: rows.map((row) => ({
-                  member_ordinal: Number(row["member_ordinal"]),
-                  claim_ordinal: Number(row["claim_ordinal"]),
-                  probe_ordinal: Number(row["probe_ordinal"]),
-                  axis: String(row["axis"]),
-                  constraint_name: String(row["constraint_name"]),
-                  key: String(row["key"]),
-                  holder_id: String(row["holder_id"]),
-                  holder_kind: String(row["holder_kind"]),
                 })),
               }),
             }));
@@ -2068,7 +1988,6 @@ export function createCommonOperationBackend(
               const program = {
                 slots: [
                   ...claimSlots,
-                  ...conflictSlots,
                   ...nodeSlots,
                   ...cleanupSlots,
                   ...projectionSlots,
@@ -2092,10 +2011,11 @@ export function createCommonOperationBackend(
                   return input.entries.length;
                 },
               } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
-              return runAtomicNodeProjectionProgram({
+              return runAtomicNodeSidecarProgram({
                 creates: input.entries,
                 updates: [],
                 hasProjections: projectionSlots.length > 0,
+                hasPostimageAssertion: assertionSlots.length > 0,
                 run: () =>
                   withAtomicNodeBatchClassifications(
                     () => atomicExecutor.execute(program),
@@ -2132,7 +2052,6 @@ export function createCommonOperationBackend(
             const program = {
               slots: [
                 ...claimSlots,
-                ...conflictSlots,
                 ...nodeSlots,
                 ...cleanupSlots,
                 ...projectionSlots,
@@ -2162,10 +2081,11 @@ export function createCommonOperationBackend(
               AtomicNodeProgramSlot,
               readonly NodeRow[]
             >;
-            return runAtomicNodeProjectionProgram({
+            return runAtomicNodeSidecarProgram({
               creates: input.entries,
               updates: [],
               hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: assertionSlots.length > 0,
               run: () =>
                 withAtomicNodeBatchClassifications(
                   () => atomicExecutor.execute(program),
@@ -2228,10 +2148,11 @@ export function createCommonOperationBackend(
                 return input.entries.length;
               },
             } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
-            return runAtomicNodeProjectionProgram({
+            return runAtomicNodeSidecarProgram({
               creates: input.entries,
               updates: [],
               hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: assertionSlots.length > 0,
               run: () =>
                 withAtomicNodeBatchClassifications(
                   () => atomicExecutor.execute(program),
@@ -2333,10 +2254,11 @@ export function createCommonOperationBackend(
             AtomicNodeProgramSlot,
             readonly NodeRow[]
           >;
-          return runAtomicNodeProjectionProgram({
+          return runAtomicNodeSidecarProgram({
             creates: input.entries,
             updates: [],
             hasProjections: projectionSlots.length > 0,
+            hasPostimageAssertion: assertionSlots.length > 0,
             run: () =>
               withAtomicNodeBatchClassifications(
                 () => atomicExecutor.execute(program),
@@ -2970,10 +2892,11 @@ export function createCommonOperationBackend(
               AtomicResolvedMutationSlot<NodeRow>,
               readonly NodeRow[]
             >;
-            return runAtomicNodeProjectionProgram({
+            return runAtomicNodeSidecarProgram({
               creates: [],
               updates: input.entries,
               hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: projectionSlots.length > 0,
               run: () => atomicExecutor.execute(program),
               postimageRefusal: () => [],
             });
@@ -3092,10 +3015,11 @@ export function createCommonOperationBackend(
               rowId: (row) => row.id,
             });
 
-            return runAtomicNodeProjectionProgram({
+            return runAtomicNodeSidecarProgram({
               creates: input.creates,
               updates: input.updates,
               hasProjections: projectionSlots.length > 0,
+              hasPostimageAssertion: true,
               run: () =>
                 withAtomicNodeBatchClassifications(
                   () => atomicExecutor.execute(program),

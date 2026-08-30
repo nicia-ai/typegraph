@@ -196,8 +196,10 @@ caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
 input order. Claim work is chunked by member inside the same atomic submission,
 so Cloudflare D1 no longer has a batch-wide claimed-member ceiling. Its
 100-parameter budget leaves 87 claim-input binds per member after the row and
-fence: a canonical claim costs six and each legacy compatibility probe costs
-seven. A member beyond that complexity, identity-enabled and
+fence: a canonical claim costs six, each legacy hierarchy-wide uniqueness
+probe costs nine, and each legacy disjointness probe costs six. Custom
+executors should call the exported `atomicNodeClaimInputCost()` owner rather
+than reproduce this formula. A member beyond that complexity, identity-enabled and
 history/revision-tracked shapes, and other unsupported node work retain the
 existing transaction or fallback path. This per-member budget is distinct from
 the seven unique durable edge identities admitted by the convergence program
