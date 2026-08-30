@@ -172,6 +172,7 @@ export {
   AtomicEdgeBatchEndpointRefusalError,
   AtomicEdgeConvergenceTombstoneRefusalError,
   AtomicEdgeDeleteIdentityRefusalError,
+  atomicNodeClaimInputCost,
   AtomicNodeDeleteRestrictedRefusalError,
   hasAtomicMutationProgramRegistration,
   registerAtomicMutationPrograms,

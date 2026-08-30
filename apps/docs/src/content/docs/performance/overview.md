@@ -184,22 +184,29 @@ Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL also expose native write programs for eligible
 ingestion calls. Schema-managed `nodes.bulkInsert(items)` and
 `nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
-no Operational Identity, history, or revision work. The program may carry
-either fulltext/vector projection transitions or at most one advertised
-same-kind uniqueness/disjointness claim per claimed member; claim and
-projection envelopes do not yet compose in one program.
+no Operational Identity, history, or revision work. The program composes each
+member's complete advertised uniqueness/disjointness claim set with its
+fulltext/vector projection transitions. Same-kind and hierarchy-wide
+uniqueness, generated and caller IDs, and mixed claim families share this one
+program boundary.
 Neon HTTP, D1, and libSQL submit that program as one transport batch. Session-capable
 PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
 statement per bind-budget chunk. The batch may use generated IDs,
 caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
-input order. Cloudflare D1's 100-parameter budget admits 14 pure same-kind
-uniqueness claims, seven pure disjointness claims, or seven claimed members in
-a mixed-family batch. Multiple claims per member, wider uniqueness scopes,
-multiple-claim, claim-plus-projection, identity-enabled,
-history/revision-tracked, and other unsupported
-node shapes retain their existing transaction or fallback path. These ceilings
-are distinct from the seven unique durable edge identities admitted by the
-convergence program above.
+input order. Claim work is chunked by member inside the same atomic submission,
+so Cloudflare D1 no longer has a batch-wide claimed-member ceiling. Its
+100-parameter budget leaves 87 claim-input binds per member after the row and
+fence: a canonical claim costs six, each legacy hierarchy-wide uniqueness
+probe costs nine, and each legacy disjointness probe costs six. Custom
+executors should call the exported `atomicNodeClaimInputCost()` owner rather
+than reproduce this formula. A member beyond that complexity, identity-enabled and
+history/revision-tracked shapes, and other unsupported node work retain the
+existing transaction or fallback path. This per-member budget is distinct from
+the seven unique durable edge identities admitted by the convergence program
+above. A successful program needs no diagnostic reads. A refused claim first
+rolls the entire native batch back, then uses committed-state fence and claim
+reads to recover the same typed error as the portable path; those failure-only
+reads are not part of the successful-write RTT count.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
 schema-fenced atomic program when the store has no history or revision capture.

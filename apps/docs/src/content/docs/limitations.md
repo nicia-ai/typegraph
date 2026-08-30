@@ -321,32 +321,33 @@ Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL roots can use one schema-fenced native atomic program
 for schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()` calls when the
 node has no Operational Identity, history, or revision work. The program can
-carry either fulltext/vector projections or the supported claim envelope;
-claims and projections together retain the fallback. Session-capable
+compose fulltext/vector projections with the complete supported uniqueness and
+disjointness claim set for every member. Session-capable
 PostgreSQL executes that program on one pinned
-transaction; Neon HTTP, D1, and libSQL submit one transport batch. If any batch
-member has a claim, every claimed member must owe exactly one advertised claim
-family: either a `unique` constraint whose scope is the literal `kind` on a
-generated ID, or one `disjointWith` reservation on a generated or
-caller-supplied ID. The backend's claim-support budget must accommodate the
-batch, and claim-free members may participate alongside either family. IDs may
-otherwise be generated, caller-supplied, or mixed, and
+transaction; Neon HTTP, D1, and libSQL submit one transport batch. Advertised
+same-kind or hierarchy-wide uniqueness claims, disjointness claims, and mixed
+families are acquired in canonical order; compatibility reads preserve rows
+written under legacy claim axes. Claim-free members may participate alongside
+claimed members. IDs may be generated, caller-supplied, or mixed, and
 `bulkCreate()` returns rows in input order. This is an internal optimization,
-not a general Store batch API. A
-caller-supplied ID with uniqueness work, multiple claims per member, non-kind
-uniqueness scope, claim-plus-projection or identity-enabled nodes,
-history/revision tracking, missing schema-fence support, and other unsupported
-shapes fail closed to the existing transaction or fallback behavior.
+not a general Store batch API. Identity-enabled nodes, history/revision
+tracking, a member beyond the executor's declared claim-input budget, missing
+schema-fence support, and other unsupported shapes fail closed to the existing
+transaction or fallback behavior.
 
 The transport inventory for the supported libSQL root records one client
 `batch` submission and zero client `execute` calls for both generated-ID
-claim-free batches, generated-ID batches with one same-kind uniqueness claim,
-and single-disjoint-claim batches. This is a measured submission count, not a
+claim-free batches, multiple-claim batches, cross-scope claims, and
+claim-plus-projection batches. This is a measured submission count, not a
 wall-clock RTT benchmark;
 fallback paths are intentionally not assigned a latency claim.
-On D1, the family-scoped bind budgets admit 14 pure same-kind uniqueness
-claims, seven pure disjointness claims, or seven claimed members when both
-families occur in one batch. Larger batches retain the portable behavior.
+On D1, claim work is chunked inside the same submission rather than imposing a
+batch-wide ceiling. Each member has 87 claim-input binds after its row and
+fence: a canonical claim costs six, each legacy hierarchy-wide uniqueness
+probe costs nine, and each legacy disjointness probe costs six. Custom
+executors should call the exported `atomicNodeClaimInputCost()` owner rather
+than reproduce this formula. A member beyond that bound retains the portable
+behavior.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
 use one schema-fenced native program when history and revision capture are

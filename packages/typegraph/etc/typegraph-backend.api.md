@@ -256,7 +256,7 @@ export type AtomicMutationProgramVariant = (typeof ATOMIC_MUTATION_PROGRAM_VARIA
 export type AtomicNodeBatchEntry = Readonly<{
     idSource: AtomicNodeBatchIdSource;
     params: InsertNodeParams;
-    claim?: NodeInsertClaim;
+    claims?: readonly NodeInsertClaim[];
     projections?: readonly AtomicNodeProjection[];
 }>;
 
@@ -291,9 +291,12 @@ export type AtomicNodeBatchResultMode = "count" | "rows";
 export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
 
 // @public
+export function atomicNodeClaimInputCost(claims: readonly NodeInsertClaim[]): number;
+
+// @public
 export type AtomicNodeClaimSupport = Readonly<{
-    maxEntriesByFamily: Readonly<Partial<Record<AtomicNodeClaimFamily, number>>>;
-    maxMixedEntries?: number;
+    families: readonly AtomicNodeClaimFamily[];
+    maxInputCostPerEntry: number;
 }>;
 
 // @public

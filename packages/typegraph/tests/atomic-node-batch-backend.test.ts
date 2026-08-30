@@ -206,6 +206,58 @@ describe("bundled root atomic node batch", () => {
     });
   });
 
+  it("classifies a claim-only postimage primary-key refusal", async () => {
+    const { db, query } = makeNeonDatabase([]);
+    const backend = createPostgresBackend(db, { vector: false });
+    const executor = resolveBundledRootAtomicNodeBatch(backend);
+    if (executor === undefined) {
+      throw new Error("Expected Neon atomic node batch capability");
+    }
+    query.mockRejectedValueOnce(
+      Object.assign(
+        new Error(
+          'duplicate key value violates unique constraint "typegraph_nodes_pkey"',
+        ),
+        {
+          code: "23505",
+          constraint: "typegraph_nodes_pkey",
+          schema: "public",
+          table: "typegraph_nodes",
+        },
+      ),
+    );
+    const claim = {
+      axis: "Person",
+      constraintName: "person-name",
+      key: "alice",
+      placement: "pre-insert",
+      verdict: {
+        kind: "uniqueness",
+        fields: ["name"],
+        probeAxes: ["Person"],
+      },
+    } as const;
+
+    await expect(
+      executor({
+        entries: [
+          {
+            idSource: "generated",
+            params: {
+              graphId: "graph-1",
+              kind: "Person",
+              id: "person-1",
+              props: { name: "Alice" },
+            },
+            claims: [claim],
+          },
+        ],
+        resultMode: "count",
+        schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+      }),
+    ).resolves.toBe(0);
+  });
+
   it("compiles, maps, and dispatches through one Neon atomic exchange", async () => {
     const { db, query, transaction } = makeNeonDatabase([{ inserted: 1 }]);
     const backend = createPostgresBackend(db, { vector: false });
@@ -416,5 +468,125 @@ describe("bundled root atomic node batch", () => {
       }),
     ).rejects.toThrow("Atomic node batch returned a partial chunk result");
     expect(batch).toHaveBeenCalledTimes(2);
+  });
+
+  it("chunks claimed D1 members inside one atomic submission", async () => {
+    const entries = Array.from({ length: 10 }, (_value, index) => {
+      const id = `claimed-person-${index}`;
+      const claim = {
+        axis: "disjoint-axis",
+        constraintName: "disjoint-constraint",
+        key: id,
+        placement: "pre-insert",
+        verdict: {
+          kind: "disjointness",
+          conflictingKinds: ["Rival"],
+        },
+      } as const;
+      return {
+        idSource: "caller" as const,
+        params: {
+          graphId: "graph-1",
+          kind: "Person",
+          id,
+          props: { name: `Person ${index}` },
+        },
+        claims: [claim],
+        claim,
+      };
+    });
+    const boundStatements: Readonly<{
+      sql: string;
+      params: readonly unknown[];
+    }>[] = [];
+    const prepare = vi.fn((sqlText: string) => ({
+      bind(...params: readonly unknown[]) {
+        const statement = { sql: sqlText, params };
+        boundStatements.push(statement);
+        return statement;
+      },
+    }));
+    const batch = vi.fn(
+      (
+        statements: readonly Readonly<{
+          sql: string;
+          params: readonly unknown[];
+        }>[],
+      ) => {
+        let nodeChunk = 0;
+        return Promise.resolve(
+          statements.map((statement) => {
+            if (
+              statement.sql.includes('INSERT INTO "typegraph_node_uniques"')
+            ) {
+              return {
+                results: entries.map((entry) => ({
+                  node_kind: entry.claim.axis,
+                  constraint_name: entry.claim.constraintName,
+                  key: entry.claim.key,
+                  node_id: entry.params.id,
+                  concrete_kind: entry.params.kind,
+                })),
+              };
+            }
+            if (statement.sql.includes('INSERT INTO "typegraph_nodes"')) {
+              const count = [4, 4, 2][nodeChunk] ?? 0;
+              nodeChunk += 1;
+              return {
+                results: Array.from({ length: count }, () => ({ inserted: 1 })),
+              };
+            }
+            return { results: [] };
+          }),
+        );
+      },
+    );
+    const dialect = new SQLiteSyncDialect();
+    const db = {
+      $client: { batch, prepare },
+      session: { constructor: { name: "SQLiteD1Session" } },
+      dialect: {
+        sqlToQuery(query: SQL) {
+          return dialect.sqlToQuery(query);
+        },
+      },
+      all: vi.fn(() => Promise.resolve([])),
+      get: vi.fn(() => Promise.resolve(undefined)),
+      run: vi.fn(() => Promise.resolve()),
+    } as unknown as AnySqliteDatabase;
+    const backend = createSqliteBackend(db);
+    const executeAtomicNodeBatch = resolveBundledRootAtomicNodeBatch(backend);
+    if (executeAtomicNodeBatch === undefined) {
+      throw new Error("Expected D1 atomic node batch capability");
+    }
+
+    await expect(
+      executeAtomicNodeBatch({
+        entries,
+        resultMode: "count",
+        schemaFence: { graphId: "graph-1", expectedVersion: 1 },
+      }),
+    ).resolves.toBe(entries.length);
+
+    expect(batch).toHaveBeenCalledOnce();
+    expect(
+      boundStatements.filter(
+        (statement) =>
+          statement.sql.includes('INSERT INTO "typegraph_nodes"') &&
+          statement.sql.includes('RETURNING 1 AS "inserted"'),
+      ),
+    ).toHaveLength(3);
+    expect(
+      boundStatements.filter(
+        (statement) =>
+          statement.sql.includes('INSERT INTO "typegraph_nodes"') &&
+          !statement.sql.includes('RETURNING 1 AS "inserted"'),
+      ),
+    ).toHaveLength(3);
+    for (const statement of boundStatements) {
+      expect(statement.params.length).toBeLessThanOrEqual(
+        D1_MAX_BIND_PARAMETERS,
+      );
+    }
   });
 });

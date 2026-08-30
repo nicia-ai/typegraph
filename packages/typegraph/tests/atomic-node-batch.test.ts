@@ -29,7 +29,7 @@ import {
   embedding,
   searchable,
 } from "../src/core";
-import { disjointWith } from "../src/ontology";
+import { disjointWith, subClassOf } from "../src/ontology";
 import { libsqlVectorStrategy } from "../src/query/dialect/vector/libsql-strategy";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
@@ -84,6 +84,16 @@ const SearchDocument = defineNode("SearchDocument", {
 const VectorDocument = defineNode("VectorDocument", {
   schema: z.object({ vector: embedding(2).optional() }),
 });
+const MultiClaimPerson = defineNode("MultiClaimPerson", {
+  schema: z.object({ email: z.string(), handle: z.string() }),
+});
+const ClaimedDocument = defineNode("ClaimedDocument", {
+  schema: z.object({
+    slug: z.string(),
+    title: searchable(),
+    vector: embedding(2).optional(),
+  }),
+});
 const fallbackGraph = defineGraph({
   id: "atomic-node-batch-fallbacks",
   nodes: {
@@ -100,6 +110,34 @@ const fallbackGraph = defineGraph({
     },
     SearchDocument: { type: SearchDocument },
     VectorDocument: { type: VectorDocument },
+    MultiClaimPerson: {
+      type: MultiClaimPerson,
+      unique: [
+        {
+          name: "multi_claim_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+        {
+          name: "multi_claim_handle",
+          fields: ["handle"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    ClaimedDocument: {
+      type: ClaimedDocument,
+      unique: [
+        {
+          name: "claimed_document_slug",
+          fields: ["slug"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
   },
   edges: {},
 });
@@ -114,8 +152,46 @@ const evolvedFallbackGraph = defineGraph({
     },
     SearchDocument: { type: SearchDocument },
     VectorDocument: { type: VectorDocument },
+    MultiClaimPerson: fallbackGraph.nodes.MultiClaimPerson,
+    ClaimedDocument: fallbackGraph.nodes.ClaimedDocument,
   },
   edges: {},
+});
+
+const ScopedPerson = defineNode("ScopedPerson", {
+  schema: z.object({ email: z.string() }),
+});
+const ScopedEmployee = defineNode("ScopedEmployee", {
+  schema: z.object({ email: z.string() }),
+});
+const scopedClaimGraph = defineGraph({
+  id: "atomic-node-batch-scoped-claims",
+  nodes: {
+    ScopedPerson: {
+      type: ScopedPerson,
+      unique: [
+        {
+          name: "scoped_email",
+          fields: ["email"],
+          scope: "kindWithSubClasses",
+          collation: "binary",
+        },
+      ],
+    },
+    ScopedEmployee: {
+      type: ScopedEmployee,
+      unique: [
+        {
+          name: "scoped_email",
+          fields: ["email"],
+          scope: "kindWithSubClasses",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+  ontology: [subClassOf(ScopedEmployee, ScopedPerson)],
 });
 
 async function createFixture() {
@@ -130,14 +206,23 @@ async function createFixture() {
   return { backend, client, store, temporaryDirectory };
 }
 
-async function createFallbackFixture() {
+async function createFallbackFixture(maxBindParameters?: number) {
   const temporaryDirectory = mkdtempSync(
     path.join(tmpdir(), "typegraph-atomic-node-batch-fallback-"),
   );
   const client = createClient({
     url: `file:${path.join(temporaryDirectory, "graph.db")}`,
   });
-  const { backend, db } = await createLibsqlBackend(client);
+  const installed = await createLibsqlBackend(client);
+  const backend =
+    maxBindParameters === undefined ?
+      installed.backend
+    : createSqliteBackend(installed.db, {
+        capabilities: { maxBindParameters },
+        executionProfile: { isSync: false, transactionMode: "sql" },
+        vector: libsqlVectorStrategy,
+      });
+  const { db } = installed;
   const [store] = await createStoreWithSchema(fallbackGraph, backend);
   return { backend, client, db, store, temporaryDirectory };
 }
@@ -151,6 +236,18 @@ async function createDisjointFixture() {
   });
   const { backend } = await createLibsqlBackend(client);
   const [store] = await createStoreWithSchema(disjointGraph, backend);
+  return { backend, client, store, temporaryDirectory };
+}
+
+async function createScopedClaimFixture() {
+  const temporaryDirectory = mkdtempSync(
+    path.join(tmpdir(), "typegraph-atomic-node-batch-scoped-claims-"),
+  );
+  const client = createClient({
+    url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+  });
+  const { backend } = await createLibsqlBackend(client);
+  const [store] = await createStoreWithSchema(scopedClaimGraph, backend);
   return { backend, client, store, temporaryDirectory };
 }
 
@@ -565,16 +662,219 @@ describe("plain node batch store contract", () => {
     }
   });
 
-  it("keeps unique claims on the fallback path", async () => {
+  it("folds caller-id unique claims into the atomic batch", async () => {
     const fixture = await createFallbackFixture();
     try {
       const transaction = vi.spyOn(fixture.backend, "transaction");
+      const batch = vi.spyOn(fixture.client, "batch");
 
       await fixture.store.nodes.UniquePerson.bulkInsert([
         { id: "unique-a", props: { name: "Alice" } },
       ]);
 
-      expect(transaction).toHaveBeenCalledOnce();
+      expect(transaction).not.toHaveBeenCalled();
+      expect(batch).toHaveBeenCalledOnce();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("acquires multiple claims per member and rolls back sibling rows on refusal", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.MultiClaimPerson.bulkInsert([
+        {
+          id: "incumbent",
+          props: { email: "held@example.com", handle: "held" },
+        },
+      ]);
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      await expect(
+        fixture.store.nodes.MultiClaimPerson.bulkInsert([
+          {
+            id: "sibling",
+            props: { email: "sibling@example.com", handle: "sibling" },
+          },
+          {
+            id: "conflict",
+            props: { email: "new@example.com", handle: "held" },
+          },
+        ]),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: { constraintName: "multi_claim_handle" },
+      });
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(fixture.store.nodes.MultiClaimPerson.count()).resolves.toBe(
+        1,
+      );
+      await expect(
+        fixture.store.nodes.MultiClaimPerson.getById("sibling" as never),
+      ).resolves.toBeUndefined();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("rolls back successful claim chunks when a later chunk refuses", async () => {
+    const fixture = await createFallbackFixture(100);
+    try {
+      await fixture.store.nodes.MultiClaimPerson.bulkInsert([
+        {
+          id: "chunk-incumbent",
+          props: {
+            email: "incumbent@example.com",
+            handle: "held-by-incumbent",
+          },
+        },
+      ]);
+      const batch = vi.spyOn(fixture.client, "batch");
+      const fresh = Array.from({ length: 4 }, (_value, index) => ({
+        id: `chunk-sibling-${index}`,
+        props: {
+          email: `sibling-${index}@example.com`,
+          handle: `sibling-${index}`,
+        },
+      }));
+
+      await expect(
+        fixture.store.nodes.MultiClaimPerson.bulkInsert([
+          ...fresh,
+          {
+            id: "later-chunk-conflict",
+            props: {
+              email: "conflict@example.com",
+              handle: "held-by-incumbent",
+            },
+          },
+        ]),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: { constraintName: "multi_claim_handle" },
+      });
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(fixture.store.nodes.MultiClaimPerson.count()).resolves.toBe(
+        1,
+      );
+      for (const sibling of fresh) {
+        await expect(
+          fixture.store.nodes.MultiClaimPerson.getById(sibling.id as never),
+        ).resolves.toBeUndefined();
+      }
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("composes unique claims with fulltext and embedding projections", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      await fixture.store.nodes.ClaimedDocument.bulkInsert([
+        {
+          id: "claimed-document",
+          props: {
+            slug: "claimed",
+            title: "Atomic composition",
+            vector: [1, 0],
+          },
+        },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(
+        fixture.store.search.fulltext("ClaimedDocument", {
+          query: "composition",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+      await expect(
+        fixture.store.search.vector("ClaimedDocument", {
+          fieldPath: "vector",
+          queryEmbedding: [1, 0],
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+
+      await expect(
+        fixture.store.nodes.ClaimedDocument.bulkInsert([
+          {
+            id: "refused-document",
+            props: {
+              slug: "claimed",
+              title: "Must not project",
+              vector: [0, 1],
+            },
+          },
+        ]),
+      ).rejects.toBeInstanceOf(UniquenessError);
+
+      expect(batch).toHaveBeenCalledTimes(2);
+      await expect(
+        fixture.store.nodes.ClaimedDocument.getById(
+          "refused-document" as never,
+        ),
+      ).resolves.toBeUndefined();
+      await expect(
+        fixture.store.search.fulltext("ClaimedDocument", {
+          query: "Must",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("refuses a legacy cross-scope claim and rolls back sibling rows", async () => {
+    const fixture = await createScopedClaimFixture();
+    try {
+      const key = computeUniqueKey(
+        { email: "legacy@example.com" },
+        ["email"],
+        "binary",
+      );
+      await fixture.backend.insertNode({
+        graphId: scopedClaimGraph.id,
+        kind: ScopedPerson.kind,
+        id: "legacy-owner",
+        props: { email: "legacy@example.com" },
+      });
+      await fixture.backend.insertUnique({
+        graphId: scopedClaimGraph.id,
+        nodeKind: ScopedPerson.kind,
+        constraintName: "scoped_email",
+        key,
+        nodeId: "legacy-owner",
+        concreteKind: ScopedPerson.kind,
+      });
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      await expect(
+        fixture.store.nodes.ScopedEmployee.bulkInsert([
+          {
+            id: "sibling",
+            props: { email: "sibling@example.com" },
+          },
+          {
+            id: "conflict",
+            props: { email: "legacy@example.com" },
+          },
+        ]),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: {
+          constraintName: "scoped_email",
+          existingId: "legacy-owner",
+        },
+      });
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(fixture.store.nodes.ScopedEmployee.count()).resolves.toBe(0);
     } finally {
       await closeFixture(fixture);
     }
@@ -1049,7 +1349,11 @@ describe("constrained node batch store contract", () => {
       });
       expect(typeof rejection.details.newId).toBe("string");
       expect(batch).toHaveBeenCalledOnce();
-      expect(execute).not.toHaveBeenCalled();
+      // The transport-level sentinel rolls every chunk back first. The two
+      // failure-only reads then distinguish a current fence from the exact
+      // committed claim holder without letting client-side diagnosis authorize
+      // or partially commit the write.
+      expect(execute).toHaveBeenCalledTimes(2);
       await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(1);
       const claim = await fixture.backend.checkUnique({
         graphId: fallbackGraph.id,

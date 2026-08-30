@@ -79,10 +79,17 @@ export type AtomicNodeProjectionSupport = Readonly<{
 
 /** Closed claim envelope advertised by one node mutation executor. */
 export type AtomicNodeClaimSupport = Readonly<{
-  /** Pure-family member ceilings; an omitted family is unsupported. */
-  maxEntriesByFamily: Readonly<Partial<Record<AtomicNodeClaimFamily, number>>>;
-  /** Total claimed-member ceiling when more than one family is present. */
-  maxMixedEntries?: number;
+  /** Independently proved claim families; an omitted family is unsupported. */
+  families: readonly AtomicNodeClaimFamily[];
+  /**
+   * Maximum compiled claim/probe bind cost one member may contribute to its
+   * write gate.
+   * Compute a member's required value with {@link atomicNodeClaimInputCost};
+   * backend implementations must not reproduce the SQL cost formula.
+   * Total batch size is deliberately absent: the executor chunks statements
+   * inside one atomic transport submission.
+   */
+  maxInputCostPerEntry: number;
 }>;
 
 function isAtomicNodeClaimFamily(
@@ -131,59 +138,16 @@ function assertAtomicNodeClaimSupport(
     );
   }
   const support = value as Readonly<Record<PropertyKey, unknown>>;
-  const maxEntriesByFamily = support["maxEntriesByFamily"];
-  if (
-    typeof maxEntriesByFamily !== "object" ||
-    maxEntriesByFamily === null ||
-    Array.isArray(maxEntriesByFamily)
-  ) {
-    throw new ConfigurationError(
-      `Atomic mutation program family ${family} requires family-scoped claim limits.`,
-      {
-        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
-        family,
-        limit: "claimSupport.maxEntriesByFamily",
-        value: maxEntriesByFamily,
-      },
-    );
-  }
-  const familyLimits = Object.entries(maxEntriesByFamily);
-  for (const [claimFamily, limit] of familyLimits) {
-    if (!isAtomicNodeClaimFamily(claimFamily)) {
-      throw new ConfigurationError(
-        `Atomic mutation program family ${family} received an unknown claim family.`,
-        {
-          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
-          family,
-          limit: "claimSupport.maxEntriesByFamily",
-          value: claimFamily,
-        },
-      );
-    }
-    assertNonnegativeIntegerLimit(
-      family,
-      `claimSupport.maxEntriesByFamily.${claimFamily}`,
-      limit,
-    );
-  }
-  if (support["maxMixedEntries"] !== undefined) {
-    if (familyLimits.length < 2) {
-      throw new ConfigurationError(
-        `Atomic mutation program family ${family} cannot advertise mixed claims without two claim families.`,
-        {
-          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
-          family,
-          limit: "claimSupport.maxMixedEntries",
-          value: support["maxMixedEntries"],
-        },
-      );
-    }
-    assertNonnegativeIntegerLimit(
-      family,
-      "claimSupport.maxMixedEntries",
-      support["maxMixedEntries"],
-    );
-  }
+  assertAtomicNodeClaimFamilies(
+    family,
+    "claimSupport.families",
+    support["families"],
+  );
+  assertNonnegativeIntegerLimit(
+    family,
+    "claimSupport.maxInputCostPerEntry",
+    support["maxInputCostPerEntry"],
+  );
 }
 
 function isAtomicNodeProjectionFamily(
@@ -235,31 +199,43 @@ function atomicNodeClaimFamily(claim: NodeInsertClaim): AtomicNodeClaimFamily {
   return claim.verdict.kind;
 }
 
-/** Whether one executor explicitly accepts every normalized claimed member. */
+/** Bind cost of one canonical claim row in an atomic node write gate. */
+const ATOMIC_NODE_CANONICAL_CLAIM_INPUT_COST = 6;
+
+/** Bind cost of one legacy uniqueness compatibility probe. */
+const ATOMIC_NODE_UNIQUENESS_PROBE_INPUT_COST = 9;
+
+/** Bind cost of one legacy disjointness compatibility probe. */
+const ATOMIC_NODE_DISJOINTNESS_PROBE_INPUT_COST = 6;
+
+/** Exact compiled claim/probe bind cost one member contributes to its write gate. */
+export function atomicNodeClaimInputCost(
+  claims: readonly NodeInsertClaim[],
+): number {
+  let cost = 0;
+  for (const claim of claims) {
+    cost += ATOMIC_NODE_CANONICAL_CLAIM_INPUT_COST;
+    cost +=
+      claim.verdict.kind === "uniqueness" ?
+        ATOMIC_NODE_UNIQUENESS_PROBE_INPUT_COST *
+        claim.verdict.probeAxes.filter((axis) => axis !== claim.axis).length
+      : ATOMIC_NODE_DISJOINTNESS_PROBE_INPUT_COST *
+        claim.verdict.conflictingKinds.length;
+  }
+  return cost;
+}
+
+/** Whether one executor explicitly accepts one member's complete claim set. */
 export function supportsAtomicNodeClaims(
   support: AtomicNodeClaimSupport | undefined,
   claims: readonly NodeInsertClaim[],
 ): boolean {
   if (claims.length === 0) return true;
   if (support === undefined) return false;
-  const families = new Set(claims.map((claim) => atomicNodeClaimFamily(claim)));
-  if (
-    [...families].some(
-      (family) => support.maxEntriesByFamily[family] === undefined,
-    )
-  ) {
-    return false;
-  }
-  if (families.size > 1) {
-    return (
-      support.maxMixedEntries !== undefined &&
-      claims.length <= support.maxMixedEntries
-    );
-  }
-  const family = families.values().next().value;
+  const families = new Set(support.families);
   return (
-    family !== undefined &&
-    claims.length <= (support.maxEntriesByFamily[family] ?? 0)
+    claims.every((claim) => families.has(atomicNodeClaimFamily(claim))) &&
+    atomicNodeClaimInputCost(claims) <= support.maxInputCostPerEntry
   );
 }
 
@@ -268,7 +244,10 @@ export function supportsAtomicNodeClaimFamily(
   support: AtomicNodeClaimSupport | undefined,
   family: AtomicNodeClaimFamily,
 ): boolean {
-  return (support?.maxEntriesByFamily[family] ?? 0) > 0;
+  return (
+    (support?.maxInputCostPerEntry ?? 0) > 0 &&
+    support?.families.includes(family) === true
+  );
 }
 
 /** Whether one executor explicitly accepts every normalized projection. */
@@ -286,8 +265,8 @@ export function supportsAtomicNodeProjections(
 export type AtomicNodeBatchEntry = Readonly<{
   idSource: AtomicNodeBatchIdSource;
   params: InsertNodeParams;
-  /** The one claim this row owes in the currently supported native shape. */
-  claim?: NodeInsertClaim;
+  /** Complete canonically ordered claims this row owes. */
+  claims?: readonly NodeInsertClaim[];
   /** Complete derived-storage transitions owed by the written postimage. */
   projections?: readonly AtomicNodeProjection[];
 }>;

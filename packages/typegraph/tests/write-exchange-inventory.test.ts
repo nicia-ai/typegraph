@@ -9,7 +9,7 @@ import { z } from "zod";
 import { resolveBundledRootAtomicMutationPrograms } from "../src/backend/capabilities/atomic-mutation-program";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
-import { defineEdge, defineGraph, defineNode } from "../src/core";
+import { defineEdge, defineGraph, defineNode, searchable } from "../src/core";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 
@@ -21,6 +21,12 @@ const Company = defineNode("Company", {
 });
 const ClaimedPerson = defineNode("ClaimedPerson", {
   schema: z.object({ name: z.string() }),
+});
+const MultiClaimPerson = defineNode("MultiClaimPerson", {
+  schema: z.object({ email: z.string(), handle: z.string() }),
+});
+const ClaimedDocument = defineNode("ClaimedDocument", {
+  schema: z.object({ slug: z.string(), title: searchable() }),
 });
 const unconstrained = defineEdge("unconstrained", {
   schema: z.object({ role: z.string() }),
@@ -42,6 +48,34 @@ const graph = defineGraph({
         {
           name: "claimed_person_name",
           fields: ["name"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    MultiClaimPerson: {
+      type: MultiClaimPerson,
+      unique: [
+        {
+          name: "multi_claim_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+        {
+          name: "multi_claim_handle",
+          fields: ["handle"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+    ClaimedDocument: {
+      type: ClaimedDocument,
+      unique: [
+        {
+          name: "claimed_document_slug",
+          fields: ["slug"],
           scope: "kind",
           collation: "binary",
         },
@@ -189,6 +223,30 @@ describe("managed write exchange inventory", () => {
             { props: { name: "Claimed Created B" } },
           ]),
         ),
+        await measure("multiple-claim-node-batch", () =>
+          store.nodes.MultiClaimPerson.bulkInsert([
+            {
+              id: "multi-claim-a",
+              props: { email: "a@example.com", handle: "a" },
+            },
+            {
+              id: "multi-claim-b",
+              props: { email: "b@example.com", handle: "b" },
+            },
+          ]),
+        ),
+        await measure("claim-projection-node-batch", () =>
+          store.nodes.ClaimedDocument.bulkInsert([
+            {
+              id: "claimed-document-a",
+              props: { slug: "a", title: "Atomic projection A" },
+            },
+            {
+              id: "claimed-document-b",
+              props: { slug: "b", title: "Atomic projection B" },
+            },
+          ]),
+        ),
         await measure("unconstrained-edge-batch", () =>
           store.edges.unconstrained.bulkInsert([
             { from, to, props: { role: "U1" } },
@@ -322,6 +380,16 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "generated-claimed-node-create-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "multiple-claim-node-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "claim-projection-node-batch",
           },
           {
             "batch": 1,
