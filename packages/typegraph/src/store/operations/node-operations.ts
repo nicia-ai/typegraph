@@ -48,6 +48,7 @@ import { type z } from "zod";
 
 import {
   type AtomicNodeBatchEntry,
+  type AtomicNodeClaimSupport,
   type AtomicNodeDeleteBatchExecutor,
   AtomicNodeDeleteRestrictedRefusalError,
   type AtomicNodeResolvedUpdateBatchExecutor,
@@ -59,7 +60,7 @@ import {
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
 import {
-  rephaseNonTransactionalNodeClaimPlan,
+  rephaseAtomicNodeClaimPlan,
   supportsNodeCreatePlan,
   supportsNodeInsertProjections,
 } from "../../backend/capabilities/node-insert-projections";
@@ -145,6 +146,7 @@ import {
   type NodeClaimItem,
   type NodeCreateClaimPlan,
   planNodeCreateClaims,
+  refuseNodeCreateClaimError,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
@@ -1649,7 +1651,7 @@ async function prepareAtomicBatchCreates<G extends GraphDef>(
 
 function atomicNodeBatchEntries(
   preparedCreates: readonly NodeCreatePrepared[],
-  maxClaimedEntries: number,
+  claimSupport: AtomicNodeClaimSupport | undefined,
 ): readonly AtomicNodeBatchEntry[] | undefined {
   const entries: AtomicNodeBatchEntry[] = [];
   const ownerByClaimTarget = new Map<
@@ -1665,14 +1667,17 @@ function atomicNodeBatchEntries(
       continue;
     }
 
-    const rephased = rephaseNonTransactionalNodeClaimPlan({
-      entity: "node",
-      params: prepared.insertParams,
-      idGenerated: !prepared.idProvided,
-      mode: { kind: "ordinary" },
-      claims: prepared.claimPlan.claims,
-      projections: [],
-    });
+    const rephased = rephaseAtomicNodeClaimPlan(
+      {
+        entity: "node",
+        params: prepared.insertParams,
+        idGenerated: !prepared.idProvided,
+        mode: { kind: "ordinary" },
+        claims: prepared.claimPlan.claims,
+        projections: [],
+      },
+      claimSupport,
+    );
     if (rephased?.claims.length !== 1) return;
     const claim = rephased.claims[0];
     if (claim === undefined) return;
@@ -1684,33 +1689,52 @@ function atomicNodeBatchEntries(
     ]);
     const existingOwner = ownerByClaimTarget.get(targetKey);
     if (existingOwner !== undefined) {
-      if (claim.verdict.kind !== "uniqueness") return;
-      throw new UniquenessError({
+      const error = new UniquenessError({
         constraintName: claim.constraintName,
         kind: existingOwner.kind,
         existingId: existingOwner.id,
         newId: prepared.id,
-        fields: claim.verdict.fields,
+        fields: claim.verdict.kind === "uniqueness" ? claim.verdict.fields : [],
         axis: claim.axis,
       });
+      refuseNodeCreateClaimError(error, prepared.claimPlan);
     }
     ownerByClaimTarget.set(targetKey, {
       kind: prepared.kind,
       id: prepared.id,
     });
     entries.push({
-      idSource: "generated",
+      idSource: prepared.idProvided ? "caller" : "generated",
       params: prepared.insertParams,
       claim,
     });
   }
   if (
     entries.filter((entry) => entry.claim !== undefined).length >
-    maxClaimedEntries
+    (claimSupport?.maxEntries ?? 0)
   ) {
     return;
   }
   return entries;
+}
+
+async function withAtomicNodeClaimTranslation<TResult>(
+  preparedCreates: readonly NodeCreatePrepared[],
+  execute: () => Promise<TResult>,
+): Promise<TResult> {
+  try {
+    return await execute();
+  } catch (error) {
+    refuseNodeCreateClaimError(error, {
+      entries: preparedCreates.flatMap(
+        (prepared) => prepared.claimPlan.entries,
+      ),
+      claims: preparedCreates.flatMap((prepared) => prepared.claimPlan.claims),
+      verdicts: preparedCreates.flatMap(
+        (prepared) => prepared.claimPlan.verdicts,
+      ),
+    });
+  }
 }
 
 /**
@@ -2341,15 +2365,19 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
     );
     const entries = atomicNodeBatchEntries(
       preparedCreates,
-      atomicExecutor.maxClaimedEntries ?? 0,
+      atomicExecutor.claimSupport,
     );
     if (entries !== undefined) {
       const schemaFence = {
         graphId: ctx.graphId,
         expectedVersion: requireDefined(ctx.schemaVersion),
       };
-      const insertedCount = await withAlreadyExistsTranslation("node", () =>
-        atomicExecutor({ entries, resultMode: "count", schemaFence }),
+      const insertedCount = await withAtomicNodeClaimTranslation(
+        preparedCreates,
+        () =>
+          withAlreadyExistsTranslation("node", () =>
+            atomicExecutor({ entries, resultMode: "count", schemaFence }),
+          ),
       );
       if (insertedCount === 0) {
         await diagnoseFusedSchemaFenceNoRow(ctx, backend);
@@ -2450,15 +2478,19 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
     );
     const entries = atomicNodeBatchEntries(
       preparedCreates,
-      atomicExecutor.maxClaimedEntries ?? 0,
+      atomicExecutor.claimSupport,
     );
     if (entries !== undefined) {
       const schemaFence = {
         graphId: ctx.graphId,
         expectedVersion: requireDefined(ctx.schemaVersion),
       };
-      const returnedRows = await withAlreadyExistsTranslation("node", () =>
-        atomicExecutor({ entries, resultMode: "rows", schemaFence }),
+      const returnedRows = await withAtomicNodeClaimTranslation(
+        preparedCreates,
+        () =>
+          withAlreadyExistsTranslation("node", () =>
+            atomicExecutor({ entries, resultMode: "rows", schemaFence }),
+          ),
       );
       if (returnedRows.length === 0) {
         await diagnoseFusedSchemaFenceNoRow(ctx, backend);
@@ -2939,7 +2971,7 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     creates,
     backend,
   );
-  const createEntries = atomicNodeBatchEntries(preparedCreates, 0);
+  const createEntries = atomicNodeBatchEntries(preparedCreates, undefined);
   if (createEntries === undefined) {
     throw new CompilerInvariantError(
       "An eligible resolved node mutation set produced unsupported create claims.",

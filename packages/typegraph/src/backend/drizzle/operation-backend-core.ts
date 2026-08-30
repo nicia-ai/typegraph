@@ -4,6 +4,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
   DatabaseOperationError,
+  DisjointError,
   EdgeMatchIdentityConflictError,
   MigrationError,
   SchemaContentConflictError,
@@ -148,6 +149,7 @@ import { type CompiledSqlQuery, type ExecutableSql } from "./execution/types";
 import type {
   AtomicNodeClaimEntry,
   AtomicNodeClaimOwnerRow,
+  AtomicNodeDisjointConflictRow,
 } from "./operations/atomic-node-claims";
 import {
   type CommonOperationStrategy,
@@ -767,6 +769,7 @@ async function withAtomicNodeDeleteRestrictionClassification<T>(
 
 type AtomicDeleteSlotResult =
   | Readonly<{ kind: "affected"; count: number }>
+  | Readonly<{ kind: "claim-release" }>
   | Readonly<{ kind: "fence"; matched: boolean }>;
 
 function assembleAtomicDeleteBatchResult(
@@ -779,6 +782,7 @@ function assembleAtomicDeleteBatchResult(
       affectedCount += result.count;
       continue;
     }
+    if (result.kind === "claim-release") continue;
     if (fenceResult !== undefined) {
       throw new CompilerInvariantError(
         "Atomic delete program returned more than one schema-fence result.",
@@ -1447,8 +1451,12 @@ export function createCommonOperationBackend(
     : (() => {
         const maxClaimedEntries = Math.max(
           0,
-          Math.floor((options.maxBindParameters - 13) / 6),
+          Math.floor((options.maxBindParameters - 13) / 14),
         );
+        const claimSupport = Object.freeze({
+          families: ["disjointness", "uniqueness"] as const,
+          maxEntries: maxClaimedEntries,
+        });
 
         function orderedAtomicNodeClaims(
           entries: readonly AtomicNodeBatchEntry[],
@@ -1493,6 +1501,10 @@ export function createCommonOperationBackend(
               entries: readonly AtomicNodeClaimEntry[];
               rows: readonly AtomicNodeClaimOwnerRow[];
             }>
+          | Readonly<{
+              kind: "disjoint-conflicts";
+              rows: readonly AtomicNodeDisjointConflictRow[];
+            }>
           | Readonly<{ kind: "cleanup" }>
           | Readonly<{
               kind: "counts";
@@ -1508,7 +1520,7 @@ export function createCommonOperationBackend(
         function classifyAtomicNodeClaimResults(
           claimEntries: readonly AtomicNodeClaimEntry[],
           results: readonly AtomicNodeProgramSlot[],
-        ): "stale" | "owned" | UniquenessError {
+        ): "stale" | "owned" | DisjointError | UniquenessError {
           const ownerByTarget = new Map<string, ClaimOwner>();
           let returnedClaims = 0;
           for (const result of results) {
@@ -1529,6 +1541,20 @@ export function createCommonOperationBackend(
             );
           }
 
+          const disjointConflicts = results
+            .flatMap((result) =>
+              result.kind === "disjoint-conflicts" ? result.rows : [],
+            )
+            .toSorted((left, right) => left.ordinal - right.ordinal);
+          const firstDisjointConflict = disjointConflicts[0];
+          if (firstDisjointConflict !== undefined) {
+            return new DisjointError({
+              nodeId: firstDisjointConflict.node_id,
+              attemptedKind: firstDisjointConflict.attempted_kind,
+              conflictingKind: firstDisjointConflict.conflicting_kind,
+            });
+          }
+
           for (const item of claimEntries.toSorted(
             (left, right) => left.ordinal - right.ordinal,
           )) {
@@ -1545,11 +1571,12 @@ export function createCommonOperationBackend(
               nodeId: item.entry.params.id,
             };
             if (!isSameClaimOwner(owner, proposedOwner)) {
-              if (claim.verdict.kind !== "uniqueness") {
-                throw new CompilerInvariantError(
-                  "Atomic node claim program received an unsupported claim verdict.",
-                  { ordinal: item.ordinal },
-                );
+              if (claim.verdict.kind === "disjointness") {
+                return new DisjointError({
+                  nodeId: item.entry.params.id,
+                  attemptedKind: item.entry.params.kind,
+                  conflictingKind: owner.concreteKind,
+                });
               }
               return new UniquenessError({
                 constraintName: claim.constraintName,
@@ -1578,7 +1605,12 @@ export function createCommonOperationBackend(
               : "A refused atomic node claim program still inserted nodes.",
             );
           }
-          if (verdict instanceof UniquenessError) throw verdict;
+          if (
+            verdict instanceof UniquenessError ||
+            verdict instanceof DisjointError
+          ) {
+            throw verdict;
+          }
           return verdict;
         }
 
@@ -1629,7 +1661,10 @@ export function createCommonOperationBackend(
             const nodeChunkSize = Math.max(
               1,
               Math.floor(
-                (options.maxBindParameters - 4 - 6 * claimEntries.length) / 9,
+                (options.maxBindParameters -
+                  4 -
+                  14 * claimEntries.length) /
+                  9,
               ),
             );
             const nodeChunks = chunkArray(input.entries, nodeChunkSize);
@@ -1658,6 +1693,36 @@ export function createCommonOperationBackend(
                 })),
               }),
             }));
+            const disjointEntries = claimEntries.filter(
+              (item) => item.entry.claim?.verdict.kind === "disjointness",
+            );
+            const disjointSlots: AtomicSqlProgram<
+              AtomicNodeProgramSlot,
+              unknown
+            >["slots"] =
+              disjointEntries.length === 0 ?
+                []
+              : [
+                  {
+                    statement: execution.compile(
+                      operationStrategy.buildAtomicNodeDisjointConflictsWithSchemaFence(
+                        disjointEntries,
+                        input.schemaFence,
+                        atomicSchemaFenceLockClause,
+                      ),
+                    ),
+                    cardinality: "many" as const,
+                    decode: (rows) => ({
+                      kind: "disjoint-conflicts" as const,
+                      rows: rows.map((row) => ({
+                        ordinal: Number(row["ordinal"]),
+                        attempted_kind: String(row["attempted_kind"]),
+                        node_id: String(row["node_id"]),
+                        conflicting_kind: String(row["conflicting_kind"]),
+                      })),
+                    }),
+                  },
+                ];
             const writeGate =
               operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
                 claimEntries,
@@ -1702,7 +1767,12 @@ export function createCommonOperationBackend(
                 }),
               }));
               const program = {
-                slots: [...claimSlots, ...nodeSlots, ...cleanupSlots],
+                slots: [
+                  ...claimSlots,
+                  ...disjointSlots,
+                  ...nodeSlots,
+                  ...cleanupSlots,
+                ],
                 assemble(results: readonly AtomicNodeProgramSlot[]): number {
                   const counts = results.flatMap((result) =>
                     result.kind === "counts" ? [result.count] : [],
@@ -1750,7 +1820,12 @@ export function createCommonOperationBackend(
               }),
             }));
             const program = {
-              slots: [...claimSlots, ...nodeSlots, ...cleanupSlots],
+              slots: [
+                ...claimSlots,
+                ...disjointSlots,
+                ...nodeSlots,
+                ...cleanupSlots,
+              ],
               assemble(
                 results: readonly AtomicNodeProgramSlot[],
               ): readonly NodeRow[] {
@@ -1880,7 +1955,7 @@ export function createCommonOperationBackend(
 
         const boundedExecuteAtomicNodeBatch = Object.assign(
           executeAtomicNodeBatch,
-          { maxClaimedEntries },
+          { claimSupport },
         );
         return {
           executeAtomicNodeBatch: boundedExecuteAtomicNodeBatch,
@@ -2319,9 +2394,9 @@ export function createCommonOperationBackend(
         const atomicSchemaFenceLockClause = requireDefined(
           schemaFenceLockClause,
         );
-        // Fence graph/version, timestamp, graph id and kind are the five
-        // fixed binds repeated beside each id chunk.
-        const chunkSize = Math.max(1, maxBindParameters - 5);
+        // Claim release is widest: fence graph/version, graph, kind, and the
+        // timestamp in both SET and owner-postimage predicates beside each id.
+        const chunkSize = Math.max(1, maxBindParameters - 6);
 
         async function executeAtomicNodeDeleteBatch(
           input: AtomicNodeDeleteBatchInput,
@@ -2351,9 +2426,28 @@ export function createCommonOperationBackend(
             decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
               ({ kind: "affected", count: rows.length }) as const,
           }));
+          const claimReleaseSlots = chunkArray(input.ids, chunkSize).map(
+            (ids) => ({
+              statement: execution.compile(
+                operationStrategy.buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+                  {
+                    graphId: input.graphId,
+                    kind: input.kind,
+                    ids,
+                    timestamp,
+                  },
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                ),
+              ),
+              cardinality: "none" as const,
+              decode: () => ({ kind: "claim-release" as const }),
+            }),
+          );
           const program = {
             slots: [
               ...deleteSlots,
+              ...claimReleaseSlots,
               {
                 statement: execution.compile(
                   operationStrategy.buildSchemaFenceProbe(
@@ -2379,7 +2473,19 @@ export function createCommonOperationBackend(
           );
         }
 
-        return { executeAtomicNodeDeleteBatch } satisfies Readonly<{
+        const executeAtomicNodeDeleteBatchWithClaimCleanup = Object.assign(
+          executeAtomicNodeDeleteBatch,
+          {
+            releasedClaimFamilies: [
+              "disjointness",
+              "uniqueness",
+            ] as const,
+          },
+        );
+        return {
+          executeAtomicNodeDeleteBatch:
+            executeAtomicNodeDeleteBatchWithClaimCleanup,
+        } satisfies Readonly<{
           executeAtomicNodeDeleteBatch: AtomicNodeDeleteBatchExecutor;
         }>;
       })();

@@ -205,23 +205,23 @@ results to input order.
 Eligible `bulkDelete()` calls use the same mutation-program boundary. Direct
 edge batches on bundled roots submit one schema-fenced atomic program; the
 statement refuses an ID owned by another edge collection and rolls back every
-chunk. Plain node batches also submit one exchange when the node has no unique
-or disjointness claims, Operational Identity, search projections, history, or
-revision capture and its delete behavior is `restrict` (or omitted). The node
+chunk. Restricted node batches also submit one exchange and release uniqueness
+and disjointness claims owned by the tombstoned rows in that program. The node
 statement rechecks connected live edges at the write boundary, so a restricted
 delete cannot race an earlier application-side probe. Cascade, disconnect,
-sidecar, captured, derived-backend, unregistered custom-backend, and
+projection, identity, captured, derived-backend, unregistered custom-backend, and
 caller-transaction shapes keep the interactive path.
 
 The same exact-root programs serve eligible singleton `update()` and
 `delete()` calls without changing their per-operation hook contract. On an
 interactive PostgreSQL root, the guarded mutation owns a short transaction;
 on the single-submission transports it remains one batch. A node
-update with no unique/disjoint/identity/projection sidecars, or a
+update with no unique/identity/projection sidecars (disjointness has no
+update-side transition), or a
 `cardinality: "many"` edge update with no durable match identity, performs one
 authoritative preimage read, validates and merges properties in TypeGraph, then
 submits one guarded atomic update. Every direct edge delete, and a restricted
-node delete owing none of those sidecars, performs its existing live-row gate
+node delete with supported claim cleanup, performs its existing live-row gate
 and then submits one guarded atomic delete. Missing or tombstoned deletes remain
 hook-free read-only no-ops. Temporal mutations, node cascade/disconnect,
 history/revision capture, ordinary derived backends, and unregistered custom

@@ -6,6 +6,10 @@ import { SQLiteSyncDialect } from "drizzle-orm/sqlite-core";
 import { describe, expect, it } from "vitest";
 
 import {
+  type AtomicNodeClaimEntry,
+  buildAtomicNodeClaimGatePredicateWithSchemaFence,
+} from "../src/backend/drizzle/operations/atomic-node-claims";
+import {
   buildAtomicNodeBatchWithSchemaFence,
   buildInsertNodesBatchWithSchemaFence,
 } from "../src/backend/drizzle/operations/nodes";
@@ -44,6 +48,58 @@ function buildAtomicSql(
 }
 
 describe("schema-fenced atomic node batch SQL", () => {
+  it("pins the D1 disjoint-claim gate ceiling at six members", () => {
+    const entries = Array.from({ length: 7 }, (_value, index) => {
+      const id = `person-${index}`;
+      return {
+        ordinal: index,
+        entry: {
+          idSource: "caller",
+          params: {
+            graphId: schemaFence.graphId,
+            kind: "Person",
+            id,
+            props: { name: `Person ${index}` },
+          },
+          claim: {
+            axis: "disjoint-axis",
+            constraintName: "disjoint-constraint",
+            key: id,
+            placement: "pre-insert",
+            verdict: {
+              kind: "disjointness",
+              conflictingKinds: ["Rival"],
+            },
+          },
+        },
+      } as const satisfies AtomicNodeClaimEntry;
+    });
+    const parameterCounts = [6, 7].map((entryCount) => {
+      const selected = entries.slice(0, entryCount);
+      const gate = buildAtomicNodeClaimGatePredicateWithSchemaFence(
+        sqliteTables,
+        selected,
+        schemaFence,
+        drizzleSql.empty(),
+      );
+      const first = selected[0];
+      if (first === undefined) throw new Error("Expected a claimed member");
+      const query = buildAtomicNodeBatchWithSchemaFence(
+        sqliteTables,
+        [first.entry],
+        "2026-08-25T00:00:00.000Z",
+        schemaFence,
+        drizzleSql.empty(),
+        "count",
+        gate,
+      );
+      return new SQLiteSyncDialect().sqlToQuery(query).params.length;
+    });
+
+    expect(parameterCounts[0]).toBeLessThanOrEqual(100);
+    expect(parameterCounts[1]).toBeGreaterThan(100);
+  });
+
   it("refuses empty and mixed-source statement inputs", () => {
     expect(() => buildAtomicSql([])).toThrow(CompilerInvariantError);
     expect(() =>

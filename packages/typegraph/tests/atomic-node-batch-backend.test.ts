@@ -72,17 +72,18 @@ function makeNeonDatabase(rows: NeonRows): Readonly<{
 
 describe("bundled root atomic node batch", () => {
   it("dispatches node-delete chunks through one Neon atomic exchange", async () => {
-    const { db, query, transaction } = makeNeonDatabase((sqlText, params) =>
-      sqlText.includes("UPDATE") ?
-        params
-          .filter(
-            (parameter): parameter is string =>
-              typeof parameter === "string" &&
-              parameter.startsWith("delete-person-"),
-          )
-          .map((id) => ({ id }))
-      : [{ version: 1 }],
-    );
+    const { db, query, transaction } = makeNeonDatabase((sqlText, params) => {
+      if (sqlText.includes("typegraph_node_uniques")) return [];
+      return sqlText.includes("UPDATE") ?
+          params
+            .filter(
+              (parameter): parameter is string =>
+                typeof parameter === "string" &&
+                parameter.startsWith("delete-person-"),
+            )
+            .map((id) => ({ id }))
+        : [{ version: 1 }];
+    });
     const backend = createPostgresBackend(db, {
       capabilities: { maxBindParameters: 7 },
       vector: false,
@@ -103,12 +104,17 @@ describe("bundled root atomic node batch", () => {
     ).resolves.toEqual({ affectedCount: 3, schemaFenceMatched: true });
 
     expect(transaction).toHaveBeenCalledOnce();
-    expect(query).toHaveBeenCalledTimes(3);
-    for (const [sqlText, params] of query.mock.calls.slice(0, 2)) {
+    expect(query).toHaveBeenCalledTimes(7);
+    for (const [sqlText, params] of query.mock.calls.slice(0, 3)) {
       expect(sqlText).toContain("UPDATE");
       expect(params.length).toBeLessThanOrEqual(7);
     }
-    expect(query.mock.calls[2]?.[0]).toContain("SELECT");
+    for (const [sqlText, params] of query.mock.calls.slice(3, 6)) {
+      expect(sqlText).toContain("UPDATE");
+      expect(sqlText).toContain("typegraph_node_uniques");
+      expect(params.length).toBeLessThanOrEqual(7);
+    }
+    expect(query.mock.calls[6]?.[0]).toContain("SELECT");
   });
 
   it.each([

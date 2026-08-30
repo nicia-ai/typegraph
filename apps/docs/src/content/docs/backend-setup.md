@@ -1534,11 +1534,14 @@ The profile is family-scoped:
 | `updateNodes` / `updateEdges` | Eligible resolved update-only sets                                                        |
 | `mutateNodes` / `mutateEdges` | Eligible mixed create/update sets; the edge family also owns durable endpoint convergence |
 
-Executor limits such as `maxEntries`, `maxClaimedEntries`, and the two edge
-mutation ceilings are part of the registration contract and must be
+Executor limits such as `maxEntries`, `createNodes.claimSupport.maxEntries`,
+and the two edge mutation ceilings are part of the registration contract and must be
 nonnegative integers; zero honestly declares that the backend's bind budget
 cannot admit one member of that shape. TypeGraph validates those declarations
-before publishing the exact-root profile. On a transactionless root, dedicated
+before publishing the exact-root profile. `claimSupport.families` explicitly
+names `uniqueness` and/or `disjointness`; the Store never infers one family from
+the other's limit. `deleteNodes.releasedClaimFamilies` similarly declares which
+owner-side claim cleanup the delete program proves. On a transactionless root, dedicated
 update-only and mixed mutation executors are independently reachable Store
 families even when their entry ceilings are equal, so each requires its own
 conformance evidence. On an interactive root, the collection-level

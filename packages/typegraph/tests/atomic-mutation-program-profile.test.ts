@@ -337,9 +337,9 @@ describe("atomic mutation program execution profile", () => {
     registerAtomicSqlProgram(backend, emptyAtomicBatch);
     const createNodes: AtomicNodeBatchExecutor =
       executeCustomNodeBatch.bind(undefined);
-    Object.defineProperty(createNodes, "maxClaimedEntries", {
+    Object.defineProperty(createNodes, "claimSupport", {
       configurable: true,
-      value: -1,
+      value: { families: ["uniqueness"], maxEntries: -1 },
     });
 
     const error = captureThrown(() =>
@@ -350,7 +350,31 @@ describe("atomic mutation program execution profile", () => {
       details: {
         code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
         family: "createNodes",
-        limit: "maxClaimedEntries",
+        limit: "claimSupport.maxEntries",
+      },
+    });
+    expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
+  });
+
+  it("refuses malformed claim-family declarations", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    const createNodes: AtomicNodeBatchExecutor =
+      executeCustomNodeBatch.bind(undefined);
+    Object.defineProperty(createNodes, "claimSupport", {
+      configurable: true,
+      value: { families: ["unknown"], maxEntries: 1 },
+    });
+
+    const error = captureThrown(() =>
+      registerAtomicMutationPrograms(backend, { createNodes }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect(error).toMatchObject({
+      details: {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family: "createNodes",
+        limit: "claimSupport.families",
       },
     });
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);

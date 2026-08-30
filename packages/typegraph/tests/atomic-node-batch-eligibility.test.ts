@@ -9,6 +9,7 @@ import { z } from "zod";
 import { DatabaseOperationError, StaleVersionError } from "../src";
 import {
   type AtomicNodeBatchInput,
+  type AtomicNodeDeleteBatchInput,
   markBundledRootAtomicMutationPrograms,
   markBundledRootAtomicNodeBatch,
 } from "../src/backend/capabilities/atomic-mutation-program";
@@ -189,7 +190,12 @@ function createFakeAtomicNodeBatch(onCall?: () => void) {
       input.resultMode === "count" ? input.entries.length : [],
     );
   }
-  return execute;
+  return Object.assign(execute, {
+    claimSupport: {
+      families: ["disjointness", "uniqueness"] as const,
+      maxEntries: 6,
+    },
+  });
 }
 
 function markAtomicRoot(backend: GraphBackend): void {
@@ -202,11 +208,16 @@ function markAtomicDeleteRoot(backend: GraphBackend): void {
   declareAtomicBatchForTest(backend);
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicMutationPrograms(backend, {
-    deleteNodes: (deleteInput) =>
-      Promise.resolve({
-        affectedCount: deleteInput.ids.length,
-        schemaFenceMatched: true,
-      }),
+    deleteNodes: Object.assign(
+      (deleteInput: AtomicNodeDeleteBatchInput) =>
+        Promise.resolve({
+          affectedCount: deleteInput.ids.length,
+          schemaFenceMatched: true,
+        }),
+      {
+        releasedClaimFamilies: ["disjointness", "uniqueness"] as const,
+      },
+    ),
   });
 }
 
@@ -229,7 +240,7 @@ describe("atomic node batch eligibility", () => {
     ).toBeDefined();
   });
 
-  it("accepts only generated ids for one same-kind unique constraint", () => {
+  it("accepts generated ids for one same-kind unique constraint", () => {
     const backend = rootBackend(false);
     markAtomicRoot(backend);
 
@@ -239,6 +250,24 @@ describe("atomic node batch eligibility", () => {
         graph: uniqueGraph,
         registry: buildKindRegistry(uniqueGraph),
         inputs: [input],
+        schemaVersion: 1,
+        identityEnabled: false,
+        historyEnabled: false,
+        revisionTrackingEnabled: false,
+      }),
+    ).toBeDefined();
+  });
+
+  it("accepts caller ids for an advertised disjoint claim family", () => {
+    const backend = rootBackend(false);
+    markAtomicRoot(backend);
+
+    expect(
+      resolveAtomicNodeBatchExecutor({
+        backend,
+        graph: disjointGraph,
+        registry: buildKindRegistry(disjointGraph),
+        inputs: [{ ...input, id: "shared-id" }],
         schemaVersion: 1,
         identityEnabled: false,
         historyEnabled: false,
@@ -387,7 +416,6 @@ describe("atomic node batch eligibility", () => {
       false,
       false,
     ],
-    ["disjointness", disjointGraph, input, false, false, false],
     [
       "search projection",
       searchableGraph,
@@ -452,7 +480,7 @@ describe("atomic node delete batch eligibility", () => {
     ).rejects.toBeInstanceOf(DatabaseOperationError);
   });
 
-  it("accepts only a sidecar-free exact bundled root", () => {
+  it("accepts an exact bundled root with complete claim cleanup", () => {
     const backend = rootBackend(true);
     markAtomicDeleteRoot(backend);
 
@@ -472,8 +500,6 @@ describe("atomic node delete batch eligibility", () => {
   });
 
   it.each([
-    ["unique claims", uniqueGraph, "Person", false, false, false],
-    ["disjointness claims", disjointGraph, "Person", false, false, false],
     [
       "search projections",
       searchableGraph,

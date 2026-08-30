@@ -269,7 +269,7 @@ export interface AtomicNodeBatchExecutor {
     (input: AtomicNodeBatchInput & Readonly<{
         resultMode: "rows";
     }>): Promise<readonly NodeRow[]>;
-    readonly maxClaimedEntries?: number;
+    readonly claimSupport?: AtomicNodeClaimSupport;
 }
 
 // @public
@@ -286,7 +286,20 @@ export type AtomicNodeBatchInput = Readonly<{
 export type AtomicNodeBatchResultMode = "count" | "rows";
 
 // @public
-export type AtomicNodeDeleteBatchExecutor = (input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>;
+export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
+
+// @public
+export type AtomicNodeClaimSupport = Readonly<{
+    families: readonly AtomicNodeClaimFamily[];
+    maxEntries: number;
+}>;
+
+// @public
+export interface AtomicNodeDeleteBatchExecutor {
+    // (undocumented)
+    (input: AtomicNodeDeleteBatchInput): Promise<AtomicDeleteBatchResult>;
+    readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}
 
 // @public
 export type AtomicNodeDeleteBatchInput = Readonly<{

@@ -4,6 +4,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { resolveBundledRootAtomicMutationPrograms } from "../src/backend/capabilities/atomic-mutation-program";
 import {
   type AtomicNodeClaimEntry,
   buildAtomicNodeClaimCleanupWithSchemaFence,
@@ -17,7 +18,8 @@ import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import type { SchemaWriteFenceParams } from "../src/backend/types";
 import { computeUniqueKey } from "../src/constraints";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
-import { RestrictedDeleteError } from "../src/errors";
+import { DisjointError, RestrictedDeleteError } from "../src/errors";
+import { disjointWith } from "../src/ontology";
 import { createStoreWithSchema } from "../src/store";
 
 const UniquePerson = defineNode("UniquePerson", {
@@ -57,6 +59,13 @@ const deleteGraph = defineGraph({
       cardinality: "many",
     },
   },
+});
+const Rival = defineNode("Rival", { schema: z.object({ name: z.string() }) });
+const disjointGraph = defineGraph({
+  id: "atomic-node-disjoint-pglite",
+  nodes: { PlainPerson: { type: PlainPerson }, Rival: { type: Rival } },
+  edges: {},
+  ontology: [disjointWith(PlainPerson, Rival)],
 });
 
 const schemaFence = { graphId: graph.id, expectedVersion: 1 } as const;
@@ -227,6 +236,31 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
     await expect(
       store.nodes.PlainPerson.getById(connected.id),
     ).resolves.toBeDefined();
+  });
+
+  it("refuses a legacy disjoint row through the PostgreSQL atomic program", async () => {
+    const directBackend = createPostgresBackend(backend.db, { vector: false });
+    const [store] = await createStoreWithSchema(disjointGraph, directBackend);
+    expect(
+      resolveBundledRootAtomicMutationPrograms(directBackend)?.createNodes
+        ?.claimSupport?.families,
+    ).toContain("disjointness");
+    await directBackend.insertNode({
+      graphId: disjointGraph.id,
+      kind: Rival.kind,
+      id: "shared-id",
+      props: { name: "Legacy rival" },
+    });
+
+    await expect(
+      store.nodes.PlainPerson.bulkInsert([
+        { id: "sibling", props: { name: "Sibling" } },
+        { id: "shared-id", props: { name: "Conflict" } },
+      ]),
+    ).rejects.toBeInstanceOf(DisjointError);
+
+    await expect(store.nodes.PlainPerson.count()).resolves.toBe(0);
+    await expect(store.nodes.Rival.count()).resolves.toBe(1);
   });
 
   it("returns the incumbent owner and gates a conflicting generated node", async () => {

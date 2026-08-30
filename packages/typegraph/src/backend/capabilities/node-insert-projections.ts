@@ -5,6 +5,10 @@ import type {
   NodeInsertClaim,
   NodeInsertProjection,
 } from "../types";
+import {
+  type AtomicNodeClaimSupport,
+  supportsAtomicNodeClaims,
+} from "./atomic-mutation-program";
 
 export type NodeProjectionInsertTarget = BackendIdentity &
   Pick<GraphBackend, "commands">;
@@ -104,6 +108,45 @@ export function rephaseNonTransactionalNodeClaimPlan(
       ...claim,
       placement: "pre-insert",
     })),
+  };
+}
+
+/**
+ * Normalizes the one-claim envelope accepted by an atomic node program.
+ *
+ * Unlike the ordinary root insert seam, a closed program can also prove a
+ * disjoint claim because it carries the legacy live-node probe and cleanup in
+ * the same atomic transport submission. The executor's advertised support is
+ * authoritative; an omitted family remains on the portable path.
+ */
+export function rephaseAtomicNodeClaimPlan(
+  plan: ManagedNodeCreatePlan,
+  support: AtomicNodeClaimSupport | undefined,
+): ManagedNodeCreatePlan | undefined {
+  if (
+    plan.mode.kind !== "ordinary" ||
+    plan.projections.length > 0 ||
+    plan.claims.length !== 1 ||
+    !supportsAtomicNodeClaims(support, plan.claims)
+  ) {
+    return;
+  }
+  const claim = plan.claims[0];
+  if (claim === undefined) return;
+  const uniquenessSupported =
+    plan.idGenerated &&
+    claim.verdict.kind === "uniqueness" &&
+    claim.axis === plan.params.kind &&
+    claim.verdict.probeAxes.length === 1 &&
+    claim.verdict.probeAxes[0] === claim.axis;
+  const disjointnessSupported =
+    claim.verdict.kind === "disjointness" &&
+    claim.key === plan.params.id &&
+    claim.verdict.conflictingKinds.length === 1;
+  if (!uniquenessSupported && !disjointnessSupported) return;
+  return {
+    ...plan,
+    claims: [{ ...claim, placement: "pre-insert" }],
   };
 }
 
