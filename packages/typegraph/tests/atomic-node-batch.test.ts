@@ -603,6 +603,144 @@ describe("plain node batch store contract", () => {
     }
   });
 
+  it("resurrects a projected caller id with its incremented postimage version", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.SearchDocument.bulkInsert([
+        { id: "projected-tombstone", props: { title: "Before" } },
+      ]);
+      await fixture.store.nodes.SearchDocument.delete(
+        "projected-tombstone" as never,
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      await fixture.store.nodes.SearchDocument.bulkInsert([
+        { id: "projected-tombstone", props: { title: "After" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(
+        fixture.store.nodes.SearchDocument.getById(
+          "projected-tombstone" as never,
+        ),
+      ).resolves.toMatchObject({ title: "After", meta: { version: 2 } });
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "After",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("asserts projected postimages by their complete heterogeneous identity", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const executor = resolveBundledRootAtomicNodeBatch(fixture.backend);
+      if (executor === undefined) {
+        throw new Error("Expected a bundled atomic node batch executor");
+      }
+
+      await expect(
+        executor({
+          entries: [
+            {
+              idSource: "caller",
+              params: {
+                graphId: fallbackGraph.id,
+                kind: "SearchDocument",
+                id: "search-identity",
+                props: { title: "Search" },
+              },
+              projections: [
+                {
+                  kind: "fulltext",
+                  action: "upsert",
+                  content: "Search",
+                  language: "english",
+                },
+              ],
+            },
+            {
+              idSource: "caller",
+              params: {
+                graphId: fallbackGraph.id,
+                kind: "LegacySearchDocument",
+                id: "legacy-identity",
+                props: { title: "Legacy" },
+              },
+              projections: [
+                {
+                  kind: "fulltext",
+                  action: "upsert",
+                  content: "Legacy",
+                  language: "english",
+                },
+              ],
+            },
+          ],
+          resultMode: "count",
+          schemaFence: { graphId: fallbackGraph.id, expectedVersion: 1 },
+        }),
+      ).resolves.toBe(2);
+
+      await expect(
+        fixture.backend.getNode(
+          fallbackGraph.id,
+          "LegacySearchDocument",
+          "legacy-identity",
+        ),
+      ).resolves.toMatchObject({ kind: "LegacySearchDocument" });
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("treats a projection assertion primary-key collision as refusal", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const executor = resolveBundledRootAtomicNodeBatch(fixture.backend);
+      if (executor === undefined) {
+        throw new Error("Expected a bundled atomic node batch executor");
+      }
+      vi.spyOn(fixture.client, "batch").mockRejectedValueOnce(
+        Object.assign(new Error("primary key collision"), {
+          code: "SQLITE_CONSTRAINT_PRIMARYKEY",
+        }),
+      );
+
+      await expect(
+        executor({
+          entries: [
+            {
+              idSource: "caller",
+              params: {
+                graphId: fallbackGraph.id,
+                kind: "SearchDocument",
+                id: "assertion-collision",
+                props: { title: "Collision" },
+              },
+              projections: [
+                {
+                  kind: "fulltext",
+                  action: "upsert",
+                  content: "Collision",
+                  language: "english",
+                },
+              ],
+            },
+          ],
+          resultMode: "count",
+          schemaFence: { graphId: fallbackGraph.id, expectedVersion: 1 },
+        }),
+      ).resolves.toBe(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
   it("folds replacement search projections into a resolved update", async () => {
     const fixture = await createFallbackFixture();
     try {

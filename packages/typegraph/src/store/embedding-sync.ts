@@ -43,6 +43,21 @@ export type EmbeddingSyncContext = Readonly<{
   backend: GraphBackend | TransactionBackend;
 }>;
 
+type EmbeddingProjectionDecision =
+  | Readonly<{ kind: "upsert"; embedding: readonly number[] }>
+  | Readonly<{ kind: "delete" }>
+  | Readonly<{ kind: "ignore" }>;
+
+/** The single owner for how stored embedding values affect projection state. */
+function resolveEmbeddingProjectionDecision(
+  value: unknown,
+): EmbeddingProjectionDecision {
+  if (isValidEmbeddingValue(value)) {
+    return { kind: "upsert", embedding: value };
+  }
+  return value === undefined ? { kind: "delete" } : { kind: "ignore" };
+}
+
 // ============================================================
 // Schema Introspection
 // ============================================================
@@ -91,12 +106,13 @@ export function resolveNodeEmbeddingProjections(
   return getEmbeddingFields(schema).flatMap(
     (field): readonly NodeInsertProjection[] => {
       const value = readOwnProperty(props, field.fieldPath);
-      return isValidEmbeddingValue(value) ?
+      const decision = resolveEmbeddingProjectionDecision(value);
+      return decision.kind === "upsert" ?
           [
             {
               kind: "embedding",
               fieldPath: field.fieldPath,
-              embedding: value,
+              embedding: decision.embedding,
               dimensions: field.dimensions,
               metric: field.metric,
               indexType: field.indexType,
@@ -127,12 +143,19 @@ export function resolveNodeEmbeddingProjectionTransitions(
         metric: field.metric,
         indexType: field.indexType,
       };
-      if (isValidEmbeddingValue(value)) {
-        return [{ ...common, action: "upsert" as const, embedding: value }];
+      const decision = resolveEmbeddingProjectionDecision(value);
+      if (decision.kind === "upsert") {
+        return [
+          {
+            ...common,
+            action: "upsert" as const,
+            embedding: decision.embedding,
+          },
+        ];
       }
-      return options?.omitDeletes === true ?
-          []
-        : [{ ...common, action: "delete" as const }];
+      return decision.kind === "delete" && options?.omitDeletes !== true ?
+          [{ ...common, action: "delete" as const }]
+        : [];
     },
   );
 }
@@ -164,19 +187,20 @@ export async function syncEmbeddings(
   for (const field of embeddingFields) {
     const value = readOwnProperty(props, field.fieldPath);
 
-    if (isValidEmbeddingValue(value)) {
+    const decision = resolveEmbeddingProjectionDecision(value);
+    if (decision.kind === "upsert") {
       // Upsert the embedding
       await backend.upsertEmbedding({
         graphId: ctx.graphId,
         nodeKind: ctx.nodeKind,
         nodeId: ctx.nodeId,
         fieldPath: field.fieldPath,
-        embedding: value,
+        embedding: decision.embedding,
         dimensions: field.dimensions,
         metric: field.metric,
         indexType: field.indexType,
       });
-    } else if (value === undefined) {
+    } else if (decision.kind === "delete") {
       // Delete any existing embedding for this field
       await backend.deleteEmbedding({
         graphId: ctx.graphId,
@@ -226,9 +250,10 @@ export async function syncEmbeddingsBatchForKind(
     const deletionIds: string[] = [];
     for (const item of items) {
       const value = readOwnProperty(item.props, field.fieldPath);
-      if (isValidEmbeddingValue(value)) {
-        rows.push({ nodeId: item.nodeId, embedding: value });
-      } else if (value === undefined) {
+      const decision = resolveEmbeddingProjectionDecision(value);
+      if (decision.kind === "upsert") {
+        rows.push({ nodeId: item.nodeId, embedding: decision.embedding });
+      } else if (decision.kind === "delete") {
         deletionIds.push(item.nodeId);
       }
     }

@@ -172,6 +172,11 @@ const ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT = 6;
 const ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT = 6;
 const ATOMIC_NODE_INSERT_PARAM_COUNT = 9;
 const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
+// The bundled fulltext lowering is the widest projection statement today.
+// Compilation below independently refuses any strategy that exceeds the
+// resulting budget, so a future strategy cannot silently invalidate this cost.
+const ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT = 4;
+const ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY = 6;
 
 function chunkAtomicNodeEntriesByIdSource(
   entries: readonly AtomicNodeBatchEntry[],
@@ -993,7 +998,13 @@ function compileAtomicNodeProjectionSlots(
   ) {
     return [];
   }
-  const chunkSize = Math.max(1, Math.floor((maxBindParameters - 4) / 6));
+  const chunkSize = Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT) /
+        ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY,
+    ),
+  );
   const statements = operationStrategy.buildAtomicNodeProjectionStatements(
     creates,
     updates,
@@ -1005,11 +1016,48 @@ function compileAtomicNodeProjectionSlots(
       "An eligible atomic node projection family has no dialect lowering.",
     );
   }
-  return statements.map((statement) => ({
-    statement: execution.compile(statement),
-    cardinality: "none" as const,
-    decode: () => ({ kind: "projection" as const }),
-  }));
+  return statements.map((statement) => {
+    const compiled = execution.compile(statement);
+    if (compiled.params.length > maxBindParameters) {
+      throw new CompilerInvariantError(
+        "An atomic node projection statement exceeded the backend bind budget.",
+        {
+          actual: compiled.params.length,
+          maximum: maxBindParameters,
+        },
+      );
+    }
+    return {
+      statement: compiled,
+      cardinality: "none" as const,
+      decode: () => ({ kind: "projection" as const }),
+    };
+  });
+}
+
+function isAtomicNodePostimageRefusal(
+  error: unknown,
+  operationStrategy: CommonOperationStrategy,
+  hasProjectionAssertion: boolean,
+): boolean {
+  return (
+    isNotNullColumnViolation(
+      error,
+      operationStrategy.atomicNodeRefusalConstraints.mutationPostimage,
+    ) ||
+    (hasProjectionAssertion &&
+      isDuplicatePrimaryKeyError(
+        error,
+        operationStrategy.primaryKeyConstraints.nodes,
+      )) ||
+    (hasProjectionAssertion &&
+      error instanceof DatabaseOperationError &&
+      error.details.reason === "duplicate_key" &&
+      isDuplicatePrimaryKeyError(
+        error.cause,
+        operationStrategy.primaryKeyConstraints.nodes,
+      ))
+  );
 }
 
 async function withAtomicEdgeDurableRefusalClassification<T>(
@@ -1320,13 +1368,15 @@ export function createCommonOperationBackend(
   } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
-  async function runAtomicNodeProjectionProgram<TResult>(input: Readonly<{
-    creates: readonly AtomicNodeBatchEntry[];
-    updates: readonly AtomicNodeResolvedUpdateEntry[];
-    hasProjections: boolean;
-    run: () => Promise<TResult>;
-    postimageRefusal?: () => TResult;
-  }>): Promise<TResult> {
+  async function runAtomicNodeProjectionProgram<TResult>(
+    input: Readonly<{
+      creates: readonly AtomicNodeBatchEntry[];
+      updates: readonly AtomicNodeResolvedUpdateEntry[];
+      hasProjections: boolean;
+      run: () => Promise<TResult>;
+      postimageRefusal?: () => TResult;
+    }>,
+  ): Promise<TResult> {
     if (!input.hasProjections && input.postimageRefusal === undefined) {
       return input.run();
     }
@@ -1338,9 +1388,10 @@ export function createCommonOperationBackend(
     } catch (error) {
       if (
         input.postimageRefusal !== undefined &&
-        isNotNullColumnViolation(
+        isAtomicNodePostimageRefusal(
           error,
-          operationStrategy.atomicNodeRefusalConstraints.mutationPostimage,
+          operationStrategy,
+          input.hasProjections,
         )
       ) {
         return input.postimageRefusal();
@@ -1808,8 +1859,7 @@ export function createCommonOperationBackend(
             );
             const gateParameterCount =
               ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT * claimEntries.length +
-              ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT *
-                disjointEntries.length;
+              ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT * disjointEntries.length;
             const nodeChunkSize = Math.max(
               1,
               Math.floor(
@@ -2461,7 +2511,8 @@ export function createCommonOperationBackend(
               if (
                 entry.params.graphId !== input.schemaFence.graphId ||
                 entry.match.kind !== "durable" ||
-                entry.params.matchIdentity?.name !== entry.match.identity.name ||
+                entry.params.matchIdentity?.name !==
+                  entry.match.identity.name ||
                 entry.params.matchIdentity.key !== entry.match.identity.key
               ) {
                 throw new CompilerInvariantError(
@@ -2570,8 +2621,7 @@ export function createCommonOperationBackend(
                   }
                   return {
                     row,
-                    outcome:
-                      row.id === entry.params.id ? "created" : "found",
+                    outcome: row.id === entry.params.id ? "created" : "found",
                   };
                 });
               },
@@ -2703,10 +2753,7 @@ export function createCommonOperationBackend(
         const executeAtomicNodeDeleteBatchWithClaimCleanup = Object.assign(
           executeAtomicNodeDeleteBatch,
           {
-            releasedClaimFamilies: [
-              "disjointness",
-              "uniqueness",
-            ] as const,
+            releasedClaimFamilies: ["disjointness", "uniqueness"] as const,
           },
         );
         return {
@@ -3241,7 +3288,8 @@ export function createCommonOperationBackend(
           input: AtomicEdgeConvergenceInput,
         ): Promise<readonly AtomicEdgeConvergenceResult[]>;
         async function executeAtomicEdgeMutation(
-          input: AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+          input:
+            AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
         ): Promise<
           | AtomicEdgeResolvedMutationSetResult
           | readonly AtomicEdgeConvergenceResult[]

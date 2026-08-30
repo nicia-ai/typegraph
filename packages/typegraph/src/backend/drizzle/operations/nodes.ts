@@ -711,16 +711,53 @@ export function buildAssertAtomicNodeMutationPostimages(
   ];
   const first = entries[0];
   if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
-  const expectedRows = entries.map(
-    (entry) => sql`
+  if (entries.some((entry) => entry.graphId !== schemaFence.graphId)) {
+    throw new CompilerInvariantError(
+      "An atomic node postimage assertion cannot span graph fences.",
+    );
+  }
+  const expectedByKind = new Map<
+    string,
+    (
+      | Readonly<{
+          kind: "create";
+          postimage: ReturnType<typeof atomicNodeCreatePostimage>;
+        }>
+      | Readonly<{
+          kind: "update";
+          postimage: ReturnType<typeof atomicNodeUpdatePostimage>;
+        }>
+    )[]
+  >();
+  for (const entry of creates) {
+    const postimage = atomicNodeCreatePostimage(entry, timestamp);
+    const expected = expectedByKind.get(postimage.kind) ?? [];
+    expected.push({ kind: "create", postimage });
+    expectedByKind.set(postimage.kind, expected);
+  }
+  for (const entry of updates) {
+    const postimage = atomicNodeUpdatePostimage(entry, timestamp);
+    const expected = expectedByKind.get(postimage.kind) ?? [];
+    expected.push({ kind: "update", postimage });
+    expectedByKind.set(postimage.kind, expected);
+  }
+  const expectedKinds = [...expectedByKind].map(([kind, expected]) => {
+    const expectedRows = expected.map(
+      ({ kind: operation, postimage }) => sql`
       (
-            ${nodes.id} = ${entry.id}
-            AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, entry.propsJson)}
-            AND ${nodes.version} = ${entry.version}
-            AND ${nodes.updatedAt} = ${entry.updatedAt}
-          )
+        ${nodes.id} = ${postimage.id}
+        AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, postimage.propsJson)}
+        ${
+          operation === "update" ?
+            sql`AND ${nodes.version} = ${postimage.version}`
+          : sql.empty()
+        }
+        AND ${nodes.updatedAt} = ${postimage.updatedAt}
+      )
     `,
-  );
+    );
+    return sql`(${nodes.kind} = ${kind} AND (${sql.join(expectedRows, sql` OR `)}))`;
+  });
 
   return sql`
     INSERT INTO ${nodes} (${nodeColumnList(nodes)})
@@ -743,10 +780,9 @@ export function buildAssertAtomicNodeMutationPostimages(
       ) OR (
         SELECT COUNT(*)
         FROM ${nodes}
-        WHERE ${nodes.graphId} = ${first.graphId}
-          AND ${nodes.kind} = ${first.kind}
+        WHERE ${nodes.graphId} = ${schemaFence.graphId}
           AND ${nodes.deletedAt} IS NULL
-          AND (${sql.join(expectedRows, sql` OR `)})
+          AND (${sql.join(expectedKinds, sql` OR `)})
       ) <> ${entries.length}
   `;
 }
