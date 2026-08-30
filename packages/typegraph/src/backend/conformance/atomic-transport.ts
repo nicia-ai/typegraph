@@ -145,6 +145,9 @@ export async function runAtomicTransportConformance<
         `Atomic transport provenance check failed: ${name}.`,
         { check: `provenance: ${name}` },
       ),
+    (target) =>
+      resolveRegisteredAtomicSqlBatchExecutor(target) ===
+      fixture.executeAtomicBatch,
   );
 
   const orderedRows = await invoke(

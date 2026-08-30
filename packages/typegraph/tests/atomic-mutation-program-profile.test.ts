@@ -61,7 +61,11 @@ function createCustomAtomicRoot(): GraphBackend {
     capabilities: {
       execution: { interactiveTransactions: false, atomicBatch: "root" },
     },
-  } as GraphBackend;
+    commands: {
+      session: "root",
+      execute: () => Promise.reject(new Error("unused command port")),
+    },
+  } as unknown as GraphBackend;
 }
 
 const emptyAtomicBatch: AtomicSqlBatchExecutor = () => Promise.resolve([]);

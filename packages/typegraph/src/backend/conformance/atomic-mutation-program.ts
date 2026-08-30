@@ -290,6 +290,7 @@ export async function runAtomicMutationProgramConformance(
         `Atomic mutation program provenance check failed: ${name}.`,
         { check: name },
       ),
+    (target) => resolveAtomicMutationPrograms(target) === profile,
   );
 
   const dispatchCounts = new Map<AtomicMutationProgramVariant, number>();

@@ -224,26 +224,36 @@ submits one guarded atomic update. Every direct edge delete, and a restricted
 node delete owing none of those sidecars, performs its existing live-row gate
 and then submits one guarded atomic delete. Missing or tombstoned deletes remain
 hook-free read-only no-ops. Temporal mutations, node cascade/disconnect,
-history/revision capture, derived backends, caller transactions, and
-unregistered custom families retain the complete portable transaction path.
+history/revision capture, ordinary derived backends, and unregistered custom
+families retain the complete portable transaction path.
 The guarded update converges optimistically rather than holding a transaction
 lock across its read and write. A one-row update gets four attempts; sustained
 same-row contention can still end in `DatabaseOperationError`, while larger
 resolved batches retain their two-attempt budget to bound retry cost.
 
-These operations are registered through one exact-root mutation execution
+These operations are registered through an exact-resource mutation execution
 profile. Create and delete are **closed programs**: validation and arbitration
 can be expressed by the submitted SQL itself. `bulkUpsertById()` is deliberately
 different. It first reads authoritative stored properties, then merges and
-validates them before its write set is known. On bundled serverless roots, an
+validates them before its write set is known. On bundled serverless roots, a
 distinct-ID batch with no claims, projections, Operational Identity, durable
 edge match identity, temporal mutation, history, or revision capture submits
-its resolved mutation set as one atomic exchange. Update-only sets use one
+its resolved mutation set as one atomic exchange. An eligible set on bundled
+session-capable PostgreSQL stays inside its exact open transaction and
+dispatches the same reviewed program through a separate registration bound to
+that pinned transaction. Its `applied | unsupported` result is explicit:
+`unsupported` is returned only before any program SQL runs, after which the
+collection enters the complete portable path. Update-only sets use one
 guarded set update. A set containing both fresh creates and live updates carries
 both legs plus a zero-write terminal postimage assertion in the same native
 batch; an incomplete preimage deliberately aborts the batch before any create
-can commit. Repeated IDs, resurrections, temporal changes, sidecars, and caller
-transactions retain the consolidated interactive path.
+can commit. Repeated IDs, resurrections, temporal changes, sidecars, and
+unregistered transaction sessions retain the consolidated interactive path.
+The exact session may be collection-opened, supplied by `store.transaction()`,
+or adopted from the caller. A
+session program uses a savepoint so a deliberate database refusal can be rolled
+back and diagnosed without poisoning the caller's surrounding PostgreSQL
+transaction.
 
 Measured at the libSQL transport boundary, eligible plain node
 `bulkInsert()` and `bulkCreate()` calls each submit one exchange for generated,
@@ -268,10 +278,18 @@ contains the SQL statements needed for inserts and sidecars; it submits them as
 one transaction so they do not each pay network latency. The exact previous
 count varies by driver and endpoint shape.
 
+On session-capable PostgreSQL, the preimage read and mutation program remain in
+one collection-owned transaction. The program has a bounded number of
+statements independent of row count within its bind ceiling; it is not described
+as a single network exchange because wire-protocol drivers execute those
+statements on the pinned session. The gain is removal of the portable
+per-family/per-member write-plan fan-out while retaining whole-call rollback.
+
 These are internal execution optimizations, not a public Store batch API.
-History/revision capture, caller-owned transactions, derived or custom
-backends, dynamic get-or-create convergence, and other unsupported shapes
-retain their transaction or fallback behavior.
+History/revision capture, ordinary derived or custom backends, dynamic
+get-or-create convergence, and other unsupported shapes retain their
+transaction or fallback behavior. Eligible mixed sets inside a bundled
+PostgreSQL transaction are the narrow session-bound exception.
 
 ### Single vs bulk operations
 

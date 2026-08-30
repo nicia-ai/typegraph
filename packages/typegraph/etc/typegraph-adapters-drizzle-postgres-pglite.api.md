@@ -32,7 +32,7 @@ export type AnyPgTransaction = PgTransaction<PgQueryResultHKT, Record<string, un
 type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
-        atomicBatch: "none" | "root";
+        atomicBatch: "none" | "root" | "session";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;

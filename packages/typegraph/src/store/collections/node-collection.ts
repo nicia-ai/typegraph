@@ -33,7 +33,10 @@ import {
 import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
-import { runResolvedMutationSetConverging } from "../resolved-mutation-set";
+import {
+  type ResolvedMutationSetAttempt,
+  runResolvedMutationSetConverging,
+} from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
 import {
   type CreateNodeInput,
@@ -220,7 +223,9 @@ export type NodeCollectionConfig = Readonly<{
     updates: readonly NodeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<
-    Readonly<{ created: readonly Node[]; updated: readonly Node[] }> | undefined
+    ResolvedMutationSetAttempt<
+      Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
+    >
   >;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
@@ -970,12 +975,12 @@ export function createNodeCollection<
           clearDeleted: entry.clearDeleted,
           ...(entry.existing === undefined ? {} : { existing: entry.existing }),
         }));
-        const mutationSet = await executeNodeResolvedMutationSet(
+        const mutationAttempt = await executeNodeResolvedMutationSet(
           createInputs,
           updateEntries,
           target,
         );
-        if (mutationSet === undefined) {
+        if (mutationAttempt.outcome === "unsupported") {
           if (toCreate.length > 0) {
             const created = await executeNodeCreateBatch(createInputs, target);
             for (const [index, entry] of toCreate.entries()) {
@@ -996,6 +1001,7 @@ export function createNodeCollection<
             }
           }
         } else {
+          const mutationSet = mutationAttempt.value;
           for (const [index, entry] of toCreate.entries()) {
             results[entry.index] = narrowNode<N>(
               requireDefined(mutationSet.created[index]),

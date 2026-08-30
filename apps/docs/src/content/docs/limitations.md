@@ -359,14 +359,21 @@ SQL. Other delete shapes retain their transaction path. `bulkUpsertById()`
 remains a resolved mutation set because it must read and schema-validate a
 database preimage before its writes are known. Bundled serverless roots can
 submit an eligible distinct-ID, live-row resolved set as one native exchange
-after that read. Update-only sets use a guarded update; sets containing both
+after that read. Bundled session-capable PostgreSQL can bind the same program
+to the exact collection-opened, caller-supplied, or adopted transaction; this
+is a bounded statement sequence on the pinned session, not one network
+exchange. Update-only sets use a guarded update; sets containing both
 fresh creates and updates include a terminal database assertion that rolls the
 whole exchange back when any guarded postimage is absent. Repeated IDs,
 resurrections, temporal changes, sidecars (including durable edge match
-identity), history/revision capture, and caller transactions use the interactive
-path. On D1's 100-parameter budget the native ceiling is 17 total node mutations
+identity), history/revision capture, ordinary derived backends, and
+unregistered sessions use the interactive path. On D1's 100-parameter budget the native ceiling is 17 total node mutations
 or 6 total edge mutations; larger batches return to the interactive path rather
-than splitting the all-or-nothing guard across autocommit statements.
+than splitting the all-or-nothing guard across autocommit statements. The
+operation returns an explicit `unsupported` verdict before issuing program SQL;
+the Store never infers fallback safety from a missing result. Once a session
+program starts, a savepoint preserves the surrounding transaction for typed
+refusal diagnosis.
 
 Eligible singleton `update()` and `delete()` calls reuse those same registered
 families. Plain node updates, unconstrained non-durable-identity edge updates,

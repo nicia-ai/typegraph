@@ -20,6 +20,7 @@ import {
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
 } from "./collections/node-collection";
+import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
 import {
   type CreateEdgeInput,
@@ -81,7 +82,9 @@ export type NodeOperations = Readonly<{
     updates: readonly NodeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<
-    Readonly<{ created: readonly Node[]; updated: readonly Node[] }> | undefined
+    ResolvedMutationSetAttempt<
+      Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
+    >
   >;
   /**
    * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
@@ -190,7 +193,9 @@ export type EdgeOperations = Readonly<{
     updates: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<
-    Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }> | undefined
+    ResolvedMutationSetAttempt<
+      Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
+    >
   >;
   /**
    * Coalesce dirty-check for `bulkUpsertById` (props only — endpoints are the

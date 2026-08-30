@@ -602,22 +602,26 @@ submitted:
 
 - A **closed mutation program** carries every input, fence, and refusal rule
   needed for the database to decide the write. Eligible node/edge creates and
-  soft deletes use one exact-root execution profile and can run as one native
+  soft deletes use one exact-resource execution profile and can run as one native
   atomic exchange on bundled serverless transports. The profile is attached to
-  the exact backend object; derived and transaction-scoped backends do not
-  inherit it accidentally.
+  the exact backend object. Derived backends do not inherit it accidentally;
+  an already-open PostgreSQL transaction earns a separate session-bound
+  registration.
 - A **resolved mutation set** requires an authoritative database preimage and
   application computation before its writes are known. `bulkUpsertById()` is
   the canonical example: stored props are merged and Zod-validated, temporal
   decisions are derived, and repeated IDs observe earlier batch items. An
-  eligible distinct-ID set can cross the exact-root boundary after resolution:
+  eligible distinct-ID set can cross the exact registered boundary after resolution:
   its guarded SQL carries the node versions or complete edge preimages that
   justified the after-images. Update-only sets use one guarded set statement;
   mixed create/update sets add a terminal database postimage assertion inside
   the same native exchange, so an incomplete update aborts and rolls back its
   creates before the transport commits. Complex sets resolve and execute inside
   one interactive transaction. Neither shape is mislabeled as a read-free
-  program.
+  program. On an interactive PostgreSQL root, the operation runs on the exact
+  collection-opened, caller-supplied, or adopted transaction and returns an
+  explicit `applied | unsupported` verdict. `unsupported` proves that no
+  program SQL ran before the complete portable path begins.
 
 This boundary keeps transport optimization subordinate to Store semantics. A
 new bulk optimization must either prove its mutation is closed or name the

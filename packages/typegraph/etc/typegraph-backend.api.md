@@ -401,7 +401,7 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
 export type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
-        atomicBatch: "none" | "root";
+        atomicBatch: "none" | "root" | "session";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
@@ -3222,10 +3222,10 @@ export type RecursiveTraversalVerdict = Readonly<{
 })>;
 
 // @public
-export function registerAtomicMutationPrograms<T extends GraphBackend>(target: T, registration: AtomicMutationProgramRegistration): T;
+export function registerAtomicMutationPrograms<T extends GraphBackend | TransactionBackend>(target: T, registration: AtomicMutationProgramRegistration): T;
 
 // @public
-export function registerAtomicSqlProgram<T extends GraphBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
+export function registerAtomicSqlProgram<T extends GraphBackend | TransactionBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
 
 // @public
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;

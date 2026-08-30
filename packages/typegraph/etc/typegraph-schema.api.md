@@ -24,7 +24,7 @@ export function assertSchemaCurrent<G extends GraphDef>(backend: GraphBackend, g
 type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
-        atomicBatch: "none" | "root";
+        atomicBatch: "none" | "root" | "session";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;

@@ -35,7 +35,10 @@ import {
   type EdgeIdentityExpectation,
   edgeIdentityFromRow,
 } from "../operations/edge-identity";
-import { runResolvedMutationSetConverging } from "../resolved-mutation-set";
+import {
+  type ResolvedMutationSetAttempt,
+  runResolvedMutationSetConverging,
+} from "../resolved-mutation-set";
 import { type EdgeRow } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -129,7 +132,9 @@ export type EdgeCollectionConfig = Readonly<{
     updates: readonly EdgeUpsertUpdateBatchEntry[],
     backend: GraphBackend | TransactionBackend,
   ) => Promise<
-    Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }> | undefined
+    ResolvedMutationSetAttempt<
+      Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
+    >
   >;
   /** See EdgeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
@@ -1047,12 +1052,12 @@ export function createEdgeCollection<
           clearDeleted: entry.clearDeleted,
           ...(entry.existing === undefined ? {} : { existing: entry.existing }),
         }));
-        const mutationSet = await executeEdgeResolvedMutationSet(
+        const mutationAttempt = await executeEdgeResolvedMutationSet(
           createInputs,
           updateEntries,
           target,
         );
-        if (mutationSet === undefined) {
+        if (mutationAttempt.outcome === "unsupported") {
           if (toCreate.length > 0) {
             const created = await executeEdgeCreateBatch(createInputs, target);
             for (const [index, entry] of toCreate.entries()) {
@@ -1073,6 +1078,7 @@ export function createEdgeCollection<
             }
           }
         } else {
+          const mutationSet = mutationAttempt.value;
           for (const [index, entry] of toCreate.entries()) {
             results[entry.index] = narrowEdge<E>(
               requireDefined(mutationSet.created[index]),

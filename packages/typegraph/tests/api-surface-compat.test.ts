@@ -20,7 +20,7 @@ export function createFixtureBackend(capabilities: FixtureCapabilities): Fixture
 export type FixtureCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
-        atomicBatch: "none" | "root";
+        atomicBatch: "none" | "root" | "session";
     }>;
     internal?: FixtureInternalOptions;
     mandatory: FixtureMandatoryOptions;

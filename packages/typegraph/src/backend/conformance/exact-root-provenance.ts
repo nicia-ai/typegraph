@@ -28,6 +28,7 @@ export async function assertExactRootRegistrationProvenance(
   fixture: ExactRootRegistrationProvenanceFixture,
   isRegistered: ExactRootRegistrationPredicate,
   createError: (check: string) => Error,
+  isRootRegistration: ExactRootRegistrationPredicate = isRegistered,
 ): Promise<ExactRootRegistrationProvenanceReport> {
   const passed: string[] = [];
   const skipped: string[] = [];
@@ -51,7 +52,7 @@ export async function assertExactRootRegistrationProvenance(
     return { passed, skipped };
   }
   const isolated = await backend.transaction((transaction) =>
-    Promise.resolve(!isRegistered(transaction)),
+    Promise.resolve(!isRootRegistration(transaction)),
   );
   if (!isolated) throw createError("transaction backend isolation");
   passed.push("transaction backend isolation");

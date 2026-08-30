@@ -81,7 +81,15 @@ import {
   isPostgresConcurrentDdlRaceError,
 } from "../../utils/sql-errors";
 import { RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE } from "../advisory-lock-namespaces";
-import { registerAtomicMutationPrograms } from "../capabilities/atomic-mutation-program";
+import {
+  type AtomicEdgeConvergenceInput,
+  type AtomicEdgeConvergenceResult,
+  type AtomicEdgeMutationProgramExecutor,
+  type AtomicEdgeResolvedMutationSetInput,
+  type AtomicEdgeResolvedMutationSetResult,
+  carryAtomicMutationSessionRegistration,
+  registerAtomicMutationPrograms,
+} from "../capabilities/atomic-mutation-program";
 import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
@@ -92,7 +100,7 @@ import {
   assertBundledCapabilityDeclarations,
   assertNoLegacyTransactionCapability,
 } from "../capabilities/declarations";
-import { downgradeRootAtomicBatch } from "../capabilities/execution";
+import { scopeAtomicBatchToSession } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
@@ -204,6 +212,7 @@ import {
   type PostgresExecutionAdapter,
   type PostgresExecutionAdapterOptions,
 } from "./execution/postgres-execution";
+import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import { instantiateGraphTemplateSql } from "./graph-template-sql";
@@ -1286,10 +1295,13 @@ export function createPostgresBackend(
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
     });
-    const gatedBackend = gateFulltext(
+    const gatedBackend = carryAtomicMutationSessionRegistration(
       backend,
-      contributionMaterializer.assertInitialized,
-      contributionMaterializer.refuseUnavailableFulltext,
+      gateFulltext(
+        backend,
+        contributionMaterializer.assertInitialized,
+        contributionMaterializer.refuseUnavailableFulltext,
+      ),
     );
     return {
       backend: gatedBackend,
@@ -2645,7 +2657,7 @@ function createPostgresOperationBackend(
       execGet,
       execRun,
     },
-    ...(transactionScoped || atomicSqlProgramExecutor === undefined ?
+    ...(atomicSqlProgramExecutor === undefined ?
       {}
     : { atomicSqlProgramExecutor }),
     nowIso,
@@ -3255,6 +3267,36 @@ type BoundTransactionBackend = Readonly<{
   drainAndClose: () => Promise<void>;
 }>;
 
+function resolvedSetOnlyEdgeMutationProgram(
+  executor: AtomicEdgeMutationProgramExecutor,
+): AtomicEdgeMutationProgramExecutor {
+  function execute(
+    input: AtomicEdgeResolvedMutationSetInput,
+  ): Promise<AtomicEdgeResolvedMutationSetResult>;
+  function execute(
+    input: AtomicEdgeConvergenceInput,
+  ): Promise<readonly AtomicEdgeConvergenceResult[]>;
+  function execute(
+    input: AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+  ):
+    | Promise<AtomicEdgeResolvedMutationSetResult>
+    | Promise<readonly AtomicEdgeConvergenceResult[]> {
+    if (input.kind === "resolved-set") return executor(input);
+    return Promise.reject<readonly AtomicEdgeConvergenceResult[]>(
+      new CompilerInvariantError(
+        "A transaction-session edge mutation profile received durable convergence outside its declared envelope.",
+      ),
+    );
+  }
+
+  return Object.assign(execute, {
+    maxEntries: Object.freeze({
+      resolvedSet: executor.maxEntries.resolvedSet,
+      durableConvergence: 0,
+    }),
+  });
+}
+
 function createTransactionBackend(
   options: CreatePostgresTransactionBackendOptions,
 ): BoundTransactionBackend {
@@ -3265,8 +3307,34 @@ function createTransactionBackend(
   // The wrap is unconditional because the overlap is created inside TypeGraph
   // (the node write pipeline syncs embeddings and fulltext concurrently), not
   // only by user code.
+  const operationExecutionAdapter = createPostgresExecutionAdapter(
+    options.db,
+    options.adapterOptions,
+  );
+  const compiledExecutionAdapter = createPostgresExecutionAdapter(options.db, {
+    ...options.adapterOptions,
+    useTransactionClient: true,
+  });
+  const executeCompiled = compiledExecutionAdapter.executeCompiled;
+  // Preserve the established Drizzle-routed execution surface for ordinary
+  // transaction work. Only a closed atomic program needs the pinned client's
+  // compiled-text seam; changing every statement to that seam would also
+  // bypass driver logging and other Drizzle session behavior merely because
+  // this transaction can execute programs.
   const txExecutionAdapter = createSerialExecutionAdapter(
-    createPostgresExecutionAdapter(options.db, options.adapterOptions),
+    executeCompiled === undefined ?
+      operationExecutionAdapter
+    : { ...operationExecutionAdapter, executeCompiled },
+  );
+  const sessionAtomicBatchAdapter =
+    createSessionAtomicBatchAdapter(txExecutionAdapter);
+  const sessionAtomicSqlProgramExecutor =
+    sessionAtomicBatchAdapter === undefined ? undefined : (
+      createAtomicSqlProgramExecutor(sessionAtomicBatchAdapter)
+    );
+  const sessionCapabilities = scopeAtomicBatchToSession(
+    options.capabilities,
+    sessionAtomicSqlProgramExecutor !== undefined,
   );
 
   // The transaction-scoped backend shares the outer backend's
@@ -3279,10 +3347,13 @@ function createTransactionBackend(
     createPostgresOperationBackend({
       db: options.db,
       executionAdapter: txExecutionAdapter,
+      ...(sessionAtomicSqlProgramExecutor === undefined ?
+        {}
+      : { atomicSqlProgramExecutor: sessionAtomicSqlProgramExecutor }),
       adapterOptions: options.adapterOptions,
       operationStrategy: options.operationStrategy,
       tableNames: options.tableNames,
-      capabilities: downgradeRootAtomicBatch(options.capabilities),
+      capabilities: sessionCapabilities,
       fulltextStrategy: options.fulltextStrategy,
       vectorStrategy: options.vectorStrategy,
       contributionMaterializer: options.contributionMaterializer,
@@ -3293,6 +3364,17 @@ function createTransactionBackend(
       transactionScoped: true,
     }),
   );
+
+  if (sessionAtomicBatchAdapter !== undefined) {
+    registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);
+    const mutateEdges = requireDefined(
+      backend.executeAtomicEdgeMutationProgram,
+    );
+    registerAtomicMutationPrograms(backend, {
+      mutateNodes: requireDefined(backend.executeAtomicNodeResolvedMutationSet),
+      mutateEdges: resolvedSetOnlyEdgeMutationProgram(mutateEdges),
+    });
+  }
 
   return { backend, drainAndClose: txExecutionAdapter.drainAndClose };
 }

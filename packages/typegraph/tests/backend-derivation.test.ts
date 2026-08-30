@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import { resolveWriteFencePlan } from "../src/backend/capabilities/write-fence";
 import {
   deriveBackend,
+  deriveTransactionSessionBackend,
   projectBackend,
   projectBackendWithout,
   projectGraphBackend,
@@ -32,7 +33,11 @@ import {
   resolveBackendAudit,
   sharesSerializedTransactionResource,
 } from "../src/backend/transaction-resource";
-import { type GraphBackend, SQLITE_CAPABILITIES } from "../src/backend/types";
+import {
+  type GraphBackend,
+  SQLITE_CAPABILITIES,
+  type TransactionBackend,
+} from "../src/backend/types";
 import { createTestBackend, makeUnauditedBackend } from "./test-utils";
 
 type BaseVerdict = "serialized" | "independent" | "unaudited";
@@ -187,6 +192,32 @@ describe("deriveBackend over frozen inputs", () => {
     });
     expect(descriptor).not.toHaveProperty("get");
     expect(descriptor).not.toHaveProperty("set");
+  });
+});
+
+describe("transaction-session derivation", () => {
+  it("preserves only the base session declaration, never a replacement", () => {
+    const base = {
+      capabilities: {
+        ...SQLITE_CAPABILITIES,
+        execution: {
+          ...SQLITE_CAPABILITIES.execution,
+          atomicBatch: "session" as const,
+        },
+      },
+      commands: {
+        session: "transaction" as const,
+        execute: () => Promise.reject(new Error("unused command port")),
+      },
+    } as unknown as TransactionBackend;
+
+    const preserved = deriveTransactionSessionBackend(base, {});
+    const replaced = deriveTransactionSessionBackend(base, {
+      capabilities: base.capabilities,
+    });
+
+    expect(preserved.capabilities.execution.atomicBatch).toBe("session");
+    expect(replaced.capabilities.execution.atomicBatch).toBe("none");
   });
 });
 

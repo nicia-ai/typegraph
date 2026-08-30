@@ -167,7 +167,12 @@ import {
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { ResolvedMutationSetMoved } from "../resolved-mutation-set";
+import {
+  appliedResolvedMutationSet,
+  type ResolvedMutationSetAttempt,
+  ResolvedMutationSetMoved,
+  unsupportedResolvedMutationSet,
+} from "../resolved-mutation-set";
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
@@ -2884,9 +2889,13 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
   updates: readonly NodeUpsertUpdateBatchEntry[],
   backend: GraphBackend | TransactionBackend,
 ): Promise<
-  Readonly<{ created: readonly Node[]; updated: readonly Node[] }> | undefined
+  ResolvedMutationSetAttempt<
+    Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
+  >
 > {
-  if (creates.length === 0 || updates.length === 0) return;
+  if (creates.length === 0 || updates.length === 0) {
+    return unsupportedResolvedMutationSet();
+  }
   const firstUpdate = requireDefined(updates[0]);
   const executor = resolveAtomicNodeResolvedMutationSetExecutor({
     backend,
@@ -2900,12 +2909,14 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     identityEnabled: ctx.identity !== undefined,
     registry: ctx.registry,
   });
-  if (executor === undefined) return;
+  if (executor === undefined) return unsupportedResolvedMutationSet();
   const ids = new Set([
     ...creates.map((input) => requireDefined(input.id)),
     ...updates.map((entry) => entry.input.id),
   ]);
-  if (ids.size !== creates.length + updates.length) return;
+  if (ids.size !== creates.length + updates.length) {
+    return unsupportedResolvedMutationSet();
+  }
   if (
     updates.some(
       (entry) =>
@@ -2916,7 +2927,7 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
         entry.input.clearValidTo === true,
     )
   ) {
-    return;
+    return unsupportedResolvedMutationSet();
   }
 
   const preparedCreates = await prepareAtomicBatchCreates(
@@ -2925,7 +2936,11 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     backend,
   );
   const createEntries = atomicNodeBatchEntries(preparedCreates, 0);
-  if (createEntries === undefined) return;
+  if (createEntries === undefined) {
+    throw new CompilerInvariantError(
+      "An eligible resolved node mutation set produced unsupported create claims.",
+    );
+  }
   const resolvedUpdates = updates.map((entry) => {
     const existing = requireDefined(entry.existing);
     const { validatedProps } = resolveNodeUpdateProps(
@@ -2970,12 +2985,12 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     result.created,
   ).map((row) => rowToNode(row));
   const updatedById = new Map(result.updated.map((row) => [row.id, row]));
-  return {
+  return appliedResolvedMutationSet({
     created,
     updated: updates.map((entry) =>
       rowToNode(requireDefined(updatedById.get(entry.input.id))),
     ),
-  };
+  });
 }
 
 export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(

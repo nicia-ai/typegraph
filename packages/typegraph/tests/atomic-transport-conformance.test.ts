@@ -94,7 +94,11 @@ function createFixture(
   const executeAtomicBatch = wrapExecutor?.(baseExecutor) ?? baseExecutor;
   const root = {
     capabilities: { execution: { atomicBatch: "root" } },
-  } as GraphBackend;
+    commands: {
+      session: "root",
+      execute: () => Promise.reject(new Error("unused command port")),
+    },
+  } as unknown as GraphBackend;
   registerAtomicSqlProgram(root, executeAtomicBatch);
 
   return {

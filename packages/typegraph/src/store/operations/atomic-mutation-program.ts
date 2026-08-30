@@ -18,7 +18,7 @@ import {
 } from "../../backend/capabilities/atomic-mutation-program";
 import {
   type GraphBackend,
-  supportsRootAtomicBatch,
+  supportsAtomicBatch,
   type TransactionBackend,
 } from "../../backend/types";
 import type { GraphDef } from "../../core/define-graph";
@@ -39,7 +39,7 @@ type CommonAtomicMutationEligibility = Readonly<{
 }>;
 
 function resolveAtomicMutationProfile(input: CommonAtomicMutationEligibility) {
-  if (!supportsRootAtomicBatch(input.backend)) return;
+  if (!supportsAtomicBatch(input.backend)) return;
   if (input.schemaVersion === undefined) return;
   if (input.historyEnabled || input.revisionTrackingEnabled) return;
   return resolveAtomicMutationPrograms(input.backend);
