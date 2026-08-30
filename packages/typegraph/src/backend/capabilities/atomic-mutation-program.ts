@@ -280,12 +280,18 @@ export type AtomicNodeDeleteBatchInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
-/** Executes complete eligible direct node deletes for one exact root. */
-export interface AtomicNodeDeleteBatchExecutor {
+/**
+ * Executes complete eligible direct node deletes for one exact root.
+ *
+ * Keep the callable as a function type intersected with its metadata. The API
+ * compatibility inventory follows function aliases into their input types;
+ * changing this to a callable interface would hide that contravariant edge.
+ */
+export type AtomicNodeDeleteBatchExecutor = Readonly<{
   /** Claim families whose owned sidecars this program releases. */
-  readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
-  (input: AtomicNodeDeleteBatchInput): Promise<AtomicDeleteBatchResult>;
-}
+  releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}> &
+  ((input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>);
 
 /** One authoritative node preimage and replacement used by a resolved set. */
 export type AtomicNodeResolvedUpdateEntry = Readonly<{

@@ -295,11 +295,9 @@ export type AtomicNodeClaimSupport = Readonly<{
 }>;
 
 // @public
-export interface AtomicNodeDeleteBatchExecutor {
-    // (undocumented)
-    (input: AtomicNodeDeleteBatchInput): Promise<AtomicDeleteBatchResult>;
-    readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
-}
+export type AtomicNodeDeleteBatchExecutor = Readonly<{
+    releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}> & ((input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>);
 
 // @public
 export type AtomicNodeDeleteBatchInput = Readonly<{
