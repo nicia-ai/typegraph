@@ -74,7 +74,7 @@ import {
   assertBundledCapabilityDeclarations,
   assertNoLegacyTransactionCapability,
 } from "../capabilities/declarations";
-import { downgradeRootAtomicBatch } from "../capabilities/execution";
+import { downgradeAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
@@ -2672,7 +2672,7 @@ function createTransactionBackend(
   // confirmed once stays a pure `Set.has` inside every later transaction.
   return markFirstPartyFactory(
     createSqliteOperationBackend({
-      capabilities: downgradeRootAtomicBatch(options.capabilities),
+      capabilities: downgradeAtomicBatch(options.capabilities),
       db: options.db,
       executionAdapter: txExecutionAdapter,
       operationStrategy: options.operationStrategy,

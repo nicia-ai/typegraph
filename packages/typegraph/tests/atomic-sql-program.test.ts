@@ -79,7 +79,11 @@ function createRoot(): GraphBackend {
     capabilities: {
       execution: { atomicBatch: "root" },
     },
-  } as GraphBackend;
+    commands: {
+      session: "root",
+      execute: () => Promise.reject(new Error("unused command port")),
+    },
+  } as unknown as GraphBackend;
 }
 
 function expectRegistrationMismatch(action: () => unknown): void {
@@ -219,6 +223,31 @@ describe("atomic SQL program executor", () => {
     expectRegistrationMismatch(() => registerAtomicSqlProgram(noBatch, {}));
   });
 
+  it("binds root and session declarations to their matching command resource", () => {
+    const transaction = {
+      capabilities: { execution: { atomicBatch: "session" } },
+      commands: {
+        session: "transaction",
+        execute: () => Promise.reject(new Error("unused command port")),
+      },
+    } as unknown as TransactionBackend;
+    expect(() =>
+      registerAtomicSqlProgram(transaction, oneRowBatch),
+    ).not.toThrow();
+    expect(resolveAtomicSqlProgramExecutor(transaction)).toBeDefined();
+
+    const mismatched = {
+      capabilities: { execution: { atomicBatch: "root" } },
+      commands: {
+        session: "transaction",
+        execute: () => Promise.reject(new Error("unused command port")),
+      },
+    } as unknown as GraphBackend;
+    expectRegistrationMismatch(() =>
+      registerAtomicSqlProgram(mismatched, oneRowBatch),
+    );
+  });
+
   it("refuses a malformed adapter instead of recording unusable evidence", () => {
     const malformed = {
       executeAtomicBatch: "not a function",
@@ -253,7 +282,7 @@ describe("atomic SQL program executor", () => {
       registerAtomicSqlProgram(undeclared, oneValueBatch),
     );
     expect(() => registerAtomicSqlProgram(undeclared, oneValueBatch)).toThrow(
-      /atomicBatch: "root"/,
+      /exact-session atomic-batch authority/,
     );
   });
 

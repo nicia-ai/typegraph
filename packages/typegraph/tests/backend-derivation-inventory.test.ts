@@ -56,6 +56,7 @@ const SOURCE_ROOT = path.resolve(
 const SEAM_CONSTRUCTORS = [
   "decorateBackend",
   "deriveBackend",
+  "deriveTransactionSessionBackend",
   "projectBackend",
   "projectBackendWithout",
   "projectGraphBackend",
@@ -103,9 +104,9 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/contribution-materializations.ts",
-    line: "return deriveBackend<TransactionBackend>(",
+    line: "return deriveTransactionSessionBackend<TransactionBackend>(",
     reason:
-      "Gates the fulltext members of a transaction-scoped backend until the graph's contributions are materialized, leaving every other member forwarding.",
+      "Gates the fulltext members of a transaction-scoped backend until the graph's contributions are materialized while preserving the already-open session declaration; the PostgreSQL factory immediately binds fresh exact transport and semantic registrations to the wrapper.",
   },
   {
     file: "backend/drizzle/postgres.ts",

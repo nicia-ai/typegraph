@@ -173,7 +173,12 @@ import {
   resolveEdgeMatchIdentityStorage,
 } from "../edge-match-key";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { ResolvedMutationSetMoved } from "../resolved-mutation-set";
+import {
+  appliedResolvedMutationSet,
+  type ResolvedMutationSetAttempt,
+  ResolvedMutationSetMoved,
+  unsupportedResolvedMutationSet,
+} from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
 import {
   type CreateEdgeInput,
@@ -2361,9 +2366,13 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
   updates: readonly EdgeUpsertUpdateBatchEntry[],
   backend: GraphBackend | TransactionBackend,
 ): Promise<
-  Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }> | undefined
+  ResolvedMutationSetAttempt<
+    Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
+  >
 > {
-  if (creates.length === 0 || updates.length === 0) return;
+  if (creates.length === 0 || updates.length === 0) {
+    return unsupportedResolvedMutationSet();
+  }
   const firstUpdate = requireDefined(updates[0]);
   const executor = resolveAtomicEdgeResolvedMutationSetExecutor({
     backend,
@@ -2375,12 +2384,14 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
     creates,
     updateCount: updates.length,
   });
-  if (executor === undefined) return;
+  if (executor === undefined) return unsupportedResolvedMutationSet();
   const ids = new Set([
     ...creates.map((input) => requireDefined(input.id)),
     ...updates.map((entry) => entry.input.id),
   ]);
-  if (ids.size !== creates.length + updates.length) return;
+  if (ids.size !== creates.length + updates.length) {
+    return unsupportedResolvedMutationSet();
+  }
   if (
     updates.some(
       (entry) =>
@@ -2391,15 +2402,23 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
         entry.input.clearValidTo === true,
     )
   ) {
-    return;
+    return unsupportedResolvedMutationSet();
   }
 
+  // The eligibility owner above excludes every edge kind that can owe a
+  // cardinality claim. Preparation normalizes that proven shape; a claim here
+  // is contradictory evidence between the classifier and claim planner, not a
+  // late unsupported verdict that may silently enter another execution path.
   const preparation = await prepareAtomicEdgeBatchCreates(
     ctx,
     creates,
     backend,
   );
-  if (preparation.claims.length > 0) return;
+  if (preparation.claims.length > 0) {
+    throw new CompilerInvariantError(
+      "An eligible resolved edge mutation set produced unsupported cardinality claims.",
+    );
+  }
   const createParams = preparation.preparedCreates.map(
     (prepared) => prepared.insertParams,
   );
@@ -2456,14 +2475,14 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
   memoizeLeasedSchemaFence(ctx, backend);
   const createdById = new Map(result.created.map((row) => [row.id, row]));
   const updatedById = new Map(result.updated.map((row) => [row.id, row]));
-  return {
+  return appliedResolvedMutationSet({
     created: creates.map((input) =>
       rowToEdge(requireDefined(createdById.get(requireDefined(input.id)))),
     ),
     updated: updates.map((entry) =>
       rowToEdge(requireDefined(updatedById.get(entry.input.id))),
     ),
-  };
+  });
 }
 
 export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(

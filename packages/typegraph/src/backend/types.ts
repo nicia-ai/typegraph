@@ -291,8 +291,12 @@ export type BackendCapabilities = Readonly<{
   execution: Readonly<{
     /** Whether the backend can hold an interactive callback/session transaction. */
     interactiveTransactions: boolean;
-    /** Whether the exact root backend exposes a conformance-earned atomic batch. */
-    atomicBatch: "none" | "root";
+    /**
+     * Where this exact backend object can execute a conformance-earned atomic
+     * batch. `root` owns the transaction boundary; `session` is already bound
+     * to the transaction that makes a closed statement sequence atomic.
+     */
+    atomicBatch: "none" | "root" | "session";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
@@ -467,6 +471,18 @@ export function supportsRootAtomicBatch(
       backendOrCapabilities.capabilities
     : backendOrCapabilities;
   return capabilities.execution.atomicBatch === "root";
+}
+
+/** Returns whether this exact object owns any certified atomic batch session. */
+export function supportsAtomicBatch(
+  backendOrCapabilities:
+    BackendCapabilities | Readonly<{ capabilities: BackendCapabilities }>,
+): boolean {
+  const capabilities =
+    "capabilities" in backendOrCapabilities ?
+      backendOrCapabilities.capabilities
+    : backendOrCapabilities;
+  return capabilities.execution.atomicBatch !== "none";
 }
 
 // ============================================================

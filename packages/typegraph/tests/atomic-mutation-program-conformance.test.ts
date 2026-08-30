@@ -86,7 +86,7 @@ function createProfileBackend(
 }
 
 async function dispatchVariant(
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
   variant: AtomicMutationProgramVariant,
 ): Promise<void> {
   const profile = resolveAtomicMutationPrograms(backend);
@@ -163,7 +163,7 @@ function completeCases(): readonly UnboundConformanceCase[] {
 
 function bindCase(
   conformanceCase: UnboundConformanceCase,
-  backend: GraphBackend,
+  backend: GraphBackend | TransactionBackend,
 ): AtomicMutationProgramConformanceCase {
   function bind<T extends { execute: () => unknown }>(value: T): T {
     return {
@@ -197,6 +197,37 @@ function fixture(
   interactiveTransactions = false,
 ) {
   const backend = createProfileBackend(registration, interactiveTransactions);
+  return {
+    backend,
+    derivedBackends: [deriveBackend(backend, {})] as const,
+    cases: cases.map((entry) => bindCase(entry, backend)),
+    equal: (actual: unknown, expected: unknown) =>
+      JSON.stringify(actual) === JSON.stringify(expected),
+  } as const;
+}
+
+function sessionFixture() {
+  const backend = markBundledRootAtomicMutationPrograms(
+    {
+      capabilities: {
+        execution: {
+          atomicBatch: "session",
+          interactiveTransactions: true,
+        },
+      },
+    } as TransactionBackend,
+    {
+      mutateNodes: callableWithLimit<AtomicNodeResolvedMutationSetExecutor>(1),
+      mutateEdges: edgeMutationExecutor({
+        durableConvergence: 0,
+        resolvedSet: 1,
+      }),
+    },
+  );
+  const cases = [
+    conformanceCase("mutateNodes"),
+    conformanceCase("mutateEdges.resolvedSet"),
+  ];
   return {
     backend,
     derivedBackends: [deriveBackend(backend, {})] as const,
@@ -295,6 +326,23 @@ describe("atomic mutation program conformance runner", () => {
     );
 
     expect(report.variants.map((entry) => entry.variant)).toEqual(reachable);
+  });
+
+  it("certifies mixed variants registered on an exact transaction session", async () => {
+    const report = await runAtomicMutationProgramConformance(sessionFixture());
+
+    expect(report.variants.map((entry) => entry.variant)).toEqual([
+      "mutateNodes",
+      "mutateEdges.resolvedSet",
+    ]);
+    expect(report.provenance).toEqual({
+      passed: [
+        "exact root registration",
+        "derived backend lineage",
+        "derived backend isolation",
+      ],
+      skipped: ["transaction backend isolation"],
+    });
   });
 
   it("refuses missing, unregistered, and duplicate cases", async () => {

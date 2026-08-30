@@ -1,12 +1,12 @@
 /**
  * Internal execution boundary for a closed, precompiled SQL write program.
  *
- * This is deliberately an out-of-band root capability. An author registers
- * the exact root backend object after its transport has earned the root
- * execution declaration; derived backends and transaction backends do not
- * inherit the registration. A static batch is therefore never confused with
- * an interactive transaction or forwarded through a wrapper whose behavior
- * has not been audited for the program contract.
+ * This is deliberately an out-of-band exact-resource capability. An author
+ * registers either a root that owns the atomic boundary or an already-open
+ * transaction session. Derived backends and other transaction objects do not
+ * inherit the registration. A static batch is therefore never forwarded
+ * through a wrapper whose behavior has not been audited for the program
+ * contract.
  */
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import type { GraphBackend, TransactionBackend } from "../types";
@@ -62,7 +62,7 @@ type RegisteredAtomicSqlProgram = Readonly<{
   executor: AtomicSqlProgramExecutor;
 }>;
 
-const ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS = new WeakMap<
+const ATOMIC_SQL_PROGRAM_EXECUTORS = new WeakMap<
   object,
   RegisteredAtomicSqlProgram
 >();
@@ -176,11 +176,12 @@ function normalizeAtomicSqlProgramRegistration(
 }
 
 function throwAtomicSqlProgramRegistrationMismatch(
-  declaration: GraphBackend["capabilities"]["execution"]["atomicBatch"],
+  target: GraphBackend | TransactionBackend,
   registration: RegisteredAtomicSqlProgram | undefined,
 ): never {
+  const declaration = target.capabilities.execution.atomicBatch;
   throw new ConfigurationError(
-    'An atomic SQL program requires `capabilities.execution.atomicBatch: "root"` and a usable atomic batch executor.',
+    "An atomic SQL program requires exact-session atomic-batch authority and a usable batch executor.",
     {
       code: "ATOMIC_SQL_PROGRAM_REGISTRATION_MISMATCH",
       declared: declaration,
@@ -188,59 +189,68 @@ function throwAtomicSqlProgramRegistrationMismatch(
     },
     {
       suggestion:
-        'Declare `capabilities.execution.atomicBatch: "root"` only on an exact root backend whose executor submits the complete statement sequence atomically.',
+        'Declare `atomicBatch: "root"` on an exact root executor or `"session"` on an already-open transaction session, then register that exact object.',
     },
   );
 }
 
+function declaredCommandSession(target: object): unknown {
+  const commands = Reflect.get(target, "commands") as unknown;
+  if (typeof commands !== "object" || commands === null) return;
+  return Reflect.get(commands, "session") as unknown;
+}
+
 /**
- * Registers an atomic SQL program executor for one exact GraphBackend root.
+ * Registers an atomic SQL program executor for one exact backend resource.
  *
  * The declaration and executable transport are checked together so a backend
- * cannot claim root atomic execution while omitting the executor, nor expose
+ * cannot claim atomic execution while omitting the executor, nor expose
  * an executor without declaring the session on which it is valid. The
- * registration is keyed by object identity; derived and transaction-scoped
- * backends therefore do not resolve this root-only program.
+ * registration is keyed by object identity; derived backends and other
+ * transaction sessions therefore do not resolve this program.
  */
-export function registerAtomicSqlProgram<T extends GraphBackend>(
-  target: T,
-  registration: AtomicSqlProgramRegistration,
-): T {
-  if (ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.has(target)) {
+export function registerAtomicSqlProgram<
+  T extends GraphBackend | TransactionBackend,
+>(target: T, registration: AtomicSqlProgramRegistration): T {
+  if (ATOMIC_SQL_PROGRAM_EXECUTORS.has(target)) {
     throw new ConfigurationError(
-      "An atomic SQL program is already registered for this exact backend root.",
+      "An atomic SQL program is already registered for this exact backend resource.",
       { code: "ATOMIC_SQL_PROGRAM_ALREADY_REGISTERED" },
     );
   }
   const executor = normalizeAtomicSqlProgramRegistration(registration);
   const declaration = target.capabilities.execution.atomicBatch;
-  if (declaration !== "root" || executor === undefined) {
-    throwAtomicSqlProgramRegistrationMismatch(declaration, executor);
+  const declaredSession = declaredCommandSession(target);
+  const sessionMatches =
+    (declaration === "root" && declaredSession === "root") ||
+    (declaration === "session" && declaredSession === "transaction");
+  if (declaration === "none" || !sessionMatches || executor === undefined) {
+    throwAtomicSqlProgramRegistrationMismatch(target, executor);
   }
-  ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.set(target, executor);
+  ATOMIC_SQL_PROGRAM_EXECUTORS.set(target, executor);
   return target;
 }
 
 /**
- * Resolves the static program executor for an exact registered root.
- * Transaction-scoped and derived/projected backends return `undefined`.
+ * Resolves the static program executor for an exact registered resource.
+ * Other transaction sessions and derived/projected backends return `undefined`.
  */
 export function resolveAtomicSqlProgramExecutor(
   target: GraphBackend | TransactionBackend,
 ): AtomicSqlProgramExecutor | undefined {
-  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target)?.executor;
+  return ATOMIC_SQL_PROGRAM_EXECUTORS.get(target)?.executor;
 }
 
-/** @internal Resolves the exact batch function registered on one root. */
+/** @internal Resolves the exact batch function registered on one resource. */
 export function resolveRegisteredAtomicSqlBatchExecutor(
   target: GraphBackend | TransactionBackend,
 ): AtomicSqlBatchExecutor | undefined {
-  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.get(target)?.executeAtomicBatch;
+  return ATOMIC_SQL_PROGRAM_EXECUTORS.get(target)?.executeAtomicBatch;
 }
 
 /** Returns whether this exact object owns a registered atomic SQL transport. */
 export function hasAtomicSqlProgramRegistration(
   target: GraphBackend | TransactionBackend,
 ): boolean {
-  return ROOT_ATOMIC_SQL_PROGRAM_EXECUTORS.has(target);
+  return ATOMIC_SQL_PROGRAM_EXECUTORS.has(target);
 }

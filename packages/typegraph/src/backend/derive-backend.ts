@@ -23,7 +23,7 @@
  * `Backend` denotes a whole backend object; a members fragment is named
  * `*Members`.
  */
-import { downgradeRootAtomicBatch } from "./capabilities/execution";
+import { downgradeAtomicBatch } from "./capabilities/execution";
 import { carrySchemaFencedInsertEligibility } from "./capabilities/schema-fenced-insert";
 import { carryFirstPartyFactoryMark } from "./capabilities/write-fence";
 import { carryGraphCommandPortSessionMetadata } from "./command-contract";
@@ -37,6 +37,7 @@ import {
   type BackendCapabilities,
   type GraphBackend,
   type GraphCommandPort,
+  type TransactionBackend,
 } from "./types";
 
 const BACKEND_DERIVATION_SOURCES = new WeakMap<object, object>();
@@ -80,7 +81,10 @@ function isGraphCommandPort(value: unknown): value is GraphCommandPort {
   );
 }
 
-function downgradeDerivedAtomicBatch(capabilities: unknown): unknown {
+function resolveDerivedCapabilities(
+  capabilities: unknown,
+  preserveAtomicSession: boolean,
+): unknown {
   if (typeof capabilities !== "object" || capabilities === null) return;
   const capabilityMembers = capabilities as Readonly<
     Record<PropertyKey, unknown>
@@ -89,15 +93,26 @@ function downgradeDerivedAtomicBatch(capabilities: unknown): unknown {
   if (typeof execution !== "object" || execution === null) return;
   const executionMembers = execution as Readonly<Record<PropertyKey, unknown>>;
   if (!("atomicBatch" in executionMembers)) return;
-  return downgradeRootAtomicBatch(capabilityMembers as BackendCapabilities);
+  const typed = capabilityMembers as BackendCapabilities;
+  return preserveAtomicSession && typed.execution.atomicBatch === "session" ?
+      typed
+    : downgradeAtomicBatch(typed);
 }
 
-function deriveExecutionCapabilities(base: object, overrides: object): unknown {
+function deriveExecutionCapabilities(
+  base: object,
+  overrides: object,
+  preserveAtomicSession: boolean,
+): unknown {
+  const overridesCapabilities = Object.hasOwn(overrides, "capabilities");
   const capabilities =
-    Object.hasOwn(overrides, "capabilities") ?
+    overridesCapabilities ?
       (Reflect.get(overrides, "capabilities", overrides) as unknown)
     : (Reflect.get(base, "capabilities", base) as unknown);
-  return downgradeDerivedAtomicBatch(capabilities);
+  return resolveDerivedCapabilities(
+    capabilities,
+    preserveAtomicSession && !overridesCapabilities,
+  );
 }
 
 /**
@@ -141,11 +156,19 @@ function carryDerivedCommandPortMetadata(
  * declare, so the looser bound cannot smuggle a member onto a surface that
  * withholds it.
  */
-export function deriveBackend<
+function deriveBackendInternal<
   T extends object,
   const O extends Partial<T> = Partial<T>,
->(base: T, overrides: ExactBackendOverlay<T, O>): T {
-  const derivedCapabilities = deriveExecutionCapabilities(base, overrides);
+>(
+  base: T,
+  overrides: ExactBackendOverlay<T, O>,
+  preserveAtomicSession: boolean,
+): T {
+  const derivedCapabilities = deriveExecutionCapabilities(
+    base,
+    overrides,
+    preserveAtomicSession,
+  );
   // A Proxy may not report a different value for a non-writable,
   // non-configurable data property on its target. Bundled backends are often
   // frozen at public boundaries, so proxying `base` directly makes a valid
@@ -235,6 +258,29 @@ export function deriveBackend<
   return decoratedBackend;
 }
 
+export function deriveBackend<
+  T extends object,
+  const O extends Partial<T> = Partial<T>,
+>(base: T, overrides: ExactBackendOverlay<T, O>): T {
+  return deriveBackendInternal(base, overrides, false);
+}
+
+/**
+ * Decorates one already-open transaction without discarding its session
+ * declaration. The caller must separately bind exact transport and semantic
+ * registrations to the returned object before exposing it to Store code. A
+ * capabilities override still downgrades the declaration: this seam preserves
+ * evidence from the base session; it never accepts replacement evidence.
+ *
+ * @internal
+ */
+export function deriveTransactionSessionBackend<
+  T extends TransactionBackend,
+  const O extends Partial<T> = Partial<T>,
+>(base: T, overrides: ExactBackendOverlay<T, O>): T {
+  return deriveBackendInternal(base, overrides, true);
+}
+
 /** Public name for the audited, decoration-only backend derivation seam. */
 export function decorateBackend<
   T extends object,
@@ -261,7 +307,7 @@ export function projectBackend<
     const value = Reflect.get(base, key) as unknown;
     const projectedValue =
       key === "capabilities" ?
-        (downgradeDerivedAtomicBatch(value) ?? value)
+        (resolveDerivedCapabilities(value, false) ?? value)
       : value;
     return [[key, projectedValue] as const];
   });

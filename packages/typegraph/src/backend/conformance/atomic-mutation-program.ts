@@ -8,7 +8,7 @@ import {
   resolveAtomicMutationPrograms,
   withAtomicMutationProgramDispatchObserver,
 } from "../capabilities/atomic-mutation-program";
-import type { GraphBackend } from "../types";
+import type { GraphBackend, TransactionBackend } from "../types";
 import {
   assertExactRootRegistrationProvenance,
   type ExactRootRegistrationProvenanceFixture,
@@ -46,8 +46,8 @@ export type AtomicMutationProgramRefusalCase = Readonly<{
   dispatch: AtomicMutationProgramRefusalDispatch;
 }>;
 export type AtomicMutationProgramConformanceCase = Readonly<{
-  /** Exact root used by every callback in this case. */
-  backend: GraphBackend;
+  /** Exact registered resource used by every callback in this case. */
+  backend: GraphBackend | TransactionBackend;
   variant: AtomicMutationProgramVariant;
   orderedSuccess: AtomicMutationProgramSuccessCase;
   staleFenceNoWrite: AtomicMutationProgramRefusalCase &
@@ -55,8 +55,8 @@ export type AtomicMutationProgramConformanceCase = Readonly<{
   semanticRefusalRollback: AtomicMutationProgramRefusalCase;
 }>;
 export type AtomicMutationProgramConformanceFixture = Readonly<{
-  /** Exact root reserved exclusively for this conformance run. */
-  backend: GraphBackend;
+  /** Exact root or open transaction session reserved for this run. */
+  backend: GraphBackend | TransactionBackend;
   equal: (actual: unknown, expected: unknown) => boolean;
   cases: readonly AtomicMutationProgramConformanceCase[];
 }> &
@@ -290,6 +290,7 @@ export async function runAtomicMutationProgramConformance(
         `Atomic mutation program provenance check failed: ${name}.`,
         { check: name },
       ),
+    (target) => resolveAtomicMutationPrograms(target) === profile,
   );
 
   const dispatchCounts = new Map<AtomicMutationProgramVariant, number>();

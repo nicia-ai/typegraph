@@ -177,7 +177,7 @@ export type AtomicEdgeResolvedUpdateEntry = Readonly<{
 
 // @public (undocumented)
 export type AtomicMutationProgramConformanceCase = Readonly<{
-    backend: GraphBackend;
+    backend: GraphBackend | TransactionBackend;
     variant: AtomicMutationProgramVariant;
     orderedSuccess: AtomicMutationProgramSuccessCase;
     staleFenceNoWrite: AtomicMutationProgramRefusalCase & Readonly<{
@@ -193,7 +193,7 @@ export class AtomicMutationProgramConformanceError extends TypeGraphError {
 
 // @public (undocumented)
 export type AtomicMutationProgramConformanceFixture = Readonly<{
-    backend: GraphBackend;
+    backend: GraphBackend | TransactionBackend;
     equal: (actual: unknown, expected: unknown) => boolean;
     cases: readonly AtomicMutationProgramConformanceCase[];
 }> & ExactRootRegistrationProvenanceFixture;
@@ -359,7 +359,7 @@ export class AtomicTransportConformanceError extends TypeGraphError {
 
 // @public (undocumented)
 export type AtomicTransportConformanceFixture<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined> = Readonly<{
-    backend: GraphBackend;
+    backend: GraphBackend | TransactionBackend;
     executeAtomicBatch: AtomicSqlBatchExecutor;
     equal: AtomicTransportEquality;
     orderedResults: Readonly<{
@@ -401,7 +401,7 @@ export type AtomicTransportRollbackCase<TSnapshot> = Readonly<{
 export type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
-        atomicBatch: "none" | "root";
+        atomicBatch: "none" | "root" | "session";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
@@ -1928,7 +1928,10 @@ export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O & Re
 
 // @public
 export type ExactRootRegistrationProvenanceFixture = Readonly<{
-    derivedBackends: readonly [GraphBackend, ...GraphBackend[]];
+    derivedBackends: readonly [
+    GraphBackend | TransactionBackend,
+    ...(GraphBackend | TransactionBackend)[]
+    ];
 }>;
 
 // @public
@@ -3222,10 +3225,10 @@ export type RecursiveTraversalVerdict = Readonly<{
 })>;
 
 // @public
-export function registerAtomicMutationPrograms<T extends GraphBackend>(target: T, registration: AtomicMutationProgramRegistration): T;
+export function registerAtomicMutationPrograms<T extends GraphBackend | TransactionBackend>(target: T, registration: AtomicMutationProgramRegistration): T;
 
 // @public
-export function registerAtomicSqlProgram<T extends GraphBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
+export function registerAtomicSqlProgram<T extends GraphBackend | TransactionBackend>(target: T, registration: AtomicSqlProgramRegistration): T;
 
 // @public
 export type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;

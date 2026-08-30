@@ -17,7 +17,7 @@ import {
   hasAtomicSqlProgramRegistration,
   resolveRegisteredAtomicSqlBatchExecutor,
 } from "../capabilities/atomic-sql-program";
-import type { GraphBackend } from "../types";
+import type { GraphBackend, TransactionBackend } from "../types";
 import {
   assertExactRootRegistrationProvenance,
   type ExactRootRegistrationProvenanceFixture,
@@ -42,8 +42,8 @@ export type AtomicTransportConformanceFixture<
   TSnapshot = unknown,
   TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined,
 > = Readonly<{
-  /** Exact root that registered the batch function under test. */
-  backend: GraphBackend;
+  /** Exact root or open transaction session registered under test. */
+  backend: GraphBackend | TransactionBackend;
   executeAtomicBatch: AtomicSqlBatchExecutor;
   equal: AtomicTransportEquality;
   /** A multi-statement program whose result slots identify their positions. */
@@ -145,6 +145,9 @@ export async function runAtomicTransportConformance<
         `Atomic transport provenance check failed: ${name}.`,
         { check: `provenance: ${name}` },
       ),
+    (target) =>
+      resolveRegisteredAtomicSqlBatchExecutor(target) ===
+      fixture.executeAtomicBatch,
   );
 
   const orderedRows = await invoke(

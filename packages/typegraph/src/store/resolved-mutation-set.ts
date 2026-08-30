@@ -10,6 +10,29 @@ type ResolvedMutationSetExecutor =
   AtomicNodeResolvedMutationSetExecutor | AtomicEdgeMutationProgramExecutor;
 
 /**
+ * An operation-level atomic attempt. `unsupported` is emitted only before the
+ * operation executor is invoked, so it is affirmative evidence that the
+ * attempt executed no SQL and the caller may enter the complete portable path.
+ */
+export type ResolvedMutationSetAttempt<T> =
+  | Readonly<{ outcome: "applied"; value: T }>
+  | Readonly<{ outcome: "unsupported" }>;
+
+/** Constructs the only successful operation-level attempt verdict. */
+export function appliedResolvedMutationSet<T>(
+  value: T,
+): ResolvedMutationSetAttempt<T> {
+  return { outcome: "applied", value };
+}
+
+/** Constructs the no-SQL fallback verdict. */
+export function unsupportedResolvedMutationSet<
+  T,
+>(): ResolvedMutationSetAttempt<T> {
+  return { outcome: "unsupported" };
+}
+
+/**
  * Internal retry signal for a resolved mutation set whose authoritative
  * preconditions moved before its atomic program ran. The collection owns the
  * create/update partition, so only it can honestly re-read and rebuild the

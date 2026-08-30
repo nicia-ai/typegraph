@@ -46,7 +46,7 @@ import {
   resolveWriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
-import { deriveBackend } from "../derive-backend";
+import { deriveTransactionSessionBackend } from "../derive-backend";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import type { StrategyTableContribution } from "../table-contribution";
 import {
@@ -562,7 +562,7 @@ export function gateFulltext(
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
 ): TransactionBackend {
-  return deriveBackend<TransactionBackend>(
+  return deriveTransactionSessionBackend<TransactionBackend>(
     tx,
     gateFulltextMethods(tx, assert, refuseUnavailable),
   );

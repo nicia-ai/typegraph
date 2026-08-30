@@ -4,6 +4,7 @@ export {
   createPostgresExecutionAdapter,
   type PostgresExecutionAdapter,
 } from "./postgres-execution";
+export { createSessionAtomicBatchAdapter } from "./session-atomic-batch";
 export {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,

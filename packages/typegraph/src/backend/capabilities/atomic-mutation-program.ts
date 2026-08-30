@@ -1,10 +1,10 @@
 /**
- * Exact-root execution profile for closed semantic mutation programs.
+ * Exact-resource execution profile for closed semantic mutation programs.
  *
- * The transport-level atomic SQL executor answers only "can this exact root
+ * The transport-level atomic SQL executor answers only "can this exact resource
  * submit a closed statement sequence atomically?" This profile is the next
  * layer up: it names the TypeGraph mutations the backend can lower onto that
- * transport. Keeping every mutation family in one exact-root registration
+ * transport. Keeping every mutation family in one exact-resource registration
  * prevents each new operation from inventing another provenance WeakMap.
  */
 import { ConfigurationError } from "../../errors";
@@ -20,8 +20,12 @@ import type {
   SchemaWriteFenceParams,
   TransactionBackend,
 } from "../types";
-import { supportsRootAtomicBatch } from "../types";
-import { hasAtomicSqlProgramRegistration } from "./atomic-sql-program";
+import { supportsAtomicBatch } from "../types";
+import {
+  hasAtomicSqlProgramRegistration,
+  registerAtomicSqlProgram,
+  resolveRegisteredAtomicSqlBatchExecutor,
+} from "./atomic-sql-program";
 
 /** How a node batch member obtained the identifier stored by its program. */
 export type AtomicNodeBatchIdSource = "generated" | "caller";
@@ -300,19 +304,22 @@ export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND = {
  * Owns which semantic variants a normalized profile can reach independently.
  *
  * A zero limit is an honest opt-out. Singleton updates reach the update-only
- * families directly on every exact root. Mixed resolved sets still move their
- * collection-level read/partition/write unit into an interactive transaction,
- * where exact-root registration deliberately does not follow. Conformance
- * consumes this owner instead of independently re-spelling either decision.
+ * families directly on every exact root. Mixed resolved sets move their
+ * collection-level read/partition/write unit into an interactive transaction;
+ * an interactive root therefore cannot reach them, while an exact registered
+ * `atomicBatch: "session"` target can. Conformance consumes this owner instead
+ * of inferring session reachability from transaction availability.
  */
 export function reachableAtomicMutationProgramVariants(
   profile: AtomicMutationProgramExecutor,
   execution: Pick<
     GraphBackend["capabilities"]["execution"],
-    "interactiveTransactions"
+    "atomicBatch" | "interactiveTransactions"
   >,
 ): readonly AtomicMutationProgramVariant[] {
   const variants: AtomicMutationProgramVariant[] = [];
+  const resolvedMutationSetsReachable =
+    !execution.interactiveTransactions || execution.atomicBatch === "session";
   if (profile.createNodes !== undefined) variants.push("createNodes");
   if (profile.createEdges !== undefined) variants.push("createEdges");
   if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
@@ -324,13 +331,13 @@ export function reachableAtomicMutationProgramVariants(
     variants.push("updateEdges");
   }
   if (
-    !execution.interactiveTransactions &&
+    resolvedMutationSetsReachable &&
     (profile.mutateNodes?.maxEntries ?? 0) > 0
   ) {
     variants.push("mutateNodes");
   }
   if (
-    !execution.interactiveTransactions &&
+    resolvedMutationSetsReachable &&
     (profile.mutateEdges?.maxEntries.resolvedSet ?? 0) > 0
   ) {
     variants.push("mutateEdges.resolvedSet");
@@ -359,7 +366,7 @@ export type AtomicMutationProgramRegistration = Readonly<{
   mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
 }>;
 
-const ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
+const ATOMIC_MUTATION_PROGRAM_EXECUTORS = new WeakMap<
   object,
   AtomicMutationProgramExecutor
 >();
@@ -368,7 +375,7 @@ type AtomicMutationProgramDispatchObserver = (
   variant: AtomicMutationProgramVariant,
 ) => void;
 
-const ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS = new WeakMap<
+const ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS = new WeakMap<
   object,
   AtomicMutationProgramDispatchObserver
 >();
@@ -381,7 +388,7 @@ function reportAtomicMutationProgramDispatch(
   target: object,
   variant: AtomicMutationProgramVariant,
 ): void {
-  ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.get(target)?.(variant);
+  ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.get(target)?.(variant);
 }
 
 function instrumentAtomicMutationProgramExecutors(
@@ -447,23 +454,23 @@ function instrumentAtomicMutationProgramExecutors(
   );
 }
 
-/** @internal Runs work while observing dispatches from this exact root. */
+/** @internal Runs work while observing dispatches from this exact resource. */
 export async function withAtomicMutationProgramDispatchObserver<TResult>(
   target: object,
   observer: AtomicMutationProgramDispatchObserver,
   run: () => TResult | PromiseLike<TResult>,
 ): Promise<TResult> {
-  if (ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.has(target)) {
+  if (ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.has(target)) {
     throw new ConfigurationError(
-      "Atomic mutation program dispatch observation is already active for this exact root.",
+      "Atomic mutation program dispatch observation is already active for this exact resource.",
       { code: "ATOMIC_MUTATION_PROGRAM_OBSERVER_ALREADY_ACTIVE" },
     );
   }
-  ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.set(target, observer);
+  ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.set(target, observer);
   try {
     return await run();
   } finally {
-    ROOT_ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.delete(target);
+    ATOMIC_MUTATION_PROGRAM_DISPATCH_OBSERVERS.delete(target);
   }
 }
 
@@ -600,10 +607,10 @@ function normalizeAtomicMutationProgramRegistration(
 }
 
 function throwAtomicMutationProgramRegistrationMismatch(
-  target: GraphBackend,
+  target: GraphBackend | TransactionBackend,
 ): never {
   throw new ConfigurationError(
-    "Atomic mutation programs require an exact root backend with a registered atomic SQL transport.",
+    "Atomic mutation programs require an exact backend session with a registered atomic SQL transport.",
     {
       code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
       atomicBatch: target.capabilities.execution.atomicBatch,
@@ -611,37 +618,36 @@ function throwAtomicMutationProgramRegistrationMismatch(
     },
     {
       suggestion:
-        "Register and validate the root atomic SQL transport before registering only the TypeGraph mutation families this backend implements.",
+        "Register and validate the exact-session atomic SQL transport before registering only the TypeGraph mutation families this backend implements.",
     },
   );
 }
 
 /**
- * Registers TypeGraph semantic mutation programs for one exact backend root.
+ * Registers TypeGraph semantic mutation programs for one exact backend resource.
  *
  * Transport registration proves atomic statement dispatch only. This second,
  * explicit profile declares which graph mutation families preserve their
  * complete schema-fence, validation, side-effect, refusal, and result-ordering
  * contracts. Object-identity registration prevents derived, projected, and
- * transaction-scoped backends from inheriting root execution evidence.
+ * other transaction sessions from inheriting execution evidence.
  */
-export function registerAtomicMutationPrograms<T extends GraphBackend>(
-  target: T,
-  registration: AtomicMutationProgramRegistration,
-): T {
+export function registerAtomicMutationPrograms<
+  T extends GraphBackend | TransactionBackend,
+>(target: T, registration: AtomicMutationProgramRegistration): T {
   if (
-    !supportsRootAtomicBatch(target) ||
+    !supportsAtomicBatch(target) ||
     !hasAtomicSqlProgramRegistration(target)
   ) {
     throwAtomicMutationProgramRegistrationMismatch(target);
   }
-  if (ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.has(target)) {
+  if (ATOMIC_MUTATION_PROGRAM_EXECUTORS.has(target)) {
     throw new ConfigurationError(
-      "Atomic mutation programs are already registered for this exact backend root.",
+      "Atomic mutation programs are already registered for this exact backend resource.",
       { code: "ATOMIC_MUTATION_PROGRAM_ALREADY_REGISTERED" },
     );
   }
-  ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
+  ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
     target,
     instrumentAtomicMutationProgramExecutors(
       target,
@@ -651,18 +657,44 @@ export function registerAtomicMutationPrograms<T extends GraphBackend>(
   return target;
 }
 
-/** Returns whether this exact root owns a semantic program profile. */
+/** Returns whether this exact resource owns a semantic program profile. */
 export function hasAtomicMutationProgramRegistration(
   target: GraphBackend | TransactionBackend,
 ): boolean {
-  return ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.has(target);
+  return ATOMIC_MUTATION_PROGRAM_EXECUTORS.has(target);
 }
 
-/** Resolves semantic mutation programs only for their exact registered root. */
+/** Resolves semantic mutation programs only for their exact registered resource. */
 export function resolveAtomicMutationPrograms(
   target: GraphBackend | TransactionBackend,
 ): AtomicMutationProgramExecutor | undefined {
-  return ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+  return ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+}
+
+/**
+ * Re-registers exact-session evidence on a transparent transaction wrapper.
+ *
+ * Session authority is never inherited implicitly: the wrapper seam calls
+ * this only after deriving a backend that forwards to the same pinned command
+ * session. Root registrations remain non-transferable.
+ *
+ * @internal
+ */
+export function carryAtomicMutationSessionRegistration<
+  T extends TransactionBackend,
+>(base: TransactionBackend, derived: T): T {
+  if (
+    base.capabilities.execution.atomicBatch !== "session" ||
+    derived.capabilities.execution.atomicBatch !== "session"
+  ) {
+    return derived;
+  }
+  const executeAtomicBatch = resolveRegisteredAtomicSqlBatchExecutor(base);
+  const profile = resolveAtomicMutationPrograms(base);
+  if (executeAtomicBatch === undefined || profile === undefined) return derived;
+  registerAtomicSqlProgram(derived, executeAtomicBatch);
+  registerAtomicMutationPrograms(derived, profile);
+  return derived;
 }
 
 /**
@@ -684,7 +716,7 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
     mutateEdges?: AtomicEdgeMutationProgramExecutor | undefined;
   }>,
 ): T {
-  ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
+  ATOMIC_MUTATION_PROGRAM_EXECUTORS.set(
     target,
     instrumentAtomicMutationProgramExecutors(target, executor),
   );
@@ -703,7 +735,7 @@ export function markBundledRootAtomicNodeBatch<T extends object>(
   target: T,
   executor: AtomicNodeBatchExecutor,
 ): T {
-  const existing = ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+  const existing = ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
   return markBundledRootAtomicMutationPrograms(target, {
     ...existing,
     createNodes: executor,
@@ -715,7 +747,7 @@ export function markBundledRootAtomicEdgeBatch<T extends object>(
   target: T,
   executor: AtomicEdgeBatchExecutor,
 ): T {
-  const existing = ROOT_ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
+  const existing = ATOMIC_MUTATION_PROGRAM_EXECUTORS.get(target);
   return markBundledRootAtomicMutationPrograms(target, {
     ...existing,
     createEdges: executor,

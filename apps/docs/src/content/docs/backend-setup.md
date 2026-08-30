@@ -1197,7 +1197,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 
 | Field                                                                      | Meaning                                                                                             |
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `execution`                                                                | Execution boundaries: `interactiveTransactions` and exact-root `atomicBatch` support                |
+| `execution`                                                                | Execution boundaries: `interactiveTransactions` and exact-resource `atomicBatch` support            |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
 | `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
@@ -1211,10 +1211,13 @@ can inspect the same object as `backend.capabilities`. The shape is:
 The former top-level `capabilities.transactions` override is not interpreted
 as an alias. Bundled factories refuse it with `LEGACY_CAPABILITY_OVERRIDE`,
 including for JavaScript and already-compiled callers, because transaction
-availability and root atomic batching are now independent facts. Move the
-value to `capabilities.execution.interactiveTransactions`; root
-`atomicBatch` support is discovered from the bundled transport and cannot be
-claimed through factory overrides.
+availability and atomic batching are now independent facts. Move the value to
+`capabilities.execution.interactiveTransactions`; root `atomicBatch` support
+is discovered from the bundled transport and cannot be claimed through factory
+overrides. Bundled PostgreSQL transaction factories may expose
+`atomicBatch: "session"` on the exact already-open transaction object. That
+declaration is paired with fresh transport and semantic registrations and is
+never inherited by an ordinary derived backend.
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
@@ -1451,9 +1454,11 @@ await runAtomicMutationProgramConformance({
 });
 ```
 
-Transport registration is exact-root evidence only: a derived or
-transaction-scoped backend does not inherit it, and a second registration on
-the same root is refused rather than replacing the function production uses.
+Transport registration is exact-resource evidence only: a derived backend does
+not inherit it, and a second registration on the same object is refused rather
+than replacing the function production uses. A bundled PostgreSQL transaction
+session earns a separate registration bound to its pinned client; it does not
+inherit the root's registration.
 Create wrappers with the exported `decorateBackend()` seam so the runner can
 verify their lineage back to the registered root instead of accepting an
 unrelated object as derivation evidence. The conformance fixture's mandatory
@@ -1467,15 +1472,16 @@ program.
 
 The separate `registerAtomicMutationPrograms()` call is the semantic boundary:
 each member declares one complete TypeGraph mutation family implemented by that
-exact root. Omitted families retain the portable path, and an empty profile or
+exact backend resource. Omitted families retain the portable path, and an empty profile or
 a profile registered before its atomic transport is refused with
 `ConfigurationError`.
 
 The semantic executors must preserve the same schema fence, validation,
 side-effect, refusal classification, rollback, postimage correlation, result
 ordering, and bind-ceiling contracts as the bundled implementation. Registering
-one family is not evidence for another. Derived, projected, and
-transaction-scoped backends inherit neither root registration.
+one family is not evidence for another. Derived and projected backends inherit
+neither registration. An exact transaction session must be registered
+independently before Store code can dispatch through it.
 
 `runAtomicMutationProgramConformance()` is the executable semantic boundary.
 For every reachable positive-limit variant in `mutationPrograms`, the fixture supplies
@@ -1537,9 +1543,18 @@ update-only and mixed mutation executors are independently reachable Store
 families even when their entry ceilings are equal, so each requires its own
 conformance evidence. On an interactive root, the collection-level
 read/partition/write unit moves into a transaction and exact-root registration
-does not follow; the conformance inventory therefore excludes those four root
-variants while continuing to require direct create, delete, and durable
-convergence evidence.
+does not follow; the root conformance inventory therefore excludes the mixed
+variants while continuing to require direct create, delete, update, and durable
+convergence evidence. Bundled PostgreSQL binds the same reviewed lowering to the
+exact transaction session and exercises the mixed node and edge variants against
+a real engine, including typed refusal rollback.
+An exact `atomicBatch: "session"` conformance fixture includes those mixed
+variants even though `interactiveTransactions` is true; nested-transaction
+isolation is reported as inapplicable because the fixture resource is already
+the open transaction. The transport runner accepts the same exact-session
+resource and certifies its ordered slots, parameter preservation, rollback,
+and empty-program behavior. Generic derived session objects still lose both
+the declaration and the identity-bound registrations.
 Backend authors implementing edge
 refusal paths use the exported
 `AtomicEdgeBatchEndpointRefusalError`,
@@ -1696,8 +1711,8 @@ TypeGraph choosing separate query semantics per backend:
 | Managed node projection fusion                        | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite                        | SQLite writes the node and fulltext/vector sidecars through the portable transaction path. PostgreSQL can compile them into one managed statement when every active strategy supplies an inserted-node builder |
 | Managed node claim fusion (`capabilities.atomicNodeInsertClaims`) | ✗ portable transactional fallback             | ✓ PostgreSQL/PGlite                        | SQLite keeps claim acquisition and insertion in the portable transaction. PostgreSQL transaction receivers fuse supported claim plans; a root non-transactional receiver is limited to exactly one generated-id, same-kind uniqueness claim with no other side effects |
 | Managed edge cardinality fusion                       | ✗ portable transactional fallback                    | ✓ PostgreSQL/PGlite transaction receivers | SQLite keeps its guarded claim and edge insert in the portable transaction. PostgreSQL can combine endpoint liveness, one cardinality claim, and the insert in one statement after any required graph lock |
-| Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on bundled recognized PostgreSQL drivers, including neon-http | `root` is an exact-backend declaration paired with a registered executor. Neon HTTP uses its native transaction batch; session-capable `pg`, postgres-js, neon-serverless, and PGlite drivers execute the program on one pinned Drizzle transaction. Unrecognized drivers remain `none`. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
-| Eligible exact-root managed writes                    | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative create statement. Eligible sidecar-free node updates, unconstrained non-durable-identity edge updates, direct edge deletes, and plain restricted node deletes use one authoritative read/gate plus one registered atomic mutation. Plain, projection-free generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches and direct edge batches without history/revision capture use one schema-fenced native atomic program; edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same exact-root mutation profile. A custom backend may opt in per family only after registering its exact-root atomic transport and semantic executor. Derived wrappers, adopted caller transactions, unregistered or otherwise ineligible families, constrained/projected/identity-enabled node deletes, cascade/disconnect deletes, and other managed writes retain the existing path |
+| Atomic SQL transport (`capabilities.execution.atomicBatch`) | ✓ on certified D1/libSQL roots; otherwise `none` | ✓ on bundled recognized PostgreSQL drivers, including neon-http | `root` means the exact backend owns the atomic boundary; `session` means the exact object is already bound to an open transaction and the outer transaction owns commit/rollback. Both require identity-keyed executor registration. Neon HTTP uses its native transaction batch; session-capable `pg`, postgres-js, neon-serverless, and PGlite drivers can execute programs on one pinned Drizzle transaction. Unrecognized drivers remain `none`. A custom backend must pass the framework-agnostic conformance runner before opting in; omitted support keeps the portable path |
+| Eligible registered managed writes                    | ✓ bundled SQLite roots, including D1 and libSQL     | ✓ bundled PostgreSQL roots, including neon-http | Eligible singleton generated-ID nodes and `cardinality: "many"` edges use one authoritative create statement. Eligible sidecar-free node updates, unconstrained non-durable-identity edge updates, direct edge deletes, and plain restricted node deletes use one authoritative read/gate plus one registered atomic mutation. Plain, projection-free generated-, caller-, or mixed-ID node `bulkInsert`/`bulkCreate` batches and direct edge batches without history/revision capture use one schema-fenced native atomic program; edge programs also maintain durable match identity and cardinality claims. Direct edge `bulkDelete` and plain restricted node `bulkDelete` use the same mutation profile. Eligible mixed `bulkUpsertById` sets use the profile on serverless roots and on exact bundled PostgreSQL transaction sessions; a generic derived backend still loses the evidence. A custom backend may opt in per family only after registering its exact transport and semantic executor. Unregistered or otherwise ineligible families, constrained/projected/identity-enabled node deletes, cascade/disconnect deletes, and other managed writes retain the existing path |
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
