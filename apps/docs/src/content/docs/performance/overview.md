@@ -402,7 +402,7 @@ await trustedImportGraphStream(store, interchangeChunks);
 ### Batch sizing for large multi-call imports
 
 For a dataset too large for a single `bulkInsert`/`bulkCreate` call (e.g., streaming rows from a
-file in a loop), the _size_ of each call matters, not just the total row count. Each call is its
+file in a loop), the *size* of each call matters, not just the total row count. Each call is its
 own transaction, and — per the default
 [`autoRefreshStatistics`](/backend-setup#refreshing-planner-statistics-after-bulk-loads) — can
 trigger a planner-statistics refresh on its own. In a large-scale bulk-load benchmark, batches of
@@ -451,7 +451,7 @@ into one transaction — the statement count is unchanged either way. If the rou
 hurt, replace the calls with a traversal (one statement) or `store.subgraph()` (a fixed 2 on
 SQLite, 3 on PostgreSQL, however large the result).
 
-To read the edges of a _set_ of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
+To read the edges of a *set* of endpoints, prefer `bulkFindFrom` / `bulkFindTo` (see
 [Edge Collections](/schemas-stores#edge-collections)).
 Where `store.batch()` runs N singleton reads over one connection, these widen the endpoint predicate
 itself to `from_id IN (...)` — one set-oriented statement per endpoint kind and bind-budget chunk,
@@ -830,8 +830,8 @@ Deep-recursive benchmark probes explicitly set `cyclePolicy: "allow"` to isolate
 expansion cost; the default `cyclePolicy: "prevent"` prioritizes cycle-safe semantics and is
 expected to be slower on long traversals.
 
-_Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
-and schema/data shape._
+*Note: Real-world performance varies by hardware, database driver, network latency (for PostgreSQL),
+and schema/data shape.*
 
 <details>
 <summary>Benchmark configuration and guardrails</summary>
