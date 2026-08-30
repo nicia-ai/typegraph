@@ -154,6 +154,8 @@ export type {
   AtomicNodeBatchIdSource,
   AtomicNodeBatchInput,
   AtomicNodeBatchResultMode,
+  AtomicNodeClaimFamily,
+  AtomicNodeClaimSupport,
   AtomicNodeDeleteBatchExecutor,
   AtomicNodeDeleteBatchInput,
   AtomicNodeResolvedMutationSetExecutor,

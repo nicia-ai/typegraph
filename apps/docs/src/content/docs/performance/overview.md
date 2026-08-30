@@ -182,17 +182,21 @@ atomic convergence contract across multiple submissions.
 
 Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL also expose native write programs for eligible
-ingestion calls. Plain schema-managed `nodes.bulkInsert(items)` and
-`nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
-no claims, Operational Identity, history, revision, or projections. Neon HTTP,
-D1, and libSQL submit that program as one transport batch. Session-capable
+ingestion calls. Schema-managed `nodes.bulkInsert(items)` and
+`nodes.bulkCreate(items)` run one schema-fenced atomic program when each claimed
+member owes at most one advertised same-kind uniqueness or disjointness claim
+and the node has no Operational Identity, history, revision, or projections.
+Neon HTTP, D1, and libSQL submit that program as one transport batch. Session-capable
 PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
 statement per bind-budget chunk. The batch may use generated IDs,
 caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
-input order.
-Claimed, projected, identity-enabled, history/revision-tracked, constrained,
-and other unsupported node shapes retain their existing transaction or
-fallback path.
+input order. Cloudflare D1's 100-parameter budget admits 14 pure same-kind
+uniqueness claims, seven pure disjointness claims, or seven claimed members in
+a mixed-family batch. Multiple claims per member, wider uniqueness scopes,
+projected, identity-enabled, history/revision-tracked, and other unsupported
+node shapes retain their existing transaction or fallback path. These ceilings
+are distinct from the seven unique durable edge identities admitted by the
+convergence program above.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
 schema-fenced atomic program when the store has no history or revision capture.
@@ -205,23 +209,23 @@ results to input order.
 Eligible `bulkDelete()` calls use the same mutation-program boundary. Direct
 edge batches on bundled roots submit one schema-fenced atomic program; the
 statement refuses an ID owned by another edge collection and rolls back every
-chunk. Plain node batches also submit one exchange when the node has no unique
-or disjointness claims, Operational Identity, search projections, history, or
-revision capture and its delete behavior is `restrict` (or omitted). The node
+chunk. Restricted node batches also submit one exchange and release uniqueness
+and disjointness claims owned by the tombstoned rows in that program. The node
 statement rechecks connected live edges at the write boundary, so a restricted
 delete cannot race an earlier application-side probe. Cascade, disconnect,
-sidecar, captured, derived-backend, unregistered custom-backend, and
+projection, identity, captured, derived-backend, unregistered custom-backend, and
 caller-transaction shapes keep the interactive path.
 
 The same exact-root programs serve eligible singleton `update()` and
 `delete()` calls without changing their per-operation hook contract. On an
 interactive PostgreSQL root, the guarded mutation owns a short transaction;
 on the single-submission transports it remains one batch. A node
-update with no unique/disjoint/identity/projection sidecars, or a
+update with no unique/identity/projection sidecars (disjointness has no
+update-side transition), or a
 `cardinality: "many"` edge update with no durable match identity, performs one
 authoritative preimage read, validates and merges properties in TypeGraph, then
 submits one guarded atomic update. Every direct edge delete, and a restricted
-node delete owing none of those sidecars, performs its existing live-row gate
+node delete with supported claim cleanup, performs its existing live-row gate
 and then submits one guarded atomic delete. Missing or tombstoned deletes remain
 hook-free read-only no-ops. Temporal mutations, node cascade/disconnect,
 history/revision capture, ordinary derived backends, and unregistered custom

@@ -18,6 +18,7 @@ import {
   registerAtomicMutationPrograms,
   resolveAtomicMutationPrograms,
   resolveBundledRootAtomicMutationPrograms,
+  supportsAtomicNodeClaims,
 } from "../src/backend/capabilities/atomic-mutation-program";
 import {
   type AtomicSqlBatchExecutor,
@@ -32,7 +33,7 @@ import {
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
-import type { GraphBackend } from "../src/backend/types";
+import type { GraphBackend, NodeInsertClaim } from "../src/backend/types";
 import { defineGraph, defineNode } from "../src/core";
 import { ConfigurationError } from "../src/errors";
 import {
@@ -46,6 +47,13 @@ type RefusalConstraints = Pick<
   CommonOperationStrategy,
   "atomicEdgeRefusalConstraints" | "atomicNodeRefusalConstraints"
 >;
+
+function repeatClaim(
+  claim: NodeInsertClaim,
+  count: number,
+): readonly NodeInsertClaim[] {
+  return Array.from({ length: count }, () => claim);
+}
 
 const CustomNode = defineNode("CustomNode", {
   schema: z.object({ name: z.string() }),
@@ -337,9 +345,9 @@ describe("atomic mutation program execution profile", () => {
     registerAtomicSqlProgram(backend, emptyAtomicBatch);
     const createNodes: AtomicNodeBatchExecutor =
       executeCustomNodeBatch.bind(undefined);
-    Object.defineProperty(createNodes, "maxClaimedEntries", {
+    Object.defineProperty(createNodes, "claimSupport", {
       configurable: true,
-      value: -1,
+      value: { maxEntriesByFamily: { uniqueness: -1 } },
     });
 
     const error = captureThrown(() =>
@@ -350,10 +358,100 @@ describe("atomic mutation program execution profile", () => {
       details: {
         code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
         family: "createNodes",
-        limit: "maxClaimedEntries",
+        limit: "claimSupport.maxEntriesByFamily.uniqueness",
       },
     });
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
+  });
+
+  it("refuses malformed claim-family declarations", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    const createNodes: AtomicNodeBatchExecutor =
+      executeCustomNodeBatch.bind(undefined);
+    Object.defineProperty(createNodes, "claimSupport", {
+      configurable: true,
+      value: { maxEntriesByFamily: { unknown: 1 } },
+    });
+
+    const error = captureThrown(() =>
+      registerAtomicMutationPrograms(backend, { createNodes }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect(error).toMatchObject({
+      details: {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family: "createNodes",
+        limit: "claimSupport.maxEntriesByFamily",
+      },
+    });
+    expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
+  });
+
+  it("accepts an empty claim-support envelope as an honest opt-out", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    const createNodes: AtomicNodeBatchExecutor =
+      executeCustomNodeBatch.bind(undefined);
+    Object.defineProperty(createNodes, "claimSupport", {
+      configurable: true,
+      value: { maxEntriesByFamily: {} },
+    });
+
+    expect(() =>
+      registerAtomicMutationPrograms(backend, { createNodes }),
+    ).not.toThrow();
+    expect(hasAtomicMutationProgramRegistration(backend)).toBe(true);
+  });
+
+  it("applies pure and mixed claim-family ceilings independently", () => {
+    const uniquenessClaim = {
+      axis: "Person",
+      constraintName: "person-name",
+      key: "name",
+      placement: "pre-insert",
+      verdict: {
+        kind: "uniqueness",
+        fields: ["name"],
+        probeAxes: ["Person"],
+      },
+    } as const satisfies NodeInsertClaim;
+    const disjointnessClaim = {
+      axis: "Person|Rival",
+      constraintName: "disjoint",
+      key: "id",
+      placement: "pre-insert",
+      verdict: { kind: "disjointness", conflictingKinds: ["Rival"] },
+    } as const satisfies NodeInsertClaim;
+    const support = {
+      maxEntriesByFamily: { uniqueness: 14, disjointness: 7 },
+      maxMixedEntries: 7,
+    } as const;
+
+    expect(
+      supportsAtomicNodeClaims(support, repeatClaim(uniquenessClaim, 14)),
+    ).toBe(true);
+    expect(
+      supportsAtomicNodeClaims(support, repeatClaim(uniquenessClaim, 15)),
+    ).toBe(false);
+    expect(
+      supportsAtomicNodeClaims(support, repeatClaim(disjointnessClaim, 7)),
+    ).toBe(true);
+    expect(
+      supportsAtomicNodeClaims(support, repeatClaim(disjointnessClaim, 8)),
+    ).toBe(false);
+    expect(
+      supportsAtomicNodeClaims(support, [
+        ...repeatClaim(uniquenessClaim, 6),
+        disjointnessClaim,
+      ]),
+    ).toBe(true);
+    expect(
+      supportsAtomicNodeClaims(support, [
+        ...repeatClaim(uniquenessClaim, 7),
+        disjointnessClaim,
+      ]),
+    ).toBe(false);
   });
 
   it("refuses infinite family limits before publishing the profile", () => {

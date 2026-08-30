@@ -34,6 +34,14 @@ export type AtomicNodeClaimOwnerRow = Readonly<{
   concrete_kind: string;
 }>;
 
+/** Legacy live-node evidence returned for one disjoint proposal. */
+export type AtomicNodeDisjointConflictRow = Readonly<{
+  ordinal: number;
+  attempted_kind: string;
+  node_id: string;
+  conflicting_kind: string;
+}>;
+
 const CLAIM_INPUT_ALIAS = "atomic_node_claim_input";
 const SCHEMA_FENCE_ALIAS = "atomic_node_claim_schema_fence";
 
@@ -44,6 +52,14 @@ const CLAIM_INPUT_COLUMNS = [
   "key",
   "node_id",
   "concrete_kind",
+] as const;
+const DISJOINT_INPUT_COLUMNS = [
+  "ordinal",
+  "graph_id",
+  "key",
+  "node_id",
+  "attempted_kind",
+  "conflicting_kind",
 ] as const;
 
 function drizzleSqlTag(
@@ -111,17 +127,23 @@ function assertClaimEntries(
   for (const item of entries) {
     const { entry } = item;
     const claim = entry.claim;
+    const uniquenessSupported =
+      entry.idSource === "generated" &&
+      claim?.verdict.kind === "uniqueness" &&
+      claim.axis === entry.params.kind &&
+      claim.verdict.probeAxes.length === 1 &&
+      claim.verdict.probeAxes[0] === claim.axis;
+    const disjointnessSupported =
+      claim?.verdict.kind === "disjointness" &&
+      claim.key === entry.params.id &&
+      claim.verdict.conflictingKinds.length === 1;
     if (
-      entry.idSource !== "generated" ||
-      claim?.verdict.kind !== "uniqueness" ||
-      claim.axis !== entry.params.kind ||
-      claim.placement !== "pre-insert" ||
-      claim.verdict.probeAxes.length !== 1 ||
-      claim.verdict.probeAxes[0] !== claim.axis ||
+      claim?.placement !== "pre-insert" ||
+      (!uniquenessSupported && !disjointnessSupported) ||
       entry.params.graphId !== schemaFence.graphId
     ) {
       throw new CompilerInvariantError(
-        "Atomic node claims require generated ids and exactly one own-kind uniqueness claim.",
+        "Atomic node claims require one supported pre-insert claim.",
         { ordinal: item.ordinal },
       );
     }
@@ -135,6 +157,96 @@ function assertClaimEntries(
       );
     }
   }
+}
+
+function disjointInputValues(
+  entries: readonly AtomicNodeClaimEntry[],
+): readonly SQL[] {
+  return entries.flatMap((item) => {
+    const claim = claimOf(item);
+    if (claim.verdict.kind !== "disjointness") return [];
+    return claim.verdict.conflictingKinds.map(
+      (conflictingKind) => sql`
+        (
+          ${item.ordinal},
+          ${item.entry.params.graphId},
+          ${claim.key},
+          ${item.entry.params.id},
+          ${item.entry.params.kind},
+          ${conflictingKind}
+        )
+      `,
+    );
+  });
+}
+
+function disjointInputCte(
+  entries: readonly AtomicNodeClaimEntry[],
+  alias: string,
+): SQL | undefined {
+  const values = disjointInputValues(entries);
+  if (values.length === 0) return;
+  const columns = sql.join(
+    DISJOINT_INPUT_COLUMNS.map((column) => sql.identifier(column)),
+    sql`, `,
+  );
+  return sql`${sql.identifier(alias)} (${columns}) AS (VALUES ${sql.join([...values], sql`, `)})`;
+}
+
+function disjointConflictPredicate(
+  tables: Tables,
+  entries: readonly AtomicNodeClaimEntry[],
+  inputAlias: string,
+): SQL | undefined {
+  const inputCte = disjointInputCte(entries, inputAlias);
+  if (inputCte === undefined) return;
+  const input = sql.identifier(inputAlias);
+  const inputColumn = (name: string): SQL =>
+    sql`${input}.${quotedColumn({ name })}`;
+  const candidate = sql.identifier("atomic_disjoint_candidate");
+  const candidateColumn = (column: Readonly<{ name: string }>): SQL =>
+    sql`${candidate}.${quotedColumn(column)}`;
+  return sql`
+    WITH ${inputCte}
+    SELECT
+      ${inputColumn("ordinal")} AS ordinal,
+      ${inputColumn("attempted_kind")} AS attempted_kind,
+      ${inputColumn("node_id")} AS node_id,
+      ${candidateColumn(tables.nodes.kind)} AS conflicting_kind
+    FROM ${input}
+    JOIN ${tables.nodes} AS ${candidate}
+      ON ${candidateColumn(tables.nodes.graphId)} = ${inputColumn("graph_id")}
+     AND ${candidateColumn(tables.nodes.kind)} = ${inputColumn("conflicting_kind")}
+     AND ${candidateColumn(tables.nodes.id)} = ${inputColumn("key")}
+     AND ${candidateColumn(tables.nodes.deletedAt)} IS NULL
+  `;
+}
+
+/** Reads legacy live disjoint rows under the same schema fence as the write. */
+export function buildAtomicNodeDisjointConflictsWithSchemaFence(
+  tables: Tables,
+  entries: readonly AtomicNodeClaimEntry[],
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  assertClaimEntries(entries, schemaFence);
+  const conflicts = disjointConflictPredicate(
+    tables,
+    entries,
+    "atomic_node_disjoint_input",
+  );
+  if (conflicts === undefined) {
+    throw new CompilerInvariantError(
+      "An atomic disjoint conflict read requires a disjoint claim.",
+    );
+  }
+  return sql`
+    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
+    SELECT conflict.*
+    FROM (${conflicts}) AS conflict
+    CROSS JOIN ${sql.identifier(SCHEMA_FENCE_ALIAS)}
+    ORDER BY conflict.ordinal
+  `;
 }
 
 function claimOf(item: AtomicNodeClaimEntry): NodeInsertClaim {
@@ -307,6 +419,13 @@ export function buildAtomicNodeClaimGatePredicateWithSchemaFence(
   const target = sql.identifier("candidate_claim");
   const targetColumn = (column: Readonly<{ name: string }>): SQL =>
     sql`${target}.${quotedColumn(column)}`;
+  const disjointConflicts = disjointConflictPredicate(
+    tables,
+    entries,
+    "atomic_node_disjoint_gate_input",
+  );
+  const disjointGate =
+    disjointConflicts === undefined ? sql`` : sql`AND NOT EXISTS (${disjointConflicts})`;
 
   return sql`
     EXISTS (
@@ -330,6 +449,7 @@ export function buildAtomicNodeClaimGatePredicateWithSchemaFence(
             AND ${targetColumn(uniques.deletedAt)} IS NULL
         )
       )
+      ${disjointGate}
     )
   `;
 }
@@ -377,6 +497,52 @@ export function buildAtomicNodeClaimCleanupWithSchemaFence(
           AND ${nodes.kind} = ${targetColumn(uniques.concreteKind)}
           AND ${nodes.id} = ${targetColumn(uniques.nodeId)}
           AND ${nodes.deletedAt} IS NULL
+      )
+  `;
+}
+
+/**
+ * Releases every claim owned by nodes tombstoned by this exact atomic delete.
+ *
+ * Owner-based cleanup deliberately avoids reconstructing uniqueness keys from
+ * preimages. The timestamp predicate binds the side effect to rows changed by
+ * this program; a stale fence or an already-deleted input therefore removes no
+ * claim.
+ */
+export function buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+  tables: Tables,
+  input: Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+    timestamp: string;
+  }>,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { nodes, uniques } = tables;
+  const owner = sql.identifier("atomic_deleted_claim_owner");
+  const ownerColumn = (column: Readonly<{ name: string }>): SQL =>
+    sql`${owner}.${quotedColumn(column)}`;
+  return sql`
+    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
+    UPDATE ${uniques} AS ${owner}
+    SET ${quotedColumn(uniques.deletedAt)} = ${input.timestamp}
+    WHERE EXISTS (SELECT 1 FROM ${sql.identifier(SCHEMA_FENCE_ALIAS)})
+      AND ${ownerColumn(uniques.graphId)} = ${input.graphId}
+      AND ${ownerColumn(uniques.concreteKind)} = ${input.kind}
+      AND ${ownerColumn(uniques.deletedAt)} IS NULL
+      AND ${ownerColumn(uniques.nodeId)} IN (${sql.join(
+        input.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      AND EXISTS (
+        SELECT 1
+        FROM ${nodes}
+        WHERE ${nodes.graphId} = ${ownerColumn(uniques.graphId)}
+          AND ${nodes.kind} = ${ownerColumn(uniques.concreteKind)}
+          AND ${nodes.id} = ${ownerColumn(uniques.nodeId)}
+          AND ${nodes.deletedAt} = ${input.timestamp}
       )
   `;
 }

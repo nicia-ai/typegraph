@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  DisjointError,
   RestrictedDeleteError,
   StaleVersionError,
   UniquenessError,
@@ -16,6 +17,7 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { computeUniqueKey } from "../src/constraints";
 import { defineEdge, defineGraph, defineNode, searchable } from "../src/core";
+import { disjointWith } from "../src/ontology";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
 
@@ -27,6 +29,16 @@ const graph = defineGraph({
   id: "atomic-node-batch-store",
   nodes: { Person: { type: Person } },
   edges: {},
+});
+
+const Rival = defineNode("Rival", {
+  schema: z.object({ name: z.string() }),
+});
+const disjointGraph = defineGraph({
+  id: "atomic-node-batch-disjoint-store",
+  nodes: { Person: { type: Person }, Rival: { type: Rival } },
+  edges: {},
+  ontology: [disjointWith(Person, Rival)],
 });
 
 const knows = defineEdge("knows", { schema: z.object({}) });
@@ -109,6 +121,18 @@ async function createFallbackFixture() {
   });
   const { backend } = await createLibsqlBackend(client);
   const [store] = await createStoreWithSchema(fallbackGraph, backend);
+  return { backend, client, store, temporaryDirectory };
+}
+
+async function createDisjointFixture() {
+  const temporaryDirectory = mkdtempSync(
+    path.join(tmpdir(), "typegraph-atomic-node-batch-disjoint-"),
+  );
+  const client = createClient({
+    url: `file:${path.join(temporaryDirectory, "graph.db")}`,
+  });
+  const { backend } = await createLibsqlBackend(client);
+  const [store] = await createStoreWithSchema(disjointGraph, backend);
   return { backend, client, store, temporaryDirectory };
 }
 
@@ -257,6 +281,102 @@ describe("plain node batch store contract", () => {
       expect(batch).toHaveBeenCalledOnce();
       expect(execute).not.toHaveBeenCalled();
       await expect(fixture.store.nodes.Person.count()).resolves.toBe(2);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("refuses a legacy disjoint row without committing sibling creates", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      // Model a pre-claim database: the live row exists but no canonical
+      // disjoint reservation accompanies it.
+      await fixture.backend.insertNode({
+        graphId: disjointGraph.id,
+        kind: Rival.kind,
+        id: "shared-id",
+        props: { name: "Legacy rival" },
+      });
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      await expect(
+        fixture.store.nodes.Person.bulkInsert([
+          { id: "sibling", props: { name: "Sibling" } },
+          { id: "shared-id", props: { name: "Conflict" } },
+        ]),
+      ).rejects.toMatchObject({
+        name: DisjointError.name,
+        details: {
+          attemptedKind: Person.kind,
+          conflictingKind: Rival.kind,
+          nodeId: "shared-id",
+        },
+      });
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(fixture.store.nodes.Person.count()).resolves.toBe(0);
+      await expect(fixture.store.nodes.Rival.count()).resolves.toBe(1);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("keeps mixed-ID disjoint creates in one atomic submission", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      const created = await fixture.store.nodes.Person.bulkCreate([
+        { id: "caller", props: { name: "Caller" } },
+        { props: { name: "Generated" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(created.map((node) => node.name)).toEqual(["Caller", "Generated"]);
+      expect(created[0]?.id).toBe("caller");
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("releases disjoint claims inside the native delete program", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      const person = await fixture.store.nodes.Person.create(
+        { name: "Person" },
+        { id: "reusable-id" },
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      await fixture.store.nodes.Person.bulkDelete([person.id]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      await expect(
+        fixture.store.nodes.Rival.create({ name: "Rival" }, { id: person.id }),
+      ).resolves.toMatchObject({ id: "reusable-id" });
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("releases uniqueness claims inside the native delete program", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const original = await fixture.store.nodes.UniquePerson.create({
+        name: "Reusable name",
+      });
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      await fixture.store.nodes.UniquePerson.bulkDelete([original.id]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+      await expect(
+        fixture.store.nodes.UniquePerson.create({ name: "Reusable name" }),
+      ).resolves.toMatchObject({ name: "Reusable name" });
     } finally {
       await closeFixture(fixture);
     }

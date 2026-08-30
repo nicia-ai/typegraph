@@ -26,6 +26,7 @@ import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { rowPropsToObject } from "../src/backend/types";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { CompilerInvariantError, DatabaseOperationError } from "../src/errors";
+import { disjointWith } from "../src/ontology";
 import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 import {
@@ -68,6 +69,15 @@ const durableGraph = defineGraph({
       matchIdentity: { name: "label", fields: ["label"] },
     },
   },
+});
+const Rival = defineNode("Rival", {
+  schema: z.object({ name: z.string(), score: z.number() }),
+});
+const disjointGraph = defineGraph({
+  id: "atomic-resolved-update-batch-disjoint",
+  nodes: { Person: { type: Person }, Rival: { type: Rival } },
+  edges: {},
+  ontology: [disjointWith(Person, Rival)],
 });
 
 describe("atomic resolved update batches", () => {
@@ -122,6 +132,45 @@ describe("atomic resolved update batches", () => {
     expect(rows.map((row) => rowPropsToObject(row.props)["score"])).toEqual([
       10, 10,
     ]);
+  });
+
+  it("routes update-only disjoint kinds through the atomic family", async () => {
+    const client = createClient({ url: "file::memory:" });
+    clients.push(client);
+    const installed = await createLibsqlBackend(client);
+    const [store] = await createStoreWithSchema(
+      disjointGraph,
+      installed.backend,
+    );
+    const person = await store.nodes.Person.create(
+      { name: "Before", score: 1 },
+      { id: "person" },
+    );
+    const transactionlessBackend = createSqliteBackend(installed.db, {
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const [transactionlessStore] = await createVerifiedStore(
+      disjointGraph,
+      transactionlessBackend,
+    );
+    const profile = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(transactionlessBackend),
+    );
+    const updateNodes = vi.fn(requireDefined(profile.updateNodes));
+    const observedUpdateNodes = Object.assign(updateNodes, {
+      maxEntries: requireDefined(profile.updateNodes).maxEntries,
+    });
+    markBundledRootAtomicMutationPrograms(transactionlessBackend, {
+      ...profile,
+      updateNodes: observedUpdateNodes,
+    });
+
+    const [updated] = await transactionlessStore.nodes.Person.bulkUpsertById([
+      { id: person.id, props: { name: "After", score: 2 } },
+    ]);
+
+    expect(updateNodes).toHaveBeenCalledOnce();
+    expect(updated).toMatchObject({ name: "After", score: 2 });
   });
 
   it("updates no node when one preimage moved", async () => {

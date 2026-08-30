@@ -61,9 +61,11 @@ import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 import {
   type AtomicNodeClaimEntry,
+  buildAtomicDeletedNodeClaimReleaseWithSchemaFence,
   buildAtomicNodeClaimCleanupWithSchemaFence,
   buildAtomicNodeClaimGatePredicateWithSchemaFence,
   buildAtomicNodeClaimUpsertWithSchemaFence,
+  buildAtomicNodeDisjointConflictsWithSchemaFence,
 } from "./atomic-node-claims";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
@@ -299,6 +301,21 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildAtomicNodeClaimCleanupWithSchemaFence: (
     entries: readonly AtomicNodeClaimEntry[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeDisjointConflictsWithSchemaFence: (
+    entries: readonly AtomicNodeClaimEntry[],
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicDeletedNodeClaimReleaseWithSchemaFence: (
+    input: Readonly<{
+      graphId: string;
+      kind: string;
+      ids: readonly string[];
+      timestamp: string;
+    }>,
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
@@ -1015,6 +1032,35 @@ function createCommonOperationStrategy(
       return buildAtomicNodeClaimCleanupWithSchemaFence(
         tables,
         entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeDisjointConflictsWithSchemaFence(
+      entries: readonly AtomicNodeClaimEntry[],
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeDisjointConflictsWithSchemaFence(
+        tables,
+        entries,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+      input: Readonly<{
+        graphId: string;
+        kind: string;
+        ids: readonly string[];
+        timestamp: string;
+      }>,
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+        tables,
+        input,
         schemaFence,
         schemaLockClause,
       );

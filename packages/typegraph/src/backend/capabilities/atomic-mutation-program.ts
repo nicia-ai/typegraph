@@ -32,6 +32,159 @@ export type AtomicNodeBatchIdSource = "generated" | "caller";
 /** Whether a node batch returns only its count or its ordered postimages. */
 export type AtomicNodeBatchResultMode = "count" | "rows";
 
+/** Independently provable claim semantics accepted by a node mutation family. */
+export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
+
+/** Closed claim envelope advertised by one node mutation executor. */
+export type AtomicNodeClaimSupport = Readonly<{
+  /** Pure-family member ceilings; an omitted family is unsupported. */
+  maxEntriesByFamily: Readonly<Partial<Record<AtomicNodeClaimFamily, number>>>;
+  /** Total claimed-member ceiling when more than one family is present. */
+  maxMixedEntries?: number;
+}>;
+
+function isAtomicNodeClaimFamily(
+  value: unknown,
+): value is AtomicNodeClaimFamily {
+  return value === "disjointness" || value === "uniqueness";
+}
+
+function assertAtomicNodeClaimFamilies(
+  family: keyof AtomicMutationProgramRegistration,
+  name: string,
+  value: unknown,
+): void {
+  if (
+    Array.isArray(value) &&
+    new Set(value).size === value.length &&
+    value.every((claimFamily) => isAtomicNodeClaimFamily(claimFamily))
+  ) {
+    return;
+  }
+  throw new ConfigurationError(
+    `Atomic mutation program family ${family} requires distinct ${name}.`,
+    {
+      code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+      family,
+      limit: name,
+      value,
+    },
+  );
+}
+
+function assertAtomicNodeClaimSupport(
+  family: "createNodes" | "mutateNodes",
+  value: unknown,
+): void {
+  if (value === undefined) return;
+  if (typeof value !== "object" || value === null) {
+    throw new ConfigurationError(
+      `Atomic mutation program family ${family} requires claimSupport metadata.`,
+      {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family,
+        limit: "claimSupport",
+        value,
+      },
+    );
+  }
+  const support = value as Readonly<Record<PropertyKey, unknown>>;
+  const maxEntriesByFamily = support["maxEntriesByFamily"];
+  if (
+    typeof maxEntriesByFamily !== "object" ||
+    maxEntriesByFamily === null ||
+    Array.isArray(maxEntriesByFamily)
+  ) {
+    throw new ConfigurationError(
+      `Atomic mutation program family ${family} requires family-scoped claim limits.`,
+      {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family,
+        limit: "claimSupport.maxEntriesByFamily",
+        value: maxEntriesByFamily,
+      },
+    );
+  }
+  const familyLimits = Object.entries(maxEntriesByFamily);
+  for (const [claimFamily, limit] of familyLimits) {
+    if (!isAtomicNodeClaimFamily(claimFamily)) {
+      throw new ConfigurationError(
+        `Atomic mutation program family ${family} received an unknown claim family.`,
+        {
+          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+          family,
+          limit: "claimSupport.maxEntriesByFamily",
+          value: claimFamily,
+        },
+      );
+    }
+    assertNonnegativeIntegerLimit(
+      family,
+      `claimSupport.maxEntriesByFamily.${claimFamily}`,
+      limit,
+    );
+  }
+  if (support["maxMixedEntries"] !== undefined) {
+    if (familyLimits.length < 2) {
+      throw new ConfigurationError(
+        `Atomic mutation program family ${family} cannot advertise mixed claims without two claim families.`,
+        {
+          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+          family,
+          limit: "claimSupport.maxMixedEntries",
+          value: support["maxMixedEntries"],
+        },
+      );
+    }
+    assertNonnegativeIntegerLimit(
+      family,
+      "claimSupport.maxMixedEntries",
+      support["maxMixedEntries"],
+    );
+  }
+}
+
+/** The one owner of claim-verdict to advertised-family correlation. */
+function atomicNodeClaimFamily(claim: NodeInsertClaim): AtomicNodeClaimFamily {
+  return claim.verdict.kind;
+}
+
+/** Whether one executor explicitly accepts every normalized claimed member. */
+export function supportsAtomicNodeClaims(
+  support: AtomicNodeClaimSupport | undefined,
+  claims: readonly NodeInsertClaim[],
+): boolean {
+  if (claims.length === 0) return true;
+  if (support === undefined) return false;
+  const families = new Set(claims.map((claim) => atomicNodeClaimFamily(claim)));
+  if (
+    [...families].some(
+      (family) => support.maxEntriesByFamily[family] === undefined,
+    )
+  ) {
+    return false;
+  }
+  if (families.size > 1) {
+    return (
+      support.maxMixedEntries !== undefined &&
+      claims.length <= support.maxMixedEntries
+    );
+  }
+  const family = families.values().next().value;
+  return (
+    family !== undefined &&
+    claims.length <= (support.maxEntriesByFamily[family] ?? 0)
+  );
+}
+
+/** Whether an executor can admit at least one member of a claim family. */
+export function supportsAtomicNodeClaimFamily(
+  support: AtomicNodeClaimSupport | undefined,
+  family: AtomicNodeClaimFamily,
+): boolean {
+  return (support?.maxEntriesByFamily[family] ?? 0) > 0;
+}
+
 /** One normalized node-create member supplied to a semantic executor. */
 export type AtomicNodeBatchEntry = Readonly<{
   idSource: AtomicNodeBatchIdSource;
@@ -49,8 +202,8 @@ export type AtomicNodeBatchInput = Readonly<{
 
 /** Executes the complete eligible node-create family for one exact root. */
 export interface AtomicNodeBatchExecutor {
-  /** Maximum constrained members the backend can gate in one statement. */
-  readonly maxClaimedEntries?: number;
+  /** Claim semantics this executor can prove, omitted for plain rows only. */
+  readonly claimSupport?: AtomicNodeClaimSupport;
   (
     input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
   ): Promise<number>;
@@ -127,10 +280,18 @@ export type AtomicNodeDeleteBatchInput = Readonly<{
   schemaFence: SchemaWriteFenceParams;
 }>;
 
-/** Executes complete eligible direct node deletes for one exact root. */
-export type AtomicNodeDeleteBatchExecutor = (
-  input: AtomicNodeDeleteBatchInput,
-) => Promise<AtomicDeleteBatchResult>;
+/**
+ * Executes complete eligible direct node deletes for one exact root.
+ *
+ * Keep the callable as a function type intersected with its metadata. The API
+ * compatibility inventory follows function aliases into their input types;
+ * changing this to a callable interface would hide that contravariant edge.
+ */
+export type AtomicNodeDeleteBatchExecutor = Readonly<{
+  /** Claim families whose owned sidecars this program releases. */
+  releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}> &
+  ((input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>);
 
 /** One authoritative node preimage and replacement used by a resolved set. */
 export type AtomicNodeResolvedUpdateEntry = Readonly<{
@@ -510,13 +671,21 @@ function assertAtomicMutationProgramLimits(
 ): void {
   if (executor === undefined) return;
   if (family === "createNodes") {
-    const maxClaimedEntries = (executor as AtomicNodeBatchExecutor)
-      .maxClaimedEntries;
-    if (maxClaimedEntries !== undefined) {
-      assertNonnegativeIntegerLimit(
+    assertAtomicNodeClaimSupport(
+      family,
+      (executor as AtomicNodeBatchExecutor).claimSupport,
+    );
+    return;
+  }
+  if (family === "deleteNodes") {
+    const releasedClaimFamilies: unknown = (
+      executor as AtomicNodeDeleteBatchExecutor
+    ).releasedClaimFamilies;
+    if (releasedClaimFamilies !== undefined) {
+      assertAtomicNodeClaimFamilies(
         family,
-        "maxClaimedEntries",
-        maxClaimedEntries,
+        "releasedClaimFamilies",
+        releasedClaimFamilies,
       );
     }
     return;

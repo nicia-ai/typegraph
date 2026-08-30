@@ -726,16 +726,18 @@ generated, caller-supplied, or mixed IDs can run as one schema-fenced atomic
 program when there are no claims, Operational Identity, history, revision, or
 projections. Session-capable PostgreSQL pins the program to one transaction;
 Neon HTTP, D1, and libSQL submit one transport batch. `bulkCreate()` restores
-rows to input order. This is an internal implementation detail, not a general
-Store batch surface. Constrained, projected, identity-enabled,
-history/revision-tracked, and other unsupported shapes keep the existing
-transaction or fallback path.
+rows to input order. The same program accepts one advertised same-kind
+uniqueness or disjointness claim per member; multiple claims, wider uniqueness
+scopes, projections, identity, and history/revision capture keep the existing
+transaction or fallback path. This is an internal implementation detail, not a
+general Store batch surface.
 
 The same bundled roots execute eligible node and edge `bulkDelete()` calls as
 closed schema-fenced mutation programs. Edge collection identity and node
-`restrict` behavior are rechecked by the write statement itself. Nodes with
-unique, disjointness, search, identity, or capture sidecars, or with cascade or
-disconnect behavior, retain the interactive path, as do derived/custom
+`restrict` behavior are rechecked by the write statement itself. Restricted
+node programs release owner-side uniqueness and disjointness claims in the
+same exchange. Nodes with search, identity, or capture sidecars, or with cascade
+or disconnect behavior, retain the interactive path, as do derived/custom
 backends and caller-owned transactions. On a portable backend, edge bulk
 deletion still resolves all IDs in one batched read and applies them through a
 set-based delete port when available, replacing the former per-ID loop.
@@ -1223,10 +1225,10 @@ store.nodes.Person.bulkDelete(
 ): Promise<void>;
 ```
 
-On eligible bundled roots, a plain restricted node kind runs this call as one
-schema-fenced atomic exchange. Kinds that owe unique, disjointness, search,
-identity, or capture cleanup, or cascade/disconnect work, use the transactional
-path instead.
+On eligible bundled roots, a restricted node kind runs this call as one
+schema-fenced atomic exchange, including owner-side uniqueness and disjointness
+claim cleanup. Kinds that owe search, identity, or capture cleanup, or
+cascade/disconnect work, use the transactional path instead.
 
 #### `getOrCreateByConstraint(constraintName, props, options?)`
 

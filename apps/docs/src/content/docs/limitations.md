@@ -323,24 +323,28 @@ for plain schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()` calls
 when the node has no claims, Operational Identity, history, revision, or
 projections. Session-capable PostgreSQL executes that program on one pinned
 transaction; Neon HTTP, D1, and libSQL submit one transport batch. If any batch
-member has a claim, every
-claimed member must have exactly one `unique` constraint whose scope is the
-literal `kind`, every input ID must be generated, and the backend's
-claimed-member budget must accommodate the batch. Claim-free kinds may
-participate in that generated-ID batch. IDs may otherwise be generated,
-caller-supplied, or mixed only for the wholly claim-free shape, and
+member has a claim, every claimed member must owe exactly one advertised claim
+family: either a `unique` constraint whose scope is the literal `kind` on a
+generated ID, or one `disjointWith` reservation on a generated or
+caller-supplied ID. The backend's claim-support budget must accommodate the
+batch, and claim-free members may participate alongside either family. IDs may
+otherwise be generated, caller-supplied, or mixed, and
 `bulkCreate()` returns rows in input order. This is an internal optimization,
 not a general Store batch API. A
-caller-supplied or mixed ID in a claimed batch, multiple unique constraints,
-non-kind uniqueness scope, disjointness, projected or identity-enabled nodes,
+caller-supplied ID with uniqueness work, multiple claims per member, non-kind
+uniqueness scope, projected or identity-enabled nodes,
 history/revision tracking, missing schema-fence support, and other unsupported
 shapes fail closed to the existing transaction or fallback behavior.
 
 The transport inventory for the supported libSQL root records one client
 `batch` submission and zero client `execute` calls for both generated-ID
-claim-free batches and generated-ID batches with one same-kind uniqueness
-claim. This is a measured submission count, not a wall-clock RTT benchmark;
+claim-free batches, generated-ID batches with one same-kind uniqueness claim,
+and single-disjoint-claim batches. This is a measured submission count, not a
+wall-clock RTT benchmark;
 fallback paths are intentionally not assigned a latency claim.
+On D1, the family-scoped bind budgets admit 14 pure same-kind uniqueness
+claims, seven pure disjointness claims, or seven claimed members when both
+families occur in one batch. Larger batches retain the portable behavior.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
 use one schema-fenced native program when history and revision capture are
@@ -352,10 +356,10 @@ semantic registration, and dynamic get-or-create convergence retain the
 interactive path.
 
 Direct edge `bulkDelete()` calls use the same exact-root exchange and refuse a
-foreign-kind ID atomically. Plain node `bulkDelete()` qualifies when no unique,
-disjointness, identity, projection, history, revision, cascade, or disconnect
-work is owed; the program enforces `restrict` against live connected edges in
-SQL. Other delete shapes retain their transaction path. `bulkUpsertById()`
+foreign-kind ID atomically. Restricted node `bulkDelete()` also releases every
+unique or disjoint claim owned by rows it tombstones in the same program, while
+enforcing live connected edges in SQL. Identity, projection, history,
+revision, cascade, and disconnect shapes retain their transaction path. `bulkUpsertById()`
 remains a resolved mutation set because it must read and schema-validate a
 database preimage before its writes are known. Bundled serverless roots can
 submit an eligible distinct-ID, live-row resolved set as one native exchange

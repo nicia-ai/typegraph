@@ -15,6 +15,7 @@ import {
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   resolveAtomicMutationPrograms,
+  supportsAtomicNodeClaimFamily,
 } from "../../backend/capabilities/atomic-mutation-program";
 import {
   type GraphBackend,
@@ -82,12 +83,18 @@ export function resolveAtomicNodeBatchExecutor(
   if (input.inputs.length === 0 || input.identityEnabled) return;
   const profile = resolveAtomicMutationProfile(input);
   if (profile?.createNodes === undefined) return;
+  const claimSupport = profile.createNodes.claimSupport;
 
   const registrations = input.inputs.map((item) => {
     if (!hasOwnKey(input.graph.nodes, item.kind)) return false;
     const registration = input.graph.nodes[item.kind];
     if (registration === undefined) return false;
-    if (input.registry.getDisjointKinds(item.kind).length > 0) return false;
+    if (
+      input.registry.getDisjointKinds(item.kind).length > 0 &&
+      !supportsAtomicNodeClaimFamily(claimSupport, "disjointness")
+    ) {
+      return false;
+    }
     if (getSearchableFields(registration.type.schema).length > 0) return false;
     if (getEmbeddingFields(registration.type.schema).length > 0) return false;
     return registration;
@@ -99,6 +106,7 @@ export function resolveAtomicNodeBatchExecutor(
       registration !== false && (registration.unique ?? []).length > 0,
   );
   if (hasDeclaredClaims) {
+    if (!supportsAtomicNodeClaimFamily(claimSupport, "uniqueness")) return;
     if (input.inputs.some((item) => item.id !== undefined)) return;
     if (
       registrations.some(
@@ -228,8 +236,21 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   if (!hasOwnKey(input.graph.nodes, input.kind)) return;
   const registration = input.graph.nodes[input.kind];
   if (registration === undefined) return;
-  if (input.registry.getDisjointKinds(input.kind).length > 0) return;
-  if ((registration.unique ?? []).length > 0) return;
+  const executor = resolveAtomicMutationProfile(input)?.deleteNodes;
+  if (executor === undefined) return;
+  const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);
+  if (
+    input.registry.getDisjointKinds(input.kind).length > 0 &&
+    !releasedClaimFamilies.has("disjointness")
+  ) {
+    return;
+  }
+  if (
+    (registration.unique ?? []).length > 0 &&
+    !releasedClaimFamilies.has("uniqueness")
+  ) {
+    return;
+  }
   if (
     registration.onDelete !== undefined &&
     registration.onDelete !== "restrict"
@@ -238,7 +259,7 @@ export function resolveAtomicNodeDeleteBatchExecutor(
   }
   if (getSearchableFields(registration.type.schema).length > 0) return;
   if (getEmbeddingFields(registration.type.schema).length > 0) return;
-  return resolveAtomicMutationProfile(input)?.deleteNodes;
+  return executor;
 }
 
 export type AtomicNodeResolvedUpdateEligibilityInput =
@@ -266,7 +287,6 @@ function isAtomicResolvedNodeKindEligible(
   const registration = input.graph.nodes[input.kind];
   return (
     registration !== undefined &&
-    input.registry.getDisjointKinds(input.kind).length === 0 &&
     (registration.unique ?? []).length === 0 &&
     getSearchableFields(registration.type.schema).length === 0 &&
     getEmbeddingFields(registration.type.schema).length === 0
@@ -329,6 +349,10 @@ export function resolveAtomicNodeResolvedMutationSetExecutor(
 ): AtomicNodeResolvedMutationSetExecutor | undefined {
   const entryCount = input.creates.length + input.updateCount;
   if (entryCount === 0 || !isAtomicResolvedNodeKindEligible(input)) return;
+  // A mixed set may create rows, so its program must carry disjoint claim
+  // acquisition and refusal. Update-only sets owe no disjoint transition and
+  // are independently eligible through `updateNodes`.
+  if (input.registry.getDisjointKinds(input.kind).length > 0) return;
   if (
     input.creates.some(
       (item) => item.kind !== input.kind || item.id === undefined,
