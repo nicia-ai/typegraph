@@ -16,6 +16,7 @@ import {
   type AtomicNodeResolvedUpdateBatchExecutor,
   resolveAtomicMutationPrograms,
   supportsAtomicNodeClaimFamily,
+  supportsAtomicNodeProjections,
 } from "../../backend/capabilities/atomic-mutation-program";
 import {
   type GraphBackend,
@@ -44,6 +45,19 @@ function resolveAtomicMutationProfile(input: CommonAtomicMutationEligibility) {
   if (input.schemaVersion === undefined) return;
   if (input.historyEnabled || input.revisionTrackingEnabled) return;
   return resolveAtomicMutationPrograms(input.backend);
+}
+
+function atomicNodeProjectionFamilies(
+  registration: NonNullable<GraphDef["nodes"][string]>,
+): readonly ("embedding" | "fulltext")[] {
+  return [
+    ...(getEmbeddingFields(registration.type.schema).length === 0 ?
+      []
+    : (["embedding"] as const)),
+    ...(getSearchableFields(registration.type.schema).length === 0 ?
+      []
+    : (["fulltext"] as const)),
+  ];
 }
 
 /**
@@ -84,6 +98,7 @@ export function resolveAtomicNodeBatchExecutor(
   const profile = resolveAtomicMutationProfile(input);
   if (profile?.createNodes === undefined) return;
   const claimSupport = profile.createNodes.claimSupport;
+  const projectionSupport = profile.createNodes.projectionSupport;
 
   const registrations = input.inputs.map((item) => {
     if (!hasOwnKey(input.graph.nodes, item.kind)) return false;
@@ -95,8 +110,14 @@ export function resolveAtomicNodeBatchExecutor(
     ) {
       return false;
     }
-    if (getSearchableFields(registration.type.schema).length > 0) return false;
-    if (getEmbeddingFields(registration.type.schema).length > 0) return false;
+    if (
+      !supportsAtomicNodeProjections(
+        projectionSupport,
+        atomicNodeProjectionFamilies(registration),
+      )
+    ) {
+      return false;
+    }
     return registration;
   });
   if (registrations.includes(false)) return;
@@ -105,6 +126,23 @@ export function resolveAtomicNodeBatchExecutor(
     (registration) =>
       registration !== false && (registration.unique ?? []).length > 0,
   );
+  const hasProjections = registrations.some(
+    (registration) =>
+      registration !== false &&
+      atomicNodeProjectionFamilies(registration).length > 0,
+  );
+  // Claim refusal and projection application are independently complete, but
+  // their composed create program is deliberately deferred to the multiple-
+  // claim fold. Until that owner exists, keep the combination portable.
+  if (
+    hasProjections &&
+    (hasDeclaredClaims ||
+      input.inputs.some(
+        (item) => input.registry.getDisjointKinds(item.kind).length > 0,
+      ))
+  ) {
+    return;
+  }
   if (hasDeclaredClaims) {
     if (!supportsAtomicNodeClaimFamily(claimSupport, "uniqueness")) return;
     if (input.inputs.some((item) => item.id !== undefined)) return;
@@ -285,11 +323,20 @@ function isAtomicResolvedNodeKindEligible(
     return false;
   }
   const registration = input.graph.nodes[input.kind];
+  return registration !== undefined && (registration.unique ?? []).length === 0;
+}
+
+function supportsAtomicResolvedNodeKindProjections(
+  input: AtomicResolvedNodeKindEligibility,
+  support: AtomicNodeResolvedMutationSetExecutor["projectionSupport"],
+): boolean {
+  const registration = input.graph.nodes[input.kind];
   return (
     registration !== undefined &&
-    (registration.unique ?? []).length === 0 &&
-    getSearchableFields(registration.type.schema).length === 0 &&
-    getEmbeddingFields(registration.type.schema).length === 0
+    supportsAtomicNodeProjections(
+      support,
+      atomicNodeProjectionFamilies(registration),
+    )
   );
 }
 
@@ -313,7 +360,16 @@ export function resolveAtomicNodeResolvedUpdateBatchExecutor(
     return;
   }
   const executor = resolveAtomicMutationProfile(input)?.updateNodes;
-  if (executor === undefined || input.entryCount > executor.maxEntries) return;
+  if (
+    executor === undefined ||
+    input.entryCount > executor.maxEntries ||
+    !supportsAtomicResolvedNodeKindProjections(
+      input,
+      executor.projectionSupport,
+    )
+  ) {
+    return;
+  }
   return executor;
 }
 
@@ -361,7 +417,16 @@ export function resolveAtomicNodeResolvedMutationSetExecutor(
     return;
   }
   const executor = resolveAtomicMutationProfile(input)?.mutateNodes;
-  if (executor === undefined || entryCount > executor.maxEntries) return;
+  if (
+    executor === undefined ||
+    entryCount > executor.maxEntries ||
+    !supportsAtomicResolvedNodeKindProjections(
+      input,
+      executor.projectionSupport,
+    )
+  ) {
+    return;
+  }
   return executor;
 }
 

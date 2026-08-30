@@ -4,7 +4,10 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { resolveBundledRootAtomicMutationPrograms } from "../src/backend/capabilities/atomic-mutation-program";
+import {
+  resolveBundledRootAtomicMutationPrograms,
+  withAtomicMutationProgramDispatchObserver,
+} from "../src/backend/capabilities/atomic-mutation-program";
 import {
   type AtomicNodeClaimEntry,
   buildAtomicNodeClaimCleanupWithSchemaFence,
@@ -17,9 +20,22 @@ import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import type { SchemaWriteFenceParams } from "../src/backend/types";
 import { computeUniqueKey } from "../src/constraints";
-import { defineEdge, defineGraph, defineNode } from "../src/core";
-import { DisjointError, RestrictedDeleteError } from "../src/errors";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  embedding,
+  searchable,
+} from "../src/core";
+import {
+  ContributionUnavailableError,
+  DisjointError,
+  RestrictedDeleteError,
+  StaleVersionError,
+} from "../src/errors";
 import { disjointWith } from "../src/ontology";
+import { vectorPhysicalName } from "../src/query/dialect/vector-strategy";
+import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
 
 const UniquePerson = defineNode("UniquePerson", {
@@ -66,6 +82,36 @@ const disjointGraph = defineGraph({
   nodes: { PlainPerson: { type: PlainPerson }, Rival: { type: Rival } },
   edges: {},
   ontology: [disjointWith(PlainPerson, Rival)],
+});
+const SearchDocument = defineNode("SearchDocument", {
+  schema: z.object({ title: searchable() }),
+});
+const projectionGraph = defineGraph({
+  id: "atomic-node-projection-pglite",
+  nodes: { SearchDocument: { type: SearchDocument } },
+  edges: {},
+});
+const evolvedProjectionGraph = defineGraph({
+  id: projectionGraph.id,
+  nodes: {
+    SearchDocument: {
+      type: defineNode("SearchDocument", {
+        schema: z.object({
+          title: searchable(),
+          subtitle: z.string().optional(),
+        }),
+      }),
+    },
+  },
+  edges: {},
+});
+const VectorDocument = defineNode("VectorDocument", {
+  schema: z.object({ vector: embedding(2).optional() }),
+});
+const vectorProjectionGraph = defineGraph({
+  id: "atomic-node-vector-projection-pglite",
+  nodes: { VectorDocument: { type: VectorDocument } },
+  edges: {},
 });
 
 const schemaFence = { graphId: graph.id, expectedVersion: 1 } as const;
@@ -261,6 +307,149 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
 
     await expect(store.nodes.PlainPerson.count()).resolves.toBe(0);
     await expect(store.nodes.Rival.count()).resolves.toBe(1);
+  });
+
+  it("commits projected node rows and fulltext sidecars in one PostgreSQL program", async () => {
+    const directBackend = createPostgresBackend(backend.db, { vector: false });
+    const [store] = await createStoreWithSchema(projectionGraph, directBackend);
+    expect(
+      resolveBundledRootAtomicMutationPrograms(directBackend)?.createNodes
+        ?.projectionSupport,
+    ).toEqual({ families: ["fulltext"] });
+
+    await store.nodes.SearchDocument.bulkInsert([
+      { id: "projected", props: { title: "Atomic projection" } },
+    ]);
+
+    await expect(
+      store.search.fulltext("SearchDocument", {
+        query: "projection",
+        limit: 10,
+      }),
+    ).resolves.toHaveLength(1);
+
+    await store.nodes.SearchDocument.update("projected" as never, {
+      title: "",
+    });
+
+    await expect(
+      store.search.fulltext("SearchDocument", {
+        query: "projection",
+        limit: 10,
+      }),
+    ).resolves.toHaveLength(0);
+  });
+
+  it("commits vector sidecars through the PostgreSQL atomic program", async () => {
+    const vectorBackend = await createLocalPgliteBackend();
+    try {
+      const directBackend = createPostgresBackend(vectorBackend.db);
+      const [store] = await createStoreWithSchema(
+        vectorProjectionGraph,
+        directBackend,
+      );
+      expect(
+        resolveBundledRootAtomicMutationPrograms(directBackend)?.createNodes
+          ?.projectionSupport,
+      ).toEqual({ families: ["embedding", "fulltext"] });
+
+      await store.nodes.VectorDocument.bulkInsert([
+        { id: "vector-projected", props: { vector: [1, 0] } },
+      ]);
+
+      const hits = await store.search.vector("VectorDocument", {
+        fieldPath: "vector",
+        queryEmbedding: [1, 0],
+        limit: 1,
+      });
+      expect(hits[0]?.node.id).toBe("vector-projected");
+
+      const variants: string[] = [];
+      await withAtomicMutationProgramDispatchObserver(
+        directBackend,
+        (variant) => variants.push(variant),
+        () =>
+          store.nodes.VectorDocument.update("vector-projected" as never, {
+            vector: undefined,
+          }),
+      );
+      expect(variants).toEqual(["updateNodes"]);
+      await expect(
+        store.nodes.VectorDocument.getById("vector-projected" as never),
+      ).resolves.not.toHaveProperty("vector");
+      const vectorRows = await vectorBackend.client.query(
+        `SELECT node_id FROM "${vectorPhysicalName(
+          "tg_vec",
+          vectorProjectionGraph.id,
+          "VectorDocument",
+          "vector",
+        )}"`,
+      );
+      expect(vectorRows.rows).toEqual([]);
+      await expect(
+        store.search.vector("VectorDocument", {
+          fieldPath: "vector",
+          queryEmbedding: [1, 0],
+          limit: 1,
+        }),
+      ).resolves.toHaveLength(0);
+    } finally {
+      await vectorBackend.backend.close();
+    }
+  });
+
+  it("rolls projected PostgreSQL updates back behind a stale fence", async () => {
+    const isolated = await createLocalPgliteBackend({ vector: false });
+    try {
+      const directBackend = createPostgresBackend(isolated.db, {
+        vector: false,
+      });
+      const [store] = await createStoreWithSchema(
+        projectionGraph,
+        directBackend,
+      );
+      await store.nodes.SearchDocument.bulkInsert([
+        { id: "stale-projected", props: { title: "Before" } },
+      ]);
+      await migrateSchema(directBackend, evolvedProjectionGraph, 1);
+
+      await expect(
+        store.nodes.SearchDocument.update("stale-projected" as never, {
+          title: "After",
+        }),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(
+        store.search.fulltext("SearchDocument", {
+          query: "After",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(0);
+    } finally {
+      await isolated.backend.close();
+    }
+  });
+
+  it("refuses missing PostgreSQL projection storage without persisting its node", async () => {
+    const isolated = await createLocalPgliteBackend({ vector: false });
+    try {
+      const directBackend = createPostgresBackend(isolated.db, {
+        vector: false,
+      });
+      const [store] = await createStoreWithSchema(
+        projectionGraph,
+        directBackend,
+      );
+      await isolated.client.exec(`DROP TABLE ${tables.fulltextTableName}`);
+
+      await expect(
+        store.nodes.SearchDocument.bulkInsert([
+          { id: "missing-sidecar", props: { title: "Unavailable" } },
+        ]),
+      ).rejects.toBeInstanceOf(ContributionUnavailableError);
+      await expect(store.nodes.SearchDocument.count()).resolves.toBe(0);
+    } finally {
+      await isolated.backend.close();
+    }
   });
 
   it("returns the incumbent owner and gates a conflicting generated node", async () => {

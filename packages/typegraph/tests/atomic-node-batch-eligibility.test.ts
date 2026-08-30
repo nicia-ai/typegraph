@@ -175,7 +175,10 @@ function declareAtomicBatchForTest(backend: GraphBackend): void {
   });
 }
 
-function createFakeAtomicNodeBatch(onCall?: () => void) {
+function createFakeAtomicNodeBatch(
+  onCall?: () => void,
+  projectionFamilies?: readonly ("embedding" | "fulltext")[],
+) {
   async function execute(
     input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
   ): Promise<number>;
@@ -195,6 +198,9 @@ function createFakeAtomicNodeBatch(onCall?: () => void) {
       maxEntriesByFamily: { disjointness: 6, uniqueness: 6 },
       maxMixedEntries: 6,
     },
+    ...(projectionFamilies === undefined ?
+      {}
+    : { projectionSupport: { families: projectionFamilies } }),
   });
 }
 
@@ -202,6 +208,15 @@ function markAtomicRoot(backend: GraphBackend): void {
   declareAtomicBatchForTest(backend);
   markBundledRootAutocommitEligible(backend);
   markBundledRootAtomicNodeBatch(backend, createFakeAtomicNodeBatch());
+}
+
+function markAtomicProjectionRoot(backend: GraphBackend): void {
+  declareAtomicBatchForTest(backend);
+  markBundledRootAutocommitEligible(backend);
+  markBundledRootAtomicNodeBatch(
+    backend,
+    createFakeAtomicNodeBatch(undefined, ["embedding", "fulltext"]),
+  );
 }
 
 function markAtomicDeleteRoot(backend: GraphBackend): void {
@@ -275,6 +290,38 @@ describe("atomic node batch eligibility", () => {
       }),
     ).toBeDefined();
   });
+
+  it.each([
+    [
+      "fulltext",
+      searchableGraph,
+      { kind: "SearchDocument", props: { title: "Alice" } },
+    ],
+    [
+      "embedding",
+      embeddingGraph,
+      { kind: "VectorDocument", props: { vector: [1, 0] } },
+    ],
+  ] as const)(
+    "accepts an advertised %s projection family",
+    (_label, candidateGraph, candidateInput) => {
+      const backend = rootBackend(false);
+      markAtomicProjectionRoot(backend);
+
+      expect(
+        resolveAtomicNodeBatchExecutor({
+          backend,
+          graph: candidateGraph,
+          registry: buildKindRegistry(candidateGraph),
+          inputs: [candidateInput],
+          schemaVersion: 1,
+          identityEnabled: false,
+          historyEnabled: false,
+          revisionTrackingEnabled: false,
+        }),
+      ).toBeDefined();
+    },
+  );
 
   it.each([
     ["caller id", [{ ...input, id: "person-1" }]],

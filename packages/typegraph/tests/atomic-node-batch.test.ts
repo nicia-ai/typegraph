@@ -7,19 +7,32 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  ContributionUnavailableError,
   DisjointError,
   RestrictedDeleteError,
   StaleVersionError,
   UniquenessError,
 } from "../src";
-import { resolveBundledRootAtomicNodeBatch } from "../src/backend/capabilities/atomic-mutation-program";
+import {
+  resolveBundledRootAtomicMutationPrograms,
+  resolveBundledRootAtomicNodeBatch,
+  withAtomicMutationProgramDispatchObserver,
+} from "../src/backend/capabilities/atomic-mutation-program";
+import { tables as sqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { computeUniqueKey } from "../src/constraints";
-import { defineEdge, defineGraph, defineNode, searchable } from "../src/core";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  embedding,
+  searchable,
+} from "../src/core";
 import { disjointWith } from "../src/ontology";
+import { libsqlVectorStrategy } from "../src/query/dialect/vector/libsql-strategy";
 import { migrateSchema } from "../src/schema";
-import { createStoreWithSchema } from "../src/store";
+import { createStoreWithSchema, createVerifiedStore } from "../src/store";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -68,6 +81,9 @@ const UniquePerson = defineNode("UniquePerson", {
 const SearchDocument = defineNode("SearchDocument", {
   schema: z.object({ title: searchable() }),
 });
+const VectorDocument = defineNode("VectorDocument", {
+  schema: z.object({ vector: embedding(2).optional() }),
+});
 const fallbackGraph = defineGraph({
   id: "atomic-node-batch-fallbacks",
   nodes: {
@@ -83,6 +99,7 @@ const fallbackGraph = defineGraph({
       ],
     },
     SearchDocument: { type: SearchDocument },
+    VectorDocument: { type: VectorDocument },
   },
   edges: {},
 });
@@ -96,6 +113,7 @@ const evolvedFallbackGraph = defineGraph({
       unique: fallbackGraph.nodes.UniquePerson.unique,
     },
     SearchDocument: { type: SearchDocument },
+    VectorDocument: { type: VectorDocument },
   },
   edges: {},
 });
@@ -119,9 +137,9 @@ async function createFallbackFixture() {
   const client = createClient({
     url: `file:${path.join(temporaryDirectory, "graph.db")}`,
   });
-  const { backend } = await createLibsqlBackend(client);
+  const { backend, db } = await createLibsqlBackend(client);
   const [store] = await createStoreWithSchema(fallbackGraph, backend);
-  return { backend, client, store, temporaryDirectory };
+  return { backend, client, db, store, temporaryDirectory };
 }
 
 async function createDisjointFixture() {
@@ -562,16 +580,267 @@ describe("plain node batch store contract", () => {
     }
   });
 
-  it("keeps search projections on the fallback path", async () => {
+  it("folds search projections into the atomic batch", async () => {
     const fixture = await createFallbackFixture();
     try {
       const transaction = vi.spyOn(fixture.backend, "transaction");
+      const batch = vi.spyOn(fixture.client, "batch");
 
       await fixture.store.nodes.SearchDocument.bulkInsert([
         { id: "search-a", props: { title: "Alice" } },
       ]);
 
-      expect(transaction).toHaveBeenCalledOnce();
+      expect(transaction).not.toHaveBeenCalled();
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "Alice",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("folds replacement search projections into a resolved update", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.SearchDocument.bulkInsert([
+        { id: "search-update", props: { title: "Before" } },
+      ]);
+      expect(
+        resolveBundledRootAtomicMutationPrograms(fixture.backend)?.updateNodes
+          ?.projectionSupport,
+      ).toEqual({ families: ["embedding", "fulltext"] });
+      const transactionlessBackend = createSqliteBackend(fixture.db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+        vector: libsqlVectorStrategy,
+      });
+      const [root] = await createVerifiedStore(
+        fallbackGraph,
+        transactionlessBackend,
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+      const variants: string[] = [];
+
+      await withAtomicMutationProgramDispatchObserver(
+        transactionlessBackend,
+        (variant) => variants.push(variant),
+        () =>
+          root.nodes.SearchDocument.update("search-update" as never, {
+            title: "After",
+          }),
+      );
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "Before",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(0);
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "After",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+
+      await withAtomicMutationProgramDispatchObserver(
+        transactionlessBackend,
+        (variant) => variants.push(variant),
+        () =>
+          root.nodes.SearchDocument.update("search-update" as never, {
+            title: "",
+          }),
+      );
+
+      expect(batch).toHaveBeenCalledTimes(2);
+      expect(variants).toEqual(["updateNodes", "updateNodes"]);
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "After",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("folds embedding creates and replacements into atomic programs", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.VectorDocument.bulkInsert([
+        { id: "vector-target", props: { vector: [1, 0] } },
+        { id: "vector-anchor", props: { vector: [0, 1] } },
+      ]);
+      const initial = await fixture.store.search.vector("VectorDocument", {
+        fieldPath: "vector",
+        queryEmbedding: [1, 0],
+        limit: 2,
+      });
+      expect(initial[0]?.node.id).toBe("vector-target");
+
+      const transactionlessBackend = createSqliteBackend(fixture.db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+        vector: libsqlVectorStrategy,
+      });
+      const [root] = await createVerifiedStore(
+        fallbackGraph,
+        transactionlessBackend,
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+      const variants: string[] = [];
+
+      await withAtomicMutationProgramDispatchObserver(
+        transactionlessBackend,
+        (variant) => variants.push(variant),
+        () =>
+          root.nodes.VectorDocument.update("vector-target" as never, {
+            vector: [-1, 0],
+          }),
+      );
+
+      expect(batch).toHaveBeenCalledOnce();
+      const replaced = await fixture.store.search.vector("VectorDocument", {
+        fieldPath: "vector",
+        queryEmbedding: [1, 0],
+        limit: 2,
+      });
+      expect(replaced.map((hit) => hit.node.id)).toEqual([
+        "vector-anchor",
+        "vector-target",
+      ]);
+
+      await withAtomicMutationProgramDispatchObserver(
+        transactionlessBackend,
+        (variant) => variants.push(variant),
+        () =>
+          root.nodes.VectorDocument.update("vector-target" as never, {
+            vector: undefined,
+          }),
+      );
+
+      expect(batch).toHaveBeenCalledTimes(2);
+      expect(variants).toEqual(["updateNodes", "updateNodes"]);
+      const afterDelete = await fixture.store.search.vector("VectorDocument", {
+        fieldPath: "vector",
+        queryEmbedding: [1, 0],
+        limit: 2,
+      });
+      expect(afterDelete.map((hit) => hit.node.id)).toEqual(["vector-anchor"]);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("folds projected creates and updates into one mixed mutation program", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.SearchDocument.bulkInsert([
+        { id: "search-existing", props: { title: "Before" } },
+      ]);
+      const transactionlessBackend = createSqliteBackend(fixture.db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+      });
+      const [root] = await createVerifiedStore(
+        fallbackGraph,
+        transactionlessBackend,
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      const rows = await root.nodes.SearchDocument.bulkUpsertById([
+        { id: "search-new", props: { title: "Created" } },
+        { id: "search-existing", props: { title: "Updated" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(rows.map((row) => [row.id, row.title])).toEqual([
+        ["search-new", "Created"],
+        ["search-existing", "Updated"],
+      ]);
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "Created OR Updated",
+          limit: 10,
+          mode: "raw",
+        }),
+      ).resolves.toHaveLength(2);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("rolls projected sidecars back when the schema fence is stale", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await migrateSchema(fixture.backend, evolvedFallbackGraph, 1);
+
+      await expect(
+        fixture.store.nodes.SearchDocument.bulkInsert([
+          { id: "stale-search", props: { title: "MustNotPersist" } },
+        ]),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "MustNotPersist",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("diagnoses stale projected updates and tombstone creates without primary-key masking", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.SearchDocument.bulkInsert([
+        { id: "stale-live", props: { title: "Before" } },
+        { id: "stale-tombstone", props: { title: "Deleted" } },
+      ]);
+      await fixture.store.nodes.SearchDocument.delete(
+        "stale-tombstone" as never,
+      );
+      await migrateSchema(fixture.backend, evolvedFallbackGraph, 1);
+
+      await expect(
+        fixture.store.nodes.SearchDocument.update("stale-live" as never, {
+          title: "After",
+        }),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(
+        fixture.store.nodes.SearchDocument.bulkInsert([
+          { id: "stale-tombstone", props: { title: "Resurrected" } },
+        ]),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(
+        fixture.store.search.fulltext("SearchDocument", {
+          query: "After OR Resurrected",
+          limit: 10,
+          mode: "raw",
+        }),
+      ).resolves.toHaveLength(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("refuses missing projection storage without persisting its node", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.client.execute(
+        `DROP TABLE ${sqliteTables.fulltextTableName}`,
+      );
+
+      await expect(
+        fixture.store.nodes.SearchDocument.bulkInsert([
+          { id: "missing-sidecar", props: { title: "Unavailable" } },
+        ]),
+      ).rejects.toBeInstanceOf(ContributionUnavailableError);
+      await expect(fixture.store.nodes.SearchDocument.count()).resolves.toBe(0);
     } finally {
       await closeFixture(fixture);
     }

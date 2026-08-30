@@ -7,6 +7,7 @@
  */
 import { type z } from "zod";
 
+import type { AtomicNodeProjection } from "../backend/capabilities/atomic-mutation-program";
 import {
   type GraphBackend,
   type NodeInsertProjection,
@@ -87,21 +88,53 @@ export function resolveNodeEmbeddingProjections(
   schema: z.ZodType,
   props: Record<string, unknown>,
 ): readonly NodeInsertProjection[] {
-  return getEmbeddingFields(schema).flatMap((field) => {
-    const value = readOwnProperty(props, field.fieldPath);
-    return isValidEmbeddingValue(value) ?
-        [
-          {
-            kind: "embedding",
-            fieldPath: field.fieldPath,
-            embedding: value,
-            dimensions: field.dimensions,
-            metric: field.metric,
-            indexType: field.indexType,
-          },
-        ]
-      : [];
-  });
+  return getEmbeddingFields(schema).flatMap(
+    (field): readonly NodeInsertProjection[] => {
+      const value = readOwnProperty(props, field.fieldPath);
+      return isValidEmbeddingValue(value) ?
+          [
+            {
+              kind: "embedding",
+              fieldPath: field.fieldPath,
+              embedding: value,
+              dimensions: field.dimensions,
+              metric: field.metric,
+              indexType: field.indexType,
+            },
+          ]
+        : [];
+    },
+  );
+}
+
+/**
+ * Resolves every embedding transition owed by a replacement postimage.
+ * Unlike fresh generated-id insertion, an absent value is an explicit delete:
+ * caller-id resurrection and updates may be replacing an older projection.
+ */
+export function resolveNodeEmbeddingProjectionTransitions(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+  options?: Readonly<{ omitDeletes?: boolean }>,
+): readonly AtomicNodeProjection[] {
+  return getEmbeddingFields(schema).flatMap(
+    (field): readonly AtomicNodeProjection[] => {
+      const value = readOwnProperty(props, field.fieldPath);
+      const common = {
+        kind: "embedding" as const,
+        fieldPath: field.fieldPath,
+        dimensions: field.dimensions,
+        metric: field.metric,
+        indexType: field.indexType,
+      };
+      if (isValidEmbeddingValue(value)) {
+        return [{ ...common, action: "upsert" as const, embedding: value }];
+      }
+      return options?.omitDeletes === true ?
+          []
+        : [{ ...common, action: "delete" as const }];
+    },
+  );
 }
 
 /**

@@ -12,6 +12,7 @@ import type {
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
   AtomicNodeDeleteBatchInput,
+  AtomicNodeProjectionFamily,
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import { nowIso } from "../../row-mappers";
@@ -127,7 +128,10 @@ import {
 } from "./edges";
 import { buildFulltextSearch } from "./fulltext";
 import { buildHybridSearchStatement, hybridCandidatesRef } from "./hybrid";
-import { buildInsertNodeWithProjections } from "./node-projections";
+import {
+  buildAtomicNodeProjectionStatements,
+  buildInsertNodeWithProjections,
+} from "./node-projections";
 import {
   buildAssertAtomicNodeMutationPostimages,
   buildAtomicNodeBatchWithSchemaFence,
@@ -184,6 +188,7 @@ function nullableText(value: string | undefined): SQL {
 }
 
 export type CommonOperationStrategy = Readonly<{
+  atomicNodeProjectionFamilies: readonly AtomicNodeProjectionFamily[];
   /** Terminal NOT NULL sentinel shared by resolved mutation-set programs. */
   /**
    * The exact NOT NULL sentinels emitted by the closed edge-batch program.
@@ -266,6 +271,12 @@ export type CommonOperationStrategy = Readonly<{
     timestamp: string,
     schemaLockClause?: SQL,
   ) => SQL | undefined;
+  buildAtomicNodeProjectionStatements: (
+    creates: readonly AtomicNodeBatchEntry[],
+    updates: readonly AtomicNodeResolvedUpdateEntry[],
+    timestamp: string,
+    chunkSize: number,
+  ) => readonly SQL[] | undefined;
   buildInsertNodeNoReturn: (params: InsertNodeParams, timestamp: string) => SQL;
   buildInsertNodesBatch: (
     params: readonly InsertNodeParams[],
@@ -667,6 +678,7 @@ function createCommonOperationStrategy(
   tables: Tables,
   dialect: SqlDialect,
   fulltextStrategy: FulltextStrategy,
+  vectorStrategy: VectorStrategy | undefined,
 ): CommonOperationStrategy {
   const tableOperations = bindTableOperationBuilders(
     tables,
@@ -679,6 +691,22 @@ function createCommonOperationStrategy(
   // to pg_trgm / ParadeDB / pgroonga swaps the full CRUD pipeline, not
   // just the read-side fragments.
   const fulltextBuilders = {
+    buildAtomicNodeProjectionStatements: (
+      creates: readonly AtomicNodeBatchEntry[],
+      updates: readonly AtomicNodeResolvedUpdateEntry[],
+      timestamp: string,
+      chunkSize: number,
+    ): readonly SQL[] | undefined =>
+      buildAtomicNodeProjectionStatements(
+        creates,
+        updates,
+        timestamp,
+        dialect,
+        fulltextTable,
+        fulltextStrategy,
+        vectorStrategy,
+        chunkSize,
+      ),
     buildUpsertFulltext: (
       params: UpsertFulltextParams,
       timestamp: string,
@@ -854,6 +882,8 @@ function createCommonOperationStrategy(
   return {
     ...tableOperations,
     ...fulltextBuilders,
+    atomicNodeProjectionFamilies:
+      vectorStrategy === undefined ? ["fulltext"] : ["embedding", "fulltext"],
     buildConvergeEdgeCreate: (params) =>
       buildConvergeEdgeCreate(tables, params),
     buildAtomicConvergeEdges: (params) =>
@@ -1227,8 +1257,14 @@ export function createCachedTableExistence(
 export function createSqliteOperationStrategy(
   tables: SqliteTables,
   fulltextStrategy: FulltextStrategy,
+  vectorStrategy?: VectorStrategy,
 ): SqliteOperationStrategy {
-  return createCommonOperationStrategy(tables, "sqlite", fulltextStrategy);
+  return createCommonOperationStrategy(
+    tables,
+    "sqlite",
+    fulltextStrategy,
+    vectorStrategy,
+  );
 }
 
 function createPostgresNodeProjectionBuilders(
@@ -1261,7 +1297,12 @@ export function createPostgresOperationStrategy(
   vectorStrategy?: VectorStrategy,
 ): PostgresOperationStrategy {
   return {
-    ...createCommonOperationStrategy(tables, "postgres", fulltextStrategy),
+    ...createCommonOperationStrategy(
+      tables,
+      "postgres",
+      fulltextStrategy,
+      vectorStrategy,
+    ),
     ...createPostgresNodeProjectionBuilders(
       tables,
       "postgres",

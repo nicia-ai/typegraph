@@ -51,6 +51,7 @@ import {
   type AtomicNodeClaimSupport,
   type AtomicNodeDeleteBatchExecutor,
   AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodeProjection,
   type AtomicNodeResolvedUpdateBatchExecutor,
   supportsAtomicNodeClaims,
 } from "../../backend/capabilities/atomic-mutation-program";
@@ -163,6 +164,7 @@ import {
 import {
   getEmbeddingFields,
   resolveNodeEmbeddingProjections,
+  resolveNodeEmbeddingProjectionTransitions,
 } from "../embedding-sync";
 import {
   getSearchableFields,
@@ -1042,6 +1044,21 @@ function resolveNodeInsertProjections(
   ];
 }
 
+/** Complete projection transitions for an atomic node postimage. */
+function resolveAtomicNodeProjections(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+  options?: Readonly<{ omitEmbeddingDeletes?: boolean }>,
+): readonly AtomicNodeProjection[] {
+  const fulltext = resolveNodeFulltextProjection(schema, props);
+  return [
+    ...(fulltext === undefined ? [] : [fulltext]),
+    ...resolveNodeEmbeddingProjectionTransitions(schema, props, {
+      omitDeletes: options?.omitEmbeddingDeletes === true,
+    }),
+  ];
+}
+
 /**
  * One prepared create as the session's insert unit: the row params, the claims
  * the row owes, and the sidecar inputs, as ONE value.
@@ -1664,6 +1681,11 @@ function atomicNodeBatchEntries(
       entries.push({
         idSource: prepared.idProvided ? "caller" : "generated",
         params: prepared.insertParams,
+        projections: resolveAtomicNodeProjections(
+          prepared.nodeKind.schema,
+          prepared.validatedProps,
+          { omitEmbeddingDeletes: !prepared.idProvided },
+        ),
       });
       continue;
     }
@@ -2989,6 +3011,10 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
       id: entry.input.id,
       props: validatedProps,
       expectedVersion: existing.version,
+      projections: resolveAtomicNodeProjections(
+        getNodeRegistration(ctx.graph, entry.input.kind).type.schema,
+        validatedProps,
+      ),
     };
   });
   const result = await withAlreadyExistsTranslation("node", () =>
@@ -3151,6 +3177,10 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
         id: entry.input.id,
         props: validatedProps,
         expectedVersion: row.version,
+        projections: resolveAtomicNodeProjections(
+          getNodeRegistration(ctx.graph, entry.input.kind).type.schema,
+          validatedProps,
+        ),
       };
     });
     const rows = await atomicExecutor({

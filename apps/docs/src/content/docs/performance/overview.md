@@ -183,9 +183,11 @@ atomic convergence contract across multiple submissions.
 Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL also expose native write programs for eligible
 ingestion calls. Schema-managed `nodes.bulkInsert(items)` and
-`nodes.bulkCreate(items)` run one schema-fenced atomic program when each claimed
-member owes at most one advertised same-kind uniqueness or disjointness claim
-and the node has no Operational Identity, history, revision, or projections.
+`nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
+no Operational Identity, history, or revision work. The program may carry
+either fulltext/vector projection transitions or at most one advertised
+same-kind uniqueness/disjointness claim per claimed member; claim and
+projection envelopes do not yet compose in one program.
 Neon HTTP, D1, and libSQL submit that program as one transport batch. Session-capable
 PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
 statement per bind-budget chunk. The batch may use generated IDs,
@@ -193,7 +195,8 @@ caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
 input order. Cloudflare D1's 100-parameter budget admits 14 pure same-kind
 uniqueness claims, seven pure disjointness claims, or seven claimed members in
 a mixed-family batch. Multiple claims per member, wider uniqueness scopes,
-projected, identity-enabled, history/revision-tracked, and other unsupported
+multiple-claim, claim-plus-projection, identity-enabled,
+history/revision-tracked, and other unsupported
 node shapes retain their existing transaction or fallback path. These ceilings
 are distinct from the seven unique durable edge identities admitted by the
 convergence program above.
@@ -220,8 +223,8 @@ The same exact-root programs serve eligible singleton `update()` and
 `delete()` calls without changing their per-operation hook contract. On an
 interactive PostgreSQL root, the guarded mutation owns a short transaction;
 on the single-submission transports it remains one batch. A node
-update with no unique/identity/projection sidecars (disjointness has no
-update-side transition), or a
+update with no unique/identity sidecars (disjointness has no update-side
+transition) may carry its fulltext/vector replacements in the same program. A
 `cardinality: "many"` edge update with no durable match identity, performs one
 authoritative preimage read, validates and merges properties in TypeGraph, then
 submits one guarded atomic update. Every direct edge delete, and a restricted
@@ -240,9 +243,10 @@ profile. Create and delete are **closed programs**: validation and arbitration
 can be expressed by the submitted SQL itself. `bulkUpsertById()` is deliberately
 different. It first reads authoritative stored properties, then merges and
 validates them before its write set is known. On bundled serverless roots, a
-distinct-ID batch with no claims, projections, Operational Identity, durable
+distinct-ID batch with no claims, Operational Identity, durable
 edge match identity, temporal mutation, history, or revision capture submits
-its resolved mutation set as one atomic exchange. An eligible set on bundled
+its resolved mutation set, including node fulltext/vector replacements, as one
+atomic exchange. An eligible set on bundled
 session-capable PostgreSQL stays inside its exact open transaction and
 dispatches the same reviewed program through a separate registration bound to
 that pinned transaction. Its `applied | unsupported` result is explicit:
@@ -251,7 +255,8 @@ collection enters the complete portable path. Update-only sets use one
 guarded set update. A set containing both fresh creates and live updates carries
 both legs plus a zero-write terminal postimage assertion in the same native
 batch; an incomplete preimage deliberately aborts the batch before any create
-can commit. Repeated IDs, resurrections, temporal changes, sidecars, and
+can commit. Repeated IDs, resurrections, temporal changes, claims, edge
+sidecars, and
 unregistered transaction sessions retain the consolidated interactive path.
 The exact session may be collection-opened, supplied by `store.transaction()`,
 or adopted from the caller. A
@@ -278,9 +283,15 @@ ceiling is all-or-nothing rather than chunked: a larger batch returns to the
 consolidated interactive path because separate autocommit statements could not
 preserve the set's atomic guard. Other backends derive their ceiling from their
 declared parameter budget. The native exchange still
-contains the SQL statements needed for inserts and sidecars; it submits them as
+contains the SQL statements needed for inserts and node projection sidecars;
+it groups fulltext and per-vector-slot transitions into set statements and
+submits them as
 one transaction so they do not each pay network latency. The exact previous
-count varies by driver and endpoint shape.
+count varies by driver and endpoint shape. A newly constructed backend first
+reads the durable contribution markers before its first projected write; that
+cold safety check is one additional read exchange and is cached on the backend
+instance. The one-exchange count therefore describes the mutation submission
+after contribution evidence is warm, not total cold-start traffic.
 
 On session-capable PostgreSQL, the preimage read and mutation program remain in
 one collection-owned transaction. The program has a bounded number of
@@ -301,13 +312,13 @@ For small numbers of writes, individual `create()` calls inside a transaction ar
 volumes, use the bulk collection APIs — they use multi-row INSERTs and handle parameter chunking
 internally.
 
-| Method | Returns results | Use case |
-|--------|----------------|----------|
-| `bulkCreate(items)` | Yes | Need created nodes back |
-| `bulkInsert(items)` | No | Maximum throughput ingestion |
-| `bulkUpsertById(items)` | Yes | Idempotent import (create or update by ID) |
-| `bulkDelete(ids)` | No | Mass soft-delete |
-| `trustedImportGraphStream(store, chunks)` | No | Fastest initial load into a fresh dedicated database |
+| Method                                    | Returns results | Use case                                             |
+| ----------------------------------------- | --------------- | ---------------------------------------------------- |
+| `bulkCreate(items)`                       | Yes             | Need created nodes back                              |
+| `bulkInsert(items)`                       | No              | Maximum throughput ingestion                         |
+| `bulkUpsertById(items)`                   | Yes             | Idempotent import (create or update by ID)           |
+| `bulkDelete(ids)`                         | No              | Mass soft-delete                                     |
+| `trustedImportGraphStream(store, chunks)` | No              | Fastest initial load into a fresh dedicated database |
 
 The collection APIs remain the default: they validate data and maintain every
 configured constraint and sidecar. For a one-time initial load whose producer
@@ -413,10 +424,14 @@ framing. It buys a connection profile that never peaks at N — not lower latenc
 
 ```typescript
 const [activeUsers, recentOrders] = await store.batch(
-  store.query().from("User", "u")
+  store
+    .query()
+    .from("User", "u")
     .whereNode("u", (u) => u.status.eq("active"))
     .select((ctx) => ({ id: ctx.u.id, name: ctx.u.name })),
-  store.query().from("Order", "o")
+  store
+    .query()
+    .from("Order", "o")
     .select((ctx) => ({ id: ctx.o.id, total: ctx.o.total }))
     .orderBy("o", "createdAt", "desc")
     .limit(20),
@@ -489,7 +504,7 @@ import { Pool } from "pg";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: 20,                       // Size based on your concurrency needs
+  max: 20, // Size based on your concurrency needs
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 2_000,
 });
@@ -606,13 +621,13 @@ a workaround.
 
 **When optimization applies:**
 
-| Pattern | Optimized? | Reason |
-|---------|-----------|--------|
-| `ctx => ({ email: ctx.p.email })` | Yes | Simple field extraction |
-| `ctx => [ctx.p.id, ctx.p.name]` | Yes | Multiple fields in array |
-| `ctx => ctx.p` | No | Whole node returned |
-| `ctx => ({ upper: ctx.p.email.toUpperCase() })` | Yes | Field extracted; method runs in JS |
-| `ctx => ({ ...ctx.p })` | No | Spread requires full node |
+| Pattern                                         | Optimized? | Reason                             |
+| ----------------------------------------------- | ---------- | ---------------------------------- |
+| `ctx => ({ email: ctx.p.email })`               | Yes        | Simple field extraction            |
+| `ctx => [ctx.p.id, ctx.p.name]`                 | Yes        | Multiple fields in array           |
+| `ctx => ctx.p`                                  | No         | Whole node returned                |
+| `ctx => ({ upper: ctx.p.email.toUpperCase() })` | Yes        | Field extracted; method runs in JS |
+| `ctx => ({ ...ctx.p })`                         | No         | Spread requires full node          |
 
 The optimization is transparent — if your callback can't be optimized, TypeGraph automatically
 falls back to fetching the full node data.
@@ -816,46 +831,46 @@ and schema/data shape.*
 
 Current suite configuration:
 
-| Setting | Value |
-|---------|-------|
-| Seed users | 1200 |
-| Follows per user | 10 |
-| Posts per user | 5 |
-| Batch size | 250 |
-| Warmup iterations | 2 |
-| Sample iterations (median reported) | 15 |
+| Setting                             | Value |
+| ----------------------------------- | ----- |
+| Seed users                          | 1200  |
+| Follows per user                    | 10    |
+| Posts per user                      | 5     |
+| Batch size                          | 250   |
+| Warmup iterations                   | 2     |
+| Sample iterations (median reported) | 15    |
 
 Default guardrails:
 
-| Check | Threshold |
-|-------|-----------|
-| reverse/forward ratio | <= 6x |
-| inverse traversal latency | <= 500ms |
-| inverse/forward ratio | <= 10x |
-| 3-hop latency | <= 500ms |
-| 3-hop/2-hop ratio | <= 8x |
-| aggregate latency | <= 500ms |
-| aggregate distinct latency | <= 700ms |
-| aggregateDistinct/aggregate ratio | <= 4x |
-| cached execute latency | <= 500ms |
-| prepared execute latency | <= 500ms |
-| prepared/cached ratio | <= 2x |
-| 10-hop recursive latency | <= 250ms |
-| 100-hop recursive latency | <= 1000ms |
-| 100-hop-recursive/10-hop-recursive ratio | <= 30x |
-| 1000-hop recursive latency | <= 5000ms |
-| 1000-hop-recursive/100-hop-recursive ratio | <= 20x |
+| Check                                      | Threshold |
+| ------------------------------------------ | --------- |
+| reverse/forward ratio                      | <= 6x     |
+| inverse traversal latency                  | <= 500ms  |
+| inverse/forward ratio                      | <= 10x    |
+| 3-hop latency                              | <= 500ms  |
+| 3-hop/2-hop ratio                          | <= 8x     |
+| aggregate latency                          | <= 500ms  |
+| aggregate distinct latency                 | <= 700ms  |
+| aggregateDistinct/aggregate ratio          | <= 4x     |
+| cached execute latency                     | <= 500ms  |
+| prepared execute latency                   | <= 500ms  |
+| prepared/cached ratio                      | <= 2x     |
+| 10-hop recursive latency                   | <= 250ms  |
+| 100-hop recursive latency                  | <= 1000ms |
+| 100-hop-recursive/10-hop-recursive ratio   | <= 30x    |
+| 1000-hop recursive latency                 | <= 5000ms |
+| 1000-hop-recursive/100-hop-recursive ratio | <= 20x    |
 
 Backend-specific overrides:
 
-| Backend | Check | Threshold |
-|---------|-------|-----------|
-| SQLite | 1000-hop recursive latency | <= 7000ms |
-| PostgreSQL | inverse traversal latency | <= 1000ms |
-| PostgreSQL | inverse/forward ratio | <= 30x |
-| PostgreSQL | 3-hop latency | <= 1000ms |
+| Backend    | Check                      | Threshold |
+| ---------- | -------------------------- | --------- |
+| SQLite     | 1000-hop recursive latency | <= 7000ms |
+| PostgreSQL | inverse traversal latency  | <= 1000ms |
+| PostgreSQL | inverse/forward ratio      | <= 30x    |
+| PostgreSQL | 3-hop latency              | <= 1000ms |
 | PostgreSQL | aggregate distinct latency | <= 1200ms |
-| PostgreSQL | prepared execute latency | <= 700ms |
+| PostgreSQL | prepared execute latency   | <= 700ms  |
 
 </details>
 

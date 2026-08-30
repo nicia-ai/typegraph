@@ -236,6 +236,7 @@ import {
   type InternalOperationBackend,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
+import { resolveAtomicNodeProjectionRequirements } from "./operations/node-projections";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
@@ -2671,6 +2672,33 @@ function createPostgresOperationBackend(
       toUniqueRow,
     },
     schemaFenceLockClause: sql.raw("FOR SHARE"),
+    async beforeAtomicNodeProjections(creates, updates): Promise<void> {
+      const requirements = resolveAtomicNodeProjectionRequirements(
+        creates,
+        updates,
+      );
+      if (requirements === undefined) return;
+      await contributionMaterializer.assertNodeInsertProjections(
+        requirements.graphId,
+        requirements,
+      );
+    },
+    async refuseAtomicNodeProjectionError(
+      creates,
+      updates,
+      error,
+    ): Promise<never> {
+      const requirements = resolveAtomicNodeProjectionRequirements(
+        creates,
+        updates,
+      );
+      if (requirements === undefined) throw error;
+      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
+        requirements.graphId,
+        requirements,
+        error,
+      );
+    },
     nodeProjectionInsertFusion: true,
     async beforeNodeProjectionInsert(params, plan): Promise<void> {
       const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(params, plan);

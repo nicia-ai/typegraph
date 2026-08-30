@@ -657,7 +657,7 @@ describe("atomic resolved update batches", () => {
     // The create statements are independently chunked. These exact counts pin
     // every unchunked slot at the public D1 ceilings (17 total nodes, 6 total
     // edges), so the shared maxEntries formula cannot silently become too wide.
-    expect(parameterCounts.slice(1, 4)).toEqual([88, 76, 21]);
+    expect(parameterCounts.slice(1, 4)).toEqual([88, 79, 21]);
     expect(parameterCounts.slice(5)).toEqual([62, 54, 9]);
     for (const parameterCount of parameterCounts) {
       expect(parameterCount).toBeLessThanOrEqual(100);
