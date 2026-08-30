@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import { createSessionAtomicBatchAdapter } from "../src/backend/drizzle/execution/session-atomic-batch";
 import type { SqlExecutionAdapter } from "../src/backend/drizzle/execution/types";
 import { CompilerInvariantError } from "../src/errors";
-import { requireDefined } from "../src/utils/presence";
 
 function createSessionAdapter(
   executeCompiled: NonNullable<SqlExecutionAdapter["executeCompiled"]>,
@@ -40,9 +39,7 @@ describe("transaction-session atomic batches", () => {
       ] as unknown as readonly TRow[]);
     };
     const { execution, exclusiveCalls } = createSessionAdapter(executeCompiled);
-    const batch = requireDefined(
-      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
-    );
+    const batch = createSessionAtomicBatchAdapter(execution).executeAtomicBatch;
 
     const result = await batch<{ sql: string }>([
       { sql: "SELECT first", params: [] },
@@ -73,9 +70,7 @@ describe("transaction-session atomic batches", () => {
       return Promise.resolve([] as readonly TRow[]);
     };
     const { execution } = createSessionAdapter(executeCompiled);
-    const batch = requireDefined(
-      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
-    );
+    const batch = createSessionAtomicBatchAdapter(execution).executeAtomicBatch;
 
     await expect(batch([{ sql: "BROKEN", params: [] }])).rejects.toBe(refusal);
     expect(statements).toEqual([
@@ -103,9 +98,7 @@ describe("transaction-session atomic batches", () => {
       return Promise.resolve([] as readonly TRow[]);
     };
     const { execution } = createSessionAdapter(executeCompiled);
-    const batch = requireDefined(
-      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
-    );
+    const batch = createSessionAtomicBatchAdapter(execution).executeAtomicBatch;
 
     const failure = await batch([{ sql: "BROKEN", params: [] }]).catch(
       (error: unknown) => error,
@@ -128,9 +121,7 @@ describe("transaction-session atomic batches", () => {
   it("returns an empty program without opening a savepoint or queue slot", async () => {
     const executeCompiled = vi.fn().mockResolvedValue([]);
     const { execution, exclusiveCalls } = createSessionAdapter(executeCompiled);
-    const batch = requireDefined(
-      createSessionAtomicBatchAdapter(execution)?.executeAtomicBatch,
-    );
+    const batch = createSessionAtomicBatchAdapter(execution).executeAtomicBatch;
 
     await expect(batch([])).resolves.toEqual([]);
     expect(exclusiveCalls()).toBe(0);
