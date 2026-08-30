@@ -47,9 +47,34 @@ function buildAtomicSql(
   );
 }
 
+function atomicNodeClaimGateParameterCount(
+  entries: readonly AtomicNodeClaimEntry[],
+  entryCount: number,
+): number {
+  const selected = entries.slice(0, entryCount);
+  const gate = buildAtomicNodeClaimGatePredicateWithSchemaFence(
+    sqliteTables,
+    selected,
+    schemaFence,
+    drizzleSql.empty(),
+  );
+  const first = selected[0];
+  if (first === undefined) throw new Error("Expected a claimed member");
+  const query = buildAtomicNodeBatchWithSchemaFence(
+    sqliteTables,
+    [first.entry],
+    "2026-08-25T00:00:00.000Z",
+    schemaFence,
+    drizzleSql.empty(),
+    "count",
+    gate,
+  );
+  return new SQLiteSyncDialect().sqlToQuery(query).params.length;
+}
+
 describe("schema-fenced atomic node batch SQL", () => {
-  it("pins the D1 disjoint-claim gate ceiling at six members", () => {
-    const entries = Array.from({ length: 7 }, (_value, index) => {
+  it("pins family-scoped D1 claim-gate ceilings", () => {
+    const disjointEntries = Array.from({ length: 8 }, (_value, index) => {
       const id = `person-${index}`;
       return {
         ordinal: index,
@@ -74,30 +99,45 @@ describe("schema-fenced atomic node batch SQL", () => {
         },
       } as const satisfies AtomicNodeClaimEntry;
     });
-    const parameterCounts = [6, 7].map((entryCount) => {
-      const selected = entries.slice(0, entryCount);
-      const gate = buildAtomicNodeClaimGatePredicateWithSchemaFence(
-        sqliteTables,
-        selected,
-        schemaFence,
-        drizzleSql.empty(),
-      );
-      const first = selected[0];
-      if (first === undefined) throw new Error("Expected a claimed member");
-      const query = buildAtomicNodeBatchWithSchemaFence(
-        sqliteTables,
-        [first.entry],
-        "2026-08-25T00:00:00.000Z",
-        schemaFence,
-        drizzleSql.empty(),
-        "count",
-        gate,
-      );
-      return new SQLiteSyncDialect().sqlToQuery(query).params.length;
+    const uniquenessEntries = Array.from({ length: 15 }, (_value, index) => {
+      const id = `unique-person-${index}`;
+      return {
+        ordinal: index,
+        entry: {
+          idSource: "generated",
+          params: {
+            graphId: schemaFence.graphId,
+            kind: "Person",
+            id,
+            props: { name: `Unique Person ${index}` },
+          },
+          claim: {
+            axis: "Person",
+            constraintName: "person-name",
+            key: `unique-name-${index}`,
+            placement: "pre-insert",
+            verdict: {
+              kind: "uniqueness",
+              fields: ["name"],
+              probeAxes: ["Person"],
+            },
+          },
+        },
+      } as const satisfies AtomicNodeClaimEntry;
     });
 
-    expect(parameterCounts[0]).toBeLessThanOrEqual(100);
-    expect(parameterCounts[1]).toBeGreaterThan(100);
+    expect(
+      atomicNodeClaimGateParameterCount(disjointEntries, 7),
+    ).toBeLessThanOrEqual(100);
+    expect(
+      atomicNodeClaimGateParameterCount(disjointEntries, 8),
+    ).toBeGreaterThan(100);
+    expect(
+      atomicNodeClaimGateParameterCount(uniquenessEntries, 14),
+    ).toBeLessThanOrEqual(100);
+    expect(
+      atomicNodeClaimGateParameterCount(uniquenessEntries, 15),
+    ).toBeGreaterThan(100);
   });
 
   it("refuses empty and mixed-source statement inputs", () => {

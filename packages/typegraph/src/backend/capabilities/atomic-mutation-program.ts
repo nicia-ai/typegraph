@@ -37,9 +37,10 @@ export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
 
 /** Closed claim envelope advertised by one node mutation executor. */
 export type AtomicNodeClaimSupport = Readonly<{
-  families: readonly AtomicNodeClaimFamily[];
-  /** Maximum members carrying one supported claim in a single program. */
-  maxEntries: number;
+  /** Pure-family member ceilings; an omitted family is unsupported. */
+  maxEntriesByFamily: Readonly<Partial<Record<AtomicNodeClaimFamily, number>>>;
+  /** Total claimed-member ceiling when more than one family is present. */
+  maxMixedEntries?: number;
 }>;
 
 function isAtomicNodeClaimFamily(
@@ -55,7 +56,6 @@ function assertAtomicNodeClaimFamilies(
 ): void {
   if (
     Array.isArray(value) &&
-    value.length > 0 &&
     new Set(value).size === value.length &&
     value.every((claimFamily) => isAtomicNodeClaimFamily(claimFamily))
   ) {
@@ -89,16 +89,59 @@ function assertAtomicNodeClaimSupport(
     );
   }
   const support = value as Readonly<Record<PropertyKey, unknown>>;
-  assertNonnegativeIntegerLimit(
-    family,
-    "claimSupport.maxEntries",
-    support["maxEntries"],
-  );
-  assertAtomicNodeClaimFamilies(
-    family,
-    "claimSupport.families",
-    support["families"],
-  );
+  const maxEntriesByFamily = support["maxEntriesByFamily"];
+  if (
+    typeof maxEntriesByFamily !== "object" ||
+    maxEntriesByFamily === null ||
+    Array.isArray(maxEntriesByFamily)
+  ) {
+    throw new ConfigurationError(
+      `Atomic mutation program family ${family} requires family-scoped claim limits.`,
+      {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family,
+        limit: "claimSupport.maxEntriesByFamily",
+        value: maxEntriesByFamily,
+      },
+    );
+  }
+  const familyLimits = Object.entries(maxEntriesByFamily);
+  for (const [claimFamily, limit] of familyLimits) {
+    if (!isAtomicNodeClaimFamily(claimFamily)) {
+      throw new ConfigurationError(
+        `Atomic mutation program family ${family} received an unknown claim family.`,
+        {
+          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+          family,
+          limit: "claimSupport.maxEntriesByFamily",
+          value: claimFamily,
+        },
+      );
+    }
+    assertNonnegativeIntegerLimit(
+      family,
+      `claimSupport.maxEntriesByFamily.${claimFamily}`,
+      limit,
+    );
+  }
+  if (support["maxMixedEntries"] !== undefined) {
+    if (familyLimits.length < 2) {
+      throw new ConfigurationError(
+        `Atomic mutation program family ${family} cannot advertise mixed claims without two claim families.`,
+        {
+          code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+          family,
+          limit: "claimSupport.maxMixedEntries",
+          value: support["maxMixedEntries"],
+        },
+      );
+    }
+    assertNonnegativeIntegerLimit(
+      family,
+      "claimSupport.maxMixedEntries",
+      support["maxMixedEntries"],
+    );
+  }
 }
 
 /** The one owner of claim-verdict to advertised-family correlation. */
@@ -112,13 +155,34 @@ export function supportsAtomicNodeClaims(
   claims: readonly NodeInsertClaim[],
 ): boolean {
   if (claims.length === 0) return true;
-  return (
-    support !== undefined &&
-    claims.length <= support.maxEntries &&
-    claims.every((claim) =>
-      support.families.includes(atomicNodeClaimFamily(claim)),
+  if (support === undefined) return false;
+  const families = new Set(claims.map((claim) => atomicNodeClaimFamily(claim)));
+  if (
+    [...families].some(
+      (family) => support.maxEntriesByFamily[family] === undefined,
     )
+  ) {
+    return false;
+  }
+  if (families.size > 1) {
+    return (
+      support.maxMixedEntries !== undefined &&
+      claims.length <= support.maxMixedEntries
+    );
+  }
+  const family = families.values().next().value;
+  return (
+    family !== undefined &&
+    claims.length <= (support.maxEntriesByFamily[family] ?? 0)
   );
+}
+
+/** Whether an executor can admit at least one member of a claim family. */
+export function supportsAtomicNodeClaimFamily(
+  support: AtomicNodeClaimSupport | undefined,
+  family: AtomicNodeClaimFamily,
+): boolean {
+  return (support?.maxEntriesByFamily[family] ?? 0) > 0;
 }
 
 /** One normalized node-create member supplied to a semantic executor. */

@@ -11,11 +11,11 @@ import {
   type AtomicEdgeMutationProgramExecutor,
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicNodeBatchExecutor as BackendAtomicNodeBatchExecutor,
-  type AtomicNodeClaimFamily,
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   resolveAtomicMutationPrograms,
+  supportsAtomicNodeClaimFamily,
 } from "../../backend/capabilities/atomic-mutation-program";
 import {
   type GraphBackend,
@@ -83,9 +83,7 @@ export function resolveAtomicNodeBatchExecutor(
   if (input.inputs.length === 0 || input.identityEnabled) return;
   const profile = resolveAtomicMutationProfile(input);
   if (profile?.createNodes === undefined) return;
-  const supportedClaimFamilies = new Set<AtomicNodeClaimFamily>(
-    profile.createNodes.claimSupport?.families,
-  );
+  const claimSupport = profile.createNodes.claimSupport;
 
   const registrations = input.inputs.map((item) => {
     if (!hasOwnKey(input.graph.nodes, item.kind)) return false;
@@ -93,7 +91,7 @@ export function resolveAtomicNodeBatchExecutor(
     if (registration === undefined) return false;
     if (
       input.registry.getDisjointKinds(item.kind).length > 0 &&
-      !supportedClaimFamilies.has("disjointness")
+      !supportsAtomicNodeClaimFamily(claimSupport, "disjointness")
     ) {
       return false;
     }
@@ -108,7 +106,7 @@ export function resolveAtomicNodeBatchExecutor(
       registration !== false && (registration.unique ?? []).length > 0,
   );
   if (hasDeclaredClaims) {
-    if (!supportedClaimFamilies.has("uniqueness")) return;
+    if (!supportsAtomicNodeClaimFamily(claimSupport, "uniqueness")) return;
     if (input.inputs.some((item) => item.id !== undefined)) return;
     if (
       registrations.some(

@@ -243,8 +243,8 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
     const [store] = await createStoreWithSchema(disjointGraph, directBackend);
     expect(
       resolveBundledRootAtomicMutationPrograms(directBackend)?.createNodes
-        ?.claimSupport?.families,
-    ).toContain("disjointness");
+        ?.claimSupport?.maxEntriesByFamily.disjointness,
+    ).toBeGreaterThan(0);
     await directBackend.insertNode({
       graphId: disjointGraph.id,
       kind: Rival.kind,

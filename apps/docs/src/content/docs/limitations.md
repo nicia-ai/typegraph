@@ -342,6 +342,9 @@ claim-free batches, generated-ID batches with one same-kind uniqueness claim,
 and single-disjoint-claim batches. This is a measured submission count, not a
 wall-clock RTT benchmark;
 fallback paths are intentionally not assigned a latency claim.
+On D1, the family-scoped bind budgets admit 14 pure same-kind uniqueness
+claims, seven pure disjointness claims, or seven claimed members when both
+families occur in one batch. Larger batches retain the portable behavior.
 
 Direct `edges.bulkInsert()` and `edges.bulkCreate()` calls on those same roots
 use one schema-fenced native program when history and revision capture are

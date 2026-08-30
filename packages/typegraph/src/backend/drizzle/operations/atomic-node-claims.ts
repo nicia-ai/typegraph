@@ -56,8 +56,6 @@ const CLAIM_INPUT_COLUMNS = [
 const DISJOINT_INPUT_COLUMNS = [
   "ordinal",
   "graph_id",
-  "axis",
-  "constraint_name",
   "key",
   "node_id",
   "attempted_kind",
@@ -172,8 +170,6 @@ function disjointInputValues(
         (
           ${item.ordinal},
           ${item.entry.params.graphId},
-          ${claim.axis},
-          ${claim.constraintName},
           ${claim.key},
           ${item.entry.params.id},
           ${item.entry.params.kind},

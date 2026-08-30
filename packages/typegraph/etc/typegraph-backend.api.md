@@ -290,8 +290,8 @@ export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
 
 // @public
 export type AtomicNodeClaimSupport = Readonly<{
-    families: readonly AtomicNodeClaimFamily[];
-    maxEntries: number;
+    maxEntriesByFamily: Readonly<Partial<Record<AtomicNodeClaimFamily, number>>>;
+    maxMixedEntries?: number;
 }>;
 
 // @public

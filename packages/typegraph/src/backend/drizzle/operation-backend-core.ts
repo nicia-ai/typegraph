@@ -61,12 +61,14 @@ import {
   type AtomicNodeBatchEntry,
   type AtomicNodeBatchExecutor,
   type AtomicNodeBatchInput,
+  type AtomicNodeClaimSupport,
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeDeleteBatchInput,
   AtomicNodeDeleteRestrictedRefusalError,
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   type AtomicNodeResolvedUpdateEntry,
+  supportsAtomicNodeClaims,
 } from "../capabilities/atomic-mutation-program";
 import type {
   AtomicSqlProgram,
@@ -165,6 +167,22 @@ import {
 const ATOMIC_EDGE_CLAIM_PARAM_COUNT = 18;
 const ATOMIC_EDGE_CONVERGENCE_PARAM_COUNT = 14;
 const ATOMIC_EDGE_CONVERGENCE_FIXED_PARAM_COUNT = 2;
+const ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT = 6;
+const ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT = 6;
+const ATOMIC_NODE_INSERT_PARAM_COUNT = 9;
+const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
+
+function chunkAtomicNodeEntriesByIdSource(
+  entries: readonly AtomicNodeBatchEntry[],
+  chunkSize: number,
+): readonly (readonly AtomicNodeBatchEntry[])[] {
+  return (["generated", "caller"] as const).flatMap((idSource) =>
+    chunkArray(
+      entries.filter((entry) => entry.idSource === idSource),
+      chunkSize,
+    ),
+  );
+}
 
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
@@ -1449,14 +1467,32 @@ export function createCommonOperationBackend(
     ) ?
       {}
     : (() => {
-        const maxClaimedEntries = Math.max(
+        const maxPureUniquenessEntries = Math.max(
           0,
-          Math.floor((options.maxBindParameters - 13) / 14),
+          Math.floor(
+            (options.maxBindParameters -
+              ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
+              ATOMIC_NODE_INSERT_PARAM_COUNT) /
+              ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
+          ),
+        );
+        const maxDisjointOrMixedEntries = Math.max(
+          0,
+          Math.floor(
+            (options.maxBindParameters -
+              ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
+              ATOMIC_NODE_INSERT_PARAM_COUNT) /
+              (ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT +
+                ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT),
+          ),
         );
         const claimSupport = Object.freeze({
-          families: ["disjointness", "uniqueness"] as const,
-          maxEntries: maxClaimedEntries,
-        });
+          maxEntriesByFamily: Object.freeze({
+            disjointness: maxDisjointOrMixedEntries,
+            uniqueness: maxPureUniquenessEntries,
+          }),
+          maxMixedEntries: maxDisjointOrMixedEntries,
+        } satisfies AtomicNodeClaimSupport);
 
         function orderedAtomicNodeClaims(
           entries: readonly AtomicNodeBatchEntry[],
@@ -1632,12 +1668,9 @@ export function createCommonOperationBackend(
           );
 
           const timestamp = nowIso();
-          const sourceGroups = ["generated", "caller"] as const;
-          const chunks = sourceGroups.flatMap((idSource) =>
-            chunkArray(
-              input.entries.filter((entry) => entry.idSource === idSource),
-              batchConfig.nodeSchemaFencedInsertBatchSize,
-            ),
+          const chunks = chunkAtomicNodeEntriesByIdSource(
+            input.entries,
+            batchConfig.nodeSchemaFencedInsertBatchSize,
           );
           const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
           const atomicSchemaFenceLockClause = requireDefined(
@@ -1645,29 +1678,45 @@ export function createCommonOperationBackend(
           );
           const claimEntries = orderedAtomicNodeClaims(input.entries);
           if (claimEntries.length > 0) {
-            if (claimEntries.length > maxClaimedEntries) {
+            const claims = claimEntries.map((item) =>
+              requireDefined(item.entry.claim),
+            );
+            if (!supportsAtomicNodeClaims(claimSupport, claims)) {
               throw new CompilerInvariantError(
                 "Atomic node claim program exceeded its declared member budget.",
                 {
                   claimedEntries: claimEntries.length,
-                  maxClaimedEntries,
+                  claimSupport,
                 },
               );
             }
+            const disjointEntries = claimEntries.filter(
+              (item) => item.entry.claim?.verdict.kind === "disjointness",
+            );
             const claimChunkSize = Math.max(
               1,
-              Math.floor((options.maxBindParameters - 2) / 6),
+              Math.floor(
+                (options.maxBindParameters - 2) /
+                  ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
+              ),
             );
+            const gateParameterCount =
+              ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT * claimEntries.length +
+              ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT *
+                disjointEntries.length;
             const nodeChunkSize = Math.max(
               1,
               Math.floor(
                 (options.maxBindParameters -
-                  4 -
-                  14 * claimEntries.length) /
-                  9,
+                  ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT -
+                  gateParameterCount) /
+                  ATOMIC_NODE_INSERT_PARAM_COUNT,
               ),
             );
-            const nodeChunks = chunkArray(input.entries, nodeChunkSize);
+            const nodeChunks = chunkAtomicNodeEntriesByIdSource(
+              input.entries,
+              nodeChunkSize,
+            );
             const claimChunks = chunkArray(claimEntries, claimChunkSize);
             const claimSlots: AtomicSqlProgram<
               AtomicNodeProgramSlot,
@@ -1693,9 +1742,6 @@ export function createCommonOperationBackend(
                 })),
               }),
             }));
-            const disjointEntries = claimEntries.filter(
-              (item) => item.entry.claim?.verdict.kind === "disjointness",
-            );
             const disjointSlots: AtomicSqlProgram<
               AtomicNodeProgramSlot,
               unknown

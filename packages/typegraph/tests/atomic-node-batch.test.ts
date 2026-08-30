@@ -321,6 +321,24 @@ describe("plain node batch store contract", () => {
     }
   });
 
+  it("keeps mixed-ID disjoint creates in one atomic submission", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      const created = await fixture.store.nodes.Person.bulkCreate([
+        { id: "caller", props: { name: "Caller" } },
+        { props: { name: "Generated" } },
+      ]);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(created.map((node) => node.name)).toEqual(["Caller", "Generated"]);
+      expect(created[0]?.id).toBe("caller");
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
   it("releases disjoint claims inside the native delete program", async () => {
     const fixture = await createDisjointFixture();
     try {

@@ -52,6 +52,7 @@ import {
   type AtomicNodeDeleteBatchExecutor,
   AtomicNodeDeleteRestrictedRefusalError,
   type AtomicNodeResolvedUpdateBatchExecutor,
+  supportsAtomicNodeClaims,
 } from "../../backend/capabilities/atomic-mutation-program";
 import { isBundledRootAutocommitEligible } from "../../backend/capabilities/autocommit-single-statement";
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
@@ -1709,12 +1710,10 @@ function atomicNodeBatchEntries(
       claim,
     });
   }
-  if (
-    entries.filter((entry) => entry.claim !== undefined).length >
-    (claimSupport?.maxEntries ?? 0)
-  ) {
-    return;
-  }
+  const claims = entries.flatMap((entry) =>
+    entry.claim === undefined ? [] : [entry.claim],
+  );
+  if (!supportsAtomicNodeClaims(claimSupport, claims)) return;
   return entries;
 }
 

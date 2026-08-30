@@ -182,17 +182,21 @@ atomic convergence contract across multiple submissions.
 
 Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL also expose native write programs for eligible
-ingestion calls. Plain schema-managed `nodes.bulkInsert(items)` and
-`nodes.bulkCreate(items)` run one schema-fenced atomic program when the node has
-no claims, Operational Identity, history, revision, or projections. Neon HTTP,
-D1, and libSQL submit that program as one transport batch. Session-capable
+ingestion calls. Schema-managed `nodes.bulkInsert(items)` and
+`nodes.bulkCreate(items)` run one schema-fenced atomic program when each claimed
+member owes at most one advertised same-kind uniqueness or disjointness claim
+and the node has no Operational Identity, history, revision, or projections.
+Neon HTTP, D1, and libSQL submit that program as one transport batch. Session-capable
 PostgreSQL runs its statements on one pinned Drizzle transaction, with one SQL
 statement per bind-budget chunk. The batch may use generated IDs,
 caller-supplied IDs, or a mixture of both; `bulkCreate()` restores its rows to
-input order.
-Claimed, projected, identity-enabled, history/revision-tracked, constrained,
-and other unsupported node shapes retain their existing transaction or
-fallback path.
+input order. Cloudflare D1's 100-parameter budget admits 14 pure same-kind
+uniqueness claims, seven pure disjointness claims, or seven claimed members in
+a mixed-family batch. Multiple claims per member, wider uniqueness scopes,
+projected, identity-enabled, history/revision-tracked, and other unsupported
+node shapes retain their existing transaction or fallback path. These ceilings
+are distinct from the seven unique durable edge identities admitted by the
+convergence program above.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
 schema-fenced atomic program when the store has no history or revision capture.

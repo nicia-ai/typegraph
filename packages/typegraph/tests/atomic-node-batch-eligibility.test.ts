@@ -192,8 +192,8 @@ function createFakeAtomicNodeBatch(onCall?: () => void) {
   }
   return Object.assign(execute, {
     claimSupport: {
-      families: ["disjointness", "uniqueness"] as const,
-      maxEntries: 6,
+      maxEntriesByFamily: { disjointness: 6, uniqueness: 6 },
+      maxMixedEntries: 6,
     },
   });
 }
