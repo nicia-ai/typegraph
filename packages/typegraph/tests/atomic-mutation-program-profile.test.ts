@@ -478,6 +478,33 @@ describe("atomic mutation program execution profile", () => {
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
   });
 
+  it("refuses malformed node projection support before publishing the profile", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    const updateNodes = (() =>
+      Promise.resolve([])) as unknown as AtomicNodeResolvedUpdateBatchExecutor;
+    Object.defineProperties(updateNodes, {
+      maxEntries: { configurable: true, value: 1 },
+      projectionSupport: {
+        configurable: true,
+        value: { families: ["fulltext", "fulltext"] },
+      },
+    });
+
+    const error = captureThrown(() =>
+      registerAtomicMutationPrograms(backend, { updateNodes }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect(error).toMatchObject({
+      details: {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family: "updateNodes",
+        limit: "projectionSupport.families",
+      },
+    });
+    expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
+  });
+
   it("refuses malformed edge mutation limits before publishing the profile", () => {
     const backend = createCustomAtomicRoot();
     registerAtomicSqlProgram(backend, emptyAtomicBatch);

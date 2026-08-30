@@ -210,6 +210,7 @@ import {
   type InternalOperationBackend,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
+import { resolveAtomicNodeProjectionRequirements } from "./operations/node-projections";
 import {
   createSqliteOperationStrategy,
   tableExistsFromRow,
@@ -792,6 +793,33 @@ function createSqliteOperationBackend(
       toUniqueRow,
     },
     schemaFenceLockClause: sql.raw(""),
+    async beforeAtomicNodeProjections(creates, updates): Promise<void> {
+      const requirements = resolveAtomicNodeProjectionRequirements(
+        creates,
+        updates,
+      );
+      if (requirements === undefined) return;
+      await contributionMaterializer.assertNodeInsertProjections(
+        requirements.graphId,
+        requirements,
+      );
+    },
+    async refuseAtomicNodeProjectionError(
+      creates,
+      updates,
+      error,
+    ): Promise<never> {
+      const requirements = resolveAtomicNodeProjectionRequirements(
+        creates,
+        updates,
+      );
+      if (requirements === undefined) throw error;
+      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
+        requirements.graphId,
+        requirements,
+        error,
+      );
+    },
   });
 
   const executeCompiled = executionAdapter.executeCompiled;
@@ -1450,6 +1478,7 @@ export function createSqliteBackend(
   const operationStrategy = createSqliteOperationStrategy(
     tables,
     fulltextStrategy,
+    vectorStrategy,
   );
   // Serialize top-level operations per backend on every transaction-capable
   // mode ("sql", "drizzle", "do-sqlite"). SQLite is single-writer, and two

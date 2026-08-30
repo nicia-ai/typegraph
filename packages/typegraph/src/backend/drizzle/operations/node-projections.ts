@@ -3,8 +3,18 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 import { CompilerInvariantError } from "../../../errors";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
-import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
+import type {
+  VectorSlot,
+  VectorStrategy,
+} from "../../../query/dialect/vector-strategy";
+import { chunk as chunkArray } from "../../../utils/array";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
+import { encodeTupleKey } from "../../../utils/tuple-key";
+import type {
+  AtomicNodeBatchEntry,
+  AtomicNodeProjection,
+  AtomicNodeResolvedUpdateEntry,
+} from "../../capabilities/atomic-mutation-program";
 import type {
   InsertNodeParams,
   ManagedNodeCreatePlan,
@@ -23,6 +33,250 @@ import { buildInsertUniqueFromSource } from "./uniques";
 
 /** The fixed alias shared by the node CTE and all projection strategies. */
 export const INSERTED_NODE_PROJECTION_CTE_ALIAS = "inserted_node";
+
+type AtomicNodeProjectionEntry = Readonly<{
+  graphId: string;
+  kind: string;
+  id: string;
+  projections: readonly AtomicNodeProjection[];
+}>;
+
+function atomicProjectionEntries(
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+): readonly AtomicNodeProjectionEntry[] {
+  return [
+    ...creates.map((entry) => ({
+      graphId: entry.params.graphId,
+      kind: entry.params.kind,
+      id: entry.params.id,
+      projections: entry.projections ?? [],
+    })),
+    ...updates.map((entry) => ({
+      graphId: entry.graphId,
+      kind: entry.kind,
+      id: entry.id,
+      projections: entry.projections ?? [],
+    })),
+  ];
+}
+
+export type AtomicNodeProjectionRequirements = Readonly<{
+  graphId: string;
+  fulltext: boolean;
+  vectorSlots: readonly VectorSlot[];
+}>;
+
+/** One owner for the physical derived-storage requirements of a node program. */
+export function resolveAtomicNodeProjectionRequirements(
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+): AtomicNodeProjectionRequirements | undefined {
+  const entries = atomicProjectionEntries(creates, updates);
+  const projected = entries.filter((entry) => entry.projections.length > 0);
+  const first = projected[0];
+  if (first === undefined) return;
+  if (projected.some((entry) => entry.graphId !== first.graphId)) {
+    throw new CompilerInvariantError(
+      "An atomic node projection program crossed graph storage.",
+    );
+  }
+  const vectorSlots = new Map<string, VectorSlot>();
+  for (const entry of projected) {
+    for (const projection of entry.projections) {
+      if (projection.kind !== "embedding") continue;
+      const slot = {
+        graphId: entry.graphId,
+        nodeKind: entry.kind,
+        fieldPath: projection.fieldPath,
+        dimensions: projection.dimensions,
+        metric: projection.metric,
+        indexType: projection.indexType,
+      };
+      vectorSlots.set(
+        encodeTupleKey([
+          slot.graphId,
+          slot.nodeKind,
+          slot.fieldPath,
+          String(slot.dimensions),
+          slot.metric,
+          slot.indexType,
+        ]),
+        slot,
+      );
+    }
+  }
+  return {
+    graphId: first.graphId,
+    fulltext: projected.some((entry) =>
+      entry.projections.some((projection) => projection.kind === "fulltext"),
+    ),
+    vectorSlots: [...vectorSlots.values()],
+  };
+}
+
+/**
+ * Builds every derived-storage statement owed by an atomic node postimage set.
+ *
+ * Row mutation and this statement list share one atomic transport submission.
+ * The terminal row-postimage assertion is the commit gate: stale or moved row
+ * work deliberately aborts the submission and rolls these transitions back.
+ */
+export function buildAtomicNodeProjectionStatements(
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  dialect: SqlDialect,
+  fulltextTableName: string,
+  fulltextStrategy: FulltextStrategy,
+  vectorStrategy: VectorStrategy | undefined,
+  chunkSize: number,
+): readonly SQL[] | undefined {
+  const entries = atomicProjectionEntries(creates, updates);
+  const fulltextGroups = new Map<
+    string,
+    Readonly<{
+      graphId: string;
+      nodeKind: string;
+      upserts: { nodeId: string; content: string; language: string }[];
+      deletes: string[];
+    }>
+  >();
+  const embeddingGroups = new Map<
+    string,
+    Readonly<{
+      slot: Readonly<{
+        graphId: string;
+        nodeKind: string;
+        fieldPath: string;
+        dimensions: number;
+        metric: Extract<AtomicNodeProjection, { kind: "embedding" }>["metric"];
+        indexType: Extract<
+          AtomicNodeProjection,
+          { kind: "embedding" }
+        >["indexType"];
+      }>;
+      upserts: { nodeId: string; embedding: readonly number[] }[];
+      deletes: string[];
+    }>
+  >();
+
+  for (const entry of entries) {
+    for (const projection of entry.projections) {
+      if (projection.kind === "fulltext") {
+        const key = encodeTupleKey([entry.graphId, entry.kind]);
+        const group = fulltextGroups.get(key) ?? {
+          graphId: entry.graphId,
+          nodeKind: entry.kind,
+          upserts: [],
+          deletes: [],
+        };
+        if (projection.action === "upsert") {
+          group.upserts.push({
+            nodeId: entry.id,
+            content: projection.content,
+            language: projection.language,
+          });
+        } else {
+          group.deletes.push(entry.id);
+        }
+        fulltextGroups.set(key, group);
+        continue;
+      }
+      if (vectorStrategy === undefined) return;
+      const slot = {
+        graphId: entry.graphId,
+        nodeKind: entry.kind,
+        fieldPath: projection.fieldPath,
+        dimensions: projection.dimensions,
+        metric: projection.metric,
+        indexType: projection.indexType,
+      };
+      const key = encodeTupleKey([
+        slot.graphId,
+        slot.nodeKind,
+        slot.fieldPath,
+        String(slot.dimensions),
+        slot.metric,
+        slot.indexType,
+      ]);
+      const group = embeddingGroups.get(key) ?? {
+        slot,
+        upserts: [],
+        deletes: [],
+      };
+      if (projection.action === "upsert") {
+        group.upserts.push({
+          nodeId: entry.id,
+          embedding: projection.embedding,
+        });
+      } else {
+        group.deletes.push(entry.id);
+      }
+      embeddingGroups.set(key, group);
+    }
+  }
+
+  const statements: SQL[] = [];
+  for (const group of fulltextGroups.values()) {
+    for (const rows of chunkArray(group.upserts, chunkSize)) {
+      statements.push(
+        ...fulltextStrategy
+          .buildBatchUpsert(
+            fulltextTableName,
+            { graphId: group.graphId, nodeKind: group.nodeKind, rows },
+            timestamp,
+          )
+          .map((statement) => toDrizzleSql(statement, dialect)),
+      );
+    }
+    for (const nodeIds of chunkArray(group.deletes, chunkSize)) {
+      statements.push(
+        ...fulltextStrategy
+          .buildBatchDelete(fulltextTableName, {
+            graphId: group.graphId,
+            nodeKind: group.nodeKind,
+            nodeIds,
+          })
+          .map((statement) => toDrizzleSql(statement, dialect)),
+      );
+    }
+  }
+  for (const group of embeddingGroups.values()) {
+    for (const rows of chunkArray(group.upserts, chunkSize)) {
+      const fragments =
+        vectorStrategy?.buildUpsertBatch === undefined ?
+          rows.flatMap((row) =>
+            vectorStrategy?.buildUpsert(
+              group.slot,
+              {
+                ...group.slot,
+                nodeId: row.nodeId,
+                embedding: row.embedding,
+              },
+              timestamp,
+            ) ?? [],
+          )
+        : vectorStrategy.buildUpsertBatch(
+            group.slot,
+            { ...group.slot, rows },
+            timestamp,
+          );
+      statements.push(
+        ...fragments.map((statement) => toDrizzleSql(statement, dialect)),
+      );
+    }
+    for (const nodeIds of chunkArray(group.deletes, chunkSize)) {
+      statements.push(
+        ...(vectorStrategy?.buildDeleteBatch(group.slot, {
+          ...group.slot,
+          nodeIds,
+        }) ?? []).map((statement) => toDrizzleSql(statement, dialect)),
+      );
+    }
+  }
+  return statements;
+}
 
 function refuseUnknownManagedNodeMode(mode: never): never {
   throw new CompilerInvariantError(

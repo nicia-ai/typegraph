@@ -16,6 +16,7 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   NodeInsertClaim,
+  NodeInsertProjection,
   NodeRow,
   SchemaWriteFenceParams,
   TransactionBackend,
@@ -34,6 +35,47 @@ export type AtomicNodeBatchResultMode = "count" | "rows";
 
 /** Independently provable claim semantics accepted by a node mutation family. */
 export type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
+
+/** Independently provable derived-storage families in a node program. */
+export type AtomicNodeProjectionFamily = "embedding" | "fulltext";
+
+/**
+ * One complete derived-storage transition attached to a node postimage.
+ *
+ * Identity stays on the containing row entry so a projection cannot target a
+ * different node. Embedding deletes are explicit because updates and
+ * caller-id resurrection can remove a value that previously existed.
+ */
+export type AtomicNodeProjection =
+  | Extract<NodeInsertProjection, { kind: "fulltext" }>
+  | Readonly<{
+      kind: "embedding";
+      action: "upsert";
+      fieldPath: string;
+      embedding: readonly number[];
+      dimensions: number;
+      metric: Extract<NodeInsertProjection, { kind: "embedding" }>["metric"];
+      indexType: Extract<
+        NodeInsertProjection,
+        { kind: "embedding" }
+      >["indexType"];
+    }>
+  | Readonly<{
+      kind: "embedding";
+      action: "delete";
+      fieldPath: string;
+      dimensions: number;
+      metric: Extract<NodeInsertProjection, { kind: "embedding" }>["metric"];
+      indexType: Extract<
+        NodeInsertProjection,
+        { kind: "embedding" }
+      >["indexType"];
+    }>;
+
+/** Closed derived-storage envelope advertised by one node executor. */
+export type AtomicNodeProjectionSupport = Readonly<{
+  families: readonly AtomicNodeProjectionFamily[];
+}>;
 
 /** Closed claim envelope advertised by one node mutation executor. */
 export type AtomicNodeClaimSupport = Readonly<{
@@ -144,6 +186,50 @@ function assertAtomicNodeClaimSupport(
   }
 }
 
+function isAtomicNodeProjectionFamily(
+  value: unknown,
+): value is AtomicNodeProjectionFamily {
+  return value === "embedding" || value === "fulltext";
+}
+
+function assertAtomicNodeProjectionSupport(
+  family: "createNodes" | "mutateNodes" | "updateNodes",
+  value: unknown,
+): void {
+  if (value === undefined) return;
+  if (typeof value !== "object" || value === null) {
+    throw new ConfigurationError(
+      `Atomic mutation program family ${family} requires projectionSupport metadata.`,
+      {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family,
+        limit: "projectionSupport",
+        value,
+      },
+    );
+  }
+  const families = (value as Readonly<Record<PropertyKey, unknown>>)[
+    "families"
+  ];
+  if (
+    !Array.isArray(families) ||
+    new Set(families).size !== families.length ||
+    !families.every((projectionFamily) =>
+      isAtomicNodeProjectionFamily(projectionFamily),
+    )
+  ) {
+    throw new ConfigurationError(
+      `Atomic mutation program family ${family} requires distinct projection families.`,
+      {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family,
+        limit: "projectionSupport.families",
+        value: families,
+      },
+    );
+  }
+}
+
 /** The one owner of claim-verdict to advertised-family correlation. */
 function atomicNodeClaimFamily(claim: NodeInsertClaim): AtomicNodeClaimFamily {
   return claim.verdict.kind;
@@ -185,12 +271,25 @@ export function supportsAtomicNodeClaimFamily(
   return (support?.maxEntriesByFamily[family] ?? 0) > 0;
 }
 
+/** Whether one executor explicitly accepts every normalized projection. */
+export function supportsAtomicNodeProjections(
+  support: AtomicNodeProjectionSupport | undefined,
+  families: readonly AtomicNodeProjectionFamily[],
+): boolean {
+  if (families.length === 0) return true;
+  if (support === undefined) return false;
+  const advertised = new Set(support.families);
+  return families.every((family) => advertised.has(family));
+}
+
 /** One normalized node-create member supplied to a semantic executor. */
 export type AtomicNodeBatchEntry = Readonly<{
   idSource: AtomicNodeBatchIdSource;
   params: InsertNodeParams;
   /** The one claim this row owes in the currently supported native shape. */
   claim?: NodeInsertClaim;
+  /** Complete derived-storage transitions owed by the written postimage. */
+  projections?: readonly AtomicNodeProjection[];
 }>;
 
 /** Complete schema-fenced input to an atomic node-create family. */
@@ -204,6 +303,8 @@ export type AtomicNodeBatchInput = Readonly<{
 export interface AtomicNodeBatchExecutor {
   /** Claim semantics this executor can prove, omitted for plain rows only. */
   readonly claimSupport?: AtomicNodeClaimSupport;
+  /** Derived-storage families this executor carries inside its program. */
+  readonly projectionSupport?: AtomicNodeProjectionSupport;
   (
     input: AtomicNodeBatchInput & Readonly<{ resultMode: "count" }>,
   ): Promise<number>;
@@ -300,11 +401,15 @@ export type AtomicNodeResolvedUpdateEntry = Readonly<{
   id: string;
   props: Readonly<Record<string, unknown>>;
   expectedVersion: number;
+  /** Complete derived-storage transitions owed by the written postimage. */
+  projections?: readonly AtomicNodeProjection[];
 }>;
 
 /** Executes a complete eligible resolved node update set. */
 export interface AtomicNodeResolvedUpdateBatchExecutor {
   readonly maxEntries: number;
+  /** Derived-storage families this executor carries inside its program. */
+  readonly projectionSupport?: AtomicNodeProjectionSupport;
   (
     input: Readonly<{
       entries: readonly AtomicNodeResolvedUpdateEntry[];
@@ -340,6 +445,8 @@ export type AtomicNodeResolvedMutationSetResult = Readonly<{
 export interface AtomicNodeResolvedMutationSetExecutor {
   /** Maximum total members the terminal postimage assertion can prove. */
   readonly maxEntries: number;
+  /** Derived-storage families this executor carries inside its program. */
+  readonly projectionSupport?: AtomicNodeProjectionSupport;
   (
     input: Readonly<{
       creates: readonly AtomicNodeBatchEntry[];
@@ -671,10 +778,9 @@ function assertAtomicMutationProgramLimits(
 ): void {
   if (executor === undefined) return;
   if (family === "createNodes") {
-    assertAtomicNodeClaimSupport(
-      family,
-      (executor as AtomicNodeBatchExecutor).claimSupport,
-    );
+    const nodeExecutor = executor as AtomicNodeBatchExecutor;
+    assertAtomicNodeClaimSupport(family, nodeExecutor.claimSupport);
+    assertAtomicNodeProjectionSupport(family, nodeExecutor.projectionSupport);
     return;
   }
   if (family === "deleteNodes") {
@@ -700,6 +806,16 @@ function assertAtomicMutationProgramLimits(
       "maxEntries",
       (executor as Readonly<{ maxEntries: unknown }>).maxEntries,
     );
+    if (family === "updateNodes" || family === "mutateNodes") {
+      assertAtomicNodeProjectionSupport(
+        family,
+        (
+          executor as
+            | AtomicNodeResolvedMutationSetExecutor
+            | AtomicNodeResolvedUpdateBatchExecutor
+        ).projectionSupport,
+      );
+    }
     return;
   }
   if (family === "mutateEdges") {

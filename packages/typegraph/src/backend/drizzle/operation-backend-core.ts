@@ -65,6 +65,7 @@ import {
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeDeleteBatchInput,
   AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodeProjectionSupport,
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   type AtomicNodeResolvedUpdateEntry,
@@ -171,6 +172,11 @@ const ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT = 6;
 const ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT = 6;
 const ATOMIC_NODE_INSERT_PARAM_COUNT = 9;
 const ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT = 4;
+// The bundled fulltext lowering is the widest projection statement today.
+// Compilation below independently refuses any strategy that exceeds the
+// resulting budget, so a future strategy cannot silently invalidate this cost.
+const ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT = 4;
+const ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY = 6;
 
 function chunkAtomicNodeEntriesByIdSource(
   entries: readonly AtomicNodeBatchEntry[],
@@ -628,6 +634,21 @@ type CreateCommonOperationBackendOptions = Readonly<{
         error: unknown,
       ) => Promise<never>)
     | undefined;
+  /** Read-only materialization gate for an atomic node projection program. */
+  beforeAtomicNodeProjections?:
+    | ((
+        creates: readonly AtomicNodeBatchEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+      ) => Promise<void>)
+    | undefined;
+  /** Maps physical projection failures without weakening row classifications. */
+  refuseAtomicNodeProjectionError?:
+    | ((
+        creates: readonly AtomicNodeBatchEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+        error: unknown,
+      ) => Promise<never>)
+    | undefined;
   tableExistenceCache?: TableExistenceCacheOptions | undefined;
 }>;
 
@@ -823,6 +844,7 @@ type AtomicResolvedMutationSlot<TRow> =
   | Readonly<{ kind: "created"; rows: readonly TRow[] }>
   | Readonly<{ kind: "updated"; rows: readonly TRow[] }>
   | Readonly<{ kind: "postimages"; rows: readonly TRow[] }>
+  | Readonly<{ kind: "projection" }>
   | Readonly<{ kind: "assertion" }>;
 
 function assembleAtomicResolvedMutationSet<TRow>(
@@ -891,6 +913,7 @@ function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
     updateIds: readonly string[];
     compileCreate: (chunk: readonly TCreate[]) => CompiledAtomicSqlStatement;
     compileUpdate: (updates: readonly TUpdate[]) => CompiledAtomicSqlStatement;
+    compiledSidecars?: readonly CompiledAtomicSqlStatement[];
     compileAssertion: () => CompiledAtomicSqlStatement;
     compilePostimages: () => CompiledAtomicSqlStatement;
     decodeRow: (row: Readonly<Record<string, unknown>>) => TRow;
@@ -925,6 +948,11 @@ function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
     slots: [
       ...createSlots,
       ...updateSlots,
+      ...(input.compiledSidecars ?? []).map((statement) => ({
+        statement,
+        cardinality: "none" as const,
+        decode: () => ({ kind: "projection" as const }),
+      })),
       {
         statement: input.compileAssertion(),
         cardinality: "none",
@@ -948,6 +976,88 @@ function buildAtomicResolvedMutationSetProgram<TRow, TCreate, TUpdate>(
         input.rowId,
       ),
   };
+}
+
+type AtomicNodeProjectionSlot = Readonly<{ kind: "projection" }>;
+
+function compileAtomicNodeProjectionSlots(
+  operationStrategy: CommonOperationStrategy,
+  execution: OperationBackendExecution,
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  maxBindParameters: number,
+): readonly Readonly<{
+  statement: CompiledAtomicSqlStatement;
+  cardinality: "none";
+  decode: () => AtomicNodeProjectionSlot;
+}>[] {
+  if (
+    !creates.some((entry) => (entry.projections?.length ?? 0) > 0) &&
+    !updates.some((entry) => (entry.projections?.length ?? 0) > 0)
+  ) {
+    return [];
+  }
+  const chunkSize = Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - ATOMIC_NODE_PROJECTION_FIXED_PARAM_COUNT) /
+        ATOMIC_NODE_PROJECTION_MAX_PARAM_COUNT_PER_ENTRY,
+    ),
+  );
+  const statements = operationStrategy.buildAtomicNodeProjectionStatements(
+    creates,
+    updates,
+    timestamp,
+    chunkSize,
+  );
+  if (statements === undefined) {
+    throw new CompilerInvariantError(
+      "An eligible atomic node projection family has no dialect lowering.",
+    );
+  }
+  return statements.map((statement) => {
+    const compiled = execution.compile(statement);
+    if (compiled.params.length > maxBindParameters) {
+      throw new CompilerInvariantError(
+        "An atomic node projection statement exceeded the backend bind budget.",
+        {
+          actual: compiled.params.length,
+          maximum: maxBindParameters,
+        },
+      );
+    }
+    return {
+      statement: compiled,
+      cardinality: "none" as const,
+      decode: () => ({ kind: "projection" as const }),
+    };
+  });
+}
+
+function isAtomicNodePostimageRefusal(
+  error: unknown,
+  operationStrategy: CommonOperationStrategy,
+  hasProjectionAssertion: boolean,
+): boolean {
+  return (
+    isNotNullColumnViolation(
+      error,
+      operationStrategy.atomicNodeRefusalConstraints.mutationPostimage,
+    ) ||
+    (hasProjectionAssertion &&
+      isDuplicatePrimaryKeyError(
+        error,
+        operationStrategy.primaryKeyConstraints.nodes,
+      )) ||
+    (hasProjectionAssertion &&
+      error instanceof DatabaseOperationError &&
+      error.details.reason === "duplicate_key" &&
+      isDuplicatePrimaryKeyError(
+        error.cause,
+        operationStrategy.primaryKeyConstraints.nodes,
+      ))
+  );
 }
 
 async function withAtomicEdgeDurableRefusalClassification<T>(
@@ -1258,6 +1368,48 @@ export function createCommonOperationBackend(
   } = options;
   const nowIso = options.nowIso ?? defaultNowIso;
 
+  async function runAtomicNodeProjectionProgram<TResult>(
+    input: Readonly<{
+      creates: readonly AtomicNodeBatchEntry[];
+      updates: readonly AtomicNodeResolvedUpdateEntry[];
+      hasProjections: boolean;
+      run: () => Promise<TResult>;
+      postimageRefusal?: () => TResult;
+    }>,
+  ): Promise<TResult> {
+    if (!input.hasProjections && input.postimageRefusal === undefined) {
+      return input.run();
+    }
+    if (input.hasProjections) {
+      await options.beforeAtomicNodeProjections?.(input.creates, input.updates);
+    }
+    try {
+      return await input.run();
+    } catch (error) {
+      if (
+        input.postimageRefusal !== undefined &&
+        isAtomicNodePostimageRefusal(
+          error,
+          operationStrategy,
+          input.hasProjections,
+        )
+      ) {
+        return input.postimageRefusal();
+      }
+      if (
+        input.hasProjections &&
+        options.refuseAtomicNodeProjectionError !== undefined
+      ) {
+        return options.refuseAtomicNodeProjectionError(
+          input.creates,
+          input.updates,
+          error,
+        );
+      }
+      throw error;
+    }
+  }
+
   // Positive results are cached by default because on standard schemas the
   // recorded DDL is stable; Postgres disables that cache because visibility is
   // search_path-sensitive. Missing tables stay re-probable unless a caller opts
@@ -1493,6 +1645,9 @@ export function createCommonOperationBackend(
           }),
           maxMixedEntries: maxDisjointOrMixedEntries,
         } satisfies AtomicNodeClaimSupport);
+        const projectionSupport = Object.freeze({
+          families: operationStrategy.atomicNodeProjectionFamilies,
+        } satisfies AtomicNodeProjectionSupport);
 
         function orderedAtomicNodeClaims(
           entries: readonly AtomicNodeBatchEntry[],
@@ -1542,6 +1697,8 @@ export function createCommonOperationBackend(
               rows: readonly AtomicNodeDisjointConflictRow[];
             }>
           | Readonly<{ kind: "cleanup" }>
+          | AtomicNodeProjectionSlot
+          | Readonly<{ kind: "assertion" }>
           | Readonly<{
               kind: "counts";
               chunk: readonly AtomicNodeBatchEntry[];
@@ -1702,8 +1859,7 @@ export function createCommonOperationBackend(
             );
             const gateParameterCount =
               ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT * claimEntries.length +
-              ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT *
-                disjointEntries.length;
+              ATOMIC_NODE_DISJOINT_INPUT_PARAM_COUNT * disjointEntries.length;
             const nodeChunkSize = Math.max(
               1,
               Math.floor(
@@ -1904,7 +2060,7 @@ export function createCommonOperationBackend(
           }
 
           if (input.resultMode === "count") {
-            const slots = chunks.map((chunk) => ({
+            const nodeSlots = chunks.map((chunk) => ({
               statement: execution.compile(
                 operationStrategy.buildAtomicNodeBatchWithSchemaFence(
                   chunk,
@@ -1915,25 +2071,61 @@ export function createCommonOperationBackend(
                 ),
               ),
               cardinality: "many" as const,
-              decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
-                rows.length,
+              decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+                kind: "counts" as const,
+                chunk,
+                count: rows.length,
+              }),
             }));
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+            );
+            const assertionSlots =
+              projectionSlots.length === 0 ?
+                []
+              : chunks.map((chunk) => ({
+                  statement: execution.compile(
+                    operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                      chunk,
+                      [],
+                      timestamp,
+                      input.schemaFence,
+                    ),
+                  ),
+                  cardinality: "none" as const,
+                  decode: () => ({ kind: "assertion" as const }),
+                }));
             const program = {
-              slots,
-              assemble(counts: readonly number[]): number {
+              slots: [...nodeSlots, ...projectionSlots, ...assertionSlots],
+              assemble(results: readonly AtomicNodeProgramSlot[]): number {
+                const counts = results.flatMap((result) =>
+                  result.kind === "counts" ? [result.count] : [],
+                );
                 if (counts.every((count) => count === 0)) return 0;
                 assertCompleteAtomicChunks(counts, chunks, "node");
                 return input.entries.length;
               },
-            } satisfies AtomicSqlProgram<number, number>;
-            return withAtomicNodeBatchClassifications(
-              () => atomicExecutor.execute(program),
-              input.entries,
-              operationStrategy,
-            );
+            } satisfies AtomicSqlProgram<AtomicNodeProgramSlot, number>;
+            return runAtomicNodeProjectionProgram({
+              creates: input.entries,
+              updates: [],
+              hasProjections: projectionSlots.length > 0,
+              run: () =>
+                withAtomicNodeBatchClassifications(
+                  () => atomicExecutor.execute(program),
+                  input.entries,
+                  operationStrategy,
+                ),
+              postimageRefusal: () => 0,
+            });
           }
 
-          const slots = chunks.map((chunk) => ({
+          const nodeSlots = chunks.map((chunk) => ({
             statement: execution.compile(
               operationStrategy.buildAtomicNodeBatchWithSchemaFence(
                 chunk,
@@ -1944,14 +2136,43 @@ export function createCommonOperationBackend(
               ),
             ),
             cardinality: "many" as const,
-            decode: (rows: readonly Readonly<Record<string, unknown>>[]) =>
-              rows.map((row) => rowMappers.toNodeRow(row)),
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+              kind: "rows" as const,
+              chunk,
+              rows: rows.map((row) => rowMappers.toNodeRow(row)),
+            }),
           }));
+          const projectionSlots = compileAtomicNodeProjectionSlots(
+            operationStrategy,
+            execution,
+            input.entries,
+            [],
+            timestamp,
+            options.maxBindParameters,
+          );
+          const assertionSlots =
+            projectionSlots.length === 0 ?
+              []
+            : chunks.map((chunk) => ({
+                statement: execution.compile(
+                  operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                    chunk,
+                    [],
+                    timestamp,
+                    input.schemaFence,
+                  ),
+                ),
+                cardinality: "none" as const,
+                decode: () => ({ kind: "assertion" as const }),
+              }));
           const program = {
-            slots,
+            slots: [...nodeSlots, ...projectionSlots, ...assertionSlots],
             assemble(
-              rowChunks: readonly (readonly NodeRow[])[],
+              results: readonly AtomicNodeProgramSlot[],
             ): readonly NodeRow[] {
+              const rowChunks = results.flatMap((result) =>
+                result.kind === "rows" ? [result.rows] : [],
+              );
               if (rowChunks.every((rows) => rows.length === 0)) return [];
               const rows = rowChunks.flat();
               if (rows.length !== input.entries.length) {
@@ -1991,17 +2212,27 @@ export function createCommonOperationBackend(
                 return row;
               });
             },
-          } satisfies AtomicSqlProgram<readonly NodeRow[], readonly NodeRow[]>;
-          return withAtomicNodeBatchClassifications(
-            () => atomicExecutor.execute(program),
-            input.entries,
-            operationStrategy,
-          );
+          } satisfies AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            readonly NodeRow[]
+          >;
+          return runAtomicNodeProjectionProgram({
+            creates: input.entries,
+            updates: [],
+            hasProjections: projectionSlots.length > 0,
+            run: () =>
+              withAtomicNodeBatchClassifications(
+                () => atomicExecutor.execute(program),
+                input.entries,
+                operationStrategy,
+              ),
+            postimageRefusal: () => [],
+          });
         }
 
         const boundedExecuteAtomicNodeBatch = Object.assign(
           executeAtomicNodeBatch,
-          { claimSupport },
+          { claimSupport, projectionSupport },
         );
         return {
           executeAtomicNodeBatch: boundedExecuteAtomicNodeBatch,
@@ -2280,7 +2511,8 @@ export function createCommonOperationBackend(
               if (
                 entry.params.graphId !== input.schemaFence.graphId ||
                 entry.match.kind !== "durable" ||
-                entry.params.matchIdentity?.name !== entry.match.identity.name ||
+                entry.params.matchIdentity?.name !==
+                  entry.match.identity.name ||
                 entry.params.matchIdentity.key !== entry.match.identity.key
               ) {
                 throw new CompilerInvariantError(
@@ -2389,8 +2621,7 @@ export function createCommonOperationBackend(
                   }
                   return {
                     row,
-                    outcome:
-                      row.id === entry.params.id ? "created" : "found",
+                    outcome: row.id === entry.params.id ? "created" : "found",
                   };
                 });
               },
@@ -2522,10 +2753,7 @@ export function createCommonOperationBackend(
         const executeAtomicNodeDeleteBatchWithClaimCleanup = Object.assign(
           executeAtomicNodeDeleteBatch,
           {
-            releasedClaimFamilies: [
-              "disjointness",
-              "uniqueness",
-            ] as const,
+            releasedClaimFamilies: ["disjointness", "uniqueness"] as const,
           },
         );
         return {
@@ -2570,11 +2798,20 @@ export function createCommonOperationBackend(
                 { entries: input.entries.length, maxEntries },
               );
             }
+            const timestamp = nowIso();
             const query = operationStrategy.buildAtomicNodeResolvedUpdateBatch(
               input.entries,
-              nowIso(),
+              timestamp,
               input.schemaFence,
               atomicSchemaFenceLockClause,
+            );
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              [],
+              input.entries,
+              timestamp,
+              options.maxBindParameters,
             );
             const program = {
               slots: [
@@ -2583,18 +2820,53 @@ export function createCommonOperationBackend(
                   cardinality: "many" as const,
                   decode: (
                     rows: readonly Readonly<Record<string, unknown>>[],
-                  ) => rows.map((row) => rowMappers.toNodeRow(row)),
+                  ) => ({
+                    kind: "updated" as const,
+                    rows: rows.map((row) => rowMappers.toNodeRow(row)),
+                  }),
                 },
+                ...projectionSlots,
+                ...(projectionSlots.length === 0 ?
+                  []
+                : [
+                    {
+                      statement: execution.compile(
+                        operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                          [],
+                          input.entries,
+                          timestamp,
+                          input.schemaFence,
+                        ),
+                      ),
+                      cardinality: "none" as const,
+                      decode: () => ({ kind: "assertion" as const }),
+                    },
+                  ]),
               ],
-              assemble: (results: readonly (readonly NodeRow[])[]) =>
-                results[0] ?? [],
+              assemble: (
+                results: readonly AtomicResolvedMutationSlot<NodeRow>[],
+              ) =>
+                results.flatMap((result) =>
+                  result.kind === "updated" ? result.rows : [],
+                ),
             } satisfies AtomicSqlProgram<
-              readonly NodeRow[],
+              AtomicResolvedMutationSlot<NodeRow>,
               readonly NodeRow[]
             >;
-            return atomicExecutor.execute(program);
+            return runAtomicNodeProjectionProgram({
+              creates: [],
+              updates: input.entries,
+              hasProjections: projectionSlots.length > 0,
+              run: () => atomicExecutor.execute(program),
+              postimageRefusal: () => [],
+            });
           },
-          { maxEntries },
+          {
+            maxEntries,
+            projectionSupport: Object.freeze({
+              families: operationStrategy.atomicNodeProjectionFamilies,
+            } satisfies AtomicNodeProjectionSupport),
+          },
         ) satisfies AtomicNodeResolvedUpdateBatchExecutor;
 
         return { executeAtomicNodeResolvedUpdateBatch };
@@ -2641,6 +2913,14 @@ export function createCommonOperationBackend(
 
             const timestamp = nowIso();
             const firstIdentity = input.creates[0]?.params ?? input.updates[0];
+            const projectionSlots = compileAtomicNodeProjectionSlots(
+              operationStrategy,
+              execution,
+              input.creates,
+              input.updates,
+              timestamp,
+              options.maxBindParameters,
+            );
             const program = buildAtomicResolvedMutationSetProgram({
               entity: "node",
               createChunks: chunkArray(
@@ -2669,6 +2949,7 @@ export function createCommonOperationBackend(
                     atomicSchemaFenceLockClause,
                   ),
                 ),
+              compiledSidecars: projectionSlots.map((slot) => slot.statement),
               compileAssertion: () =>
                 execution.compile(
                   operationStrategy.buildAssertAtomicNodeMutationPostimages(
@@ -2694,26 +2975,25 @@ export function createCommonOperationBackend(
               rowId: (row) => row.id,
             });
 
-            try {
-              return await withAtomicNodeBatchClassifications(
-                () => atomicExecutor.execute(program),
-                input.creates,
-                operationStrategy,
-              );
-            } catch (error) {
-              if (
-                isNotNullColumnViolation(
-                  error,
-                  operationStrategy.atomicNodeRefusalConstraints
-                    .mutationPostimage,
-                )
-              ) {
-                return { created: [], updated: [] };
-              }
-              throw error;
-            }
+            return runAtomicNodeProjectionProgram({
+              creates: input.creates,
+              updates: input.updates,
+              hasProjections: projectionSlots.length > 0,
+              run: () =>
+                withAtomicNodeBatchClassifications(
+                  () => atomicExecutor.execute(program),
+                  input.creates,
+                  operationStrategy,
+                ),
+              postimageRefusal: () => ({ created: [], updated: [] }),
+            });
           },
-          { maxEntries },
+          {
+            maxEntries,
+            projectionSupport: Object.freeze({
+              families: operationStrategy.atomicNodeProjectionFamilies,
+            } satisfies AtomicNodeProjectionSupport),
+          },
         ) satisfies AtomicNodeResolvedMutationSetExecutor;
 
         return { executeAtomicNodeResolvedMutationSet };
@@ -3008,7 +3288,8 @@ export function createCommonOperationBackend(
           input: AtomicEdgeConvergenceInput,
         ): Promise<readonly AtomicEdgeConvergenceResult[]>;
         async function executeAtomicEdgeMutation(
-          input: AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
+          input:
+            AtomicEdgeResolvedMutationSetInput | AtomicEdgeConvergenceInput,
         ): Promise<
           | AtomicEdgeResolvedMutationSetResult
           | readonly AtomicEdgeConvergenceResult[]

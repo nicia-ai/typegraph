@@ -257,6 +257,7 @@ export type AtomicNodeBatchEntry = Readonly<{
     idSource: AtomicNodeBatchIdSource;
     params: InsertNodeParams;
     claim?: NodeInsertClaim;
+    projections?: readonly AtomicNodeProjection[];
 }>;
 
 // @public
@@ -270,6 +271,7 @@ export interface AtomicNodeBatchExecutor {
         resultMode: "rows";
     }>): Promise<readonly NodeRow[]>;
     readonly claimSupport?: AtomicNodeClaimSupport;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
 }
 
 // @public
@@ -313,6 +315,42 @@ export class AtomicNodeDeleteRestrictedRefusalError extends Error {
 }
 
 // @public
+export type AtomicNodeProjection = Extract<NodeInsertProjection, {
+    kind: "fulltext";
+}> | Readonly<{
+    kind: "embedding";
+    action: "upsert";
+    fieldPath: string;
+    embedding: readonly number[];
+    dimensions: number;
+    metric: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["metric"];
+    indexType: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["indexType"];
+}> | Readonly<{
+    kind: "embedding";
+    action: "delete";
+    fieldPath: string;
+    dimensions: number;
+    metric: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["metric"];
+    indexType: Extract<NodeInsertProjection, {
+        kind: "embedding";
+    }>["indexType"];
+}>;
+
+// @public
+export type AtomicNodeProjectionFamily = "embedding" | "fulltext";
+
+// @public
+export type AtomicNodeProjectionSupport = Readonly<{
+    families: readonly AtomicNodeProjectionFamily[];
+}>;
+
+// @public
 export interface AtomicNodeResolvedMutationSetExecutor {
     // (undocumented)
     (input: Readonly<{
@@ -321,6 +359,7 @@ export interface AtomicNodeResolvedMutationSetExecutor {
         schemaFence: SchemaWriteFenceParams;
     }>): Promise<AtomicNodeResolvedMutationSetResult>;
     readonly maxEntries: number;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
 }
 
 // @public
@@ -338,6 +377,7 @@ export interface AtomicNodeResolvedUpdateBatchExecutor {
     }>): Promise<readonly NodeRow[]>;
     // (undocumented)
     readonly maxEntries: number;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
 }
 
 // @public
@@ -347,6 +387,7 @@ export type AtomicNodeResolvedUpdateEntry = Readonly<{
     id: string;
     props: Readonly<Record<string, unknown>>;
     expectedVersion: number;
+    projections?: readonly AtomicNodeProjection[];
 }>;
 
 // @public

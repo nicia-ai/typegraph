@@ -319,9 +319,11 @@ for (let i = 0; i < items.length; i += BATCH_SIZE) {
 
 Bundled PostgreSQL roots using a recognized session-capable driver, Neon HTTP,
 Cloudflare D1, and libSQL roots can use one schema-fenced native atomic program
-for plain schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()` calls
-when the node has no claims, Operational Identity, history, revision, or
-projections. Session-capable PostgreSQL executes that program on one pinned
+for schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()` calls when the
+node has no Operational Identity, history, or revision work. The program can
+carry either fulltext/vector projections or the supported claim envelope;
+claims and projections together retain the fallback. Session-capable
+PostgreSQL executes that program on one pinned
 transaction; Neon HTTP, D1, and libSQL submit one transport batch. If any batch
 member has a claim, every claimed member must owe exactly one advertised claim
 family: either a `unique` constraint whose scope is the literal `kind` on a
@@ -332,7 +334,7 @@ otherwise be generated, caller-supplied, or mixed, and
 `bulkCreate()` returns rows in input order. This is an internal optimization,
 not a general Store batch API. A
 caller-supplied ID with uniqueness work, multiple claims per member, non-kind
-uniqueness scope, projected or identity-enabled nodes,
+uniqueness scope, claim-plus-projection or identity-enabled nodes,
 history/revision tracking, missing schema-fence support, and other unsupported
 shapes fail closed to the existing transaction or fallback behavior.
 
@@ -369,8 +371,8 @@ is a bounded statement sequence on the pinned session, not one network
 exchange. Update-only sets use a guarded update; sets containing both
 fresh creates and updates include a terminal database assertion that rolls the
 whole exchange back when any guarded postimage is absent. Repeated IDs,
-resurrections, temporal changes, sidecars (including durable edge match
-identity), history/revision capture, ordinary derived backends, and
+resurrections, temporal changes, claims, edge sidecars (including durable edge
+match identity), history/revision capture, ordinary derived backends, and
 unregistered sessions use the interactive path. On D1's 100-parameter budget the native ceiling is 17 total node mutations
 or 6 total edge mutations; larger batches return to the interactive path rather
 than splitting the all-or-nothing guard across autocommit statements. The
@@ -380,13 +382,13 @@ program starts, a savepoint preserves the surrounding transaction for typed
 refusal diagnosis.
 
 Eligible singleton `update()` and `delete()` calls reuse those same registered
-families. Plain node updates, unconstrained non-durable-identity edge updates,
+families. Plain or projected node updates, unconstrained non-durable-identity edge updates,
 all direct edge deletes, and plain restricted node deletes remain two-exchange
 operations—one authoritative read/gate and one atomic mutation—because
 TypeGraph must validate merged update properties and must preserve the rule
 that a missing delete fires no operation hooks. This removes explicit
-transaction transport from the eligible shape; it does not turn sidecar,
-temporal, captured, derived-backend, or caller-transaction writes into
+transaction transport from the eligible shape; it does not turn claims, edge
+sidecars, temporal, captured, derived-backend, or caller-transaction writes into
 autocommit operations.
 
 That singleton update path uses optimistic convergence: the mutation asserts

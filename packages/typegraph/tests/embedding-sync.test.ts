@@ -11,6 +11,7 @@ import {
   deleteNodeEmbeddings,
   type EmbeddingSyncContext,
   getEmbeddingFields,
+  resolveNodeEmbeddingProjectionTransitions,
   syncEmbeddings,
 } from "../src/store/embedding-sync";
 
@@ -193,6 +194,20 @@ describe("syncEmbeddings", () => {
   const schema = z.object({
     name: z.string(),
     embedding: embedding(3),
+  });
+
+  it("classifies invalid values consistently for atomic and portable sync", async () => {
+    const backend = createMockBackend();
+    const ctx = createContext(backend);
+    const invalidProps = { name: "Test", embedding: "not an array" };
+
+    await syncEmbeddings(ctx, schema, invalidProps);
+
+    expect(
+      resolveNodeEmbeddingProjectionTransitions(schema, invalidProps),
+    ).toEqual([]);
+    expect(backend.upsertEmbedding).not.toHaveBeenCalled();
+    expect(backend.deleteEmbedding).not.toHaveBeenCalled();
   });
 
   it("upserts embedding when value is provided", async () => {

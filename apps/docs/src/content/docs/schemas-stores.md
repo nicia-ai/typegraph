@@ -721,14 +721,15 @@ a backend cannot provide it.
 
 For ingestion, bundled PostgreSQL roots using a recognized session-capable
 driver, Neon HTTP, Cloudflare D1, and libSQL roots have a narrower native path
-for plain schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()`:
+for schema-managed `nodes.bulkInsert()` and `nodes.bulkCreate()`:
 generated, caller-supplied, or mixed IDs can run as one schema-fenced atomic
-program when there are no claims, Operational Identity, history, revision, or
-projections. Session-capable PostgreSQL pins the program to one transaction;
+program when there is no Operational Identity, history, or revision work. The
+program can carry fulltext/vector projections or its supported claim envelope,
+but not both yet. Session-capable PostgreSQL pins the program to one transaction;
 Neon HTTP, D1, and libSQL submit one transport batch. `bulkCreate()` restores
 rows to input order. The same program accepts one advertised same-kind
 uniqueness or disjointness claim per member; multiple claims, wider uniqueness
-scopes, projections, identity, and history/revision capture keep the existing
+scopes, claim-plus-projection work, identity, and history/revision capture keep the existing
 transaction or fallback path. This is an internal implementation detail, not a
 general Store batch surface.
 

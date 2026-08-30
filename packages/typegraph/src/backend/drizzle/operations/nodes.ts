@@ -690,13 +690,12 @@ export function buildAtomicNodeResolvedUpdateBatch(
  * Every earlier slot is schema-fenced, but a guarded update can legitimately
  * return no rows when one preimage moved. The transport cannot discover that
  * after committing: this final slot rechecks the complete postimage set and
- * deliberately violates the created node's NOT NULL created_at column when it is
- * incomplete, forcing the native batch to roll every preceding insert/update
- * back. Its dedicated sentinel keeps create-collision classification distinct
- * and the hot write path away from the schema registry; the duplicate primary
- * key is an independent refusal if the timestamp invariant is ever weakened. A
- * stale fence matches no marker row and remains the program's ordinary all-zero
- * diagnostic signal.
+ * deliberately violates the node table's NOT NULL created_at column when it is
+ * incomplete or the fence is stale, forcing the native batch to roll every
+ * preceding row and projection statement back. The refusal row is built from
+ * expected postimage constants rather than a created database row, so the same
+ * assertion protects create-only, update-only, and mixed programs even when a
+ * stale fence prevented every row mutation.
  */
 export function buildAssertAtomicNodeMutationPostimages(
   tables: Tables,
@@ -706,54 +705,84 @@ export function buildAssertAtomicNodeMutationPostimages(
   schemaFence: SchemaWriteFenceParams,
 ): SQL {
   const { nodes, schemaVersions } = tables;
-  const firstCreate = creates[0];
-  if (firstCreate === undefined) return sql`SELECT 1 WHERE FALSE`;
-  const first = atomicNodeCreatePostimage(firstCreate, timestamp);
   const entries = [
-    first,
-    ...creates
-      .slice(1)
-      .map((entry) => atomicNodeCreatePostimage(entry, timestamp)),
+    ...creates.map((entry) => atomicNodeCreatePostimage(entry, timestamp)),
     ...updates.map((entry) => atomicNodeUpdatePostimage(entry, timestamp)),
   ];
-  const expectedRows = entries.map(
-    (entry) => sql`
-      (
-            ${nodes.id} = ${entry.id}
-            AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, entry.propsJson)}
-            AND ${nodes.version} = ${entry.version}
-            AND ${nodes.updatedAt} = ${entry.updatedAt}
-          )
-    `,
-  );
+  const first = entries[0];
+  if (first === undefined) return sql`SELECT 1 WHERE FALSE`;
+  if (entries.some((entry) => entry.graphId !== schemaFence.graphId)) {
+    throw new CompilerInvariantError(
+      "An atomic node postimage assertion cannot span graph fences.",
+    );
+  }
+  const expectedByKind = new Map<
+    string,
+    (
+      | Readonly<{
+          kind: "create";
+          postimage: ReturnType<typeof atomicNodeCreatePostimage>;
+        }>
+      | Readonly<{
+          kind: "update";
+          postimage: ReturnType<typeof atomicNodeUpdatePostimage>;
+        }>
+    )[]
+  >();
+  for (const entry of creates) {
+    const postimage = atomicNodeCreatePostimage(entry, timestamp);
+    const expected = expectedByKind.get(postimage.kind) ?? [];
+    expected.push({ kind: "create", postimage });
+    expectedByKind.set(postimage.kind, expected);
+  }
+  for (const entry of updates) {
+    const postimage = atomicNodeUpdatePostimage(entry, timestamp);
+    const expected = expectedByKind.get(postimage.kind) ?? [];
+    expected.push({ kind: "update", postimage });
+    expectedByKind.set(postimage.kind, expected);
+  }
+  const expectedKinds = [...expectedByKind].map(([kind, expected]) => {
+    const expectedRows = expected.map(
+      ({ kind: operation, postimage }) => sql`
+        (
+          ${nodes.id} = ${postimage.id}
+          AND ${nodes.props} = ${castBoundValueForColumn(nodes.props, postimage.propsJson)}
+          ${
+          operation === "update" ?
+            sql`AND ${nodes.version} = ${postimage.version}`
+          : sql.empty()
+        }
+          AND ${nodes.updatedAt} = ${postimage.updatedAt}
+        )
+      `,
+    );
+    return sql`(${nodes.kind} = ${kind} AND (${sql.join(expectedRows, sql` OR `)}))`;
+  });
 
   return sql`
     INSERT INTO ${nodes} (${nodeColumnList(nodes)})
     SELECT
-      ${nodes.graphId},
-      ${nodes.kind},
-      ${nodes.id},
-      ${nodes.props},
-      ${nodes.version},
-      ${nodes.validFrom},
-      ${nodes.validTo},
+      ${first.graphId},
+      ${first.kind},
+      ${first.id},
+      ${castBoundValueForColumn(nodes.props, first.propsJson)},
+      ${first.version},
       NULL,
-      ${nodes.updatedAt}
-    FROM ${nodes}
-    CROSS JOIN ${schemaVersions}
-    WHERE ${nodes.graphId} = ${firstCreate.params.graphId}
-      AND ${nodes.kind} = ${firstCreate.params.kind}
-      AND ${nodes.id} = ${firstCreate.params.id}
-      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
-      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
-      AND ${schemaVersions.isActive} = TRUE
-      AND (
+      NULL,
+      NULL,
+      ${first.updatedAt}
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM ${schemaVersions}
+        WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+          AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+          AND ${schemaVersions.isActive} = TRUE
+      ) OR (
         SELECT COUNT(*)
         FROM ${nodes}
-        WHERE ${nodes.graphId} = ${first.graphId}
-          AND ${nodes.kind} = ${first.kind}
+        WHERE ${nodes.graphId} = ${schemaFence.graphId}
           AND ${nodes.deletedAt} IS NULL
-          AND (${sql.join(expectedRows, sql` OR `)})
+          AND (${sql.join(expectedKinds, sql` OR `)})
       ) <> ${entries.length}
   `;
 }

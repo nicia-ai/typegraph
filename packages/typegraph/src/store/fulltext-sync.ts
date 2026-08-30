@@ -83,7 +83,7 @@ export function computeFulltextContent(
 export function resolveNodeFulltextProjection(
   schema: z.ZodType,
   props: Record<string, unknown>,
-): NodeInsertProjection | undefined {
+): Extract<NodeInsertProjection, { kind: "fulltext" }> | undefined {
   if (getSearchableFields(schema).length === 0) return undefined;
   const computed = computeFulltextContent(schema, props);
   return computed === undefined ?
