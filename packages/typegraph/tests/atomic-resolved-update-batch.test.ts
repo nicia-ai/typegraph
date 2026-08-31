@@ -96,7 +96,7 @@ describe("atomic resolved update batches", () => {
     const profile = requireDefined(
       resolveBundledRootAtomicMutationPrograms(backend),
     );
-    return { backend, db, profile, store };
+    return { backend, client, db, profile, store };
   }
 
   it("gives singleton convergence two additional attempts", () => {
@@ -132,6 +132,143 @@ describe("atomic resolved update batches", () => {
     expect(rows.map((row) => rowPropsToObject(row.props)["score"])).toEqual([
       10, 10,
     ]);
+  });
+
+  it("updates node and edge sets beyond D1 statement ceilings", async () => {
+    const { client, db, store } = await fixture();
+    const nodes = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 18 }, (_value, index) => ({
+        id: `node-${index}`,
+        props: { name: `Node ${index}`, score: index },
+      })),
+    );
+    const [from, to] = nodes;
+    const edges = await store.edges.relates.bulkCreate(
+      Array.from({ length: 7 }, (_value, index) => ({
+        id: `edge-${index}`,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: `Edge ${index}` },
+      })),
+    );
+    const budgetedBackend = createSqliteBackend(db, {
+      capabilities: { maxBindParameters: 100 },
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const [root] = await createVerifiedStore(graph, budgetedBackend);
+    const batch = vi.spyOn(client, "batch");
+
+    const updatedNodes = await root.nodes.Person.bulkUpsertById(
+      nodes.map((node) => ({
+        id: node.id,
+        props: { name: node.name, score: node.score + 100 },
+      })),
+    );
+    const updatedEdges = await root.edges.relates.bulkUpsertById(
+      edges.map((edge) => ({
+        id: edge.id,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: `${edge.label} updated` },
+      })),
+    );
+
+    expect(updatedNodes.map((node) => node.score)).toEqual(
+      Array.from({ length: 18 }, (_value, index) => index + 100),
+    );
+    expect(updatedEdges.map((edge) => edge.label)).toEqual(
+      Array.from({ length: 7 }, (_value, index) => `Edge ${index} updated`),
+    );
+    expect(batch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rolls every node update chunk back when a later preimage moved", async () => {
+    const { backend, db, store } = await fixture();
+    await store.nodes.Person.bulkCreate(
+      Array.from({ length: 18 }, (_value, index) => ({
+        id: `node-${index}`,
+        props: { name: `Node ${index}`, score: index },
+      })),
+    );
+    const before = await requireDefined(backend.getNodes)(
+      graph.id,
+      Person.kind,
+      Array.from({ length: 18 }, (_value, index) => `node-${index}`),
+    );
+    await store.nodes.Person.update("node-17" as never, { score: 999 });
+    const budgetedBackend = createSqliteBackend(db, {
+      capabilities: { maxBindParameters: 100 },
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const executor = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(budgetedBackend)?.updateNodes,
+    );
+
+    await expect(
+      executor({
+        entries: before.map((row) => ({
+          graphId: graph.id,
+          kind: row.kind,
+          id: row.id,
+          props: { ...rowPropsToObject(row.props), score: 100 },
+          expectedVersion: row.version,
+        })),
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      store.nodes.Person.getById("node-0" as never),
+    ).resolves.toMatchObject({ score: 0 });
+    await expect(
+      store.nodes.Person.getById("node-17" as never),
+    ).resolves.toMatchObject({ score: 999 });
+  });
+
+  it("rolls every edge update chunk back when a later preimage moved", async () => {
+    const { backend, db, store } = await fixture();
+    const [from, to] = await store.nodes.Person.bulkCreate([
+      { id: "from", props: { name: "From", score: 1 } },
+      { id: "to", props: { name: "To", score: 2 } },
+    ]);
+    await store.edges.relates.bulkCreate(
+      Array.from({ length: 7 }, (_value, index) => ({
+        id: `edge-${index}`,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: `Edge ${index}` },
+      })),
+    );
+    const before = await Promise.all(
+      Array.from({ length: 7 }, (_value, index) =>
+        backend.getEdge(graph.id, `edge-${index}`),
+      ),
+    );
+    await store.edges.relates.update("edge-6" as never, {
+      label: "Concurrent",
+    });
+    const budgetedBackend = createSqliteBackend(db, {
+      capabilities: { maxBindParameters: 100 },
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const executor = requireDefined(
+      resolveBundledRootAtomicMutationPrograms(budgetedBackend)?.updateEdges,
+    );
+
+    await expect(
+      executor({
+        entries: before.map((row) => ({
+          existing: requireDefined(row),
+          props: { label: "Resolved" },
+        })),
+        schemaFence: { graphId: graph.id, expectedVersion: 1 },
+      }),
+    ).resolves.toEqual([]);
+    await expect(
+      store.edges.relates.getById("edge-0" as never),
+    ).resolves.toMatchObject({ label: "Edge 0" });
+    await expect(
+      store.edges.relates.getById("edge-6" as never),
+    ).resolves.toMatchObject({ label: "Concurrent" });
   });
 
   it("routes update-only disjoint kinds through the atomic family", async () => {
@@ -369,7 +506,7 @@ describe("atomic resolved update batches", () => {
     ).resolves.toEqual([]);
   });
 
-  it("pins the D1 eligibility ceilings and refuses durable match identity", async () => {
+  it("chunks beyond D1 statement ceilings and refuses durable match identity", async () => {
     const { db } = await fixture();
     const budgetedBackend = createSqliteBackend(db, {
       capabilities: { maxBindParameters: 100 },
@@ -378,12 +515,18 @@ describe("atomic resolved update batches", () => {
     const profile = requireDefined(
       resolveBundledRootAtomicMutationPrograms(budgetedBackend),
     );
-    expect(requireDefined(profile.updateNodes).maxEntries).toBe(17);
-    expect(requireDefined(profile.updateEdges).maxEntries).toBe(6);
-    expect(requireDefined(profile.mutateNodes).maxEntries).toBe(17);
+    expect(requireDefined(profile.updateNodes).maxEntries).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(requireDefined(profile.updateEdges).maxEntries).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(requireDefined(profile.mutateNodes).maxEntries).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
     expect(requireDefined(profile.mutateEdges).maxEntries).toEqual({
       durableConvergence: 7,
-      resolvedSet: 6,
+      resolvedSet: Number.MAX_SAFE_INTEGER,
     });
 
     const common = {
@@ -410,7 +553,7 @@ describe("atomic resolved update batches", () => {
         ...nodeInput,
         entryCount: 18,
       }),
-    ).toBeUndefined();
+    ).toBe(profile.updateNodes);
     expect(
       resolveAtomicEdgeResolvedUpdateBatchExecutor({
         ...common,
@@ -424,7 +567,7 @@ describe("atomic resolved update batches", () => {
         kind: relates.kind,
         entryCount: 7,
       }),
-    ).toBeUndefined();
+    ).toBe(profile.updateEdges);
     expect(
       resolveAtomicEdgeResolvedUpdateBatchExecutor({
         ...common,
@@ -455,7 +598,7 @@ describe("atomic resolved update batches", () => {
         creates: [nodeCreate],
         updateCount: 17,
       }),
-    ).toBeUndefined();
+    ).toBe(profile.mutateNodes);
     expect(
       resolveAtomicNodeResolvedMutationSetExecutor({
         ...nodeInput,
@@ -495,7 +638,7 @@ describe("atomic resolved update batches", () => {
         creates: [edgeCreate],
         updateCount: 6,
       }),
-    ).toBeUndefined();
+    ).toBe(profile.mutateEdges);
     expect(
       resolveAtomicEdgeResolvedMutationSetExecutor({
         ...common,
@@ -654,11 +797,11 @@ describe("atomic resolved update batches", () => {
       (statement) => dialect.sqlToQuery(statement).params.length,
     );
 
-    // The create statements are independently chunked. These exact counts pin
-    // every unchunked slot at the public D1 ceilings (17 total nodes, 6 total
-    // edges), so the shared maxEntries formula cannot silently become too wide.
+    // Every statement is independently chunked. These exact counts pin each
+    // widest D1-sized slot (17 nodes or 6 edges), so the shared chunk formula
+    // cannot silently become too wide.
     expect(parameterCounts.slice(1, 4)).toEqual([88, 78, 21]);
-    expect(parameterCounts.slice(5)).toEqual([62, 54, 9]);
+    expect(parameterCounts.slice(5)).toEqual([62, 62, 9]);
     for (const parameterCount of parameterCounts) {
       expect(parameterCount).toBeLessThanOrEqual(100);
     }

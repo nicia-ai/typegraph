@@ -5,6 +5,7 @@ import {
   resolveStampedValidityLowerBound,
   resolveStatedValidityLowerBound,
 } from "../../../utils/date";
+import { requireDefined } from "../../../utils/presence";
 import type {
   AtomicEdgeConvergenceEntry,
   AtomicEdgeDeleteBatchInput,
@@ -85,8 +86,8 @@ function atomicEdgeCreatePostimage(
     matchIdentityKey: params.matchIdentity?.key,
     // The temporal inventory requires the owner and its input on one line.
     // prettier-ignore
-    validFrom: resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp),
-    validTo: params.validTo,
+    storedLowerBound: resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp),
+    storedUpperBound: params.validTo,
     createdAt: timestamp,
     updatedAt: timestamp,
   } as const;
@@ -106,6 +107,11 @@ function atomicEdgeUpdatePostimage(
     toKind: existing.to_kind,
     toId: existing.to_id,
     propsJson: JSON.stringify(entry.props),
+    matchIdentityName: existing.match_identity_name,
+    matchIdentityKey: existing.match_identity_key,
+    storedLowerBound: existing.valid_from,
+    storedUpperBound: existing.valid_to,
+    createdAt: existing.created_at,
     updatedAt: timestamp,
   } as const;
 }
@@ -358,7 +364,10 @@ export function buildAtomicConvergeEdges(
 ): SQL {
   const { edges, nodes, schemaVersions } = tables;
   const { entries, timestamp, schemaFence, schemaLockClause } = input;
-  if (entries.length === 0 || entries.some((entry) => entry.match.kind !== "durable")) {
+  if (
+    entries.length === 0 ||
+    entries.some((entry) => entry.match.kind !== "durable")
+  ) {
     throw new CompilerInvariantError(
       "Atomic edge convergence requires at least one durable identity.",
     );
@@ -512,7 +521,10 @@ export function buildAtomicConvergeEdgesTombstoneRefusal(
 ): SQL {
   const { edges, schemaVersions } = tables;
   const { entries, schemaFence, schemaLockClause } = input;
-  if (entries.length === 0 || entries.some((entry) => entry.match.kind !== "durable")) {
+  if (
+    entries.length === 0 ||
+    entries.some((entry) => entry.match.kind !== "durable")
+  ) {
     throw new CompilerInvariantError(
       "Atomic edge tombstone refusal requires at least one durable identity.",
     );
@@ -721,8 +733,8 @@ function buildInsertEdgesBatchWithSchemaFenceStatement(
             ${castBoundValueForColumn(edges.props, postimage.propsJson)},
             ${castBoundValueForColumn(edges.matchIdentityName, sqlNull(postimage.matchIdentityName))},
             ${castBoundValueForColumn(edges.matchIdentityKey, sqlNull(postimage.matchIdentityKey))},
-            ${castBoundValueForColumn(edges.validFrom, sqlNull(postimage.validFrom))},
-            ${castBoundValueForColumn(edges.validTo, sqlNull(postimage.validTo))},
+            ${castBoundValueForColumn(edges.validFrom, sqlNull(postimage.storedLowerBound))},
+            ${castBoundValueForColumn(edges.validTo, sqlNull(postimage.storedUpperBound))},
             ${castBoundValueForColumn(edges.createdAt, postimage.createdAt)},
             ${castBoundValueForColumn(edges.updatedAt, postimage.updatedAt)}
           )
@@ -1120,10 +1132,10 @@ export function buildAtomicEdgeResolvedUpdateBatch(
 
 /**
  * Terminal database assertion for an atomic resolved edge mutation set.
- * A missing guarded update turns the created edge's NOT NULL kind into the
- * rollback sentinel; the duplicate primary key independently refuses the row
- * if that invariant is ever weakened. A stale schema fence still matches no
- * marker row and is diagnosed by the Store from the program's all-zero result.
+ * A missing guarded postimage turns the refusal row's NOT NULL kind into the
+ * rollback sentinel; its duplicate primary key independently refuses the row
+ * when the first input still exists. A stale schema fence is diagnosed by the
+ * Store after the same sentinel rolls the program back.
  */
 export function buildAssertAtomicEdgeMutationPostimages(
   tables: Tables,
@@ -1134,13 +1146,16 @@ export function buildAssertAtomicEdgeMutationPostimages(
 ): SQL {
   const { edges, schemaVersions } = tables;
   const firstCreate = creates[0];
-  if (firstCreate === undefined) return sql`SELECT 1 WHERE FALSE`;
-  const first = atomicEdgeCreatePostimage(firstCreate, timestamp);
+  const firstUpdate = updates[0];
+  if (firstCreate === undefined && firstUpdate === undefined) {
+    return sql`SELECT 1 WHERE FALSE`;
+  }
+  const first =
+    firstCreate === undefined ?
+      atomicEdgeUpdatePostimage(requireDefined(firstUpdate), timestamp)
+    : atomicEdgeCreatePostimage(firstCreate, timestamp);
   const entries = [
-    first,
-    ...creates
-      .slice(1)
-      .map((params) => atomicEdgeCreatePostimage(params, timestamp)),
+    ...creates.map((params) => atomicEdgeCreatePostimage(params, timestamp)),
     ...updates.map((entry) => atomicEdgeUpdatePostimage(entry, timestamp)),
   ];
   const expectedRows = entries.map(
@@ -1161,28 +1176,27 @@ export function buildAssertAtomicEdgeMutationPostimages(
   return sql`
     INSERT INTO ${edges} (${edgeColumnList(edges)})
     SELECT
-      ${edges.graphId},
-      ${edges.id},
+      ${first.graphId},
+      ${first.id},
       NULL,
-      ${edges.fromKind},
-      ${edges.fromId},
-      ${edges.toKind},
-      ${edges.toId},
-      ${edges.props},
-      ${edges.matchIdentityName},
-      ${edges.matchIdentityKey},
-      ${edges.validFrom},
-      ${edges.validTo},
-      ${edges.createdAt},
-      ${edges.updatedAt}
-    FROM ${edges}
-    CROSS JOIN ${schemaVersions}
-    WHERE ${edges.graphId} = ${firstCreate.graphId}
-      AND ${edges.id} = ${firstCreate.id}
-      AND ${schemaVersions.graphId} = ${schemaFence.graphId}
-      AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
-      AND ${schemaVersions.isActive} = TRUE
-      AND (
+      ${first.fromKind},
+      ${first.fromId},
+      ${first.toKind},
+      ${first.toId},
+      ${castBoundValueForColumn(edges.props, first.propsJson)},
+      ${sqlNull(first.matchIdentityName)},
+      ${sqlNull(first.matchIdentityKey)},
+      ${sqlNull(first.storedLowerBound)},
+      ${sqlNull(first.storedUpperBound)},
+      ${first.createdAt},
+      ${first.updatedAt}
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM ${schemaVersions}
+        WHERE ${schemaVersions.graphId} = ${schemaFence.graphId}
+          AND ${schemaVersions.version} = ${schemaFence.expectedVersion}
+          AND ${schemaVersions.isActive} = TRUE
+      ) OR (
         SELECT COUNT(*)
         FROM ${edges}
         WHERE ${edges.graphId} = ${first.graphId}

@@ -94,6 +94,60 @@ describe("atomic resolved mutation sets", () => {
     ]);
   });
 
+  it("keeps oversized D1 mixed sets in one internally chunked program", async () => {
+    const { db, store } = await fixture();
+    const nodes = await store.nodes.Person.bulkCreate(
+      Array.from({ length: 17 }, (_value, index) => ({
+        id: `node-${index}`,
+        props: { name: `Node ${index}`, score: index },
+      })),
+    );
+    const [from, to] = nodes;
+    const edges = await store.edges.relates.bulkCreate(
+      Array.from({ length: 6 }, (_value, index) => ({
+        id: `edge-${index}`,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: `Edge ${index}` },
+      })),
+    );
+    const budgetedBackend = createSqliteBackend(db, {
+      capabilities: { maxBindParameters: 100 },
+      executionProfile: { isSync: false, transactionMode: "none" },
+    });
+    const [root] = await createVerifiedStore(graph, budgetedBackend);
+
+    const nodeResults = await root.nodes.Person.bulkUpsertById([
+      ...nodes.map((node) => ({
+        id: node.id,
+        props: { name: node.name, score: node.score + 100 },
+      })),
+      { id: "node-new", props: { name: "Node New", score: 999 } },
+    ]);
+    const edgeResults = await root.edges.relates.bulkUpsertById([
+      ...edges.map((edge) => ({
+        id: edge.id,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: `${edge.label} updated` },
+      })),
+      {
+        id: "edge-new" as never,
+        from: requireDefined(from),
+        to: requireDefined(to),
+        props: { label: "Edge New" },
+      },
+    ]);
+
+    expect(nodeResults).toHaveLength(18);
+    expect(nodeResults.at(-1)).toMatchObject({ id: "node-new", score: 999 });
+    expect(edgeResults).toHaveLength(7);
+    expect(edgeResults.at(-1)).toMatchObject({
+      id: "edge-new",
+      label: "Edge New",
+    });
+  });
+
   it("rolls a node create back when one guarded update preimage moved", async () => {
     const { backend, store } = await fixture();
     await store.nodes.Person.create(

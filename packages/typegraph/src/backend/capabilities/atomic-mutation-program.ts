@@ -386,6 +386,7 @@ export type AtomicNodeResolvedUpdateEntry = Readonly<{
 
 /** Executes a complete eligible resolved node update set. */
 export interface AtomicNodeResolvedUpdateBatchExecutor {
+  /** Maximum members accepted by one atomic submission, including internal chunks. */
   readonly maxEntries: number;
   /** Derived-storage families this executor carries inside its program. */
   readonly projectionSupport?: AtomicNodeProjectionSupport;
@@ -405,6 +406,7 @@ export type AtomicEdgeResolvedUpdateEntry = Readonly<{
 
 /** Executes a complete eligible resolved edge update set. */
 export interface AtomicEdgeResolvedUpdateBatchExecutor {
+  /** Maximum members accepted by one atomic submission, including internal chunks. */
   readonly maxEntries: number;
   (
     input: Readonly<{
@@ -422,7 +424,7 @@ export type AtomicNodeResolvedMutationSetResult = Readonly<{
 
 /** Executes a complete eligible mixed node create/update set. */
 export interface AtomicNodeResolvedMutationSetExecutor {
-  /** Maximum total members the terminal postimage assertion can prove. */
+  /** Maximum total members accepted across the program's terminal assertions. */
   readonly maxEntries: number;
   /** Derived-storage families this executor carries inside its program. */
   readonly projectionSupport?: AtomicNodeProjectionSupport;

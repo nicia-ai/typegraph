@@ -286,15 +286,15 @@ edge `bulkDelete()` calls likewise submit 1 atomic exchange instead of a
 transaction plus per-row probes/writes. On the portable edge path, one batched
 authoritative read plus one set-based soft delete replaces the former two
 statements per input. Eligible update-only and mixed create/update node and edge
-`bulkUpsertById()` calls submit 2 exchanges regardless of row count within the
-bind budget: one batched preimage read and one atomic mutation exchange. Mixed
+`bulkUpsertById()` calls submit 2 exchanges: one batched preimage read and one
+atomic mutation exchange. Mixed
 sets previously required separate create and update submissions after the read,
-so they fall from 3 exchanges to 2 (33%). The D1 100-parameter budget admits at
-most 17 total node mutations or 6 total edge mutations in that shape. The
-ceiling is all-or-nothing rather than chunked: a larger batch returns to the
-consolidated interactive path because separate autocommit statements could not
-preserve the set's atomic guard. Other backends derive their ceiling from their
-declared parameter budget. The native exchange still
+so they fall from 3 exchanges to 2 (33%). D1's 100-parameter budget admits 17
+node mutations or 6 edge mutations per statement. Larger eligible sets remain
+two exchanges: the mutation program chunks statements inside one atomic batch,
+and a terminal postimage assertion for every chunk rolls the complete
+submission back if any guarded member moved. Other backends derive the
+per-statement chunk size from their declared parameter budget. The native exchange still
 contains the SQL statements needed for inserts and node projection sidecars;
 it groups fulltext and per-vector-slot transitions into set statements and
 submits them as
