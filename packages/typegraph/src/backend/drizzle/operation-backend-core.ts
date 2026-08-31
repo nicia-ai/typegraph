@@ -154,6 +154,11 @@ import type {
   AtomicNodeClaimEntry,
   AtomicNodeClaimOwnerRow,
 } from "./operations/atomic-node-claims";
+import type { AtomicContributionEvidence } from "./operations/contribution-evidence";
+import {
+  ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT,
+  ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
+} from "./operations/contribution-evidence";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -677,8 +682,15 @@ type CreateCommonOperationBackendOptions = Readonly<{
         error: unknown,
       ) => Promise<never>)
     | undefined;
-  /** Read-only materialization gate for an atomic node projection program. */
-  beforeAtomicNodeProjections?:
+  /** Local signature evidence compiled into an atomic projection program. */
+  resolveAtomicNodeProjectionEvidence?:
+    | ((
+        creates: readonly AtomicNodeBatchEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+      ) => Promise<readonly AtomicContributionEvidence[]>)
+    | undefined;
+  /** Failure-only durable marker diagnosis after an atomic refusal rolls back. */
+  diagnoseAtomicNodeProjectionEvidence?:
     | ((
         creates: readonly AtomicNodeBatchEntry[],
         updates: readonly AtomicNodeResolvedUpdateEntry[],
@@ -1146,6 +1158,61 @@ function compileAtomicNodeProjectionSlots(
   });
 }
 
+async function compileAtomicNodeProjectionEvidenceSlots(
+  operationStrategy: CommonOperationStrategy,
+  execution: OperationBackendExecution,
+  creates: readonly AtomicNodeBatchEntry[],
+  updates: readonly AtomicNodeResolvedUpdateEntry[],
+  timestamp: string,
+  maxBindParameters: number,
+  resolveEvidence:
+    | ((
+        creates: readonly AtomicNodeBatchEntry[],
+        updates: readonly AtomicNodeResolvedUpdateEntry[],
+      ) => Promise<readonly AtomicContributionEvidence[]>)
+    | undefined,
+): Promise<
+  readonly Readonly<{
+    statement: CompiledAtomicSqlStatement;
+    cardinality: "none";
+    decode: () => AtomicNodeProjectionSlot;
+  }>[]
+> {
+  if (resolveEvidence === undefined) return [];
+  const evidence = await resolveEvidence(creates, updates);
+  if (evidence.length === 0) return [];
+  const availableBinds =
+    maxBindParameters - ATOMIC_CONTRIBUTION_ASSERTION_FIXED_BIND_COUNT;
+  const chunkSize = Math.floor(
+    availableBinds / ATOMIC_CONTRIBUTION_EVIDENCE_BIND_COUNT,
+  );
+  if (chunkSize < 1) {
+    throw new CompilerInvariantError(
+      "Atomic contribution evidence cannot fit the backend bind budget.",
+      { maximum: maxBindParameters },
+    );
+  }
+  return chunkArray(evidence, chunkSize).map((evidenceChunk) => {
+    const compiled = execution.compile(
+      operationStrategy.buildAssertAtomicNodeProjectionEvidence(
+        timestamp,
+        evidenceChunk,
+      ),
+    );
+    if (compiled.params.length > maxBindParameters) {
+      throw new CompilerInvariantError(
+        "Atomic contribution evidence exceeded the backend bind budget.",
+        { actual: compiled.params.length, maximum: maxBindParameters },
+      );
+    }
+    return {
+      statement: compiled,
+      cardinality: "none" as const,
+      decode: () => ({ kind: "projection" as const }),
+    };
+  });
+}
+
 function isAtomicMutationPostimageRefusal(
   error: unknown,
   operationStrategy: CommonOperationStrategy,
@@ -1483,6 +1550,7 @@ export function createCommonOperationBackend(
     input: Readonly<{
       creates: readonly AtomicNodeBatchEntry[];
       updates: readonly AtomicNodeResolvedUpdateEntry[];
+      operation: "insert" | "update" | "upsert";
       hasProjections: boolean;
       hasPostimageAssertion: boolean;
       run: () => Promise<TResult>;
@@ -1492,12 +1560,31 @@ export function createCommonOperationBackend(
     if (!input.hasProjections && input.postimageRefusal === undefined) {
       return input.run();
     }
-    if (input.hasProjections) {
-      await options.beforeAtomicNodeProjections?.(input.creates, input.updates);
-    }
     try {
       return await input.run();
     } catch (error) {
+      const projectionEvidenceRefusal =
+        input.hasProjections &&
+        isNotNullColumnViolation(
+          error,
+          operationStrategy.atomicNodeRefusalConstraints.projectionEvidence,
+        );
+      if (
+        input.hasProjections &&
+        (projectionEvidenceRefusal || isMissingTableError(error))
+      ) {
+        await options.diagnoseAtomicNodeProjectionEvidence?.(
+          input.creates,
+          input.updates,
+        );
+        if (projectionEvidenceRefusal) {
+          throw new DatabaseOperationError(
+            "Atomic node projection evidence changed before its refusal could be diagnosed.",
+            { operation: input.operation, entity: "node" },
+            { cause: error },
+          );
+        }
+      }
       if (
         input.postimageRefusal !== undefined &&
         isAtomicMutationPostimageRefusal(
@@ -2010,6 +2097,16 @@ export function createCommonOperationBackend(
               timestamp,
               options.maxBindParameters,
             );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                input.entries,
+                [],
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
             // A per-chunk gate can refuse one member while a different chunk
             // remains eligible. Assert every postimage inside the atomic
             // transport so no successful sibling can commit before the Store
@@ -2060,6 +2157,7 @@ export function createCommonOperationBackend(
                   ...nodeSlots,
                   ...cleanupSlots,
                   ...projectionSlots,
+                  ...projectionEvidenceSlots,
                   ...assertionSlots,
                 ],
                 assemble(results: readonly AtomicNodeProgramSlot[]): number {
@@ -2083,6 +2181,7 @@ export function createCommonOperationBackend(
               return runAtomicNodeSidecarProgram({
                 creates: input.entries,
                 updates: [],
+                operation: "insert",
                 hasProjections: projectionSlots.length > 0,
                 hasPostimageAssertion: assertionSlots.length > 0,
                 run: () =>
@@ -2124,6 +2223,7 @@ export function createCommonOperationBackend(
                 ...nodeSlots,
                 ...cleanupSlots,
                 ...projectionSlots,
+                ...projectionEvidenceSlots,
                 ...assertionSlots,
               ],
               assemble(
@@ -2153,6 +2253,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: input.entries,
               updates: [],
+              operation: "insert",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: assertionSlots.length > 0,
               run: () =>
@@ -2191,6 +2292,16 @@ export function createCommonOperationBackend(
               timestamp,
               options.maxBindParameters,
             );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                input.entries,
+                [],
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
             const assertionSlots =
               projectionSlots.length === 0 ?
                 []
@@ -2207,7 +2318,12 @@ export function createCommonOperationBackend(
                   decode: () => ({ kind: "assertion" as const }),
                 }));
             const program = {
-              slots: [...nodeSlots, ...projectionSlots, ...assertionSlots],
+              slots: [
+                ...nodeSlots,
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+                ...assertionSlots,
+              ],
               assemble(results: readonly AtomicNodeProgramSlot[]): number {
                 const counts = results.flatMap((result) =>
                   result.kind === "counts" ? [result.count] : [],
@@ -2220,6 +2336,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: input.entries,
               updates: [],
+              operation: "insert",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: assertionSlots.length > 0,
               run: () =>
@@ -2257,6 +2374,16 @@ export function createCommonOperationBackend(
             timestamp,
             options.maxBindParameters,
           );
+          const projectionEvidenceSlots =
+            await compileAtomicNodeProjectionEvidenceSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+              options.resolveAtomicNodeProjectionEvidence,
+            );
           const assertionSlots =
             projectionSlots.length === 0 ?
               []
@@ -2273,7 +2400,12 @@ export function createCommonOperationBackend(
                 decode: () => ({ kind: "assertion" as const }),
               }));
           const program = {
-            slots: [...nodeSlots, ...projectionSlots, ...assertionSlots],
+            slots: [
+              ...nodeSlots,
+              ...projectionSlots,
+              ...projectionEvidenceSlots,
+              ...assertionSlots,
+            ],
             assemble(
               results: readonly AtomicNodeProgramSlot[],
             ): readonly NodeRow[] {
@@ -2326,6 +2458,7 @@ export function createCommonOperationBackend(
           return runAtomicNodeSidecarProgram({
             creates: input.entries,
             updates: [],
+            operation: "insert",
             hasProjections: projectionSlots.length > 0,
             hasPostimageAssertion: assertionSlots.length > 0,
             run: () =>
@@ -2890,9 +3023,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
 
         const executeAtomicNodeResolvedUpdateBatch = Object.assign(
           async (
@@ -2913,6 +3045,16 @@ export function createCommonOperationBackend(
               timestamp,
               options.maxBindParameters,
             );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                [],
+                input.entries,
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
             const first = requireDefined(input.entries[0]);
             const program = buildAtomicResolvedMutationSetProgram({
               entity: "node",
@@ -2934,7 +3076,10 @@ export function createCommonOperationBackend(
                     atomicSchemaFenceLockClause,
                   ),
                 ),
-              compiledSidecars: projectionSlots.map((slot) => slot.statement),
+              compiledSidecars: [
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+              ].map((slot) => slot.statement),
               compileAssertion: (_creates, updates) =>
                 execution.compile(
                   operationStrategy.buildAssertAtomicNodeMutationPostimages(
@@ -2959,6 +3104,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: [],
               updates: input.entries,
+              operation: "update",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: true,
               run: async () => {
@@ -2997,9 +3143,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
 
         const executeAtomicNodeResolvedMutationSet = Object.assign(
           async (
@@ -3022,6 +3167,16 @@ export function createCommonOperationBackend(
               timestamp,
               options.maxBindParameters,
             );
+            const projectionEvidenceSlots =
+              await compileAtomicNodeProjectionEvidenceSlots(
+                operationStrategy,
+                execution,
+                input.creates,
+                input.updates,
+                timestamp,
+                options.maxBindParameters,
+                options.resolveAtomicNodeProjectionEvidence,
+              );
             const program = buildAtomicResolvedMutationSetProgram({
               entity: "node",
               createChunks: chunkArray(
@@ -3053,7 +3208,10 @@ export function createCommonOperationBackend(
                     atomicSchemaFenceLockClause,
                   ),
                 ),
-              compiledSidecars: projectionSlots.map((slot) => slot.statement),
+              compiledSidecars: [
+                ...projectionSlots,
+                ...projectionEvidenceSlots,
+              ].map((slot) => slot.statement),
               compileAssertion: (creates, updates) =>
                 execution.compile(
                   operationStrategy.buildAssertAtomicNodeMutationPostimages(
@@ -3079,6 +3237,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: input.creates,
               updates: input.updates,
+              operation: "upsert",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: true,
               run: () =>
@@ -3194,9 +3353,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
         const executeAtomicEdgeResolvedUpdateBatch = Object.assign(
           async (
             input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0],
@@ -3296,9 +3454,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
 
         const executeAtomicEdgeResolvedMutationSet = Object.assign(
           async (

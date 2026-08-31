@@ -299,16 +299,20 @@ rolls the complete submission back if any guarded member moved. When the
 preimage read also exceeds its bind budget, it costs one read exchange per read
 chunk plus the single atomic mutation submission. Other backends derive their
 per-statement chunk size from their declared parameter budget and retain an
-absolute 512-member submission ceiling. The native exchange still
-contains the SQL statements needed for inserts and node projection sidecars;
-it groups fulltext and per-vector-slot transitions into set statements and
-submits them as
-one transaction so they do not each pay network latency. The exact previous
-count varies by driver and endpoint shape. A newly constructed backend first
-reads the durable contribution markers before its first projected write; that
-cold safety check is one additional read exchange and is cached on the backend
-instance. The one-exchange count therefore describes the mutation submission
-after contribution evidence is warm, not total cold-start traffic.
+absolute 512-member submission ceiling. The native exchange still contains the
+SQL statements needed for inserts and node projection sidecars; it groups
+fulltext and per-vector-slot transitions into set statements and submits them
+as one transaction so they do not each pay network latency. The exact previous
+count varies by driver and endpoint shape. The program also proves the exact
+durable contribution-marker identity and strategy signature in that
+submission. A newly constructed backend therefore pays no separate cold marker
+read before an eligible projected write. Missing, stale, failed, or
+unmaterialized evidence aborts the whole submission; the failure path then
+reads committed marker state to recover the existing typed contribution
+diagnostic. The marker proof is an additional SQL statement inside that atomic
+submission, so the optimization removes a network exchange rather than all
+server-side proof work. Schemas with more marker identities may require more
+than one proof statement within the same submission.
 
 On session-capable PostgreSQL, the preimage read and mutation program remain in
 one collection-owned transaction. The program has a bounded number of

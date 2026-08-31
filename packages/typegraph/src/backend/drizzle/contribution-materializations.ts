@@ -66,6 +66,7 @@ import {
   type TransactionBackend,
 } from "../types";
 import { runtimeStrategyContributions } from "./ddl";
+import type { AtomicContributionEvidence } from "./operations/contribution-evidence";
 
 /**
  * Bridges the dialect-specific timestamp column representation to the
@@ -707,6 +708,28 @@ export type ContributionMaterializer = Readonly<{
     }>,
   ) => Promise<void>;
   /**
+   * Resolves the exact marker rows an atomic projection program must prove.
+   * This computes only strategy signatures; it performs no database read.
+   */
+  resolveNodeProjectionEvidence: (
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ) => Promise<readonly AtomicContributionEvidence[]>;
+  /**
+   * Failure-only read-through diagnosis after an in-program marker assertion
+   * refused. The program's database evidence supersedes any process cache.
+   */
+  diagnoseNodeProjectionEvidence: (
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ) => Promise<void>;
+  /**
    * Forget a vector slot: delete its `ownedTables` contribution
    * marker(s) and evict the per-instance cache. Called after the slot's
    * physical table is dropped (vector-field reclaim) so a future
@@ -835,6 +858,12 @@ export function createContributionMaterializer(
   // verdicts are never cached, so a concurrent boot that fixes the state is
   // picked up on the next call.
   const initializedSignatures = new Map<string, string>();
+  // Every cache-producing operation captures the key's revision before its
+  // durable read. Diagnosis advances the revision before reading, so an older
+  // in-flight assertion cannot repopulate a positive verdict after diagnosis
+  // has invalidated it. This keeps the race barrier per contribution instead
+  // of permanently disabling healthy siblings in the same projection set.
+  const cacheRevisions = new Map<string, number>();
   // A vector slot evicted during transactional cleanup cannot safely become a
   // positive cache hit again on this materializer: another request may read
   // the old marker before the cleanup commits, then finish after commit. Keep
@@ -895,10 +924,65 @@ export function createContributionMaterializer(
     return runtimeStrategyContributions(fulltextStrategy, fulltextTableName);
   }
 
-  function cacheInitializedSignature(key: string, signature: string): void {
-    if (!uncacheableKeys.has(key)) {
-      initializedSignatures.set(key, signature);
+  type ResolvedContribution = Readonly<{
+    contribution: StrategyTableContribution;
+    key: string;
+    signature: string;
+    cacheRevision: number;
+  }>;
+
+  function currentCacheRevision(key: string): number {
+    return cacheRevisions.get(key) ?? 0;
+  }
+
+  function invalidateContributionCache(
+    keys: readonly string[],
+    permanentlyReadThrough: boolean,
+  ): void {
+    for (const key of keys) {
+      cacheRevisions.set(key, currentCacheRevision(key) + 1);
+      if (permanentlyReadThrough) uncacheableKeys.add(key);
+      initializedSignatures.delete(key);
     }
+  }
+
+  async function resolveContributionEntries(
+    graphId: string,
+    contributions: readonly StrategyTableContribution[],
+  ): Promise<readonly ResolvedContribution[]> {
+    return Promise.all(
+      contributions.map(async (contribution) => {
+        const key = contributionKey(graphId, contribution);
+        const cacheRevision = currentCacheRevision(key);
+        return {
+          contribution,
+          key,
+          signature: await resolveContributionSignature(key, contribution),
+          cacheRevision,
+        };
+      }),
+    );
+  }
+
+  function cacheInitializedSignature(entry: ResolvedContribution): void {
+    if (
+      !uncacheableKeys.has(entry.key) &&
+      currentCacheRevision(entry.key) === entry.cacheRevision
+    ) {
+      initializedSignatures.set(entry.key, entry.signature);
+    }
+  }
+
+  function contributionRefusalError(
+    graphId: string,
+    entry: ResolvedContribution,
+    state: Exclude<ReturnType<typeof evaluateContributionState>, "initialized">,
+    cause?: unknown,
+  ): StoreNotInitializedError {
+    return new StoreNotInitializedError(graphId, state, {
+      ...(cause === undefined ? {} : { cause }),
+      details: { logicalName: entry.contribution.logicalName },
+    });
   }
 
   async function materializeOne(
@@ -1051,26 +1135,17 @@ export function createContributionMaterializer(
   ): Promise<void> {
     const force = options?.force === true;
     const bypassCache = options?.bypassCache === true;
-    const entries = await Promise.all(
-      contributions.map(async (contribution) => {
-        const key = contributionKey(graphId, contribution);
-        return {
-          contribution,
-          key,
-          signature: await resolveContributionSignature(key, contribution),
-        };
-      }),
-    );
+    const entries = await resolveContributionEntries(graphId, contributions);
     if (bypassCache) {
       // Repair is invoked precisely when durable state may have changed behind
       // this materializer's positive cache. Keep every touched key read-through
       // from now on: deleting only the current entry would still let an assert
       // that started before the repair repopulate stale success after a failed
       // repair recorded the contribution as unusable.
-      for (const entry of entries) {
-        uncacheableKeys.add(entry.key);
-        initializedSignatures.delete(entry.key);
-      }
+      invalidateContributionCache(
+        entries.map((entry) => entry.key),
+        true,
+      );
     }
     // A cache hit requires the signature to match — a contribution whose
     // shape changed on this instance falls through to the drift-guard.
@@ -1097,7 +1172,7 @@ export function createContributionMaterializer(
       )
     ) {
       for (const entry of pending) {
-        cacheInitializedSignature(entry.key, entry.signature);
+        cacheInitializedSignature(entry);
       }
       return;
     }
@@ -1127,7 +1202,7 @@ export function createContributionMaterializer(
       // was materialized at this signature, and asserts must keep reading
       // it as stale until reembedVectorField restamps it.
       if (outcome === "materialized") {
-        cacheInitializedSignature(entry.key, entry.signature);
+        cacheInitializedSignature(entry);
       }
     }
   }
@@ -1145,16 +1220,7 @@ export function createContributionMaterializer(
     graphId: string,
     contributions: readonly StrategyTableContribution[],
   ): Promise<void> {
-    const entries = await Promise.all(
-      contributions.map(async (contribution) => {
-        const key = contributionKey(graphId, contribution);
-        return {
-          contribution,
-          key,
-          signature: await resolveContributionSignature(key, contribution),
-        };
-      }),
-    );
+    const entries = await resolveContributionEntries(graphId, contributions);
     const pending = entries.filter(
       (entry) =>
         uncacheableKeys.has(entry.key) ||
@@ -1166,21 +1232,16 @@ export function createContributionMaterializer(
     if (read.kind === "missing-table") {
       const first = pending[0];
       if (first === undefined) return;
-      throw new StoreNotInitializedError(graphId, "missing", {
-        cause: read.error,
-        details: { logicalName: first.contribution.logicalName },
-      });
+      throw contributionRefusalError(graphId, first, "missing", read.error);
     }
 
     for (const entry of pending) {
-      const { contribution, key, signature } = entry;
+      const { key, signature } = entry;
       const state = evaluateContributionState(read.rows.get(key), signature);
       if (state !== "initialized") {
-        throw new StoreNotInitializedError(graphId, state, {
-          details: { logicalName: contribution.logicalName },
-        });
+        throw contributionRefusalError(graphId, entry, state);
       }
-      cacheInitializedSignature(key, signature);
+      cacheInitializedSignature(entry);
     }
   }
 
@@ -1297,12 +1358,104 @@ export function createContributionMaterializer(
       vectorSlots: readonly VectorSlot[];
     }>,
   ): Promise<void> {
+    await assertContributions(
+      graphId,
+      nodeProjectionContributions(graphId, projections),
+    );
+  }
+
+  function nodeProjectionContributions(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): readonly StrategyTableContribution[] {
     const vectorContributions =
       groupVectorContributions(projections.vectorSlots).get(graphId) ?? [];
-    await assertContributions(graphId, [
+    const contributions = [
       ...(projections.fulltext ? runtimeContributions() : []),
       ...vectorContributions,
-    ]);
+    ];
+    return [
+      ...new Map(
+        contributions.map((contribution) => [
+          contributionKey(graphId, contribution),
+          contribution,
+        ]),
+      ).values(),
+    ];
+  }
+
+  async function resolveNodeProjectionEvidence(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): Promise<readonly AtomicContributionEvidence[]> {
+    return Promise.all(
+      nodeProjectionContributions(graphId, projections).map(
+        async (contribution) => {
+          const key = contributionKey(graphId, contribution);
+          return {
+            ...identityOf(graphId, contribution),
+            signature: await resolveContributionSignature(key, contribution),
+          };
+        },
+      ),
+    );
+  }
+
+  async function diagnoseNodeProjectionEvidence(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): Promise<void> {
+    const contributions = nodeProjectionContributions(graphId, projections);
+    const keys = contributions.map((contribution) =>
+      contributionKey(graphId, contribution),
+    );
+    invalidateContributionCache(keys, false);
+    const entries = await resolveContributionEntries(graphId, contributions);
+    const read = await readMarkerRows(graphId);
+    if (read.kind === "missing-table") {
+      invalidateContributionCache(keys, true);
+      const first = entries[0];
+      if (first === undefined) return;
+      throw contributionRefusalError(graphId, first, "missing", read.error);
+    }
+
+    let firstRefusal:
+      | Readonly<{
+          entry: ResolvedContribution;
+          state: Exclude<
+            ReturnType<typeof evaluateContributionState>,
+            "initialized"
+          >;
+        }>
+      | undefined;
+    for (const entry of entries) {
+      const state = evaluateContributionState(
+        read.rows.get(entry.key),
+        entry.signature,
+      );
+      if (state === "initialized") {
+        cacheInitializedSignature(entry);
+        continue;
+      }
+      invalidateContributionCache([entry.key], true);
+      firstRefusal ??= { entry, state };
+    }
+    if (firstRefusal !== undefined) {
+      throw contributionRefusalError(
+        graphId,
+        firstRefusal.entry,
+        firstRefusal.state,
+      );
+    }
   }
 
   function verificationTargetsByGraph(
@@ -1683,16 +1836,7 @@ export function createContributionMaterializer(
     // Hashing is async WebCrypto and independent of the fence, so the
     // signatures the stamps will carry are resolved before the schema
     // lock is taken rather than while it is held.
-    const stamps = await Promise.all(
-      contributions.map(async (contribution) => {
-        const key = contributionKey(graphId, contribution);
-        return {
-          contribution,
-          key,
-          signature: await resolveContributionSignature(key, contribution),
-        };
-      }),
-    );
+    const stamps = await resolveContributionEntries(graphId, contributions);
     // The stamp below writes to the marker table; a database that has
     // never bootstrapped it would fail after the drop had already run.
     await deps.ensureMarkerTable();
@@ -1846,8 +1990,8 @@ export function createContributionMaterializer(
 
     // Only after the fence commits: a positive cache entry written for a
     // rebuild that rolled back would bless a shape that is not on disk.
-    for (const { key, signature } of stamps) {
-      cacheInitializedSignature(key, signature);
+    for (const stamp of stamps) {
+      cacheInitializedSignature(stamp);
     }
     return rebuilt;
   }
@@ -1856,8 +2000,7 @@ export function createContributionMaterializer(
     if (deps.vectorStrategy === undefined) return;
     for (const contribution of deps.vectorStrategy.ownedTables(slot)) {
       const key = contributionKey(slot.graphId, contribution);
-      uncacheableKeys.add(key);
-      initializedSignatures.delete(key);
+      invalidateContributionCache([key], true);
       computedSignatures.delete(key);
     }
   }
@@ -1886,6 +2029,8 @@ export function createContributionMaterializer(
     assertVectorSlot,
     assertVectorSlots,
     assertNodeInsertProjections,
+    resolveNodeProjectionEvidence,
+    diagnoseNodeProjectionEvidence,
     dropVectorSlot,
     evictVectorSlot,
     verifyContributions,

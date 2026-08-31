@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { createClient } from "@libsql/client";
+import { getTableName } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
@@ -12,6 +13,7 @@ import {
   DisjointError,
   RestrictedDeleteError,
   StaleVersionError,
+  StoreNotInitializedError,
   UniquenessError,
 } from "../src";
 import {
@@ -33,7 +35,11 @@ import {
 import { disjointWith, subClassOf } from "../src/ontology";
 import { libsqlVectorStrategy } from "../src/query/dialect/vector/libsql-strategy";
 import { migrateSchema } from "../src/schema";
-import { createStoreWithSchema, createVerifiedStore } from "../src/store";
+import {
+  createAdapterStore,
+  createStoreWithSchema,
+  createVerifiedStore,
+} from "../src/store";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -1099,15 +1105,21 @@ describe("plain node batch store contract", () => {
   it("folds search projections into the atomic batch", async () => {
     const fixture = await createFallbackFixture();
     try {
-      const transaction = vi.spyOn(fixture.backend, "transaction");
+      const transactionlessBackend = createSqliteBackend(fixture.db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+      });
+      const root = createAdapterStore(fallbackGraph, transactionlessBackend, {
+        reconciled: { graph: fallbackGraph, version: 1, hash: undefined },
+      });
       const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
 
-      await fixture.store.nodes.SearchDocument.bulkInsert([
+      await root.nodes.SearchDocument.bulkInsert([
         { id: "search-a", props: { title: "Alice" } },
       ]);
 
-      expect(transaction).not.toHaveBeenCalled();
       expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
       await expect(
         fixture.store.search.fulltext("SearchDocument", {
           query: "Alice",
@@ -1271,11 +1283,11 @@ describe("plain node batch store contract", () => {
         executionProfile: { isSync: false, transactionMode: "none" },
         vector: libsqlVectorStrategy,
       });
-      const [root] = await createVerifiedStore(
-        fallbackGraph,
-        transactionlessBackend,
-      );
+      const root = createAdapterStore(fallbackGraph, transactionlessBackend, {
+        reconciled: { graph: fallbackGraph, version: 1, hash: undefined },
+      });
       const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
       const variants: string[] = [];
 
       await withAtomicMutationProgramDispatchObserver(
@@ -1288,6 +1300,7 @@ describe("plain node batch store contract", () => {
       );
 
       expect(batch).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
       await expect(
         fixture.store.search.fulltext("SearchDocument", {
           query: "Before",
@@ -1495,6 +1508,71 @@ describe("plain node batch store contract", () => {
         ]),
       ).rejects.toBeInstanceOf(ContributionUnavailableError);
       await expect(fixture.store.nodes.SearchDocument.count()).resolves.toBe(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("diagnoses missing durable projection evidence only after atomic rollback", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const transactionlessBackend = createSqliteBackend(fixture.db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+      });
+      const [root] = await createVerifiedStore(
+        fallbackGraph,
+        transactionlessBackend,
+      );
+      await fixture.client.execute(
+        `DELETE FROM ${getTableName(sqliteTables.contributionMaterializations)} WHERE graph_id = ?`,
+        [fallbackGraph.id],
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      await expect(
+        root.nodes.SearchDocument.bulkInsert([
+          { id: "missing-marker", props: { title: "Unavailable" } },
+        ]),
+      ).rejects.toBeInstanceOf(StoreNotInitializedError);
+
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledOnce();
+      await expect(
+        fixture.store.nodes.SearchDocument.getById("missing-marker" as never),
+      ).resolves.toBeUndefined();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("maps an absent durable projection marker table to the typed refusal", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      const transactionlessBackend = createSqliteBackend(fixture.db, {
+        executionProfile: { isSync: false, transactionMode: "none" },
+      });
+      const [root] = await createVerifiedStore(
+        fallbackGraph,
+        transactionlessBackend,
+      );
+      await fixture.client.execute(
+        `DROP TABLE ${getTableName(sqliteTables.contributionMaterializations)}`,
+      );
+      const batch = vi.spyOn(fixture.client, "batch");
+
+      await expect(
+        root.nodes.SearchDocument.bulkInsert([
+          { id: "missing-marker-table", props: { title: "Unavailable" } },
+        ]),
+      ).rejects.toBeInstanceOf(StoreNotInitializedError);
+
+      expect(batch).toHaveBeenCalledOnce();
+      await expect(
+        fixture.store.nodes.SearchDocument.getById(
+          "missing-marker-table" as never,
+        ),
+      ).resolves.toBeUndefined();
     } finally {
       await closeFixture(fixture);
     }

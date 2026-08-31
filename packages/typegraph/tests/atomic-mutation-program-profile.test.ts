@@ -153,11 +153,21 @@ describe("atomic mutation program execution profile", () => {
   it("binds every refusal classifier to a NOT NULL schema column", () => {
     assertRefusalSentinelsAreNotNull(
       createSqliteOperationStrategy(sqliteTables, fts5Strategy),
-      [sqliteTables.nodes, sqliteTables.edges, sqliteTables.edgeClaims],
+      [
+        sqliteTables.nodes,
+        sqliteTables.edges,
+        sqliteTables.edgeClaims,
+        sqliteTables.contributionMaterializations,
+      ],
     );
     assertRefusalSentinelsAreNotNull(
       createPostgresOperationStrategy(postgresTables, tsvectorStrategy),
-      [postgresTables.nodes, postgresTables.edges, postgresTables.edgeClaims],
+      [
+        postgresTables.nodes,
+        postgresTables.edges,
+        postgresTables.edgeClaims,
+        postgresTables.contributionMaterializations,
+      ],
     );
   });
 

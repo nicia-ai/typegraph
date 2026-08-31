@@ -81,6 +81,7 @@ import {
   buildContendedUniqueRowAudit,
   buildDisjointOverlapAudit,
 } from "./constraint-fence-audit";
+import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
   buildAcquireAtomicEdgeClaims,
   buildAssertAtomicEdgeClaimsOwned,
@@ -133,6 +134,7 @@ import {
 } from "./node-projections";
 import {
   buildAssertAtomicNodeMutationPostimages,
+  buildAssertAtomicNodeProjectionEvidence,
   buildAtomicNodeBatchWithSchemaFence,
   buildAtomicNodeDeleteBatchWithSchemaFence,
   buildAtomicNodeResolvedUpdateBatch,
@@ -206,6 +208,7 @@ export type CommonOperationStrategy = Readonly<{
     deleteRestricted: Readonly<{ table: string; column: string }>;
     liveIdentity: Readonly<{ table: string; column: string }>;
     mutationPostimage: Readonly<{ table: string; column: string }>;
+    projectionEvidence: Readonly<{ table: string; column: string }>;
   }>;
   /**
    * The nodes and edges PRIMARY KEY constraints, as the engine names them — the
@@ -338,6 +341,10 @@ export type CommonOperationStrategy = Readonly<{
     updates: readonly AtomicNodeResolvedUpdateEntry[],
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
+  ) => SQL;
+  buildAssertAtomicNodeProjectionEvidence: (
+    timestamp: string,
+    evidence: readonly AtomicContributionEvidence[],
   ) => SQL;
   buildReadAtomicNodeMutationPostimages: (
     graphId: string,
@@ -629,6 +636,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildUpdateNode,
   buildAtomicNodeResolvedUpdateBatch,
   buildAssertAtomicNodeMutationPostimages,
+  buildAssertAtomicNodeProjectionEvidence,
   buildReadAtomicNodeMutationPostimages,
   buildDeleteNode,
   buildHardDeleteNode,
@@ -943,6 +951,10 @@ function createCommonOperationStrategy(
       mutationPostimage: {
         table: getTableName(tables.nodes),
         column: tables.nodes.createdAt.name,
+      },
+      projectionEvidence: {
+        table: getTableName(tables.contributionMaterializations),
+        column: tables.contributionMaterializations.signature.name,
       },
     },
     buildAtomicNodeDeleteBatchWithSchemaFence: (

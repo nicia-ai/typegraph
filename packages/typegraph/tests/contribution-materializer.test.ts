@@ -71,6 +71,25 @@ async function captureRejection(promise: Promise<unknown>): Promise<unknown> {
   }
 }
 
+function createDeferred<T>(): Readonly<{
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}> {
+  let resolvePromise: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve(value) {
+      if (resolvePromise === undefined) {
+        throw new Error("Deferred promise was not initialized.");
+      }
+      resolvePromise(value);
+    },
+  };
+}
+
 function markerKey(identity: ContributionMaterializationIdentity): string {
   return [
     identity.graphId,
@@ -325,6 +344,116 @@ const OTHER_GRAPH_VECTOR_SLOT = {
   ...VECTOR_SLOT,
   graphId: "other-contrib-mat-unit",
 } as const;
+
+describe("atomic node projection evidence diagnosis", () => {
+  it("keeps only the invalid marker permanently read-through", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      undefined,
+      pgvectorStrategy,
+    );
+    const projections = {
+      fulltext: true,
+      vectorSlots: [VECTOR_SLOT],
+    } as const;
+    await materializer.assertNodeInsertProjections(GRAPH_ID, projections);
+
+    const vectorMarkerEntry = [...markers.entries()].find(
+      ([, row]) => row.tableName === vectorTableOf(VECTOR_SLOT),
+    );
+    const fulltextMarkerEntry = [...markers.entries()].find(
+      ([, row]) => row.logicalName === "fulltext",
+    );
+    if (vectorMarkerEntry === undefined || fulltextMarkerEntry === undefined) {
+      throw new Error("Expected fulltext and vector contribution markers.");
+    }
+    const [vectorKey, vectorMarker] = vectorMarkerEntry;
+    const [fulltextKey] = fulltextMarkerEntry;
+    markers.set(vectorKey, { ...vectorMarker, signature: "stale-signature" });
+
+    await expect(
+      materializer.diagnoseNodeProjectionEvidence(GRAPH_ID, projections),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+
+    markers.set(vectorKey, vectorMarker);
+    markers.delete(fulltextKey);
+    spies.getMarkers.mockClear();
+    await expect(
+      materializer.assertNodeInsertProjections(GRAPH_ID, projections),
+    ).resolves.toBeUndefined();
+    expect(spies.getMarkers).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an older in-flight positive cache write during diagnosis", async () => {
+    const markers = new Map<string, ContributionMaterializationRow>();
+    await provision(markers);
+    const healthySnapshot = [...markers.values()].map((row) => ({ ...row }));
+    const firstRead =
+      createDeferred<readonly ContributionMaterializationRow[]>();
+    const diagnosticRead =
+      createDeferred<readonly ContributionMaterializationRow[]>();
+    let readCount = 0;
+    const { materializer, spies } = createMockMaterializer(
+      markers,
+      () => {
+        readCount += 1;
+        if (readCount === 1) return firstRead.promise;
+        if (readCount === 2) return diagnosticRead.promise;
+        return Promise.resolve([...markers.values()]);
+      },
+      pgvectorStrategy,
+    );
+    const projections = {
+      fulltext: true,
+      vectorSlots: [VECTOR_SLOT],
+    } as const;
+
+    const olderAssertion = materializer.assertNodeInsertProjections(
+      GRAPH_ID,
+      projections,
+    );
+    await vi.waitFor(() => {
+      expect(spies.getMarkers).toHaveBeenCalledTimes(1);
+    });
+    const vectorMarkerEntry = [...markers.entries()].find(
+      ([, row]) => row.tableName === vectorTableOf(VECTOR_SLOT),
+    );
+    if (vectorMarkerEntry === undefined) {
+      throw new Error("Expected a vector contribution marker.");
+    }
+    const [vectorKey, vectorMarker] = vectorMarkerEntry;
+    markers.set(vectorKey, { ...vectorMarker, signature: "stale-signature" });
+
+    const diagnosis = materializer.diagnoseNodeProjectionEvidence(
+      GRAPH_ID,
+      projections,
+    );
+    await vi.waitFor(() => {
+      expect(spies.getMarkers).toHaveBeenCalledTimes(2);
+    });
+    firstRead.resolve(healthySnapshot);
+    await expect(olderAssertion).resolves.toBeUndefined();
+
+    await expect(
+      materializer.assertNodeInsertProjections(GRAPH_ID, projections),
+    ).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+    expect(spies.getMarkers).toHaveBeenCalledTimes(3);
+
+    diagnosticRead.resolve([...markers.values()]);
+    await expect(diagnosis).rejects.toMatchObject({
+      name: "StoreNotInitializedError",
+      details: { reason: "stale" },
+    });
+  });
+});
 
 describe("#149 ensureRuntimeContributions is read-only when already materialized", () => {
   it("a fresh materializer over an already-materialized graph runs zero DDL", async () => {
