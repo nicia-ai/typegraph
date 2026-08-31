@@ -1550,6 +1550,7 @@ export function createCommonOperationBackend(
     input: Readonly<{
       creates: readonly AtomicNodeBatchEntry[];
       updates: readonly AtomicNodeResolvedUpdateEntry[];
+      operation: "insert" | "update" | "upsert";
       hasProjections: boolean;
       hasPostimageAssertion: boolean;
       run: () => Promise<TResult>;
@@ -1579,7 +1580,7 @@ export function createCommonOperationBackend(
         if (projectionEvidenceRefusal) {
           throw new DatabaseOperationError(
             "Atomic node projection evidence changed before its refusal could be diagnosed.",
-            { operation: "insert", entity: "node" },
+            { operation: input.operation, entity: "node" },
             { cause: error },
           );
         }
@@ -2180,6 +2181,7 @@ export function createCommonOperationBackend(
               return runAtomicNodeSidecarProgram({
                 creates: input.entries,
                 updates: [],
+                operation: "insert",
                 hasProjections: projectionSlots.length > 0,
                 hasPostimageAssertion: assertionSlots.length > 0,
                 run: () =>
@@ -2251,6 +2253,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: input.entries,
               updates: [],
+              operation: "insert",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: assertionSlots.length > 0,
               run: () =>
@@ -2333,6 +2336,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: input.entries,
               updates: [],
+              operation: "insert",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: assertionSlots.length > 0,
               run: () =>
@@ -2454,6 +2458,7 @@ export function createCommonOperationBackend(
           return runAtomicNodeSidecarProgram({
             creates: input.entries,
             updates: [],
+            operation: "insert",
             hasProjections: projectionSlots.length > 0,
             hasPostimageAssertion: assertionSlots.length > 0,
             run: () =>
@@ -3018,9 +3023,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
 
         const executeAtomicNodeResolvedUpdateBatch = Object.assign(
           async (
@@ -3100,6 +3104,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: [],
               updates: input.entries,
+              operation: "update",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: true,
               run: async () => {
@@ -3138,9 +3143,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
 
         const executeAtomicNodeResolvedMutationSet = Object.assign(
           async (
@@ -3233,6 +3237,7 @@ export function createCommonOperationBackend(
             return runAtomicNodeSidecarProgram({
               creates: input.creates,
               updates: input.updates,
+              operation: "upsert",
               hasProjections: projectionSlots.length > 0,
               hasPostimageAssertion: true,
               run: () =>
@@ -3348,9 +3353,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
         const executeAtomicEdgeResolvedUpdateBatch = Object.assign(
           async (
             input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0],
@@ -3450,9 +3454,8 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
-        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
-          statementChunkSize,
-        );
+        const maxEntries =
+          atomicResolvedMutationSubmissionMaxEntries(statementChunkSize);
 
         const executeAtomicEdgeResolvedMutationSet = Object.assign(
           async (
