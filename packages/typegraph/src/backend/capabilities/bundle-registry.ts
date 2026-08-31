@@ -628,24 +628,6 @@ export const STATEMENT_EXECUTION = {
       ],
     },
     {
-      operation: "adopted constraint transaction writer-slot proof",
-      disposition: {
-        kind: "refuse",
-        code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
-      },
-      sites: [
-        {
-          file: "store/operations/write-transaction.ts",
-          member: "executeStatement",
-          rewiring: {
-            class: "reasoned",
-            reason:
-              "the exact adopted transaction must presence-test and invoke its own statement port before any decision-driving read; a separately resolved bundle would not prove execution on that transaction resource",
-          },
-        },
-      ],
-    },
-    {
       operation: "recorded-time migration",
       disposition: {
         kind: "refuse",

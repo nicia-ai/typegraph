@@ -59,6 +59,9 @@
  * would make the claim above false wherever it matters most. Unconstrained
  * writes assert nothing and keep working on those backends.
  */
+import { statementExecutionMembers } from "../../backend/capabilities/bind";
+import { type STATEMENT_EXECUTION } from "../../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
   isFirstPartyFactory,
   resolveWriteFencePlan,
@@ -97,6 +100,8 @@ export type WriteTransactionContext = Readonly<{
   historyEnabled: boolean;
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
+  /** Resolved once from the root backend; exact targets are bound separately. */
+  statementExecution?: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
 }>;
 
 interface WriteTransactionSession {
@@ -250,7 +255,8 @@ async function ensureAdoptedConstraintWriterSlot(
   ) {
     return;
   }
-  if (target.executeStatement === undefined) {
+  const statementExecution = ctx.statementExecution;
+  if (statementExecution?.supported !== true) {
     throw new ConfigurationError(
       "This engine-serialized transaction cannot prove that it holds its writer slot before a constrained write.",
       {
@@ -264,8 +270,12 @@ async function ensureAdoptedConstraintWriterSlot(
       },
     );
   }
+  const { executeStatement } = statementExecutionMembers(
+    target,
+    statementExecution,
+  );
   try {
-    await target.executeStatement(
+    await executeStatement(
       asCompiledStatementSql(
         sql`UPDATE ${ctx.revisionSchema.nodesTable} SET graph_id = graph_id WHERE 0`,
       ),

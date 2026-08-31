@@ -19,6 +19,7 @@ import {
 import { bindExtra, bindExtraIfReachable } from "../backend/capabilities/bind";
 import type {
   RECORDED_REVISION_ORIGINS,
+  STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
 } from "../backend/capabilities/bundle-registry";
 import {
@@ -945,6 +946,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * write and read actually executes through.
    */
   readonly #batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  readonly #statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   readonly #uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
   /**
    * The contribution-health methods and `ensureRevisionOrigin` read
@@ -1067,6 +1069,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : asGraphWriteBackend(backend);
     this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
     this.#batchPointRead = batchPointReadVerdict(this.#backend);
+    this.#statementExecution = statementExecutionVerdict(this.#backend);
     this.#uniqueSidecarBatch = uniqueSidecarBatchVerdict(this.#backend);
     this.#contributionHealth = contributionHealthVerdict(this.#baseBackend);
     this.#recordedRevisionOrigins = recordedRevisionOriginsVerdict(
@@ -1340,6 +1343,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         historyEnabled: this.#captureEnabled,
         revisionTrackingEnabled: this.#revisionTrackingEnabled,
         revisionSchema: this.#sqlSchema(),
+        statementExecution: this.#statementExecution,
       },
       this.#baseBackend,
       async (target) =>
@@ -5127,6 +5131,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
+      statementExecution: this.#statementExecution,
       registry: this.#registry,
       claimsVerdict: this.#claimsVerdict,
       batchPointRead: this.#batchPointRead,
@@ -5210,6 +5215,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       claimsVerdict: this.#claimsVerdict,
       batchPointRead: this.#batchPointRead,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      statementExecution: this.#statementExecution,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,

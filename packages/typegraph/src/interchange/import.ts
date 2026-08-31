@@ -383,6 +383,7 @@ async function importGraphData<G extends GraphDef>(
       // interning exists to rule out.
       claimsVerdict: createClaimsVerdictThunk(backend),
       uniqueSidecarBatch,
+      statementExecution,
       schemaVersion: store.introspect().schemaVersion,
       historyEnabled: store.historyEnabled,
       revisionTrackingEnabled: store.revisionTrackingEnabled,
