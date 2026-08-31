@@ -373,6 +373,9 @@ export default defineConfig({
     },
   },
   output: "server",
+  // No route in this app touches Astro's session API — opt out of bundling
+  // it to cut cold-start parsing overhead on Cloudflare Workers.
+  session: false,
   adapter: cloudflare({
     imageService: "passthrough",
     prerenderEnvironment: "node",
