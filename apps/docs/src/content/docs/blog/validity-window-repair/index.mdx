@@ -1,0 +1,161 @@
+---
+title: "Rows That Exist at No Point in Time"
+date: 2026-08-21
+excerpt: "A validity window that runs backwards is readable at no coordinate at all — `asOf(t)` needs `valid_from <= t < valid_to`, and backwards bounds admit no `t`. The write paths no longer produce one, and upgrading deliberately rewrites nothing, because silently making invisible rows appear in historical queries is the worse surprise. `repairInvertedValidityWindows` is the explicit operator action, plus `clearValidTo` for the ordinary case of reopening a window you closed too early."
+tags:
+  - announcements
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Bitemporal Recorded Time](/blog/truth-maintenance-for-agent-memory) built
+the second temporal axis and the provenance-backed retraction on top of
+it. This is the smaller, less glamorous follow-up: the vocabulary for
+fixing valid-time windows that are _wrong_.
+
+Three related problems, in increasing order of how alarming they are.
+
+## Reopening a window you closed too early
+
+An employment record ends. Then it turns out the person never left — a
+transfer was miscoded, a contract was renewed retroactively. The row
+needs its `validTo` removed without becoming a different entity.
+
+`clearValidTo: true` does exactly that, across node and edge update and
+upsert APIs:
+
+```typescript
+await store.nodes.Employment.updateById(employmentId, {
+  patch: { department: "Research" },
+  clearValidTo: true,
+});
+```
+
+Identity is preserved — this is the same row with an open window again,
+not a new row shadowing an old one. Unchanged replays coalesce as usual,
+and `oneActive` relationships are rechecked on reopening, because
+reopening a window can create a second simultaneously-active edge where
+the constraint permits only one.
+
+Custom backends must advertise `capabilities.clearValidTo: true` only
+when both `updateNode` and `updateEdge` genuinely apply it by storing SQL
+`NULL` in `valid_to`. An explicit clear on a backend without that promise
+is refused with `ConfigurationError` code `CLEAR_VALID_TO_UNSUPPORTED`
+_before_ coalescing or writes — so the outcome doesn't depend on whether
+the target row happened to be open already. Omission still means
+preserve, so backends that don't support clearing stay compatible with
+every write that doesn't ask for it.
+
+Graph merge carries branch-authored reopenings, while rejecting
+delete-and-resurrect window artifacts that would otherwise smuggle a
+different row in under the same identity.
+
+## A row that ends before it starts
+
+Some writes state an end without a beginning: an import of a record known
+to have closed, backfilled after the fact. If the write stamps its own
+instant as `validFrom` and the caller stated a `validTo` in the past, the
+row gets a window running backwards — and a row whose window runs
+backwards is readable at **no coordinate at all**. `asOf(t)` needs
+`valid_from <= t < valid_to`. Backwards bounds admit no `t`.
+
+The rule now: a write that CREATES a row, or RESETS its window, while
+stating a `validTo` at or before its own instant and no `validFrom`,
+stores **no lower bound** rather than an inverting one. The row's start is
+unknown rather than after its end, so it reads back at every `asOf`
+before that end — "ended at T, start unknown."
+
+A `validTo` in the _future_ is unaffected. It still stamps the write
+instant, so the row stays invisible at instants before it existed.
+
+One stated window reaches one stored shape whichever node path resets it:
+a create on a fresh id, a create on a tombstone, or a resurrecting
+`upsertById`. Edges deliberately differ — an edge resurrection retains
+its stored lower bound, so reviving an edge into a window that closed
+before the edge began is refused as a `ValidationError` and means passing
+both bounds explicitly.
+
+Custom insert builders should apply the same rule by importing its owner
+rather than re-deriving the comparison:
+
+```typescript
+import { resolveStampedValidityLowerBound } from "@nicia-ai/typegraph/backend";
+
+const validFrom = resolveStampedValidityLowerBound(
+  params.validFrom,
+  params.validTo,
+  writeInstant,
+);
+```
+
+Use the same `writeInstant` for the decision and the row's stamp.
+
+## The rows already in your database
+
+Here is the part that needs an operator, not an upgrade. Older library
+versions _could_ store an inverted window, and **upgrading rewrites
+nothing.**
+
+That is deliberate, and it is the right call even though it means
+shipping a known-bad state forward. An upgrade that silently made
+previously-invisible rows appear in historical queries would be the worse
+surprise — reports would change, replays would diverge, and nothing in
+the release would have told you which rows moved.
+
+`repairInvertedValidityWindows` is the explicit action. It has two modes:
+`report` counts and writes nothing; `apply` normalizes what it counted to
+`valid_from = NULL`.
+
+```typescript
+import { repairInvertedValidityWindows } from "@nicia-ai/typegraph";
+
+const report = await repairInvertedValidityWindows({
+  backend: anyBackend,
+  relations: "live-and-recorded",
+  mode: "report",
+});
+// report.counts.recordedNodes === undefined means NOT SCANNED, never "clean"
+// report.atomic === false means counts came from per-relation snapshots
+```
+
+`report` reads through `execute`, a required backend member, so it runs
+against _any_ backend — including a history-capturing one and one with no
+statement-execution support.
+
+Four things to get right before running `apply`:
+
+1. **Stop writers.** A concurrent window-bearing update may fence its
+   write on the validity lower bound it read, so a repair landing in
+   between can make the peer's first `UPDATE` match no row.
+2. **Pass the raw backend on a history-enabled store** — the one you
+   constructed it from. The repair mints no revision by design, and the
+   capture wrapper refuses raw statements.
+3. **`relations` is required, and `"live-and-recorded"` is the
+   recommended scope.** Repairing only the live axis leaves the recorded
+   twin carrying the inverted window, which re-materializes the invisible
+   row at any `asOfRecorded` coordinate — the same defect one axis over.
+4. **Read `undefined` as "not scanned."** A count that is absent never
+   means clean.
+
+`"live"` alone is right in exactly two cases: the store captures no
+history and the `recorded_*` tables don't exist (scanning them is then an
+error, not a no-op), or you are deliberately keeping the recorded axis as
+an audit record of the pre-repair state and accept that `asOfRecorded`
+reads keep returning the invisible shape.
+
+Re-baseline any outstanding merge branches afterward.
+
+## Try it
+
+- [Repairing inverted validity windows](/schema-management#repairing-inverted-validity-windows):
+  the full operator runbook, including `tableNames` overrides
+- [Open-left rows](/queries/temporal#open-left-rows-validfrom-is-undefined):
+  what a missing lower bound means to every read
+- [Temporal queries](/queries/temporal): `asOf`, `includeEnded`, and the
+  two axes
+- [Limitations](/limitations#temporal-query-limitations): the honest list
+  of temporal constraints
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

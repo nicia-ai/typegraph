@@ -1,0 +1,152 @@
+---
+title: "Claim Relations: The Constraint Holds Even When Nobody Took the Lock"
+date: 2026-08-21
+excerpt: "A declared constraint used to be enforced by whoever held the per-graph write lock — which `importGraph` never does. Uniqueness, `disjointWith` and edge cardinality are now each reserved in a claim relation whose primary key admits one live claimant per axis, so the fence holds for lock-free writers too. And because upgrading repairs nothing, `store.verifyConstraintFences()` is the read-only audit that finds the violations already sitting in your database."
+tags:
+  - announcements
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Operational Identity](/blog/operational-identity) closed on a point worth
+generalizing. A contradiction there is refused twice: once by application
+validation that read the current state and decided, and once by a
+constraint the database enforces whether or not that code ran.
+
+Every other declared constraint deserved the same treatment, and did not
+have it.
+
+`unique("mrn")`, `disjointWith(Person, Organization)`,
+`cardinality: "one"` — all of them were enforced by a writer holding the
+per-graph write lock, checking, and then writing. That works exactly as
+long as every writer takes the lock. `importGraph` does not. It never
+did.
+
+## What a claim relation is
+
+Underneath the lock, a declared constraint is now also reserved in a
+**claim relation** whose primary key admits one live claimant per axis:
+
+- `uniques` — uniqueness scopes and `disjointWith` pairs
+- `typegraph_edge_claims` — `cardinality: "one" | "unique" | "oneActive"`
+
+The claim is a row. Taking the axis means winning the insert. Both
+bundled backends carry these relations and report
+`capabilities.constraintClaims: true`.
+
+That single change is what makes those constraints hold for a writer that
+holds no per-graph lock at all. Import is the one in the box, and import
+is exactly the path most likely to be carrying data you didn't author.
+
+Three families now fence this way, each enforced under `importGraph` as
+well as through the store:
+
+| Declared as                                     | Reserved on             | Contention reported as |
+| ----------------------------------------------- | ----------------------- | ---------------------- |
+| `unique(...)` scopes                            | `uniques`               | conflicting `owners`   |
+| `disjointWith(A, B)`                            | `uniques` (pair label)  | conflicting `owners`   |
+| `cardinality: "one" \| "unique" \| "oneActive"` | `typegraph_edge_claims` | conflicting `edgeIds`  |
+
+Uniqueness under `scope: "kindWithSubClasses"` gets the subtler
+treatment: siblings share one claim axis, and ownership is decided by
+`(concrete_kind, node_id)` — because an id is unique only within a kind,
+so the node id alone doesn't identify a claimant.
+
+## What it does not promise
+
+This is a protocol, not a database-level guarantee, and the difference
+matters enough to state plainly: **the protocol is
+application-maintained.** Raw SQL that writes only `nodes` or `edges`
+bypasses the corresponding claim write and can violate the declaration.
+An out-of-band writer is fenced only if it participates in the same claim
+protocol, in the same transaction.
+
+Two more properties are worth knowing before you rely on it.
+
+**A claim row's lock is held to the end of the transaction, including on
+refusal.** A caller that catches a typed constraint error and keeps going
+— import's per-row recovery, or your own `try`/`catch` inside
+`store.transaction` — still holds the lock on the row it was refused at.
+Any other writer of that axis waits until that transaction ends. This is
+inherent to every row-lock fence, not a quirk of this one, but it will
+surprise you the first time a caught-and-continued error serializes an
+unrelated writer.
+
+**Above READ COMMITTED, PostgreSQL reports a serialization failure
+instead of the typed error.** At `REPEATABLE READ` or `SERIALIZABLE`,
+`INSERT … ON CONFLICT DO UPDATE` raises `40001` rather than resolving the
+conflict, so the losing writer sees something to retry rather than a
+`UniquenessError`. SQLite has no such mode.
+
+## Upgrading repairs nothing
+
+The fence refuses the second live claimant of an axis from the first
+write after upgrade onward. It does not go looking for the ones already
+there.
+
+A database that carried two live siblings sharing a
+`kindWithSubClasses` key, or an id live under both kinds of a
+`disjointWith` pair, or two live `cardinality: "one"` edges from one
+source, keeps carrying them. Nothing fails at boot. The next write that
+touches such an axis is refused with the ordinary typed error naming the
+incumbent — and until that write happens, nothing says so at all.
+
+`store.verifyConstraintFences()` is the diagnostic that says so:
+
+```typescript
+for (const violation of await store.verifyConstraintFences()) {
+  // violation.target names the claim row two claimants contend for
+  console.warn(violation.family, violation.target.axis, violation.target.key);
+}
+```
+
+One entry per contended axis. `nodeUniqueness` and `nodeDisjointness`
+carry the conflicting `owners`, each a `concrete_kind` / `node_id` pair;
+`edgeCardinality` carries the conflicting `edgeIds`.
+
+The implementation detail here is the whole reason it works: the audit
+reads the relation each constraint is **declared over** — nodes, edges,
+and the live `uniques` rows — never a claim relation's primary key. A
+claim key admits one row per axis by construction, and a database written
+before the claim tables existed holds no edge claims at all. A claim scan
+would confidently report zero violations on precisely the data the audit
+exists to find.
+
+Contention is counted in distinct owner pairs rather than rows, so a node
+legitimately holding its key at both a legacy axis and the current one is
+not reported as a conflict with itself.
+
+It writes nothing and repairs nothing. Choosing which claimant keeps an
+axis destroys data one way or the other, and that decision stays with
+you.
+
+On a backend without the underlying member, the call refuses with
+`ConfigurationError` / `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` rather than
+returning an empty report a caller would reasonably read as "clean."
+
+## One pipeline behind every write
+
+Alongside the fences, every write now routes through a single typed write
+pipeline — node creates, updates, upserts, the set-based `updateWhere`,
+edge writes, and interchange import's previously hand-built write path.
+
+The motivation is the ordinary one for consolidation, and the payoff is
+specific: constraint claims are written from the same claim-site
+classification the per-graph lock is derived from, so the question "does
+this write take the lock, and what does it reserve" has exactly one
+answer in exactly one place. When import stopped being a parallel write
+implementation, it stopped being able to drift from the store's rules —
+which is how it came to be missing these constraints in the first place.
+
+## Try it
+
+- [Claim relations, and what they do not promise](/backend-setup#claim-relations-and-what-they-do-not-promise):
+  the reference, including the parity matrix rows this mechanism owes you
+- [Declared constraints require `transactions`](/backend-setup#declared-constraints-require-transactions):
+  why a non-transactional backend refuses these declarations outright
+- [Ontology](/ontology): `disjointWith` and the rest of the declaration surface
+- [Interchange](/interchange): the import path these fences now cover
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

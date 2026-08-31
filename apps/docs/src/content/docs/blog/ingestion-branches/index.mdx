@@ -1,0 +1,170 @@
+---
+title: "Ingestion Branches: Staging the Duplicate You Came to Resolve"
+date: 2026-08-21
+excerpt: "An untrusted feed arrives carrying an alias that repeats a canonical patient's MRN. An ordinary branch rejects it during staging — before entity resolution ever gets to look at it. `ingestionBranch()` materializes a working copy with node uniqueness deferred and everything else still enforced, so the duplicate and the identity evidence that explains it can be staged together and validated as one set at merge time."
+tags:
+  - announcements
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Graph Merge](/blog/graph-merge) showed two clean feeds folding into one
+canonical record. [Materializing Event Streams](/blog/materializing-event-streams)
+showed two bots writing durable beliefs and reconciling them. Both posts
+skipped the same step, and it's the step that makes real ingestion hard:
+what do you do with a batch whose rows _are_ duplicates, before you've
+decided which ones are duplicates?
+
+A hospital's provider feed arrives with a patient record carrying MRN
+`MRN-4471`. The graph already has a `Patient` with that MRN. That is not
+a bug in the feed — it is the entire reason the feed exists. The whole
+point of the ingestion pass is to look at the incoming record, compare it
+to the canonical one, and decide whether they are the same person.
+
+But a `Patient` kind with `unique("mrn")` will not let you write the
+second row. Stage it into an ordinary `branch()` and staging fails at the
+duplicate, before entity resolution has seen anything.
+
+## Deferring one constraint, and only one
+
+`ingestionBranch()` materializes a working copy whose derived schema
+defers **node uniqueness** and nothing else:
+
+```typescript
+import { asNodeId } from "@nicia-ai/typegraph";
+import {
+  applyMergePlan,
+  asBranchId,
+  ingestionBranch,
+  planMergeIncremental,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+import { importGraph } from "@nicia-ai/typegraph/interchange";
+
+const incoming = unwrap(
+  await ingestionBranch(base, makeBackend, { id: asBranchId("provider-a") }),
+);
+```
+
+Schema validation, edge endpoint checks, disjointness and edge
+cardinality all still apply immediately. A malformed row is still
+rejected while staging; only the constraint you are actively trying to
+adjudicate steps aside.
+
+That distinction is the whole design. "Turn off validation for the import"
+is the usual shape of this feature, and it means every other class of
+corruption rides in alongside the duplicates you meant to allow.
+
+## Import into the branch directly
+
+Both `importGraph()` and `importGraphStream()` accept the handle, so an
+interchange document stages without a hand-written collection copy loop:
+
+```typescript
+const imported = await importGraph(incoming, providerDocument, {
+  onConflict: "error",
+  onUnknownProperty: "error",
+});
+if (!imported.success) throw new Error("Provider import was rejected");
+```
+
+Import stays the single owner of node-first ordering, validity windows,
+edge endpoint order and reference validation. The branch changes what is
+_enforced_, not who does the writing.
+
+## Stage the evidence with the duplicate
+
+Here is the part that makes the deferral safe rather than merely
+permissive. On an identity-enabled graph, the handle also exposes an
+assertion-only identity facade — `assertSame`, `assertDifferent`, and
+their bulk forms:
+
+```typescript
+const alias = await incoming.nodes.Patient.getById(
+  asNodeId("incoming-patient"),
+);
+if (alias === undefined) throw new Error("Imported patient was not found");
+
+// `canonicalPatient` was read from the base before forking.
+await incoming.identity.assertSame(canonicalPatient, alias);
+```
+
+The duplicate MRN and the claim that explains it now live on the same
+branch, staged together, and they reach merge planning together. Without
+this, the two halves of one decision have to travel separately: the row
+in the branch, the assertion somewhere else, reconciled by hand.
+
+Note what the facade _doesn't_ expose. No identity reads, no retractions,
+no schema operations, no transactions, no access to the branch's
+underlying `Store`. Assertion contradictions and invalid endpoints are
+still refused while staging. You cannot use the ingestion handle to walk
+around the deferred-constraint contract, because the handle simply does
+not have the surface to do it with — and when the graph doesn't enable
+Operational Identity, the `identity` property is absent at the type
+level.
+
+## The original contract still decides
+
+Deferral during staging buys review time. It does not lower the bar for
+what actually commits:
+
+```typescript
+const plan = unwrap(
+  await planMergeIncremental({
+    forkPoint: base,
+    target: base,
+    branches: [incoming],
+    options: {
+      onBasePropertyConflict: "flag",
+      resolve: {
+        Patient: {
+          blockIndex: "patient_mrn_candidates",
+          similarity: { kind: "fulltext", fields: ["name"] },
+          threshold: 0.9,
+        },
+      },
+    },
+  }),
+);
+const applied = unwrap(await applyMergePlan(base, plan));
+await incoming.close();
+```
+
+`applyMergePlan()` validates node uniqueness against the **entire
+resolved write set** in the target transaction. Valid key handoffs and
+swaps are accepted as one set — the case a row-by-row check gets wrong,
+because an intermediate state transiently has two owners even though the
+final state has one.
+
+If reviewed resolution still leaves two live owners of one unique key,
+the merge returns `MergeConstraintConflictError` and commits **no graph
+or provenance writes**. The branch bought review time; it did not buy
+permission.
+
+## Deferral you can audit
+
+The derived schema is persisted on the working-copy backend. The relaxed
+contract is therefore inspectable after the fact, and an explicit
+reattachment with an equivalent graph definition verifies the same
+constraint behavior. This is deliberately not an in-memory flag, and it
+does not disable database constraints ad hoc.
+
+Two consequences worth planning for: `ingestionBranch()` exposes no
+general reopen/resume API, and it requires a backend with the batch
+uniqueness operations needed for atomic final validation. An unsupported
+backend is refused rather than quietly falling back to sequential checks
+that would not be atomic.
+
+## Try it
+
+- [Constraint-aware ingestion branches](/graph-merge#constraint-aware-ingestion-branches):
+  the reference, including the full merge lifecycle around it
+- [Operational Identity](/identity): the assertion ledger the staged
+  evidence lands in
+- [Entity resolution](/graph-merge#entity-resolution): blocking,
+  similarity strategies, and how candidates are scored
+- [Interchange](/interchange): the document format `importGraph()` reads
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

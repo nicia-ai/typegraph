@@ -1,0 +1,400 @@
+---
+title: "Operational Identity: Two Systems, One Customer, Zero Silent Contradictions"
+date: 2026-08-21
+excerpt: "`store.identity` is a queryable, retractable, bitemporal ledger for asserting that two nodes — same kind or different kinds — are the same real-world thing, or provably not. Nodes sharing an id can fold automatically; everything else is an explicit assertion, optionally bounded to a validity window, propagated through traversal, interchange, and graph merge. A contradiction is refused twice: once by application validation, and again by a constraint the database itself enforces."
+tags:
+  - announcements
+cover:
+  alt: "Diagram of two records, Person and CaseSubject, folding into one identity class over a shared id, then splitting into two separated classes after a retraction, with a small database lock icon marking the constraint that refuses to let them refold"
+  image: "./cover.png"
+social:
+  alt: "Operational Identity: Two Systems, One Customer, Zero Silent Contradictions"
+  image: "./social.png"
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+A bank's KYC onboarding flow writes a `Person` row keyed by its own
+customer id. A separate fraud-detection pipeline writes a `CaseSubject`
+row for every actor named in an investigation, keyed by whatever id the
+case system uses — which, for a walk-in customer, happens to be the id
+the bank already assigned. Two systems, two schemas, one person.
+
+Graph libraries usually answer this at the type level. TypeGraph's own
+`sameAs` and `differentFrom` ontology factories did exactly that: they
+related _kinds_, not rows, and `differentFrom` never enforced anything
+about instance data at all. They are deprecated now.
+
+`store.identity` is the replacement, and it is a different kind of
+object: a ledger of assertions about individual nodes, queryable at any
+temporal coordinate, retractable without deletion, propagated through
+traversal, interchange and graph merge — and backstopped in the database
+against ever committing a claim that contradicts itself.
+
+## Two ways two nodes become one entity
+
+Identity is opt-in per graph. Enabling it also decides whether nodes of
+different kinds that happen to share an id fold together on sight:
+
+```typescript
+const graph = defineGraph({
+  id: "compliance",
+  nodes: {
+    Person: { type: Person },
+    CaseSubject: { type: CaseSubject },
+    Organization: { type: Organization },
+  },
+  edges: {},
+  ontology: [disjointWith(Person, Organization)],
+  identity: { sameIdAcrossKinds: "fold" },
+});
+```
+
+`"fold"` joins live nodes of different kinds sharing an id
+automatically. `"ignore"` enables the same ledger without that implicit
+join, for graphs where a shared id across kinds is a coincidence rather
+than evidence. With `"fold"`, the two systems above never need to
+coordinate:
+
+```typescript
+const person = await store.nodes.Person.create(
+  { name: "Alex Rivera" },
+  { id: "cust-8842" },
+);
+const subject = await store.nodes.CaseSubject.create(
+  { note: "Named in fraud case FC-2201" },
+  { id: "cust-8842" },
+);
+
+await store.identity.membersOf(person);
+// [{ kind: "CaseSubject", id: "cust-8842" },
+//  { kind: "Person", id: "cust-8842" }]
+```
+
+Folds conduct on a node's **lifecycle**, not its validity window. A node
+created today with a backdated `validFrom` is visible in the past to an
+ordinary read, but it does not conduct a fold there — the fold begins
+when the node actually exists. Symmetrically, a node with a future
+`validFrom` folds today, because it already exists and is live. That
+keeps the materialized closure behind current reads identical to the one
+`asOf(now)` reads, with no valid-time skew to special-case.
+
+## When the ids don't already match
+
+Most matches aren't that convenient. An investigator manually links a
+walk-in customer to an actor named in an unrelated case, under two ids
+that share nothing:
+
+```typescript
+const walkIn = await store.nodes.Person.create(
+  { name: "J. Alvarez" },
+  { id: "person-119" },
+);
+const caseActor = await store.nodes.CaseSubject.create(
+  { note: "Signed the wire authorization in case FC-2214" },
+  { id: "case-77" },
+);
+
+const linked = await store.identity.assertSame(walkIn, caseActor);
+// { action: "created", assertion: { id, relation: "same", a, b, validFrom } }
+
+await store.identity.assertSame(walkIn, caseActor);
+// { action: "existing", assertion: <same assertion> } — idempotent
+```
+
+`assertSame` and `assertDifferent` return a durable receipt either way,
+so a caller that re-runs after a crash cannot tell whether it created the
+assertion or confirmed one already there — the same idempotent shape as
+[`transactionWithReceipt()`](/blog/materializing-event-streams). Assertion
+IDs carry a private-symbol brand, so an unrelated string can't be passed
+by accident; a plain string that came back from persistence re-enters the
+branded type through `asIdentityAssertionId(value)` rather than a cast.
+
+The bulk forms — `bulkAssertSame`, `bulkAssertDifferent` — preserve input
+order and return exactly one result per pair. On PostgreSQL they run
+under a single graph identity lock; SQLite serializes through its own
+single-writer lock instead. `bulkRetractAssertions` is the one method
+that deliberately breaks the one-result-per-input shape: it dedupes ids
+and returns only the assertions that were actually open, so its result
+does not align index-by-index with its input.
+
+The ontology gets a say before anything touches storage. Folding
+`walkIn` onto an `Organization` — a kind `disjointWith` `Person` — is
+rejected on the spot:
+
+```typescript
+await store.identity.assertSame(walkIn, acmeFreight);
+// throws IdentityContradictionError
+// details: { operation: "assertSame", reason: "disjoint-kinds", a, b }
+```
+
+## Claims that were true for a while
+
+Not every identity claim is permanent. A person and a legacy record can
+be the same entity for a period and then diverge — a merged account that
+was later split, a case subject correct only for the window an
+investigation covered. Assertions take an explicit half-open validity
+window:
+
+```typescript
+await store.identity.assertSame(alice, legacyAlice, {
+  validFrom: "2020-01-01T00:00:00.000Z",
+  validTo: "2022-01-01T00:00:00.000Z",
+});
+
+await store.identity.bulkAssertDifferent([
+  { a: alice, b: bob, validFrom: "2023-01-01T00:00:00.000Z" },
+  { a: alice, b: carol }, // ordinary current-assertion semantics
+]);
+```
+
+A past-ended window affects historical reads only. An open window
+beginning in the past affects both historical and current reads. The
+rules around the edges are the interesting part: a windowed assertion
+requires both endpoint rows to cover its whole interval, so an ended or
+late-starting endpoint raises `IdentityEndpointValidityError` rather
+than recording a claim about a node that wasn't there. Future bounds and
+inverted windows raise `IdentityValidityWindowError`. Zero-width windows
+are accepted as empty history. Repeating the exact relation, pair and
+window is idempotent — but a _second_ open window for a pair that is
+already current is refused rather than silently collapsed onto a
+different `validFrom`.
+
+Contradictions are checked throughout every overlapping segment,
+including along transitive `same` paths, and adjacent half-open windows
+correctly do not overlap.
+
+## The ledger won't hold both claims at once
+
+Three weeks later, forensic review proves `person-119` and `case-77` are
+two different people who happened to share a wire-authorization
+signature. That's new evidence, and exactly the shape a system should be
+able to record — but the ledger currently says they're the same entity,
+and it means it:
+
+```typescript
+await store.identity.assertDifferent(walkIn, caseActor);
+// throws IdentityContradictionError
+// details: { operation: "assertDifferent", reason: "same-class", a, b }
+```
+
+`assertDifferent` refuses endpoints already in one identity class, the
+same way `assertSame` refuses endpoints an ontology already separated.
+Recording new evidence means retracting the old claim first —
+explicitly, not by overwriting it:
+
+```typescript
+const ended = await store.identity.retractAssertion(linked.assertion.id);
+// ended.validTo: "2026-08-21T18:03:11.442Z" — the fold ends, timestamped
+
+await store.identity.assertDifferent(walkIn, caseActor);
+// { action: "created", ... } — now recorded as provably different
+
+await store.identity.areSame(walkIn, caseActor); // false
+await store.identity.areDifferent(walkIn, caseActor); // true
+```
+
+`retractAssertion` deletes nothing. The ended assertion and its `validTo`
+stay readable through `identity.assertionsOf(...)` and at any historical
+coordinate. The class split is a fact with a timestamp, not a silent
+correction.
+
+Deletion participates in the same discipline. Soft-deleting a node ends
+its current assertions; when a deletion is what ended an assertion, the
+row records that node as `endedBy`, so a later reader can tell _why_ an
+assertion ended and not merely that it did.
+
+## A backstop beneath the application
+
+Everything above is code deciding whether a write is legal, and code can
+be wrong. `assertSame` validates against state it just read — the right
+layer for a clear error message, but still "read, then decide." A bug
+elsewhere that writes identity rows directly could in principle commit
+the exact contradiction the API refuses.
+
+So identity maintains a second derived relation: the **separation
+relation**, one row per pair of identity classes that a current
+`different` assertion holds apart, keyed under a
+`CHECK (class_key_low < class_key_high)` constraint. Every transaction
+that fuses two classes relabels the affected separation rows in the same
+statement batch. Fusing two classes that were separated relabels both
+sides of their shared row onto one key, and the database aborts the
+transaction:
+
+```typescript
+// IdentitySeparationViolationError
+// details: { graphId, enforcedBy: "database", classKey,
+//            assertionId, a, b }
+```
+
+`enforcedBy: "writer"` on the same error means the opposite happened: the
+write was accepted and only the writer's own re-check caught it, which
+means the relation was provisioned without its constraint. Either way the
+graph cannot end up holding a contradiction. The interesting question
+becomes which layer let it get that far.
+
+## Identity you can traverse
+
+An identity class is only useful if queries respect it. Traversal
+expansion is per hop and defaults off:
+
+```typescript
+const results = await store
+  .query()
+  .from("Person", "person")
+  .traverse("authored", "edge", { includeIdentityMembers: true })
+  .to("Document", "document")
+  .select((ctx) => ({ edge: ctx.edge, document: ctx.document }))
+  .execute();
+```
+
+The hop considers coordinate-visible members of the source class,
+returns the physical edge and target rows, preserves provenance, and
+deduplicates a physical edge within the step. There is no automatic
+graph-wide expansion, and collection reads like `getById` have no
+identity option — expansion is something you ask for.
+
+Both coordinates reach the candidate edge through an ordinary indexed
+equality on the class member, never a membership test evaluated per
+candidate edge. What differs is what a class costs to compute. At the
+**current** coordinate the maintained closure already _is_ the class
+relation, so each step seeks into it from its own frontier. Cost is
+proportional to the frontier and the size of its classes — never to how
+many identity classes the graph holds. Measured on SQLite, with each
+`Person` folded to a `Company` and an `Alias` peer sharing its id:
+
+| source rows | fan-out | matching edges | before    | after |
+| ----------- | ------- | -------------- | --------- | ----- |
+| 250         | 1       | 250            | 67 ms     | 6 ms  |
+| 1000        | 1       | 1000           | 1077 ms   | 9 ms  |
+| 2000        | 1       | 2000           | 4616 ms   | 19 ms |
+| 1000        | 8       | 8000           | 8611 ms   | 13 ms |
+| 500         | 200     | 100,000        | 51,602 ms | 77 ms |
+
+A **historical** hop cannot use that closure, because the closure
+represents only the present. Its classes are reconstructed from the
+assertion ledger, and under `"fold"` that reconstruction also has to
+consider the structural same-id relation across every live node. No
+frontier narrows that fixed point, so it is built once per statement into
+a materialized relation each step joins.
+
+That asymmetry is the thing to plan around: a past-coordinate hop
+rebuilds the whole graph's classes even when you asked about one node. A
+current hop has no such floor — a single-start-row hop over 50,000 folded
+triples measures 1 ms on SQLite against 387 ms before the closure was
+seekable, and nine unrelated 501-member classes cost it nothing at all.
+Reading the present is the cheaper question by a wide margin.
+
+## Identity that travels
+
+Identity truth is not confined to one database.
+
+**Interchange** format `2.0` carries an optional identity section. State
+export includes current assertions; `identityMode: "archival"` also
+includes ended ones, restored after shape validation without affecting
+the current closure. Identity-enabled exports default `includeTemporal`
+to `true`, because importing identity truth has to prove both endpoints
+existed throughout each assertion window — setting it to `false` on an
+identity-enabled graph is refused outright.
+
+```typescript
+const archive = await exportGraph(store, {
+  identityMode: "archival",
+  includeDeleted: true,
+});
+```
+
+There is a genuine trade-off in that second option worth stating plainly:
+without `includeDeleted`, an assertion whose endpoint is soft-deleted is
+dropped from the export entirely rather than carried as a dangling
+reference. With it, those assertions survive — but interchange documents
+carry no `deletedAt` field, so nodes exported only because of that flag
+re-import as **live**. An `includeDeleted` archive resurrects its
+soft-deleted nodes. Choose deliberately for a backup.
+
+**Graph merge** includes identity truth in staleness fingerprints and
+diffs, and detects identity conflicts at plan time as a typed
+`IdentityMergeConflictError`: direct opposing relations on one endpoint
+pair, transitive contradictions reached through a chain of `same`
+assertions no single branch wrote, retract/reassert races, and assertions
+over a node another branch deleted. A branch that retracts a pair and
+reasserts it itself — convergent, not racing — merges cleanly.
+
+Plan time is the early surface, not the only one. After its identity
+writes, and still inside the same transaction, a merge re-derives the
+classes it touched from the written state and refuses a contradiction
+there too, so a plan validated against state that has since moved cannot
+leave a contradictory ledger behind. If the derived classes disagree with
+the materialized closure, the closure is rebuilt inside that same
+transaction and the check re-runs — repairing a lagging closure
+atomically with a merge that is otherwise sound.
+
+This is mechanical truth propagation, not semantic entity
+reconciliation. It moves the claims you made; it does not invent new
+ones.
+
+**Ingestion branches** are where identity meets messy data. An untrusted
+batch often contains an alias that deliberately repeats a canonical
+node's unique key — and the identity evidence needed to collapse it. An
+`ingestionBranch()` handle exposes an assertion-only identity facade
+alongside its collections, so the duplicate and the assertion explaining
+it can be staged together and resolved at merge time. That story is its
+own post.
+
+## What it costs
+
+Identity is free when you don't use it: an identity-disabled graph runs
+no identity SQL, locks, or closure work at all — construction and
+property updates measure 0.002 ms and 0.039 ms on SQLite.
+
+When you do enable it, there are three costs worth knowing before you
+turn it on:
+
+- **A per-graph write fence.** On PostgreSQL every identity-affecting
+  node write serializes on a per-graph advisory transaction lock: at most
+  one writer per graph at a time. That is a correctness guarantee for the
+  ledger and closure, and also a throughput ceiling. Other graphs and all
+  reads are unaffected.
+- **First-time enablement is heavier than steady state.** It takes a
+  `SHARE` lock on the shared nodes table — briefly blocking writes for
+  _every_ graph in that database — and loads the whole graph to build the
+  initial closure. Plan it for a quiet window on large databases.
+  `evolve()` re-runs the same rebuild.
+- **Changing `sameIdAcrossKinds` is breaking.** A `fold`↔`ignore` flip
+  rewrites the closure and changes every `areSame`/`membersOf` answer
+  against existing data, so it requires the same explicit
+  `migrateSchema()` opt-in as any other breaking change. It never
+  auto-migrates silently.
+
+Identity also requires interactive atomic transactions. The bundled
+SQLite and PostgreSQL drivers have them; Cloudflare D1 and
+`drizzle-orm/neon-http` refuse an identity-enabled graph with
+`ConfigurationError` code `IDENTITY_REQUIRES_ATOMIC_BACKEND`. A custom
+backend must additionally declare how it fences concurrent writers, or
+construction is refused with `IDENTITY_REQUIRES_WRITE_FENCE` — the error
+names the exact declaration line to add.
+
+## What this deliberately isn't
+
+Durable entity handles, identity-group IDs, semantic reconciliation,
+automatic OWL property substitution, and graph-wide identity expansion
+are not part of this. `store.identity` records and propagates the
+identity claims _you_ make, with a ledger you can audit and a database
+that refuses to hold a contradiction. Deciding that two records are the
+same person is still your call — or your entity-resolution pass's.
+
+## Try it
+
+- [Operational Identity](/identity): the full guide — bulk assertions,
+  identity-expanded traversal, interchange and graph-merge propagation,
+  error codes, and migrating off `sameAs`/`differentFrom`
+- [Ontology](/ontology): `disjointWith` and the other relations identity
+  is validated against
+- [Graph Merge](/graph-merge): branch, resolve, and fold identity truth
+  back together
+- [`identity.test.ts`](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/tests/identity.test.ts):
+  the behavioral test suite this post's examples are drawn from
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />

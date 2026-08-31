@@ -1,0 +1,221 @@
+---
+title: "Bring Your Own Backend: Declaring What Your Engine Can't Do"
+date: 2026-08-21
+excerpt: "Drizzle becomes an optional peer dependency, and ten entrypoints are provably Drizzle-free — enforced by a reachability scanner at both source and dist grain. On top of that, a capability model: an engine declares that it has no recursive CTEs or no advisory locks, and TypeGraph turns that declaration into a typed refusal at construction, or a fallback that returns the same answer a slower way. The error names the exact line to add."
+tags:
+  - announcements
+draft: true
+---
+
+import NewsletterSignup from "../../../../components/landing/NewsletterSignup.astro";
+
+[Portable Stores](/blog/portable-stores) split the Store into a
+Drizzle-free core and an adapter escape hatch. [An Infinite Supply of
+Graph Databases](/blog/infinite-graph-databases) put TypeGraph inside a
+Cloudflare Durable Object, one SQLite file per tenant.
+
+Both posts pointed at the same reader: someone running TypeGraph on
+something that is not a `pg` pool. This release is for that reader, and
+it does two things — it removes Drizzle from the dependency graph
+entirely for the portable paths, and it gives an engine a way to say what
+it cannot do.
+
+## Drizzle is now an optional peer
+
+`drizzle-orm` moves to an optional peer dependency. The affected
+configuration first, because it's the part that can break an install:
+**package managers that do not auto-install optional peers now need
+`drizzle-orm` added explicitly** to use the Drizzle adapter entrypoints.
+
+Ten entrypoints need no Drizzle at all — the root, `backend`, `core`,
+`schema`, `indexes`, `graph-extension`, `interchange`, `profiler`,
+`graph-merge`, and `provenance`. That isn't an aspiration in a README. An
+install-grain fixture imports and requires all ten with `drizzle-orm`
+absent from `node_modules`, and a reachability scanner plus ratchet tests
+assert they stay Drizzle-free at both the source and dist grain, in both
+module formats. A future import cannot silently re-couple them.
+
+Getting there meant severing three last routes. The interesting one:
+recorded-time migration used to obtain its DDL from Drizzle schema
+objects. `GraphBackend` now carries an optional `recordedTableDdl`
+member, so the migration asks the _backend_ for its DDL instead — and a
+backend without that member gets a typed refusal on the migration branch
+rather than a crash. The claim-owner SQL comparison and the three removal
+builders moved to portable owners with golden `{sql, params}` tests
+pinning byte-identical output on both dialects.
+
+The two managed Store entrypoints (`sqlite/local`, `postgres/pglite`)
+refuse a missing peer with a typed error naming the failing specifier and
+the install command, in both module formats. The six explicit
+Drizzle-native adapter entrypoints surface the raw module-resolution
+error at module evaluation, documented per entrypoint. A
+`drizzle-orm`-present-but-broken install is never laundered into the
+missing-peer refusal — those are different problems and they report
+differently.
+
+## Declaring what the engine can't do
+
+Removing a dependency is the easy half. The harder half is that TypeGraph
+emits SQL some engines cannot run, and until now it found out at the
+worst possible moment.
+
+`BackendCapabilities` gains `recursiveTraversal`, describing whether the
+engine can compute a bounded transitive closure of a relation in one
+round trip — a recursive CTE on a SQL engine, a graph-native expansion
+operator elsewhere:
+
+```typescript
+const capabilities: Partial<BackendCapabilities> = {
+  recursiveTraversal: {
+    supported: false,
+    reason: "engine has no WITH RECURSIVE / equivalent",
+  },
+};
+```
+
+**Absent means supported.** That default is doing real work: every
+existing custom backend already runs the six recursive-CTE emission sites
+unconditionally, so a default of "unsupported" would refuse traversals
+that work today.
+
+The decision resolves through a branded `RecursiveTraversalVerdict` that
+only `resolveRecursiveTraversal` can construct, so a caller cannot forge
+one by writing `{ supported: true }` inline at a call site. Where a query
+compiles without a backend at all, there is one sanctioned way to obtain
+a verdict — `assumeRecursiveTraversalSupported` — and it is named for
+what it does.
+
+Five operations refuse when the verdict says unsupported, each throwing
+`ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED` with
+`details.operation` naming the site: variable-length `traverse` queries,
+`store.subgraph()`, historical identity class reads, identity-expanded
+historical queries, and the identity window-ledger read.
+
+The sixth doesn't refuse. `weightedShortestPath` falls back to a per-hop
+predecessor walk on a backend with temporary statements but no recursion,
+issuing `pathLength + 1` extraction statements for the path a recursive
+CTE would have returned in one round trip. Same path, more round trips.
+
+Worth being precise about what is _not_ affected: unweighted
+`shortestPath`, along with `reachable`, `canReach` and `neighbors`, emits
+no recursive CTE at all — it routes through the iterative working-table
+or inline path — so it neither refuses nor falls back regardless of this
+declaration.
+
+## How your engine serializes writers
+
+TypeGraph fences a family of writes behind a per-graph lock rather than
+trusting default isolation: Operational Identity's mutations, and the
+recorded-clock allocation behind `history` / `revisionTracking`.
+Which lock to take was, until now, derived inline from `dialect` at eight
+separate call sites.
+
+`capabilities.pessimisticLocks` declares what an engine actually
+provides, and `resolveWriteFencePlan` is the one place that declaration
+becomes a plan:
+
+- `{ kind: "lock", advisoryLocks: true, tableLocks: boolean }` — take the
+  declared lock.
+- `{ kind: "engine-serialized" }` — no lock needed; the engine serializes
+  writers by construction (SQLite's single writer slot).
+- `{ kind: "unfenced" }` — neither. Every non-degradable fence refuses
+  rather than running unfenced.
+
+The resolution order is where the honesty lives. A declared value wins.
+Absent, _and_ built by `createSqliteBackend` / `createPostgresBackend`,
+it derives from `dialect` — exactly what the eight sites used to compute.
+Absent on anything else: `unfenced`, because an undeclared custom backend
+is by definition uncertified, and inferring lock support from `dialect`
+alone is precisely the unsound inference this capability replaces.
+
+That last clause has teeth. A custom backend hosting Operational
+Identity, `history: true`, or `revisionTracking: true` that does not
+declare `pessimisticLocks` is now **refused at store construction**,
+immediately, with no deprecation release. The refusal names the exact
+one-line declaration to add, keyed to the backend's dialect:
+
+```typescript
+// PostgreSQL
+pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false }
+// SQLite
+pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: true }
+```
+
+The error text is the migration guide, rather than a pointer to a page
+that contains the migration guide.
+
+A declared-advisory-only backend that reaches a site requiring a table
+lock is refused with `WRITE_FENCE_UNAVAILABLE`, naming
+`details.operation` and `details.requires` — the plan resolved, it just
+cannot satisfy what that specific operation needs.
+
+Alongside it, `recordedTimeOwnership` names who allocates recorded-time
+revisions. Absent means `"typegraph-relations"`, today's behavior
+everywhere. Declaring `"engine-native"` together with history or revision
+tracking is refused with `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` —
+an interim measure, stated as one, because that read/write path does not
+exist yet and admitting the declaration would only move the failure from
+construction to mid-flush.
+
+## Bundles, so a caller stops re-deriving support
+
+Scattered `undefined` checks are how "does this backend support X" drifts
+between call sites. A **capability bundle** groups the members one
+operation family needs, with one verdict resolver and one member
+accessor. Six ship as a pilot:
+
+| Bundle                    | Kind      | Behavior when a member is absent                                                                                               |
+| ------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `claims`                  | gated     | Bidirectional cross-check against `constraintClaims`; disagreement either way refuses with `CONSTRAINT_CLAIM_SURFACE_MISMATCH` |
+| `statementExecution`      | gated     | Refuses with `IDENTITY_REQUIRES_STATEMENT_EXECUTION`                                                                           |
+| `recordedRevisionOrigins` | gated     | Refuses with the operation's own typed error                                                                                   |
+| `batchPointRead`          | graduated | `getNodes` falls back to per-id `getNode`; `getEdges` to per-id `getEdge`                                                      |
+| `uniqueSidecarBatch`      | graduated | `insertUniqueBatch` falls back to individual claims; `checkUniqueBatch` to a per-key loop                                      |
+| `contributionHealth`      | graduated | `probeContributions` falls back to `{ entries: [] }`; the rest refuse typed                                                    |
+
+Every bundle's member accessor applies one disposition-keyed rule. A
+`refuse`-disposition row whose backend object cannot actually reach the
+member throws that bundle's port-mismatch code. A `fallback`-disposition
+row whose port cannot reach the member takes its declared fallback
+instead of throwing — the verdict said the member was there, the object
+says otherwise, and a fallback row is _defined_ to degrade rather than
+assert.
+
+The honest scope: this covers **six of the twenty-one** member-bearing
+operation families measured across the codebase. The other fifteen are a
+named follow-up, not a silent gap — their members keep working exactly as
+before, unbundled, with an access-count ceiling that stops new scattered
+checks from accumulating ahead of that work.
+
+## Nothing shipped changes behavior
+
+Both bundled backends already declare every capability and carry every
+member each pilot bundle needs. `recursiveTraversal: { supported: true }`
+on both. `pessimisticLocks` unconditionally on both. No shipped
+configuration behaves differently after this release.
+
+One exception is worth flagging for custom backend authors: a
+backend-owned clone of the factory-assembled `capabilities` object is now
+deep-frozen. Code that mutated `backend.capabilities` — or a nested field
+like `backend.capabilities.vector` — after construction now throws
+instead of silently succeeding. Objects you supply through factory
+options remain yours and remain mutable.
+
+The factories also refuse a contradictory declaration at construction:
+`supported: false` with no `reason`, or `supported: true` with a dangling
+`reason`, raises `CAPABILITY_DECLARATION_CONTRADICTION`.
+
+## Try it
+
+- [Backend Capabilities](/backend-setup#backend-capabilities): the full
+  capability shape, and the parity matrix
+- [Write fence declaration](/backend-setup#write-fence-declaration-pessimisticlocks):
+  the two lines to copy, and what each refusal code means
+- [Capability bundles](/backend-setup#capability-bundles): the pilot six,
+  and what a conformance kit will certify
+- [Drizzle-Free Entrypoints](/backend-setup#drizzle-free-entrypoints):
+  the ten, and the `resolveStampedValidityLowerBound` helper custom insert
+  builders should use
+- [GitHub](https://github.com/nicia-ai/typegraph)
+
+<NewsletterSignup />
