@@ -384,6 +384,62 @@
     "issue": "#533"
   },
   {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "NodeCollection",
+    "member": "bulkReplaceById",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
+    "issue": "#533"
+  },
+  {
     "entrypoint": "typegraph-backend.api.md",
     "declaration": "AtomicNodeDeleteBatchInput",
     "member": "schemaFence",

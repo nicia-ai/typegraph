@@ -21,7 +21,12 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ConfigurationError } from "../../errors";
+import {
+  ConfigurationError,
+  ENTITY_ALREADY_EXISTS_CODE,
+  NodeNotFoundError,
+  ValidationError,
+} from "../../errors";
 import type { DynamicNodeAccessor, NodeAccessor } from "../../query/builder";
 import { type QueryBuilder } from "../../query/builder";
 import { type Predicate } from "../../query/predicates";
@@ -68,6 +73,16 @@ import {
   resolveTemporalReadParams,
   type TemporalReadParams,
 } from "./temporal-read-params";
+
+function isNodeReplacementPartitionMovement(error: unknown): boolean {
+  return (
+    error instanceof NodeNotFoundError ||
+    (error instanceof ValidationError &&
+      error.details.issues.some(
+        (issue) => issue.code === ENTITY_ALREADY_EXISTS_CODE,
+      ))
+  );
+}
 
 type OnImmutableLowerBound = "preserve" | "refuse";
 
@@ -174,6 +189,8 @@ export type NodeUpsertUpdateBatchEntry = Readonly<{
   input: UpsertUpdateNodeInput;
   clearDeleted: boolean;
   existing?: BackendNodeRow;
+  /** Complete props already validated by the replacement API owner. */
+  replacementProps?: Record<string, unknown>;
 }>;
 
 /**
@@ -201,6 +218,7 @@ export type NodeCollectionConfig = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{ propsPreValidated?: true }>,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
@@ -227,6 +245,18 @@ export type NodeCollectionConfig = Readonly<{
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
     >
   >;
+  prepareReplacement: (
+    kind: string,
+    props: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  executeReplacementBatch: (
+    kind: string,
+    items: readonly Readonly<{
+      id: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
   executeDelete: (
@@ -382,6 +412,8 @@ export function createNodeCollection<
     executeUpdateWhere: executeNodeUpdateWhere,
     executeUpsertUpdateBatch: executeNodeUpsertUpdateBatch,
     executeResolvedMutationSet: executeNodeResolvedMutationSet,
+    prepareReplacement,
+    executeReplacementBatch: executeNodeReplacementBatch,
     executeDelete: executeNodeDelete,
     executeDeleteBatch: executeNodeDeleteBatch,
     executeHardDelete: executeNodeHardDelete,
@@ -744,6 +776,92 @@ export function createNodeCollection<
       const results = await executeNodeCreateBatch(batchInputs, backend);
       await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return narrowNodes<N>(results);
+    },
+
+    async bulkReplaceById(
+      items: readonly Readonly<{
+        id: string;
+        props: z.input<N["schema"]>;
+      }>[],
+    ): Promise<Node<N>[]> {
+      if (items.length === 0) return [];
+      const seenIds = new Set<string>();
+      for (const item of items) {
+        if (seenIds.has(item.id)) {
+          throw new ValidationError(
+            `bulkReplaceById requires distinct node ids; received "${item.id}" more than once.`,
+            {
+              entityType: "node",
+              kind,
+              operation: "update",
+              id: item.id,
+              issues: [],
+            },
+          );
+        }
+        seenIds.add(item.id);
+      }
+      const prepared = items.map((item) => ({
+        id: item.id,
+        props: prepareReplacement(kind, item.props),
+      }));
+      const attempt = await executeNodeReplacementBatch(
+        kind,
+        prepared,
+        backend,
+      );
+      if (attempt.outcome === "applied") {
+        await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
+        return narrowNodes<N>(attempt.value);
+      }
+      const results = await runResolvedMutationSetConverging(
+        "node",
+        backend,
+        () =>
+          runOptionallyInTransaction(backend, async (target) => {
+            const rows = await getNodeRowsByIds(
+              target,
+              batchPointRead,
+              graphId,
+              kind,
+              prepared.map((item) => item.id),
+            );
+            const results = new Map<string, Node<N>>();
+            const creates = prepared.filter((item) => !rows.has(item.id));
+            const updates = prepared.filter((item) => rows.has(item.id));
+            if (creates.length > 0) {
+              const created = await executeNodeCreateBatch(
+                creates.map((item) =>
+                  buildCreateInput(kind, item.props, { id: item.id }),
+                ),
+                target,
+                { propsPreValidated: true },
+              );
+              for (const row of created)
+                results.set(row.id, narrowNode<N>(row));
+            }
+            if (updates.length > 0) {
+              const updated = await executeNodeUpsertUpdateBatch(
+                updates.map((item) => {
+                  const existing = requireDefined(rows.get(item.id));
+                  return {
+                    input: buildUpsertUpdateInput(kind, item.id, item.props),
+                    clearDeleted: existing.deleted_at !== undefined,
+                    existing,
+                    replacementProps: item.props,
+                  };
+                }),
+                target,
+              );
+              for (const row of updated)
+                results.set(row.id, narrowNode<N>(row));
+            }
+            return prepared.map((item) => requireDefined(results.get(item.id)));
+          }),
+        { isMovement: isNodeReplacementPartitionMovement },
+      );
+      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+      return results;
     },
 
     async bulkUpsertById(

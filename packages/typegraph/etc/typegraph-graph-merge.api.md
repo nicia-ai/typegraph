@@ -3881,6 +3881,10 @@ type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
         validFrom?: string;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation)[]) => Promise<Node<N>[]>;
+    bulkReplaceById: (items: readonly Readonly<{
+        id: string;
+        props: z.input<N["schema"]>;
+    }>[]) => Promise<Node<N>[]>;
     bulkInsert: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;

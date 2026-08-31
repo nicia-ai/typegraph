@@ -253,6 +253,18 @@ function buildCases(
   const createNodesStale = scenario(client, backend, "create-nodes-stale");
   const createNodesRefusal = scenario(client, backend, "create-nodes-refusal");
 
+  const replaceNodesSuccess = scenario(
+    client,
+    backend,
+    "replace-nodes-success",
+  );
+  const replaceNodesStale = scenario(client, backend, "replace-nodes-stale");
+  const replaceNodesRefusal = scenario(
+    client,
+    backend,
+    "replace-nodes-refusal",
+  );
+
   const createEdgesSuccess = scenario(client, backend, "create-edges-success");
   const createEdgesStale = scenario(client, backend, "create-edges-stale");
   const createEdgesRefusal = scenario(client, backend, "create-edges-refusal");
@@ -347,6 +359,79 @@ function buildCases(
             },
           ]),
         observeState: createNodesRefusal.observe,
+        errorMatches: (error) => error instanceof ValidationError,
+      },
+    },
+    {
+      variant: "replaceNodes",
+      orderedSuccess: {
+        prepare: async () => {
+          const store = await replaceNodesSuccess.open();
+          await store.nodes.Person.bulkInsert([
+            {
+              id: "replace-existing",
+              props: { name: "Before", score: 0 },
+            },
+          ]);
+          return {
+            expectedResult: [
+              ["replace-new", "New"],
+              ["replace-existing", "After"],
+            ],
+            expectedState: {
+              edges: [],
+              nodes: [
+                ["replace-existing", "After", 2],
+                ["replace-new", "New", 1],
+              ],
+            },
+          };
+        },
+        execute: async () => {
+          const nodes = await replaceNodesSuccess
+            .requireStore()
+            .nodes.Person.bulkReplaceById([
+              {
+                id: "replace-new",
+                props: { name: "New", score: 1 },
+              },
+              {
+                id: "replace-existing",
+                props: { name: "After", score: 2 },
+              },
+            ]);
+          return nodes.map((node) => [node.id, node.name]);
+        },
+        observeState: replaceNodesSuccess.observe,
+      },
+      staleFenceNoWrite: {
+        dispatch: "required",
+        prepare: async () => {
+          await replaceNodesStale.open();
+          await replaceNodesStale.stale();
+          return { expectedState: await replaceNodesStale.observe() };
+        },
+        execute: () =>
+          replaceNodesStale
+            .requireStore()
+            .nodes.Person.bulkReplaceById([
+              { id: "stale-replace", props: { name: "Stale", score: 1 } },
+            ]),
+        observeState: replaceNodesStale.observe,
+        errorMatches: (error) => error instanceof StaleVersionError,
+      },
+      semanticRefusalRollback: {
+        dispatch: "pre-dispatch",
+        prepare: async () => {
+          await replaceNodesRefusal.open();
+          return { expectedState: await replaceNodesRefusal.observe() };
+        },
+        execute: () =>
+          replaceNodesRefusal.requireStore().nodes.Person.bulkReplaceById([
+            { id: "repeated-node", props: { name: "First", score: 2 } },
+            { id: "repeated-node", props: { name: "Second", score: 3 } },
+          ]),
+        observeState: replaceNodesRefusal.observe,
         errorMatches: (error) => error instanceof ValidationError,
       },
     },
@@ -1314,6 +1399,7 @@ describe("bundled atomic mutation program semantic conformance: libSQL", () => {
       );
       expect(required).toEqual([
         "createNodes",
+        "replaceNodes",
         "createEdges",
         "deleteNodes",
         "deleteEdges",

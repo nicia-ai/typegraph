@@ -5,7 +5,10 @@ import {
   type ClaimOwnerColumnNames,
   claimOwnerMatchesSql,
 } from "../../../store/claims/axis";
-import type { AtomicNodeBatchEntry } from "../../capabilities/atomic-mutation-program";
+import type {
+  AtomicNodeBatchEntry,
+  AtomicNodePostimageEntry,
+} from "../../capabilities/atomic-mutation-program";
 import type {
   InsertNodeParams,
   NodeInsertClaim,
@@ -20,10 +23,12 @@ import {
 } from "./shared";
 
 /** One node batch member, carrying its stable ordinal into claim SQL. */
-export type AtomicNodeClaimEntry = Readonly<{
+export type AtomicNodeClaimEntry<
+  TEntry extends AtomicNodePostimageEntry = AtomicNodeBatchEntry,
+> = Readonly<{
   memberOrdinal: number;
   claimOrdinal: number;
-  entry: AtomicNodeBatchEntry;
+  entry: TEntry;
   claim: NodeInsertClaim;
 }>;
 
@@ -90,7 +95,7 @@ function excludedColumn(columnName: string): SQL {
 }
 
 function assertClaimEntries(
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
   schemaFence: SchemaWriteFenceParams,
 ): void {
   if (entries.length === 0) {
@@ -164,7 +169,7 @@ function ordinalLiteral(value: number): SQL {
 /** Complete legacy-storage conflict reads for one normalized claim set. */
 function claimConflictQueries(
   tables: Tables,
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
   schemaFence: SchemaWriteFenceParams,
 ): readonly SQL[] {
   return entries.flatMap((item) => {
@@ -221,17 +226,21 @@ function claimConflictQueries(
   });
 }
 
-function claimOf(item: AtomicNodeClaimEntry): NodeInsertClaim {
+function claimOf(
+  item: AtomicNodeClaimEntry<AtomicNodePostimageEntry>,
+): NodeInsertClaim {
   return item.claim;
 }
 
-function paramsOf(item: AtomicNodeClaimEntry): InsertNodeParams {
+function paramsOf(
+  item: AtomicNodeClaimEntry<AtomicNodePostimageEntry>,
+): InsertNodeParams {
   return item.entry.params;
 }
 
 function claimInputValues(
   tables: Tables,
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
 ): SQL {
   const { uniques } = tables;
   return sql.join(
@@ -255,7 +264,7 @@ function claimInputValues(
 
 function claimInputCte(
   tables: Tables,
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
   alias: string,
 ): SQL {
   const columns = sql.join(
@@ -304,7 +313,7 @@ function claimOwnerMatches(tables: Tables, dialect: SqlDialect): SQL {
 export function buildAtomicNodeClaimUpsertWithSchemaFence(
   tables: Tables,
   dialect: SqlDialect,
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
 ): SQL {
@@ -372,7 +381,7 @@ export function buildAtomicNodeClaimUpsertWithSchemaFence(
  */
 export function buildAtomicNodeClaimGatePredicateWithSchemaFence(
   tables: Tables,
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
 ): SQL {
@@ -424,7 +433,7 @@ export function buildAtomicNodeClaimGatePredicateWithSchemaFence(
  */
 export function buildAtomicNodeClaimCleanupWithSchemaFence(
   tables: Tables,
-  entries: readonly AtomicNodeClaimEntry[],
+  entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
 ): SQL {
@@ -507,5 +516,41 @@ export function buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
           AND ${nodes.id} = ${ownerColumn(uniques.nodeId)}
           AND ${nodes.deletedAt} = ${input.timestamp}
       )
+  `;
+}
+
+/**
+ * Soft-releases every live claim owned by a blind-replacement member.
+ *
+ * Replacement has no preimage by contract, so it cannot diff old and new
+ * claim keys. Releasing by exact owner before acquiring the postimage claims
+ * makes omission and key changes complete without an extra read. The later
+ * claim gate and terminal postimage assertion keep this cleanup in the same
+ * all-or-nothing submission as the row replacement.
+ */
+export function buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
+  tables: Tables,
+  input: Readonly<{
+    graphId: string;
+    kind: string;
+    ids: readonly string[];
+    timestamp: string;
+  }>,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+): SQL {
+  const { uniques } = tables;
+  return sql`
+    WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)}
+    UPDATE ${uniques}
+    SET ${quotedColumn(uniques.deletedAt)} = ${input.timestamp}
+    WHERE EXISTS (SELECT 1 FROM ${sql.identifier(SCHEMA_FENCE_ALIAS)})
+      AND ${uniques.graphId} = ${input.graphId}
+      AND ${uniques.concreteKind} = ${input.kind}
+      AND ${uniques.deletedAt} IS NULL
+      AND ${uniques.nodeId} IN (${sql.join(
+        input.ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
   `;
 }

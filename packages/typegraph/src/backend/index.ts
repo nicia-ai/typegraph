@@ -161,6 +161,8 @@ export type {
   AtomicNodeProjection,
   AtomicNodeProjectionFamily,
   AtomicNodeProjectionSupport,
+  AtomicNodeReplacementBatchExecutor,
+  AtomicNodeReplacementEntry,
   AtomicNodeResolvedMutationSetExecutor,
   AtomicNodeResolvedMutationSetResult,
   AtomicNodeResolvedUpdateBatchExecutor,

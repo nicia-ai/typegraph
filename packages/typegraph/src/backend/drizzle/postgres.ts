@@ -2130,6 +2130,7 @@ export function createPostgresBackend(
     registerAtomicSqlProgram(backend, executionAdapter);
     registerAtomicMutationPrograms(backend, {
       createNodes: operations.executeAtomicNodeBatch,
+      replaceNodes: operations.executeAtomicNodeReplacementBatch,
       createEdges: operations.executeAtomicEdgeBatch,
       deleteNodes: operations.executeAtomicNodeDeleteBatch,
       deleteEdges: operations.executeAtomicEdgeDeleteBatch,
@@ -3416,6 +3417,7 @@ function createTransactionBackend(
     registerAtomicMutationPrograms(backend, {
       mutateNodes: requireDefined(backend.executeAtomicNodeResolvedMutationSet),
       mutateEdges: resolvedSetOnlyEdgeMutationProgram(mutateEdges),
+      replaceNodes: requireDefined(backend.executeAtomicNodeReplacementBatch),
     });
   }
 

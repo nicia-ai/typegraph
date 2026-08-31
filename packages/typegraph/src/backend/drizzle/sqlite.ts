@@ -2685,6 +2685,7 @@ export function createSqliteBackend(
     registerAtomicSqlProgram(backend, executionAdapter);
     registerAtomicMutationPrograms(backend, {
       createNodes: operations.executeAtomicNodeBatch,
+      replaceNodes: operations.executeAtomicNodeReplacementBatch,
       createEdges: operations.executeAtomicEdgeBatch,
       deleteNodes: operations.executeAtomicNodeDeleteBatch,
       deleteEdges: operations.executeAtomicEdgeDeleteBatch,

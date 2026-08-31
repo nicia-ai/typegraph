@@ -4523,7 +4523,7 @@ const NODE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count"
 const NODE_TYPE_BRAND: "__nodeType";
 
 // @public
-const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
+const NODE_WRITE_NAMES: readonly ["create", "createFromRecord", "update", "updateWhere", "delete", "hardDelete", "upsertById", "upsertByIdFromRecord", "bulkCreate", "bulkReplaceById", "bulkUpsertById", "bulkInsert", "bulkDelete", "getOrCreateByConstraint", "bulkGetOrCreateByConstraint"];
 
 // @public
 export type NodeAccessor<N extends NodeType> = IsDynamicNodeType<N> extends true ? DynamicNodeAccessor : Readonly<{
@@ -4611,6 +4611,10 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
         validFrom?: string;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation)[]) => Promise<Node<N>[]>;
+    bulkReplaceById: (items: readonly Readonly<{
+        id: string;
+        props: z.input<N["schema"]>;
+    }>[]) => Promise<Node<N>[]>;
     bulkInsert: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;

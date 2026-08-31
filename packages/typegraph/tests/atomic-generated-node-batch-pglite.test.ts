@@ -144,6 +144,11 @@ const composedGraph = defineGraph({
   },
   edges: {},
 });
+const replacementComposedGraph = defineGraph({
+  id: `${composedGraph.id}-replacement`,
+  nodes: composedGraph.nodes,
+  edges: {},
+});
 const ScopedPerson = defineNode("ScopedPerson", {
   schema: z.object({ email: z.string() }),
 });
@@ -506,6 +511,47 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
         limit: 10,
       }),
     ).resolves.toHaveLength(0);
+  });
+
+  it("replaces claimed projected nodes through one PostgreSQL program", async () => {
+    const directBackend = createPostgresBackend(backend.db, { vector: false });
+    const [store] = await createStoreWithSchema(
+      replacementComposedGraph,
+      directBackend,
+    );
+
+    await store.nodes.ComposedDocument.bulkInsert([
+      {
+        id: "replace-a",
+        props: { slug: "a", tenant: "tenant", title: "Before A" },
+      },
+      {
+        id: "replace-b",
+        props: { slug: "b", tenant: "tenant", title: "Before B" },
+      },
+    ]);
+
+    const rows = await store.nodes.ComposedDocument.bulkReplaceById([
+      {
+        id: "replace-a",
+        props: { slug: "released", tenant: "tenant", title: "Quasar A" },
+      },
+      {
+        id: "replace-b",
+        props: { slug: "a", tenant: "tenant", title: "Quasar B" },
+      },
+    ]);
+
+    expect(rows.map((row) => [row.id, row.slug, row.title])).toEqual([
+      ["replace-a", "released", "Quasar A"],
+      ["replace-b", "a", "Quasar B"],
+    ]);
+    await expect(
+      store.search.fulltext("ComposedDocument", {
+        query: "Quasar",
+        limit: 10,
+      }),
+    ).resolves.toHaveLength(2);
   });
 
   it("refuses a legacy cross-scope claim through the PostgreSQL program", async () => {

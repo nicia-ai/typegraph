@@ -1217,6 +1217,27 @@ dirty-check is applied per item: value-identical items are skipped from the
 write batch but still appear in the returned array (the existing node, in input
 order). See [`upsertById`](#upsertbyidid-props-options).
 
+#### `bulkReplaceById(items)`
+
+Creates or completely replaces multiple node documents by distinct IDs:
+
+```typescript
+store.nodes.Person.bulkReplaceById(
+  items: readonly {
+    id: string;
+    props: { name: string; email?: string };
+  }[]
+): Promise<Node<Person>[]>;
+```
+
+Unlike `bulkUpsertById`, replacement does not merge with stored properties.
+An omitted optional field is removed. Missing IDs are created, live rows keep
+their stored validity window, and tombstones are resurrected with a freshly
+stamped validity window. The method deliberately accepts no temporal mutation
+options: its complete postimage is knowable before dispatch, which lets eligible
+serverless backends execute the call without a preimage read. Duplicate IDs are
+refused rather than interpreted as an ordered script.
+
 #### `bulkDelete(ids)`
 
 Soft-deletes multiple nodes.

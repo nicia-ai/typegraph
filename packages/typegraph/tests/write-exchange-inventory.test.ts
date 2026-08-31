@@ -247,6 +247,18 @@ describe("managed write exchange inventory", () => {
             },
           ]),
         ),
+        await measure("claim-projection-node-replacement-batch", () =>
+          store.nodes.ClaimedDocument.bulkReplaceById([
+            {
+              id: "claimed-document-a",
+              props: { slug: "a2", title: "Replaced projection A" },
+            },
+            {
+              id: "claimed-document-b",
+              props: { slug: "b2", title: "Replaced projection B" },
+            },
+          ]),
+        ),
         await measure("unconstrained-edge-batch", () =>
           store.edges.unconstrained.bulkInsert([
             { from, to, props: { role: "U1" } },
@@ -390,6 +402,11 @@ describe("managed write exchange inventory", () => {
             "batch": 1,
             "execute": 0,
             "name": "claim-projection-node-batch",
+          },
+          {
+            "batch": 1,
+            "execute": 0,
+            "name": "claim-projection-node-replacement-batch",
           },
           {
             "batch": 1,

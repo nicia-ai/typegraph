@@ -1048,6 +1048,23 @@ export type NodeCollection<
   ) => Promise<Node<N>[]>;
 
   /**
+   * Replaces complete node documents by id.
+   *
+   * Missing ids are created. Tombstones are resurrected with a freshly stamped
+   * validity window. Live rows preserve their stored validity window. Unlike
+   * `bulkUpsertById`, every `props` value is a complete replacement: omitted
+   * optional fields are removed rather than merged from the stored document.
+   * Duplicate ids are refused because replacement describes a set, not an
+   * ordered script.
+   */
+  bulkReplaceById: (
+    items: readonly Readonly<{
+      id: string;
+      props: z.input<N["schema"]>;
+    }>[],
+  ) => Promise<Node<N>[]>;
+
+  /**
    * Insert multiple nodes without returning results.
    *
    * This is the dedicated fast path for bulk inserts. Unlike `bulkCreate`

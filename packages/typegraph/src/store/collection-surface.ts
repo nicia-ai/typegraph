@@ -51,6 +51,7 @@ export const NODE_WRITE_NAMES = [
   "upsertById",
   "upsertByIdFromRecord",
   "bulkCreate",
+  "bulkReplaceById",
   "bulkUpsertById",
   "bulkInsert",
   "bulkDelete",

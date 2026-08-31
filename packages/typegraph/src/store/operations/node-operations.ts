@@ -52,6 +52,7 @@ import {
   type AtomicNodeDeleteBatchExecutor,
   AtomicNodeDeleteRestrictedRefusalError,
   type AtomicNodeProjection,
+  type AtomicNodeReplacementEntry,
   type AtomicNodeResolvedUpdateBatchExecutor,
   supportsAtomicNodeClaims,
 } from "../../backend/capabilities/atomic-mutation-program";
@@ -209,6 +210,7 @@ import {
   assertAtomicDeleteSchemaFenceMatched,
   resolveAtomicNodeBatchExecutor,
   resolveAtomicNodeDeleteBatchExecutor,
+  resolveAtomicNodeReplacementBatchProgram,
   resolveAtomicNodeResolvedMutationSetExecutor,
   resolveAtomicNodeResolvedUpdateBatchExecutor,
 } from "./atomic-mutation-program";
@@ -1190,12 +1192,17 @@ export function nodeUpsertDirtyCheck<G extends GraphDef>(
   };
 }
 
+type NodeUpdateExecutionOptions = Readonly<{
+  clearDeleted?: boolean;
+  replacementProps?: Record<string, unknown>;
+}>;
+
 async function performNodeUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   input: UpsertUpdateNodeInput,
   session: NodeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: NodeUpdateExecutionOptions,
   resolvedExisting?: BackendNodeRow,
 ): Promise<Node> {
   const { kind, id } = input;
@@ -1206,11 +1213,13 @@ async function performNodeUpdate<G extends GraphDef>(
     resolvedExisting ?? (await target.getNode(ctx.graphId, kind, id));
   if (!existing) throw new NodeNotFoundError(kind, id);
 
-  const { registration, validatedProps } = resolveNodeUpdateProps(
-    ctx,
-    existing,
-    input.props,
-  );
+  const { registration, validatedProps } =
+    options?.replacementProps === undefined ?
+      resolveNodeUpdateProps(ctx, existing, input.props)
+    : {
+        registration: getNodeRegistration(ctx.graph, kind),
+        validatedProps: options.replacementProps,
+      };
   const nodeKind = registration.type;
 
   const validTo = validateOptionalCanonicalIsoDate(input.validTo, "validTo");
@@ -1389,7 +1398,7 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
   input: UpsertUpdateNodeInput,
   session: NodeWriteSession,
   target: WriteTarget,
-  options?: Readonly<{ clearDeleted?: boolean }>,
+  options?: NodeUpdateExecutionOptions,
   resolvedExisting?: BackendNodeRow,
 ): Promise<Node> {
   for (let attempt = 1; attempt <= NODE_UPDATE_ATTEMPTS; attempt += 1) {
@@ -1401,7 +1410,9 @@ async function performNodeUpdateWithResurrectionRecovery<G extends GraphDef>(
         input,
         session,
         target,
-        attempt === 1 ? options : undefined,
+        attempt === 1 ? options
+        : options?.replacementProps === undefined ? undefined
+        : { replacementProps: options.replacementProps },
         attempt === 1 ? resolvedExisting : undefined,
       );
     } catch (error) {
@@ -1722,6 +1733,106 @@ function atomicNodeBatchEntries(
     return;
   }
   return entries;
+}
+
+/**
+ * Validates a replacement document once for both atomic and portable paths.
+ * The portable update carries this complete postimage through its internal
+ * replacement marker instead of parsing or merging it again.
+ */
+export function prepareNodeReplacement<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  props: Record<string, unknown>,
+): Record<string, unknown> {
+  const schema = getNodeRegistration(ctx.graph, kind).type.schema;
+  return validateNodeProps(schema, props, { kind, operation: "update" });
+}
+
+/**
+ * Attempts one read-free, schema-fenced replacement program.
+ *
+ * `unsupported` proves that no SQL ran; the collection then enters the full
+ * portable upsert path with the replacement patches prepared above.
+ */
+export async function executeNodeReplacementBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  items: readonly Readonly<{ id: string; props: Record<string, unknown> }>[],
+  backend: GraphBackend | TransactionBackend,
+): Promise<ResolvedMutationSetAttempt<readonly Node[]>> {
+  if (items.length === 0) return appliedResolvedMutationSet([]);
+  const program = resolveAtomicNodeReplacementBatchProgram({
+    backend,
+    graph: ctx.graph,
+    registry: ctx.registry,
+    kind,
+    entryCount: items.length,
+    schemaVersion: ctx.schemaVersion,
+    identityEnabled: ctx.identity !== undefined,
+    historyEnabled: ctx.historyEnabled,
+    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+  });
+  if (program === undefined) return unsupportedResolvedMutationSet();
+  const { executor, releaseClaims } = program;
+
+  const inputs = items.map((item) => ({
+    kind,
+    id: item.id,
+    props: item.props,
+  }));
+  const preparedCreates = await prepareAtomicBatchCreates(
+    ctx,
+    inputs,
+    backend,
+    { propsPreValidated: true },
+  );
+  const createEntries = atomicNodeBatchEntries(
+    preparedCreates,
+    executor.claimSupport,
+  );
+  if (createEntries === undefined) return unsupportedResolvedMutationSet();
+  const entries: readonly AtomicNodeReplacementEntry[] = createEntries.map(
+    ({ params, claims, projections }) => ({
+      params,
+      ...(claims === undefined ? {} : { claims }),
+      ...(projections === undefined ? {} : { projections }),
+    }),
+  );
+  if (executor.accepts?.(entries) === false) {
+    return unsupportedResolvedMutationSet();
+  }
+  const returnedRows = await withAtomicNodeClaimTranslation(
+    preparedCreates,
+    () =>
+      executor({
+        entries,
+        releaseClaims,
+        schemaFence: {
+          graphId: ctx.graphId,
+          expectedVersion: requireDefined(ctx.schemaVersion),
+        },
+      }),
+  );
+  if (returnedRows.length === 0) {
+    await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
+  }
+  if (returnedRows.length !== items.length) {
+    throw new DatabaseOperationError(
+      "Atomic node replacement returned a partial result.",
+      {
+        operation: "upsert",
+        entity: "node",
+        attempted: items.map((item) => ({ kind, id: item.id })),
+      },
+    );
+  }
+  memoizeLeasedSchemaFence(ctx, backend);
+  return appliedResolvedMutationSet(
+    restoreAtomicNodeBatchRows(ctx.graphId, preparedCreates, returnedRows).map(
+      (row) => rowToNode(row),
+    ),
+  );
 }
 
 async function withAtomicNodeClaimTranslation<TResult>(
@@ -3242,11 +3353,9 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
   }
   const resolvedUpdates = updates.map((entry) => {
     const existing = requireDefined(entry.existing);
-    const { validatedProps } = resolveNodeUpdateProps(
-      ctx,
-      existing,
-      entry.input.props,
-    );
+    const validatedProps =
+      entry.replacementProps ??
+      resolveNodeUpdateProps(ctx, existing, entry.input.props).validatedProps;
     return {
       graphId: ctx.graphId,
       kind: entry.input.kind,
@@ -3351,7 +3460,14 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
             entry.input,
             session,
             target,
-            entry.clearDeleted ? { clearDeleted: true } : undefined,
+            entry.clearDeleted || entry.replacementProps !== undefined ?
+              {
+                ...(entry.clearDeleted ? { clearDeleted: true } : {}),
+                ...(entry.replacementProps === undefined ?
+                  {}
+                : { replacementProps: entry.replacementProps }),
+              }
+            : undefined,
             resolvedRows?.get(entry.input.id),
           ),
         );
@@ -3408,11 +3524,9 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
     }
     const resolved = entries.map((entry) => {
       const row = requireDefined(byId.get(entry.input.id));
-      const { validatedProps } = resolveNodeUpdateProps(
-        ctx,
-        row,
-        entry.input.props,
-      );
+      const validatedProps =
+        entry.replacementProps ??
+        resolveNodeUpdateProps(ctx, row, entry.input.props).validatedProps;
       return {
         graphId: ctx.graphId,
         kind: entry.input.kind,

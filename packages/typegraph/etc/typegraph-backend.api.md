@@ -49,7 +49,7 @@ export const ATOMIC_EDGE_MUTATION_VARIANT_BY_KIND: {
 };
 
 // @public
-export const ATOMIC_MUTATION_PROGRAM_VARIANTS: readonly ["createNodes", "createEdges", "deleteNodes", "deleteEdges", "updateNodes", "updateEdges", "mutateNodes", "mutateEdges.resolvedSet", "mutateEdges.durableConvergence"];
+export const ATOMIC_MUTATION_PROGRAM_VARIANTS: readonly ["createNodes", "replaceNodes", "createEdges", "deleteNodes", "deleteEdges", "updateNodes", "updateEdges", "mutateNodes", "mutateEdges.resolvedSet", "mutateEdges.durableConvergence"];
 
 // @public
 export type AtomicDeleteBatchResult = Readonly<{
@@ -232,6 +232,7 @@ export type AtomicMutationProgramRefusalPreparation = Readonly<{
 // @public
 export type AtomicMutationProgramRegistration = Readonly<{
     createNodes?: AtomicNodeBatchExecutor | undefined;
+    replaceNodes?: AtomicNodeReplacementBatchExecutor | undefined;
     createEdges?: AtomicEdgeBatchExecutor | undefined;
     deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
     deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
@@ -350,6 +351,31 @@ export type AtomicNodeProjectionFamily = "embedding" | "fulltext";
 // @public
 export type AtomicNodeProjectionSupport = Readonly<{
     families: readonly AtomicNodeProjectionFamily[];
+}>;
+
+// @public
+export interface AtomicNodeReplacementBatchExecutor {
+    // (undocumented)
+    (input: Readonly<{
+        entries: readonly AtomicNodeReplacementEntry[];
+        releaseClaims: boolean;
+        schemaFence: SchemaWriteFenceParams;
+    }>): Promise<readonly NodeRow[]>;
+    readonly accepts?: (entries: readonly AtomicNodeReplacementEntry[]) => boolean;
+    readonly claimSupport?: AtomicNodeClaimSupport;
+    readonly maxEntries: Readonly<{
+        plain: number;
+        claimed: number;
+    }>;
+    readonly projectionSupport?: AtomicNodeProjectionSupport;
+    readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+}
+
+// @public
+export type AtomicNodeReplacementEntry = Readonly<{
+    params: InsertNodeParams;
+    claims?: readonly NodeInsertClaim[];
+    projections?: readonly AtomicNodeProjection[];
 }>;
 
 // @public

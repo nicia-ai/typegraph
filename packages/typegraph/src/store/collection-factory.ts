@@ -56,6 +56,7 @@ export type NodeOperations = Readonly<{
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
     backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{ propsPreValidated?: true }>,
   ) => Promise<readonly Node[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
@@ -86,6 +87,18 @@ export type NodeOperations = Readonly<{
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
     >
   >;
+  prepareReplacement: (
+    kind: string,
+    props: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  executeReplacementBatch: (
+    kind: string,
+    items: readonly Readonly<{
+      id: string;
+      props: Record<string, unknown>;
+    }>[],
+    backend: GraphBackend | TransactionBackend,
+  ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /**
    * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
    * the store was created with `coalesceUnchangedUpserts: true`; its absence is
