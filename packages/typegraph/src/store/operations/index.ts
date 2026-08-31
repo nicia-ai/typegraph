@@ -49,6 +49,7 @@ export {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
   executeNodeUpdate,
   executeNodeUpdateWhere,
@@ -56,6 +57,7 @@ export {
   executeNodeUpsertUpdateBatch,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
+  prepareNodeReplacement,
 } from "./node-operations";
 export { runWritePlan } from "./write-executor";
 export {

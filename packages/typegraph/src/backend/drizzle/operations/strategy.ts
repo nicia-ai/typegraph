@@ -12,7 +12,9 @@ import type {
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
   AtomicNodeDeleteBatchInput,
+  AtomicNodePostimageEntry,
   AtomicNodeProjectionFamily,
+  AtomicNodeReplacementEntry,
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import { nowIso } from "../../row-mappers";
@@ -66,6 +68,7 @@ import {
   buildAtomicNodeClaimCleanupWithSchemaFence,
   buildAtomicNodeClaimGatePredicateWithSchemaFence,
   buildAtomicNodeClaimUpsertWithSchemaFence,
+  buildAtomicNodeReplacementClaimReleaseWithSchemaFence,
 } from "./atomic-node-claims";
 import { buildClearGraph, type ClearGraphStatement } from "./clear";
 import {
@@ -137,6 +140,7 @@ import {
   buildAssertAtomicNodeProjectionEvidence,
   buildAtomicNodeBatchWithSchemaFence,
   buildAtomicNodeDeleteBatchWithSchemaFence,
+  buildAtomicNodeReplacementBatchWithSchemaFence,
   buildAtomicNodeResolvedUpdateBatch,
   buildDeleteNode,
   buildGetNode,
@@ -274,7 +278,7 @@ export type CommonOperationStrategy = Readonly<{
     schemaLockClause?: SQL,
   ) => SQL | undefined;
   buildAtomicNodeProjectionStatements: (
-    creates: readonly AtomicNodeBatchEntry[],
+    creates: readonly AtomicNodePostimageEntry[],
     updates: readonly AtomicNodeResolvedUpdateEntry[],
     timestamp: string,
     chunkSize: number,
@@ -302,22 +306,39 @@ export type CommonOperationStrategy = Readonly<{
     resultMode: AtomicNodeBatchResultMode,
     writeGate?: SQL,
   ) => SQL;
+  buildAtomicNodeReplacementBatchWithSchemaFence: (
+    entries: readonly AtomicNodeReplacementEntry[],
+    timestamp: string,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+    writeGate?: SQL,
+  ) => SQL;
   buildAtomicNodeClaimUpsertWithSchemaFence: (
-    entries: readonly AtomicNodeClaimEntry[],
+    entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
   buildAtomicNodeClaimGatePredicateWithSchemaFence: (
-    entries: readonly AtomicNodeClaimEntry[],
+    entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
   buildAtomicNodeClaimCleanupWithSchemaFence: (
-    entries: readonly AtomicNodeClaimEntry[],
+    entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
     schemaFence: SchemaWriteFenceParams,
     schemaLockClause: SQL,
   ) => SQL;
   buildAtomicDeletedNodeClaimReleaseWithSchemaFence: (
+    input: Readonly<{
+      graphId: string;
+      kind: string;
+      ids: readonly string[];
+      timestamp: string;
+    }>,
+    schemaFence: SchemaWriteFenceParams,
+    schemaLockClause: SQL,
+  ) => SQL;
+  buildAtomicNodeReplacementClaimReleaseWithSchemaFence: (
     input: Readonly<{
       graphId: string;
       kind: string;
@@ -337,7 +358,7 @@ export type CommonOperationStrategy = Readonly<{
     schemaLockClause: SQL,
   ) => SQL;
   buildAssertAtomicNodeMutationPostimages: (
-    creates: readonly AtomicNodeBatchEntry[],
+    creates: readonly AtomicNodePostimageEntry[],
     updates: readonly AtomicNodeResolvedUpdateEntry[],
     timestamp: string,
     schemaFence: SchemaWriteFenceParams,
@@ -631,6 +652,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildInsertNodesBatchReturning,
   buildInsertNodesBatchWithSchemaFence,
   buildAtomicNodeBatchWithSchemaFence,
+  buildAtomicNodeReplacementBatchWithSchemaFence,
   buildGetNode,
   buildGetNodes,
   buildUpdateNode,
@@ -694,7 +716,7 @@ function createCommonOperationStrategy(
   // just the read-side fragments.
   const fulltextBuilders = {
     buildAtomicNodeProjectionStatements: (
-      creates: readonly AtomicNodeBatchEntry[],
+      creates: readonly AtomicNodePostimageEntry[],
       updates: readonly AtomicNodeResolvedUpdateEntry[],
       timestamp: string,
       chunkSize: number,
@@ -1036,7 +1058,7 @@ function createCommonOperationStrategy(
       return buildInsertUniqueBatch(tables, dialect, entries);
     },
     buildAtomicNodeClaimUpsertWithSchemaFence(
-      entries: readonly AtomicNodeClaimEntry[],
+      entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
       schemaFence: SchemaWriteFenceParams,
       schemaLockClause: SQL,
     ): SQL {
@@ -1049,7 +1071,7 @@ function createCommonOperationStrategy(
       );
     },
     buildAtomicNodeClaimGatePredicateWithSchemaFence(
-      entries: readonly AtomicNodeClaimEntry[],
+      entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
       schemaFence: SchemaWriteFenceParams,
       schemaLockClause: SQL,
     ): SQL {
@@ -1061,7 +1083,7 @@ function createCommonOperationStrategy(
       );
     },
     buildAtomicNodeClaimCleanupWithSchemaFence(
-      entries: readonly AtomicNodeClaimEntry[],
+      entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
       schemaFence: SchemaWriteFenceParams,
       schemaLockClause: SQL,
     ): SQL {
@@ -1083,6 +1105,23 @@ function createCommonOperationStrategy(
       schemaLockClause: SQL,
     ): SQL {
       return buildAtomicDeletedNodeClaimReleaseWithSchemaFence(
+        tables,
+        input,
+        schemaFence,
+        schemaLockClause,
+      );
+    },
+    buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
+      input: Readonly<{
+        graphId: string;
+        kind: string;
+        ids: readonly string[];
+        timestamp: string;
+      }>,
+      schemaFence: SchemaWriteFenceParams,
+      schemaLockClause: SQL,
+    ): SQL {
+      return buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
         tables,
         input,
         schemaFence,

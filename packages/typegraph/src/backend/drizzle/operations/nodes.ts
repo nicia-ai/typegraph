@@ -8,6 +8,8 @@ import type {
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
   AtomicNodeDeleteBatchInput,
+  AtomicNodePostimageEntry,
+  AtomicNodeReplacementEntry,
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import type {
@@ -40,7 +42,7 @@ const INITIAL_NODE_VERSION = 1;
 const NODE_VERSION_INCREMENT = 1;
 
 function atomicNodeCreatePostimage(
-  entry: AtomicNodeBatchEntry,
+  entry: Pick<AtomicNodePostimageEntry, "params">,
   timestamp: string,
 ) {
   const params = entry.params;
@@ -71,6 +73,12 @@ function atomicNodeUpdatePostimage(
     version: entry.expectedVersion + NODE_VERSION_INCREMENT,
     updatedAt: timestamp,
   } as const;
+}
+
+function isAtomicNodeBatchEntry(
+  entry: AtomicNodePostimageEntry,
+): entry is AtomicNodeBatchEntry {
+  return "idSource" in entry;
 }
 
 /**
@@ -360,13 +368,14 @@ export function buildInsertNodesBatchWithSchemaFence(
  * engine refusal is classified by the backend as a duplicate node identity,
  * and the native batch rolls back every earlier statement.
  */
-export function buildAtomicNodeBatchWithSchemaFence(
+function buildAtomicNodeWriteBatchWithSchemaFence(
   tables: Tables,
-  entries: readonly AtomicNodeBatchEntry[],
+  entries: readonly AtomicNodePostimageEntry[],
   timestamp: string,
   schemaFence: SchemaWriteFenceParams,
   schemaLockClause: SQL,
   resultMode: AtomicNodeBatchResultMode,
+  writeMode: "create" | "replace",
   writeGate?: SQL,
 ): SQL {
   const firstEntry = entries[0];
@@ -375,12 +384,23 @@ export function buildAtomicNodeBatchWithSchemaFence(
       "An atomic node batch statement needs at least one entry.",
     );
   }
-  if (!entries.every((entry) => entry.idSource === firstEntry.idSource)) {
+  if (
+    writeMode === "create" &&
+    (!isAtomicNodeBatchEntry(firstEntry) ||
+      !entries.every(
+        (entry) =>
+          isAtomicNodeBatchEntry(entry) &&
+          entry.idSource === firstEntry.idSource,
+      ))
+  ) {
     throw new CompilerInvariantError(
       "An atomic node batch statement cannot mix identity sources.",
     );
   }
-  const generated = firstEntry.idSource === "generated";
+  const generated =
+    writeMode === "create" &&
+    isAtomicNodeBatchEntry(firstEntry) &&
+    firstEntry.idSource === "generated";
   const { nodes, schemaVersions } = tables;
   const columns = nodeColumnList(nodes);
   const inputColumns = [
@@ -464,6 +484,21 @@ export function buildAtomicNodeBatchWithSchemaFence(
         ELSE ${excluded(nodes.updatedAt)}
       END
   `;
+  const replacement = sql`
+    ON CONFLICT (${conflictColumns}) DO UPDATE SET
+      ${quotedColumn(nodes.props)} = ${excluded(nodes.props)},
+      ${quotedColumn(nodes.version)} = ${currentVersion} + 1,
+      ${quotedColumn(nodes.validFrom)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentValidFrom}
+        ELSE ${excluded(nodes.validFrom)}
+      END,
+      ${quotedColumn(nodes.validTo)} = CASE
+        WHEN ${currentDeletedAt} IS NULL THEN ${currentValidTo}
+        ELSE ${excluded(nodes.validTo)}
+      END,
+      ${quotedColumn(nodes.deletedAt)} = NULL,
+      ${quotedColumn(nodes.updatedAt)} = ${excluded(nodes.updatedAt)}
+  `;
 
   return sql`
     WITH "schema_fence" AS (
@@ -488,9 +523,56 @@ export function buildAtomicNodeBatchWithSchemaFence(
         : sql`WHERE TRUE`
       : sql`WHERE ${writeGate}`
     }
-    ${generated ? sql.empty() : resurrection}
+    ${
+      writeMode === "replace" ? replacement
+      : generated ? sql.empty()
+      : resurrection
+    }
     ${resultClause}
   `;
+}
+
+/** Schema-fenced create batch with caller-id resurrection semantics. */
+export function buildAtomicNodeBatchWithSchemaFence(
+  tables: Tables,
+  entries: readonly AtomicNodeBatchEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+  resultMode: AtomicNodeBatchResultMode,
+  writeGate?: SQL,
+): SQL {
+  return buildAtomicNodeWriteBatchWithSchemaFence(
+    tables,
+    entries,
+    timestamp,
+    schemaFence,
+    schemaLockClause,
+    resultMode,
+    "create",
+    writeGate,
+  );
+}
+
+/** Schema-fenced blind replacement: create missing, replace live, revive tombstones. */
+export function buildAtomicNodeReplacementBatchWithSchemaFence(
+  tables: Tables,
+  entries: readonly AtomicNodeReplacementEntry[],
+  timestamp: string,
+  schemaFence: SchemaWriteFenceParams,
+  schemaLockClause: SQL,
+  writeGate?: SQL,
+): SQL {
+  return buildAtomicNodeWriteBatchWithSchemaFence(
+    tables,
+    entries,
+    timestamp,
+    schemaFence,
+    schemaLockClause,
+    "rows",
+    "replace",
+    writeGate,
+  );
 }
 
 /**
@@ -700,7 +782,7 @@ export function buildAtomicNodeResolvedUpdateBatch(
  */
 export function buildAssertAtomicNodeMutationPostimages(
   tables: Tables,
-  creates: readonly AtomicNodeBatchEntry[],
+  creates: readonly AtomicNodePostimageEntry[],
   updates: readonly AtomicNodeResolvedUpdateEntry[],
   timestamp: string,
   schemaFence: SchemaWriteFenceParams,

@@ -66,7 +66,10 @@ import {
   type AtomicNodeDeleteBatchExecutor,
   type AtomicNodeDeleteBatchInput,
   AtomicNodeDeleteRestrictedRefusalError,
+  type AtomicNodePostimageEntry,
   type AtomicNodeProjectionSupport,
+  type AtomicNodeReplacementBatchExecutor,
+  type AtomicNodeReplacementEntry,
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   type AtomicNodeResolvedUpdateEntry,
@@ -235,6 +238,20 @@ function chunkAtomicNodeEntriesByClaimWork(
         ATOMIC_NODE_INSERT_PARAM_COUNT +
         atomicNodeClaimInputCost(entry.claims ?? []),
     ),
+  );
+}
+
+function chunkAtomicNodeReplacementEntriesByClaimWork(
+  entries: readonly AtomicNodeReplacementEntry[],
+  maxBindParameters: number,
+): readonly (readonly AtomicNodeReplacementEntry[])[] {
+  const available = maxBindParameters - ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT;
+  return chunkByWeight(
+    entries,
+    available,
+    (entry) =>
+      ATOMIC_NODE_INSERT_PARAM_COUNT +
+      atomicNodeClaimInputCost(entry.claims ?? []),
   );
 }
 
@@ -558,6 +575,7 @@ export type CommonOperationBackend = Pick<
 > &
   Readonly<{
     executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
+    executeAtomicNodeReplacementBatch?: AtomicNodeReplacementBatchExecutor;
     executeAtomicNodeDeleteBatch?: AtomicNodeDeleteBatchExecutor;
     executeAtomicNodeResolvedUpdateBatch?: AtomicNodeResolvedUpdateBatchExecutor;
     executeAtomicNodeResolvedMutationSet?: AtomicNodeResolvedMutationSetExecutor;
@@ -685,21 +703,21 @@ type CreateCommonOperationBackendOptions = Readonly<{
   /** Local signature evidence compiled into an atomic projection program. */
   resolveAtomicNodeProjectionEvidence?:
     | ((
-        creates: readonly AtomicNodeBatchEntry[],
+        creates: readonly AtomicNodePostimageEntry[],
         updates: readonly AtomicNodeResolvedUpdateEntry[],
       ) => Promise<readonly AtomicContributionEvidence[]>)
     | undefined;
   /** Failure-only durable marker diagnosis after an atomic refusal rolls back. */
   diagnoseAtomicNodeProjectionEvidence?:
     | ((
-        creates: readonly AtomicNodeBatchEntry[],
+        creates: readonly AtomicNodePostimageEntry[],
         updates: readonly AtomicNodeResolvedUpdateEntry[],
       ) => Promise<void>)
     | undefined;
   /** Maps physical projection failures without weakening row classifications. */
   refuseAtomicNodeProjectionError?:
     | ((
-        creates: readonly AtomicNodeBatchEntry[],
+        creates: readonly AtomicNodePostimageEntry[],
         updates: readonly AtomicNodeResolvedUpdateEntry[],
         error: unknown,
       ) => Promise<never>)
@@ -909,7 +927,7 @@ type AtomicResolvedMutationSlot<TRow> =
 // can never exceed K mutation statements. The absolute member ceiling keeps a
 // high-bind PostgreSQL backend from turning the same contract into an enormous
 // HTTP request merely because one SQL statement can carry many parameters.
-const ATOMIC_RESOLVED_MUTATION_MAX_MUTATION_STATEMENTS = 32;
+const ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS = 32;
 const ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS = 512;
 const ATOMIC_RESOLVED_MUTATION_FIXED_PARAM_COUNT = 12;
 const ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY = 5;
@@ -933,9 +951,7 @@ function atomicResolvedMutationSubmissionMaxEntries(
 ): number {
   return Math.min(
     ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
-    statementChunkSize *
-      (ATOMIC_RESOLVED_MUTATION_MAX_MUTATION_STATEMENTS - 1) +
-      1,
+    statementChunkSize * (ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS - 1) + 1,
   );
 }
 
@@ -1106,7 +1122,7 @@ type AtomicNodeProjectionSlot = Readonly<{ kind: "projection" }>;
 function compileAtomicNodeProjectionSlots(
   operationStrategy: CommonOperationStrategy,
   execution: OperationBackendExecution,
-  creates: readonly AtomicNodeBatchEntry[],
+  creates: readonly AtomicNodePostimageEntry[],
   updates: readonly AtomicNodeResolvedUpdateEntry[],
   timestamp: string,
   maxBindParameters: number,
@@ -1161,13 +1177,13 @@ function compileAtomicNodeProjectionSlots(
 async function compileAtomicNodeProjectionEvidenceSlots(
   operationStrategy: CommonOperationStrategy,
   execution: OperationBackendExecution,
-  creates: readonly AtomicNodeBatchEntry[],
+  creates: readonly AtomicNodePostimageEntry[],
   updates: readonly AtomicNodeResolvedUpdateEntry[],
   timestamp: string,
   maxBindParameters: number,
   resolveEvidence:
     | ((
-        creates: readonly AtomicNodeBatchEntry[],
+        creates: readonly AtomicNodePostimageEntry[],
         updates: readonly AtomicNodeResolvedUpdateEntry[],
       ) => Promise<readonly AtomicContributionEvidence[]>)
     | undefined,
@@ -1548,7 +1564,7 @@ export function createCommonOperationBackend(
 
   async function runAtomicNodeSidecarProgram<TResult>(
     input: Readonly<{
-      creates: readonly AtomicNodeBatchEntry[];
+      creates: readonly AtomicNodePostimageEntry[];
       updates: readonly AtomicNodeResolvedUpdateEntry[];
       operation: "insert" | "update" | "upsert";
       hasProjections: boolean;
@@ -1833,9 +1849,9 @@ export function createCommonOperationBackend(
           families: operationStrategy.atomicNodeProjectionFamilies,
         } satisfies AtomicNodeProjectionSupport);
 
-        function orderedAtomicNodeClaims(
-          entries: readonly AtomicNodeBatchEntry[],
-        ): readonly AtomicNodeClaimEntry[] {
+        function orderedAtomicNodeClaims<
+          TEntry extends AtomicNodePostimageEntry,
+        >(entries: readonly TEntry[]): readonly AtomicNodeClaimEntry<TEntry>[] {
           return entries
             .flatMap((entry, memberOrdinal) =>
               (entry.claims ?? []).map((claim, claimOrdinal) => ({
@@ -1865,7 +1881,9 @@ export function createCommonOperationBackend(
             });
         }
 
-        function atomicNodeClaimTargetKey(entry: AtomicNodeClaimEntry): string {
+        function atomicNodeClaimTargetKey(
+          entry: AtomicNodeClaimEntry<AtomicNodePostimageEntry>,
+        ): string {
           return encodeTupleKey([
             entry.claim.axis,
             entry.claim.constraintName,
@@ -1880,7 +1898,7 @@ export function createCommonOperationBackend(
         type AtomicNodeProgramSlot =
           | Readonly<{
               kind: "claims";
-              entries: readonly AtomicNodeClaimEntry[];
+              entries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[];
               rows: readonly AtomicNodeClaimOwnerRow[];
             }>
           | Readonly<{ kind: "cleanup" }>
@@ -1888,17 +1906,17 @@ export function createCommonOperationBackend(
           | Readonly<{ kind: "assertion" }>
           | Readonly<{
               kind: "counts";
-              chunk: readonly AtomicNodeBatchEntry[];
+              chunk: readonly AtomicNodePostimageEntry[];
               count: number;
             }>
           | Readonly<{
               kind: "rows";
-              chunk: readonly AtomicNodeBatchEntry[];
+              chunk: readonly AtomicNodePostimageEntry[];
               rows: readonly NodeRow[];
             }>;
 
         function classifyAtomicNodeClaimResults(
-          claimEntries: readonly AtomicNodeClaimEntry[],
+          claimEntries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
           results: readonly AtomicNodeProgramSlot[],
         ): "stale" | "owned" | DisjointError | UniquenessError {
           const ownerByTarget = new Map<string, ClaimOwner>();
@@ -1963,7 +1981,7 @@ export function createCommonOperationBackend(
         }
 
         function requireAtomicNodeClaimWrite(
-          claimEntries: readonly AtomicNodeClaimEntry[],
+          claimEntries: readonly AtomicNodeClaimEntry<AtomicNodePostimageEntry>[],
           results: readonly AtomicNodeProgramSlot[],
           insertedCount: number,
         ): "stale" | "owned" {
@@ -2038,7 +2056,7 @@ export function createCommonOperationBackend(
               options.maxBindParameters,
             );
             function claimGateForChunk(chunk: readonly AtomicNodeBatchEntry[]) {
-              const members = new Set(chunk);
+              const members = new Set<AtomicNodePostimageEntry>(chunk);
               const chunkClaims = claimEntries.filter((item) =>
                 members.has(item.entry),
               );
@@ -2471,14 +2489,288 @@ export function createCommonOperationBackend(
           });
         }
 
+        async function executeAtomicNodeReplacementBatch(
+          input: Parameters<AtomicNodeReplacementBatchExecutor>[0],
+        ): Promise<readonly NodeRow[]> {
+          if (input.entries.length === 0) return [];
+          assertMatchingNodeSchemaFences(
+            input.entries.map((entry) => entry.params),
+            input.schemaFence,
+          );
+          const firstEntry = requireDefined(input.entries[0]);
+          const identities = new Set<string>();
+          for (const entry of input.entries) {
+            if (
+              entry.params.graphId !== firstEntry.params.graphId ||
+              entry.params.kind !== firstEntry.params.kind
+            ) {
+              throw new CompilerInvariantError(
+                "An atomic node replacement requires one graph and node kind.",
+                {
+                  expectedGraphId: firstEntry.params.graphId,
+                  expectedKind: firstEntry.params.kind,
+                  actualGraphId: entry.params.graphId,
+                  actualKind: entry.params.kind,
+                },
+              );
+            }
+            const identity = encodeTupleKey([
+              entry.params.graphId,
+              entry.params.kind,
+              entry.params.id,
+            ]);
+            if (identities.has(identity)) {
+              throw new CompilerInvariantError(
+                "An atomic node replacement requires distinct identities.",
+              );
+            }
+            identities.add(identity);
+            if (!supportsAtomicNodeClaims(claimSupport, entry.claims ?? [])) {
+              throw new CompilerInvariantError(
+                "Atomic node replacement exceeded its declared per-member claim budget.",
+                { claimSupport },
+              );
+            }
+          }
+
+          const timestamp = nowIso();
+          const atomicExecutor = requireDefined(atomicSqlProgramExecutor);
+          const atomicSchemaFenceLockClause = requireDefined(
+            schemaFenceLockClause,
+          );
+          const claimEntries = orderedAtomicNodeClaims(input.entries);
+          const nodeChunks = chunkAtomicNodeReplacementEntriesByClaimWork(
+            input.entries,
+            options.maxBindParameters,
+          );
+          if (nodeChunks.length > ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS) {
+            throw new CompilerInvariantError(
+              "Atomic node replacement exceeded its declared submission statement budget.",
+              {
+                actual: nodeChunks.length,
+                maximum: ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS,
+              },
+            );
+          }
+
+          const claimChunkSize = Math.max(
+            1,
+            Math.floor(
+              (options.maxBindParameters - 2) /
+                ATOMIC_NODE_CLAIM_INPUT_PARAM_COUNT,
+            ),
+          );
+          const claimChunks = chunkArray(claimEntries, claimChunkSize);
+          const claimSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] = claimChunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeClaimUpsertWithSchemaFence(
+                chunk,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+              kind: "claims" as const,
+              entries: chunk,
+              rows: rows.map((row) => ({
+                node_kind: String(row["node_kind"]),
+                constraint_name: String(row["constraint_name"]),
+                key: String(row["key"]),
+                node_id: String(row["node_id"]),
+                concrete_kind: String(row["concrete_kind"]),
+              })),
+            }),
+          }));
+          const releaseChunkSize = Math.max(1, options.maxBindParameters - 5);
+          const releaseSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] =
+            input.releaseClaims ?
+              chunkArray(input.entries, releaseChunkSize).map((chunk) => ({
+                statement: execution.compile(
+                  operationStrategy.buildAtomicNodeReplacementClaimReleaseWithSchemaFence(
+                    {
+                      graphId: requireDefined(chunk[0]).params.graphId,
+                      kind: requireDefined(chunk[0]).params.kind,
+                      ids: chunk.map((entry) => entry.params.id),
+                      timestamp,
+                    },
+                    input.schemaFence,
+                    atomicSchemaFenceLockClause,
+                  ),
+                ),
+                cardinality: "none" as const,
+                decode: () => ({ kind: "cleanup" as const }),
+              }))
+            : [];
+          function claimGateForChunk(
+            chunk: readonly AtomicNodeReplacementEntry[],
+          ): SQL | undefined {
+            const members = new Set<AtomicNodePostimageEntry>(chunk);
+            const chunkClaims = claimEntries.filter((item) =>
+              members.has(item.entry),
+            );
+            return chunkClaims.length === 0 ?
+                undefined
+              : operationStrategy.buildAtomicNodeClaimGatePredicateWithSchemaFence(
+                  chunkClaims,
+                  input.schemaFence,
+                  atomicSchemaFenceLockClause,
+                );
+          }
+          const nodeSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] = nodeChunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAtomicNodeReplacementBatchWithSchemaFence(
+                chunk,
+                timestamp,
+                input.schemaFence,
+                atomicSchemaFenceLockClause,
+                claimGateForChunk(chunk),
+              ),
+            ),
+            cardinality: "many" as const,
+            decode: (rows: readonly Readonly<Record<string, unknown>>[]) => ({
+              kind: "rows" as const,
+              chunk,
+              rows: rows.map((row) => rowMappers.toNodeRow(row)),
+            }),
+          }));
+          const projectionSlots = compileAtomicNodeProjectionSlots(
+            operationStrategy,
+            execution,
+            input.entries,
+            [],
+            timestamp,
+            options.maxBindParameters,
+          );
+          const projectionEvidenceSlots =
+            await compileAtomicNodeProjectionEvidenceSlots(
+              operationStrategy,
+              execution,
+              input.entries,
+              [],
+              timestamp,
+              options.maxBindParameters,
+              options.resolveAtomicNodeProjectionEvidence,
+            );
+          const assertionSlots: AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            unknown
+          >["slots"] = nodeChunks.map((chunk) => ({
+            statement: execution.compile(
+              operationStrategy.buildAssertAtomicNodeMutationPostimages(
+                chunk,
+                [],
+                timestamp,
+                input.schemaFence,
+              ),
+            ),
+            cardinality: "none" as const,
+            decode: () => ({ kind: "assertion" as const }),
+          }));
+          const program = {
+            slots: [
+              ...releaseSlots,
+              ...claimSlots,
+              ...nodeSlots,
+              ...projectionSlots,
+              ...projectionEvidenceSlots,
+              ...assertionSlots,
+            ],
+            assemble(
+              results: readonly AtomicNodeProgramSlot[],
+            ): readonly NodeRow[] {
+              const rows = results.flatMap((result) =>
+                result.kind === "rows" ? result.rows : [],
+              );
+              if (claimEntries.length > 0) {
+                const claimVerdict = requireAtomicNodeClaimWrite(
+                  claimEntries,
+                  results,
+                  rows.length,
+                );
+                if (claimVerdict === "stale") return [];
+              }
+              if (rows.length !== input.entries.length) {
+                throw new CompilerInvariantError(
+                  "Atomic node replacement returned a partial result.",
+                  { expected: input.entries.length, actual: rows.length },
+                );
+              }
+              const byIdentity = new Map(
+                rows.map((row) => [
+                  encodeTupleKey([row.graph_id, row.kind, row.id]),
+                  row,
+                ]),
+              );
+              if (byIdentity.size !== rows.length) {
+                throw new CompilerInvariantError(
+                  "Atomic node replacement returned duplicate result rows.",
+                );
+              }
+              return input.entries.map((entry) =>
+                requireDefined(
+                  byIdentity.get(
+                    encodeTupleKey([
+                      entry.params.graphId,
+                      entry.params.kind,
+                      entry.params.id,
+                    ]),
+                  ),
+                  "Atomic node replacement omitted an input row.",
+                ),
+              );
+            },
+          } satisfies AtomicSqlProgram<
+            AtomicNodeProgramSlot,
+            readonly NodeRow[]
+          >;
+          return runAtomicNodeSidecarProgram({
+            creates: input.entries,
+            updates: [],
+            operation: "upsert",
+            hasProjections: projectionSlots.length > 0,
+            hasPostimageAssertion: true,
+            run: () => atomicExecutor.execute(program),
+            postimageRefusal: () => [],
+          });
+        }
+
         const boundedExecuteAtomicNodeBatch = Object.assign(
           executeAtomicNodeBatch,
           { claimSupport, projectionSupport },
         );
+        const executeAtomicNodeReplacement = Object.assign(
+          executeAtomicNodeReplacementBatch,
+          {
+            claimSupport,
+            maxEntries: Object.freeze({
+              plain: Math.min(
+                ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
+                atomicResolvedMutationSubmissionMaxEntries(
+                  batchConfig.nodeSchemaFencedInsertBatchSize,
+                ),
+              ),
+              claimed: ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS,
+            }),
+            projectionSupport,
+            releasedClaimFamilies: claimSupport.families,
+          },
+        );
         return {
           executeAtomicNodeBatch: boundedExecuteAtomicNodeBatch,
+          executeAtomicNodeReplacementBatch: executeAtomicNodeReplacement,
         } satisfies Readonly<{
           executeAtomicNodeBatch: AtomicNodeBatchExecutor;
+          executeAtomicNodeReplacementBatch: AtomicNodeReplacementBatchExecutor;
         }>;
       })();
 

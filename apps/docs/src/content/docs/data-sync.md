@@ -186,6 +186,29 @@ already exist, then a second for the new ones. The interchange importer
 directly — it applies each row in document order regardless of batch size, at the
 cost of the per-row validation and reporting that a bulk write skips.
 
+### bulkReplaceById
+
+Use node `bulkReplaceById` when each source record is authoritative and should
+replace the stored document rather than merge with it:
+
+```typescript
+await store.nodes.Document.bulkReplaceById(
+  externalRecords.map((record) => ({
+    id: record.id,
+    props: {
+      title: record.title,
+      content: record.body,
+    },
+  }))
+);
+```
+
+Omitted optional fields are removed. IDs must be distinct within the call;
+replacement is a set of final documents, not an ordered patch stream. On an
+eligible serverless backend this is the read-free sync path: TypeGraph submits
+creation, replacement, resurrection, claims, and search sidecars as one atomic
+program instead of reading every stored document before writing.
+
 ### bulkDelete
 
 Deletes multiple nodes by ID. Silently ignores IDs that don't exist:

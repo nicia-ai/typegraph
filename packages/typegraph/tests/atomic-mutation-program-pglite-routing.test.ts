@@ -51,6 +51,7 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
         ),
       ).toEqual([
         "createNodes",
+        "replaceNodes",
         "createEdges",
         "deleteNodes",
         "deleteEdges",
@@ -100,6 +101,12 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
             { id: "created-node-a", props: { name: "A", score: 10 } },
             { id: "created-node-b", props: { name: "B", score: 11 } },
           ]);
+          await store.nodes.Person.bulkReplaceById([
+            {
+              id: "created-node-a",
+              props: { name: "Replaced A", score: 12 },
+            },
+          ]);
           await store.edges.relates.bulkCreate([
             {
               id: "created-edge-a",
@@ -131,6 +138,7 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
 
       expect(dispatched).toEqual([
         "createNodes",
+        "replaceNodes",
         "createEdges",
         "updateNodes",
         "updateEdges",
@@ -182,6 +190,7 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
               resolveAtomicMutationPrograms(transactionBackend),
             );
             expect(Object.keys(sessionProfile)).toEqual([
+              "replaceNodes",
               "mutateNodes",
               "mutateEdges",
             ]);
@@ -193,7 +202,11 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
                 sessionProfile,
                 transactionBackend.capabilities.execution,
               ),
-            ).toEqual(["mutateNodes", "mutateEdges.resolvedSet"]);
+            ).toEqual([
+              "replaceNodes",
+              "mutateNodes",
+              "mutateEdges.resolvedSet",
+            ]);
             const ordinaryWrapper = deriveBackend(transactionBackend, {});
             expect(ordinaryWrapper.capabilities.execution.atomicBatch).toBe(
               "none",
@@ -236,8 +249,8 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
       expect(dispatched).toEqual(["mutateNodes", "mutateEdges.resolvedSet"]);
 
       dispatched.length = 0;
-      await store.transaction((tx) =>
-        tx.nodes.Person.bulkUpsertById([
+      await store.transaction(async (tx) => {
+        await tx.nodes.Person.bulkUpsertById([
           {
             id: "caller-session-new",
             props: { name: "Caller new", score: 6 },
@@ -246,9 +259,15 @@ describe("interactive PostgreSQL atomic mutation routing", () => {
             id: requireDefined(existingNode).id,
             props: { name: "Caller updated", score: 7 },
           },
-        ]),
-      );
-      expect(dispatched).toEqual(["mutateNodes"]);
+        ]);
+        await tx.nodes.Person.bulkReplaceById([
+          {
+            id: "caller-session-replace",
+            props: { name: "Caller replaced", score: 8 },
+          },
+        ]);
+      });
+      expect(dispatched).toEqual(["mutateNodes", "replaceNodes"]);
 
       dispatched.length = 0;
       const repeated = await store.nodes.Person.bulkUpsertById([

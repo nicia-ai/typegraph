@@ -252,9 +252,17 @@ resolved batches retain their two-attempt budget to bound retry cost.
 
 These operations are registered through an exact-resource mutation execution
 profile. Create and delete are **closed programs**: validation and arbitration
-can be expressed by the submitted SQL itself. `bulkUpsertById()` is deliberately
-different. It first reads authoritative stored properties, then merges and
-validates them before its write set is known. On bundled serverless roots, a
+can be expressed by the submitted SQL itself. Node `bulkReplaceById()` is also
+a closed program: every item supplies a complete document, so eligible bundled
+roots submit missing-row creation, live replacement, tombstone resurrection,
+claim release/acquisition, and fulltext/vector transitions in one read-free
+atomic exchange. Live rows preserve their validity windows; resurrected rows
+receive a fresh stamped window. Operational Identity and history/revision
+capture retain the portable path.
+
+`bulkUpsertById()` is deliberately different. It first reads authoritative
+stored properties, then merges and validates them before its write set is
+known. On bundled serverless roots, a
 distinct-ID batch with no claims, Operational Identity, durable
 edge match identity, temporal mutation, history, or revision capture submits
 its resolved mutation set, including node fulltext/vector replacements, as one
@@ -285,7 +293,9 @@ from 8 transport submissions to 1 atomic exchange. Eligible one-chunk node and
 edge `bulkDelete()` calls likewise submit 1 atomic exchange instead of a
 transaction plus per-row probes/writes. On the portable edge path, one batched
 authoritative read plus one set-based soft delete replaces the former two
-statements per input. Eligible update-only and mixed create/update node and edge
+statements per input. Eligible `nodes.bulkReplaceById()` calls submit 1 atomic
+exchange with no preimage read, including claim and projection sidecars.
+Eligible update-only and mixed create/update node and edge
 `bulkUpsertById()` calls whose preimages fit one bind-budget read submit 2
 exchanges: one batched preimage read and one atomic mutation exchange. Mixed
 sets previously required separate create and update submissions after the read,
@@ -338,6 +348,7 @@ internally.
 | `bulkCreate(items)`                       | Yes             | Need created nodes back                              |
 | `bulkInsert(items)`                       | No              | Maximum throughput ingestion                         |
 | `bulkUpsertById(items)`                   | Yes             | Idempotent import (create or update by ID)           |
+| `bulkReplaceById(items)`                  | Yes             | Idempotent complete-document replacement by ID       |
 | `bulkDelete(ids)`                         | No              | Mass soft-delete                                     |
 | `trustedImportGraphStream(store, chunks)` | No              | Fastest initial load into a fresh dedicated database |
 

@@ -1530,11 +1530,13 @@ The profile is family-scoped:
 | Member                        | Store operations authorized                                                               |
 | ----------------------------- | ----------------------------------------------------------------------------------------- |
 | `createNodes` / `createEdges` | Eligible direct `bulkInsert()` and `bulkCreate()` programs                                |
+| `replaceNodes`                | Eligible complete-document `nodes.bulkReplaceById()` programs                            |
 | `deleteNodes` / `deleteEdges` | Eligible direct `bulkDelete()` programs                                                   |
 | `updateNodes` / `updateEdges` | Eligible resolved update-only sets                                                        |
 | `mutateNodes` / `mutateEdges` | Eligible mixed create/update sets; the edge family also owns durable endpoint convergence |
 
-Executor limits such as `maxEntries`,
+Executor limits such as `maxEntries`, `replaceNodes.maxEntries.plain`,
+`replaceNodes.maxEntries.claimed`,
 `createNodes.claimSupport.maxInputCostPerEntry`, and the two edge mutation
 ceilings are part of the registration contract and must be nonnegative
 integers; zero honestly declares that the backend's bind budget cannot admit
@@ -1546,7 +1548,10 @@ honestly opts out of all claim work. The Store calls the exported
 when its complete normalized claim set exceeds the executor's declared bound.
 Custom executors must use that same helper instead of reproducing its
 dialect-reviewed bind formula. `deleteNodes.releasedClaimFamilies` similarly
-declares which owner-side claim cleanup the delete program proves. Node
+declares which owner-side claim cleanup the delete program proves.
+`replaceNodes.releasedClaimFamilies` declares which previous owner claims the
+replacement releases before acquiring its complete postimage claims; the Store
+does not infer that proof from `claimSupport`. Node
 create/update/mutation executors advertise derived-storage support separately
 through `projectionSupport.families`; omission or an empty list honestly opts
 out, and the Store never infers projection safety from transport registration
@@ -1561,7 +1566,9 @@ does not follow; the root conformance inventory therefore excludes the mixed
 variants while continuing to require direct create, delete, update, and durable
 convergence evidence. Bundled PostgreSQL binds the same reviewed lowering to the
 exact transaction session and exercises the mixed node and edge variants against
-a real engine, including typed refusal rollback.
+a real engine, including typed refusal rollback. The same session profile
+registers `replaceNodes`, so a caller-owned PostgreSQL transaction keeps blind
+replacement inside its savepoint-backed atomic program.
 An exact `atomicBatch: "session"` conformance fixture includes those mixed
 variants even though `interactiveTransactions` is true; nested-transaction
 isolation is reported as inapplicable because the fixture resource is already

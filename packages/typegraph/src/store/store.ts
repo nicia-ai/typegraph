@@ -267,6 +267,7 @@ import {
   executeNodeFindByConstraint,
   executeNodeGetOrCreateByConstraint,
   executeNodeHardDelete,
+  executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
   executeNodeUpdate,
   executeNodeUpdateWhere,
@@ -274,6 +275,7 @@ import {
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
   nodeUpsertDirtyCheck,
+  prepareNodeReplacement,
 } from "./operations";
 import {
   runInWriteTransaction,
@@ -1948,8 +1950,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, backend) => executeNodeCreate(ctx, input, backend),
-      executeCreateBatch: (inputs, backend) =>
-        executeNodeCreateBatch(ctx, inputs, backend),
+      executeCreateBatch: (inputs, backend, options) =>
+        executeNodeCreateBatch(ctx, inputs, backend, options),
       executeCreateNoReturnBatch: (inputs, backend) =>
         executeNodeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend, options) =>
@@ -1973,6 +1975,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeUpsertUpdateBatch(ctx, entries, backend),
       executeResolvedMutationSet: (creates, updates, backend) =>
         executeNodeResolvedMutationSet(ctx, creates, updates, backend),
+      prepareReplacement: (kind, props) =>
+        prepareNodeReplacement(ctx, kind, props),
+      executeReplacementBatch: (kind, items, backend) =>
+        executeNodeReplacementBatch(ctx, kind, items, backend),
       // Present only when opted in; its absence is the coalesce off switch.
       ...(ctx.coalesceUnchangedUpsertsEnabled && {
         upsertDirtyCheck: (kind, id, existingProps, inputProps) =>

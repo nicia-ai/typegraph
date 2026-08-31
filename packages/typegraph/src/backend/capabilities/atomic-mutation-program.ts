@@ -122,7 +122,7 @@ function assertAtomicNodeClaimFamilies(
 }
 
 function assertAtomicNodeClaimSupport(
-  family: "createNodes" | "mutateNodes",
+  family: "createNodes" | "mutateNodes" | "replaceNodes",
   value: unknown,
 ): void {
   if (value === undefined) return;
@@ -157,7 +157,7 @@ function isAtomicNodeProjectionFamily(
 }
 
 function assertAtomicNodeProjectionSupport(
-  family: "createNodes" | "mutateNodes" | "updateNodes",
+  family: "createNodes" | "mutateNodes" | "replaceNodes" | "updateNodes",
   value: unknown,
 ): void {
   if (value === undefined) return;
@@ -289,6 +289,39 @@ export interface AtomicNodeBatchExecutor {
   ): Promise<number>;
   (
     input: AtomicNodeBatchInput & Readonly<{ resultMode: "rows" }>,
+  ): Promise<readonly NodeRow[]>;
+}
+
+/** One complete, preimage-free replacement supplied to a semantic executor. */
+export type AtomicNodeReplacementEntry = Readonly<{
+  params: InsertNodeParams;
+  /** Complete canonically ordered claims the replacement postimage owes. */
+  claims?: readonly NodeInsertClaim[];
+  /** Complete derived-storage transitions owed by the replacement postimage. */
+  projections?: readonly AtomicNodeProjection[];
+}>;
+
+/** Any node entry whose complete postimage drives projections/assertions. */
+export type AtomicNodePostimageEntry =
+  AtomicNodeBatchEntry | AtomicNodeReplacementEntry;
+
+/** Executes complete blind node replacements for one exact resource. */
+export interface AtomicNodeReplacementBatchExecutor {
+  /** Maximum members accepted by one atomic submission, including internal chunks. */
+  readonly maxEntries: Readonly<{ plain: number; claimed: number }>;
+  /** Claim semantics this executor can prove, omitted for plain rows only. */
+  readonly claimSupport?: AtomicNodeClaimSupport;
+  /** Claim families whose earlier owner rows this program releases. */
+  readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
+  /** Derived-storage families this executor carries inside its program. */
+  readonly projectionSupport?: AtomicNodeProjectionSupport;
+  (
+    input: Readonly<{
+      entries: readonly AtomicNodeReplacementEntry[];
+      /** Whether earlier owner claims must be released before acquisition. */
+      releaseClaims: boolean;
+      schemaFence: SchemaWriteFenceParams;
+    }>,
   ): Promise<readonly NodeRow[]>;
 }
 
@@ -511,6 +544,7 @@ export class AtomicNodeDeleteRestrictedRefusalError extends Error {
  */
 export type AtomicMutationProgramExecutor = Readonly<{
   createNodes?: AtomicNodeBatchExecutor;
+  replaceNodes?: AtomicNodeReplacementBatchExecutor;
   createEdges?: AtomicEdgeBatchExecutor;
   deleteNodes?: AtomicNodeDeleteBatchExecutor;
   deleteEdges?: AtomicEdgeDeleteBatchExecutor;
@@ -523,6 +557,7 @@ export type AtomicMutationProgramExecutor = Readonly<{
 /** Every independently enabled semantic variant in a mutation profile. */
 export const ATOMIC_MUTATION_PROGRAM_VARIANTS = [
   "createNodes",
+  "replaceNodes",
   "createEdges",
   "deleteNodes",
   "deleteEdges",
@@ -570,6 +605,12 @@ export function reachableAtomicMutationProgramVariants(
   const resolvedMutationSetsReachable =
     !execution.interactiveTransactions || execution.atomicBatch === "session";
   if (profile.createNodes !== undefined) variants.push("createNodes");
+  if (
+    (profile.replaceNodes?.maxEntries.plain ?? 0) > 0 ||
+    (profile.replaceNodes?.maxEntries.claimed ?? 0) > 0
+  ) {
+    variants.push("replaceNodes");
+  }
   if (profile.createEdges !== undefined) variants.push("createEdges");
   if (profile.deleteNodes !== undefined) variants.push("deleteNodes");
   if (profile.deleteEdges !== undefined) variants.push("deleteEdges");
@@ -606,6 +647,7 @@ export function reachableAtomicMutationProgramVariants(
  */
 export type AtomicMutationProgramRegistration = Readonly<{
   createNodes?: AtomicNodeBatchExecutor | undefined;
+  replaceNodes?: AtomicNodeReplacementBatchExecutor | undefined;
   createEdges?: AtomicEdgeBatchExecutor | undefined;
   deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
   deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;
@@ -650,6 +692,7 @@ function instrumentAtomicMutationProgramExecutors(
   const descriptors = {
     createEdges: { variant: () => "createEdges" },
     createNodes: { variant: () => "createNodes" },
+    replaceNodes: { variant: () => "replaceNodes" },
     deleteEdges: { variant: () => "deleteEdges" },
     deleteNodes: { variant: () => "deleteNodes" },
     mutateEdges: {
@@ -725,6 +768,7 @@ export async function withAtomicMutationProgramDispatchObserver<TResult>(
 
 const ATOMIC_MUTATION_PROGRAM_FAMILIES = [
   "createNodes",
+  "replaceNodes",
   "createEdges",
   "deleteNodes",
   "deleteEdges",
@@ -758,10 +802,48 @@ function assertAtomicMutationProgramLimits(
   executor: AtomicMutationProgramRegistration[typeof family],
 ): void {
   if (executor === undefined) return;
-  if (family === "createNodes") {
-    const nodeExecutor = executor as AtomicNodeBatchExecutor;
+  if (family === "createNodes" || family === "replaceNodes") {
+    const nodeExecutor = executor as
+      AtomicNodeBatchExecutor | AtomicNodeReplacementBatchExecutor;
     assertAtomicNodeClaimSupport(family, nodeExecutor.claimSupport);
     assertAtomicNodeProjectionSupport(family, nodeExecutor.projectionSupport);
+    if (family === "replaceNodes") {
+      const replacementExecutor =
+        nodeExecutor as AtomicNodeReplacementBatchExecutor;
+      const releasedClaimFamilies = replacementExecutor.releasedClaimFamilies;
+      if (releasedClaimFamilies !== undefined) {
+        assertAtomicNodeClaimFamilies(
+          family,
+          "releasedClaimFamilies",
+          releasedClaimFamilies,
+        );
+      }
+      const maxEntries = (
+        replacementExecutor as unknown as Readonly<Record<string, unknown>>
+      )["maxEntries"];
+      if (typeof maxEntries !== "object" || maxEntries === null) {
+        throw new ConfigurationError(
+          "Atomic mutation program family replaceNodes requires maxEntries metadata.",
+          {
+            code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+            family,
+            limit: "maxEntries",
+            value: maxEntries,
+          },
+        );
+      }
+      const limits = maxEntries as Readonly<Record<string, unknown>>;
+      assertNonnegativeIntegerLimit(
+        family,
+        "maxEntries.plain",
+        limits["plain"],
+      );
+      assertNonnegativeIntegerLimit(
+        family,
+        "maxEntries.claimed",
+        limits["claimed"],
+      );
+    }
     return;
   }
   if (family === "deleteNodes") {
@@ -973,6 +1055,7 @@ export function markBundledRootAtomicMutationPrograms<T extends object>(
   target: T,
   executor: Readonly<{
     createNodes?: AtomicNodeBatchExecutor | undefined;
+    replaceNodes?: AtomicNodeReplacementBatchExecutor | undefined;
     createEdges?: AtomicEdgeBatchExecutor | undefined;
     deleteNodes?: AtomicNodeDeleteBatchExecutor | undefined;
     deleteEdges?: AtomicEdgeDeleteBatchExecutor | undefined;

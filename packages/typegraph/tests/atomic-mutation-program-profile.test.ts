@@ -14,6 +14,7 @@ import {
   type AtomicNodeBatchExecutor,
   type AtomicNodeBatchInput,
   atomicNodeClaimInputCost,
+  type AtomicNodeReplacementBatchExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   hasAtomicMutationProgramRegistration,
   registerAtomicMutationPrograms,
@@ -562,6 +563,30 @@ describe("atomic mutation program execution profile", () => {
         code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
         family: "mutateEdges",
         limit: "maxEntries.durableConvergence",
+      },
+    });
+    expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);
+  });
+
+  it("refuses malformed replacement limits before publishing the profile", () => {
+    const backend = createCustomAtomicRoot();
+    registerAtomicSqlProgram(backend, emptyAtomicBatch);
+    const replaceNodes = (() =>
+      Promise.resolve([])) as unknown as AtomicNodeReplacementBatchExecutor;
+    Object.defineProperty(replaceNodes, "maxEntries", {
+      configurable: true,
+      value: undefined,
+    });
+
+    const error = captureThrown(() =>
+      registerAtomicMutationPrograms(backend, { replaceNodes }),
+    );
+    expect(error).toBeInstanceOf(ConfigurationError);
+    expect(error).toMatchObject({
+      details: {
+        code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+        family: "replaceNodes",
+        limit: "maxEntries",
       },
     });
     expect(hasAtomicMutationProgramRegistration(backend)).toBe(false);

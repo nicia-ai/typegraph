@@ -12,6 +12,7 @@ import {
   type AtomicEdgeResolvedUpdateBatchExecutor,
   type AtomicNodeBatchExecutor as BackendAtomicNodeBatchExecutor,
   type AtomicNodeDeleteBatchExecutor,
+  type AtomicNodeReplacementBatchExecutor,
   type AtomicNodeResolvedMutationSetExecutor,
   type AtomicNodeResolvedUpdateBatchExecutor,
   resolveAtomicMutationPrograms,
@@ -133,6 +134,67 @@ export function resolveAtomicNodeBatchExecutor(
   }
 
   return profile.createNodes;
+}
+
+export type AtomicNodeReplacementEligibilityInput =
+  CommonAtomicMutationEligibility &
+    Readonly<{
+      registry: KindRegistry;
+      kind: string;
+      entryCount: number;
+      identityEnabled: boolean;
+    }>;
+
+/** The one owner of the static store proof for blind node replacement. */
+export function resolveAtomicNodeReplacementBatchProgram(
+  input: AtomicNodeReplacementEligibilityInput,
+):
+  | Readonly<{
+      executor: AtomicNodeReplacementBatchExecutor;
+      releaseClaims: boolean;
+    }>
+  | undefined {
+  if (input.entryCount === 0 || input.identityEnabled) return;
+  if (!hasOwnKey(input.graph.nodes, input.kind)) return;
+  const registration = input.graph.nodes[input.kind];
+  if (registration === undefined) return;
+  const executor = resolveAtomicMutationProfile(input)?.replaceNodes;
+  if (executor === undefined) return;
+  const releasedClaimFamilies = new Set(executor.releasedClaimFamilies);
+  const hasDisjointness =
+    input.registry.getDisjointKinds(input.kind).length > 0;
+  const hasUniqueness = (registration.unique ?? []).length > 0;
+  const maxEntries =
+    hasDisjointness || hasUniqueness ?
+      executor.maxEntries.claimed
+    : executor.maxEntries.plain;
+  if (input.entryCount > maxEntries) return;
+  if (
+    hasDisjointness &&
+    (!supportsAtomicNodeClaimFamily(executor.claimSupport, "disjointness") ||
+      !releasedClaimFamilies.has("disjointness"))
+  ) {
+    return;
+  }
+  if (
+    hasUniqueness &&
+    (!supportsAtomicNodeClaimFamily(executor.claimSupport, "uniqueness") ||
+      !releasedClaimFamilies.has("uniqueness"))
+  ) {
+    return;
+  }
+  if (
+    !supportsAtomicNodeProjections(
+      executor.projectionSupport,
+      atomicNodeProjectionFamilies(registration),
+    )
+  ) {
+    return;
+  }
+  return {
+    executor,
+    releaseClaims: hasDisjointness || hasUniqueness,
+  };
 }
 
 export type AtomicEdgeBatchEligibilityInput = CommonAtomicMutationEligibility &

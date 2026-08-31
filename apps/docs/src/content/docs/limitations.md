@@ -388,6 +388,15 @@ the Store never infers fallback safety from a missing result. Once a session
 program starts, a savepoint preserves the surrounding transaction for typed
 refusal diagnosis.
 
+Node `bulkReplaceById()` avoids that structural preimage read by accepting only
+complete replacement documents and distinct IDs. On an eligible bundled root,
+the complete call—including claim ownership changes and fulltext/vector
+sidecars—uses one atomic transport submission. Live rows retain their stored
+validity windows; tombstones receive a freshly stamped window. Operational
+Identity and history/revision capture use the portable path. Custom backends
+must register and semantically certify the independent `replaceNodes` family;
+transport registration or another node family is not evidence for replacement.
+
 Eligible singleton `update()` and `delete()` calls reuse those same registered
 families. Plain or projected node updates, unconstrained non-durable-identity edge updates,
 all direct edge deletes, and plain restricted node deletes remain two-exchange

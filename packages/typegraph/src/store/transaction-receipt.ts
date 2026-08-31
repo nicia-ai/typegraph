@@ -107,6 +107,7 @@ const NODE_WRITE_INTENT_COUNTERS = {
   upsertById: countSingleWrite,
   upsertByIdFromRecord: countSingleWrite,
   bulkCreate: countBulkInputAt(0),
+  bulkReplaceById: countBulkInputAt(0),
   bulkUpsertById: countBulkInputAt(0),
   bulkInsert: countBulkInputAt(0),
   bulkDelete: countBulkInputAt(0),

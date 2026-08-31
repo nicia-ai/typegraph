@@ -11,7 +11,7 @@ import { chunk as chunkArray } from "../../../utils/array";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import { encodeTupleKey } from "../../../utils/tuple-key";
 import type {
-  AtomicNodeBatchEntry,
+  AtomicNodePostimageEntry,
   AtomicNodeProjection,
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
@@ -42,7 +42,7 @@ type AtomicNodeProjectionEntry = Readonly<{
 }>;
 
 function atomicProjectionEntries(
-  creates: readonly AtomicNodeBatchEntry[],
+  creates: readonly AtomicNodePostimageEntry[],
   updates: readonly AtomicNodeResolvedUpdateEntry[],
 ): readonly AtomicNodeProjectionEntry[] {
   return [
@@ -69,7 +69,7 @@ export type AtomicNodeProjectionRequirements = Readonly<{
 
 /** One owner for the physical derived-storage requirements of a node program. */
 export function resolveAtomicNodeProjectionRequirements(
-  creates: readonly AtomicNodeBatchEntry[],
+  creates: readonly AtomicNodePostimageEntry[],
   updates: readonly AtomicNodeResolvedUpdateEntry[],
 ): AtomicNodeProjectionRequirements | undefined {
   const entries = atomicProjectionEntries(creates, updates);
@@ -123,7 +123,7 @@ export function resolveAtomicNodeProjectionRequirements(
  * work deliberately aborts the submission and rolls these transitions back.
  */
 export function buildAtomicNodeProjectionStatements(
-  creates: readonly AtomicNodeBatchEntry[],
+  creates: readonly AtomicNodePostimageEntry[],
   updates: readonly AtomicNodeResolvedUpdateEntry[],
   timestamp: string,
   dialect: SqlDialect,
