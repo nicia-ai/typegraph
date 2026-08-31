@@ -286,15 +286,20 @@ edge `bulkDelete()` calls likewise submit 1 atomic exchange instead of a
 transaction plus per-row probes/writes. On the portable edge path, one batched
 authoritative read plus one set-based soft delete replaces the former two
 statements per input. Eligible update-only and mixed create/update node and edge
-`bulkUpsertById()` calls submit 2 exchanges: one batched preimage read and one
-atomic mutation exchange. Mixed
+`bulkUpsertById()` calls whose preimages fit one bind-budget read submit 2
+exchanges: one batched preimage read and one atomic mutation exchange. Mixed
 sets previously required separate create and update submissions after the read,
 so they fall from 3 exchanges to 2 (33%). D1's 100-parameter budget admits 17
-node mutations or 6 edge mutations per statement. Larger eligible sets remain
-two exchanges: the mutation program chunks statements inside one atomic batch,
-and a terminal postimage assertion for every chunk rolls the complete
-submission back if any guarded member moved. Other backends derive the
-per-statement chunk size from their declared parameter budget. The native exchange still
+node mutations or 6 edge mutations per mutation statement. One D1 native
+submission accepts at most 512 node members or 187 edge members; larger sets
+fail closed to the portable path rather than constructing an unbounded
+transport request. Within that ceiling, the mutation program chunks statements
+inside one atomic batch, and a terminal postimage assertion for every chunk
+rolls the complete submission back if any guarded member moved. When the
+preimage read also exceeds its bind budget, it costs one read exchange per read
+chunk plus the single atomic mutation submission. Other backends derive their
+per-statement chunk size from their declared parameter budget and retain an
+absolute 512-member submission ceiling. The native exchange still
 contains the SQL statements needed for inserts and node projection sidecars;
 it groups fulltext and per-vector-slot transitions into set statements and
 submits them as

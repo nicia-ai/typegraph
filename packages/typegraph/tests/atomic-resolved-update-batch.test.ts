@@ -515,18 +515,12 @@ describe("atomic resolved update batches", () => {
     const profile = requireDefined(
       resolveBundledRootAtomicMutationPrograms(budgetedBackend),
     );
-    expect(requireDefined(profile.updateNodes).maxEntries).toBe(
-      Number.MAX_SAFE_INTEGER,
-    );
-    expect(requireDefined(profile.updateEdges).maxEntries).toBe(
-      Number.MAX_SAFE_INTEGER,
-    );
-    expect(requireDefined(profile.mutateNodes).maxEntries).toBe(
-      Number.MAX_SAFE_INTEGER,
-    );
+    expect(requireDefined(profile.updateNodes).maxEntries).toBe(512);
+    expect(requireDefined(profile.updateEdges).maxEntries).toBe(187);
+    expect(requireDefined(profile.mutateNodes).maxEntries).toBe(512);
     expect(requireDefined(profile.mutateEdges).maxEntries).toEqual({
       durableConvergence: 7,
-      resolvedSet: Number.MAX_SAFE_INTEGER,
+      resolvedSet: 187,
     });
 
     const common = {
@@ -551,9 +545,9 @@ describe("atomic resolved update batches", () => {
     expect(
       resolveAtomicNodeResolvedUpdateBatchExecutor({
         ...nodeInput,
-        entryCount: 18,
+        entryCount: 513,
       }),
-    ).toBe(profile.updateNodes);
+    ).toBeUndefined();
     expect(
       resolveAtomicEdgeResolvedUpdateBatchExecutor({
         ...common,
@@ -565,9 +559,9 @@ describe("atomic resolved update batches", () => {
       resolveAtomicEdgeResolvedUpdateBatchExecutor({
         ...common,
         kind: relates.kind,
-        entryCount: 7,
+        entryCount: 188,
       }),
-    ).toBe(profile.updateEdges);
+    ).toBeUndefined();
     expect(
       resolveAtomicEdgeResolvedUpdateBatchExecutor({
         ...common,
@@ -596,9 +590,9 @@ describe("atomic resolved update batches", () => {
       resolveAtomicNodeResolvedMutationSetExecutor({
         ...nodeInput,
         creates: [nodeCreate],
-        updateCount: 17,
+        updateCount: 512,
       }),
-    ).toBe(profile.mutateNodes);
+    ).toBeUndefined();
     expect(
       resolveAtomicNodeResolvedMutationSetExecutor({
         ...nodeInput,
@@ -636,9 +630,9 @@ describe("atomic resolved update batches", () => {
         ...common,
         kind: relates.kind,
         creates: [edgeCreate],
-        updateCount: 6,
+        updateCount: 187,
       }),
-    ).toBe(profile.mutateEdges);
+    ).toBeUndefined();
     expect(
       resolveAtomicEdgeResolvedMutationSetExecutor({
         ...common,
@@ -728,6 +722,36 @@ describe("atomic resolved update batches", () => {
       },
       props: { label: `After ${index}` },
     }));
+    const nodeUpdateOnlyChunk = [
+      ...nodeUpdates,
+      {
+        graphId: graph.id,
+        kind: Person.kind,
+        id: "node-16",
+        props: { name: "Node 16", score: 16 },
+        expectedVersion: 1,
+      },
+    ];
+    const edgeUpdateOnlyChunk = Array.from({ length: 6 }, (_, index) => ({
+      existing: {
+        graph_id: graph.id,
+        kind: relates.kind,
+        id: `edge-full-${index}`,
+        from_kind: Person.kind,
+        from_id: "from",
+        to_kind: Person.kind,
+        to_id: "to",
+        props: { label: `Before ${index}` },
+        match_identity_name: "external",
+        match_identity_key: `key-${index}`,
+        valid_from: timestamp,
+        valid_to: "2026-08-28T00:00:00.000Z",
+        created_at: timestamp,
+        updated_at: timestamp,
+        deleted_at: undefined,
+      },
+      props: { label: `After ${index}` },
+    }));
     const statements: readonly SQL[] = [
       buildAtomicNodeBatchWithSchemaFence(
         sqliteTables,
@@ -791,6 +815,34 @@ describe("atomic resolved update batches", () => {
         ],
         schemaFence,
       ),
+      buildAtomicNodeResolvedUpdateBatch(
+        sqliteTables,
+        nodeUpdateOnlyChunk,
+        timestamp,
+        schemaFence,
+        drizzleSql.empty(),
+      ),
+      buildAssertAtomicNodeMutationPostimages(
+        sqliteTables,
+        [],
+        nodeUpdateOnlyChunk,
+        timestamp,
+        schemaFence,
+      ),
+      buildAtomicEdgeResolvedUpdateBatch(
+        sqliteTables,
+        edgeUpdateOnlyChunk,
+        timestamp,
+        schemaFence,
+        drizzleSql.empty(),
+      ),
+      buildAssertAtomicEdgeMutationPostimages(
+        sqliteTables,
+        [],
+        edgeUpdateOnlyChunk,
+        timestamp,
+        schemaFence,
+      ),
     ];
     const dialect = new SQLiteSyncDialect();
     const parameterCounts = statements.map(
@@ -801,7 +853,8 @@ describe("atomic resolved update batches", () => {
     // widest D1-sized slot (17 nodes or 6 edges), so the shared chunk formula
     // cannot silently become too wide.
     expect(parameterCounts.slice(1, 4)).toEqual([88, 78, 21]);
-    expect(parameterCounts.slice(5)).toEqual([62, 62, 9]);
+    expect(parameterCounts.slice(5, 8)).toEqual([62, 62, 9]);
+    expect(parameterCounts.slice(8)).toEqual([93, 79, 85, 65]);
     for (const parameterCount of parameterCounts) {
       expect(parameterCount).toBeLessThanOrEqual(100);
     }

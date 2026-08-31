@@ -890,11 +890,15 @@ type AtomicResolvedMutationSlot<TRow> =
   | Readonly<{ kind: "projection" }>
   | Readonly<{ kind: "assertion" }>;
 
-// The executor chunks every statement by the real bind budget. This public
-// limit therefore describes the complete atomic submission rather than any
-// one SQL statement. Use the largest exact integer as the contract's effective
-// "unbounded" value; the caller's array will impose a smaller practical limit.
-const ATOMIC_RESOLVED_MUTATION_MAX_BATCH_ENTRIES = Number.MAX_SAFE_INTEGER;
+// A native submission is one transport request and one rollback boundary, so
+// per-statement bind safety is necessary but not sufficient. Bound the number
+// of mutation statements as well: a mixed set can spend one partial chunk on
+// each side, hence K - 1 full chunks plus one member is the largest total that
+// can never exceed K mutation statements. The absolute member ceiling keeps a
+// high-bind PostgreSQL backend from turning the same contract into an enormous
+// HTTP request merely because one SQL statement can carry many parameters.
+const ATOMIC_RESOLVED_MUTATION_MAX_MUTATION_STATEMENTS = 32;
+const ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS = 512;
 const ATOMIC_RESOLVED_MUTATION_FIXED_PARAM_COUNT = 12;
 const ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY = 5;
 const ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY = 14;
@@ -909,6 +913,17 @@ function atomicResolvedMutationStatementChunkSize(
       (maxBindParameters - ATOMIC_RESOLVED_MUTATION_FIXED_PARAM_COUNT) /
         parametersPerEntry,
     ),
+  );
+}
+
+function atomicResolvedMutationSubmissionMaxEntries(
+  statementChunkSize: number,
+): number {
+  return Math.min(
+    ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
+    statementChunkSize *
+      (ATOMIC_RESOLVED_MUTATION_MAX_MUTATION_STATEMENTS - 1) +
+      1,
   );
 }
 
@@ -1131,50 +1146,28 @@ function compileAtomicNodeProjectionSlots(
   });
 }
 
-function isAtomicNodePostimageRefusal(
+function isAtomicMutationPostimageRefusal(
   error: unknown,
   operationStrategy: CommonOperationStrategy,
+  entity: "node" | "edge",
   hasPostimageAssertion: boolean,
 ): boolean {
+  const notNullConstraint =
+    entity === "node" ?
+      operationStrategy.atomicNodeRefusalConstraints.mutationPostimage
+    : operationStrategy.atomicEdgeRefusalConstraints.mutationPostimage;
+  const primaryKeyConstraint =
+    entity === "node" ?
+      operationStrategy.primaryKeyConstraints.nodes
+    : operationStrategy.primaryKeyConstraints.edges;
   return (
-    isNotNullColumnViolation(
-      error,
-      operationStrategy.atomicNodeRefusalConstraints.mutationPostimage,
-    ) ||
+    isNotNullColumnViolation(error, notNullConstraint) ||
     (hasPostimageAssertion &&
-      isDuplicatePrimaryKeyError(
-        error,
-        operationStrategy.primaryKeyConstraints.nodes,
-      )) ||
+      isDuplicatePrimaryKeyError(error, primaryKeyConstraint)) ||
     (hasPostimageAssertion &&
       error instanceof DatabaseOperationError &&
       error.details.reason === "duplicate_key" &&
-      isDuplicatePrimaryKeyError(
-        error.cause,
-        operationStrategy.primaryKeyConstraints.nodes,
-      ))
-  );
-}
-
-function isAtomicEdgePostimageRefusal(
-  error: unknown,
-  operationStrategy: CommonOperationStrategy,
-): boolean {
-  return (
-    isNotNullColumnViolation(
-      error,
-      operationStrategy.atomicEdgeRefusalConstraints.mutationPostimage,
-    ) ||
-    isDuplicatePrimaryKeyError(
-      error,
-      operationStrategy.primaryKeyConstraints.edges,
-    ) ||
-    (error instanceof DatabaseOperationError &&
-      error.details.reason === "duplicate_key" &&
-      isDuplicatePrimaryKeyError(
-        error.cause,
-        operationStrategy.primaryKeyConstraints.edges,
-      ))
+      isDuplicatePrimaryKeyError(error.cause, primaryKeyConstraint))
   );
 }
 
@@ -1507,9 +1500,10 @@ export function createCommonOperationBackend(
     } catch (error) {
       if (
         input.postimageRefusal !== undefined &&
-        isAtomicNodePostimageRefusal(
+        isAtomicMutationPostimageRefusal(
           error,
           operationStrategy,
+          "node",
           input.hasPostimageAssertion,
         )
       ) {
@@ -2896,6 +2890,9 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
+        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
+          statementChunkSize,
+        );
 
         const executeAtomicNodeResolvedUpdateBatch = Object.assign(
           async (
@@ -2972,7 +2969,7 @@ export function createCommonOperationBackend(
             });
           },
           {
-            maxEntries: ATOMIC_RESOLVED_MUTATION_MAX_BATCH_ENTRIES,
+            maxEntries,
             projectionSupport: Object.freeze({
               families: operationStrategy.atomicNodeProjectionFamilies,
             } satisfies AtomicNodeProjectionSupport),
@@ -2999,6 +2996,9 @@ export function createCommonOperationBackend(
         const statementChunkSize = atomicResolvedMutationStatementChunkSize(
           maxBindParameters,
           ATOMIC_NODE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
+        );
+        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
+          statementChunkSize,
         );
 
         const executeAtomicNodeResolvedMutationSet = Object.assign(
@@ -3091,7 +3091,7 @@ export function createCommonOperationBackend(
             });
           },
           {
-            maxEntries: ATOMIC_RESOLVED_MUTATION_MAX_BATCH_ENTRIES,
+            maxEntries,
             projectionSupport: Object.freeze({
               families: operationStrategy.atomicNodeProjectionFamilies,
             } satisfies AtomicNodeProjectionSupport),
@@ -3194,6 +3194,9 @@ export function createCommonOperationBackend(
           maxBindParameters,
           ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
         );
+        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
+          statementChunkSize,
+        );
         const executeAtomicEdgeResolvedUpdateBatch = Object.assign(
           async (
             input: Parameters<AtomicEdgeResolvedUpdateBatchExecutor>[0],
@@ -3255,13 +3258,20 @@ export function createCommonOperationBackend(
               const result = await atomicExecutor.execute(program);
               return result.updated;
             } catch (error) {
-              if (isAtomicEdgePostimageRefusal(error, operationStrategy)) {
+              if (
+                isAtomicMutationPostimageRefusal(
+                  error,
+                  operationStrategy,
+                  "edge",
+                  true,
+                )
+              ) {
                 return [];
               }
               throw error;
             }
           },
-          { maxEntries: ATOMIC_RESOLVED_MUTATION_MAX_BATCH_ENTRIES },
+          { maxEntries },
         ) satisfies AtomicEdgeResolvedUpdateBatchExecutor;
 
         return { executeAtomicEdgeResolvedUpdateBatch };
@@ -3285,6 +3295,9 @@ export function createCommonOperationBackend(
         const statementChunkSize = atomicResolvedMutationStatementChunkSize(
           maxBindParameters,
           ATOMIC_EDGE_RESOLVED_MUTATION_PARAMS_PER_ENTRY,
+        );
+        const maxEntries = atomicResolvedMutationSubmissionMaxEntries(
+          statementChunkSize,
         );
 
         const executeAtomicEdgeResolvedMutationSet = Object.assign(
@@ -3367,14 +3380,21 @@ export function createCommonOperationBackend(
                 [],
               );
             } catch (error) {
-              if (isAtomicEdgePostimageRefusal(error, operationStrategy)) {
+              if (
+                isAtomicMutationPostimageRefusal(
+                  error,
+                  operationStrategy,
+                  "edge",
+                  true,
+                )
+              ) {
                 return { created: [], updated: [] };
               }
               throw error;
             }
           },
           {
-            maxEntries: ATOMIC_RESOLVED_MUTATION_MAX_BATCH_ENTRIES,
+            maxEntries,
           },
         );
 

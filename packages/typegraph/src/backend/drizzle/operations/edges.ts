@@ -1186,10 +1186,10 @@ export function buildAssertAtomicEdgeMutationPostimages(
       ${castBoundValueForColumn(edges.props, first.propsJson)},
       ${sqlNull(first.matchIdentityName)},
       ${sqlNull(first.matchIdentityKey)},
-      ${sqlNull(first.storedLowerBound)},
-      ${sqlNull(first.storedUpperBound)},
-      ${first.createdAt},
-      ${first.updatedAt}
+      ${castBoundValueForColumn(edges.validFrom, sqlNull(first.storedLowerBound))},
+      ${castBoundValueForColumn(edges.validTo, sqlNull(first.storedUpperBound))},
+      ${castBoundValueForColumn(edges.createdAt, first.createdAt)},
+      ${castBoundValueForColumn(edges.updatedAt, first.updatedAt)}
     WHERE NOT EXISTS (
         SELECT 1
         FROM ${schemaVersions}

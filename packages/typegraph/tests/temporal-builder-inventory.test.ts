@@ -117,7 +117,7 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     // The update-only terminal assertion forwards the bound from the exact
     // preimage its guarded update already read; it chooses no new instant.
     "storedLowerBound: existing.valid_from,",
-    "${sqlNull(first.storedLowerBound)},",
+    "${castBoundValueForColumn(edges.validFrom, sqlNull(first.storedLowerBound))},",
     // The terminal assertion duplicates the already-written row solely to
     // trigger its dedicated kind refusal sentinel.
     "${edges.validFrom},",
