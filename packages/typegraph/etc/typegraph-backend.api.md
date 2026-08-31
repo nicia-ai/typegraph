@@ -361,6 +361,7 @@ export interface AtomicNodeReplacementBatchExecutor {
         releaseClaims: boolean;
         schemaFence: SchemaWriteFenceParams;
     }>): Promise<readonly NodeRow[]>;
+    readonly accepts?: (entries: readonly AtomicNodeReplacementEntry[]) => boolean;
     readonly claimSupport?: AtomicNodeClaimSupport;
     readonly maxEntries: Readonly<{
         plain: number;

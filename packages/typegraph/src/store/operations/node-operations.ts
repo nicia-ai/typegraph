@@ -1799,6 +1799,9 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
       ...(projections === undefined ? {} : { projections }),
     }),
   );
+  if (executor.accepts?.(entries) === false) {
+    return unsupportedResolvedMutationSet();
+  }
   const returnedRows = await withAtomicNodeClaimTranslation(
     preparedCreates,
     () =>
@@ -1815,8 +1818,13 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
     await diagnoseAtomicNodeBatchNoRow(ctx, backend, preparedCreates);
   }
   if (returnedRows.length !== items.length) {
-    throw new CompilerInvariantError(
+    throw new DatabaseOperationError(
       "Atomic node replacement returned a partial result.",
+      {
+        operation: "upsert",
+        entity: "node",
+        attempted: items.map((item) => ({ kind, id: item.id })),
+      },
     );
   }
   memoizeLeasedSchemaFence(ctx, backend);

@@ -309,6 +309,10 @@ export type AtomicNodePostimageEntry =
 export interface AtomicNodeReplacementBatchExecutor {
   /** Maximum members accepted by one atomic submission, including internal chunks. */
   readonly maxEntries: Readonly<{ plain: number; claimed: number }>;
+  /** Exact no-SQL admission proof for the prepared replacement work. */
+  readonly accepts?: (
+    entries: readonly AtomicNodeReplacementEntry[],
+  ) => boolean;
   /** Claim semantics this executor can prove, omitted for plain rows only. */
   readonly claimSupport?: AtomicNodeClaimSupport;
   /** Claim families whose earlier owner rows this program releases. */
@@ -843,6 +847,18 @@ function assertAtomicMutationProgramLimits(
         "maxEntries.claimed",
         limits["claimed"],
       );
+      const accepts = (executor as AtomicNodeReplacementBatchExecutor).accepts;
+      if (accepts !== undefined && typeof accepts !== "function") {
+        throw new ConfigurationError(
+          "Atomic mutation program family replaceNodes requires a callable accepts predicate.",
+          {
+            code: "ATOMIC_MUTATION_PROGRAM_REGISTRATION_MISMATCH",
+            family,
+            limit: "accepts",
+            value: accepts,
+          },
+        );
+      }
     }
     return;
   }

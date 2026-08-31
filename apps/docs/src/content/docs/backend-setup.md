@@ -1549,6 +1549,12 @@ when its complete normalized claim set exceeds the executor's declared bound.
 Custom executors must use that same helper instead of reproducing its
 dialect-reviewed bind formula. `deleteNodes.releasedClaimFamilies` similarly
 declares which owner-side claim cleanup the delete program proves.
+Bundled replacement executors also expose an `accepts(entries)` pre-dispatch
+proof. It packs prepared members with the same bind-weighted planner used by
+execution, so claimed batches are admitted by their actual work instead of an
+unrelated fixed 32-entry ceiling; `false` is an explicit no-SQL fallback
+verdict. Custom executors may provide the same exact admission seam when one
+claimed-member ceiling would be needlessly pessimistic.
 `replaceNodes.releasedClaimFamilies` declares which previous owner claims the
 replacement releases before acquiring its complete postimage claims; the Store
 does not infer that proof from `claimSupport`. Node

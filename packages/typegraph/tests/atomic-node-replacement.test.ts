@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import { StaleVersionError, UniquenessError } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
+import { atomicNodeReplacementSubmissionMaxEntries } from "../src/backend/drizzle/operation-backend-core";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { defineGraph, defineNode, searchable } from "../src/core";
 import { migrateSchema } from "../src/schema";
@@ -83,6 +84,12 @@ async function closeFixture(
 }
 
 describe("atomic node replacement", () => {
+  it("derives its advertised ceiling from the replacement chunk budget", () => {
+    expect(atomicNodeReplacementSubmissionMaxEntries(100)).toBe(311);
+    expect(atomicNodeReplacementSubmissionMaxEntries(101)).toBe(311);
+    expect(atomicNodeReplacementSubmissionMaxEntries(102)).toBe(311);
+  });
+
   it("creates, replaces, and resurrects complete documents in one exchange", async () => {
     const fixture = await createFixture();
     try {
@@ -155,6 +162,26 @@ describe("atomic node replacement", () => {
     }
   });
 
+  it("admits claimed batches by actual statement work beyond 32 members", async () => {
+    const fixture = await createFixture();
+    try {
+      const items = Array.from({ length: 33 }, (_, index) => ({
+        id: `claimed-${index}`,
+        props: { slug: `slug-${index}`, title: `Title ${index}` },
+      }));
+      const batch = vi.spyOn(fixture.client, "batch");
+      const execute = vi.spyOn(fixture.client, "execute");
+
+      await expect(
+        fixture.store.nodes.Document.bulkReplaceById(items),
+      ).resolves.toHaveLength(items.length);
+      expect(batch).toHaveBeenCalledOnce();
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
   it("preserves replacement semantics on an unregistered derived backend", async () => {
     const fixture = await createFixture();
     try {
@@ -179,6 +206,37 @@ describe("atomic node replacement", () => {
       });
       expect(row?.note).toBeUndefined();
       expect(batch).not.toHaveBeenCalled();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("rebuilds the portable partition after a concurrent create", async () => {
+    const fixture = await createFixture();
+    try {
+      const getNodes = fixture.backend.getNodes;
+      expect(getNodes).toBeDefined();
+      let injected = false;
+      const racingBackend = deriveBackend(fixture.backend, {
+        getNodes: async (graphId, kind, ids) => {
+          const rows = await getNodes?.(graphId, kind, ids);
+          if (!injected) {
+            injected = true;
+            await fixture.store.nodes.Document.create(
+              { slug: "raced", title: "Concurrent" },
+              { id: "raced" },
+            );
+          }
+          return rows ?? [];
+        },
+      });
+      const [portable] = await createVerifiedStore(graph, racingBackend);
+
+      await expect(
+        portable.nodes.Document.bulkReplaceById([
+          { id: "raced", props: { slug: "raced", title: "Replacement" } },
+        ]),
+      ).resolves.toMatchObject([{ id: "raced", title: "Replacement" }]);
     } finally {
       await closeFixture(fixture);
     }

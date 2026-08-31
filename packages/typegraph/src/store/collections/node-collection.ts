@@ -21,7 +21,12 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ConfigurationError, ValidationError } from "../../errors";
+import {
+  ConfigurationError,
+  ENTITY_ALREADY_EXISTS_CODE,
+  NodeNotFoundError,
+  ValidationError,
+} from "../../errors";
 import type { DynamicNodeAccessor, NodeAccessor } from "../../query/builder";
 import { type QueryBuilder } from "../../query/builder";
 import { type Predicate } from "../../query/predicates";
@@ -68,6 +73,16 @@ import {
   resolveTemporalReadParams,
   type TemporalReadParams,
 } from "./temporal-read-params";
+
+function isNodeReplacementPartitionMovement(error: unknown): boolean {
+  return (
+    error instanceof NodeNotFoundError ||
+    (error instanceof ValidationError &&
+      error.details.issues.some(
+        (issue) => issue.code === ENTITY_ALREADY_EXISTS_CODE,
+      ))
+  );
+}
 
 type OnImmutableLowerBound = "preserve" | "refuse";
 
@@ -799,46 +814,51 @@ export function createNodeCollection<
         await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
         return narrowNodes<N>(attempt.value);
       }
-      const results = await runOptionallyInTransaction(
+      const results = await runResolvedMutationSetConverging(
+        "node",
         backend,
-        async (target) => {
-          const rows = await getNodeRowsByIds(
-            target,
-            batchPointRead,
-            graphId,
-            kind,
-            prepared.map((item) => item.id),
-          );
-          const results = new Map<string, Node<N>>();
-          const creates = prepared.filter((item) => !rows.has(item.id));
-          const updates = prepared.filter((item) => rows.has(item.id));
-          if (creates.length > 0) {
-            const created = await executeNodeCreateBatch(
-              creates.map((item) =>
-                buildCreateInput(kind, item.props, { id: item.id }),
-              ),
+        () =>
+          runOptionallyInTransaction(backend, async (target) => {
+            const rows = await getNodeRowsByIds(
               target,
-              { propsPreValidated: true },
+              batchPointRead,
+              graphId,
+              kind,
+              prepared.map((item) => item.id),
             );
-            for (const row of created) results.set(row.id, narrowNode<N>(row));
-          }
-          if (updates.length > 0) {
-            const updated = await executeNodeUpsertUpdateBatch(
-              updates.map((item) => {
-                const existing = requireDefined(rows.get(item.id));
-                return {
-                  input: buildUpsertUpdateInput(kind, item.id, item.props),
-                  clearDeleted: existing.deleted_at !== undefined,
-                  existing,
-                  replacementProps: item.props,
-                };
-              }),
-              target,
-            );
-            for (const row of updated) results.set(row.id, narrowNode<N>(row));
-          }
-          return prepared.map((item) => requireDefined(results.get(item.id)));
-        },
+            const results = new Map<string, Node<N>>();
+            const creates = prepared.filter((item) => !rows.has(item.id));
+            const updates = prepared.filter((item) => rows.has(item.id));
+            if (creates.length > 0) {
+              const created = await executeNodeCreateBatch(
+                creates.map((item) =>
+                  buildCreateInput(kind, item.props, { id: item.id }),
+                ),
+                target,
+                { propsPreValidated: true },
+              );
+              for (const row of created)
+                results.set(row.id, narrowNode<N>(row));
+            }
+            if (updates.length > 0) {
+              const updated = await executeNodeUpsertUpdateBatch(
+                updates.map((item) => {
+                  const existing = requireDefined(rows.get(item.id));
+                  return {
+                    input: buildUpsertUpdateInput(kind, item.id, item.props),
+                    clearDeleted: existing.deleted_at !== undefined,
+                    existing,
+                    replacementProps: item.props,
+                  };
+                }),
+                target,
+              );
+              for (const row of updated)
+                results.set(row.id, narrowNode<N>(row));
+            }
+            return prepared.map((item) => requireDefined(results.get(item.id)));
+          }),
+        { isMovement: isNodeReplacementPartitionMovement },
       );
       await config.maybeRefreshStatisticsAfterBulk?.(results.length);
       return results;

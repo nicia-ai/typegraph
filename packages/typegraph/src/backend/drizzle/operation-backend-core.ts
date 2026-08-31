@@ -255,6 +255,23 @@ function chunkAtomicNodeReplacementEntriesByClaimWork(
   );
 }
 
+/** Maximum plain replacement members whose chunks fit one atomic submission. */
+export function atomicNodeReplacementSubmissionMaxEntries(
+  maxBindParameters: number,
+): number {
+  const entriesPerStatement = Math.max(
+    1,
+    Math.floor(
+      (maxBindParameters - ATOMIC_NODE_WRITE_FIXED_PARAM_COUNT) /
+        ATOMIC_NODE_INSERT_PARAM_COUNT,
+    ),
+  );
+  return Math.min(
+    ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
+    atomicResolvedMutationSubmissionMaxEntries(entriesPerStatement),
+  );
+}
+
 function assertMatchingFusedEdgeClaim(
   params: InsertEdgeParams,
   claim: ClaimEdgeCardinalityParams,
@@ -2489,6 +2506,17 @@ export function createCommonOperationBackend(
           });
         }
 
+        function acceptsAtomicNodeReplacementEntries(
+          entries: readonly AtomicNodeReplacementEntry[],
+        ): boolean {
+          return (
+            chunkAtomicNodeReplacementEntriesByClaimWork(
+              entries,
+              options.maxBindParameters,
+            ).length <= ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS
+          );
+        }
+
         async function executeAtomicNodeReplacementBatch(
           input: Parameters<AtomicNodeReplacementBatchExecutor>[0],
         ): Promise<readonly NodeRow[]> {
@@ -2543,7 +2571,7 @@ export function createCommonOperationBackend(
             input.entries,
             options.maxBindParameters,
           );
-          if (nodeChunks.length > ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS) {
+          if (!acceptsAtomicNodeReplacementEntries(input.entries)) {
             throw new CompilerInvariantError(
               "Atomic node replacement exceeded its declared submission statement budget.",
               {
@@ -2751,15 +2779,13 @@ export function createCommonOperationBackend(
         const executeAtomicNodeReplacement = Object.assign(
           executeAtomicNodeReplacementBatch,
           {
+            accepts: acceptsAtomicNodeReplacementEntries,
             claimSupport,
             maxEntries: Object.freeze({
-              plain: Math.min(
-                ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
-                atomicResolvedMutationSubmissionMaxEntries(
-                  batchConfig.nodeSchemaFencedInsertBatchSize,
-                ),
+              plain: atomicNodeReplacementSubmissionMaxEntries(
+                options.maxBindParameters,
               ),
-              claimed: ATOMIC_MUTATION_MAX_MUTATION_STATEMENTS,
+              claimed: ATOMIC_RESOLVED_MUTATION_MAX_MEMBERS,
             }),
             projectionSupport,
             releasedClaimFamilies: claimSupport.families,

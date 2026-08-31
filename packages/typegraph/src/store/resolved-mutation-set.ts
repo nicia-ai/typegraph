@@ -68,6 +68,7 @@ export async function runResolvedMutationSetConverging<T>(
   entity: "node" | "edge",
   backend: GraphBackend | TransactionBackend,
   run: () => Promise<T>,
+  options?: Readonly<{ isMovement?: (error: unknown) => boolean }>,
 ): Promise<T> {
   for (
     let attempt = 1;
@@ -77,10 +78,10 @@ export async function runResolvedMutationSetConverging<T>(
     try {
       return await run();
     } catch (error) {
-      if (
-        !(error instanceof ResolvedMutationSetMoved) ||
-        !error.isOwnedBy(entity, backend)
-      ) {
+      const isOwnedAtomicMovement =
+        error instanceof ResolvedMutationSetMoved &&
+        error.isOwnedBy(entity, backend);
+      if (!isOwnedAtomicMovement && options?.isMovement?.(error) !== true) {
         throw error;
       }
       if (attempt === RESOLVED_MUTATION_SET_ATTEMPTS) {
