@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import {
   ContributionUnavailableError,
+  DatabaseOperationError,
   DisjointError,
   RestrictedDeleteError,
   StaleVersionError,
@@ -413,6 +414,8 @@ describe("plain node batch store contract", () => {
         props: { name: "Legacy rival" },
       });
       const batch = vi.spyOn(fixture.client, "batch");
+      const batchNodeRead = vi.spyOn(fixture.backend, "getNodes");
+      const scalarNodeRead = vi.spyOn(fixture.backend, "getNode");
 
       await expect(
         fixture.store.nodes.Person.bulkInsert([
@@ -429,6 +432,8 @@ describe("plain node batch store contract", () => {
       });
 
       expect(batch).toHaveBeenCalledOnce();
+      expect(batchNodeRead).toHaveBeenCalledOnce();
+      expect(scalarNodeRead).not.toHaveBeenCalled();
       await expect(fixture.store.nodes.Person.count()).resolves.toBe(0);
       await expect(fixture.store.nodes.Rival.count()).resolves.toBe(1);
     } finally {
@@ -449,6 +454,74 @@ describe("plain node batch store contract", () => {
       expect(batch).toHaveBeenCalledOnce();
       expect(created.map((node) => node.name)).toEqual(["Caller", "Generated"]);
       expect(created[0]?.id).toBe("caller");
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("diagnoses a late disjoint refusal with one set-oriented node read", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      await fixture.backend.insertNode({
+        graphId: disjointGraph.id,
+        kind: Rival.kind,
+        id: "late-disjoint-64",
+        props: { name: "Legacy rival" },
+      });
+      const batchNodeRead = vi.spyOn(fixture.backend, "getNodes");
+      const scalarNodeRead = vi.spyOn(fixture.backend, "getNode");
+      const inputs = Array.from({ length: 65 }, (_value, index) => ({
+        id: `late-disjoint-${index}`,
+        props: { name: `Person ${index}` },
+      }));
+
+      await expect(
+        fixture.store.nodes.Person.bulkInsert(inputs),
+      ).rejects.toMatchObject({
+        name: DisjointError.name,
+        details: { nodeId: "late-disjoint-64" },
+      });
+
+      expect(batchNodeRead).toHaveBeenCalledOnce();
+      expect(scalarNodeRead).not.toHaveBeenCalled();
+      await expect(fixture.store.nodes.Person.count()).resolves.toBe(0);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("uses the shared row-liveness verdict during scalar disjoint diagnosis", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      await fixture.backend.insertNode({
+        graphId: disjointGraph.id,
+        kind: Rival.kind,
+        id: "null-liveness",
+        props: { name: "Legacy rival" },
+      });
+      Object.defineProperty(fixture.backend, "getNodes", {
+        configurable: true,
+        value: undefined,
+      });
+      const getNode = fixture.backend.getNode;
+      vi.spyOn(fixture.backend, "getNode").mockImplementation(
+        async (...args) => {
+          const row = await getNode(...args);
+          if (row === undefined) return;
+          // Deliberately model a third-party backend that violates TypeGraph's
+          // timestamp normalization. Scalar and set reads must still classify
+          // the same row through the shared liveness predicate.
+          // eslint-disable-next-line unicorn/no-null -- null is the malformed transport value under test.
+          return { ...row, deleted_at: null } as never;
+        },
+      );
+
+      const insertion = fixture.store.nodes.Person.bulkInsert([
+        { id: "null-liveness", props: { name: "Proposed" } },
+      ]);
+      const rejection = await insertion.catch((error: unknown) => error);
+      expect(rejection).toBeInstanceOf(DatabaseOperationError);
+      expect(rejection).not.toBeInstanceOf(DisjointError);
     } finally {
       await closeFixture(fixture);
     }
@@ -713,6 +786,149 @@ describe("plain node batch store contract", () => {
       await expect(
         fixture.store.nodes.MultiClaimPerson.getById("sibling" as never),
       ).resolves.toBeUndefined();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("diagnoses a late uniqueness refusal with one set-oriented probe", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.UniquePerson.bulkInsert([
+        { id: "late-incumbent", props: { name: "Held" } },
+      ]);
+      const batchClaimProbe = vi.spyOn(fixture.backend, "checkUniqueBatch");
+      const scalarClaimProbe = vi.spyOn(fixture.backend, "checkUnique");
+      const inputs = Array.from({ length: 65 }, (_value, index) => ({
+        id: `late-member-${index}`,
+        props: { name: index === 64 ? "Held" : `Fresh ${index}` },
+      }));
+
+      await expect(
+        fixture.store.nodes.UniquePerson.bulkInsert(inputs),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: {
+          existingId: "late-incumbent",
+          newId: "late-member-64",
+        },
+      });
+
+      expect(batchClaimProbe).toHaveBeenCalledOnce();
+      expect(scalarClaimProbe).not.toHaveBeenCalled();
+      await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(1);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("bounds scalar diagnosis without truncating late inputs", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.UniquePerson.bulkInsert([
+        { id: "scalar-incumbent", props: { name: "Held" } },
+      ]);
+      Object.defineProperty(fixture.backend, "checkUniqueBatch", {
+        configurable: true,
+        value: undefined,
+      });
+      const checkUnique = fixture.backend.checkUnique;
+      let activeReads = 0;
+      let maximumActiveReads = 0;
+      const scalarClaimProbe = vi
+        .spyOn(fixture.backend, "checkUnique")
+        .mockImplementation(async (params) => {
+          activeReads += 1;
+          maximumActiveReads = Math.max(maximumActiveReads, activeReads);
+          try {
+            return await checkUnique(params);
+          } finally {
+            activeReads -= 1;
+          }
+        });
+      const inputs = Array.from({ length: 65 }, (_value, index) => ({
+        id: `scalar-member-${index}`,
+        props: { name: index === 64 ? "Held" : `Fresh ${index}` },
+      }));
+
+      await expect(
+        fixture.store.nodes.UniquePerson.bulkInsert(inputs),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: { newId: "scalar-member-64" },
+      });
+
+      expect(scalarClaimProbe).toHaveBeenCalledTimes(65);
+      expect(maximumActiveReads).toBe(32);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("stops scalar diagnosis after the earliest refusing window", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.UniquePerson.bulkInsert([
+        { id: "early-incumbent", props: { name: "Held" } },
+      ]);
+      Object.defineProperty(fixture.backend, "checkUniqueBatch", {
+        configurable: true,
+        value: undefined,
+      });
+      const checkUnique = fixture.backend.checkUnique;
+      const scalarClaimProbe = vi
+        .spyOn(fixture.backend, "checkUnique")
+        .mockImplementation(async (params) => checkUnique(params));
+      const inputs = Array.from({ length: 65 }, (_value, index) => ({
+        id: `early-member-${index}`,
+        props: { name: index === 0 ? "Held" : `Fresh ${index}` },
+      }));
+
+      await expect(
+        fixture.store.nodes.UniquePerson.bulkInsert(inputs),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: { newId: "early-member-0" },
+      });
+
+      expect(scalarClaimProbe).toHaveBeenCalledTimes(32);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("selects claim refusals in input order after batched diagnosis", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.MultiClaimPerson.bulkInsert([
+        {
+          id: "handle-incumbent",
+          props: { email: "free@example.com", handle: "held-handle" },
+        },
+        {
+          id: "email-incumbent",
+          props: { email: "held@example.com", handle: "free-handle" },
+        },
+      ]);
+
+      await expect(
+        fixture.store.nodes.MultiClaimPerson.bulkInsert([
+          {
+            id: "first-refusal",
+            props: { email: "first@example.com", handle: "held-handle" },
+          },
+          {
+            id: "second-refusal",
+            props: { email: "held@example.com", handle: "second-handle" },
+          },
+        ]),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: {
+          constraintName: "multi_claim_handle",
+          newId: "first-refusal",
+        },
+      });
     } finally {
       await closeFixture(fixture);
     }
@@ -1332,6 +1548,8 @@ describe("constrained node batch store contract", () => {
       });
       const batch = vi.spyOn(fixture.client, "batch");
       const execute = vi.spyOn(fixture.client, "execute");
+      const batchClaimProbe = vi.spyOn(fixture.backend, "checkUniqueBatch");
+      const scalarClaimProbe = vi.spyOn(fixture.backend, "checkUnique");
 
       const insertion = fixture.store.nodes.UniquePerson.bulkInsert([
         { props: { name: "Alice" } },
@@ -1349,6 +1567,8 @@ describe("constrained node batch store contract", () => {
       });
       expect(typeof rejection.details.newId).toBe("string");
       expect(batch).toHaveBeenCalledOnce();
+      expect(batchClaimProbe).toHaveBeenCalledOnce();
+      expect(scalarClaimProbe).not.toHaveBeenCalled();
       // The transport-level sentinel rolls every chunk back first. The two
       // failure-only reads then distinguish a current fence from the exact
       // committed claim holder without letting client-side diagnosis authorize
@@ -1362,6 +1582,29 @@ describe("constrained node batch store contract", () => {
         key: computeUniqueKey({ name: "Bob" }, ["name"], "binary"),
       });
       expect(claim).toBeUndefined();
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("reports an honest terminal when committed claim state changed", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.UniquePerson.bulkInsert([
+        { id: "moving-incumbent", props: { name: "Moving" } },
+      ]);
+      vi.spyOn(fixture.backend, "checkUniqueBatch").mockResolvedValue([]);
+
+      const insertion = fixture.store.nodes.UniquePerson.bulkInsert([
+        { id: "refused", props: { name: "Moving" } },
+      ]);
+      await expect(insertion).rejects.toBeInstanceOf(DatabaseOperationError);
+      const rejection = await insertion.catch((error: unknown) => error);
+      if (!(rejection instanceof DatabaseOperationError)) throw rejection;
+      expect(rejection.message).toContain(
+        "current schema-fence and claim state do not explain",
+      );
+      await expect(fixture.store.nodes.UniquePerson.count()).resolves.toBe(1);
     } finally {
       await closeFixture(fixture);
     }
