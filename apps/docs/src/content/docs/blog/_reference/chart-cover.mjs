@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 // PATTERN: measured comparison (see .claude/skills/blog-cover/SKILL.md).
 //
-// Cover/social images for the 0.35 performance release. Three of the six
-// measured wins from the post, plotted so the reader SEES the change: a bar
-// that shrinks to a stub says "20x faster" before any numeral is read.
+// Reference implementation for a post whose payload is measurements rather
+// than a mechanism. Copy this into the post's folder as generate-images.mjs
+// and replace ROWS with that post's real numbers.
 //
-// This replaces a six-card stat grid — each card holding "47µs -> 2.4µs" in
-// type — that the 2026-08 cover review rejected as a slide rather than a
-// picture. Each row is scaled to its own larger value, so the rows are not
-// comparable to each other; they are separate measures, and one shared
-// scale would bury 2.4µs under 174ms.
+// The point of the pattern is that the reader SEES the change: a bar that
+// shrinks to a stub says "20x faster" before any numeral is read. The
+// failure it replaces is the stat grid — a row of cards each containing
+// "47µs -> 2.4µs" — which is a slide, not a picture, and which got both
+// numeric covers rejected in the 2026-08 cover review.
+//
+// The numbers below are the real 0.35 release measurements, kept here so
+// the reference renders something truthful rather than placeholder data.
 //
 // Usage:
 //   node chart-cover.mjs [--out-dir dir]
@@ -29,7 +32,7 @@ import {
   writeBlogImages,
 } from "#blog-art";
 
-const SLUG = "typegraph-0-35-performance";
+const SLUG = "chart-cover-reference";
 const TITLE = "TypeGraph 0.35: A Performance Release";
 
 const BEFORE_LABEL = "0.34";

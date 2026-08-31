@@ -79,12 +79,12 @@ function renderTrack({ y, label, color, offsets, crashAfter }) {
       const x = tickX(index, offsets.length);
       const isCrash = crashAfter === index;
       const dot = `<circle cx="${x}" cy="${y}" r="7" fill="${color}" stroke="#ffffff" stroke-width="2"/>
-    <text x="${x}" y="${y + 26}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12" fill="${COLOR_TEXT_MUTED}">${escapeXml(offset)}</text>`;
+    <text x="${x}" y="${y + 26}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="${COLOR_TEXT_MUTED}">${escapeXml(offset)}</text>`;
       if (!isCrash) return dot;
       const crashX = (x + tickX(index + 1, offsets.length)) / 2;
       return `${dot}
     <text x="${crashX}" y="${y - 14}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="20">&#9889;</text>
-    <text x="${crashX}" y="${y + 42}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="700" fill="${COLOR_CRASH}">crash</text>`;
+    <text x="${crashX}" y="${y + 42}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="700" fill="${COLOR_CRASH}">crash</text>`;
     })
     .join("\n    ");
 
@@ -101,9 +101,9 @@ function renderCanonicalCard() {
   return `<rect x="${CANONICAL_X}" y="${CANONICAL_Y}" width="${CANONICAL_W}" height="${CANONICAL_H}" rx="12" fill="${COLOR_CANONICAL_FILL}" stroke="${COLOR_CANONICAL_STROKE}" stroke-width="2"/>
     <text x="${centerX}" y="${CANONICAL_Y - 18}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="700" fill="${COLOR_TEXT_DARK}" letter-spacing="1">CANONICAL</text>
     <text x="${centerX}" y="${CANONICAL_Y + 40}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#ffffff">Jane Doe</text>
-    <text x="${centerX}" y="${CANONICAL_Y + 64}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="14" fill="#dbeafe">VP Eng &amp; Product</text>
-    <text x="${centerX}" y="${CANONICAL_Y + 88}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#dbeafe">2 companies</text>
-    <text x="${centerX}" y="${CANONICAL_Y + 112}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#fca5a5">4 conflicts flagged</text>`;
+    <text x="${centerX}" y="${CANONICAL_Y + 64}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="16" fill="#dbeafe">VP Eng &amp; Product</text>
+    <text x="${centerX}" y="${CANONICAL_Y + 88}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#dbeafe">2 companies</text>
+    <text x="${centerX}" y="${CANONICAL_Y + 112}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#fca5a5">4 conflicts flagged</text>`;
 }
 
 /**

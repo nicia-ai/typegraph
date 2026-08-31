@@ -115,7 +115,7 @@ function renderRankScale({ x, maxRank, label, align }) {
   return `<line x1="${x}" y1="${LANE_TOP_Y}" x2="${x}" y2="${bottomY}" stroke="${COLOR_TEXT_MUTED}" stroke-width="2" opacity="0.35"/>
     ${ticks}
     <text x="${x}" y="${LANE_TOP_Y - 28}" text-anchor="${labelAnchor}" font-family="system-ui, -apple-system, sans-serif" font-size="17" font-weight="700" fill="${COLOR_TEXT_DARK}" letter-spacing="1">${escapeXml(label)}</text>
-    <text x="${x}" y="${LANE_TOP_Y - 10}" text-anchor="${labelAnchor}" font-family="system-ui, -apple-system, sans-serif" font-size="13" fill="${COLOR_TEXT_MUTED}">rank 1 → ${maxRank}</text>`;
+    <text x="${x}" y="${LANE_TOP_Y - 10}" text-anchor="${labelAnchor}" font-family="system-ui, -apple-system, sans-serif" font-size="16" fill="${COLOR_TEXT_MUTED}">rank 1 → ${maxRank}</text>`;
 }
 
 /**
@@ -144,14 +144,14 @@ function renderFusedCard(product, cardY) {
   return `<rect x="${FUSED_CARD_X}" y="${cardY}" width="${FUSED_CARD_W}" height="${FUSED_CARD_H}" rx="10" fill="${COLOR_CARD_FILL}" stroke="${COLOR_FULLTEXT}" stroke-width="2"/>
     <text x="${FUSED_CARD_X - 14}" y="${cardY + FUSED_CARD_H / 2 + 6}" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20" font-weight="700" fill="${COLOR_TEXT_DARK}">#${product.fusedRank}</text>
     <text x="${centerX}" y="${nameY}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="700" fill="#ffffff">${escapeXml(product.name)}</text>
-    <text x="${centerX}" y="${scoreY}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#dbeafe">rrf=${product.score}</text>`;
+    <text x="${centerX}" y="${scoreY}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" fill="#dbeafe">rrf=${product.score}</text>`;
 }
 
 /**
  * @returns {string}
  */
 function renderDiagram() {
-  const kicker = `<text x="90" y="${LANE_TOP_Y - 70}" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="600" fill="${COLOR_TEXT_MUTED}">RRF fusion &#8212; query &quot;waterproof shell&quot;</text>`;
+  const queryLabel = `<text x="${FUSED_CARD_X + FUSED_CARD_W / 2}" y="${LANE_TOP_Y - 26}" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17" font-weight="600" fill="${COLOR_TEXT_DARK}">query &quot;waterproof shell&quot;</text>`;
 
   const vectorScale = renderRankScale({
     x: VECTOR_LANE_X,
@@ -206,11 +206,11 @@ function renderDiagram() {
 
   const fusedLabel = `<text x="${FUSED_CARD_X + FUSED_CARD_W / 2}" y="${LANE_TOP_Y - 40}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="17" font-weight="700" fill="${COLOR_TEXT_DARK}" letter-spacing="1">RRF FUSED</text>`;
 
-  const footerY = FUSED_CARD_Y[2] + FUSED_CARD_H + 56;
-  const footer = `<text x="90" y="${footerY}" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="600" fill="${COLOR_TEXT_DARK}">buried at vector rank 6, fulltext's top pick, fused rank 2</text>`;
+  const buriedY = FUSED_CARD_Y[1] + FUSED_CARD_H + 26;
+  const footer = `<text x="${FUSED_CARD_X + FUSED_CARD_W / 2}" y="${buriedY}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="16" font-weight="600" fill="${COLOR_TEXT_DARK}">vector #6, fulltext #1</text>`;
 
   return `<g>
-    ${kicker}
+    ${queryLabel}
     ${vectorScale}
     ${fulltextScale}
     ${fusedLabel}

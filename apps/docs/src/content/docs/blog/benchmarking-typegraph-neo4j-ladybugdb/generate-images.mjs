@@ -1,20 +1,23 @@
 #!/usr/bin/env node
-// Bespoke cover/social images for the "TypeGraph vs. Neo4j vs. LadybugDB
-// vs. pgGraph" post — NOT a generic template. Replaces an earlier
-// two-column ranked-numbers diagram (query latency vs. bulk-load time,
-// four rows each) with two abstract query shapes side by side: a direct
-// point lookup (concentric rings collapsing on a single hit — the shape
-// of IS1-IS7, which TypeGraph/SQLite wins by construction) and a small
-// traversed graph (a lit path through part of a node cluster — the shape
-// of GA_WCC/GA_BFS/GA_SSSP/IC13, which the native-CSR engines win). The
-// post's finding is literally "different query shapes, different
-// winners," so the diagram draws the two shapes rather than another
-// leaderboard of numbers.
+// PATTERN: field with a lit path (see .claude/skills/blog-cover/SKILL.md).
 //
-// See ../graph-algorithms/generate-images.mjs for the sibling bespoke
-// script this one borrows the glow-path technique from, and #blog-art
-// (scripts/lib/blog-art.mjs) for the shared canvas/logo/background/title
-// primitives.
+// Cover/social images for the five-engine benchmark post. The post's whole
+// point is that the answer flips depending on the workload: TypeGraph/SQLite
+// wins every point read, and loses the LDBC graph algorithms to pgGraph and
+// Neo4j's GDS plugin by three to four orders of magnitude. Both are true.
+//
+// So the picture is the flip. Two logarithmic tracks — point reads on top,
+// graph algorithms below — with the five engines placed on each by measured
+// time. TypeGraph is the lit mark; a line joins its two positions, running
+// from the fast end of one track to the slow end of the other. The reader
+// sees a single steep diagonal: same engine, opposite ends.
+//
+// This replaces a cover showing two static icons ("point reads" / "graph
+// algorithms") side by side, which the 2026-08 review rejected as empty —
+// it named the two workloads without saying anything about either.
+//
+// Positions are log10(time) mapped onto each track, from the post's own
+// SF1 measurements.
 //
 // Usage:
 //   node generate-images.mjs [--out-dir dir]
@@ -22,8 +25,10 @@
 import process from "node:process";
 
 import {
-  CONTENT_SAFE_TOP,
+  CANVAS_HEIGHT,
+  escapeXml,
   layoutTitle,
+  MARGIN_X,
   parseOutDirArgument,
   renderIllustrationBackground,
   renderLogoMark,
@@ -36,172 +41,137 @@ const SLUG = "benchmarking-typegraph-neo4j-ladybugdb";
 const TITLE =
   "TypeGraph vs. Neo4j vs. LadybugDB vs. pgGraph: Where Each Engine Actually Wins";
 
-const COLOR_BLUE = "#2563eb";
-const COLOR_BLUE_DARK = "#1d4ed8";
-const COLOR_AMBER = "#f59e0b";
-const COLOR_AMBER_DARK = "#b45309";
-const COLOR_AMBER_GLOW = "#fcd34d";
-const COLOR_MUTED_FILL = "#cbd5e1";
-const COLOR_MUTED_STROKE = "#94a3b8";
-const COLOR_TEXT_MUTED = "#64748b";
+const COLOR_TRACK = "#cbd5e1";
+const COLOR_RIVAL = "#94a3b8";
+const COLOR_RIVAL_TEXT = "#64748b";
+const COLOR_US = "#1d4ed8";
+const COLOR_US_GLOW = "#93c5fd";
+const COLOR_TEXT = "#0f172a";
 
-const POINT_CX = 300;
-const GRAPH_CX = 900;
-const CENTER_Y = 335;
-const DIVIDER_X = 600;
-const LABEL_Y = 470;
+const SANS = "system-ui, -apple-system, sans-serif";
+const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
-/**
- * The point-read side: concentric rings collapsing on a single solid hit,
- * with a short arrow feeding straight into it — one lookup, no traversal.
- * @returns {string}
- */
-function renderPointRead() {
-  const rings = [72, 50, 30]
-    .map((r, index) => {
-      const opacity = 0.15 + index * 0.12;
-      return `<circle cx="${POINT_CX}" cy="${CENTER_Y}" r="${r}" fill="none" stroke="${COLOR_BLUE}" stroke-width="3" opacity="${opacity.toFixed(2)}"/>`;
-    })
-    .join("\n    ");
+const TRACK_LEFT = 215;
+const TRACK_RIGHT = 1080;
+const READS_Y = 275;
+const ALGOS_Y = 470;
 
-  const arrow = `<line x1="150" y1="${CENTER_Y}" x2="222" y2="${CENTER_Y}" stroke="${COLOR_TEXT_MUTED}" stroke-width="3"/>
-    <path d="M 214 ${CENTER_Y - 8} L 228 ${CENTER_Y} L 214 ${CENTER_Y + 8} Z" fill="${COLOR_TEXT_MUTED}"/>`;
-
-  const core = `<circle cx="${POINT_CX}" cy="${CENTER_Y}" r="20" fill="${COLOR_BLUE}" stroke="${COLOR_BLUE_DARK}" stroke-width="3"/>`;
-
-  const label = `<text x="${POINT_CX}" y="${LABEL_Y}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="21" font-weight="700" fill="${COLOR_BLUE_DARK}">point reads</text>`;
-
-  return `${rings}\n    ${arrow}\n    ${core}\n    ${label}`;
-}
-
-// A small invented 8-node ring cluster (not real benchmark data — this is
-// a shape, not a dataset) with two short chords for texture. Positions are
-// an octagon around GRAPH_CX/CENTER_Y at radius 90.
-const GRAPH_R = 90;
-const GRAPH_NODE_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];
+// Each track is its own log decade span, since the two workloads differ by
+// orders of magnitude; a shared scale would collapse one of them to a point.
+const READS_DECADES = { min: -2, max: 2 };
+const ALGOS_DECADES = { min: 0, max: 4 };
 
 /**
- * @param {number} angleDegrees
- * @returns {{ x: number; y: number }}
+ * Measured times in milliseconds. `us` marks TypeGraph, the lit subject.
  */
-function graphNodePoint(angleDegrees) {
-  const radians = (angleDegrees * Math.PI) / 180;
-  return {
-    x: GRAPH_CX + GRAPH_R * Math.cos(radians),
-    y: CENTER_Y - GRAPH_R * Math.sin(radians),
-  };
-}
-
-const GRAPH_NODES = GRAPH_NODE_ANGLES.map((angle) => graphNodePoint(angle));
-const GRAPH_RING_EDGES = GRAPH_NODE_ANGLES.map((_, index) => [
-  index,
-  (index + 1) % GRAPH_NODE_ANGLES.length,
-]);
-const GRAPH_CHORDS = [
-  [0, 2],
-  [4, 6],
+const TRACKS = [
+  {
+    y: READS_Y,
+    decades: READS_DECADES,
+    label: "POINT READS",
+    engines: [
+      { name: "TypeGraph", ms: 0.024, us: true },
+      { name: "LadybugDB", ms: 0.6 },
+      { name: "pgGraph", ms: 2.4 },
+      { name: "Neo4j", ms: 9 },
+    ],
+  },
+  {
+    y: ALGOS_Y,
+    decades: ALGOS_DECADES,
+    label: "GRAPH ALGORITHMS",
+    engines: [
+      { name: "Neo4j GDS", ms: 8 },
+      { name: "pgGraph", ms: 14 },
+      { name: "LadybugDB", ms: 900 },
+      { name: "TypeGraph", ms: 7600, us: true },
+    ],
+  },
 ];
-// The lit traversal: four consecutive hops around part of the ring.
-const HIGHLIGHT_INDICES = [5, 4, 3, 2, 1];
 
 /**
- * The graph-algorithm side: a small node cluster with one path lit up
- * across part of it — the shape of a multi-hop traversal.
- * @returns {string}
+ * @param {number} ms
+ * @param {{ min: number; max: number }} decades
+ * @returns {number}
  */
-function renderGraphAlgorithm() {
-  const backgroundEdges = [...GRAPH_RING_EDGES, ...GRAPH_CHORDS]
-    .map(([fromIndex, toIndex]) => {
-      const from = GRAPH_NODES[fromIndex];
-      const to = GRAPH_NODES[toIndex];
-      return `<line x1="${from.x.toFixed(1)}" y1="${from.y.toFixed(1)}" x2="${to.x.toFixed(1)}" y2="${to.y.toFixed(1)}" stroke="${COLOR_MUTED_STROKE}" stroke-width="1.5" opacity="0.5"/>`;
-    })
-    .join("\n    ");
-
-  const highlighted = new Set(HIGHLIGHT_INDICES);
-  const backgroundNodes = GRAPH_NODES.filter(
-    (_, index) => !highlighted.has(index),
-  )
-    .map(
-      (node) =>
-        `<circle cx="${node.x.toFixed(1)}" cy="${node.y.toFixed(1)}" r="7" fill="${COLOR_MUTED_FILL}" stroke="${COLOR_MUTED_STROKE}" stroke-width="1.5"/>`,
-    )
-    .join("\n    ");
-
-  const pathPoints = HIGHLIGHT_INDICES.map((index) => GRAPH_NODES[index]);
-  const pathD = pathPoints
-    .map(
-      (point, index) =>
-        `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`,
-    )
-    .join(" ");
-  const glow = `<path d="${pathD}" fill="none" stroke="${COLOR_AMBER_GLOW}" stroke-width="12" stroke-linejoin="round" stroke-linecap="round" opacity="0.55"/>`;
-  const solid = `<path d="${pathD}" fill="none" stroke="${COLOR_AMBER}" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>`;
-
-  const highlightNodes = HIGHLIGHT_INDICES.map(
-    (index) =>
-      `<circle cx="${GRAPH_NODES[index].x.toFixed(1)}" cy="${GRAPH_NODES[index].y.toFixed(1)}" r="10" fill="${COLOR_AMBER}" stroke="${COLOR_AMBER_DARK}" stroke-width="2.5"/>`,
-  ).join("\n    ");
-
-  const label = `<text x="${GRAPH_CX}" y="${LABEL_Y}" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="21" font-weight="700" fill="${COLOR_AMBER_DARK}">graph algorithms</text>`;
-
-  return `${backgroundEdges}\n    ${backgroundNodes}\n    ${glow}\n    ${solid}\n    ${highlightNodes}\n    ${label}`;
+function trackX(ms, decades) {
+  const position = (Math.log10(ms) - decades.min) / (decades.max - decades.min);
+  const clamped = Math.min(1, Math.max(0, position));
+  return TRACK_LEFT + clamped * (TRACK_RIGHT - TRACK_LEFT);
 }
 
 /**
+ * Labels alternate above and below the track so neighbouring engines never
+ * collide, whatever the measurements put next to each other.
+ * @param {{ name: string; ms: number; us?: boolean }} engine
+ * @param {number} index
+ * @param {{ y: number; decades: { min: number; max: number } }} track
  * @returns {string}
  */
-function renderDivider() {
-  return `<line x1="${DIVIDER_X}" y1="215" x2="${DIVIDER_X}" y2="500" stroke="${COLOR_MUTED_STROKE}" stroke-width="2" stroke-dasharray="2 10" stroke-linecap="round" opacity="0.6"/>`;
+function renderEngine(engine, index, track) {
+  const x = trackX(engine.ms, track.decades);
+  // Alternate the other way on the lower track so no label lands on the
+  // flip curve that crosses it.
+  const above = track.y === READS_Y ? index % 2 === 0 : index % 2 === 1;
+  const labelY = above ? track.y - 22 : track.y + 34;
+  const color = engine.us ? COLOR_US : COLOR_RIVAL;
+  const textColor = engine.us ? COLOR_US : COLOR_RIVAL_TEXT;
+  const weight = engine.us ? "700" : "500";
+  const glow =
+    engine.us ?
+      `<circle cx="${x.toFixed(1)}" cy="${track.y}" r="18" fill="${COLOR_US_GLOW}" opacity="0.55"/>`
+    : "";
+
+  return `${glow}<circle cx="${x.toFixed(1)}" cy="${track.y}" r="${engine.us ? 10 : 7}" fill="${color}" stroke="#ffffff" stroke-width="2"/>
+    <text x="${x.toFixed(1)}" y="${labelY}" text-anchor="middle" font-family="${SANS}" font-size="16" font-weight="${weight}" fill="${textColor}">${escapeXml(engine.name)}</text>`;
 }
 
 /**
  * @returns {string}
  */
 function renderDiagram() {
-  return `<g>
-    ${renderPointRead()}
-    ${renderDivider()}
-    ${renderGraphAlgorithm()}
-  </g>`;
+  const tracks = TRACKS.map((track) => {
+    const engines = track.engines
+      .map((engine, index) => renderEngine(engine, index, track))
+      .join("\n    ");
+    return `<line x1="${TRACK_LEFT}" y1="${track.y}" x2="${TRACK_RIGHT}" y2="${track.y}" stroke="${COLOR_TRACK}" stroke-width="3"/>
+    <text x="${MARGIN_X}" y="${track.y + 6}" font-family="${SANS}" font-size="17" font-weight="700" fill="${COLOR_TEXT}">${escapeXml(track.label)}</text>
+    ${engines}`;
+  }).join("\n    ");
+
+  const readsUs = TRACKS[0].engines.find((engine) => engine.us);
+  const algosUs = TRACKS[1].engines.find((engine) => engine.us);
+  const x1 = trackX(readsUs.ms, READS_DECADES);
+  const x2 = trackX(algosUs.ms, ALGOS_DECADES);
+  const flip = `<path d="M ${x1.toFixed(1)} ${READS_Y} C ${x1 + 260} ${READS_Y}, ${x2 - 260} ${ALGOS_Y}, ${x2.toFixed(1)} ${ALGOS_Y}" fill="none" stroke="${COLOR_US}" stroke-width="3" stroke-dasharray="7 6" opacity="0.75"/>`;
+
+  const axis = `<text x="${TRACK_LEFT}" y="${ALGOS_Y + 76}" font-family="${MONO}" font-size="16" fill="${COLOR_RIVAL_TEXT}">faster</text>
+    <text x="${TRACK_RIGHT}" y="${ALGOS_Y + 76}" text-anchor="end" font-family="${MONO}" font-size="16" fill="${COLOR_RIVAL_TEXT}">slower · log scale</text>
+    <line x1="${TRACK_LEFT}" y1="${ALGOS_Y + 56}" x2="${TRACK_RIGHT}" y2="${ALGOS_Y + 56}" stroke="${COLOR_TRACK}" stroke-width="1.5" stroke-dasharray="4 5"/>`;
+
+  return `${flip}\n    ${tracks}\n    ${axis}`;
 }
 
 /**
- * The content cover: the two query shapes side by side, no title text.
- * Shown on the page itself (blog index + post header).
  * @returns {string}
  */
 function generateCoverSvg() {
   return svgDocument(`  ${renderIllustrationBackground()}
-
-  ${renderDiagram()}
-
-  ${renderLogoMark()}`);
+  ${renderLogoMark()}
+  ${renderDiagram()}`);
 }
 
 /**
- * The social/OG card: title on top, diagram scaled down and centered
- * below it. Only used for og:image / twitter:image — never rendered on
- * the page.
  * @returns {string}
  */
 function generateSocialSvg() {
-  const { lines, fontSize } = layoutTitle(TITLE, 1000);
-  const titleMarkup = renderTitleLines(lines, fontSize, {
-    x: 90,
-    centerY: CONTENT_SAFE_TOP + 70,
-  });
+  const { lines, fontSize } = layoutTitle(TITLE, 300);
 
   return svgDocument(`  ${renderIllustrationBackground()}
-
-  <g transform="translate(60, 220) scale(0.62)">
-    ${renderDiagram()}
-  </g>
-
   ${renderLogoMark()}
-
-  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
-    ${titleMarkup}
+  ${renderTitleLines(lines, fontSize, { x: MARGIN_X, centerY: CANVAS_HEIGHT / 2 })}
+  <g transform="translate(340, 120) scale(0.56)">
+    ${renderDiagram()}
   </g>`);
 }
 

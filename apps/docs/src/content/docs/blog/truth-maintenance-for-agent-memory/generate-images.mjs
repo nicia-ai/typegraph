@@ -200,13 +200,13 @@ function renderDiagram() {
     renderCaption(
       "two sources → stays blocked",
       block14.x,
-      block14.y - 22,
+      block14.y + block14.h + 30,
       COLOR_TEXT_MUTED,
     ),
     renderCaption(
       "feed retracted → unblocks",
       block22.x,
-      block22.y - 22,
+      block22.y + block22.h + 30,
       COLOR_DEAD,
     ),
   ].join("\n    ");

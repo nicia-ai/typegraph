@@ -247,3 +247,110 @@ export function leftAnchor(box) {
 export function rightAnchor(box) {
   return { x: box.x + box.w, y: box.y + box.h / 2 };
 }
+
+/**
+ * Palette for the measured-comparison cover pattern. The two steps are one
+ * hue light-to-dark, because a before/after pair is two readings of the
+ * same measure, not two identities — and they were checked with the
+ * dataviz skill's validator rather than picked by eye: both sit inside the
+ * lightness band, clear the chroma floor, and separate by ΔE 21.4 normal /
+ * 15.5 tritan (target 8). `BAR_BEFORE` lands at 2.9:1 against the pale
+ * canvas rather than 3:1, which the validator permits only when every mark
+ * carries a visible label — `renderBarComparison()` therefore labels every
+ * bar, and that relief is load-bearing, not decoration.
+ */
+const BAR_BEFORE = "#6698d8";
+const BAR_AFTER = "#1d4ed8";
+const BAR_AXIS = "#cbd5e1";
+
+const BAR_HEIGHT = 20;
+const BAR_GAP = 5;
+const BAR_ROW_STRIDE = 120;
+const BAR_MIN_WIDTH = 6;
+const BAR_LABEL_SIZE = 18;
+const BAR_VALUE_SIZE = 18;
+const BAR_LEGEND_SIZE = 16;
+// SVG defaults to a serif face; every text node here states its own family.
+const SANS = "system-ui, -apple-system, sans-serif";
+const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+const BAR_RADIUS = 4;
+
+/**
+ * @param {{ label: string; text: string; value: number; y: number; x: number; maxWidth: number; scale: number; color: string }} bar
+ * @returns {string}
+ */
+function renderComparisonBar({
+  label,
+  text,
+  value,
+  y,
+  x,
+  maxWidth,
+  scale,
+  color,
+}) {
+  const width = Math.max(BAR_MIN_WIDTH, (value / scale) * maxWidth);
+  return `<rect x="${x}" y="${y}" width="${width.toFixed(1)}" height="${BAR_HEIGHT}" rx="${BAR_RADIUS}" fill="${color}"/>
+    <text x="${(x + width + 12).toFixed(1)}" y="${y + BAR_HEIGHT - 3}" font-size="${BAR_VALUE_SIZE}" font-family="${MONO}" font-weight="600" fill="#0f172a">${escapeXml(text)}</text>
+    <title>${escapeXml(`${label}: ${text}`)}</title>`;
+}
+
+/**
+ * The measured-comparison cover pattern: paired before/after bars, one pair
+ * per metric. Each pair is scaled to its OWN larger value, so a row reads as
+ * "how far did this move" and works whether the metric got smaller (latency)
+ * or larger (throughput). Rows are deliberately not comparable to each other
+ * — they are separate measures, and forcing them onto one scale would bury
+ * every small number under the largest.
+ *
+ * Keep to three rows: a fourth pushes value labels into the footer band the
+ * cover lint rejects.
+ *
+ * @param {{
+ *   rows: readonly { label: string; beforeValue: number; beforeText: string; afterValue: number; afterText: string }[];
+ *   beforeLabel: string;
+ *   afterLabel: string;
+ *   x?: number;
+ *   top?: number;
+ *   labelWidth?: number;
+ *   barMaxWidth?: number;
+ * }} options
+ * @returns {string}
+ */
+export function renderBarComparison({
+  rows,
+  beforeLabel,
+  afterLabel,
+  x = MARGIN_X,
+  top = 248,
+  labelWidth = 250,
+  barMaxWidth = 560,
+}) {
+  const barX = x + labelWidth;
+  const legendY = top - 45;
+
+  const legend = `<g>
+    <rect x="${barX}" y="${legendY - 11}" width="14" height="14" rx="3" fill="${BAR_BEFORE}"/>
+    <text x="${barX + 22}" y="${legendY}" font-size="${BAR_LEGEND_SIZE}" font-family="${SANS}" fill="#64748b">${escapeXml(beforeLabel)}</text>
+    <rect x="${barX + 130}" y="${legendY - 11}" width="14" height="14" rx="3" fill="${BAR_AFTER}"/>
+    <text x="${barX + 152}" y="${legendY}" font-size="${BAR_LEGEND_SIZE}" font-family="${SANS}" fill="#64748b">${escapeXml(afterLabel)}</text>
+  </g>`;
+
+  const body = rows
+    .map((row, index) => {
+      const rowTop = top + index * BAR_ROW_STRIDE;
+      const scale = Math.max(row.beforeValue, row.afterValue);
+      const beforeY = rowTop;
+      const afterY = rowTop + BAR_HEIGHT + BAR_GAP;
+
+      return `<g>
+    <text x="${x}" y="${rowTop - 12}" font-size="${BAR_LABEL_SIZE}" font-family="${SANS}" font-weight="600" fill="#0f172a">${escapeXml(row.label)}</text>
+    <line x1="${barX - 10}" y1="${beforeY - 4}" x2="${barX - 10}" y2="${afterY + BAR_HEIGHT + 4}" stroke="${BAR_AXIS}" stroke-width="2"/>
+    ${renderComparisonBar({ label: beforeLabel, text: row.beforeText, value: row.beforeValue, y: beforeY, x: barX, maxWidth: barMaxWidth, scale, color: BAR_BEFORE })}
+    ${renderComparisonBar({ label: afterLabel, text: row.afterText, value: row.afterValue, y: afterY, x: barX, maxWidth: barMaxWidth, scale, color: BAR_AFTER })}
+  </g>`;
+    })
+    .join("\n  ");
+
+  return `${legend}\n  ${body}`;
+}
