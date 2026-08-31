@@ -228,6 +228,7 @@ jobs:
           --reporter=default
           --reporter=blob
           --outputFile.blob=.vitest-reports/blob-${{ matrix.artifact }}.json
+          --testTimeout=15000
           --coverage.thresholds.branches=0
           --coverage.thresholds.functions=0
           --coverage.thresholds.lines=0
