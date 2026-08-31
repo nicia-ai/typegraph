@@ -12,6 +12,36 @@ import { type IntegrationTestContext } from "./test-context";
 export function registerOrderingIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe("system temporal columns", () => {
+    it("orders by the physical validity lower bound before and after select", async () => {
+      const store = context.getStore();
+      await store.nodes.Person.create(
+        { name: "Later", age: 30, email: "later@example.com" },
+        { id: "temporal-later", validFrom: "2026-02-01T00:00:00.000Z" },
+      );
+      await store.nodes.Person.create(
+        { name: "Earlier", age: 30, email: "earlier@example.com" },
+        { id: "temporal-earlier", validFrom: "2026-01-01T00:00:00.000Z" },
+      );
+
+      const beforeSelect = await store
+        .query()
+        .from("Person", "p")
+        .orderBy("p", "valid_from", "asc")
+        .select((ctx) => ({ name: ctx.p.name }))
+        .execute();
+      const afterSelect = await store
+        .query()
+        .from("Person", "p")
+        .select((ctx) => ({ name: ctx.p.name }))
+        .orderBy("p", "valid_from", "asc")
+        .execute();
+
+      expect(beforeSelect.map((row) => row.name)).toEqual(["Earlier", "Later"]);
+      expect(afterSelect).toEqual(beforeSelect);
+    });
+  });
+
   describe("Ordering with Nulls", () => {
     beforeEach(async () => {
       const store = context.getStore();

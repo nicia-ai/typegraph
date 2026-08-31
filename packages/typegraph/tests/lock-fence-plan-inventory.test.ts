@@ -4,9 +4,10 @@
  * Two ratchets, both comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **10** call sites — the 8 lock
- *     sites (J1-J8) plus the 2 construction gates (J9a recorded-clock
- *     ownership, J9b identity) — enumerated in both directions, keyed on
+ *  1. `resolveWriteFencePlan` has exactly **11** call sites — the 8 lock
+ *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
+ *     ownership, J9b identity), and the adopted-transaction writer-slot
+ *     proof (J9c) — enumerated in both directions, keyed on
  *     `(file, trimmed line)` so line drift cannot rot the pin.
  *  2. Zero dialect-literal comparisons (`dialect (!==|===) "postgres"/
  *     "sqlite"`, in a `BinaryExpression` or a `SwitchStatement` discriminant)
@@ -52,7 +53,7 @@ type InventoryEntry = Readonly<{
   reason: string;
 }>;
 
-/** The 10 `resolveWriteFencePlan` call sites (Contract J, I8). */
+/** The 11 `resolveWriteFencePlan` call sites (Contract J, I8). */
 const CALL_SITES: readonly InventoryEntry[] = [
   {
     file: "store/recorded-capture/clock.ts",
@@ -123,6 +124,13 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J9a",
     reason:
       "The recorded-clock-allocation construction gate refuses an unfenced backend before any statement runs.",
+  },
+  {
+    file: "store/operations/write-transaction.ts",
+    line: 'resolveWriteFencePlan(target).kind !== "engine-serialized"',
+    site: "J9c",
+    reason:
+      "An adopted engine-serialized transaction proves its writer slot before any constrained-write read.",
   },
 ];
 
@@ -379,13 +387,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 10 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 11 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 10 declared call sites, both directions", () => {
-    expect(found).toHaveLength(10);
-    expect(CALL_SITES).toHaveLength(10);
+  it("has exactly the 11 declared call sites, both directions", () => {
+    expect(found).toHaveLength(11);
+    expect(CALL_SITES).toHaveLength(11);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

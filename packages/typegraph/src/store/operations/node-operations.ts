@@ -60,6 +60,7 @@ import { isBundledRootAutocommitEligible } from "../../backend/capabilities/auto
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
+  type STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
 import {
@@ -271,6 +272,8 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /** Threaded from `store.ts`'s `#uniqueSidecarBatch` — never re-resolved here. */
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /** Threaded from `store.ts`; exact transaction targets bind separately. */
+  statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   createOperationContext: (
     operation: "create" | "update" | "delete",
     entity: KindEntity,

@@ -56,6 +56,7 @@ const Person = defineNode("Person", {
     email: z.string().optional(),
     isActive: z.boolean().default(true),
     tags: z.array(z.string()).optional(),
+    created_at: z.string().optional(),
     metadata: z
       .object({
         source: z.string(),
@@ -81,6 +82,7 @@ const Company = defineNode("Company", {
 const worksAt = defineEdge("worksAt", {
   schema: z.object({
     role: z.string(),
+    created_at: z.string().optional(),
   }),
 });
 
@@ -345,6 +347,26 @@ describe("Query Builder Basics", () => {
     expect(ast.orderBy?.[0]?.direction).toBe("asc");
   });
 
+  it("orders a declared temporal-named property through props before and after select", () => {
+    const beforeSelect = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .orderBy("p", "created_at", "asc")
+      .select((context) => context.p);
+    const afterSelect = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .select((context) => context.p)
+      .orderBy("p", "created_at", "asc");
+
+    for (const query of [beforeSelect, afterSelect]) {
+      const { sql } = toSqlWithParams(
+        compileQuery(query.toAst(), graph.id, "sqlite"),
+      );
+      expect(sql).toContain("ORDER BY (json_extract");
+      expect(sql).toContain("p_props");
+      expect(sql).toContain("created_at");
+    }
+  });
+
   it("supports limit and offset for pagination", () => {
     const query = createQueryBuilder<typeof graph>(graph.id, registry)
       .from("Person", "p")
@@ -386,6 +408,22 @@ describe("Query Builder - Traversals", () => {
     const ast = query.toAst();
 
     expect(requireDefined(ast.traversals[0]).direction).toBe("in");
+  });
+
+  it("orders a declared temporal-named edge property through props", () => {
+    const query = createQueryBuilder<typeof graph>(graph.id, registry)
+      .from("Person", "p")
+      .traverse("worksAt", "e")
+      .to("Organization", "o")
+      .orderBy("e", "created_at", "asc")
+      .select((context) => context.o);
+    const { sql } = toSqlWithParams(
+      compileQuery(query.toAst(), graph.id, "sqlite"),
+    );
+
+    expect(sql).toContain("ORDER BY (json_extract");
+    expect(sql).toContain("e_props");
+    expect(sql).toContain("created_at");
   });
 });
 

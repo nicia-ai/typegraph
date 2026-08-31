@@ -84,6 +84,7 @@ import { isBundledRootAutocommitEligible } from "../../backend/capabilities/auto
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import {
   BATCH_POINT_READ,
+  type STATEMENT_EXECUTION,
   type UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
 import {
@@ -280,6 +281,8 @@ export type EdgeOperationContext<G extends GraphDef> = Readonly<{
    * session's `WriteSessionContext` parameter carries the field.
    */
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /** Threaded from `store.ts`; exact transaction targets bind separately. */
+  statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   createOperationContext: (
     operation: "create" | "update" | "delete",
     entity: KindEntity,

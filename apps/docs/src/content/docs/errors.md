@@ -694,6 +694,13 @@ untouched — see
 [Declared constraints require an interactive transaction](/backend-setup#declared-constraints-require-an-interactive-transaction)
 for what still works there.
 
+`CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED` is the corresponding refusal for a
+caller-adopted SQLite transaction whose `DEFERRED` snapshot became stale before
+the constrained write could take the writer slot. Roll back that transaction
+and retry it with `BEGIN IMMEDIATE`; TypeGraph-owned transactions already use
+that mode. The refusal happens before the constraint probe, so the write is
+fenced or refused rather than allowed to rely on a stale decision.
+
 #### Write-fence declaration codes
 
 `capabilities.pessimisticLocks` resolves one of three write-fence plans a

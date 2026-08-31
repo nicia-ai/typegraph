@@ -42,12 +42,12 @@ import {
   nullToUndefined,
   transformPathColumns,
 } from "../execution";
-import { jsonPointer, parseJsonPointer } from "../json-pointer";
-import { fieldRef } from "../predicates";
+import { parseJsonPointer } from "../json-pointer";
 import { type FieldTypeInfo } from "../schema-introspector";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
+import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   buildQueryTemplate,
@@ -167,50 +167,54 @@ export class ExecutableQuery<
       (traversal) => traversal.edgeAlias === alias,
     );
     const isEdge = edgeTraversal !== undefined;
-    const isSystem =
-      field === "id" ||
-      field === "kind" ||
-      (isEdge && (field === "from_id" || field === "to_id"));
+    const edgeKindNames =
+      edgeTraversal === undefined ? undefined : mergeEdgeKinds(edgeTraversal);
+    const nodeKindNames =
+      isEdge ? undefined
+      : alias === this.#state.startAlias ? this.#state.startKinds
+      : this.#state.traversals.find(
+          (traversal) => traversal.nodeAlias === alias,
+        )?.nodeKinds;
+    const hasDeclaredProperty =
+      edgeKindNames ?
+        this.#config.schemaIntrospector.hasDeclaredEdgeField(
+          edgeKindNames,
+          field,
+        )
+      : nodeKindNames !== undefined &&
+        this.#config.schemaIntrospector.hasDeclaredField(nodeKindNames, field);
+    const systemField = resolveSystemOrderField(
+      alias,
+      field,
+      isEdge,
+      hasDeclaredProperty,
+    );
 
     let typeInfo: FieldTypeInfo | undefined;
-    if (!isSystem) {
-      if (isEdge) {
-        const edgeKindNames = mergeEdgeKinds(edgeTraversal);
+    if (systemField === undefined) {
+      if (edgeKindNames) {
         typeInfo = this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
           edgeKindNames,
           field,
         );
       } else {
-        const kindNames =
-          alias === this.#state.startAlias ?
-            this.#state.startKinds
-          : this.#state.traversals.find(
-              (traversal) => traversal.nodeAlias === alias,
-            )?.nodeKinds;
         typeInfo =
-          kindNames ?
+          nodeKindNames ?
             this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-              kindNames,
+              nodeKindNames,
               field,
             )
           : undefined;
       }
     }
 
-    const orderSpec: OrderSpec =
-      isSystem ?
-        {
-          field: fieldRef(alias, [field], { valueType: "string" }),
-          direction,
-        }
-      : {
-          field: fieldRef(alias, ["props"], {
-            jsonPointer: jsonPointer([field]),
-            valueType: typeInfo?.valueType,
-            elementType: typeInfo?.elementType,
-          }),
-          direction,
-        };
+    const orderSpec = buildOrderSpec(
+      alias,
+      field,
+      direction,
+      systemField,
+      typeInfo,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,

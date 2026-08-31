@@ -19,6 +19,7 @@ import {
 import { bindExtra, bindExtraIfReachable } from "../backend/capabilities/bind";
 import type {
   RECORDED_REVISION_ORIGINS,
+  STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
 } from "../backend/capabilities/bundle-registry";
 import {
@@ -946,6 +947,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   readonly #batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   readonly #uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /** Root verdict minted once; transaction targets bind its member separately. */
+  readonly #statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   /**
    * The contribution-health methods and `ensureRevisionOrigin` read
    * `#baseBackend`, not `#backend` (recorded capture never wraps them), so
@@ -1068,6 +1071,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
     this.#batchPointRead = batchPointReadVerdict(this.#backend);
     this.#uniqueSidecarBatch = uniqueSidecarBatchVerdict(this.#backend);
+    this.#statementExecution = statementExecution;
     this.#contributionHealth = contributionHealthVerdict(this.#baseBackend);
     this.#recordedRevisionOrigins = recordedRevisionOriginsVerdict(
       this.#baseBackend,
@@ -1340,6 +1344,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         historyEnabled: this.#captureEnabled,
         revisionTrackingEnabled: this.#revisionTrackingEnabled,
         revisionSchema: this.#sqlSchema(),
+        statementExecution: this.#statementExecution,
       },
       this.#baseBackend,
       async (target) =>
@@ -3067,9 +3072,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               invokeTransaction,
             )
           : invokeTransaction();
-        if (!this.#captureEnabled && !this.#revisionTrackingEnabled) {
-          return invokeWithSchemaFenceLease();
-        }
         return withWriteTransactionSession(
           txBackend,
           {
@@ -5127,6 +5129,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       revisionTrackingEnabled: this.#revisionTrackingEnabled,
       coalesceUnchangedUpsertsEnabled: this.#coalescesUnchangedUpserts(),
       revisionSchema: this.#sqlSchema(),
+      statementExecution: this.#statementExecution,
       registry: this.#registry,
       claimsVerdict: this.#claimsVerdict,
       batchPointRead: this.#batchPointRead,
@@ -5210,6 +5213,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       claimsVerdict: this.#claimsVerdict,
       batchPointRead: this.#batchPointRead,
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
+      statementExecution: this.#statementExecution,
       createOperationContext: (operation, entity, kind, id) =>
         this.#createOperationContext(operation, entity, kind, id),
       withOperationHooks: runHooks,
