@@ -113,7 +113,11 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     "edges.validFrom,",
     // The atomic create postimage owns the stamped value; the VALUES tuple only
     // forwards it into the physical column.
-    "${castBoundValueForColumn(edges.validFrom, sqlNull(postimage.validFrom))},",
+    "${castBoundValueForColumn(edges.validFrom, sqlNull(postimage.storedLowerBound))},",
+    // The update-only terminal assertion forwards the bound from the exact
+    // preimage its guarded update already read; it chooses no new instant.
+    "storedLowerBound: existing.valid_from,",
+    "${castBoundValueForColumn(edges.validFrom, sqlNull(first.storedLowerBound))},",
     // The terminal assertion duplicates the already-written row solely to
     // trigger its dedicated kind refusal sentinel.
     "${edges.validFrom},",

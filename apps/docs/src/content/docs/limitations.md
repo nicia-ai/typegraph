@@ -374,9 +374,15 @@ fresh creates and updates include a terminal database assertion that rolls the
 whole exchange back when any guarded postimage is absent. Repeated IDs,
 resurrections, temporal changes, claims, edge sidecars (including durable edge
 match identity), history/revision capture, ordinary derived backends, and
-unregistered sessions use the interactive path. On D1's 100-parameter budget the native ceiling is 17 total node mutations
-or 6 total edge mutations; larger batches return to the interactive path rather
-than splitting the all-or-nothing guard across autocommit statements. The
+unregistered sessions use the interactive path. On D1's 100-parameter budget,
+each native statement carries at most 17 node mutations or 6 edge mutations.
+Larger eligible sets are chunked inside the same atomic transport submission;
+each chunk has its own terminal postimage assertion, so one refusal rolls every
+sibling chunk back rather than weakening the set contract. A D1 submission is
+bounded to 512 node members or 187 edge members; larger sets fail closed to the
+portable path instead of building an unbounded request. Other backends derive
+their statement width from their declared bind budget and retain an absolute
+512-member submission ceiling. The
 operation returns an explicit `unsupported` verdict before issuing program SQL;
 the Store never infers fallback safety from a missing result. Once a session
 program starts, a savepoint preserves the surrounding transaction for typed

@@ -165,7 +165,6 @@ export interface AtomicEdgeResolvedUpdateBatchExecutor {
         entries: readonly AtomicEdgeResolvedUpdateEntry[];
         schemaFence: SchemaWriteFenceParams;
     }>): Promise<readonly EdgeRow[]>;
-    // (undocumented)
     readonly maxEntries: number;
 }
 
@@ -378,7 +377,6 @@ export interface AtomicNodeResolvedUpdateBatchExecutor {
         entries: readonly AtomicNodeResolvedUpdateEntry[];
         schemaFence: SchemaWriteFenceParams;
     }>): Promise<readonly NodeRow[]>;
-    // (undocumented)
     readonly maxEntries: number;
     readonly projectionSupport?: AtomicNodeProjectionSupport;
 }
