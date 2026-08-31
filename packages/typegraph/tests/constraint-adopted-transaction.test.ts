@@ -51,7 +51,10 @@ async function openStore() {
   );
   openDirectories.push(directory);
   const file = path.join(directory, "graph.db");
-  const owner = new Database(file);
+  const ownerStatements: string[] = [];
+  const owner = new Database(file, {
+    verbose: (statement) => ownerStatements.push(String(statement)),
+  });
   const other = new Database(file, { timeout: 0 });
   openDatabases.push(owner, other);
   owner.pragma("journal_mode = WAL");
@@ -63,7 +66,7 @@ async function openStore() {
   });
   const [store] = await createAdapterStoreWithSchema(graph, backend);
   await store.nodes.Person.create({ name: "Anchor" }, { id: "anchor" });
-  return { other, owner, ownerDb, store };
+  return { other, owner, ownerDb, ownerStatements, store };
 }
 
 function commitUnrelatedRow(other: Database.Database): void {
@@ -114,5 +117,51 @@ describe("constrained writes in adopted SQLite transactions", () => {
     );
     expect(company.id).toBe("company");
     owner.exec("COMMIT");
+  });
+
+  it("proves the writer slot again for a later transaction on the same adopted store", async () => {
+    const { other, owner, ownerDb, store } = await openStore();
+    const transactionStore = store.withTransaction(ownerDb);
+
+    owner.exec("BEGIN IMMEDIATE");
+    await transactionStore.nodes.Company.create(
+      { name: "First company" },
+      { id: "first-company" },
+    );
+    owner.exec("COMMIT");
+
+    owner.exec("BEGIN");
+    await transactionStore.nodes.Person.find();
+    commitUnrelatedRow(other);
+
+    await expect(
+      transactionStore.nodes.Company.create(
+        { name: "Second company" },
+        { id: "second-company" },
+      ),
+    ).rejects.toMatchObject({
+      details: {
+        code: "CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED",
+        graphId: graph.id,
+      },
+    });
+  });
+
+  it("does not probe the writer slot inside a transaction TypeGraph opened", async () => {
+    const { ownerStatements, store } = await openStore();
+    ownerStatements.length = 0;
+
+    await store.transaction(async (transactionStore) => {
+      await transactionStore.nodes.Company.create(
+        { name: "Managed company" },
+        { id: "managed-company" },
+      );
+    });
+
+    expect(
+      ownerStatements.some((statement) =>
+        statement.includes("SET graph_id = graph_id WHERE 0"),
+      ),
+    ).toBe(false);
   });
 });

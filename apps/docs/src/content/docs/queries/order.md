@@ -69,8 +69,9 @@ Or use the array syntax:
 ### Temporal System Columns
 
 The alias form can order directly by TypeGraph's physical temporal metadata:
-`valid_from`, `valid_to`, `created_at`, `updated_at`, and `deleted_at`. These
-names resolve to system columns, not properties inside `props`:
+`valid_from`, `valid_to`, `created_at`, `updated_at`, and `deleted_at`. When the
+queried node or edge kinds do not declare a property with that name, it resolves
+to the physical system column:
 
 ```typescript
 const oldestFirst = await store
@@ -83,6 +84,12 @@ const oldestFirst = await store
 
 The same classification applies whether `orderBy()` appears before or after
 `select()`.
+
+A declared property takes precedence over same-named temporal metadata. For
+example, if `Task` declares its own `created_at` property,
+`whereNode("t", (field) => field.created_at...)` and
+`orderBy("t", "created_at")` both address `props.created_at`. Rename the
+property when a query must order by TypeGraph's physical `created_at` column.
 
 ### Null Handling
 

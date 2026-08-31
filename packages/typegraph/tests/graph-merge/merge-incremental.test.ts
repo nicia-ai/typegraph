@@ -25,7 +25,12 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { rowPropsToObject } from "../../src/backend/types";
+import { deriveBackend } from "../../src/backend/derive-backend";
+import {
+  rowPropsToObject,
+  type TransactionBackend,
+  type TransactionOptions,
+} from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import {
   BaseVersionMismatchError,
@@ -271,6 +276,49 @@ describe.each(backendMatrix())(
         { id: "new-ana", name: "Ana Rivera", mrn: "MRN-1" },
       ]);
       expect(await target.recordedNow()).toBeDefined();
+    });
+
+    it("acquires the schema fence for a managed target without revision tracking", async () => {
+      cleanups = [];
+      const forkPoint = await emptyStore();
+      const provider = await forkOf(forkPoint);
+      await provider.store.nodes.Encounter.create(
+        { reason: "new encounter" },
+        { id: "new-encounter" },
+      );
+
+      const baseBackend = await makeBackend();
+      let schemaFenceCount = 0;
+      const targetBackend = deriveBackend(baseBackend, {
+        transaction: async <T>(
+          fn: (tx: TransactionBackend) => Promise<T>,
+          transactionOptions?: TransactionOptions,
+        ): Promise<T> =>
+          baseBackend.transaction(async (tx) => {
+            const lockSchemaVersionForWrite = requireDefined(
+              tx.lockSchemaVersionForWrite,
+            );
+            const observedTx = deriveBackend(tx, {
+              lockSchemaVersionForWrite: async (input) => {
+                schemaFenceCount += 1;
+                await lockSchemaVersionForWrite(input);
+              },
+            });
+            return fn(observedTx);
+          }, transactionOptions),
+      });
+      const [target] = await createStoreWithSchema(careGraph, targetBackend);
+      schemaFenceCount = 0;
+
+      const result = await mergeIncremental<CareGraph>({
+        forkPoint,
+        target,
+        branches: [provider],
+        options: options(),
+      });
+
+      expect(isOk(result)).toBe(true);
+      expect(schemaFenceCount).toBeGreaterThan(0);
     });
 
     it("HAPPY PATH: resolves a branch addition onto an advanced target's base entity", async () => {

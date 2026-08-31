@@ -167,27 +167,41 @@ export class ExecutableQuery<
       (traversal) => traversal.edgeAlias === alias,
     );
     const isEdge = edgeTraversal !== undefined;
-    const systemField = resolveSystemOrderField(alias, field, isEdge);
+    const edgeKindNames =
+      edgeTraversal === undefined ? undefined : mergeEdgeKinds(edgeTraversal);
+    const nodeKindNames =
+      isEdge ? undefined
+      : alias === this.#state.startAlias ? this.#state.startKinds
+      : this.#state.traversals.find(
+          (traversal) => traversal.nodeAlias === alias,
+        )?.nodeKinds;
+    const hasDeclaredProperty =
+      edgeKindNames ?
+        this.#config.schemaIntrospector.hasDeclaredEdgeField(
+          edgeKindNames,
+          field,
+        )
+      : nodeKindNames !== undefined &&
+        this.#config.schemaIntrospector.hasDeclaredField(nodeKindNames, field);
+    const systemField = resolveSystemOrderField(
+      alias,
+      field,
+      isEdge,
+      hasDeclaredProperty,
+    );
 
     let typeInfo: FieldTypeInfo | undefined;
     if (systemField === undefined) {
-      if (isEdge) {
-        const edgeKindNames = mergeEdgeKinds(edgeTraversal);
+      if (edgeKindNames) {
         typeInfo = this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
           edgeKindNames,
           field,
         );
       } else {
-        const kindNames =
-          alias === this.#state.startAlias ?
-            this.#state.startKinds
-          : this.#state.traversals.find(
-              (traversal) => traversal.nodeAlias === alias,
-            )?.nodeKinds;
         typeInfo =
-          kindNames ?
+          nodeKindNames ?
             this.#config.schemaIntrospector.getSharedFieldTypeInfo(
-              kindNames,
+              nodeKindNames,
               field,
             )
           : undefined;

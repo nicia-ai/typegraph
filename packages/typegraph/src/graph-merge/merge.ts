@@ -2263,6 +2263,7 @@ async function assertTargetUnchanged<G extends GraphDef>(
     await lockMergeTargetWrite(txBackend, {
       graphId: target.graphId,
       schemaVersion: target.introspect().schemaVersion,
+      graphLock: "required",
       staleSchemaError: (cause) =>
         new BaseVersionMismatchError(
           "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
@@ -3630,6 +3631,7 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
       artifact.target.schema.managed ?
         artifact.target.schema.version
       : undefined,
+    graphLock: "required",
     staleSchemaError: (cause) =>
       new MergePlanSchemaMismatchError(
         "The target's active schema no longer matches the merge plan.",
@@ -4864,17 +4866,17 @@ async function commitIncrementalPlan<G extends GraphDef>(
   return runMergeCommit(() =>
     withTxConflictRetry(() =>
       target.transaction(async (tx) => {
-        if (target.revisionTrackingEnabled) {
-          await lockMergeTargetWrite(transactionBackend(tx), {
-            graphId: target.graphId,
-            schemaVersion: target.introspect().schemaVersion,
-            staleSchemaError: (cause) =>
-              new BaseVersionMismatchError(
-                "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
-                { cause },
-              ),
-          });
-        }
+        await lockMergeTargetWrite(transactionBackend(tx), {
+          graphId: target.graphId,
+          schemaVersion: target.introspect().schemaVersion,
+          graphLock:
+            target.revisionTrackingEnabled ? "required" : "not-required",
+          staleSchemaError: (cause) =>
+            new BaseVersionMismatchError(
+              "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
+              { cause },
+            ),
+        });
         // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
         // against is re-read here, so a write to it in the plan→commit window
         // refuses the merge instead of committing diffs against a fork point

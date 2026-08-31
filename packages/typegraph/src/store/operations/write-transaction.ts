@@ -212,7 +212,6 @@ export function forceWriteTransactionRevision(
  * manual savepoints inside a managed write are outside the contract.
  */
 const heldGraphWriteLocks = new WeakMap<object, Set<string>>();
-const adoptedTransactionWriterSlots = new WeakSet<object>();
 
 function adoptedConstraintWriterSlotError(
   ctx: Pick<WriteTransactionContext, "graphId">,
@@ -223,7 +222,6 @@ function adoptedConstraintWriterSlotError(
     {
       code: "CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED",
       graphId: ctx.graphId,
-      sqliteCode: "SQLITE_BUSY_SNAPSHOT",
     },
     {
       cause,
@@ -237,8 +235,9 @@ function adoptedConstraintWriterSlotError(
  * Makes SQLite's engine-serialized fence true for a transaction TypeGraph did
  * not open. A zero-row write takes the writer slot without changing data; it
  * must run before the schema fence, graph lock, or any constraint probe fixes
- * a read snapshot. The exact transaction object is memoized only after that
- * write succeeds, so no later constrained write in the same frame pays again.
+ * a read snapshot. Caller-adopted backends do not expose transaction-lifetime
+ * identity, so this proof deliberately runs at every constrained write rather
+ * than caching connection-scoped evidence across unrelated transactions.
  */
 async function ensureAdoptedConstraintWriterSlot(
   ctx: WriteTransactionContext,
@@ -250,7 +249,6 @@ async function ensureAdoptedConstraintWriterSlot(
     fenceReason === undefined ||
     transactionMode !== "existing" ||
     writeTransactionSessions.has(target) ||
-    adoptedTransactionWriterSlots.has(target) ||
     resolveWriteFencePlan(target).kind !== "engine-serialized"
   ) {
     return;
@@ -284,7 +282,6 @@ async function ensureAdoptedConstraintWriterSlot(
     if (!isSqliteStaleSnapshotError(error)) throw error;
     throw adoptedConstraintWriterSlotError(ctx, error);
   }
-  adoptedTransactionWriterSlots.add(target);
 }
 
 /**

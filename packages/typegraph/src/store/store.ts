@@ -3072,9 +3072,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               invokeTransaction,
             )
           : invokeTransaction();
-        if (!this.#captureEnabled && !this.#revisionTrackingEnabled) {
-          return invokeWithSchemaFenceLease();
-        }
         return withWriteTransactionSession(
           txBackend,
           {

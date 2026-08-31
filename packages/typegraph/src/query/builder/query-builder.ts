@@ -976,7 +976,22 @@ export class QueryBuilder<
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
     const isEdge = edgeKindNames !== undefined;
-    const systemField = resolveSystemOrderField(alias, field, isEdge);
+    const nodeKindNames =
+      isEdge ? undefined : this.#getKindNamesForAlias(alias);
+    const hasDeclaredProperty =
+      isEdge ?
+        this.#config.schemaIntrospector.hasDeclaredEdgeField(
+          edgeKindNames,
+          field,
+        )
+      : nodeKindNames !== undefined &&
+        this.#config.schemaIntrospector.hasDeclaredField(nodeKindNames, field);
+    const systemField = resolveSystemOrderField(
+      alias,
+      field,
+      isEdge,
+      hasDeclaredProperty,
+    );
     let typeInfo: FieldTypeInfo | undefined;
     if (systemField === undefined) {
       typeInfo =
@@ -985,7 +1000,11 @@ export class QueryBuilder<
             edgeKindNames,
             field,
           )
-        : this.#getOrderByTypeInfo(alias, field);
+        : nodeKindNames === undefined ? undefined
+        : this.#config.schemaIntrospector.getSharedFieldTypeInfo(
+            nodeKindNames,
+            field,
+          );
     }
     const orderSpec = buildOrderSpec(
       alias,
@@ -1001,13 +1020,6 @@ export class QueryBuilder<
     };
 
     return new QueryBuilder(this.#config, newState);
-  }
-
-  #getOrderByTypeInfo(alias: string, field: string): FieldTypeInfo | undefined {
-    const kindNames = this.#getKindNamesForAlias(alias);
-    return kindNames ?
-        this.#config.schemaIntrospector.getSharedFieldTypeInfo(kindNames, field)
-      : undefined;
   }
 
   /**

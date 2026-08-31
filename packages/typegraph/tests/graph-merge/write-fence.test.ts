@@ -45,6 +45,7 @@ describe("graph-merge write fences", () => {
     await lockMergeTargetWrite(makeBackend(events), {
       graphId: "merge-fence",
       schemaVersion: 3,
+      graphLock: "required",
       staleSchemaError: (cause) =>
         new BaseVersionMismatchError("schema moved", { cause }),
     });
@@ -59,10 +60,23 @@ describe("graph-merge write fences", () => {
       lockMergeTargetWrite(backend, {
         graphId: "merge-fence",
         schemaVersion: 3,
+        graphLock: "required",
         staleSchemaError: (cause) =>
           new BaseVersionMismatchError("schema moved", { cause }),
       }),
     ).rejects.toBeInstanceOf(BaseVersionMismatchError);
+    expect(events).toEqual(["schema"]);
+  });
+
+  it("can fence schema-managed writes without taking the revision graph lock", async () => {
+    const events: string[] = [];
+    await lockMergeTargetWrite(makeBackend(events), {
+      graphId: "merge-fence",
+      schemaVersion: 3,
+      graphLock: "not-required",
+      staleSchemaError: (cause) =>
+        new BaseVersionMismatchError("schema moved", { cause }),
+    });
     expect(events).toEqual(["schema"]);
   });
 });

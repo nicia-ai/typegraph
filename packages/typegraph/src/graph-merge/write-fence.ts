@@ -9,6 +9,7 @@ export async function lockMergeTargetWrite(
   input: Readonly<{
     graphId: string;
     schemaVersion: number | undefined;
+    graphLock: "required" | "not-required";
     staleSchemaError: (cause: unknown) => TypeGraphError;
   }>,
 ): Promise<void> {
@@ -26,5 +27,7 @@ export async function lockMergeTargetWrite(
     }
     throw input.staleSchemaError(error);
   }
-  await lockRecordedGraphWrite(txBackend, input.graphId);
+  if (input.graphLock === "required") {
+    await lockRecordedGraphWrite(txBackend, input.graphId);
+  }
 }

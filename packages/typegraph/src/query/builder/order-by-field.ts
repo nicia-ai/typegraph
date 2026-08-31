@@ -24,17 +24,33 @@ const EDGE_SYSTEM_ORDER_FIELDS = new Map<
   ["to_id", "string"],
 ]);
 
+const DECLARED_PROPERTY_SHADOWABLE_SYSTEM_ORDER_FIELDS = new Set([
+  "valid_from",
+  "valid_to",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+]);
+
 /**
  * Resolves an orderable physical system column, or `undefined` when `field`
- * names a user property. Both fluent builder stages consume this decision so
- * a newly orderable system column cannot compile through one stage and fall
- * back to `props` JSON through the other.
+ * names a user property. Declared properties retain precedence over temporal
+ * metadata with the same name, keeping `where*` and `orderBy` semantics
+ * aligned. Structural identity fields remain unconditionally system-owned.
+ * Both fluent builder stages consume this decision so they cannot drift.
  */
 export function resolveSystemOrderField(
   alias: string,
   field: string,
   isEdge: boolean,
+  hasDeclaredProperty: boolean,
 ): FieldRef | undefined {
+  if (
+    hasDeclaredProperty &&
+    DECLARED_PROPERTY_SHADOWABLE_SYSTEM_ORDER_FIELDS.has(field)
+  ) {
+    return undefined;
+  }
   const valueType =
     COMMON_SYSTEM_ORDER_FIELDS.get(field) ??
     (isEdge ? EDGE_SYSTEM_ORDER_FIELDS.get(field) : undefined);
