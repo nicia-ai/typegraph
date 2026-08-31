@@ -448,11 +448,24 @@ export function groupNodeUniquenessProbes(
  * @throws UniquenessError when a DIFFERENT node holds the key under any kind in
  *   scope.
  */
-async function probeUniqueKey(
+export async function probeUniqueKey(
   ctx: UniquenessProbeContext,
   kind: string,
   id: string,
   entry: UniquenessClaimEntry,
+  lookup: (
+    nodeKind: string,
+    entry: UniquenessClaimEntry,
+  ) => UniqueRow | undefined | Promise<UniqueRow | undefined> = async (
+    nodeKind,
+    claimEntry,
+  ) =>
+    ctx.backend.checkUnique({
+      graphId: ctx.graphId,
+      nodeKind,
+      constraintName: claimEntry.constraintName,
+      key: claimEntry.key,
+    }),
 ): Promise<boolean> {
   // `let` earns its place: the loop must visit EVERY kind in scope to reach its
   // refusal, so the ownership reading cannot be an early return.
@@ -462,12 +475,7 @@ async function probeUniqueKey(
     entry.refusal.constraint.scope,
     ctx.registry,
   )) {
-    const existing = await ctx.backend.checkUnique({
-      graphId: ctx.graphId,
-      nodeKind: kindToCheck,
-      constraintName: entry.constraintName,
-      key: entry.key,
-    });
+    const existing = await lookup(kindToCheck, entry);
 
     if (existing === undefined) continue;
     const refusal = uniquenessClaimRefusal(kind, id, entry, existing);
@@ -484,7 +492,7 @@ async function probeUniqueKey(
  * so owner-pair equality and the public error payload cannot drift between the
  * portable preflight and the native program's exceptional diagnostic path.
  */
-export function uniquenessClaimRefusal(
+function uniquenessClaimRefusal(
   kind: string,
   id: string,
   entry: UniquenessClaimEntry,

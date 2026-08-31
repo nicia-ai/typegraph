@@ -207,10 +207,11 @@ above. A successful program needs no diagnostic reads. A refused claim first
 rolls the entire native batch back, then uses committed-state fence and claim
 reads to recover the same typed error as the portable path. Bundled backends
 diagnose the complete refused input with set-oriented node and uniqueness reads
-rather than one probe per member; custom backends without those batch reads use
-32-member concurrency windows while still covering every input and selecting
-the error in input order. These failure-only reads are not part of the
-successful-write RTT count.
+rather than one probe per member. Custom backends without those batch reads
+advance through 32-member concurrency windows until the earliest refusal can be
+selected in input order; when no claim explains the rollback, every input is
+covered before the honest terminal error. These failure-only reads are not part
+of the successful-write RTT count.
 
 Both `edges.bulkInsert(items)` and `edges.bulkCreate(items)` use the same
 schema-fenced atomic program when the store has no history or revision capture.

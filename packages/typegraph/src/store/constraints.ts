@@ -34,7 +34,7 @@
  * are what the write paths ask so they take that same per-graph lock whenever
  * one of these probes is in play, and only then.
  */
-import { type GraphEntityReadBackend } from "../backend/types";
+import { type GraphEntityReadBackend, isLiveNodeRow } from "../backend/types";
 import {
   checkCardinality,
   checkDisjointness,
@@ -196,7 +196,7 @@ export async function checkDisjointnessConstraint(
   // For each disjoint kind, check if a node with this ID exists
   for (const disjointKind of disjointKinds) {
     const existing = await ctx.backend.getNode(ctx.graphId, disjointKind, id);
-    if (existing && !existing.deleted_at) {
+    if (existing !== undefined && isLiveNodeRow(existing)) {
       const error = checkDisjointness(id, kind, [disjointKind], ctx.registry);
       if (error) throw error;
     }

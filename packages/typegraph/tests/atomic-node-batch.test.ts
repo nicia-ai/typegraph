@@ -490,6 +490,43 @@ describe("plain node batch store contract", () => {
     }
   });
 
+  it("uses the shared row-liveness verdict during scalar disjoint diagnosis", async () => {
+    const fixture = await createDisjointFixture();
+    try {
+      await fixture.backend.insertNode({
+        graphId: disjointGraph.id,
+        kind: Rival.kind,
+        id: "null-liveness",
+        props: { name: "Legacy rival" },
+      });
+      Object.defineProperty(fixture.backend, "getNodes", {
+        configurable: true,
+        value: undefined,
+      });
+      const getNode = fixture.backend.getNode;
+      vi.spyOn(fixture.backend, "getNode").mockImplementation(
+        async (...args) => {
+          const row = await getNode(...args);
+          if (row === undefined) return;
+          // Deliberately model a third-party backend that violates TypeGraph's
+          // timestamp normalization. Scalar and set reads must still classify
+          // the same row through the shared liveness predicate.
+          // eslint-disable-next-line unicorn/no-null -- null is the malformed transport value under test.
+          return { ...row, deleted_at: null } as never;
+        },
+      );
+
+      const insertion = fixture.store.nodes.Person.bulkInsert([
+        { id: "null-liveness", props: { name: "Proposed" } },
+      ]);
+      const rejection = await insertion.catch((error: unknown) => error);
+      expect(rejection).toBeInstanceOf(DatabaseOperationError);
+      expect(rejection).not.toBeInstanceOf(DisjointError);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
   it("releases disjoint claims inside the native delete program", async () => {
     const fixture = await createDisjointFixture();
     try {
@@ -823,6 +860,38 @@ describe("plain node batch store contract", () => {
 
       expect(scalarClaimProbe).toHaveBeenCalledTimes(65);
       expect(maximumActiveReads).toBe(32);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("stops scalar diagnosis after the earliest refusing window", async () => {
+    const fixture = await createFallbackFixture();
+    try {
+      await fixture.store.nodes.UniquePerson.bulkInsert([
+        { id: "early-incumbent", props: { name: "Held" } },
+      ]);
+      Object.defineProperty(fixture.backend, "checkUniqueBatch", {
+        configurable: true,
+        value: undefined,
+      });
+      const checkUnique = fixture.backend.checkUnique;
+      const scalarClaimProbe = vi
+        .spyOn(fixture.backend, "checkUnique")
+        .mockImplementation(async (params) => checkUnique(params));
+      const inputs = Array.from({ length: 65 }, (_value, index) => ({
+        id: `early-member-${index}`,
+        props: { name: index === 0 ? "Held" : `Fresh ${index}` },
+      }));
+
+      await expect(
+        fixture.store.nodes.UniquePerson.bulkInsert(inputs),
+      ).rejects.toMatchObject({
+        name: UniquenessError.name,
+        details: { newId: "early-member-0" },
+      });
+
+      expect(scalarClaimProbe).toHaveBeenCalledTimes(32);
     } finally {
       await closeFixture(fixture);
     }

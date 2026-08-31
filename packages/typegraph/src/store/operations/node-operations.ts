@@ -155,8 +155,8 @@ import {
   type NodeClaimItem,
   type NodeCreateClaimPlan,
   planNodeCreateClaims,
+  probeUniqueKey,
   refuseNodeCreateClaimError,
-  uniquenessClaimRefusal,
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
@@ -1755,25 +1755,16 @@ async function captureAtomicNodeClaimDiagnosticVerdicts(
   preparedCreates: readonly NodeCreatePrepared[],
   diagnose: (prepared: NodeCreatePrepared) => Promise<void>,
 ): Promise<readonly AtomicNodeClaimDiagnosticVerdict[]> {
-  const verdicts: AtomicNodeClaimDiagnosticVerdict[] = [];
-  for (const window of chunk(
-    preparedCreates,
-    ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE,
-  )) {
-    verdicts.push(
-      ...(await Promise.all(
-        window.map(async (prepared) => {
-          try {
-            await diagnose(prepared);
-            return ATOMIC_NODE_CLAIM_CLEAR;
-          } catch (error) {
-            return { kind: "refusal" as const, error };
-          }
-        }),
-      )),
-    );
-  }
-  return verdicts;
+  return Promise.all(
+    preparedCreates.map(async (prepared) => {
+      try {
+        await diagnose(prepared);
+        return ATOMIC_NODE_CLAIM_CLEAR;
+      } catch (error) {
+        return { kind: "refusal" as const, error };
+      }
+    }),
+  );
 }
 
 async function runAtomicNodeClaimDiagnosticGroups<T>(
@@ -1918,31 +1909,32 @@ async function diagnoseAtomicNodeUniqueness<G extends GraphDef>(
     }
   });
 
-  return preparedCreates.map((prepared, index) => {
-    for (const entry of requireDefined(probeItems[index]).entries) {
-      if (!isUniquenessClaimEntry(entry)) continue;
-      for (const nodeKind of uniquenessProbeKinds(
-        prepared.kind,
-        entry.refusal.constraint.scope,
-        ctx.registry,
-      )) {
-        const existing = rowsByTarget.get(
-          encodeTupleKey([nodeKind, entry.constraintName, entry.key]),
-        );
-        if (existing === undefined) continue;
-        const refusal = uniquenessClaimRefusal(
-          prepared.kind,
-          prepared.id,
-          entry,
-          existing,
-        );
-        if (refusal !== undefined) {
-          return { kind: "refusal" as const, error: refusal };
+  return Promise.all(
+    preparedCreates.map(async (prepared, index) => {
+      for (const entry of requireDefined(probeItems[index]).entries) {
+        if (!isUniquenessClaimEntry(entry)) continue;
+        try {
+          await probeUniqueKey(
+            uniquenessContext,
+            prepared.kind,
+            prepared.id,
+            entry,
+            (nodeKind, claimEntry) =>
+              rowsByTarget.get(
+                encodeTupleKey([
+                  nodeKind,
+                  claimEntry.constraintName,
+                  claimEntry.key,
+                ]),
+              ),
+          );
+        } catch (error) {
+          return { kind: "refusal" as const, error };
         }
       }
-    }
-    return ATOMIC_NODE_CLAIM_CLEAR;
-  });
+      return ATOMIC_NODE_CLAIM_CLEAR;
+    }),
+  );
 }
 
 /**
@@ -1951,8 +1943,8 @@ async function diagnoseAtomicNodeUniqueness<G extends GraphDef>(
  * The atomic program deliberately reports only the rollback sentinel: claim
  * ownership is read again from committed state so a successful sibling chunk
  * can never be mistaken for permission to commit. These are the same portable
- * constraint probes used outside the native program, preserving their typed
- * errors and input order on the failure-only path.
+ * verdict owners used outside the native program, preserving their typed errors
+ * and input order on the failure-only path.
  */
 async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -1960,15 +1952,38 @@ async function diagnoseAtomicNodeBatchNoRow<G extends GraphDef>(
   preparedCreates: readonly NodeCreatePrepared[],
 ): Promise<never> {
   await diagnoseFusedSchemaFenceNoRow(ctx, backend);
-  const [disjointnessVerdicts, uniquenessVerdicts] = await Promise.all([
-    diagnoseAtomicNodeDisjointness(ctx, backend, preparedCreates),
-    diagnoseAtomicNodeUniqueness(ctx, backend, preparedCreates),
-  ]);
-  for (const [index] of preparedCreates.entries()) {
-    const disjointness = requireDefined(disjointnessVerdicts[index]);
-    if (disjointness.kind === "refusal") throw disjointness.error;
-    const uniqueness = requireDefined(uniquenessVerdicts[index]);
-    if (uniqueness.kind === "refusal") throw uniqueness.error;
+  const hasSetOrientedDiagnosis =
+    bindExtraIfReachable(
+      backend,
+      ctx.batchPointRead.extras.getNodes,
+      BATCH_POINT_READ.id,
+    ) !== undefined &&
+    bindExtraIfReachable(
+      backend,
+      ctx.uniqueSidecarBatch.extras.checkUniqueBatch,
+      UNIQUE_SIDECAR_BATCH.id,
+    ) !== undefined;
+  const diagnosticWindows =
+    hasSetOrientedDiagnosis ?
+      [preparedCreates]
+    : chunk(preparedCreates, ATOMIC_NODE_CLAIM_DIAGNOSTIC_WINDOW_SIZE);
+  for (const window of diagnosticWindows) {
+    const [disjointnessVerdicts, uniquenessVerdicts] =
+      hasSetOrientedDiagnosis ?
+        await Promise.all([
+          diagnoseAtomicNodeDisjointness(ctx, backend, window),
+          diagnoseAtomicNodeUniqueness(ctx, backend, window),
+        ])
+      : [
+          await diagnoseAtomicNodeDisjointness(ctx, backend, window),
+          await diagnoseAtomicNodeUniqueness(ctx, backend, window),
+        ];
+    for (const [index] of window.entries()) {
+      const disjointness = requireDefined(disjointnessVerdicts[index]);
+      if (disjointness.kind === "refusal") throw disjointness.error;
+      const uniqueness = requireDefined(uniquenessVerdicts[index]);
+      if (uniqueness.kind === "refusal") throw uniqueness.error;
+    }
   }
   throw new DatabaseOperationError(
     "Atomic node batch returned no postimages, but current schema-fence and " +
