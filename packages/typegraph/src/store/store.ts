@@ -946,8 +946,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * write and read actually executes through.
    */
   readonly #batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
-  readonly #statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   readonly #uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  /** Root verdict minted once; transaction targets bind its member separately. */
+  readonly #statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
   /**
    * The contribution-health methods and `ensureRevisionOrigin` read
    * `#baseBackend`, not `#backend` (recorded capture never wraps them), so
@@ -1069,8 +1070,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : asGraphWriteBackend(backend);
     this.#claimsVerdict = createClaimsVerdictThunk(this.#backend);
     this.#batchPointRead = batchPointReadVerdict(this.#backend);
-    this.#statementExecution = statementExecutionVerdict(this.#backend);
     this.#uniqueSidecarBatch = uniqueSidecarBatchVerdict(this.#backend);
+    this.#statementExecution = statementExecution;
     this.#contributionHealth = contributionHealthVerdict(this.#baseBackend);
     this.#recordedRevisionOrigins = recordedRevisionOriginsVerdict(
       this.#baseBackend,
