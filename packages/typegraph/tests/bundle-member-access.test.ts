@@ -30,14 +30,14 @@ import {
 } from "../src/backend/capabilities/bundle-registry";
 
 const PILOT_COUNT = 0;
-const ANNOTATED_RESIDUE_COUNT = 7;
-const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
+const ANNOTATED_RESIDUE_COUNT = 9;
+const ANNOTATED_RESIDUE_PAIR_COUNT = 4;
 const STATICALLY_REQUIRED_COUNT = 2;
 const REASONED_FLOOR = 88;
 const DEFERRED_LIVE_TOTAL = 206;
 const DEFERRED_DECLARED_TOTAL = 209;
 const EXCLUDED_COUNT = 4;
-const TOTAL_ROW_COUNT = 307;
+const TOTAL_ROW_COUNT = 309;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:160#executeStatement",
   "backend/migrate-recorded-time.ts:167#executeStatement",
@@ -46,6 +46,8 @@ const ANNOTATED_RESIDUE_KEYS = [
   "store/recorded-capture/guards.ts:67#executeStatement",
   "store/recorded-capture/guards.ts:84#executeStatement",
   "store/recorded-capture/guards.ts:219#executeStatement",
+  "store/operations/write-transaction.ts:253#executeStatement",
+  "store/operations/write-transaction.ts:268#executeStatement",
 ] as const;
 
 function rowKey(
@@ -83,7 +85,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.pilot).toBe(PILOT_COUNT);
   });
 
-  it("the annotated pilot residue is exactly 7 rows over 3 (file, member) pairs", () => {
+  it("the annotated pilot residue is exactly 9 rows over 4 (file, member) pairs", () => {
     const annotatedRows = scan.rows.filter(
       (row) => row.class === "annotated-residue",
     );
@@ -95,6 +97,7 @@ describe("live bundle member access scan (I6, T21)", () => {
         "identity/sql-target.ts#executeStatement",
         "store/recorded-capture/guards.ts#executeStatement",
         "backend/migrate-recorded-time.ts#executeStatement",
+        "store/operations/write-transaction.ts#executeStatement",
       ].toSorted(),
     );
     const liveKeys = new Set(annotatedRows.map((row) => rowKey(row)));
@@ -184,7 +187,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 307)", () => {
+  it("the class partition covers every scanned row (total 309)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

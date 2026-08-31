@@ -54,7 +54,6 @@ export { forceWriteTransactionRevision } from "../store/operations/write-transac
 export {
   advanceRevisionClock,
   forceRecordedGraphRevision,
-  lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
 } from "../store/recorded-capture";

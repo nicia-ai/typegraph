@@ -42,12 +42,12 @@ import {
   nullToUndefined,
   transformPathColumns,
 } from "../execution";
-import { jsonPointer, parseJsonPointer } from "../json-pointer";
-import { fieldRef } from "../predicates";
+import { parseJsonPointer } from "../json-pointer";
 import { type FieldTypeInfo } from "../schema-introspector";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
+import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   buildQueryTemplate,
@@ -167,13 +167,10 @@ export class ExecutableQuery<
       (traversal) => traversal.edgeAlias === alias,
     );
     const isEdge = edgeTraversal !== undefined;
-    const isSystem =
-      field === "id" ||
-      field === "kind" ||
-      (isEdge && (field === "from_id" || field === "to_id"));
+    const systemField = resolveSystemOrderField(alias, field, isEdge);
 
     let typeInfo: FieldTypeInfo | undefined;
-    if (!isSystem) {
+    if (systemField === undefined) {
       if (isEdge) {
         const edgeKindNames = mergeEdgeKinds(edgeTraversal);
         typeInfo = this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
@@ -197,20 +194,13 @@ export class ExecutableQuery<
       }
     }
 
-    const orderSpec: OrderSpec =
-      isSystem ?
-        {
-          field: fieldRef(alias, [field], { valueType: "string" }),
-          direction,
-        }
-      : {
-          field: fieldRef(alias, ["props"], {
-            jsonPointer: jsonPointer([field]),
-            valueType: typeInfo?.valueType,
-            elementType: typeInfo?.elementType,
-          }),
-          direction,
-        };
+    const orderSpec = buildOrderSpec(
+      alias,
+      field,
+      direction,
+      systemField,
+      typeInfo,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,

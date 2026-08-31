@@ -722,6 +722,13 @@ once at startup with `createAdapterStoreWithSchema(graph, backend)` so
 fulltext-backed writes find their durable materialization marker; an uninitialized store
 throws `StoreNotInitializedError` instead of migrating mid-transaction.
 
+On SQLite, open caller-owned transactions that may perform constrained writes
+with `BEGIN IMMEDIATE`. TypeGraph probes the writer slot before any
+decision-driving constraint read; if a `DEFERRED` snapshot was invalidated by a
+concurrent commit, the operation refuses with
+`CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED` and the caller must roll back and
+retry the whole transaction.
+
 `withTransaction` throws `ConfigurationError` on backends that cannot provide
 real rollback (`backend.capabilities.execution.interactiveTransactions === false`:
 `drizzle-orm/neon-http`, Cloudflare D1, SQLite `transactionMode: "none"`) —

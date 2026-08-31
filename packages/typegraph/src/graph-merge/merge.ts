@@ -197,7 +197,6 @@ import {
   advanceRevisionClock,
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
-  lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
   storeBackend,
@@ -230,6 +229,7 @@ import type {
 } from "./types";
 import type { ValidToChange } from "./valid-window";
 import { resolveValidWindows } from "./valid-window";
+import { lockMergeTargetWrite } from "./write-fence";
 
 /** A node id in its untyped (`NodeType`-default) branded form. */
 type AnyNodeId = NodeId<NodeType>;
@@ -2260,7 +2260,15 @@ async function assertTargetUnchanged<G extends GraphDef>(
     // advance the same clock before committing. Holding it around the
     // read→apply sequence makes the O(1) anchor check a TOCTOU guard without
     // relying on the transaction's snapshot being the latest committed state.
-    await lockRecordedGraphWrite(txBackend, target.graphId);
+    await lockMergeTargetWrite(txBackend, {
+      graphId: target.graphId,
+      schemaVersion: target.introspect().schemaVersion,
+      staleSchemaError: (cause) =>
+        new BaseVersionMismatchError(
+          "The merge target schema changed before the commit transaction; the resolved plan was not applied.",
+          { cause },
+        ),
+    });
     const expectedOrigin = revisionOriginOf(expectedBaseVersion);
     const liveOrigin = await readRevisionOrigin(
       txBackend,
@@ -3616,7 +3624,18 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   txBackend: TransactionBackend,
   artifact: MergePlanArtifactV1,
 ): Promise<void> {
-  await lockRecordedGraphWrite(txBackend, target.graphId);
+  await lockMergeTargetWrite(txBackend, {
+    graphId: target.graphId,
+    schemaVersion:
+      artifact.target.schema.managed ?
+        artifact.target.schema.version
+      : undefined,
+    staleSchemaError: (cause) =>
+      new MergePlanSchemaMismatchError(
+        "The target's active schema no longer matches the merge plan.",
+        { cause, details: { expected: artifact.target.schema } },
+      ),
+  });
   const activeSchema = await txBackend.getActiveSchema(target.graphId);
   const liveSchema = {
     managed: activeSchema !== undefined,
@@ -4846,7 +4865,15 @@ async function commitIncrementalPlan<G extends GraphDef>(
     withTxConflictRetry(() =>
       target.transaction(async (tx) => {
         if (target.revisionTrackingEnabled) {
-          await lockRecordedGraphWrite(transactionBackend(tx), target.graphId);
+          await lockMergeTargetWrite(transactionBackend(tx), {
+            graphId: target.graphId,
+            schemaVersion: target.introspect().schemaVersion,
+            staleSchemaError: (cause) =>
+              new BaseVersionMismatchError(
+                "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
+                { cause },
+              ),
+          });
         }
         // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
         // against is re-read here, so a write to it in the plan→commit window

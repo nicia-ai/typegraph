@@ -23,7 +23,6 @@ import {
   type GroupBySpec,
   type HybridFusionOptions,
   mergeEdgeKinds,
-  type OrderSpec,
   type PredicateExpression,
   type ProjectedField,
   type SortDirection,
@@ -47,6 +46,7 @@ import {
 import { ExecutableAggregateQuery } from "./executable-aggregate-query";
 import { ExecutableQuery } from "./executable-query";
 import { getQueryBuilderInternalContext } from "./internal-context";
+import { buildOrderSpec, resolveSystemOrderField } from "./order-by-field";
 import { TraversalBuilder } from "./traversal-builder";
 import {
   type AliasMap,
@@ -976,32 +976,24 @@ export class QueryBuilder<
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
     const edgeKindNames = this.#getEdgeKindNamesForAlias(alias);
     const isEdge = edgeKindNames !== undefined;
-    const isSystem =
-      field === "id" ||
-      field === "kind" ||
-      (isEdge && (field === "from_id" || field === "to_id"));
-    const typeInfo =
-      isSystem ? undefined
-      : isEdge ?
-        this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
-          edgeKindNames,
-          field,
-        )
-      : this.#getOrderByTypeInfo(alias, field);
-    const orderSpec: OrderSpec =
-      isSystem ?
-        {
-          field: fieldRef(alias, [field], { valueType: "string" }),
-          direction,
-        }
-      : {
-          field: fieldRef(alias, ["props"], {
-            jsonPointer: jsonPointer([field]),
-            valueType: typeInfo?.valueType,
-            elementType: typeInfo?.elementType,
-          }),
-          direction,
-        };
+    const systemField = resolveSystemOrderField(alias, field, isEdge);
+    let typeInfo: FieldTypeInfo | undefined;
+    if (systemField === undefined) {
+      typeInfo =
+        isEdge ?
+          this.#config.schemaIntrospector.getSharedEdgeFieldTypeInfo(
+            edgeKindNames,
+            field,
+          )
+        : this.#getOrderByTypeInfo(alias, field);
+    }
+    const orderSpec = buildOrderSpec(
+      alias,
+      field,
+      direction,
+      systemField,
+      typeInfo,
+    );
 
     const newState: QueryBuilderState = {
       ...this.#state,

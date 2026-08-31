@@ -66,6 +66,24 @@ Or use the array syntax:
 ])
 ```
 
+### Temporal System Columns
+
+The alias form can order directly by TypeGraph's physical temporal metadata:
+`valid_from`, `valid_to`, `created_at`, `updated_at`, and `deleted_at`. These
+names resolve to system columns, not properties inside `props`:
+
+```typescript
+const oldestFirst = await store
+  .query()
+  .from("Task", "t")
+  .orderBy("t", "valid_from", "asc")
+  .select((ctx) => ctx.t)
+  .execute();
+```
+
+The same classification applies whether `orderBy()` appears before or after
+`select()`.
+
 ### Null Handling
 
 Control where null values appear:

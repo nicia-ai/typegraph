@@ -59,7 +59,10 @@
  * would make the claim above false wherever it matters most. Unconstrained
  * writes assert nothing and keep working on those backends.
  */
-import { isFirstPartyFactory } from "../../backend/capabilities/write-fence";
+import {
+  isFirstPartyFactory,
+  resolveWriteFencePlan,
+} from "../../backend/capabilities/write-fence";
 import {
   type GraphBackend,
   runOptionallyInTransaction,
@@ -67,6 +70,9 @@ import {
 } from "../../backend/types";
 import { ConfigurationError, StaleVersionError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
+import { sql } from "../../query/sql-fragment";
+import { asCompiledStatementSql } from "../../query/sql-intent";
+import { isSqliteStaleSnapshotError } from "../../utils/sql-errors";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
@@ -201,6 +207,75 @@ export function forceWriteTransactionRevision(
  * manual savepoints inside a managed write are outside the contract.
  */
 const heldGraphWriteLocks = new WeakMap<object, Set<string>>();
+const adoptedTransactionWriterSlots = new WeakSet<object>();
+
+function adoptedConstraintWriterSlotError(
+  ctx: Pick<WriteTransactionContext, "graphId">,
+  cause: unknown,
+): ConfigurationError {
+  return new ConfigurationError(
+    "This constrained write could not take the SQLite writer slot: the adopted transaction was begun DEFERRED and another connection committed after its read snapshot was established.",
+    {
+      code: "CONSTRAINT_TRANSACTION_NOT_WRITE_FENCED",
+      graphId: ctx.graphId,
+      sqliteCode: "SQLITE_BUSY_SNAPSHOT",
+    },
+    {
+      cause,
+      suggestion:
+        "Roll back and re-run the transaction with BEGIN IMMEDIATE, or run the writes through store.transaction(), which acquires the writer slot before any decision-driving read.",
+    },
+  );
+}
+
+/**
+ * Makes SQLite's engine-serialized fence true for a transaction TypeGraph did
+ * not open. A zero-row write takes the writer slot without changing data; it
+ * must run before the schema fence, graph lock, or any constraint probe fixes
+ * a read snapshot. The exact transaction object is memoized only after that
+ * write succeeds, so no later constrained write in the same frame pays again.
+ */
+async function ensureAdoptedConstraintWriterSlot(
+  ctx: WriteTransactionContext,
+  target: GraphBackend | TransactionBackend,
+  transactionMode: WriteTransactionMode,
+  fenceReason: ConstraintFenceReason | undefined,
+): Promise<void> {
+  if (
+    fenceReason === undefined ||
+    transactionMode !== "existing" ||
+    writeTransactionSessions.has(target) ||
+    adoptedTransactionWriterSlots.has(target) ||
+    resolveWriteFencePlan(target).kind !== "engine-serialized"
+  ) {
+    return;
+  }
+  if (target.executeStatement === undefined) {
+    throw new ConfigurationError(
+      "This engine-serialized transaction cannot prove that it holds its writer slot before a constrained write.",
+      {
+        code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+        graphId: ctx.graphId,
+        constraint: fenceReason,
+      },
+      {
+        suggestion:
+          "Expose transaction-scoped statement execution, or run the constrained write through a backend transaction TypeGraph opens.",
+      },
+    );
+  }
+  try {
+    await target.executeStatement(
+      asCompiledStatementSql(
+        sql`UPDATE ${ctx.revisionSchema.nodesTable} SET graph_id = graph_id WHERE 0`,
+      ),
+    );
+  } catch (error) {
+    if (!isSqliteStaleSnapshotError(error)) throw error;
+    throw adoptedConstraintWriterSlotError(ctx, error);
+  }
+  adoptedTransactionWriterSlots.add(target);
+}
 
 /**
  * Binds nested typed mutations to one caller-owned transaction commit so a
@@ -498,6 +573,12 @@ export function runInWriteTransaction<T>(
     ctx.revisionTrackingEnabled ||
     fenceReason !== undefined;
   return runOptionallyInTransaction(backend, async (target) => {
+    await ensureAdoptedConstraintWriterSlot(
+      ctx,
+      target,
+      transactionMode,
+      fenceReason,
+    );
     const session =
       needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
     // Either constructor yields the same compile-time evidence token; which one
