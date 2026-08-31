@@ -19,6 +19,7 @@ import type {
   UpdateNodeSetParams,
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
+import type { AtomicContributionEvidence } from "./contribution-evidence";
 import {
   castBoundValueForColumn,
   expectedValidFromPredicate,
@@ -784,6 +785,83 @@ export function buildAssertAtomicNodeMutationPostimages(
           AND ${nodes.deletedAt} IS NULL
           AND (${sql.join(expectedKinds, sql` OR `)})
       ) <> ${entries.length}
+  `;
+}
+
+/**
+ * Terminal durable-marker assertion for atomic node projections.
+ *
+ * A cold backend resolves marker signatures locally, then this statement
+ * proves their exact database rows inside the same atomic submission as the
+ * node and projection writes. Missing, stale, failed, or unmaterialized
+ * evidence deliberately writes a null signature through the marker's own
+ * conflict target, forcing a distinct NOT NULL refusal and rolling the
+ * complete transport submission back.
+ */
+export function buildAssertAtomicNodeProjectionEvidence(
+  tables: Tables,
+  timestamp: string,
+  evidence: readonly AtomicContributionEvidence[],
+): SQL {
+  const { contributionMaterializations } = tables;
+  const first = evidence[0];
+  if (first === undefined) {
+    return sql`SELECT 1 WHERE FALSE`;
+  }
+  if (evidence.some((entry) => entry.graphId !== first.graphId)) {
+    throw new CompilerInvariantError(
+      "Atomic node projection evidence crossed graph storage.",
+    );
+  }
+  const expectedMarkers = evidence.map(
+    (entry) => sql`
+      (
+        ${contributionMaterializations.graphId} = ${entry.graphId}
+        AND ${contributionMaterializations.logicalName} = ${entry.logicalName}
+        AND ${contributionMaterializations.owner} = ${entry.owner}
+        AND ${contributionMaterializations.tableName} = ${entry.tableName}
+        AND ${contributionMaterializations.signature} = ${entry.signature}
+      )
+    `,
+  );
+
+  return sql`
+    INSERT INTO ${contributionMaterializations} (
+      ${sql.identifier(contributionMaterializations.graphId.name)},
+      ${sql.identifier(contributionMaterializations.logicalName.name)},
+      ${sql.identifier(contributionMaterializations.owner.name)},
+      ${sql.identifier(contributionMaterializations.tableName.name)},
+      ${sql.identifier(contributionMaterializations.signature.name)},
+      ${sql.identifier(contributionMaterializations.materializedAt.name)},
+      ${sql.identifier(contributionMaterializations.lastAttemptedAt.name)},
+      ${sql.identifier(contributionMaterializations.lastError.name)}
+    )
+    SELECT
+      ${first.graphId},
+      ${first.logicalName},
+      ${first.owner},
+      ${first.tableName},
+      NULL,
+      NULL,
+      ${castBoundValueForColumn(
+        contributionMaterializations.lastAttemptedAt,
+        timestamp,
+      )},
+      NULL
+    WHERE (
+      SELECT COUNT(*)
+      FROM ${contributionMaterializations}
+      WHERE (${sql.join(expectedMarkers, sql` OR `)})
+        AND ${contributionMaterializations.materializedAt} IS NOT NULL
+        AND ${contributionMaterializations.lastError} IS NULL
+    ) <> ${evidence.length}
+    ON CONFLICT (
+      ${sql.identifier(contributionMaterializations.graphId.name)},
+      ${sql.identifier(contributionMaterializations.logicalName.name)},
+      ${sql.identifier(contributionMaterializations.owner.name)},
+      ${sql.identifier(contributionMaterializations.tableName.name)}
+    ) DO UPDATE SET
+      ${sql.identifier(contributionMaterializations.signature.name)} = NULL
   `;
 }
 

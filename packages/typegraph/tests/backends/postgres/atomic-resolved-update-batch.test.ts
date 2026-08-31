@@ -16,7 +16,13 @@ import {
 } from "../../../src/backend/drizzle/operations/edges";
 import { createPostgresBackend, tables } from "../../../src/backend/postgres";
 import { rowPropsToObject } from "../../../src/backend/types";
-import { defineEdge, defineGraph, defineNode } from "../../../src/core";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  searchable,
+} from "../../../src/core";
+import { StoreNotInitializedError } from "../../../src/errors";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
@@ -29,9 +35,12 @@ const Person = defineNode("Person", {
 const knows = defineEdge("knows", {
   schema: z.object({ label: z.string() }),
 });
+const SearchDocument = defineNode("SearchDocument", {
+  schema: z.object({ title: searchable() }),
+});
 const graph = defineGraph({
   id: "postgres-atomic-resolved-update-batch",
-  nodes: { Person: { type: Person } },
+  nodes: { Person: { type: Person }, SearchDocument: { type: SearchDocument } },
   edges: { knows: { type: knows, from: [Person], to: [Person] } },
 });
 
@@ -124,6 +133,34 @@ describe.runIf(process.env["POSTGRES_URL"])(
       await expect(
         pool.query(missingPostimage.sql, missingPostimage.params),
       ).rejects.toMatchObject({ code: "23502" });
+    });
+
+    it("proves projection markers inside the atomic PostgreSQL program", async () => {
+      const backend = createPostgresBackend(drizzle(pool), { vector: false });
+      const [store] = await createStoreWithSchema(graph, backend);
+
+      await store.nodes.SearchDocument.bulkInsert([
+        { id: "projected-pg", props: { title: "Atomic evidence" } },
+      ]);
+      await expect(
+        store.search.fulltext("SearchDocument", {
+          query: "Atomic evidence",
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+
+      await pool.query(
+        `DELETE FROM typegraph_contribution_materializations WHERE graph_id = $1`,
+        [graph.id],
+      );
+      await expect(
+        store.nodes.SearchDocument.bulkInsert([
+          { id: "missing-pg-marker", props: { title: "Must roll back" } },
+        ]),
+      ).rejects.toBeInstanceOf(StoreNotInitializedError);
+      await expect(
+        store.nodes.SearchDocument.getById("missing-pg-marker" as never),
+      ).resolves.toBeUndefined();
     });
   },
 );

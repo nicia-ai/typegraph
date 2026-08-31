@@ -2672,13 +2672,27 @@ function createPostgresOperationBackend(
       toUniqueRow,
     },
     schemaFenceLockClause: sql.raw("FOR SHARE"),
-    async beforeAtomicNodeProjections(creates, updates): Promise<void> {
+    async resolveAtomicNodeProjectionEvidence(creates, updates) {
+      const requirements = resolveAtomicNodeProjectionRequirements(
+        creates,
+        updates,
+      );
+      if (requirements === undefined) return [];
+      return contributionMaterializer.resolveNodeProjectionEvidence(
+        requirements.graphId,
+        requirements,
+      );
+    },
+    async diagnoseAtomicNodeProjectionEvidence(
+      creates,
+      updates,
+    ): Promise<void> {
       const requirements = resolveAtomicNodeProjectionRequirements(
         creates,
         updates,
       );
       if (requirements === undefined) return;
-      await contributionMaterializer.assertNodeInsertProjections(
+      await contributionMaterializer.diagnoseNodeProjectionEvidence(
         requirements.graphId,
         requirements,
       );

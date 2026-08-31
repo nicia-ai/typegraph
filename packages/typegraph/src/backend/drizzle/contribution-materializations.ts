@@ -66,6 +66,7 @@ import {
   type TransactionBackend,
 } from "../types";
 import { runtimeStrategyContributions } from "./ddl";
+import type { AtomicContributionEvidence } from "./operations/contribution-evidence";
 
 /**
  * Bridges the dialect-specific timestamp column representation to the
@@ -707,6 +708,28 @@ export type ContributionMaterializer = Readonly<{
     }>,
   ) => Promise<void>;
   /**
+   * Resolves the exact marker rows an atomic projection program must prove.
+   * This computes only strategy signatures; it performs no database read.
+   */
+  resolveNodeProjectionEvidence: (
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ) => Promise<readonly AtomicContributionEvidence[]>;
+  /**
+   * Failure-only read-through diagnosis after an in-program marker assertion
+   * refused. The program's database evidence supersedes any process cache.
+   */
+  diagnoseNodeProjectionEvidence: (
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ) => Promise<void>;
+  /**
    * Forget a vector slot: delete its `ownedTables` contribution
    * marker(s) and evict the per-instance cache. Called after the slot's
    * physical table is dropped (vector-field reclaim) so a future
@@ -1144,6 +1167,7 @@ export function createContributionMaterializer(
   async function assertContributions(
     graphId: string,
     contributions: readonly StrategyTableContribution[],
+    options?: Readonly<{ bypassCache?: boolean }>,
   ): Promise<void> {
     const entries = await Promise.all(
       contributions.map(async (contribution) => {
@@ -1155,11 +1179,14 @@ export function createContributionMaterializer(
         };
       }),
     );
-    const pending = entries.filter(
-      (entry) =>
-        uncacheableKeys.has(entry.key) ||
-        initializedSignatures.get(entry.key) !== entry.signature,
-    );
+    const pending =
+      options?.bypassCache === true ?
+        entries
+      : entries.filter(
+          (entry) =>
+            uncacheableKeys.has(entry.key) ||
+            initializedSignatures.get(entry.key) !== entry.signature,
+        );
     if (pending.length === 0) return;
 
     const read = await readMarkerRows(graphId);
@@ -1297,12 +1324,81 @@ export function createContributionMaterializer(
       vectorSlots: readonly VectorSlot[];
     }>,
   ): Promise<void> {
+    await assertContributions(
+      graphId,
+      nodeProjectionContributions(graphId, projections),
+    );
+  }
+
+  function nodeProjectionContributions(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): readonly StrategyTableContribution[] {
     const vectorContributions =
       groupVectorContributions(projections.vectorSlots).get(graphId) ?? [];
-    await assertContributions(graphId, [
+    const contributions = [
       ...(projections.fulltext ? runtimeContributions() : []),
       ...vectorContributions,
-    ]);
+    ];
+    return [
+      ...new Map(
+        contributions.map((contribution) => [
+          contributionKey(graphId, contribution),
+          contribution,
+        ]),
+      ).values(),
+    ];
+  }
+
+  async function resolveNodeProjectionEvidence(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): Promise<readonly AtomicContributionEvidence[]> {
+    return Promise.all(
+      nodeProjectionContributions(graphId, projections).map(
+        async (contribution) => {
+          const key = contributionKey(graphId, contribution);
+          return {
+            ...identityOf(graphId, contribution),
+            signature: await resolveContributionSignature(key, contribution),
+          };
+        },
+      ),
+    );
+  }
+
+  async function diagnoseNodeProjectionEvidence(
+    graphId: string,
+    projections: Readonly<{
+      fulltext: boolean;
+      vectorSlots: readonly VectorSlot[];
+    }>,
+  ): Promise<void> {
+    const contributions = nodeProjectionContributions(
+      graphId,
+      projections,
+    );
+    for (const contribution of contributions) {
+      const key = contributionKey(graphId, contribution);
+      initializedSignatures.delete(key);
+    }
+    try {
+      await assertContributions(graphId, contributions, { bypassCache: true });
+    } catch (error) {
+      // The atomic statement and committed read both proved the marker
+      // unusable. Keep the key read-through so an assertion already in flight
+      // cannot restore a stale positive after this diagnosis completes.
+      for (const contribution of contributions) {
+        uncacheableKeys.add(contributionKey(graphId, contribution));
+      }
+      throw error;
+    }
   }
 
   function verificationTargetsByGraph(
@@ -1886,6 +1982,8 @@ export function createContributionMaterializer(
     assertVectorSlot,
     assertVectorSlots,
     assertNodeInsertProjections,
+    resolveNodeProjectionEvidence,
+    diagnoseNodeProjectionEvidence,
     dropVectorSlot,
     evictVectorSlot,
     verifyContributions,
