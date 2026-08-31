@@ -4,6 +4,12 @@ date: 2026-08-21
 excerpt: "Five releases of work that individually didn't warrant a post and together make one point: the N+1 read is now a bulk read, the whole-set update is one transactional statement, and the schema-commit path stopped assuming it was the only writer. Including a `migrateSchema()` bug that was silently dropping runtime-committed kinds."
 tags:
   - announcements
+cover:
+  alt: "Fifty faint query lines fanning from one caller out to fifty rows, with a single thick bulk statement drawn over them to a bracket spanning the same rows"
+  image: "./cover.png"
+social:
+  alt: "One Statement Instead of Fifty, and a Schema That Survives Two Writers"
+  image: "./social.png"
 draft: true
 ---
 

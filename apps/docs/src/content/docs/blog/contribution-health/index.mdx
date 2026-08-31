@@ -4,6 +4,12 @@ date: 2026-08-21
 excerpt: "A store whose fulltext table was dropped out of band opens perfectly clean and fails at the first search. The marker row said initialization succeeded, and nothing ever looked at the catalog. Contribution health is the ladder that closes that gap — a read-only probe safe on a replica, a non-destructive repair for bookkeeping drift, and a scoped destructive rebuild for the one state repair can't fix."
 tags:
   - announcements
+cover:
+  alt: "A ladder of three rungs stepping down and right — probe, repair, rebuild — with the set of unresolved damaged states shrinking from seven to four to one above them"
+  image: "./cover.png"
+social:
+  alt: "Probe, Repair, Rebuild: When the Search Index Isn't There Anymore"
+  image: "./social.png"
 draft: true
 ---
 

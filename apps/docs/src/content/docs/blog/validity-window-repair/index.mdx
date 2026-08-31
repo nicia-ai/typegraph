@@ -4,6 +4,12 @@ date: 2026-08-21
 excerpt: "A validity window that runs backwards is readable at no coordinate at all — `asOf(t)` needs `valid_from <= t < valid_to`, and backwards bounds admit no `t`. The write paths no longer produce one, and upgrading deliberately rewrites nothing, because silently making invisible rows appear in historical queries is the worse surprise. `repairInvertedValidityWindows` is the explicit operator action, plus `clearValidTo` for the ordinary case of reopening a window you closed too early."
 tags:
   - announcements
+cover:
+  alt: "Validity windows on a time axis with an asOf(t) scan line marking each window it falls inside; one window's arrow runs backwards down the axis and takes no mark"
+  image: "./cover.png"
+social:
+  alt: "Rows That Exist at No Point in Time"
+  image: "./social.png"
 draft: true
 ---
 

@@ -4,6 +4,12 @@ date: 2026-08-21
 excerpt: "Drizzle becomes an optional peer dependency, and ten entrypoints are provably Drizzle-free — enforced by a reachability scanner at both source and dist grain. On top of that, a capability model: an engine declares that it has no recursive CTEs or no advisory locks, and TypeGraph turns that declaration into a typed refusal at construction, or a fallback that returns the same answer a slower way. The error names the exact line to add."
 tags:
   - announcements
+cover:
+  alt: "Operations crossing a declared-capability gate: most take short direct paths to one result, a fallback swings a long way round to the same result, and a refused capability stops at a bar well short of it"
+  image: "./cover.png"
+social:
+  alt: "Bring Your Own Backend: Declaring What Your Engine Can't Do"
+  image: "./social.png"
 draft: true
 ---
 

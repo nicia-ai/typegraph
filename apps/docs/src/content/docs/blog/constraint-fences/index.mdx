@@ -4,6 +4,12 @@ date: 2026-08-21
 excerpt: "A declared constraint used to be enforced by whoever held the per-graph write lock — which `importGraph` never does. Uniqueness, `disjointWith` and edge cardinality are now each reserved in a claim relation whose primary key admits one live claimant per axis, so the fence holds for lock-free writers too. And because upgrading repairs nothing, `store.verifyConstraintFences()` is the read-only audit that finds the violations already sitting in your database."
 tags:
   - announcements
+cover:
+  alt: "Concurrent writers claiming three constraint axes, with exactly one line reaching each axis slot and the rest stopping short at a cross"
+  image: "./cover.png"
+social:
+  alt: "Claim Relations: The Constraint Holds Even When Nobody Took the Lock"
+  image: "./social.png"
 draft: true
 ---
 

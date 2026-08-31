@@ -4,6 +4,12 @@ date: 2026-08-21
 excerpt: "An untrusted feed arrives carrying an alias that repeats a canonical patient's MRN. An ordinary branch rejects it during staging — before entity resolution ever gets to look at it. `ingestionBranch()` materializes a working copy with node uniqueness deferred and everything else still enforced, so the duplicate and the identity evidence that explains it can be staged together and validated as one set at merge time."
 tags:
   - announcements
+cover:
+  alt: "Two ingestion lanes: the ordinary branch stops dead at a fence during staging, while the ingestion branch passes a deferred fence, gathers identity evidence, and reaches a validation fence at merge"
+  image: "./cover.png"
+social:
+  alt: "Ingestion Branches: Staging the Duplicate You Came to Resolve"
+  image: "./social.png"
 draft: true
 ---
 
