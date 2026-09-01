@@ -444,7 +444,7 @@ export class RuntimeKindTokenError extends TypeGraphError {
         "Runtime-kind evidence belongs to a different Store instance.",
       stale:
         "Runtime-kind evidence does not match the Store's reconciled schema.",
-      "schema-mismatch": `The supplied Zod schema does not match the registered ${entity} kind.`,
+      "schema-mismatch": `The supplied graph-extension definition does not match the registered ${entity} kind.`,
       unreconciled:
         "Runtime-kind evidence requires a Store with reconciled schema metadata.",
     };

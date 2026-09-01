@@ -1450,7 +1450,7 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
-  previous?: SerializedSchema,
+  previous: SerializedSchema | undefined,
 ): Promise<SchemaVersionRow> {
   const params = await buildNewSchemaVersionCommit(
     graph,
@@ -1469,7 +1469,7 @@ export async function commitNewSchemaVersionIfKindsEmpty<G extends GraphDef>(
   graph: G,
   currentVersion: number,
   probes: readonly SchemaKindEmptinessProbe[],
-  previous?: SerializedSchema,
+  previous: SerializedSchema | undefined,
 ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
   const params = await buildNewSchemaVersionCommit(
     graph,
@@ -1493,7 +1493,7 @@ export async function commitNewSchemaVersionIfKindsEmpty<G extends GraphDef>(
 async function buildNewSchemaVersionCommit<G extends GraphDef>(
   graph: G,
   currentVersion: number,
-  previous?: SerializedSchema,
+  previous: SerializedSchema | undefined,
 ): Promise<CommitSchemaVersionParams> {
   // See initializeSchema: reject structurally invalid graphs (e.g.
   // endpoint-incompatible implies() relations) before committing, not
@@ -1521,7 +1521,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   graph: G,
   currentVersion: number,
   preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
-  previous?: SerializedSchema,
+  previous: SerializedSchema | undefined,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a

@@ -231,10 +231,12 @@ export type NodeCollectionConfig = Readonly<{
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
-    options?: Readonly<{
-      operation?: "compareAndSet" | "updateWhere";
-      expected?: Record<string, unknown>;
-    }>,
+    request:
+      | Readonly<{ operation: "updateWhere" }>
+      | Readonly<{
+          operation: "compareAndSet";
+          expected: Record<string, unknown>;
+        }>,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
@@ -606,6 +608,7 @@ export function createNodeCollection<
         compiledCandidates,
         candidateIdColumn,
         backend,
+        { operation: "updateWhere" },
       );
       await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
       return result;

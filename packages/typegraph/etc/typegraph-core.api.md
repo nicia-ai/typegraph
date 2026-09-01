@@ -544,7 +544,10 @@ type JsonPointer = string & {
 };
 
 // @public
-export type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+export type JsonScalar = null | string | number | boolean;
+
+// @public
+export type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 

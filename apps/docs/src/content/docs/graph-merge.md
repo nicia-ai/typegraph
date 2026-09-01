@@ -835,6 +835,10 @@ to incremental merge planning, and closes the working copy on every outcome.
 The result is the ordinary `MergePlanArtifact`, so review and application use
 the same APIs as every other merge plan.
 
+Planning clones the complete target graph into a disposable working copy before
+staging the candidate set. Use it for bounded review workflows, not as a hot-path
+comparison primitive against a large graph.
+
 ```typescript
 import {
   captureCandidateWriteSetTarget,

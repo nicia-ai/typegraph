@@ -497,6 +497,37 @@ Each method runtime-validates against the registry: a typo throws
 endpoint for the current edge / direction throws `EndpointError`.
 Compile-time `from` / `traverse` / `to` are unchanged.
 
+When the extension document is available in typed code, mint Store-bound
+runtime-kind evidence from the exact persisted definition. The token narrows
+collections and query aliases without asking callers to restate the schema in
+Zod:
+
+```ts
+const tagKind = store.runtimeNodeKind("Tag", extension.nodes.Tag);
+const taggedWithKind = store.runtimeEdgeKind(
+  "taggedWith",
+  extension.edges.taggedWith,
+);
+
+const tags = store.getNodeCollectionOrThrow(tagKind);
+const rows = await store.query()
+  .fromDynamic(tagKind, "tag")       // ctx.tag has the declared Tag fields
+  .traverseDynamic(taggedWithKind, "edge") // ctx.edge is narrowed too
+  .toDynamic("Document", "document")
+  .select((ctx) => ({ label: ctx.tag.label, weight: ctx.edge.weight }))
+  .execute();
+```
+
+Definitions, rather than hand-authored Zod schemas, are the type evidence:
+TypeGraph compares the complete graph-extension declaration that TypeScript
+infers against the definition persisted for that kind. This keeps refinements
+such as enums, optionality, arrays, and numeric constraints on one authoritative
+surface. Tokens are bound to the issuing Store and active schema hash; use a
+fresh token after reopening or evolving a Store. Token lookups intentionally
+use the throwing `getNodeCollectionOrThrow` / `getEdgeCollectionOrThrow`
+variants because valid Store-issued evidence already proves that the kind
+exists.
+
 Predicate accessors on dynamic aliases use a `.field(name)`
 discriminator:
 
@@ -616,10 +647,10 @@ value of each key it supplies; it does not recursively merge nested objects.
 
 ## Population statistics and stored-data validation
 
-`await store.describe()` pairs the merged schema introspection with population
-statistics taken in one repeatable-read snapshot. It returns current node and
-edge counts for every declared kind plus non-null coverage for each declared
-property (including nested property paths):
+`await store.describe()` pairs the merged schema introspection with current
+population statistics. It returns node and edge counts for every declared kind
+plus present, explicit-null, and non-null counts (and non-null coverage) for
+each directly addressable declared property:
 
 ```ts
 const description = await store.describe();
@@ -633,10 +664,13 @@ console.log(
 );
 ```
 
-The snapshot includes the active schema version and hash when present, a
-`schemaFence`, a `dataFence`, and the pinned `validTime`. `describe()` submits
-one node scan and one edge scan regardless of vocabulary size; aggregation is
-shared across SQL dialects in TypeGraph.
+The snapshot includes the active schema version and hash when present and a
+`schemaFence`. TypeGraph reads that schema coordinate before and after one SQL
+aggregate statement and refuses the result if it changed. The database, rather
+than TypeGraph's JavaScript process, computes all counts. Coverage follows
+ordinary nested JSON Schema `properties`; TypeGraph intentionally does not
+invent population semantics through `$ref`, unions, intersections, arrays, or
+conditionals. `validateStore()` remains authoritative for those schemas.
 
 Use `validateStore()` to find rows that no longer satisfy a kind's current
 declared Zod schema, for example after tightening a rule around existing data:
@@ -662,16 +696,21 @@ as violations, including when the authored Zod object is strict. Each failure
 names the record id, JSON-pointer path, top-level property when applicable,
 Zod issue code, and reason.
 
-Continuation cursors are bound to the entity, kind, schema fence, complete
-scoped-data fingerprint, and pinned valid-time coordinate. A schema or data
-change between pages throws `StoreAnalysisCursorStaleError`; restart without a
-cursor to establish a new snapshot. To verify that full data fence,
-`validateStore()` intentionally rescans the selected kind on every page before
-returning that page's violations. Its round-trip count is vocabulary-independent,
-but its per-page database and validation work scales with the selected kind's
-population. Both analysis methods require an interactive transactional backend
-that can hold a repeatable-read snapshot; non-transactional adapters refuse the
-operation rather than returning a result assembled across snapshots.
+`pageSize` is the number of records scanned, not a cap on violations: one record
+can contribute several Zod issues. Each request performs a bounded SQL keyset
+scan (`LIMIT pageSize + 1`) and reports `scannedCount`; it never materializes or
+rescans the complete kind just to continue. Cursors bind the entity, kind,
+schema fence, and last scanned id. A schema change throws
+`StoreAnalysisCursorStaleError`. Data pages are deliberately live rather than a
+claimed cross-request snapshot, so concurrent inserts, updates, and deletes can
+affect later pages. Each page still reads the schema coordinate before and after
+its data statement and refuses a concurrent schema flip.
+
+Both analysis methods are current-only. They are absent from `StoreView` and
+transaction callback facades; recorded/as-of population analysis is deferred
+until it can be backed by an equally explicit temporal contract. Because the
+consistency boundary is a SQL statement plus schema bracketing, these methods
+also work on non-interactive transactional adapters.
 
 ## `store.materializeIndexes(options?)`
 

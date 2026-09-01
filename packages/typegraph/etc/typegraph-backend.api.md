@@ -1396,10 +1396,16 @@ export type CommitSchemaVersionParams = Readonly<{
     schemaDoc: SerializedSchema;
 }>;
 
-// @public
-export type CompareAndSetNodeParams = UpdateNodeSetParams & Readonly<{
-    expectedProperties: Readonly<Record<string, JsonValue>>;
-    expectedAbsentProperties: readonly string[];
+// @public (undocumented)
+export type CompareAndSetNodeParams = Readonly<{
+    operation: "compareAndSet";
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+    expected: Readonly<Record<string, NodePropertyExpectation>>;
 }>;
 
 // @public
@@ -1816,10 +1822,10 @@ export interface DialectAdapter {
     readonly jsonExtractNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractText: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonHasPath: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
-    readonly jsonPathEquals: (this: void, column: SqlFragment, pointer: JsonPointer, value: JsonValue) => SqlFragment;
     readonly jsonPathIsNotNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNull: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonPathIsNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
+    readonly jsonScalarPathEquals: (this: void, column: SqlFragment, pointer: JsonPointer, value: JsonScalar) => SqlFragment;
     readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>, unsetProperties?: readonly string[]) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
@@ -2896,6 +2902,9 @@ export type JsonPointer = string & {
 };
 
 // @public
+export type JsonScalar = null | string | number | boolean;
+
+// @public
 export type JsonSchema = Readonly<{
     $schema?: string;
     type?: string | readonly string[];
@@ -2921,7 +2930,7 @@ export type JsonSchema = Readonly<{
 }>;
 
 // @public
-export type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+export type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -3090,6 +3099,14 @@ export type NodeInsertProjection = Readonly<{
 }> | Readonly<{
     kind: "fulltext";
     action: "delete";
+}>;
+
+// @public
+export type NodePropertyExpectation = Readonly<{
+    kind: "value";
+    value: JsonScalar;
+}> | Readonly<{
+    kind: "absent";
 }>;
 
 // @public
@@ -4514,6 +4531,7 @@ export type UpdateNodeParams = Readonly<{
 
 // @public
 export type UpdateNodeSetParams = Readonly<{
+    operation: "updateWhere";
     graphId: string;
     kind: string;
     patch: Readonly<Record<string, JsonValue>>;

@@ -278,11 +278,12 @@ const indexDeclarationZod = z.discriminatedUnion("entity", [
 // extensions without breaking older readers — same posture as the rest
 // of the schema document.
 const runtimePropertyZod = z.record(z.string(), z.unknown());
+const annotationsZod = z.record(z.string(), z.json());
 
 const runtimeNodeDocumentZod = z
   .object({
     description: z.string().optional(),
-    annotations: z.record(z.string(), z.json()).optional(),
+    annotations: annotationsZod.optional(),
     properties: z.record(z.string(), runtimePropertyZod),
     unique: z.array(z.object({}).loose()).optional(),
   })
@@ -291,7 +292,7 @@ const runtimeNodeDocumentZod = z
 const runtimeEdgeDocumentZod = z
   .object({
     description: z.string().optional(),
-    annotations: z.record(z.string(), z.json()).optional(),
+    annotations: annotationsZod.optional(),
     from: z.array(z.string()),
     to: z.array(z.string()),
     properties: z.record(z.string(), runtimePropertyZod).optional(),
@@ -331,7 +332,7 @@ const graphExtensionZod = z
     // the version check and produces actionable errors. Documents
     // that pre-date the field round-trip as `version: undefined`.
     version: z.number().optional(),
-    annotations: z.record(z.string(), z.json()).optional(),
+    annotations: annotationsZod.optional(),
     nodes: z.record(z.string(), runtimeNodeDocumentZod).optional(),
     edges: z.record(z.string(), runtimeEdgeDocumentZod).optional(),
     ontology: z.array(runtimeOntologyRelationZod).optional(),
@@ -533,7 +534,7 @@ function checkRecordKeyMatchesField(
 export const serializedSchemaZod = z
   .object({
     graphId: z.string(),
-    annotations: z.record(z.string(), z.json()).optional(),
+    annotations: annotationsZod.optional(),
     version: z.number(),
     generatedAt: z.string(),
     nodes: z
@@ -556,7 +557,7 @@ export const serializedSchemaZod = z
             ),
             onDelete: deleteBehaviorZod,
             description: z.string().optional(),
-            annotations: z.record(z.string(), z.json()).optional(),
+            annotations: annotationsZod.optional(),
           })
           .loose(),
       )
@@ -580,7 +581,7 @@ export const serializedSchemaZod = z
               .loose()
               .optional(),
             description: z.string().optional(),
-            annotations: z.record(z.string(), z.json()).optional(),
+            annotations: annotationsZod.optional(),
           })
           .loose(),
       )

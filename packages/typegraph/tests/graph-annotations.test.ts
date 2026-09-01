@@ -41,6 +41,12 @@ describe("graph-scoped annotations", () => {
       await computeSchemaHash(serializeSchema(legacy, 1)),
     );
 
+    const [emptyStore] = await createStoreWithSchema(
+      empty,
+      createTestBackend(),
+    );
+    expect(emptyStore.introspect().annotations).toBeUndefined();
+
     const backend = createTestBackend();
     const [store] = await createStoreWithSchema(annotated, backend);
     expect(store.introspect().annotations).toEqual({

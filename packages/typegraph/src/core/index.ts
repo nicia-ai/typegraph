@@ -84,6 +84,7 @@ export {
   isEdgeType,
   isEdgeTypeWithEndpoints,
   isNodeType,
+  type JsonScalar,
   type JsonValue,
   type KindAnnotations,
   type KindEntity,

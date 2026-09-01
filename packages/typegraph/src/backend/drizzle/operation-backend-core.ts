@@ -4469,6 +4469,16 @@ export function createCommonOperationBackend(
 
   const commandsPort = { session: commandSession, execute: executeCommand };
 
+  async function executeNodeSetUpdate(
+    params: CompareAndSetNodeParams | UpdateNodeSetParams,
+  ): Promise<UpdateNodeSetResult> {
+    const timestamp = nowIso();
+    const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
+    const rows = await execution.execAll<Record<string, unknown>>(query);
+    const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+    return { affectedCount: updatedRows.length, rows: updatedRows };
+  }
+
   return {
     tableExists,
 
@@ -4642,11 +4652,7 @@ export function createCommonOperationBackend(
           { operation: "updateNodeSet", kind: params.kind },
         );
       }
-      const timestamp = nowIso();
-      const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
-      return { affectedCount: updatedRows.length, rows: updatedRows };
+      return executeNodeSetUpdate(params);
     },
 
     async compareAndSetNode(
@@ -4661,20 +4667,13 @@ export function createCommonOperationBackend(
           { operation: "compareAndSetNode", kind: params.kind },
         );
       }
-      if (
-        Object.keys(params.expectedProperties).length === 0 &&
-        params.expectedAbsentProperties.length === 0
-      ) {
+      if (Object.keys(params.expected).length === 0) {
         throw new ConfigurationError(
           "Node compare-and-set requires at least one expected property",
           { operation: "compareAndSetNode", kind: params.kind },
         );
       }
-      const timestamp = nowIso();
-      const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
-      return { affectedCount: updatedRows.length, rows: updatedRows };
+      return executeNodeSetUpdate(params);
     },
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {

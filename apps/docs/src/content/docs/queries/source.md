@@ -120,6 +120,10 @@ surface.
 siblings. See [graph extensions ▸ Querying extension
 kinds](/graph-extensions#querying-extension-kinds) for the full story.
 
+Passing Store-issued runtime-kind evidence instead of a string narrows the
+alias to the graph-extension definition, so ordinary typed property access is
+available. String inputs retain the discriminator-based dynamic surface.
+
 ## Return Type
 
 `from()` returns a `QueryBuilder` that provides access to all query methods:

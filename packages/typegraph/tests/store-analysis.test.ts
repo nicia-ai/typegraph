@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode, ValidationError } from "../src";
+import { deriveBackend } from "../src/backend/derive-backend";
+import type { GraphBackend } from "../src/backend/types";
+import type { CompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { createTestBackend, disableTransactions } from "./test-utils";
 
@@ -42,12 +45,38 @@ describe("Store analysis argument validation", () => {
     ).rejects.toBeInstanceOf(ValidationError);
   });
 
-  it("refuses to assemble a snapshot on a non-transactional backend", async () => {
+  it("uses statement-level analysis on a non-transactional backend", async () => {
     const backend = disableTransactions(createTestBackend());
     const store = createStore(graph, backend);
 
-    await expect(store.describe()).rejects.toMatchObject({
-      code: "STORE_ANALYSIS_SNAPSHOT_UNSUPPORTED",
+    await expect(store.describe()).resolves.toMatchObject({
+      statistics: {
+        nodes: [{ kind: "Item", count: 0 }],
+      },
     });
+  });
+
+  it("uses one bounded data statement per analysis call", async () => {
+    const baseBackend = createTestBackend();
+    let dataStatements = 0;
+    const observedBackend: GraphBackend = deriveBackend(baseBackend, {
+      execute: async <T>(query: CompiledRowsSql) => {
+        dataStatements += 1;
+        return baseBackend.execute<T>(query);
+      },
+    });
+    const [store] = await createStoreWithSchema(graph, observedBackend);
+
+    dataStatements = 0;
+    await store.describe();
+    expect(dataStatements).toBe(1);
+
+    dataStatements = 0;
+    await store.validateStore({
+      entity: "node",
+      kind: "Item",
+      pageSize: 1,
+    });
+    expect(dataStatements).toBe(1);
   });
 });

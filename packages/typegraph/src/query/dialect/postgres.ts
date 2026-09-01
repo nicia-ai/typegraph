@@ -240,7 +240,7 @@ export const postgresDialect: DialectAdapter = {
     return sql`COALESCE(jsonb_typeof(${column} #> ${path}) <> 'null', FALSE)`;
   },
 
-  jsonPathEquals(column, pointer, value) {
+  jsonScalarPathEquals(column, pointer, value) {
     const path = toPostgresPath(pointer);
     return sql`${column} #> ${path} = CAST(${JSON.stringify(value)} AS jsonb)`;
   },

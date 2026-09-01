@@ -996,15 +996,24 @@ const reopened = await store.nodes.ChangeSet.compareAndSet(changeSetId, {
   patch: { status: "proposed" },
 });
 
+const claimedUnassigned = await store.nodes.ChangeSet.compareAndSet(changeSetId, {
+  expected: { assigneeId: compareAndSetAbsent },
+  patch: { assigneeId },
+});
+
 if (!reopened) {
   // Missing row or stale/mismatched precondition; nothing was written.
 }
 ```
 
-An expected value of `undefined` requires that property to be absent. Expected
-values are re-checked directly on the target row by the outer `UPDATE`, so a
-concurrent writer cannot satisfy the guard and then change the row before the
-patch lands.
+Expected values are JSON scalars (`string`, `number`, `boolean`, or `null`).
+Use the exported `compareAndSetAbsent` marker to require that an optional
+property is not stored. `undefined` is refused rather than treated as absence,
+because it can disappear while an object is assembled or serialized; arrays and
+objects are also refused so every backend uses the same exact scalar comparison.
+Expected predicates are re-checked directly on the target row by the outer
+`UPDATE`, so a concurrent writer cannot satisfy the guard and then change the
+row before the patch lands.
 
 The complete after-image still goes through ordinary schema validation,
 uniqueness, history/version bookkeeping, fulltext, and vector maintenance. This

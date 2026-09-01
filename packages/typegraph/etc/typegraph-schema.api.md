@@ -137,10 +137,16 @@ type CommitSchemaVersionParams = Readonly<{
     schemaDoc: SerializedSchema;
 }>;
 
-// @public
-type CompareAndSetNodeParams = UpdateNodeSetParams & Readonly<{
-    expectedProperties: Readonly<Record<string, JsonValue>>;
-    expectedAbsentProperties: readonly string[];
+// @public (undocumented)
+type CompareAndSetNodeParams = Readonly<{
+    operation: "compareAndSet";
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+    expected: Readonly<Record<string, NodePropertyExpectation>>;
 }>;
 
 // @public (undocumented)
@@ -1498,6 +1504,9 @@ type JsonPointer = string & {
 };
 
 // @public
+type JsonScalar = null | string | number | boolean;
+
+// @public
 export type JsonSchema = Readonly<{
     $schema?: string;
     type?: string | readonly string[];
@@ -1523,7 +1532,7 @@ export type JsonSchema = Readonly<{
 }>;
 
 // @public
-type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -1791,6 +1800,14 @@ type NodeInsertProjection = Readonly<{
 }> | Readonly<{
     kind: "fulltext";
     action: "delete";
+}>;
+
+// @public
+type NodePropertyExpectation = Readonly<{
+    kind: "value";
+    value: JsonScalar;
+}> | Readonly<{
+    kind: "absent";
 }>;
 
 // @public
@@ -2447,6 +2464,7 @@ type UpdateNodeParams = Readonly<{
 
 // @public
 type UpdateNodeSetParams = Readonly<{
+    operation: "updateWhere";
     graphId: string;
     kind: string;
     patch: Readonly<Record<string, JsonValue>>;

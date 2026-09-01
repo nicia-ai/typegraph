@@ -7,6 +7,7 @@
 import {
   type Cardinality,
   type IndexEntity,
+  type JsonScalar,
   type JsonValue,
   type KindEntity,
   type TemporalMode,
@@ -735,6 +736,7 @@ export type UpdateNodeParams = Readonly<{
  * its before-images in the same transaction before invoking this method.
  */
 export type UpdateNodeSetParams = Readonly<{
+  operation: "updateWhere";
   graphId: string;
   kind: string;
   patch: Readonly<Record<string, JsonValue>>;
@@ -751,17 +753,23 @@ export type UpdateNodeSetParams = Readonly<{
  * older/custom `updateNodeSet` implementation can never silently ignore the
  * compare-and-set fence.
  */
-export type CompareAndSetNodeParams = UpdateNodeSetParams &
-  Readonly<{
-    /**
-     * Exact property values re-checked on the target row by the outer UPDATE.
-     * These are write fences, not candidate-selection hints: a backend that
-     * accepts them MUST apply them directly to the row being updated.
-     */
-    expectedProperties: Readonly<Record<string, JsonValue>>;
-    /** Top-level properties that the outer UPDATE requires to be absent. */
-    expectedAbsentProperties: readonly string[];
-  }>;
+export type NodePropertyExpectation =
+  Readonly<{ kind: "value"; value: JsonScalar }> | Readonly<{ kind: "absent" }>;
+
+export type CompareAndSetNodeParams = Readonly<{
+  operation: "compareAndSet";
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  unsetProperties?: readonly string[];
+  candidateIds: CompiledSelectSql;
+  candidateIdColumn: string;
+  /**
+   * Exact scalar-or-absence predicates re-checked by the outer UPDATE. This
+   * discriminated map cannot be assigned to an ordinary set update.
+   */
+  expected: Readonly<Record<string, NodePropertyExpectation>>;
+}>;
 
 /** The after-images changed by {@link GraphBackend.updateNodeSet}. */
 export type UpdateNodeSetResult = Readonly<{

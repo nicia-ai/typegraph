@@ -13,6 +13,7 @@ import {
   cloneAndFreezeGraphAnnotations,
 } from "../core/json-value";
 import {
+  type GraphAnnotations,
   type KindAnnotations,
   type KindEntity,
   type NullCheckOp,
@@ -290,7 +291,7 @@ export function validateGraphExtension(
 
   const version = validateVersion(documentRecord["version"], issues);
 
-  const annotations = validateAnnotations(
+  const annotations = validateAnnotations<GraphAnnotations>(
     documentRecord["annotations"],
     "/annotations",
     "Graph extension",
@@ -1980,12 +1981,14 @@ function validateUniqueWhere(
 // Annotations
 // ============================================================
 
-function validateAnnotations(
+function validateAnnotations<
+  T extends GraphAnnotations | KindAnnotations = KindAnnotations,
+>(
   raw: unknown,
   path: string,
   ownerLabel: string,
   issues: GraphExtensionIssue[],
-): KindAnnotations | undefined {
+): T | undefined {
   if (raw === undefined) return undefined;
   if (!isPlainObject(raw)) {
     issues.push({
@@ -2017,7 +2020,7 @@ function validateAnnotations(
     throw error;
   }
 
-  return raw as KindAnnotations;
+  return raw as T;
 }
 
 // ============================================================
@@ -2164,7 +2167,7 @@ function describeUnknownValue(value: unknown): string {
 
 function freezeDocument(input: {
   version: GraphExtensionVersion;
-  annotations: KindAnnotations | undefined;
+  annotations: GraphAnnotations | undefined;
   nodes: Record<string, ExtensionNodeDef> | undefined;
   edges: Record<string, ExtensionEdgeDef> | undefined;
   ontology: readonly ExtensionOntologyRelation[] | undefined;
@@ -2173,7 +2176,7 @@ function freezeDocument(input: {
   return Object.freeze(
     compactUndefined<{
       version: GraphExtensionVersion;
-      annotations?: KindAnnotations;
+      annotations?: GraphAnnotations;
       nodes?: Record<string, ExtensionNodeDef>;
       edges?: Record<string, ExtensionEdgeDef>;
       ontology?: readonly ExtensionOntologyRelation[];

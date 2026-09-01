@@ -2,8 +2,12 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../../errors";
 import { getDialect } from "../../../query/dialect";
+import type { DialectAdapter } from "../../../query/dialect/types";
 import { jsonPointer } from "../../../query/json-pointer";
-import { sql as portableSql } from "../../../query/sql-fragment";
+import {
+  sql as portableSql,
+  type SqlFragment,
+} from "../../../query/sql-fragment";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
   AtomicNodeBatchEntry,
@@ -18,6 +22,7 @@ import type {
   DeleteNodeParams,
   HardDeleteNodeParams,
   InsertNodeParams,
+  NodePropertyExpectation,
   SchemaWriteFenceParams,
   UpdateNodeParams,
   UpdateNodeSetParams,
@@ -974,6 +979,23 @@ export function buildReadAtomicNodeMutationPostimages(
   `;
 }
 
+function buildNodeExpectationPredicate(
+  adapter: DialectAdapter,
+  propsColumn: SqlFragment,
+  property: string,
+  expectation: NodePropertyExpectation,
+): SqlFragment {
+  const pointer = jsonPointer([property]);
+  if (expectation.kind === "absent") {
+    return portableSql`NOT ${adapter.jsonHasPath(propsColumn, pointer)}`;
+  }
+  return adapter.jsonScalarPathEquals(
+    propsColumn,
+    pointer,
+    expectation.value,
+  );
+}
+
 /**
  * Builds one set-based update over candidate ids selected by the shared query
  * compiler. The outer graph/kind/live-row predicates are deliberate write
@@ -1000,36 +1022,25 @@ export function buildUpdateNodeSet(
     portableSql.identifier(params.candidateIdColumn),
     dialect,
   );
-  const expectedPropertyPredicates = Object.entries(
-    "expectedProperties" in params ? params.expectedProperties : {},
-  ).map(([property, value]) =>
-    toDrizzleSql(
-      adapter.jsonPathEquals(
-        portableSql.identifier(nodes.props.name),
-        jsonPointer([property]),
-        value,
-      ),
-      dialect,
-    ),
-  );
-  const expectedAbsentPredicates = (
-    "expectedAbsentProperties" in params ? params.expectedAbsentProperties : []
-  ).map((property) =>
-    toDrizzleSql(
-      portableSql`NOT ${adapter.jsonHasPath(
-        portableSql.identifier(nodes.props.name),
-        jsonPointer([property]),
-      )}`,
-      dialect,
-    ),
-  );
+  const propsColumn = portableSql.identifier(nodes.props.name);
+  const expectedPredicates =
+    params.operation === "compareAndSet" ?
+      Object.entries(params.expected).map(([property, expectation]) =>
+        toDrizzleSql(
+          buildNodeExpectationPredicate(
+            adapter,
+            propsColumn,
+            property,
+            expectation,
+          ),
+          dialect,
+        ),
+      )
+    : [];
   const expectedPredicate =
-    expectedPropertyPredicates.length + expectedAbsentPredicates.length === 0 ?
+    expectedPredicates.length === 0 ?
       sql.empty()
-    : sql` AND ${sql.join(
-        [...expectedPropertyPredicates, ...expectedAbsentPredicates],
-        sql` AND `,
-      )}`;
+    : sql` AND ${sql.join(expectedPredicates, sql` AND `)}`;
 
   return sql`
     UPDATE ${nodes}

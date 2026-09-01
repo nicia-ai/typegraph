@@ -129,6 +129,7 @@ function setUpdateWork(
   backend: GraphBackend,
 ): Parameters<WriteSession["reviseNodeSet"]>[0] {
   return {
+    operation: "updateWhere",
     kind: "Person",
     schema: Person.schema,
     uniqueConstraints: [],

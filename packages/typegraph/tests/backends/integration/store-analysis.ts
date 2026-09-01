@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import {
-  defineGraph,
-  defineNode,
-  StoreAnalysisCursorStaleError,
-} from "../../../src";
+import { defineGraph, defineNode } from "../../../src";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -37,7 +33,14 @@ export function registerStoreAnalysisIntegrationTests(
         name: "Alice",
         age: 30,
       });
-      const bob = await store.nodes.Person.create({ name: "Bob" });
+      await store.nodes.Person.create({ name: "Bob" });
+      const explicitJsonNull = JSON.parse("null") as unknown;
+      await store.backend.insertNode({
+        graphId: store.graphId,
+        kind: "Person",
+        id: "explicit-null",
+        props: { name: "Null age", age: explicitJsonNull },
+      });
       const company = await store.nodes.Company.create({ name: "Acme" });
       await store.edges.worksAt.create(alice, company, { role: "Engineer" });
 
@@ -49,25 +52,24 @@ export function registerStoreAnalysisIntegrationTests(
         (entry) => entry.kind === "worksAt",
       );
 
-      expect(people?.count).toBe(2);
+      expect(people?.count).toBe(3);
       expect(people?.properties).toContainEqual({
         path: "/name",
-        nonNullCount: 2,
+        presentCount: 3,
+        nullCount: 0,
+        nonNullCount: 3,
         coverage: 1,
       });
       expect(people?.properties).toContainEqual({
         path: "/age",
+        presentCount: 2,
+        nullCount: 1,
         nonNullCount: 1,
-        coverage: 0.5,
+        coverage: 1 / 3,
       });
       expect(worksAt?.count).toBe(1);
       expect(description.statistics.snapshot.schemaFence).toHaveLength(32);
-      expect(description.statistics.snapshot.dataFence).toHaveLength(32);
       expect(description.schema.graphId).toBe(store.graphId);
-
-      // Keep the second row observably live so an optimizer cannot replace the
-      // test setup with one row while preserving the first assertions.
-      expect(bob.name).toBe("Bob");
     });
 
     it("reports only declared-rule violations and pages them deterministically", async () => {
@@ -92,8 +94,9 @@ export function registerStoreAnalysisIntegrationTests(
       const first = await store.validateStore({
         entity: "node",
         kind: "Audited",
-        pageSize: 2,
+        pageSize: 1,
       });
+      expect(first.scannedCount).toBe(1);
       expect(first.violations).toEqual([
         expect.objectContaining({
           id: "bad-1",
@@ -115,9 +118,10 @@ export function registerStoreAnalysisIntegrationTests(
       const second = await store.validateStore({
         entity: "node",
         kind: "Audited",
-        pageSize: 2,
+        pageSize: 1,
         cursor: requireDefined(first.nextCursor),
       });
+      expect(second.scannedCount).toBe(1);
       expect(second.violations).toEqual([
         expect.objectContaining({ id: "bad-2", path: "/name" }),
       ]);
@@ -125,7 +129,7 @@ export function registerStoreAnalysisIntegrationTests(
       expect(second.snapshot).toEqual(first.snapshot);
     });
 
-    it("rejects a cursor after scoped data changes", async () => {
+    it("uses live keyset continuation when scoped data changes", async () => {
       const store = await context.createStore(analysisGraph);
       for (const id of ["bad-1", "bad-2"]) {
         await store.backend.insertNode({
@@ -146,14 +150,14 @@ export function registerStoreAnalysisIntegrationTests(
         id: "bad-2",
       });
 
-      await expect(
-        store.validateStore({
-          entity: "node",
-          kind: "Audited",
-          pageSize: 1,
-          cursor: requireDefined(first.nextCursor),
-        }),
-      ).rejects.toBeInstanceOf(StoreAnalysisCursorStaleError);
+      const second = await store.validateStore({
+        entity: "node",
+        kind: "Audited",
+        pageSize: 1,
+        cursor: requireDefined(first.nextCursor),
+      });
+      expect(second).toMatchObject({ scannedCount: 0, violations: [] });
+      expect(second.nextCursor).toBeUndefined();
     });
 
     it("rejects a cursor after the active schema changes", async () => {

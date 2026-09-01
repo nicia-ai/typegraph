@@ -173,9 +173,19 @@ export async function planCandidateWriteSet<G extends GraphDef>(
     );
   }
 
-  const created = await ingestionBranch(args.target, args.makeBackend, {
-    id: asBranchId(writeSet.sourceId),
-  });
+  let created: Awaited<ReturnType<typeof ingestionBranch<G>>>;
+  try {
+    created = await ingestionBranch(args.target, args.makeBackend, {
+      id: asBranchId(writeSet.sourceId),
+    });
+  } catch (error) {
+    return err(
+      new CandidateWriteSetError(
+        "Unable to create the transient candidate staging store.",
+        { cause: error },
+      ),
+    );
+  }
   if (isErr(created)) {
     return err(
       new CandidateWriteSetError(

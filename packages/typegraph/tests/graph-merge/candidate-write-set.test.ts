@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
+  BranchError,
   type CandidateWriteSet,
   CandidateWriteSetError,
   captureCandidateWriteSetTarget,
@@ -195,6 +196,26 @@ describe("candidate write-set planning", () => {
       });
     }
     expect(makeBackend).not.toHaveBeenCalled();
+  });
+
+  it("returns a typed refusal when transient staging provisioning throws", async () => {
+    const { target, writeSet } = await setup();
+    const cause = new Error("provisioning failed");
+
+    const result = await planCandidateWriteSet({
+      target,
+      makeBackend: () => Promise.reject(cause),
+      writeSet,
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(CandidateWriteSetError);
+      expect(result.error.message).toBe(
+        "Unable to create the transient candidate staging store.",
+      );
+      expect(result.error.cause).toBeInstanceOf(BranchError);
+    }
   });
 
   it("closes staging after an attributed import refusal", async () => {

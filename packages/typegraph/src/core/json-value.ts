@@ -8,7 +8,11 @@
  */
 import { ConfigurationError } from "../errors";
 import { createDataKeyedBag, isPlainObject } from "../utils/object";
-import { type GraphAnnotations, type JsonValue } from "./types";
+import {
+  type GraphAnnotations,
+  type JsonValue,
+  type KindAnnotations,
+} from "./types";
 
 /**
  * Asserts that `value` is JSON-serializable.
@@ -74,6 +78,16 @@ export function mergeGraphAnnotations(
 ): GraphAnnotations | undefined {
   if (existing === undefined && next === undefined) return undefined;
   return cloneAndFreezeGraphAnnotations({ ...existing, ...next });
+}
+
+/** Canonical omission rule shared by serialization and introspection. */
+export function canonicalAnnotations<
+  T extends GraphAnnotations | KindAnnotations,
+>(annotations: T | undefined): T | undefined {
+  if (annotations === undefined || Object.keys(annotations).length === 0) {
+    return undefined;
+  }
+  return annotations;
 }
 
 function cloneAndFreezeJsonValue(value: JsonValue): JsonValue {

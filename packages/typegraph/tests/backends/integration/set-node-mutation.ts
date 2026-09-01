@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 
-import { ConfigurationError } from "../../../src";
+import { compareAndSetAbsent, ConfigurationError } from "../../../src";
 import type {
   CompareAndSetNodeParams,
   GraphBackend,
@@ -10,6 +10,7 @@ import { rowPropsToObject } from "../../../src/backend/types";
 import type { QueryAst } from "../../../src/query/ast";
 import { compileQuery } from "../../../src/query/compiler";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
+import type { NodeSetUpdateWork } from "../../../src/store/operations/node-write-pipeline";
 import { requireDefined } from "../../../src/utils/presence";
 import { integrationTestGraph } from "./fixtures";
 import { type IntegrationTestContext } from "./test-context";
@@ -57,8 +58,27 @@ export function registerSetNodeMutationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("set-based node mutation substrate", () => {
-    it("compareAndSet atomically applies one exact guarded transition", async () => {
+    it("keeps guarded and ordinary backend parameters nominally disjoint", () => {
+      type CompareAndSetWork = Extract<
+        NodeSetUpdateWork,
+        { operation: "compareAndSet" }
+      >;
+      type UpdateWhereWork = Extract<
+        NodeSetUpdateWork,
+        { operation: "updateWhere" }
+      >;
+      expectTypeOf<CompareAndSetNodeParams>().not.toExtend<UpdateNodeSetParams>();
+      expectTypeOf<UpdateNodeSetParams>().not.toExtend<CompareAndSetNodeParams>();
+      expectTypeOf<CompareAndSetWork>().not.toExtend<UpdateWhereWork>();
+      expectTypeOf<UpdateWhereWork>().not.toExtend<CompareAndSetWork>();
+    });
+
+    it("compareAndSet atomically handles scalar matches, mismatches, and explicit absence", async () => {
       const store = context.getStore();
+      type PersonExpected = Parameters<
+        typeof store.nodes.Person.compareAndSet
+      >[1]["expected"];
+      expectTypeOf<{ email: undefined }>().not.toExtend<PersonExpected>();
       const person = await store.nodes.Person.create({
         name: "Guarded",
         age: 40,
@@ -81,43 +101,53 @@ export function registerSetNodeMutationIntegrationTests(
           patch: { age: 42 },
         }),
       ).toBe(false);
+      expect(
+        await store.nodes.Person.compareAndSet(person.id, {
+          expected: { email: "guarded@example.com" },
+          patch: { email: undefined },
+        }),
+      ).toBe(true);
+      expect(
+        await store.nodes.Person.compareAndSet(person.id, {
+          expected: { email: compareAndSetAbsent },
+          patch: { age: 42 },
+        }),
+      ).toBe(true);
       expect(await store.nodes.Person.getById(person.id)).toMatchObject({
-        age: 41,
-        meta: { version: 2 },
+        age: 42,
+        meta: { version: 4 },
       });
     });
 
-    it("compares nested JSON structurally across dialects", async () => {
+    it("refuses undefined, object, and array expectations before SQL compilation", async () => {
       const store = context.getStore();
-      const backend = context.getBackend();
+      type DocumentExpected = Parameters<
+        typeof store.nodes.Document.compareAndSet
+      >[1]["expected"];
+      expectTypeOf<{
+        metadata: { author: string; version: number };
+      }>().not.toExtend<DocumentExpected>();
+      expectTypeOf<{
+        metadata: readonly string[];
+      }>().not.toExtend<DocumentExpected>();
       const document = await store.nodes.Document.create({
         title: "Guarded document",
         metadata: { author: "Ada", version: 1 },
       });
-      const candidateIds = compileCandidateIds(
-        store.graphId,
-        backend,
-        store
-          .query()
-          .from("Document", "document")
-          .whereNode("document", (node) => node.id.eq(document.id))
-          .select((ctx) => ctx.document.id)
-          .toAst(),
-      );
-
-      const result = await compareAndSetNode(backend, {
-        graphId: store.graphId,
-        kind: "Document",
-        patch: { title: "Updated document" },
-        candidateIds,
-        candidateIdColumn: "document_id",
-        expectedProperties: {
-          metadata: { version: 1, author: "Ada" },
-        },
-        expectedAbsentProperties: [],
-      });
-
-      expect(result.affectedCount).toBe(1);
+      for (const expected of [
+        { metadata: undefined },
+        { metadata: { version: 1, author: "Ada" } },
+        { metadata: ["Ada", 1] },
+      ]) {
+        await expect(
+          store.nodes.Document.compareAndSet(document.id, {
+            expected,
+            patch: { title: "Updated document" },
+          } as never),
+        ).rejects.toThrow(
+          'compareAndSet() expected property "metadata" must be a JSON scalar or compareAndSetAbsent',
+        );
+      }
     });
 
     it("refuses a compare-and-set without a property patch", async () => {
@@ -141,13 +171,13 @@ export function registerSetNodeMutationIntegrationTests(
 
       await expect(
         compareAndSetNode(backend, {
+          operation: "compareAndSet",
           graphId: store.graphId,
           kind: "Person",
           patch: {},
           candidateIds,
           candidateIdColumn: "person_id",
-          expectedProperties: { age: 40 },
-          expectedAbsentProperties: [],
+          expected: { age: { kind: "value", value: 40 } },
         }),
       ).rejects.toThrow(
         "Node compare-and-set requires at least one property patch",
@@ -236,6 +266,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Person",
         patch: { isActive: true },
@@ -299,6 +330,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Person",
         patch: { isActive: true },
@@ -511,6 +543,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Document",
         patch: {
@@ -553,6 +586,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Document",
         patch: { "0": "zero", "01": "zero-one" },
@@ -586,6 +620,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Document",
         patch,
@@ -617,6 +652,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Person",
         patch: { isActive: true },
@@ -649,6 +685,7 @@ export function registerSetNodeMutationIntegrationTests(
       );
 
       const result = await updateNodeSet(backend, {
+        operation: "updateWhere",
         graphId: store.graphId,
         kind: "Person",
         patch: { isActive: true },
@@ -684,6 +721,7 @@ export function registerSetNodeMutationIntegrationTests(
 
       await expect(
         updateNodeSet(backend, {
+          operation: "updateWhere",
           graphId: store.graphId,
           kind: "Person",
           patch: {},

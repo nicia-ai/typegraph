@@ -12,6 +12,8 @@
  * agent-induced schemas use in practice. Anything outside this set fails
  * loudly at `defineGraphExtension(...)`.
  */
+import { type z } from "zod";
+
 import {
   type GraphAnnotations,
   type KindAnnotations,
@@ -167,6 +169,60 @@ export type ExtensionPropertyType =
   | ExtensionEnumProperty
   | ExtensionArrayProperty
   | ExtensionObjectProperty;
+
+type ExtensionDefinedOutput<P extends ExtensionPropertyType> =
+  P extends ExtensionStringProperty ? string
+  : P extends ExtensionNumberProperty ? number
+  : P extends ExtensionBooleanProperty ? boolean
+  : P extends ExtensionEnumProperty ? P["values"][number]
+  : P extends ExtensionArrayProperty ?
+    readonly ExtensionPropertyOutput<P["items"]>[]
+  : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]>
+  : never;
+
+/** TypeScript value represented by one graph-extension property descriptor. */
+export type ExtensionPropertyOutput<P extends ExtensionPropertyType> =
+  P extends { optional: true } ? ExtensionDefinedOutput<P> | undefined
+  : ExtensionDefinedOutput<P>;
+
+/** TypeScript object represented by a graph-extension property map. */
+export type ExtensionObjectOutput<
+  P extends Readonly<Record<string, ExtensionPropertyType>>,
+> = Readonly<
+  {
+    [
+      K in keyof P as P[K] extends { optional: true } ? never : K
+    ]: ExtensionPropertyOutput<P[K]>;
+  } & {
+    [
+      K in keyof P as P[K] extends { optional: true } ? K : never
+    ]?: ExtensionPropertyOutput<P[K]>;
+  }
+>;
+
+type ExtensionPropertySchema<P extends ExtensionPropertyType> =
+  P extends { optional: true } ?
+    z.ZodOptional<z.ZodType<ExtensionDefinedOutput<P>>>
+  : z.ZodType<ExtensionDefinedOutput<P>>;
+
+/** Phantom Zod object type used by sound runtime-kind evidence. */
+export type ExtensionObjectSchema<
+  P extends Readonly<Record<string, ExtensionPropertyType>>,
+> = z.ZodObject<{
+  [K in keyof P]: ExtensionPropertySchema<P[K]>;
+}>;
+
+/** Property map represented by an edge definition, including the empty default. */
+export type ExtensionEdgeProperties<D extends ExtensionEdgeDef> =
+  D extends (
+    Readonly<{
+      properties: infer P extends Readonly<
+        Record<string, ExtensionPropertyType>
+      >;
+    }>
+  ) ?
+    P
+  : Readonly<Record<never, never>>;
 
 // ============================================================
 // Unique Constraints

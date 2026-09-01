@@ -1,7 +1,7 @@
 import { type z } from "zod";
 
-import { type EdgeType, type KindEntity, type NodeType } from "../core/types";
 import { RuntimeKindTokenError } from "../errors";
+import { type EdgeType, type KindEntity, type NodeType } from "./types";
 
 declare const RUNTIME_KIND_TOKEN_BRAND: unique symbol;
 
@@ -12,32 +12,24 @@ export type RuntimeKindSchemaBinding = Readonly<{
   schemaHash: string | undefined;
 }>;
 
-/**
- * Validated evidence for one runtime node kind.
- *
- * Tokens are minted by `store.runtimeNodeKind(...)`. Their nominal brand and
- * private runtime registration make them impossible to construct faithfully in
- * consumer code.
- */
+/** Store-issued evidence for one persisted runtime node kind. */
 export type RuntimeNodeKind<
   K extends string = string,
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
 > = Readonly<{
   entity: "node";
   kind: K;
-  schema: S;
-  [RUNTIME_KIND_TOKEN_BRAND]: "node";
+  [RUNTIME_KIND_TOKEN_BRAND]: S;
 }>;
 
-/** Validated evidence for one runtime edge kind. */
+/** Store-issued evidence for one persisted runtime edge kind. */
 export type RuntimeEdgeKind<
   K extends string = string,
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
 > = Readonly<{
   entity: "edge";
   kind: K;
-  schema: S;
-  [RUNTIME_KIND_TOKEN_BRAND]: "edge";
+  [RUNTIME_KIND_TOKEN_BRAND]: S;
 }>;
 
 /** Node type recovered from validated runtime-kind evidence. */
@@ -80,7 +72,6 @@ export function createRuntimeKindToken<
   binding: RuntimeKindSchemaBinding,
   entity: "node",
   kind: K,
-  schema: S,
 ): RuntimeNodeKind<K, S>;
 export function createRuntimeKindToken<
   const K extends string,
@@ -90,36 +81,30 @@ export function createRuntimeKindToken<
   binding: RuntimeKindSchemaBinding,
   entity: "edge",
   kind: K,
-  schema: S,
 ): RuntimeEdgeKind<K, S>;
 export function createRuntimeKindToken(
   owner: object,
   binding: RuntimeKindSchemaBinding,
   entity: KindEntity,
   kind: string,
-  schema: z.ZodObject<z.ZodRawShape>,
 ): RuntimeKindToken {
-  const token = Object.freeze({ entity, kind, schema }) as RuntimeKindToken;
+  const token = Object.freeze({ entity, kind }) as RuntimeKindToken;
   TOKEN_METADATA.set(token, { owner, binding, entity, kind });
   return token;
 }
 
-/**
- * Resolves a token only after proving its entity, owner, public kind, and
- * reconciled schema identity. This is the single narrowing owner shared by
- * collection, bulk-read, and traversal entrypoints.
- */
+/** Resolves Store-issued evidence after checking its owner and schema fence. */
 export function resolveRuntimeKindToken(
   token: unknown,
   expectedEntity: KindEntity,
   owner: object | undefined,
   binding: RuntimeKindSchemaBinding | undefined,
 ): string {
-  if (typeof token !== "object" || token === null) {
-    throw new RuntimeKindTokenError("invalid", expectedEntity);
-  }
-  const metadata = TOKEN_METADATA.get(token);
-  if (metadata === undefined) {
+  const tokenObject =
+    typeof token === "object" && token !== null ? token : undefined;
+  const metadata =
+    tokenObject === undefined ? undefined : TOKEN_METADATA.get(tokenObject);
+  if (tokenObject === undefined || metadata === undefined) {
     throw new RuntimeKindTokenError("invalid", expectedEntity);
   }
   if (metadata.entity !== expectedEntity) {
@@ -129,9 +114,9 @@ export function resolveRuntimeKindToken(
     });
   }
   if (
-    !("kind" in token) ||
-    typeof token.kind !== "string" ||
-    token.kind !== metadata.kind
+    !("kind" in tokenObject) ||
+    typeof tokenObject.kind !== "string" ||
+    tokenObject.kind !== metadata.kind
   ) {
     throw new RuntimeKindTokenError("wrong-kind", expectedEntity, {
       kind: metadata.kind,
@@ -167,7 +152,8 @@ export function resolveRuntimeKindInput(
   resolver: RuntimeKindTokenResolver | undefined,
 ): string {
   if (typeof input === "string") return input;
-  return resolver === undefined ?
-      resolveRuntimeKindToken(input, entity, undefined, undefined)
-    : resolver(input, entity);
+  if (resolver === undefined) {
+    return resolveRuntimeKindToken(input, entity, undefined, undefined);
+  }
+  return resolver(input, entity);
 }

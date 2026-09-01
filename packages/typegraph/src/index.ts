@@ -206,6 +206,7 @@ export type {
   NodeInsertClaim,
   NodeInsertClaimVerdict,
   NodeInsertProjection,
+  NodePropertyExpectation,
   PopulatedSchemaKind,
   QueryExecutionBackend,
   RawQueryExecutionBackend,
@@ -304,6 +305,7 @@ export type {
   EndpointExistence,
   GraphAnnotations,
   GraphDefaults,
+  JsonScalar,
   JsonValue,
   KindAnnotations,
   MetaEdgeOptions,
@@ -460,6 +462,12 @@ export {
 // Store
 // ============================================================
 
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "./core/runtime-kind";
 export {
   type ExternalRecordedReadSource,
   recordedRelation,
@@ -619,12 +627,6 @@ export type {
   WeightedShortestPathResult,
 } from "./store/algorithms";
 export type {
-  RuntimeEdgeKind,
-  RuntimeEdgeTypeFor,
-  RuntimeNodeKind,
-  RuntimeNodeTypeFor,
-} from "./store/runtime-kind";
-export type {
   AnyEdge,
   AnyNode,
   SubgraphEdgeResult,
@@ -639,6 +641,8 @@ export type {
   AdapterTransactionContext,
   BaseStoreOptions,
   BulkOperationHookContext,
+  CompareAndSetAbsent,
+  CompareAndSetExpected,
   ConstraintNames,
   CreateEdgeInput,
   CreateNodeInput,
@@ -693,6 +697,7 @@ export type {
   UpdateNodeInput,
   ValidityEndMutation,
 } from "./store/types";
+export { compareAndSetAbsent } from "./store/types";
 
 // ============================================================
 // Query

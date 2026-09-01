@@ -19,6 +19,7 @@ import {
   type AllNodeTypes,
   type GraphDef,
 } from "../core/define-graph";
+import { canonicalAnnotations } from "../core/json-value";
 import {
   type Cardinality,
   type Collation,
@@ -169,7 +170,7 @@ export function introspectSchema<G extends GraphDef>(
 
   return {
     graphId: context.graphId,
-    annotations: graph.annotations,
+    annotations: canonicalAnnotations(graph.annotations),
     schemaVersion: context.schemaVersion,
     schemaHash: context.schemaHash,
     kinds,

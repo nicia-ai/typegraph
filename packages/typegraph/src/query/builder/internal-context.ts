@@ -6,8 +6,8 @@
  * reads through Store options. A WeakMap keeps the public QueryBuilderConfig
  * free of internal-only fields while preserving clone-by-config behavior.
  */
+import { type RuntimeKindTokenResolver } from "../../core/runtime-kind";
 import { type ReadCoordinate } from "../../core/temporal";
-import { type RuntimeKindTokenResolver } from "../../store/runtime-kind";
 import { type RecordedReadBinding } from "../compiler/schema";
 import { type QueryBuilderConfig } from "./types";
 

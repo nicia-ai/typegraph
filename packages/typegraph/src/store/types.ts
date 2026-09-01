@@ -16,12 +16,19 @@ import {
   type GraphIdentityConfig,
   type NodeKinds,
 } from "../core/define-graph";
+import type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
 import { type RecordedInstant } from "../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeId,
   type EdgeRegistration,
   type EdgeType,
+  type JsonScalar,
   type KindEntity,
   type NodeId,
   type NodeRegistration,
@@ -30,19 +37,31 @@ import {
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
-import type {
-  RuntimeEdgeKind,
-  RuntimeEdgeTypeFor,
-  RuntimeNodeKind,
-  RuntimeNodeTypeFor,
-} from "./runtime-kind";
-
 /**
  * An explicit validity-end mutation. Omission preserves the stored end,
  * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
  * two write actions mutually exclusive without exposing public `null`.
  */
 export type ValidityEndMutation = BackendValidityEndMutation;
+
+/**
+ * Compare-and-set absence marker. `undefined` is deliberately not overloaded:
+ * it can disappear while an object is assembled or serialized, whereas this
+ * marker always states the caller's predicate explicitly.
+ */
+export const compareAndSetAbsent: unique symbol = typeGraphGlobalSymbol(
+  "compare-and-set-absent-v1",
+);
+
+/** Explicitly requires that a compare-and-set property is not stored. */
+export type CompareAndSetAbsent = typeof compareAndSetAbsent;
+
+/** Scalar-only exact predicates accepted by {@link NodeCollection.compareAndSet}. */
+export type CompareAndSetExpected<Props> = Readonly<{
+  [Property in keyof Props]?:
+    | Extract<Exclude<Props[Property], undefined>, JsonScalar>
+    | CompareAndSetAbsent;
+}>;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
@@ -278,9 +297,10 @@ export type OperationHookContext = HookContext &
   }>;
 
 /**
- * Context for one set-based collection mutation. The `operation` union is the exhaustive list of
- * what `onBulkOperationStart` / `onBulkOperationEnd` observe, so a batch method
- * absent from it (every `bulk*`, including `bulkDelete`) emits no bulk event.
+ * Context for one set-based collection mutation. The `operation` union is the
+ * exhaustive list of what `onBulkOperationStart` / `onBulkOperationEnd`
+ * observe, so a batch method absent from it (every `bulk*`, including
+ * `bulkDelete`) emits no bulk event.
  */
 export type BulkOperationHookContext = HookContext &
   Readonly<{
@@ -295,8 +315,8 @@ export type BulkOperationHookContext = HookContext &
  * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`,
  * `bulkDelete`) skip per-item operation hooks for throughput, and the bulk
  * hooks below do not stand in for them — those fire only for node
- * `compareAndSet` and `updateWhere`, so a batch method emits no hook events at all, neither
- * per-item nor bulk. Query hooks still fire normally.
+ * `compareAndSet` and `updateWhere`. A batch method emits no hook events at all,
+ * neither per-item nor bulk. Query hooks still fire normally.
  *
  * @example
  * ```typescript
@@ -856,7 +876,7 @@ export type NodeCollection<
   compareAndSet: (
     id: NodeId<N>,
     params: Readonly<{
-      expected: Partial<z.input<N["schema"]>>;
+      expected: CompareAndSetExpected<z.input<N["schema"]>>;
       patch: Partial<z.input<N["schema"]>>;
     }>,
   ) => Promise<boolean>;

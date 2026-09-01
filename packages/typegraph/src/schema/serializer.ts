@@ -12,10 +12,9 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { canonicalAnnotations } from "../core/json-value";
 import {
   type EdgeRegistration,
-  type GraphAnnotations,
-  type KindAnnotations,
   type NodeRegistration,
   type NullCheckOp,
   type UniqueConstraint,
@@ -75,7 +74,7 @@ export function serializeSchema<G extends GraphDef>(
   const indexes = serializeIndexes(graph.indexes);
   const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
-  const annotations = canonicalGraphAnnotations(graph.annotations);
+  const annotations = canonicalAnnotations(graph.annotations);
 
   return {
     graphId: graph.id,
@@ -175,27 +174,6 @@ function canonicalExtension(
   if (document.version !== LEGACY_GRAPH_EXTENSION_VERSION) return document;
   const { version: _omit, ...rest } = document;
   return rest;
-}
-
-/**
- * Annotations are omitted from the canonical form when absent OR
- * empty (`{}`). Mirrors the omit-when-empty rule applied to
- * `indexes` and `deprecatedKinds` so that legacy graphs without
- * annotations and graphs declaring `annotations: {}` hash
- * byte-identically.
- */
-function canonicalAnnotations(
-  annotations: KindAnnotations | undefined,
-): KindAnnotations | undefined {
-  if (annotations === undefined) return undefined;
-  if (Object.keys(annotations).length === 0) return undefined;
-  return annotations;
-}
-
-function canonicalGraphAnnotations(
-  annotations: GraphAnnotations | undefined,
-): GraphAnnotations | undefined {
-  return canonicalAnnotations(annotations);
 }
 
 // ============================================================

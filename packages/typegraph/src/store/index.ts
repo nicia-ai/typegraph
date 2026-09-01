@@ -4,7 +4,7 @@ export type {
   RuntimeEdgeTypeFor,
   RuntimeNodeKind,
   RuntimeNodeTypeFor,
-} from "./runtime-kind";
+} from "../core/runtime-kind";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
@@ -14,6 +14,8 @@ export {
   type BulkFindRuntimeEdgesFromParams,
   type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
+  type CompareAndSetAbsent,
+  type CompareAndSetExpected,
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -82,6 +84,7 @@ export {
   type UpdateEdgeInput,
   type UpdateNodeInput,
 } from "./types";
+export { compareAndSetAbsent } from "./types";
 
 // StoreView (read-only as-of lens)
 export type {
@@ -180,7 +183,7 @@ export type {
 } from "./search";
 export { StoreSearch } from "./search-facade";
 
-// Snapshot-consistent population and declared-schema analysis
+// Current population and declared-schema analysis
 export type {
   KindPopulationStatistics,
   PropertyPopulationStatistics,

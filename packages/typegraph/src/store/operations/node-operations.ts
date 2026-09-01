@@ -81,6 +81,7 @@ import {
   type InsertNodeParams,
   isLiveNodeRow,
   type NodeInsertProjection,
+  type NodePropertyExpectation,
   type NodeRow as BackendNodeRow,
   rowPropsToObject,
   type TransactionBackend,
@@ -94,6 +95,7 @@ import {
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
+  type JsonScalar,
   type JsonValue,
   type KindEntity,
   type NodeType,
@@ -191,6 +193,7 @@ import {
 import { type NodeRow, rowToNode } from "../row-mappers";
 import {
   type BulkOperationHookContext,
+  compareAndSetAbsent,
   type CreateNodeInput,
   type GetOrCreateAction,
   type Node,
@@ -3071,6 +3074,94 @@ export async function executeNodeUpdate<G extends GraphDef>(
   );
 }
 
+function normalizeCompareAndSetExpectations(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  inputExpected: Record<string, unknown>,
+): Readonly<Record<string, NodePropertyExpectation>> {
+  if (Object.keys(inputExpected).length === 0) {
+    throw new ValidationError("compareAndSet() expected must not be empty", {
+      entityType: "node",
+      kind,
+      operation: "update",
+      issues: [{ path: "expected", message: "Provide at least one property" }],
+    });
+  }
+  const unknownExpectedProperty = Object.keys(inputExpected).find(
+    (property) => !Object.hasOwn(schema.shape, property),
+  );
+  if (unknownExpectedProperty !== undefined) {
+    throw new ValidationError(
+      `Unknown ${kind} property in compareAndSet() expected state: ${unknownExpectedProperty}`,
+      {
+        entityType: "node",
+        kind,
+        operation: "update",
+        issues: [
+          {
+            path: unknownExpectedProperty,
+            message: "Property is not declared by the node schema",
+          },
+        ],
+      },
+    );
+  }
+
+  const expected = createDataKeyedBag<NodePropertyExpectation>();
+  const scalarExpectedInput = createDataKeyedBag<unknown>();
+  for (const [property, value] of Object.entries(inputExpected)) {
+    if (value === compareAndSetAbsent) {
+      expected[property] = { kind: "absent" };
+      continue;
+    }
+    if (value === undefined || (typeof value === "object" && value !== null)) {
+      throw new ValidationError(
+        `compareAndSet() expected property "${property}" must be a JSON scalar or compareAndSetAbsent`,
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          issues: [
+            {
+              path: property,
+              message:
+                "Expected a string, number, boolean, null, or compareAndSetAbsent",
+            },
+          ],
+        },
+      );
+    }
+    scalarExpectedInput[property] = value;
+  }
+
+  const parsedExpected = validateNodeProps(
+    schema.partial(),
+    scalarExpectedInput,
+    { kind, operation: "update" },
+  );
+  for (const property of Object.keys(scalarExpectedInput)) {
+    const value = parsedExpected[property];
+    if (value === undefined || (typeof value === "object" && value !== null)) {
+      throw new ValidationError(
+        `compareAndSet() expected property "${property}" did not resolve to a JSON scalar`,
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          issues: [{ path: property, message: "Expected a JSON scalar" }],
+        },
+      );
+    }
+    assertJsonValue(
+      value,
+      property,
+      `Node "${kind}" compareAndSet expected state`,
+    );
+    expected[property] = { kind: "value", value: value as JsonScalar };
+  }
+  return expected;
+}
+
 /**
  * Executes an atomic, set-based update of current nodes. The backend returns
  * every after-image so the Store can validate the complete rows before
@@ -3083,12 +3174,14 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
   candidateIds: CompiledSelectSql,
   candidateIdColumn: string,
   backend: GraphBackend | TransactionBackend,
-  options: Readonly<{
-    operation?: "compareAndSet" | "updateWhere";
-    expected?: Record<string, unknown>;
-  }> = {},
+  request:
+    | Readonly<{ operation: "updateWhere" }>
+    | Readonly<{
+        operation: "compareAndSet";
+        expected: Record<string, unknown>;
+      }>,
 ): Promise<Readonly<{ affectedCount: number }>> {
-  const operation = options.operation ?? "updateWhere";
+  const operation = request.operation;
   const registration = getNodeRegistration(ctx.graph, kind);
   const schema = registration.type.schema;
   const uniqueConstraints = registration.unique ?? [];
@@ -3171,56 +3264,10 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
     );
   }
 
-  const inputExpected = options.expected;
-  const expectedProperties = createDataKeyedBag<JsonValue>();
-  const expectedAbsentProperties: string[] = [];
-  if (inputExpected !== undefined) {
-    if (Object.keys(inputExpected).length === 0) {
-      throw new ValidationError("compareAndSet() expected must not be empty", {
-        entityType: "node",
-        kind,
-        operation: "update",
-        issues: [
-          { path: "expected", message: "Provide at least one property" },
-        ],
-      });
-    }
-    const unknownExpectedProperty = Object.keys(inputExpected).find(
-      (property) => !Object.hasOwn(schema.shape, property),
-    );
-    if (unknownExpectedProperty !== undefined) {
-      throw new ValidationError(
-        `Unknown ${kind} property in compareAndSet() expected state: ${unknownExpectedProperty}`,
-        {
-          entityType: "node",
-          kind,
-          operation: "update",
-          issues: [
-            {
-              path: unknownExpectedProperty,
-              message: "Property is not declared by the node schema",
-            },
-          ],
-        },
-      );
-    }
-    const parsedExpected = validateNodeProps(schema.partial(), inputExpected, {
-      kind,
-      operation: "update",
-    });
-    for (const [property, value] of Object.entries(parsedExpected)) {
-      if (value === undefined) {
-        expectedAbsentProperties.push(property);
-        continue;
-      }
-      assertJsonValue(
-        value,
-        property,
-        `Node "${kind}" compareAndSet expected state`,
-      );
-      expectedProperties[property] = value as JsonValue;
-    }
-  }
+  const expected =
+    request.operation === "compareAndSet" ?
+      normalizeCompareAndSetExpectations(schema, kind, request.expected)
+    : createDataKeyedBag<NodePropertyExpectation>();
 
   if (
     uniqueConstraints.length > 0 &&
@@ -3273,18 +3320,28 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
       backend,
       (session) =>
         session.reviseNodeSet(
-          {
-            operation,
-            kind,
-            schema,
-            uniqueConstraints,
-            patch,
-            unsetProperties,
-            candidateIds,
-            candidateIdColumn,
-            expectedProperties,
-            expectedAbsentProperties,
-          },
+          operation === "compareAndSet" ?
+            {
+              operation: "compareAndSet",
+              kind,
+              schema,
+              uniqueConstraints,
+              patch,
+              unsetProperties,
+              candidateIds,
+              candidateIdColumn,
+              expected,
+            }
+          : {
+              operation: "updateWhere",
+              kind,
+              schema,
+              uniqueConstraints,
+              patch,
+              unsetProperties,
+              candidateIds,
+              candidateIdColumn,
+            },
           // This path states no window — it patches properties — so the write
           // asserts no stored lower bound. The set UPDATE has no field to
           // carry one, so a future windowed set update is refused here rather

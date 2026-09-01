@@ -27,10 +27,12 @@ import {
 import {
   type GraphBackend,
   type LiveNodeRow,
+  type NodePropertyExpectation,
   type NodeRow,
   rowPropsToObject,
   type TombstonedNodeRow,
   type TransactionBackend,
+  type UpdateNodeSetResult,
 } from "../../backend/types";
 import {
   type DeleteBehavior,
@@ -47,7 +49,6 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
-import { requireDefined } from "../../utils/presence";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
@@ -594,8 +595,7 @@ export async function applyNodeResurrect(
  * `NODE_SET_UPDATE_FENCE_APPLIERS` before this step is reached, rather than
  * accepted into a record that would quietly drop it.
  */
-export type NodeSetUpdateWork = Readonly<{
-  operation?: "compareAndSet" | "updateWhere";
+type NodeSetUpdateCommonWork = Readonly<{
   kind: string;
   schema: z.ZodType<Record<string, unknown>>;
   uniqueConstraints: readonly UniqueConstraint[];
@@ -603,9 +603,16 @@ export type NodeSetUpdateWork = Readonly<{
   unsetProperties: readonly string[];
   candidateIds: CompiledSelectSql;
   candidateIdColumn: string;
-  expectedProperties?: Readonly<Record<string, JsonValue>>;
-  expectedAbsentProperties?: readonly string[];
 }>;
+
+export type NodeSetUpdateWork = NodeSetUpdateCommonWork &
+  (
+    | Readonly<{ operation: "updateWhere" }>
+    | Readonly<{
+        operation: "compareAndSet";
+        expected: Readonly<Record<string, NodePropertyExpectation>>;
+      }>
+  );
 
 /** What a set update reports: how many live rows it rewrote. */
 export type NodeSetUpdateResult = Readonly<{ affectedCount: number }>;
@@ -640,20 +647,39 @@ export async function applyNodeSetUpdate(
   backend: Backend,
 ): Promise<NodeSetUpdateResult> {
   const { kind, schema, uniqueConstraints } = args;
-  const operation = args.operation ?? "updateWhere";
-  const updateNodeSet = backend.updateNodeSet;
-  const compareAndSetNode = backend.compareAndSetNode;
-  if (operation === "updateWhere" && updateNodeSet === undefined) {
-    throw new ConfigurationError(
-      "The transaction backend does not support set-based node updates",
-      { code: "SET_UPDATE_UNSUPPORTED", kind },
-    );
-  }
-  if (operation === "compareAndSet" && compareAndSetNode === undefined) {
-    throw new ConfigurationError(
-      "The transaction backend does not support node compare-and-set",
-      { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
-    );
+  const commonParams = {
+    graphId: ctx.graphId,
+    kind,
+    patch: args.patch,
+    unsetProperties: args.unsetProperties,
+    candidateIds: args.candidateIds,
+    candidateIdColumn: args.candidateIdColumn,
+  } as const;
+  let executeNodeSetUpdate: () => Promise<UpdateNodeSetResult>;
+  if (args.operation === "compareAndSet") {
+    const compareAndSetNode = backend.compareAndSetNode;
+    if (compareAndSetNode === undefined) {
+      throw new ConfigurationError(
+        "The transaction backend does not support node compare-and-set",
+        { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
+      );
+    }
+    executeNodeSetUpdate = () =>
+      compareAndSetNode({
+        ...commonParams,
+        operation: "compareAndSet",
+        expected: args.expected,
+      });
+  } else {
+    const updateNodeSet = backend.updateNodeSet;
+    if (updateNodeSet === undefined) {
+      throw new ConfigurationError(
+        "The transaction backend does not support set-based node updates",
+        { code: "SET_UPDATE_UNSUPPORTED", kind },
+      );
+    }
+    executeNodeSetUpdate = () =>
+      updateNodeSet({ ...commonParams, operation: "updateWhere" });
   }
   if (
     uniqueConstraints.length > 0 &&
@@ -692,22 +718,7 @@ export async function applyNodeSetUpdate(
       { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
     );
   }
-  const commonParams = {
-    graphId: ctx.graphId,
-    kind,
-    patch: args.patch,
-    unsetProperties: args.unsetProperties,
-    candidateIds: args.candidateIds,
-    candidateIdColumn: args.candidateIdColumn,
-  } as const;
-  const result =
-    operation === "compareAndSet" ?
-      await requireDefined(compareAndSetNode)({
-        ...commonParams,
-        expectedProperties: requireDefined(args.expectedProperties),
-        expectedAbsentProperties: requireDefined(args.expectedAbsentProperties),
-      })
-    : await requireDefined(updateNodeSet)(commonParams);
+  const result = await executeNodeSetUpdate();
   if (result.affectedCount === 0) return { affectedCount: 0 };
 
   const sidecarItems = result.rows.map((row) => {

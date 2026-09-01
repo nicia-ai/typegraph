@@ -1,15 +1,11 @@
-/**
- * Snapshot-consistent whole-store description and declared-schema validation.
- *
- * Both operations deliberately read through one repeatable-read transaction.
- * Their cost is independent of vocabulary size: description submits one node
- * scan and one edge scan, while validation submits one scan for the selected
- * kind. Aggregation and Zod diagnostics happen in-process so every SQL backend
- * shares one semantic owner.
- */
+/** Current-state population statistics and declared-schema validation. */
 import { type z } from "zod";
 
-import type { GraphBackend, TransactionBackend } from "../backend/types";
+import {
+  type GraphBackend,
+  type RowProps,
+  rowPropsToObject,
+} from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import type { KindEntity } from "../core/types";
 import {
@@ -21,13 +17,18 @@ import {
 import type { SqlSchema } from "../query/compiler/schema";
 import { compileTemporalFilter } from "../query/compiler/temporal";
 import { decodeCursor, encodeCursor } from "../query/cursor";
-import { sql } from "../query/sql-fragment";
+import { getDialect } from "../query/dialect";
+import {
+  encodeJsonPointerSegment,
+  type JsonPointer,
+} from "../query/json-pointer";
+import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import { sortedReplacer } from "../schema/canonical";
 import { serializeSchemaProperties } from "../schema/serializer";
 import type { JsonSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
-import { createDataKeyedBag } from "../utils/object";
 import type { SchemaIntrospection } from "./introspect";
 
 const DEFAULT_VALIDATION_PAGE_SIZE = 100;
@@ -36,38 +37,23 @@ const VALIDATION_CURSOR_COLUMNS = [
   "typegraph.validateStore.entity",
   "typegraph.validateStore.kind",
   "typegraph.validateStore.schemaFence",
-  "typegraph.validateStore.dataFence",
-  "typegraph.validateStore.validTime",
-  "typegraph.validateStore.offset",
+  "typegraph.validateStore.afterId",
 ] as const;
 
-type AnalysisRow = Readonly<{
-  kind: string;
-  id: string;
-  props: unknown;
-  valid_from: string | undefined;
-  valid_to: string | undefined;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | undefined;
-}>;
-
 export type StoreAnalysisSnapshot = Readonly<{
-  /** Active persisted schema version, when this graph has one. */
   schemaVersion?: number;
-  /** Active persisted schema hash, when this graph has one. */
   schemaHash?: string;
-  /** Fingerprint of both the Store's declarations and active schema row. */
+  /** Fingerprint of both the Store declarations and active schema row. */
   schemaFence: string;
-  /** Fingerprint of every row in this operation's data scope. */
-  dataFence: string;
-  /** Valid-time instant at which current-row membership was evaluated. */
-  validTime: string;
 }>;
 
 export type PropertyPopulationStatistics = Readonly<{
-  /** RFC 6901 JSON pointer to one declared property. */
+  /** RFC 6901 JSON pointer to a directly addressable declared property. */
   path: string;
+  /** Rows in which the property exists, including explicit JSON null. */
+  presentCount: number;
+  /** Rows in which the property exists and is the JSON null literal. */
+  nullCount: number;
   nonNullCount: number;
   /** `nonNullCount / count`; zero for an empty kind. */
   coverage: number;
@@ -81,6 +67,7 @@ export type KindPopulationStatistics = Readonly<{
 }>;
 
 export type StorePopulationStatistics = Readonly<{
+  /** Schema coordinate observed before and after the aggregate statement. */
   snapshot: StoreAnalysisSnapshot;
   nodes: readonly KindPopulationStatistics[];
   edges: readonly KindPopulationStatistics[];
@@ -94,9 +81,9 @@ export type StoreDescription = Readonly<{
 export type ValidateStoreOptions = Readonly<{
   entity: KindEntity;
   kind: string;
-  /** Number of violations to return. Default 100; maximum 1000. */
+  /** Number of records to scan. Default 100; maximum 1000. */
   pageSize?: number;
-  /** Opaque cursor returned by the preceding page. */
+  /** Opaque keyset cursor returned by the preceding page. */
   cursor?: string;
 }>;
 
@@ -113,7 +100,10 @@ export type StoreValidationFailure = Readonly<{
 }>;
 
 export type StoreValidationPage = Readonly<{
+  /** Schema coordinate observed before and after this page scan. */
   snapshot: StoreAnalysisSnapshot;
+  /** Number of records scanned, independent of the number of violations. */
+  scannedCount: number;
   violations: readonly StoreValidationFailure[];
   nextCursor?: string;
 }>;
@@ -123,11 +113,9 @@ export type StoreAnalysisCursorStaleErrorDetails = Readonly<{
   kind: string;
   expectedSchemaFence: string;
   actualSchemaFence: string;
-  expectedDataFence: string;
-  actualDataFence: string;
 }>;
 
-/** A validation cursor cannot be resumed against a different snapshot. */
+/** A validation cursor cannot be resumed after the active schema changes. */
 export class StoreAnalysisCursorStaleError extends TypeGraphError {
   declare readonly details: StoreAnalysisCursorStaleErrorDetails;
 
@@ -139,7 +127,7 @@ export class StoreAnalysisCursorStaleError extends TypeGraphError {
         category: "user",
         details,
         suggestion:
-          "Restart validateStore() without a cursor to establish a new snapshot.",
+          "Restart validateStore() without a cursor after the schema change.",
       },
     );
     this.name = "StoreAnalysisCursorStaleError";
@@ -159,47 +147,23 @@ type ValidationCursor = Readonly<{
   entity: KindEntity;
   kind: string;
   schemaFence: string;
-  dataFence: string;
-  validTime: string;
-  offset: number;
+  afterId: string;
 }>;
 
-function parseProps(props: unknown): Readonly<Record<string, unknown>> {
-  if (typeof props === "string") {
-    const parsed: unknown = JSON.parse(props);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      !Array.isArray(parsed)
-    ) {
-      return parsed as Readonly<Record<string, unknown>>;
-    }
-    return {};
-  }
-  if (typeof props === "object" && props !== null && !Array.isArray(props)) {
-    return props as Readonly<Record<string, unknown>>;
-  }
-  return {};
-}
+type ValidationRow = Readonly<{ id: string; props: RowProps }>;
+type PopulationRow = Readonly<{
+  entity: KindEntity;
+  kind: string;
+  row_count: number | string | bigint;
+}> &
+  Readonly<Record<string, unknown>>;
+type SchemaCoordinate = StoreAnalysisSnapshot;
 
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((entry) => canonicalValue(entry));
-  }
-  if (typeof value !== "object" || value === null) return value;
-  const result = createDataKeyedBag<unknown>();
-  for (const key of Object.keys(value).toSorted()) {
-    result[key] = canonicalValue(
-      (value as Readonly<Record<string, unknown>>)[key],
-    );
-  }
-  return result;
-}
-
-function escapePointerSegment(segment: string): string {
-  return segment.replaceAll("~", "~0").replaceAll("/", "~1");
-}
-
+/**
+ * Only ordinary nested `properties` members have an unambiguous portable SQL
+ * address. `$ref`, unions, intersections, arrays, and conditionals remain in
+ * the authoritative Zod validation pass rather than receiving fake coverage.
+ */
 function declaredPropertyPaths(
   schema: JsonSchema,
   parent: readonly string[] = [],
@@ -214,27 +178,9 @@ function declaredPropertyPaths(
   return paths;
 }
 
-function valueAtPath(
-  props: Readonly<Record<string, unknown>>,
-  path: readonly string[],
-): unknown {
-  let current: unknown = props;
-  for (const segment of path) {
-    if (
-      typeof current !== "object" ||
-      current === null ||
-      Array.isArray(current)
-    ) {
-      return undefined;
-    }
-    current = (current as Readonly<Record<string, unknown>>)[segment];
-  }
-  return current;
-}
-
 function pathToPointer(path: readonly PropertyKey[]): string {
   return path
-    .map((segment) => `/${escapePointerSegment(String(segment))}`)
+    .map((segment) => `/${encodeJsonPointerSegment(String(segment))}`)
     .join("");
 }
 
@@ -278,23 +224,18 @@ function decodeValidationCursor(cursor: string): ValidationCursor {
       ],
     });
   }
-  const [entity, kind, schemaFence, dataFence, validTime, offset] =
-    decoded.vals;
+  const [entity, kind, schemaFence, afterId] = decoded.vals;
   if (
     (entity !== "node" && entity !== "edge") ||
     typeof kind !== "string" ||
     typeof schemaFence !== "string" ||
-    typeof dataFence !== "string" ||
-    typeof validTime !== "string" ||
-    typeof offset !== "number" ||
-    !Number.isInteger(offset) ||
-    offset < 0
+    typeof afterId !== "string"
   ) {
     throw new ValidationError("Invalid validateStore cursor payload.", {
       issues: [{ path: "cursor", message: "Cursor payload is malformed" }],
     });
   }
-  return { entity, kind, schemaFence, dataFence, validTime, offset };
+  return { entity, kind, schemaFence, afterId };
 }
 
 function encodeValidationCursor(cursor: ValidationCursor): string {
@@ -302,46 +243,14 @@ function encodeValidationCursor(cursor: ValidationCursor): string {
     v: 1,
     d: "f",
     cols: VALIDATION_CURSOR_COLUMNS,
-    vals: [
-      cursor.entity,
-      cursor.kind,
-      cursor.schemaFence,
-      cursor.dataFence,
-      cursor.validTime,
-      cursor.offset,
-    ],
+    vals: [cursor.entity, cursor.kind, cursor.schemaFence, cursor.afterId],
   });
 }
 
-async function readRows(
-  backend: TransactionBackend,
-  schema: SqlSchema,
-  graphId: string,
-  entity: KindEntity,
-  validTime: string,
-  kind?: string,
-): Promise<readonly AnalysisRow[]> {
-  const table = entity === "node" ? schema.nodesTable : schema.edgesTable;
-  const temporal = compileTemporalFilter({
-    mode: "current",
-    currentTimestamp: sql`${validTime}`,
-  });
-  const kindFilter = kind === undefined ? sql`` : sql` AND kind = ${kind}`;
-  const query = sql`SELECT kind, id, props, valid_from, valid_to, created_at, updated_at, deleted_at FROM ${table} WHERE graph_id = ${graphId} AND ${temporal}${kindFilter} ORDER BY kind, id`;
-  return backend.execute<AnalysisRow>(asCompiledRowsSql(query));
-}
-
-async function schemaFenceFor<G extends GraphDef>(
+async function schemaCoordinateFor<G extends GraphDef>(
   ctx: AnalysisContext<G>,
-  backend: TransactionBackend,
-): Promise<
-  Readonly<{
-    schemaVersion?: number;
-    schemaHash?: string;
-    schemaFence: string;
-  }>
-> {
-  const active = await backend.getActiveSchema(ctx.graphId);
+): Promise<SchemaCoordinate> {
+  const active = await ctx.backend.getActiveSchema(ctx.graphId);
   const declaration = ctx.introspect();
   if (
     declaration.schemaVersion !== undefined &&
@@ -378,11 +287,16 @@ async function schemaFenceFor<G extends GraphDef>(
     })),
   };
   const schemaFence = await sha256Hex(
-    JSON.stringify({
-      active:
-        active === undefined ? undefined : [active.version, active.schema_hash],
-      declaration: canonicalValue(declarationShape),
-    }),
+    JSON.stringify(
+      {
+        active:
+          active === undefined ? undefined : (
+            [active.version, active.schema_hash]
+          ),
+        declaration: declarationShape,
+      },
+      sortedReplacer,
+    ),
     16,
   );
   return {
@@ -392,50 +306,131 @@ async function schemaFenceFor<G extends GraphDef>(
   };
 }
 
-async function dataFenceFor(
-  rows: readonly AnalysisRow[],
-  scope: string,
-): Promise<string> {
-  return sha256Hex(
-    JSON.stringify({
-      scope,
-      rows: rows.map((row) => ({
-        kind: row.kind,
-        id: row.id,
-        props: canonicalValue(parseProps(row.props)),
-        validFrom: row.valid_from,
-        validTo: row.valid_to,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        deletedAt: row.deleted_at,
-      })),
-    }),
-    16,
+function assertStableSchema(
+  before: SchemaCoordinate,
+  after: SchemaCoordinate,
+): void {
+  if (before.schemaFence === after.schemaFence) return;
+  throw new TypeGraphError(
+    "The active schema changed while Store analysis was reading data.",
+    "STORE_ANALYSIS_SCHEMA_CHANGED",
+    {
+      category: "user",
+      details: {
+        beforeSchemaFence: before.schemaFence,
+        afterSchemaFence: after.schemaFence,
+      },
+      suggestion: "Retry the analysis against the new active schema.",
+    },
   );
+}
+
+function numberFromSql(value: unknown, label: string): number {
+  const converted = Number(value);
+  if (!Number.isSafeInteger(converted) || converted < 0) {
+    throw new TypeGraphError(
+      `Store analysis received an invalid ${label} aggregate.`,
+      "STORE_ANALYSIS_INVALID_AGGREGATE",
+      { category: "system", details: { label, value: String(value) } },
+    );
+  }
+  return converted;
+}
+
+function allDeclaredPaths<G extends GraphDef>(graph: G): readonly string[] {
+  const paths = new Set<string>();
+  for (const registration of Object.values(graph.nodes)) {
+    for (const path of declaredPropertyPaths(
+      serializeSchemaProperties(registration.type.schema),
+    )) {
+      paths.add(pathToPointer(path));
+    }
+  }
+  for (const registration of Object.values(graph.edges)) {
+    for (const path of declaredPropertyPaths(
+      serializeSchemaProperties(registration.type.schema),
+    )) {
+      paths.add(pathToPointer(path));
+    }
+  }
+  return [...paths].toSorted();
+}
+
+function populationSelect<G extends GraphDef>(
+  ctx: AnalysisContext<G>,
+  entity: KindEntity,
+  paths: readonly string[],
+  currentTimestamp: string,
+): SqlFragment {
+  const table =
+    entity === "node" ? ctx.schema.nodesTable : ctx.schema.edgesTable;
+  const dialect = getDialect(ctx.backend.dialect);
+  const temporal = compileTemporalFilter({
+    mode: "current",
+    currentTimestamp: sql`${currentTimestamp}`,
+  });
+  const aggregates = paths.flatMap((path, index) => {
+    const pointer = path as JsonPointer;
+    const presentAlias = sql.identifier(`p${index}_present`);
+    const nonNullAlias = sql.identifier(`p${index}_non_null`);
+    return [
+      sql`SUM(CASE WHEN ${dialect.jsonHasPath(sql`props`, pointer)} THEN 1 ELSE 0 END) AS ${presentAlias}`,
+      sql`SUM(CASE WHEN ${dialect.jsonPathIsNotNull(sql`props`, pointer)} THEN 1 ELSE 0 END) AS ${nonNullAlias}`,
+    ];
+  });
+  const aggregateColumns =
+    aggregates.length === 0 ? sql`` : sql`, ${sql.join(aggregates, sql`, `)}`;
+  return sql`SELECT ${entity} AS entity, kind, COUNT(*) AS row_count${aggregateColumns} FROM ${table} WHERE graph_id = ${ctx.graphId} AND ${temporal} GROUP BY kind`;
+}
+
+async function readPopulationRows<G extends GraphDef>(
+  ctx: AnalysisContext<G>,
+  paths: readonly string[],
+): Promise<readonly PopulationRow[]> {
+  const currentTimestamp = nowIso();
+  const query = sql`${populationSelect(ctx, "node", paths, currentTimestamp)} UNION ALL ${populationSelect(ctx, "edge", paths, currentTimestamp)} ORDER BY entity, kind`;
+  return ctx.backend.execute<PopulationRow>(asCompiledRowsSql(query));
 }
 
 function populationForKind(
   entity: KindEntity,
   kind: string,
   schema: z.ZodType,
-  rows: readonly AnalysisRow[],
+  paths: readonly string[],
+  rows: readonly PopulationRow[],
 ): KindPopulationStatistics {
-  const kindRows = rows.filter((row) => row.kind === kind);
-  const paths = declaredPropertyPaths(serializeSchemaProperties(schema));
+  const row = rows.find(
+    (candidate) => candidate.entity === entity && candidate.kind === kind,
+  );
+  const count = row === undefined ? 0 : numberFromSql(row.row_count, "count");
+  const declaredPaths = new Set(
+    declaredPropertyPaths(serializeSchemaProperties(schema)).map((path) =>
+      pathToPointer(path),
+    ),
+  );
   return {
     entity,
     kind,
-    count: kindRows.length,
-    properties: paths.map((path) => {
-      const nonNullCount = kindRows.filter((row) => {
-        const value = valueAtPath(parseProps(row.props), path);
-        return value !== undefined && value !== null;
-      }).length;
-      return {
-        path: pathToPointer(path),
-        nonNullCount,
-        coverage: kindRows.length === 0 ? 0 : nonNullCount / kindRows.length,
-      };
+    count,
+    properties: paths.flatMap((path, index) => {
+      if (!declaredPaths.has(path)) return [];
+      const presentCount =
+        row === undefined ? 0 : (
+          numberFromSql(row[`p${index}_present`], "present count")
+        );
+      const nonNullCount =
+        row === undefined ? 0 : (
+          numberFromSql(row[`p${index}_non_null`], "non-null count")
+        );
+      return [
+        {
+          path,
+          presentCount,
+          nullCount: presentCount - nonNullCount,
+          nonNullCount,
+          coverage: count === 0 ? 0 : nonNullCount / count,
+        },
+      ];
     }),
   };
 }
@@ -444,16 +439,13 @@ function zodFailures(
   entity: KindEntity,
   kind: string,
   schema: z.ZodType,
-  rows: readonly AnalysisRow[],
+  rows: readonly ValidationRow[],
 ): readonly StoreValidationFailure[] {
   const failures: StoreValidationFailure[] = [];
   for (const row of rows) {
-    const parsed = schema.safeParse(parseProps(row.props));
+    const parsed = schema.safeParse(rowPropsToObject(row.props));
     if (parsed.success) continue;
     for (const issue of parsed.error.issues) {
-      // Undeclared fields are healthy semi-structured state even when a
-      // consumer authored a strict Zod object. Every other Zod issue is a
-      // rule the declared schema actually owns.
       if (issue.code === "unrecognized_keys") continue;
       const path: string[] = [];
       for (const segment of issue.path) path.push(String(segment));
@@ -471,67 +463,47 @@ function zodFailures(
   return failures;
 }
 
-function requireSnapshotBackend<G extends GraphDef>(
+async function readValidationRows<G extends GraphDef>(
   ctx: AnalysisContext<G>,
-): void {
-  if (ctx.backend.capabilities.execution.interactiveTransactions) return;
-  throw new TypeGraphError(
-    "Store analysis requires a backend that can hold a repeatable-read snapshot.",
-    "STORE_ANALYSIS_SNAPSHOT_UNSUPPORTED",
-    {
-      category: "system",
-      details: { dialect: ctx.backend.dialect },
-      suggestion:
-        "Use a transactional SQLite or PostgreSQL backend for describe() and validateStore().",
-    },
-  );
+  options: Pick<ValidateStoreOptions, "entity" | "kind">,
+  afterId: string | undefined,
+  limit: number,
+): Promise<readonly ValidationRow[]> {
+  const table =
+    options.entity === "node" ? ctx.schema.nodesTable : ctx.schema.edgesTable;
+  const temporal = compileTemporalFilter({
+    mode: "current",
+    currentTimestamp: sql`${nowIso()}`,
+  });
+  const keyset = afterId === undefined ? sql`` : sql` AND id > ${afterId}`;
+  const query = sql`SELECT id, props FROM ${table} WHERE graph_id = ${ctx.graphId} AND kind = ${options.kind} AND ${temporal}${keyset} ORDER BY id LIMIT ${limit}`;
+  return ctx.backend.execute<ValidationRow>(asCompiledRowsSql(query));
 }
 
 export async function describeStore<G extends GraphDef>(
   ctx: AnalysisContext<G>,
 ): Promise<StoreDescription> {
-  requireSnapshotBackend(ctx);
-  return ctx.backend.transaction(
-    async (backend) => {
-      const validTime = nowIso();
-      const [schemaCoordinate, nodeRows, edgeRows] = await Promise.all([
-        schemaFenceFor(ctx, backend),
-        readRows(backend, ctx.schema, ctx.graphId, "node", validTime),
-        readRows(backend, ctx.schema, ctx.graphId, "edge", validTime),
-      ]);
-      const dataFence = await sha256Hex(
-        JSON.stringify({
-          nodes: await dataFenceFor(nodeRows, "node"),
-          edges: await dataFenceFor(edgeRows, "edge"),
-        }),
-        16,
-      );
-      const nodes = Object.entries(ctx.graph.nodes).map(
-        ([kind, registration]) =>
-          populationForKind("node", kind, registration.type.schema, nodeRows),
-      );
-      const edges = Object.entries(ctx.graph.edges).map(
-        ([kind, registration]) =>
-          populationForKind("edge", kind, registration.type.schema, edgeRows),
-      );
-      return {
-        schema: ctx.introspect(),
-        statistics: {
-          snapshot: { ...schemaCoordinate, dataFence, validTime },
-          nodes,
-          edges,
-        },
-      };
-    },
-    { isolationLevel: "repeatable_read", accessMode: "read_only" },
+  const before = await schemaCoordinateFor(ctx);
+  const paths = allDeclaredPaths(ctx.graph);
+  const rows = await readPopulationRows(ctx, paths);
+  const after = await schemaCoordinateFor(ctx);
+  assertStableSchema(before, after);
+  const nodes = Object.entries(ctx.graph.nodes).map(([kind, registration]) =>
+    populationForKind("node", kind, registration.type.schema, paths, rows),
   );
+  const edges = Object.entries(ctx.graph.edges).map(([kind, registration]) =>
+    populationForKind("edge", kind, registration.type.schema, paths, rows),
+  );
+  return {
+    schema: ctx.introspect(),
+    statistics: { snapshot: before, nodes, edges },
+  };
 }
 
 export async function validateStore<G extends GraphDef>(
   ctx: AnalysisContext<G>,
   options: ValidateStoreOptions,
 ): Promise<StoreValidationPage> {
-  requireSnapshotBackend(ctx);
   const pageSize = normalizePageSize(options.pageSize);
   const cursor =
     options.cursor === undefined ?
@@ -565,62 +537,45 @@ export async function validateStore<G extends GraphDef>(
       },
     );
   }
-  const validTime = cursor?.validTime ?? nowIso();
-  return ctx.backend.transaction(
-    async (backend) => {
-      const [schemaCoordinate, rows] = await Promise.all([
-        schemaFenceFor(ctx, backend),
-        readRows(
-          backend,
-          ctx.schema,
-          ctx.graphId,
-          options.entity,
-          validTime,
-          options.kind,
-        ),
-      ]);
-      const dataFence = await dataFenceFor(rows, options.entity);
-      if (
-        cursor !== undefined &&
-        (cursor.schemaFence !== schemaCoordinate.schemaFence ||
-          cursor.dataFence !== dataFence)
-      ) {
-        throw new StoreAnalysisCursorStaleError({
+
+  const before = await schemaCoordinateFor(ctx);
+  if (cursor !== undefined && cursor.schemaFence !== before.schemaFence) {
+    throw new StoreAnalysisCursorStaleError({
+      entity: options.entity,
+      kind: options.kind,
+      expectedSchemaFence: cursor.schemaFence,
+      actualSchemaFence: before.schemaFence,
+    });
+  }
+  const fetched = await readValidationRows(
+    ctx,
+    options,
+    cursor?.afterId,
+    pageSize + 1,
+  );
+  const rows = fetched.slice(0, pageSize);
+  const after = await schemaCoordinateFor(ctx);
+  assertStableSchema(before, after);
+  const hasMore = fetched.length > rows.length;
+  const lastRow = rows.at(-1);
+  return {
+    snapshot: before,
+    scannedCount: rows.length,
+    violations: zodFailures(
+      options.entity,
+      options.kind,
+      registration.type.schema,
+      rows,
+    ),
+    ...(hasMore && lastRow !== undefined ?
+      {
+        nextCursor: encodeValidationCursor({
           entity: options.entity,
           kind: options.kind,
-          expectedSchemaFence: cursor.schemaFence,
-          actualSchemaFence: schemaCoordinate.schemaFence,
-          expectedDataFence: cursor.dataFence,
-          actualDataFence: dataFence,
-        });
+          schemaFence: before.schemaFence,
+          afterId: lastRow.id,
+        }),
       }
-      const failures = zodFailures(
-        options.entity,
-        options.kind,
-        registration.type.schema,
-        rows,
-      );
-      const offset = cursor?.offset ?? 0;
-      const violations = failures.slice(offset, offset + pageSize);
-      const nextOffset = offset + violations.length;
-      const snapshot = { ...schemaCoordinate, dataFence, validTime };
-      return {
-        snapshot,
-        violations,
-        ...(nextOffset >= failures.length ?
-          {}
-        : {
-            nextCursor: encodeValidationCursor({
-              entity: options.entity,
-              kind: options.kind,
-              schemaFence: schemaCoordinate.schemaFence,
-              dataFence,
-              validTime,
-              offset: nextOffset,
-            }),
-          }),
-      };
-    },
-    { isolationLevel: "repeatable_read", accessMode: "read_only" },
-  );
+    : {}),
+  };
 }
