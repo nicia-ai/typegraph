@@ -1,11 +1,21 @@
 // Types
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
   type BulkEdgeSourceGroup,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkFindRuntimeEdgesFromParams,
+  type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
+  type CompareAndSetAbsent,
+  type CompareAndSetExpected,
   type ConstraintNames,
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -50,6 +60,11 @@ export {
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
   type RecordedStoreViewNodeCollections,
+  type RuntimeBulkEdgeSourceGroup,
+  type RuntimeEdgeCollection,
+  type RuntimeEdgeFor,
+  type RuntimeNodeCollection,
+  type RuntimeNodeReferenceFor,
   type ScopedMeasure,
   type SqlAvailability,
   type StoreHooks,
@@ -69,6 +84,7 @@ export {
   type UpdateEdgeInput,
   type UpdateNodeInput,
 } from "./types";
+export { compareAndSetAbsent } from "./types";
 
 // StoreView (read-only as-of lens)
 export type {
@@ -120,14 +136,18 @@ export type {
   AdapterHistoryTransactionContext,
   AdapterRecordedReadStore,
   AdapterStore,
+  EdgeCollectionLookup,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,
+  NodeCollectionLookup,
   RebuildContributionOptions,
   ReconciledSchema,
   RecordedReadStore,
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,
+  RequiredEdgeCollectionLookup,
+  RequiredNodeCollectionLookup,
   SchemaManagerOptions,
   SchemaValidationResult,
   Store,
@@ -162,6 +182,20 @@ export type {
   VectorSearchOptions,
 } from "./search";
 export { StoreSearch } from "./search-facade";
+
+// Current population and declared-schema analysis
+export type {
+  KindPopulationStatistics,
+  PropertyPopulationStatistics,
+  StoreAnalysisCursorStaleErrorDetails,
+  StoreAnalysisSchemaCoordinate,
+  StoreDescription,
+  StorePopulationStatistics,
+  StoreValidationFailure,
+  StoreValidationPage,
+  ValidateStoreOptions,
+} from "./store-analysis";
+export { StoreAnalysisCursorStaleError } from "./store-analysis";
 
 // Fulltext rebuild
 export type {

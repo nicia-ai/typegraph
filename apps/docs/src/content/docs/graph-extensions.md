@@ -497,6 +497,37 @@ Each method runtime-validates against the registry: a typo throws
 endpoint for the current edge / direction throws `EndpointError`.
 Compile-time `from` / `traverse` / `to` are unchanged.
 
+When the extension document is available in typed code, mint Store-bound
+runtime-kind evidence from the exact persisted definition. The token narrows
+collections and query aliases without asking callers to restate the schema in
+Zod:
+
+```ts
+const tagKind = store.runtimeNodeKind("Tag", extension.nodes.Tag);
+const taggedWithKind = store.runtimeEdgeKind(
+  "taggedWith",
+  extension.edges.taggedWith,
+);
+
+const tags = store.getNodeCollectionOrThrow(tagKind);
+const rows = await store.query()
+  .fromDynamic(tagKind, "tag")       // ctx.tag has the declared Tag fields
+  .traverseDynamic(taggedWithKind, "edge") // ctx.edge is narrowed too
+  .toDynamic("Document", "document")
+  .select((ctx) => ({ label: ctx.tag.label, weight: ctx.edge.weight }))
+  .execute();
+```
+
+Definitions, rather than hand-authored Zod schemas, are the type evidence:
+TypeGraph compares the complete graph-extension declaration that TypeScript
+infers against the definition persisted for that kind. This keeps refinements
+such as enums, optionality, arrays, and numeric constraints on one authoritative
+surface. Tokens are bound to the issuing Store and active schema hash; use a
+fresh token after reopening or evolving a Store. Token lookups intentionally
+use the throwing `getNodeCollectionOrThrow` / `getEdgeCollectionOrThrow`
+variants because valid Store-issued evidence already proves that the kind
+exists.
+
 Predicate accessors on dynamic aliases use a `.field(name)`
 discriminator:
 
@@ -579,6 +610,7 @@ durable-state metadata the store has loaded so far. Its shape:
 | Field                  | Type                                  | Notes                                                                                          |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `graphId`              | `string`                              | The graph's stable id.                                                                         |
+| `annotations`          | `GraphAnnotations \| undefined`       | Merged graph-scoped metadata from `defineGraph` and runtime extensions.                         |
 | `kinds`                | `readonly KindIntrospection[]`        | Merged node kinds with `origin: "compile-time" \| "runtime"`, description, annotations, etc.   |
 | `edges`                | `readonly EdgeIntrospection[]`        | Merged edge kinds with the same origin discriminator and endpoint information.                 |
 | `ontology`             | `readonly OntologyIntrospection[]`    | Ontology relations declared on either tier.                                                    |
@@ -590,6 +622,7 @@ durable-state metadata the store has loaded so far. Its shape:
 ```ts
 const intro = store.introspect();
 console.log(intro.schemaVersion); // e.g. 2
+console.log(intro.annotations?.displayName);
 console.log(intro.extension?.nodes?.Paper); // ExtensionNodeDef or undefined
 console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
 ```
@@ -597,6 +630,94 @@ console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
 The `extension` field round-trips: passing it back through
 `defineGraphExtension(intro.extension!)` and `evolve()` against an
 empty graph reconstructs the same extension kinds.
+
+Graph extensions may also carry graph-scoped annotations:
+
+```ts
+const extension = defineGraphExtension({
+  annotations: {
+    displayName: "Customer knowledge",
+    capabilities: { semanticSearch: true },
+  },
+});
+```
+
+Annotation keys are shallow-merged. A later extension replaces the complete
+value of each key it supplies; it does not recursively merge nested objects.
+
+## Population statistics and stored-data validation
+
+`await store.describe()` pairs the merged schema introspection with current
+population statistics. It returns node and edge counts for every declared kind
+plus present, explicit-null, and non-null counts (and non-null coverage) for
+each directly addressable declared property:
+
+```ts
+const description = await store.describe();
+const people = description.statistics.nodes.find(
+  (entry) => entry.kind === "Person",
+);
+
+console.log(people?.count);
+console.log(
+  people?.properties.find((property) => property.path === "/email")?.coverage,
+);
+```
+
+The schema coordinate includes the active schema version and hash when present
+and a `schemaFence`. TypeGraph reads that coordinate before and after the
+bounded, sequential SQL aggregate statements and refuses the result if it
+changed. Node and edge properties are queried separately, and wide schemas are
+split into fixed-width path batches. The database, rather than TypeGraph's
+JavaScript process, computes all counts. Coverage follows ordinary nested JSON
+Schema `properties`; TypeGraph intentionally does not invent population
+semantics through `$ref`, unions, intersections, arrays, or conditionals.
+`validateStore()` remains authoritative for those schemas. Concurrent writes
+can affect different `describe()` path batches differently; the schema fence
+detects schema changes, not data changes.
+
+Use `validateStore()` to find rows that no longer satisfy a kind's current
+declared Zod schema, for example after tightening a rule around existing data:
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await store.validateStore({
+    entity: "node",
+    kind: "Person",
+    pageSize: 250,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+  for (const failure of page.violations) {
+    console.log(failure.id, failure.path, failure.reason);
+  }
+  cursor = page.nextCursor;
+} while (cursor !== undefined);
+```
+
+Undeclared properties are healthy semi-structured state and are never reported
+as violations, including when the authored Zod object is strict. Each failure
+names the record id, JSON-pointer path, top-level property when applicable,
+Zod issue code, and reason.
+
+`pageSize` is the number of records scanned, not a cap on violations: one record
+can contribute several Zod issues. Each request performs a bounded SQL keyset
+scan (`LIMIT pageSize + 1`) and reports `scannedCount`; it never materializes or
+rescans the complete kind just to continue. Cursors bind the entity, kind,
+schema fence, and last scanned id. A schema change throws
+`StoreAnalysisCursorStaleError`. Data pages are deliberately live rather than a
+claimed cross-request snapshot, so concurrent inserts, updates, and deletes can
+affect later pages. Each page still reads the schema coordinate before and after
+its data statement and refuses a concurrent schema flip.
+
+Both analysis methods are current-only. They are absent from `StoreView` and
+transaction callback facades; recorded/as-of population analysis is deferred
+until it can be backed by an equally explicit temporal contract. Because the
+consistency boundary is sequential SQL statements plus schema bracketing, these
+methods also work on non-interactive transactional adapters. Calling
+`store.describe()` through an enclosing root `store` inside a transaction
+callback does not join that transaction: where the adapter permits the call,
+it reads through the root backend outside the callback's transaction.
 
 ## `store.materializeIndexes(options?)`
 

@@ -2,6 +2,11 @@
  * TraversalBuilder - Intermediate builder for edge traversals.
  */
 import { type GraphDef } from "../../core/define-graph";
+import {
+  resolveRuntimeKindInput,
+  type RuntimeNodeKind,
+  type RuntimeNodeTypeFor,
+} from "../../core/runtime-kind";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
 import { EndpointError, KindNotFoundError } from "../../errors";
 import { isInteropProbeKey } from "../../utils/object";
@@ -29,6 +34,7 @@ import {
   type DynamicEdgeType,
   type DynamicNodeType,
 } from "./dynamic";
+import { getQueryBuilderInternalContext } from "./internal-context";
 import { type QueryBuilder } from "./query-builder";
 import {
   type AliasMap,
@@ -54,14 +60,18 @@ import { validateSqlIdentifier } from "./validation";
  * Resolves the edge type for an edge alias based on its kind type parameter.
  *
  * For `traverse(...)`, `EK` is a literal like `"authoredBy"` and the
- * type comes from the typed graph. For `traverseDynamic(...)`, `EK` is
- * widened to `string` — `string extends EK` distinguishes that case and
- * resolves to `DynamicEdgeType`, so the conditional accessor types fire.
+ * type comes from the typed graph. For string-keyed `traverseDynamic(...)`,
+ * `EK` is widened to `string`, so this falls back to `DynamicEdgeType`.
+ * Store-issued runtime-kind evidence overrides that fallback through the
+ * `TraversalBuilder`'s `ET` parameter.
  */
 type EdgeTypeForKey<G extends GraphDef, EK> =
   string extends EK ? DynamicEdgeType
   : EK extends keyof G["edges"] & string ? G["edges"][EK]["type"]
   : DynamicEdgeType;
+
+type DynamicNodeTypeFor<T> =
+  T extends RuntimeNodeKind ? RuntimeNodeTypeFor<T> : DynamicNodeType;
 
 // Forward declaration - actual import would cause circular dependency
 type QueryBuilderConstructor = new (
@@ -162,6 +172,7 @@ export class TraversalBuilder<
   PC extends boolean | string = false,
   RecAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap,
   CoordinateState extends QueryCoordinateState = "open",
+  ET extends AnyEdgeType = EdgeTypeForKey<G, EK>,
 > {
   readonly #config: QueryBuilderConfig;
   readonly #state: QueryBuilderState;
@@ -221,7 +232,8 @@ export class TraversalBuilder<
     O extends { depth: infer D extends boolean | string } ? D : DC,
     O extends { path: infer P extends boolean | string } ? P : PC,
     RecAliases,
-    CoordinateState
+    CoordinateState,
+    ET
   > {
     const minDepth = options?.minHops ?? this.#variableLength.minDepth;
     const maxDepth = options?.maxHops ?? this.#variableLength.maxDepth;
@@ -251,7 +263,8 @@ export class TraversalBuilder<
       O extends { depth: infer D extends boolean | string } ? D : DC,
       O extends { path: infer P extends boolean | string } ? P : PC,
       RecAliases,
-      CoordinateState
+      CoordinateState,
+      ET
     >(
       this.#config,
       this.#state,
@@ -289,7 +302,7 @@ export class TraversalBuilder<
    */
   whereEdge(
     alias: EA,
-    predicateFunction: (edge: EdgeAccessor<EdgeTypeForKey<G, EK>>) => Predicate,
+    predicateFunction: (edge: EdgeAccessor<ET>) => Predicate,
   ): TraversalBuilder<
     G,
     Aliases,
@@ -301,12 +314,11 @@ export class TraversalBuilder<
     DC,
     PC,
     RecAliases,
-    CoordinateState
+    CoordinateState,
+    ET
   > {
     const accessor = this.#createEdgeAccessor(alias);
-    const predicate = predicateFunction(
-      accessor as EdgeAccessor<EdgeTypeForKey<G, EK>>,
-    );
+    const predicate = predicateFunction(accessor as EdgeAccessor<ET>);
 
     const newPredicate: NodePredicate = {
       targetAlias: alias,
@@ -325,7 +337,8 @@ export class TraversalBuilder<
       DC,
       PC,
       RecAliases,
-      CoordinateState
+      CoordinateState,
+      ET
     >(
       this.#config,
       this.#state,
@@ -524,31 +537,38 @@ export class TraversalBuilder<
   }
 
   /**
-   * String-keyed sibling of `to` for runtime-declared target kinds.
+   * Runtime-kind sibling of `to`; accepts a kind name or Store-issued token.
    * Throws `KindNotFoundError` if the kind is not registered.
    */
-  toDynamic<A extends string>(
-    kind: string,
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
     alias: UniqueAlias<A, Aliases>,
     options?: { includeSubClasses?: boolean },
   ): QueryBuilder<
     G,
-    Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
-    EdgeAliases & Record<EA, EdgeAlias<EdgeTypeForKey<G, EK>, Optional>>,
+    Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
     RecAliases & BuildRecursiveAliases<DC, PC, A>,
     CoordinateState
   > {
     validateSqlIdentifier(alias);
-    if (!this.#config.registry.hasNodeType(kind)) {
-      throw new KindNotFoundError(kind, "node", {
+    const kindName = resolveRuntimeKindInput(
+      kind,
+      "node",
+      getQueryBuilderInternalContext(this.#config).runtimeKindTokenResolver,
+    );
+    if (!this.#config.registry.hasNodeType(kindName)) {
+      throw new KindNotFoundError(kindName, "node", {
         graphId: this.#config.graphId,
       });
     }
-    this.#assertValidEndpoint(kind);
+    this.#assertValidEndpoint(kindName);
 
     const includeSubClasses = options?.includeSubClasses ?? false;
     const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+      includeSubClasses ?
+        this.#config.registry.expandSubClasses(kindName)
+      : [kindName];
 
     const baseState = this.#stateWithTraversal(alias, kinds);
     const newState: QueryBuilderState = {
@@ -558,8 +578,8 @@ export class TraversalBuilder<
 
     return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
       G,
-      Aliases & Record<A, NodeAlias<DynamicNodeType, Optional>>,
-      EdgeAliases & Record<EA, EdgeAlias<EdgeTypeForKey<G, EK>, Optional>>,
+      Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
+      EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
       RecAliases & BuildRecursiveAliases<DC, PC, A>,
       CoordinateState
     >;

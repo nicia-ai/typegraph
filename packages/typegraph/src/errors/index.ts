@@ -415,6 +415,52 @@ export class KindNotFoundError extends TypeGraphError {
   }
 }
 
+export type RuntimeKindTokenFailure =
+  | "invalid"
+  | "wrong-entity"
+  | "wrong-kind"
+  | "wrong-store"
+  | "stale"
+  | "schema-mismatch"
+  | "unreconciled";
+
+/**
+ * Refuses runtime-kind evidence that was forged, misapplied, or licensed for a
+ * different reconciled store schema.
+ */
+export class RuntimeKindTokenError extends TypeGraphError {
+  readonly reason: RuntimeKindTokenFailure;
+
+  constructor(
+    reason: RuntimeKindTokenFailure,
+    entity: KindEntity,
+    details: Readonly<Record<string, unknown>> = {},
+  ) {
+    const messages: Record<RuntimeKindTokenFailure, string> = {
+      invalid: "Runtime-kind evidence is not a TypeGraph-issued token.",
+      "wrong-entity": `Runtime-kind evidence does not describe a ${entity} kind.`,
+      "wrong-kind": "Runtime-kind evidence was altered after it was issued.",
+      "wrong-store":
+        "Runtime-kind evidence belongs to a different Store instance.",
+      stale:
+        "Runtime-kind evidence does not match the Store's reconciled schema.",
+      "schema-mismatch": `The supplied graph-extension definition does not match the registered ${entity} kind.`,
+      unreconciled:
+        "Runtime-kind evidence requires a Store with reconciled schema metadata.",
+    };
+    super(messages[reason], "RUNTIME_KIND_TOKEN_ERROR", {
+      category: "user",
+      details: { reason, entity, ...details },
+      suggestion:
+        reason === "stale" || reason === "wrong-store" ?
+          "Mint a new token from the Store instance that will execute the operation."
+        : "Mint tokens with store.runtimeNodeKind(...) or store.runtimeEdgeKind(...).",
+    });
+    this.name = "RuntimeKindTokenError";
+    this.reason = reason;
+  }
+}
+
 /**
  * Details for NodeConstraintNotFoundError.
  */

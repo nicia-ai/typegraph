@@ -45,6 +45,7 @@ export const NODE_WRITE_NAMES = [
   "create",
   "createFromRecord",
   "update",
+  "compareAndSet",
   "updateWhere",
   "delete",
   "hardDelete",

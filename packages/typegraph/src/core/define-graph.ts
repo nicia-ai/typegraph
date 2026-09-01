@@ -13,10 +13,15 @@ import { assertClaimAxisSafe } from "../store/claims/axis";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
+  assertGraphAnnotations,
+  cloneAndFreezeGraphAnnotations,
+} from "./json-value";
+import {
   type AnyEdgeType,
   type DeleteBehavior,
   type EdgeRegistration,
   type EdgeTypeWithEndpoints,
+  type GraphAnnotations,
   type GraphDefaults,
   isEdgeType,
   isEdgeTypeWithEndpoints,
@@ -315,6 +320,8 @@ type GraphDefConfig<
 > = Readonly<{
   /** Unique identifier for this graph */
   id: string;
+  /** Consumer-owned JSON metadata describing the graph as a whole. */
+  annotations?: GraphAnnotations;
   /** Node registrations */
   nodes: TNodes;
   /** Edge registrations or EdgeTypes with built-in domain/range */
@@ -369,6 +376,8 @@ export type GraphDef<
 > = Readonly<{
   [GRAPH_DEF_BRAND]: true;
   id: string;
+  /** Consumer-owned JSON metadata describing the graph as a whole. */
+  annotations: GraphAnnotations | undefined;
   nodes: TNodes;
   edges: TEdges;
   ontology: TOntology;
@@ -514,6 +523,14 @@ function defineGraphUnchecked<
     temporalMode: config.defaults?.temporalMode ?? "current",
   } as const;
 
+  if (config.annotations !== undefined) {
+    assertGraphAnnotations(config.annotations, `Graph "${config.id}"`);
+  }
+  const annotations =
+    config.annotations === undefined ?
+      undefined
+    : cloneAndFreezeGraphAnnotations(config.annotations);
+
   const allNodeTypes = Object.values(config.nodes).map((reg) => reg.type);
   const normalizedEdges = normalizeEdges(config.edges, allNodeTypes);
   assertClaimNamesAreSafe(config.nodes);
@@ -546,6 +563,7 @@ function defineGraphUnchecked<
   return Object.freeze({
     [GRAPH_DEF_BRAND]: true as const,
     id: config.id,
+    annotations,
     nodes: config.nodes,
     edges: normalizedEdges,
     ontology: config.ontology ?? ([] as unknown as TOntology),

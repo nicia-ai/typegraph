@@ -34,8 +34,8 @@ function buildInventory(reportFile: string): SurfaceInventory {
 function makeEntry(overrides: Partial<ExceptionEntry> = {}): ExceptionEntry {
   return {
     entrypoint: BACKEND_ENTRYPOINT,
-    declaration: "BackendCapabilities",
-    member: "transactions",
+    declaration: "FixtureCapabilities",
+    member: "fixtureMember",
     kind: "required-member-added",
     reason: "test fixture reason",
     issue: "#1",
@@ -46,8 +46,8 @@ function makeEntry(overrides: Partial<ExceptionEntry> = {}): ExceptionEntry {
 function makeFinding(overrides: Partial<SurfaceFinding> = {}): SurfaceFinding {
   return {
     entrypoint: BACKEND_ENTRYPOINT,
-    declaration: "BackendCapabilities",
-    member: "transactions",
+    declaration: "FixtureCapabilities",
+    member: "fixtureMember",
     kind: "required-member-added",
     severity: "fail",
     message: "test fixture finding",

@@ -7,6 +7,29 @@ This reference documents the schema definition functions and store API for TypeG
 
 ## Schema Definition
 
+### `defineGraph(config)` annotations
+
+`defineGraph` accepts consumer-owned JSON metadata for the schema as a whole:
+
+```typescript
+const graph = defineGraph({
+  id: "support",
+  annotations: {
+    displayName: "Support knowledge graph",
+    description: "Queryable product and incident knowledge",
+    capabilities: { search: true, temporal: true },
+  },
+  nodes: { Incident: { type: Incident } },
+  edges: {},
+});
+```
+
+The value is available as `graph.annotations`, is persisted in
+`SerializedSchema.annotations`, and is returned by
+`store.introspect().annotations`. It follows the same JSON-only validation and
+canonical hashing rules as per-kind annotations. An absent or empty object is
+omitted from canonical form and retains legacy hashes.
+
 ### `defineNode(name, options)`
 
 Creates a node type definition.
@@ -955,6 +978,48 @@ store.nodes.Person.update(
   options?: { validTo?: string } | { clearValidTo: true },
 ): Promise<Node<Person>>;
 ```
+
+#### `compareAndSet(id, params)`
+
+Applies a patch only while the current live row still has the supplied exact
+property values. The id, expected values, and update execute as one set-based
+mutation, so this closes the race left by a separate `getById()` followed by
+`update()`.
+
+```typescript
+const reopened = await store.nodes.ChangeSet.compareAndSet(changeSetId, {
+  expected: {
+    tenantId,
+    projectId,
+    status: "adopted",
+  },
+  patch: { status: "proposed" },
+});
+
+const claimedUnassigned = await store.nodes.ChangeSet.compareAndSet(changeSetId, {
+  expected: { assigneeId: compareAndSetAbsent },
+  patch: { assigneeId },
+});
+
+if (!reopened) {
+  // Missing row or stale/mismatched precondition; nothing was written.
+}
+```
+
+Expected values are JSON scalars (`string`, `number`, `boolean`, or `null`).
+Use the exported `compareAndSetAbsent` marker to require that an optional
+property is not stored. `undefined` is refused rather than treated as absence,
+because it can disappear while an object is assembled or serialized; arrays and
+objects are also refused so every backend uses the same exact scalar comparison.
+Expected predicates are re-checked directly on the target row by the outer
+`UPDATE`, so a concurrent writer cannot satisfy the guard and then change the
+row before the patch lands.
+
+The complete after-image still goes through ordinary schema validation,
+uniqueness, history/version bookkeeping, fulltext, and vector maintenance. This
+makes `compareAndSet()` suitable for narrowly authorized exceptional recovery
+without broadening a schema's normal transition map. It requires the same
+transactional set-update backend support as `updateWhere()`.
 
 #### `updateWhere(params)`
 

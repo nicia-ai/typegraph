@@ -141,6 +141,18 @@ type CommitSchemaVersionParams = Readonly<{
 }>;
 
 // @public (undocumented)
+type CompareAndSetNodeParams = Readonly<{
+    operation: "compareAndSet";
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    candidateIds: CompiledSelectSql;
+    candidateIdColumn: string;
+    expected: Readonly<Record<string, NodePropertyExpectation>>;
+}>;
+
+// @public (undocumented)
 type CompiledRowsSql = IntentSql<"rows">;
 
 // @public (undocumented)
@@ -4377,6 +4389,9 @@ type GraphAnalyticsCapabilities = Readonly<{
 }>;
 
 // @public
+type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+// @public
 type GraphBackend = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
@@ -4392,6 +4407,7 @@ type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
@@ -4585,6 +4601,7 @@ type GraphEntityWriteBackend = NodeEntityWriteBackend & EdgeEntityWriteBackend;
 // @public
 type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];
@@ -4836,6 +4853,9 @@ type JsonPointer = string & {
 };
 
 // @public
+type JsonScalar = null | string | number | boolean;
+
+// @public
 type JsonSchema = Readonly<{
     $schema?: string;
     type?: string | readonly string[];
@@ -4861,7 +4881,7 @@ type JsonSchema = Readonly<{
 }>;
 
 // @public
-type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 
@@ -4945,7 +4965,7 @@ type NodeCreateCommandResult = Readonly<{
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -4989,6 +5009,14 @@ type NodeInsertProjection = Readonly<{
 }> | Readonly<{
     kind: "fulltext";
     action: "delete";
+}>;
+
+// @public
+type NodePropertyExpectation = Readonly<{
+    kind: "value";
+    value: JsonScalar;
+}> | Readonly<{
+    kind: "absent";
 }>;
 
 // @public
@@ -6272,6 +6300,7 @@ export type SerializedResourceDeclaration = Readonly<{
 // @public
 type SerializedSchema = Readonly<{
     graphId: string;
+    annotations?: GraphAnnotations;
     version: number;
     generatedAt: string;
     nodes: Record<string, SerializedNodeDef>;
@@ -9619,6 +9648,7 @@ type UpdateNodeParams = Readonly<{
 
 // @public
 type UpdateNodeSetParams = Readonly<{
+    operation: "updateWhere";
     graphId: string;
     kind: string;
     patch: Readonly<Record<string, JsonValue>>;

@@ -16,12 +16,19 @@ import {
   type GraphIdentityConfig,
   type NodeKinds,
 } from "../core/define-graph";
+import type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "../core/runtime-kind";
 import { type RecordedInstant } from "../core/temporal";
 import {
   type AnyEdgeType,
   type EdgeId,
   type EdgeRegistration,
   type EdgeType,
+  type JsonScalar,
   type KindEntity,
   type NodeId,
   type NodeRegistration,
@@ -30,13 +37,6 @@ import {
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
-
-/**
- * An explicit validity-end mutation. Omission preserves the stored end,
- * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
- * two write actions mutually exclusive without exposing public `null`.
- */
-export type ValidityEndMutation = BackendValidityEndMutation;
 import type {
   DynamicEdgeAccessor,
   DynamicNodeAccessor,
@@ -59,6 +59,32 @@ import type {
   NODE_WRITE_NAMES,
   RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
+
+/**
+ * An explicit validity-end mutation. Omission preserves the stored end,
+ * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
+ * two write actions mutually exclusive without exposing public `null`.
+ */
+export type ValidityEndMutation = BackendValidityEndMutation;
+
+/**
+ * Compare-and-set absence marker. `undefined` is deliberately not overloaded:
+ * it can disappear while an object is assembled or serialized, whereas this
+ * marker always states the caller's predicate explicitly.
+ */
+export const compareAndSetAbsent: unique symbol = typeGraphGlobalSymbol(
+  "compare-and-set-absent-v1",
+);
+
+/** Explicitly requires that a compare-and-set property is not stored. */
+export type CompareAndSetAbsent = typeof compareAndSetAbsent;
+
+/** Scalar-only exact predicates accepted by {@link NodeCollection.compareAndSet}. */
+export type CompareAndSetExpected<Props> = Readonly<{
+  [Property in keyof Props]?:
+    | Extract<Exclude<Props[Property], undefined>, JsonScalar>
+    | CompareAndSetAbsent;
+}>;
 
 // ============================================================
 // Row-to-Meta Field Mapping
@@ -272,14 +298,14 @@ export type OperationHookContext = HookContext &
   }>;
 
 /**
- * Context for one set-based collection mutation. Node `updateWhere` is the only
- * mutation that reports one: the `operation` union is the exhaustive list of
- * what `onBulkOperationStart` / `onBulkOperationEnd` observe, so a batch method
- * absent from it (every `bulk*`, including `bulkDelete`) emits no bulk event.
+ * Context for one set-based collection mutation. The `operation` union is the
+ * exhaustive list of what `onBulkOperationStart` / `onBulkOperationEnd`
+ * observe, so a batch method absent from it (every `bulk*`, including
+ * `bulkDelete`) emits no bulk event.
  */
 export type BulkOperationHookContext = HookContext &
   Readonly<{
-    operation: "updateWhere";
+    operation: "compareAndSet" | "updateWhere";
     entity: "node";
     kind: string;
   }>;
@@ -290,8 +316,8 @@ export type BulkOperationHookContext = HookContext &
  * Note: Batch operations (`bulkCreate`, `bulkInsert`, `bulkUpsertById`,
  * `bulkDelete`) skip per-item operation hooks for throughput, and the bulk
  * hooks below do not stand in for them — those fire only for node
- * `updateWhere`, so a batch method emits no hook events at all, neither
- * per-item nor bulk. Query hooks still fire normally.
+ * `compareAndSet` and `updateWhere`. A batch method emits no hook events at all,
+ * neither per-item nor bulk. Query hooks still fire normally.
  *
  * @example
  * ```typescript
@@ -835,6 +861,26 @@ export type NodeCollection<
     props: Partial<z.input<N["schema"]>>,
     options?: ValidityEndMutation,
   ) => Promise<Node<N>>;
+
+  /**
+   * Applies a property patch only while the current live row still has
+   * caller-supplied exact property values. The identity and values participate in
+   * the same set-based statement as the update, so a preceding read cannot
+   * open a compare-and-set race. Returns `false` on a missing row or predicate
+   * mismatch; neither case writes history or advances the row version.
+   *
+   * This is the narrow escape hatch for exceptional state recovery. It does
+   * not widen schema-declared transition rules: callers state the exceptional
+   * precondition at the call site and the complete after-image still passes
+   * ordinary TypeGraph validation, uniqueness, history, and sidecar handling.
+   */
+  compareAndSet: (
+    id: NodeId<N>,
+    params: Readonly<{
+      expected: CompareAndSetExpected<z.input<N["schema"]>>;
+      patch: Partial<z.input<N["schema"]>>;
+    }>,
+  ) => Promise<boolean>;
 
   /**
    * Updates every current node selected by the supplied predicates in one
@@ -2148,6 +2194,53 @@ export type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<
 export type DynamicEdgeCollection = WidenBrandedIds<
   EdgeCollection<AnyEdgeType, NodeType, NodeType>
 >;
+
+/** A node collection narrowed by Store-issued runtime-kind evidence. */
+export type RuntimeNodeCollection<T extends RuntimeNodeKind> = WidenBrandedIds<
+  NodeCollection<RuntimeNodeTypeFor<T>, string>
+>;
+
+/** An edge collection narrowed by Store-issued runtime-kind evidence. */
+export type RuntimeEdgeCollection<T extends RuntimeEdgeKind> = WidenBrandedIds<
+  EdgeCollection<RuntimeEdgeTypeFor<T>, NodeType, NodeType>
+>;
+
+/** One kind-grouped source input for a token-validated heterogeneous read. */
+export type RuntimeBulkEdgeSourceGroup<T extends RuntimeNodeKind> =
+  T extends RuntimeNodeKind ? Readonly<{ kind: T; ids: readonly string[] }>
+  : never;
+
+/** A source reference narrowed to the node token that licensed it. */
+export type RuntimeNodeReferenceFor<T extends RuntimeNodeKind> =
+  T extends RuntimeNodeKind ?
+    Readonly<{
+      kind: T["kind"];
+      id: NodeId<RuntimeNodeTypeFor<T>>;
+    }>
+  : never;
+
+/** An edge value narrowed to the edge token that licensed its read. */
+export type RuntimeEdgeFor<T extends RuntimeEdgeKind> =
+  T extends RuntimeEdgeKind ? Edge<RuntimeEdgeTypeFor<T>, NodeType, NodeType>
+  : never;
+
+/** Input for {@link Store.bulkFindRuntimeEdgesFrom}. */
+export type BulkFindRuntimeEdgesFromParams<
+  NT extends RuntimeNodeKind,
+  ET extends RuntimeEdgeKind,
+> = Readonly<{
+  sources: readonly RuntimeBulkEdgeSourceGroup<NT>[];
+  edgeKinds: readonly ET[];
+}>;
+
+/** One source bucket returned by {@link Store.bulkFindRuntimeEdgesFrom}. */
+export type BulkFindRuntimeEdgesFromResult<
+  NT extends RuntimeNodeKind,
+  ET extends RuntimeEdgeKind,
+> = Readonly<{
+  source: RuntimeNodeReferenceFor<NT>;
+  edges: readonly RuntimeEdgeFor<ET>[];
+}>;
 
 // ============================================================
 // Store Projection

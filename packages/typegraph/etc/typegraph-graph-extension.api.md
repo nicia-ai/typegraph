@@ -4,6 +4,8 @@
 
 ```ts
 
+import { z } from 'zod';
+
 // @public (undocumented)
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
@@ -11,7 +13,7 @@ const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relat
 export const CURRENT_GRAPH_EXTENSION_VERSION: 1;
 
 // @public
-export function defineGraphExtension(input: GraphExtension): GraphExtension;
+export function defineGraphExtension<const T extends GraphExtension>(input: T): T & GraphExtension;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -29,6 +31,9 @@ export type ExtensionArrayProperty = Readonly<{
 export type ExtensionBooleanProperty = Readonly<{
     type: "boolean";
 }> & ExtensionPropertyModifiers;
+
+// @public (undocumented)
+type ExtensionDefinedOutput<P extends ExtensionPropertyType> = P extends ExtensionStringProperty ? string : P extends ExtensionNumberProperty ? number : P extends ExtensionBooleanProperty ? boolean : P extends ExtensionEnumProperty ? P["values"][number] : P extends ExtensionArrayProperty ? readonly ExtensionPropertyOutput<P["items"]>[] : P extends ExtensionObjectProperty ? ExtensionObjectOutput<P["properties"]> : never;
 
 // @public
 export type ExtensionEdgeDef = Readonly<{
@@ -51,6 +56,11 @@ export type ExtensionEdgeIndex = Readonly<{
     scope?: "graphAndKind" | "graph" | "none";
     where?: ExtensionIndexWhere;
 }>;
+
+// @public
+export type ExtensionEdgeProperties<D extends ExtensionEdgeDef> = D extends (Readonly<{
+    properties: infer P extends Readonly<Record<string, ExtensionPropertyType>>;
+}>) ? P : Readonly<Record<never, never>>;
 
 // @public
 export type ExtensionEmbeddingModifier = Readonly<{
@@ -104,10 +114,26 @@ export type ExtensionNumberProperty = Readonly<{
 export type ExtensionObjectFieldProperty = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionArrayProperty;
 
 // @public
+export type ExtensionObjectOutput<P extends Readonly<Record<string, ExtensionPropertyType>>> = Readonly<{
+    [K in keyof P as P[K] extends {
+        optional: true;
+    } ? never : K]: ExtensionPropertyOutput<P[K]>;
+} & {
+    [K in keyof P as P[K] extends {
+        optional: true;
+    } ? K : never]?: ExtensionPropertyOutput<P[K]>;
+}>;
+
+// @public
 export type ExtensionObjectProperty = Readonly<{
     type: "object";
     properties: Readonly<Record<string, ExtensionObjectFieldProperty>>;
 }> & ExtensionPropertyModifiers;
+
+// @public
+export type ExtensionObjectSchema<P extends Readonly<Record<string, ExtensionPropertyType>>> = z.ZodObject<{
+    [K in keyof P]: ExtensionPropertySchema<P[K]>;
+}>;
 
 // @public
 export type ExtensionOntologyRelation = Readonly<{
@@ -123,6 +149,16 @@ type ExtensionPropertyModifiers = Readonly<{
     embedding?: ExtensionEmbeddingModifier;
     description?: string;
 }>;
+
+// @public
+export type ExtensionPropertyOutput<P extends ExtensionPropertyType> = P extends {
+    optional: true;
+} ? ExtensionDefinedOutput<P> | undefined : ExtensionDefinedOutput<P>;
+
+// @public (undocumented)
+type ExtensionPropertySchema<P extends ExtensionPropertyType> = P extends {
+    optional: true;
+} ? z.ZodOptional<z.ZodType<ExtensionDefinedOutput<P>>> : z.ZodType<ExtensionDefinedOutput<P>>;
 
 // @public
 export type ExtensionPropertyType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionArrayProperty | ExtensionObjectProperty;
@@ -160,11 +196,15 @@ export type ExtensionUniqueWhere = Readonly<{
 export const GRAPH_EXTENSION_ISSUE_CODES: readonly ["UNSUPPORTED_PROPERTY_TYPE", "INVALID_PROPERTY_REFINEMENT", "NESTED_ARRAY", "NESTED_OBJECT_TOO_DEEP", "INVALID_MODIFIER_TARGET", "INVALID_ENUM_VALUES", "INVALID_NUMBER_BOUNDS", "INVALID_LENGTH_BOUNDS", "INVALID_PATTERN", "INVALID_EMBEDDING_DIMENSIONS", "INVALID_SEARCHABLE_LANGUAGE", "RESERVED_PROPERTY_NAME", "INVALID_KIND_NAME", "DUPLICATE_KIND_NAME", "EMPTY_PROPERTIES", "EMPTY_FROM_OR_TO", "DUPLICATE_UNIQUE_CONSTRAINT", "EMPTY_UNIQUE_FIELDS", "DUPLICATE_UNIQUE_FIELD", "UNKNOWN_UNIQUE_FIELD", "INVALID_UNIQUE_WHERE_OP", "UNKNOWN_UNIQUE_WHERE_FIELD", "INVALID_ANNOTATION", "UNKNOWN_META_EDGE", "ONTOLOGY_CYCLE", "ONTOLOGY_SELF_LOOP", "ONTOLOGY_DISJOINT_CONFLICT", "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS", "DUPLICATE_ONTOLOGY_RELATION", "INVALID_DOCUMENT_SHAPE", "UNKNOWN_DOCUMENT_KEY", "UNSUPPORTED_STRING_FORMAT", "INVALID_INDEX_DECLARATION", "DUPLICATE_INDEX_NAME", "EMPTY_INDEX_FIELDS", "UNKNOWN_PROPERTY_KEY"];
 
 // @public
-export const GRAPH_EXTENSION_TOP_LEVEL_KEYS: readonly ["version", "nodes", "edges", "ontology", "indexes"];
+export const GRAPH_EXTENSION_TOP_LEVEL_KEYS: readonly ["version", "annotations", "nodes", "edges", "ontology", "indexes"];
+
+// @public
+type GraphAnnotations = Readonly<Record<string, JsonValue>>;
 
 // @public
 export type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];
@@ -273,7 +313,10 @@ export class IncompatibleChangeError extends GraphExtensionError {
 export type IncompatibleChangeType = (typeof INCOMPATIBLE_CHANGE_TYPES)[number];
 
 // @public
-type JsonValue = null | string | number | boolean | readonly JsonValue[] | Readonly<{
+type JsonScalar = null | string | number | boolean;
+
+// @public
+type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
     [key: string]: JsonValue;
 }>;
 

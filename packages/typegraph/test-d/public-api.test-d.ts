@@ -927,11 +927,23 @@ import type {
   ExtensionArrayProperty,
   ExtensionEdgeDef,
   ExtensionNodeDef,
+  ExtensionObjectOutput,
   ExtensionOntologyRelation,
   ExtensionPropertyType,
   ExtensionStringProperty,
   ExtensionUniqueConstraint,
 } from "../src/graph-extension";
+
+type NestedExtensionObject = ExtensionObjectOutput<{
+  required: { type: "string" };
+  optional: { type: "number"; optional: true };
+}>;
+expectAssignable<NestedExtensionObject>({ required: "present" });
+expectAssignable<NestedExtensionObject>({
+  required: "present",
+  optional: 1,
+});
+expectNotAssignable<NestedExtensionObject>({ optional: 1 });
 
 // defineGraphExtension accepts a typed GraphExtension.
 const extension = defineGraphExtension({
@@ -951,7 +963,7 @@ const extension = defineGraphExtension({
     } satisfies ExtensionNodeDef,
   },
 });
-expectType<GraphExtension>(extension);
+expectAssignable<GraphExtension>(extension);
 
 // Top-level key typo `node` should be a TypeScript error — the public
 // type signature now catches it at the call site instead of letting

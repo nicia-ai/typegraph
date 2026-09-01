@@ -619,6 +619,7 @@ const CASES: Record<keyof WriteSession, Case> = {
       return (session) =>
         session.reviseNodeSet(
           {
+            operation: "updateWhere",
             kind: "Doc",
             schema,
             uniqueConstraints,

@@ -60,6 +60,7 @@ import {
   computeSchemaHash,
   getSchemaHash,
   serializeSchema,
+  serializeSchemaPreservingUnknownFields,
 } from "./serializer";
 import { type SerializedSchema, serializedSchemaZod } from "./types";
 
@@ -432,7 +433,11 @@ export async function ensureSchema<G extends GraphDef>(
   // Hashes differ - serialize both sides to compute the diff.
   const storedSchema =
     preloaded?.storedSchema ?? parseSerializedSchema(activeSchema.schema_doc);
-  const currentSchema = serializeSchema(graph, activeSchema.version + 1);
+  const currentSchema = serializeSchemaPreservingUnknownFields(
+    graph,
+    activeSchema.version + 1,
+    storedSchema,
+  );
   const diff = computeSchemaDiff(storedSchema, currentSchema);
 
   if (!diff.hasChanges) {
@@ -466,12 +471,18 @@ export async function ensureSchema<G extends GraphDef>(
           });
       const committedRow =
         preflight === undefined ?
-          await commitNewSchemaVersion(backend, graph, activeSchema.version)
+          await commitNewSchemaVersion(
+            backend,
+            graph,
+            activeSchema.version,
+            storedSchema,
+          )
         : await commitNewSchemaVersionWithPreflight(
             backend,
             graph,
             activeSchema.version,
             preflight,
+            storedSchema,
           );
       await options?.onAfterMigrate?.(hookContext);
       return {
@@ -575,7 +586,11 @@ export async function loadAndVerifyGraph<G extends GraphDef>(
   const storedHash = activeRow.schema_hash;
   const currentHash = await getSchemaHash(merged, activeRow.version + 1);
   if (storedHash !== currentHash) {
-    const currentSchema = serializeSchema(merged, activeRow.version + 1);
+    const currentSchema = serializeSchemaPreservingUnknownFields(
+      merged,
+      activeRow.version + 1,
+      storedSchema,
+    );
     const diff = computeSchemaDiff(storedSchema, currentSchema);
     if (diff.hasChanges) {
       throw schemaBehindError(merged.id, activeRow.version, diff);
@@ -1066,8 +1081,14 @@ export async function migrateSchema<G extends GraphDef>(
           target,
           currentVersion,
           guardedDrops,
+          storedSchema,
         )
-      : await commitNewSchemaVersion(backend, target, currentVersion)
+      : await commitNewSchemaVersion(
+          backend,
+          target,
+          currentVersion,
+          storedSchema,
+        )
     : await commitNewSchemaVersionWithPreflight(
         backend,
         target,
@@ -1086,6 +1107,7 @@ export async function migrateSchema<G extends GraphDef>(
           await edgeMatchIdentityPreflight?.(transactionBackend);
           await identityPreflight?.(transactionBackend);
         },
+        storedSchema,
       );
   return committed.version;
 }
@@ -1350,12 +1372,14 @@ async function commitDroppedKindsOnlyWhenEmpty<G extends GraphDef>(
   graph: G,
   currentVersion: number,
   dropped: readonly DroppedKind[],
+  storedSchema: SerializedSchema | undefined,
 ): Promise<SchemaVersionRow> {
   const result = await commitNewSchemaVersionIfKindsEmpty(
     backend,
     graph,
     currentVersion,
     dropped.map((entry) => ({ ...entry, rows: "nonDeleted" as const })),
+    storedSchema,
   );
   if (result.status === "committed") return result.row;
 
@@ -1426,8 +1450,13 @@ export async function commitNewSchemaVersion<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
+  previous: SerializedSchema | undefined,
 ): Promise<SchemaVersionRow> {
-  const params = await buildNewSchemaVersionCommit(graph, currentVersion);
+  const params = await buildNewSchemaVersionCommit(
+    graph,
+    currentVersion,
+    previous,
+  );
   return backend.commitSchemaVersion(params);
 }
 
@@ -1440,8 +1469,13 @@ export async function commitNewSchemaVersionIfKindsEmpty<G extends GraphDef>(
   graph: G,
   currentVersion: number,
   probes: readonly SchemaKindEmptinessProbe[],
+  previous: SerializedSchema | undefined,
 ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
-  const params = await buildNewSchemaVersionCommit(graph, currentVersion);
+  const params = await buildNewSchemaVersionCommit(
+    graph,
+    currentVersion,
+    previous,
+  );
   const commitIfKindsEmpty = backend.commitSchemaVersionIfKindsEmpty;
   if (commitIfKindsEmpty === undefined) {
     throw new ConfigurationError(
@@ -1459,6 +1493,7 @@ export async function commitNewSchemaVersionIfKindsEmpty<G extends GraphDef>(
 async function buildNewSchemaVersionCommit<G extends GraphDef>(
   graph: G,
   currentVersion: number,
+  previous: SerializedSchema | undefined,
 ): Promise<CommitSchemaVersionParams> {
   // See initializeSchema: reject structurally invalid graphs (e.g.
   // endpoint-incompatible implies() relations) before committing, not
@@ -1466,7 +1501,10 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
   buildKindRegistry(graph);
 
   const newVersion = currentVersion + 1;
-  const schema = serializeSchema(graph, newVersion);
+  const schema =
+    previous === undefined ?
+      serializeSchema(graph, newVersion)
+    : serializeSchemaPreservingUnknownFields(graph, newVersion, previous);
   const hash = await computeSchemaHash(schema);
   return {
     graphId: graph.id,
@@ -1483,6 +1521,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   graph: G,
   currentVersion: number,
   preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
+  previous: SerializedSchema | undefined,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
@@ -1493,7 +1532,11 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   // Same catalog-race retry as `initializeSchema`, for the same in-transaction
   // identity DDL. The commit payload is built once, outside the retry, so a
   // re-run commits the identical version and hash rather than recomputing one.
-  const commit = await buildNewSchemaVersionCommit(graph, currentVersion);
+  const commit = await buildNewSchemaVersionCommit(
+    graph,
+    currentVersion,
+    previous,
+  );
   return withIdentityDdlRaceRetry(() => commitWithPreflight(commit, preflight));
 }
 
@@ -1595,9 +1638,14 @@ export async function getSchemaChanges<G extends GraphDef>(
     graph,
     activeRow,
   );
-  const currentSchema = serializeSchema(merged, activeRow.version + 1);
+  const currentSchema = serializeSchemaPreservingUnknownFields(
+    merged,
+    activeRow.version + 1,
+    storedSchema,
+  );
+  const diff = computeSchemaDiff(storedSchema, currentSchema);
 
-  return computeSchemaDiff(storedSchema, currentSchema);
+  return diff.hasChanges ? diff : { ...diff, toVersion: diff.fromVersion };
 }
 
 /**

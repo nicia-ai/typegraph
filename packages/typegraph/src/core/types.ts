@@ -76,6 +76,9 @@ function assertNonEmptyId(value: string, path: string): void {
 // Node Type
 // ============================================================
 
+/** A primitive JSON value, excluding arrays and objects. */
+export type JsonScalar = null | string | number | boolean;
+
 /**
  * Any JSON-serializable value.
  *
@@ -84,12 +87,7 @@ function assertNonEmptyId(value: string, path: string): void {
  * this is the one place in the public API that uses `null` over `undefined`.
  */
 export type JsonValue =
-  | null
-  | string
-  | number
-  | boolean
-  | readonly JsonValue[]
-  | Readonly<{ [key: string]: JsonValue }>;
+  JsonScalar | readonly JsonValue[] | Readonly<{ [key: string]: JsonValue }>;
 
 /**
  * Consumer-owned per-kind annotations.
@@ -113,6 +111,17 @@ export type JsonValue =
  * never silently break schema hashing or storage round-trips.
  */
 export type KindAnnotations = Readonly<Record<string, JsonValue>>;
+
+/**
+ * Consumer-owned annotations for a graph as a whole.
+ *
+ * This is the schema-level counterpart to {@link KindAnnotations}: display
+ * names, descriptions, capability declarations, and other JSON metadata that
+ * describes the materialization itself rather than one node or edge kind.
+ * Values participate in canonical schema hashing and annotation-only changes
+ * are safe schema changes.
+ */
+export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
 
 /**
  * A node type definition.

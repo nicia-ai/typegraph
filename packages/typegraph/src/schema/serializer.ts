@@ -12,9 +12,9 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { canonicalAnnotations } from "../core/json-value";
 import {
   type EdgeRegistration,
-  type KindAnnotations,
   type NodeRegistration,
   type NullCheckOp,
   type UniqueConstraint,
@@ -74,9 +74,11 @@ export function serializeSchema<G extends GraphDef>(
   const indexes = serializeIndexes(graph.indexes);
   const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
+  const annotations = canonicalAnnotations(graph.annotations);
 
   return {
     graphId: graph.id,
+    ...(annotations === undefined ? {} : { annotations }),
     version,
     generatedAt: nowIso(),
     nodes,
@@ -102,6 +104,43 @@ export function serializeSchema<G extends GraphDef>(
     // stability across insertion-order differences.
     ...(deprecatedKinds === undefined ? {} : { deprecatedKinds }),
   };
+}
+
+const SERIALIZED_SCHEMA_TOP_LEVEL_KEYS = new Set([
+  "graphId",
+  "annotations",
+  "version",
+  "generatedAt",
+  "nodes",
+  "edges",
+  "ontology",
+  "defaults",
+  "identity",
+  "indexes",
+  "extension",
+  "deprecatedKinds",
+]);
+
+/**
+ * Serializes a graph while retaining top-level fields authored by a newer
+ * schema-document format.
+ *
+ * Known fields always come from the current graph, including omission of
+ * optional slices. Only fields this version does not own are carried forward.
+ * Every recommit path uses this function so parsing a newer document can never
+ * turn a later, otherwise-valid schema write into silent metadata loss.
+ */
+export function serializeSchemaPreservingUnknownFields<G extends GraphDef>(
+  graph: G,
+  version: number,
+  previous: SerializedSchema,
+): SerializedSchema {
+  const unknownFields = Object.fromEntries(
+    Object.entries(previous).filter(
+      ([key]) => !SERIALIZED_SCHEMA_TOP_LEVEL_KEYS.has(key),
+    ),
+  );
+  return { ...unknownFields, ...serializeSchema(graph, version) };
 }
 
 function serializeDeprecatedKinds(
@@ -135,21 +174,6 @@ function canonicalExtension(
   if (document.version !== LEGACY_GRAPH_EXTENSION_VERSION) return document;
   const { version: _omit, ...rest } = document;
   return rest;
-}
-
-/**
- * Annotations are omitted from the canonical form when absent OR
- * empty (`{}`). Mirrors the omit-when-empty rule applied to
- * `indexes` and `deprecatedKinds` so that legacy graphs without
- * annotations and graphs declaring `annotations: {}` hash
- * byte-identically.
- */
-function canonicalAnnotations(
-  annotations: KindAnnotations | undefined,
-): KindAnnotations | undefined {
-  if (annotations === undefined) return undefined;
-  if (Object.keys(annotations).length === 0) return undefined;
-  return annotations;
 }
 
 // ============================================================

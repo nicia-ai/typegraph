@@ -211,6 +211,9 @@ function createQueryBuilderWithContext<
     ...(options?.sealedCoordinate !== undefined && {
       sealedCoordinate: options.sealedCoordinate,
     }),
+    ...(options?.runtimeKindTokenResolver !== undefined && {
+      runtimeKindTokenResolver: options.runtimeKindTokenResolver,
+    }),
   });
 
   // A sealed coordinate (StoreView pin) seeds the temporal axis; `.temporal()`

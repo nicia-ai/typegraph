@@ -7,6 +7,7 @@
 import {
   type Cardinality,
   type IndexEntity,
+  type JsonScalar,
   type JsonValue,
   type KindEntity,
   type TemporalMode,
@@ -735,6 +736,7 @@ export type UpdateNodeParams = Readonly<{
  * its before-images in the same transaction before invoking this method.
  */
 export type UpdateNodeSetParams = Readonly<{
+  operation: "updateWhere";
   graphId: string;
   kind: string;
   patch: Readonly<Record<string, JsonValue>>;
@@ -743,6 +745,30 @@ export type UpdateNodeSetParams = Readonly<{
   candidateIds: CompiledSelectSql;
   /** Projected SQL column holding the candidate node id (for example `n_id`). */
   candidateIdColumn: string;
+}>;
+
+/**
+ * A guarded set update whose exact current-value predicates are applied by the
+ * same outer UPDATE that writes the row. Kept as a distinct backend port so an
+ * older/custom `updateNodeSet` implementation can never silently ignore the
+ * compare-and-set fence.
+ */
+export type NodePropertyExpectation =
+  Readonly<{ kind: "value"; value: JsonScalar }> | Readonly<{ kind: "absent" }>;
+
+export type CompareAndSetNodeParams = Readonly<{
+  operation: "compareAndSet";
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  unsetProperties?: readonly string[];
+  candidateIds: CompiledSelectSql;
+  candidateIdColumn: string;
+  /**
+   * Exact scalar-or-absence predicates re-checked by the outer UPDATE. This
+   * discriminated map cannot be assigned to an ordinary set update.
+   */
+  expected: Readonly<Record<string, NodePropertyExpectation>>;
 }>;
 
 /** The after-images changed by {@link GraphBackend.updateNodeSet}. */
@@ -2177,6 +2203,10 @@ export type GraphBackend = Readonly<{
     this: void,
     params: UpdateNodeSetParams,
   ) => Promise<UpdateNodeSetResult>;
+  compareAndSetNode?: (
+    this: void,
+    params: CompareAndSetNodeParams,
+  ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   getNode: (
@@ -3419,6 +3449,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "compareAndSetNode"
   | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"

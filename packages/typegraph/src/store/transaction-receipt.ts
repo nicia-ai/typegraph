@@ -101,6 +101,7 @@ const NODE_WRITE_INTENT_COUNTERS = {
   create: countSingleWrite,
   createFromRecord: countSingleWrite,
   update: countSingleWrite,
+  compareAndSet: countSingleWrite,
   updateWhere: countSingleWrite,
   delete: countSingleWrite,
   hardDelete: countSingleWrite,

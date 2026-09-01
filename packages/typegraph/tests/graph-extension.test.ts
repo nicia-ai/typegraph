@@ -1407,11 +1407,11 @@ describe("document immutability", () => {
     expect(Object.isFrozen(document)).toBe(true);
     expect(Object.isFrozen(requireDefined(document.nodes))).toBe(true);
     expect(
-      Object.isFrozen(requireDefined(requireDefined(document.nodes)["N"])),
+      Object.isFrozen(requireDefined(requireDefined(document.nodes).N)),
     ).toBe(true);
     expect(
       Object.isFrozen(
-        requireDefined(requireDefined(document.nodes)["N"]).properties,
+        requireDefined(requireDefined(document.nodes).N).properties,
       ),
     ).toBe(true);
   });

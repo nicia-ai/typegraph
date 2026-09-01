@@ -6,7 +6,7 @@
  * implementing this interface.
  */
 import { type VectorMetric } from "../../backend/types";
-import { type JsonValue } from "../../core/types";
+import { type JsonScalar, type JsonValue } from "../../core/types";
 import { type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
@@ -353,6 +353,19 @@ export interface DialectAdapter {
     this: void,
     column: SqlFragment,
     pointer: JsonPointer,
+  ) => SqlFragment;
+
+  /**
+   * Compares one JSON scalar by exact JSON type and value. Unlike text
+   * extraction this preserves the distinction between strings, numbers,
+   * booleans, and the JSON `null` literal without introducing a separate
+   * per-dialect structural-comparison strategy.
+   */
+  readonly jsonScalarPathEquals: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+    value: JsonScalar,
   ) => SqlFragment;
 
   /**

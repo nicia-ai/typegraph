@@ -218,6 +218,21 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
   },
 
+  jsonScalarPathEquals(column, pointer, value) {
+    const path = toSqlitePath(pointer);
+    const pathSql = sql.raw(escapeSqliteLiteral(path));
+    if (value === null) {
+      return sql`json_type(${column}, ${pathSql}) = 'null'`;
+    }
+    if (typeof value === "boolean") {
+      return sql`json_type(${column}, ${pathSql}) IN ('true', 'false') AND json_extract(${column}, ${pathSql}) = ${value ? 1 : 0}`;
+    }
+    if (typeof value === "number") {
+      return sql`json_type(${column}, ${pathSql}) IN ('integer', 'real') AND json_extract(${column}, ${pathSql}) = ${value}`;
+    }
+    return sql`json_type(${column}, ${pathSql}) = 'text' AND json_extract(${column}, ${pathSql}) = ${value}`;
+  },
+
   jsonSetProperties(column, patch, unsetProperties = []) {
     const entries = Object.entries(patch);
     let patchedColumn = column;

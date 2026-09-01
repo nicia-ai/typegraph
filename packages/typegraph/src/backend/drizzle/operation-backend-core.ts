@@ -100,6 +100,7 @@ import type {
   ClaimEdgeCardinalityParams,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
+  CompareAndSetNodeParams,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
   CountEdgesByKindParams,
@@ -542,6 +543,7 @@ export type CommonOperationBackend = Pick<
   | "checkUnique"
   | "checkUniqueBatch"
   | "clearGraph"
+  | "compareAndSetNode"
   | "countEdgesByKind"
   | "countEdgesFrom"
   | "countNodesByKind"
@@ -4467,6 +4469,16 @@ export function createCommonOperationBackend(
 
   const commandsPort = { session: commandSession, execute: executeCommand };
 
+  async function executeNodeSetUpdate(
+    params: CompareAndSetNodeParams | UpdateNodeSetParams,
+  ): Promise<UpdateNodeSetResult> {
+    const timestamp = nowIso();
+    const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
+    const rows = await execution.execAll<Record<string, unknown>>(query);
+    const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+    return { affectedCount: updatedRows.length, rows: updatedRows };
+  }
+
   return {
     tableExists,
 
@@ -4640,11 +4652,28 @@ export function createCommonOperationBackend(
           { operation: "updateNodeSet", kind: params.kind },
         );
       }
-      const timestamp = nowIso();
-      const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
-      return { affectedCount: updatedRows.length, rows: updatedRows };
+      return executeNodeSetUpdate(params);
+    },
+
+    async compareAndSetNode(
+      params: CompareAndSetNodeParams,
+    ): Promise<UpdateNodeSetResult> {
+      if (
+        Object.keys(params.patch).length === 0 &&
+        (params.unsetProperties?.length ?? 0) === 0
+      ) {
+        throw new ConfigurationError(
+          "Node compare-and-set requires at least one property patch",
+          { operation: "compareAndSetNode", kind: params.kind },
+        );
+      }
+      if (Object.keys(params.expected).length === 0) {
+        throw new ConfigurationError(
+          "Node compare-and-set requires at least one expected property",
+          { operation: "compareAndSetNode", kind: params.kind },
+        );
+      }
+      return executeNodeSetUpdate(params);
     },
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {

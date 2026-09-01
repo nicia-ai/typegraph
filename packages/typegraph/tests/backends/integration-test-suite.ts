@@ -56,6 +56,7 @@ import {
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerFulltextIntegrationTests,
+  registerGraphAnnotationsIntegrationTests,
   registerGraphMergePlanIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
@@ -78,6 +79,7 @@ import {
   registerSelectiveRetryIntegrationTests,
   registerSetNodeMutationIntegrationTests,
   registerSetOperationIntegrationTests,
+  registerStoreAnalysisIntegrationTests,
   registerStoreViewIntegrationTests,
   registerSubgraphIntegrationTests,
   registerTemporalIntegrationTests,
@@ -268,6 +270,7 @@ export function createIntegrationTestSuite<
     registerCapabilityPortBindingIntegrationTests(context);
     registerCapabilityRefusalIntegrationTests(context);
     registerCoalesceUpsertIntegrationTests(context);
+    registerGraphAnnotationsIntegrationTests(context);
     registerValidityLowerBoundIntegrationTests(context);
     registerValidityEndClearingIntegrationTests(context);
     registerContributionDiagnosticIntegrationTests(context);
@@ -302,6 +305,7 @@ export function createIntegrationTestSuite<
     registerAdvancedEdgePropertyIntegrationTests(context);
     registerSubgraphIntegrationTests(context);
     registerStoreViewIntegrationTests(context);
+    registerStoreAnalysisIntegrationTests(context);
     registerAlgorithmIntegrationTests(context);
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);

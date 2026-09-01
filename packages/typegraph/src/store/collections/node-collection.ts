@@ -92,6 +92,13 @@ type NodeUpsertOptions = Readonly<{
 }> &
   ValidityEndMutation;
 
+export type NodeSetUpdateRequest =
+  | Readonly<{ operation: "updateWhere" }>
+  | Readonly<{
+      operation: "compareAndSet";
+      expected: Record<string, unknown>;
+    }>;
+
 /**
  * Narrows unparameterized Node to Node<N>.
  * Safe: props are validated by Zod at creation/update boundaries.
@@ -225,12 +232,13 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
-  executeUpdateWhere: (
+  executeNodeSetUpdate: (
     kind: string,
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
+    request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
@@ -409,7 +417,7 @@ export function createNodeCollection<
     executeCreateNoReturnBatch: executeNodeCreateNoReturnBatch,
     executeCreateBatch: executeNodeCreateBatch,
     executeUpdate: executeNodeUpdate,
-    executeUpdateWhere: executeNodeUpdateWhere,
+    executeNodeSetUpdate,
     executeUpsertUpdateBatch: executeNodeUpsertUpdateBatch,
     executeResolvedMutationSet: executeNodeResolvedMutationSet,
     prepareReplacement,
@@ -488,6 +496,31 @@ export function createNodeCollection<
         backend,
       );
       return narrowNode<N>(result);
+    },
+
+    async compareAndSet(id, params): Promise<boolean> {
+      if (createQuery === undefined) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.compareAndSet() requires a query-capable store`,
+          { kind, operation: "compareAndSet" },
+        );
+      }
+      const rootAlias = "compare_and_set_candidate";
+      const candidateIdColumn = `${rootAlias}_id`;
+      const candidateIds = createQuery()
+        .fromDynamic(kind, rootAlias)
+        .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
+        .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
+        .compile();
+      const result = await executeNodeSetUpdate(
+        kind,
+        params.patch,
+        candidateIds,
+        candidateIdColumn,
+        backend,
+        { operation: "compareAndSet", expected: params.expected },
+      );
+      return result.affectedCount === 1;
     },
 
     async updateWhere(params): Promise<Readonly<{ affectedCount: number }>> {
@@ -571,12 +604,13 @@ export function createNodeCollection<
       }
       const compiledCandidates = asCompiledSelectSql(combinedCandidates);
 
-      const result = await executeNodeUpdateWhere(
+      const result = await executeNodeSetUpdate(
         kind,
         params.patch,
         compiledCandidates,
         candidateIdColumn,
         backend,
+        { operation: "updateWhere" },
       );
       await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
       return result;
