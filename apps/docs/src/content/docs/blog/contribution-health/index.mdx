@@ -161,7 +161,8 @@ stop at any of them:
 `rebuild` needs two things at once: a strategy that declares `dropDdl`,
 and a transactional schema fence to run under. The HTTP-only PostgreSQL
 drivers cannot hold a session across statements, so they have no fence —
-the same reason they already report `capabilities.transactions === false`.
+the same reason they already declare no
+`capabilities.execution.interactiveTransactions`.
 
 A third-party strategy predating `dropDdl` keeps working for everything
 else and is reported as not rebuildable, rather than being dropped

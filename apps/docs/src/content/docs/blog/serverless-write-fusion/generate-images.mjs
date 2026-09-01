@@ -9,6 +9,11 @@
 // rather than asserted in a caption. The single fused statement is drawn
 // once, in accent, across the top of the same rails.
 //
+// The bracket names the link latency as assumed, not measured: what this
+// release measures is the number of submissions crossing the transport
+// boundary, and the millisecond figures in the post are arithmetic over that
+// count.
+//
 // This replaces a three-card stat grid ("5-6 requests -> 1 request",
 // "83% fewer") that the 2026-08 cover review rejected: the numbers were
 // real, but a numeral inside a rounded rectangle is not a picture of that
@@ -111,7 +116,7 @@ function renderDiagram() {
     LADDER_TOP + (EXCHANGES.length - 1) * ROW_STRIDE + RETURN_OFFSET;
   const bracket = `<path d="M ${RIGHT_RAIL + 20} ${LADDER_TOP - 10} L ${RIGHT_RAIL + 30} ${LADDER_TOP - 10} L ${RIGHT_RAIL + 30} ${ladderBottom + 10} L ${RIGHT_RAIL + 20} ${ladderBottom + 10}" fill="none" stroke="${COLOR_MUTED}" stroke-width="2"/>
     <text x="${RIGHT_RAIL + 42}" y="${(LADDER_TOP + ladderBottom) / 2 - 4}" font-size="18" font-family="${SANS}" font-weight="600" fill="${COLOR_MUTED_TEXT}">5–6 round trips</text>
-    <text x="${RIGHT_RAIL + 42}" y="${(LADDER_TOP + ladderBottom) / 2 + 20}" font-size="17" font-family="${MONO}" fill="${COLOR_MUTED_TEXT}">45ms each</text>`;
+    <text x="${RIGHT_RAIL + 42}" y="${(LADDER_TOP + ladderBottom) / 2 + 20}" font-size="17" font-family="${MONO}" fill="${COLOR_MUTED_TEXT}">assumed 45ms link</text>`;
 
   return `${rails}\n  ${ladder}\n  ${bracket}\n  ${fused}`;
 }
