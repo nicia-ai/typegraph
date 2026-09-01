@@ -1,5 +1,20 @@
 # @nicia-ai/typegraph
 
+## 0.54.0
+
+### Minor Changes
+
+- [#601](https://github.com/nicia-ai/typegraph/pull/601) [`f7d1ac4`](https://github.com/nicia-ai/typegraph/commit/f7d1ac44d105f6b1aedabb4c70917dbc57570c1a) Thanks [@pdlug](https://github.com/pdlug)! - Add first-class graph annotations, Store population statistics and validation,
+  branch-free candidate write-set conflict planning, schema-bound runtime-kind
+  tokens for typed collections and traversals, and guarded node compare-and-set.
+
+  This release also preserves unknown top-level serialized-schema fields across
+  reconciliation, reports no-op schema diffs without a phantom version delta,
+  ships the package changelog in the npm tarball, and clarifies base-schema
+  adoption and transaction-scoped mutation performance. The bulk-operation hook
+  context now also reports `"compareAndSet"`; exhaustive consumers of its
+  `operation` field must handle the new case.
+
 ## 0.53.0
 
 ### Highlights
