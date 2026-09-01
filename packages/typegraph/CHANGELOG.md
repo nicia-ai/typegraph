@@ -1,5 +1,34 @@
 # @nicia-ai/typegraph
 
+## 0.54.0
+
+### Highlights
+
+TypeGraph 0.54 makes runtime-evolved schemas first-class across metadata, typing, analysis, conflict planning, and guarded recovery. Graph-scoped annotations now flow through `defineGraph`, `defineGraphExtension`, `SerializedSchema`, and introspection. Schema-bound runtime-kind tokens preserve extension node and edge types through collections, bulk edge reads, and one-hop traversals without consumer-side widening adapters.
+
+New current-state Store analysis APIs keep discovery work bounded as vocabularies and datasets grow. `store.describe()` computes per-kind population and declared-property coverage in SQL, splits node and edge work, and chunks wide schemas under a fixed result-column budget. `store.validateStore()` uses keyset-paginated scans to report declared-schema violations with record ids, JSON-pointer paths, and reasons while treating undeclared fields as healthy semi-structured data. Both APIs bracket their work with a stable schema coordinate; data is live, so concurrent writes can affect different statements or pages.
+
+`planCandidateWriteSet()` brings the existing source-attributed merge planner to branch-free candidate writes without applying them. Node collections also gain scalar `compareAndSet()` and `compareAndSetAbsent()` guards that preserve ordinary validation, hooks, history, and version bookkeeping while enforcing the expected-current predicate atomically.
+
+### Upgrade notes
+
+- `BulkOperationHookContext["operation"]` now includes `"compareAndSet"`; exhaustive consumers must handle the new case.
+- Store analysis is current-only and intentionally absent from `StoreView` and transaction callback facades. Calling `store.describe()` through an enclosing root Store inside a transaction callback does not enlist the analysis in that transaction.
+- During a mixed-version rollout, upgrade every process that can write schema versions to 0.54 before enabling graph-scoped annotations. TypeGraph 0.54 preserves unknown top-level serialized-schema fields during reconciliation; older writers do not provide that guarantee.
+
+### Minor Changes
+
+- [#601](https://github.com/nicia-ai/typegraph/pull/601) [`f7d1ac4`](https://github.com/nicia-ai/typegraph/commit/f7d1ac44d105f6b1aedabb4c70917dbc57570c1a) Thanks [@pdlug](https://github.com/pdlug)! - Add first-class graph annotations, Store population statistics and validation,
+  branch-free candidate write-set conflict planning, schema-bound runtime-kind
+  tokens for typed collections and traversals, and guarded node compare-and-set.
+
+  This release also preserves unknown top-level serialized-schema fields across
+  reconciliation, reports no-op schema diffs without a phantom version delta,
+  ships the package changelog in the npm tarball, and clarifies base-schema
+  adoption and transaction-scoped mutation performance. The bulk-operation hook
+  context now also reports `"compareAndSet"`; exhaustive consumers of its
+  `operation` field must handle the new case.
+
 ## 0.53.0
 
 ### Highlights
