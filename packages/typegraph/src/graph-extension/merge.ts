@@ -1,5 +1,6 @@
 import { type GraphDef } from "../core/define-graph";
 import { defineEdge } from "../core/edge";
+import { mergeGraphAnnotations } from "../core/json-value";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
@@ -253,6 +254,10 @@ export function mergeGraphExtension<G extends GraphDef>(
   // `createDataKeyedBag` in ../utils/object.ts.
   return Object.freeze({
     ...graph,
+    annotations: mergeGraphAnnotations(
+      graph.annotations,
+      validatedUnion.annotations,
+    ),
     nodes: { ...mergedNodes },
     edges: { ...mergedEdges },
     ontology: mergedOntology,
@@ -448,6 +453,11 @@ function unionDocuments(
     return next;
   }
 
+  const annotations = mergeGraphAnnotations(
+    existing.annotations,
+    next.annotations,
+  );
+
   const nodes =
     existing.nodes === undefined && next.nodes === undefined ?
       undefined
@@ -480,6 +490,7 @@ function unionDocuments(
 
   return Object.freeze({
     ...(version === undefined ? {} : { version }),
+    ...(annotations === undefined ? {} : { annotations }),
     ...(nodes === undefined ? {} : { nodes }),
     ...(edges === undefined ? {} : { edges }),
     ...(ontology === undefined ? {} : { ontology }),
@@ -531,6 +542,7 @@ function indexCompositeKey(entry: ExtensionIndex): string {
 function isEmptyExtension(extension: GraphExtension): boolean {
   return (
     extension.nodes === undefined &&
+    extension.annotations === undefined &&
     extension.edges === undefined &&
     extension.ontology === undefined &&
     extension.indexes === undefined

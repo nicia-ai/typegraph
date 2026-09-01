@@ -22,6 +22,7 @@ import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,
+  CompareAndSetNodeParams,
   ContributionMaterializationIdentity,
   CountEdgesByKindParams,
   CountEdgesFromParams,
@@ -373,7 +374,10 @@ export type CommonOperationStrategy = Readonly<{
     ids: readonly string[],
     schemaFence: SchemaWriteFenceParams,
   ) => SQL;
-  buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
+  buildUpdateNodeSet: (
+    params: CompareAndSetNodeParams | UpdateNodeSetParams,
+    timestamp: string,
+  ) => SQL;
   buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
   buildAtomicNodeDeleteBatchWithSchemaFence: (
     input: AtomicNodeDeleteBatchInput,
@@ -1046,7 +1050,10 @@ function createCommonOperationStrategy(
       nodes: nodePrimaryKeyConstraint(tables.nodes),
       edges: edgePrimaryKeyConstraint(tables.edges),
     },
-    buildUpdateNodeSet(params: UpdateNodeSetParams, timestamp: string): SQL {
+    buildUpdateNodeSet(
+      params: CompareAndSetNodeParams | UpdateNodeSetParams,
+      timestamp: string,
+    ): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
     },
     buildDeleteContributionMaterialization,

@@ -104,6 +104,7 @@ import {
   EagerMaterializationError,
   KindNotFoundError,
   MigrationError,
+  RuntimeKindTokenError,
   UnsupportedBackendCapabilityError,
   ValidationError,
 } from "../errors";
@@ -180,6 +181,7 @@ import { type VectorSlot } from "../query/dialect/vector-strategy";
 import { renderSql } from "../query/sql-fragment";
 import { type CompiledRowsSql } from "../query/sql-intent";
 import { buildKindRegistry, type KindRegistry } from "../registry";
+import { canonicalEqual } from "../schema/canonical";
 import {
   applyDeprecatedKinds,
   commitNewSchemaVersion,
@@ -197,6 +199,7 @@ import {
 } from "../schema/manager";
 import { type SchemaDiff } from "../schema/migration";
 import { serializeSchema } from "../schema/serializer";
+import { serializeSchemaProperties } from "../schema/serializer";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -306,8 +309,22 @@ import {
   type RecordedReadService,
 } from "./recorded-read-service";
 import { rowToEdge, rowToNode } from "./row-mappers";
+import {
+  createRuntimeKindToken,
+  resolveRuntimeKindToken,
+  type RuntimeEdgeKind,
+  type RuntimeKindSchemaBinding,
+  type RuntimeNodeKind,
+} from "./runtime-kind";
 import { STORE_RUNTIME, type StoreRuntime } from "./runtime-port";
 import { StoreSearch } from "./search-facade";
+import {
+  describeStore,
+  type StoreDescription,
+  type StoreValidationPage,
+  validateStore as validateStoreImpl,
+  type ValidateStoreOptions,
+} from "./store-analysis";
 import {
   RecordedStoreView,
   StoreView,
@@ -331,6 +348,8 @@ import {
   AUTO_REFRESH_STATISTICS_ROW_THRESHOLD,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkFindRuntimeEdgesFromParams,
+  type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
   type DynamicEdgeCollection,
   type DynamicNodeCollection,
@@ -352,6 +371,8 @@ import {
   type RecordedReadStoreOptions,
   type RecordedScanOptions,
   type RecordedScanPage,
+  type RuntimeEdgeCollection,
+  type RuntimeNodeCollection,
   type ScopedMeasure,
   type StoreHooks,
   type StoreOptions,
@@ -605,6 +626,26 @@ export type ViewIdentityAccess<G extends GraphDef> =
     Readonly<{ identity: IdentityReadFacade<G> }>
   : Readonly<Record<never, never>>;
 
+export interface NodeCollectionLookup {
+  <T extends RuntimeNodeKind>(token: T): RuntimeNodeCollection<T>;
+  <const K extends string>(kind: K): DynamicNodeCollection<K> | undefined;
+}
+
+export interface RequiredNodeCollectionLookup {
+  <T extends RuntimeNodeKind>(token: T): RuntimeNodeCollection<T>;
+  <const K extends string>(kind: K): DynamicNodeCollection<K>;
+}
+
+export interface EdgeCollectionLookup {
+  <T extends RuntimeEdgeKind>(token: T): RuntimeEdgeCollection<T>;
+  (kind: string): DynamicEdgeCollection | undefined;
+}
+
+export interface RequiredEdgeCollectionLookup {
+  <T extends RuntimeEdgeKind>(token: T): RuntimeEdgeCollection<T>;
+  (kind: string): DynamicEdgeCollection;
+}
+
 type StoreCore<G extends GraphDef> = Readonly<{
   [STORE_RUNTIME]: StoreRuntime<G>;
   graph: G;
@@ -619,19 +660,35 @@ type StoreCore<G extends GraphDef> = Readonly<{
   edges: GraphEdgeCollections<G>;
   algorithms: GraphAlgorithms<G>;
   search: StoreSearch<G>;
-  getNodeCollection: <const K extends string>(
+  runtimeNodeKind: <
+    const K extends string,
+    S extends z.ZodObject<z.ZodRawShape>,
+  >(
     kind: K,
-  ) => DynamicNodeCollection<K> | undefined;
-  getNodeCollectionOrThrow: <const K extends string>(
+    schema: S,
+  ) => RuntimeNodeKind<K, S>;
+  runtimeEdgeKind: <
+    const K extends string,
+    S extends z.ZodObject<z.ZodRawShape>,
+  >(
     kind: K,
-  ) => DynamicNodeCollection<K>;
-  getEdgeCollection: (kind: string) => DynamicEdgeCollection | undefined;
-  getEdgeCollectionOrThrow: (kind: string) => DynamicEdgeCollection;
+    schema: S,
+  ) => RuntimeEdgeKind<K, S>;
+  getNodeCollection: NodeCollectionLookup;
+  getNodeCollectionOrThrow: RequiredNodeCollectionLookup;
+  getEdgeCollection: EdgeCollectionLookup;
+  getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup;
   getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getNodePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   introspect: () => SchemaIntrospection;
+  /** Describe the schema and its current population in one read snapshot. */
+  describe: () => Promise<StoreDescription>;
+  /** Page declared-schema violations without treating undeclared fields as invalid. */
+  validateStore: (
+    options: ValidateStoreOptions,
+  ) => Promise<StoreValidationPage>;
   schemaChanges: () => Promise<SchemaDiff | undefined>;
   requiresMigration: () => Promise<boolean>;
   query: () => InitialQueryBuilder<G, "open">;
@@ -655,6 +712,13 @@ type StoreCore<G extends GraphDef> = Readonly<{
     params: BulkFindEdgesFromParams<G, K>,
     options?: EdgeBulkFindEndpointOptions,
   ) => Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
+  bulkFindRuntimeEdgesFrom: <
+    NT extends RuntimeNodeKind,
+    ET extends RuntimeEdgeKind,
+  >(
+    params: BulkFindRuntimeEdgesFromParams<NT, ET>,
+    options?: EdgeBulkFindEndpointOptions,
+  ) => Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]>;
   subgraph: <
     const EK extends EdgeKinds<G>,
     const NK extends NodeKinds<G> = NodeKinds<G>,
@@ -857,6 +921,7 @@ async function commitEvolvedSchemaWhenRequiredKindsAreEmpty<G extends GraphDef>(
   graph: G,
   currentVersion: number,
   classification: ReturnType<typeof classifyModifications>,
+  storedSchema: SerializedSchema,
 ): Promise<SchemaVersionRow> {
   const result = await commitNewSchemaVersionIfKindsEmpty(
     backend,
@@ -867,6 +932,7 @@ async function commitEvolvedSchemaWhenRequiredKindsAreEmpty<G extends GraphDef>(
       kind: entry.kindName,
       rows: "nonDeleted" as const,
     })),
+    storedSchema,
   );
   if (result.status === "committed") return result.row;
 
@@ -968,6 +1034,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   readonly #schema: StoreOptions["schema"];
   readonly #recordedReads: RecordedReadService;
   #schemaMetadata: StoreSchemaMetadata;
+  readonly #runtimeKindOwner = Object.freeze({});
   readonly #defaultTraversalExpansion: TraversalExpansion;
   // Stored verbatim so `evolve()` can construct the next Store with
   // identical options. Reconstructing from the individual private
@@ -1734,6 +1801,82 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   // === Dynamic Collection Access ===
 
+  #runtimeKindBinding(): RuntimeKindSchemaBinding {
+    return {
+      graphId: this.graphId,
+      schemaVersion: this.#schemaMetadata.schemaVersion,
+      schemaHash: this.#schemaMetadata.schemaHash,
+    };
+  }
+
+  #assertRuntimeKindSchema(
+    entity: KindEntity,
+    kind: string,
+    evidence: z.ZodObject<z.ZodRawShape>,
+  ): void {
+    if (
+      this.#schemaMetadata.schemaVersion === undefined ||
+      this.#schemaMetadata.schemaHash === undefined
+    ) {
+      throw new RuntimeKindTokenError("unreconciled", entity, {
+        graphId: this.graphId,
+        kind,
+      });
+    }
+    const registered =
+      entity === "node" ?
+        this.getNodePropsSchemaOrThrow(kind)
+      : this.getEdgePropsSchemaOrThrow(kind);
+    if (
+      !canonicalEqual(
+        serializeSchemaProperties(registered),
+        serializeSchemaProperties(evidence),
+      )
+    ) {
+      throw new RuntimeKindTokenError("schema-mismatch", entity, {
+        graphId: this.graphId,
+        kind,
+      });
+    }
+  }
+
+  runtimeNodeKind<const K extends string, S extends z.ZodObject<z.ZodRawShape>>(
+    kind: K,
+    schema: S,
+  ): RuntimeNodeKind<K, S> {
+    this.#assertRuntimeKindSchema("node", kind, schema);
+    return createRuntimeKindToken(
+      this.#runtimeKindOwner,
+      this.#runtimeKindBinding(),
+      "node",
+      kind,
+      schema,
+    );
+  }
+
+  runtimeEdgeKind<const K extends string, S extends z.ZodObject<z.ZodRawShape>>(
+    kind: K,
+    schema: S,
+  ): RuntimeEdgeKind<K, S> {
+    this.#assertRuntimeKindSchema("edge", kind, schema);
+    return createRuntimeKindToken(
+      this.#runtimeKindOwner,
+      this.#runtimeKindBinding(),
+      "edge",
+      kind,
+      schema,
+    );
+  }
+
+  #resolveRuntimeKind(token: unknown, entity: KindEntity): string {
+    return resolveRuntimeKindToken(
+      token,
+      entity,
+      this.#runtimeKindOwner,
+      this.#runtimeKindBinding(),
+    );
+  }
+
   /**
    * Resolves `kind` against `collections` (either `this.nodes` or a
    * transaction-scoped — and possibly receipt-wrapped — node collection map),
@@ -1763,9 +1906,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * me the collection" pattern, prefer `getNodeCollectionOrThrow` — it
    * throws `KindNotFoundError` instead of forcing a null-check.
    */
+  getNodeCollection<T extends RuntimeNodeKind>(
+    token: T,
+  ): RuntimeNodeCollection<T>;
   getNodeCollection<const K extends string>(
     kind: K,
-  ): DynamicNodeCollection<K> | undefined {
+  ): DynamicNodeCollection<K> | undefined;
+  getNodeCollection(kindOrToken: string | RuntimeNodeKind): unknown {
+    const kind =
+      typeof kindOrToken === "string" ? kindOrToken : (
+        this.#resolveRuntimeKind(kindOrToken, "node")
+      );
     return this.#resolveDynamicNodeCollection(this.nodes, kind);
   }
 
@@ -1778,10 +1929,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * operates on the new kind, and the null-check the optional variant requires
    * is busywork.
    */
+  getNodeCollectionOrThrow<T extends RuntimeNodeKind>(
+    token: T,
+  ): RuntimeNodeCollection<T>;
   getNodeCollectionOrThrow<const K extends string>(
     kind: K,
-  ): DynamicNodeCollection<K> {
-    const collection = this.getNodeCollection(kind);
+  ): DynamicNodeCollection<K>;
+  getNodeCollectionOrThrow(kindOrToken: string | RuntimeNodeKind): unknown {
+    const kind =
+      typeof kindOrToken === "string" ? kindOrToken : (
+        this.#resolveRuntimeKind(kindOrToken, "node")
+      );
+    const collection = this.#resolveDynamicNodeCollection(this.nodes, kind);
     if (collection === undefined) {
       throw new KindNotFoundError(kind, "node", {
         graphId: this.graphId,
@@ -1797,7 +1956,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Use this for runtime string-keyed access when the kind is not known at
    * compile time. For post-evolve access, prefer `getEdgeCollectionOrThrow`.
    */
-  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
+  getEdgeCollection<T extends RuntimeEdgeKind>(
+    token: T,
+  ): RuntimeEdgeCollection<T>;
+  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined;
+  getEdgeCollection(
+    kindOrToken: string | RuntimeEdgeKind,
+  ): DynamicEdgeCollection | undefined {
+    const kind =
+      typeof kindOrToken === "string" ? kindOrToken : (
+        this.#resolveRuntimeKind(kindOrToken, "edge")
+      );
     if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
     return this.edges[
       kind as keyof G["edges"] & string
@@ -1808,7 +1977,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Returns the edge collection for the given kind. Throws
    * `KindNotFoundError` when the kind is not registered.
    */
-  getEdgeCollectionOrThrow(kind: string): DynamicEdgeCollection {
+  getEdgeCollectionOrThrow<T extends RuntimeEdgeKind>(
+    token: T,
+  ): RuntimeEdgeCollection<T>;
+  getEdgeCollectionOrThrow(kind: string): DynamicEdgeCollection;
+  getEdgeCollectionOrThrow(
+    kindOrToken: string | RuntimeEdgeKind,
+  ): DynamicEdgeCollection {
+    const kind =
+      typeof kindOrToken === "string" ? kindOrToken : (
+        this.#resolveRuntimeKind(kindOrToken, "edge")
+      );
     const collection = this.getEdgeCollection(kind);
     if (collection === undefined) {
       throw new KindNotFoundError(kind, "edge", {
@@ -1895,6 +2074,42 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * Describes the merged schema and batched population statistics from one
+   * repeatable-read snapshot. The result includes schema and data fences so it
+   * can be compared with a later validation or description.
+   */
+  async describe(): Promise<StoreDescription> {
+    return describeStore({
+      graph: this.#graph,
+      graphId: this.graphId,
+      backend: this.#baseBackend,
+      schema: this.#sqlSchema(),
+      introspect: () => this.introspect(),
+    });
+  }
+
+  /**
+   * Pages records that violate rules declared by the current kind schema.
+   * Undeclared properties remain valid semi-structured state. Continuation
+   * cursors fail with `StoreAnalysisCursorStaleError` after schema or data
+   * drift, rather than combining pages from different revisions.
+   */
+  async validateStore(
+    options: ValidateStoreOptions,
+  ): Promise<StoreValidationPage> {
+    return validateStoreImpl(
+      {
+        graph: this.#graph,
+        graphId: this.graphId,
+        backend: this.#baseBackend,
+        schema: this.#sqlSchema(),
+        introspect: () => this.introspect(),
+      },
+      options,
+    );
+  }
+
+  /**
    * Pre-flights this store's graph against the committed schema — one SELECT,
    * no DDL, no writes. Returns the structured diff, or `undefined` when no
    * schema has been committed for this graph yet.
@@ -1967,6 +2182,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         candidateIds,
         candidateIdColumn,
         backend,
+        options,
       ) =>
         executeNodeUpdateWhere(
           ctx,
@@ -1975,6 +2191,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           candidateIds,
           candidateIdColumn,
           backend,
+          options,
         ),
       executeUpsertUpdateBatch: (entries, backend) =>
         executeNodeUpsertUpdateBatch(ctx, entries, backend),
@@ -2682,6 +2899,38 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         : bucket.slice(0, limitPerInput);
       return { source, edges };
     });
+  }
+
+  /**
+   * Token-validated sibling of `bulkFindEdgesFrom` for persisted runtime kinds.
+   * Validation and type recovery happen here; execution delegates to the same
+   * set-oriented backend path as the compile-time API.
+   */
+  async bulkFindRuntimeEdgesFrom<
+    NT extends RuntimeNodeKind,
+    ET extends RuntimeEdgeKind,
+  >(
+    params: BulkFindRuntimeEdgesFromParams<NT, ET>,
+    options?: EdgeBulkFindEndpointOptions,
+  ): Promise<readonly BulkFindRuntimeEdgesFromResult<NT, ET>[]> {
+    const sources = params.sources.map((group) => ({
+      kind: this.#resolveRuntimeKind(group.kind, "node"),
+      ids: group.ids,
+    }));
+    const edgeKinds = params.edgeKinds.map((token) =>
+      this.#resolveRuntimeKind(token, "edge"),
+    );
+    const result = await this.bulkFindEdgesFrom(
+      {
+        sources,
+        edgeKinds,
+      } as unknown as BulkFindEdgesFromParams<G, EdgeKinds<G>>,
+      options,
+    );
+    return result as unknown as readonly BulkFindRuntimeEdgesFromResult<
+      NT,
+      ET
+    >[];
   }
 
   // === Subgraph Extraction ===
@@ -3856,7 +4105,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // different shape, classifyModifications throws
     // IncompatibleChangeError here — surfacing the divergence rather
     // than overwriting.
-    const { activeRow, baseline } = await this.#loadCaughtUp("evolve");
+    const { activeRow, storedSchema, baseline } =
+      await this.#loadCaughtUp("evolve");
 
     // Merge first so the "I evolved with the same extension again"
     // hot path short-circuits before we walk every property in
@@ -3965,8 +4215,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             merged,
             activeRow.version,
             classification,
+            storedSchema,
           )
-        : await commitNewSchemaVersion(this.#backend, merged, activeRow.version)
+        : await commitNewSchemaVersion(
+            this.#backend,
+            merged,
+            activeRow.version,
+            storedSchema,
+          )
       : await commitNewSchemaVersionWithPreflight(
           this.#backend,
           merged,
@@ -3982,6 +4238,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               identityProvisioning?.provisionInCommit ?? [],
             );
           },
+          storedSchema,
         );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already
@@ -4734,7 +4991,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeRemovalsOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    const { activeRow, baseline } = await this.#loadCaughtUp("remove");
+    const { activeRow, storedSchema, baseline } =
+      await this.#loadCaughtUp("remove");
     const plan = planRemovals(baseline, names);
 
     // True no-op: every name was either absent or already removed.
@@ -4782,12 +5040,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#backend,
           finalGraph,
           activeRow.version,
+          storedSchema,
         )
       : await commitNewSchemaVersionWithPreflight(
           this.#backend,
           finalGraph,
           activeRow.version,
           identityCascade,
+          storedSchema,
         );
 
     // Queue per-deployment data-cleanup status — one row per removed
@@ -5488,6 +5748,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend: queryBackend,
         dialect: backend.dialect,
         defaultTraversalExpansion: this.#defaultTraversalExpansion,
+        runtimeKindTokenResolver: (token, entity) =>
+          this.#resolveRuntimeKind(token, entity),
         ...(this.#schema !== undefined && { schema: this.#schema }),
         ...(this.#recordedReadBinding !== undefined && {
           recordedReadBinding: this.#recordedReadBinding,

@@ -810,9 +810,12 @@ function generatePostgresDDL(tables?: PostgresTables): string[];
 
 ### Upgrading deployment-wide base storage
 
-Skip this section when `createStoreWithSchema()` owns schema preparation: the
-bundled SQLite and PostgreSQL adapters adopt each numbered base-schema release
-on the first privileged open. Base-schema version 1 includes the durable graph
+Skip this section when `createStoreWithSchema()` or
+`createAdapterStoreWithSchema()` owns schema preparation: the bundled SQLite
+and PostgreSQL adapters adopt each numbered base-schema release automatically
+on the first privileged open. No separate bootstrap command is needed. The
+deployment invariant is ordering: that privileged open must finish before any
+DML-only runtime worker starts. Base-schema version 1 includes the durable graph
 template relation and edge match-identity storage. It is required even for
 graphs without a `matchIdentity` declaration because every edge write names the
 two nullable columns.

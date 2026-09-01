@@ -146,6 +146,22 @@ describe("serializedSchemaZod", () => {
       const result = serializedSchemaZod.safeParse(withExtra);
       expect(result.success).toBe(true);
     });
+
+    it("preserves unknown top-level fields at the 0.54 writer floor", () => {
+      const document = {
+        ...createValidSchemaDocument(),
+        futureTopLevelSlice: {
+          annotations: { title: "Authored by a newer writer" },
+        },
+      };
+
+      const parsed = parseSerializedSchema(JSON.stringify(document));
+
+      expect(Object.entries(parsed)).toContainEqual([
+        "futureTopLevelSlice",
+        document.futureTopLevelSlice,
+      ]);
+    });
   });
 
   describe("invalid JSON shapes", () => {

@@ -375,9 +375,13 @@ export function getSearchableMetadata(schema: z.ZodType): SearchableMetadata | u
 const GRAPH_DEF_BRAND: "__graphDef";
 
 // @public
+export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+// @public
 export type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined = GraphIdentityConfig | undefined> = Readonly<{
     [GRAPH_DEF_BRAND]: true;
     id: string;
+    annotations: GraphAnnotations | undefined;
     nodes: TNodes;
     edges: TEdges;
     ontology: TOntology;
@@ -400,6 +404,7 @@ export type GraphDefaults = Readonly<{
 // @public
 type GraphDefConfig<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>, TOntology extends readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined> = Readonly<{
     id: string;
+    annotations?: GraphAnnotations;
     nodes: TNodes;
     edges: TEdges;
     ontology?: TOntology;
@@ -411,6 +416,7 @@ type GraphDefConfig<TNodes extends Record<string, NodeRegistration>, TEdges exte
 // @public
 type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];

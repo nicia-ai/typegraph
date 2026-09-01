@@ -137,6 +137,12 @@ type CommitSchemaVersionParams = Readonly<{
     schemaDoc: SerializedSchema;
 }>;
 
+// @public
+type CompareAndSetNodeParams = UpdateNodeSetParams & Readonly<{
+    expectedProperties: Readonly<Record<string, JsonValue>>;
+    expectedAbsentProperties: readonly string[];
+}>;
+
 // @public (undocumented)
 type CompiledRowsSql = IntentSql<"rows">;
 
@@ -948,6 +954,16 @@ type GraphAnalyticsCapabilities = Readonly<{
 }>;
 
 // @public
+type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+// @public
+export type GraphAnnotationsChange = Readonly<{
+    type: ChangeType;
+    severity: "safe";
+    details: string;
+}>;
+
+// @public
 type GraphBackend = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
@@ -963,6 +979,7 @@ type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
+    compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     getNode: (this: void, graphId: string, kind: string, id: string) => Promise<NodeRow | undefined>;
@@ -1151,6 +1168,7 @@ type GraphCommandSession = "root" | "transaction";
 type GraphDef<TNodes extends Record<string, NodeRegistration> = Record<string, NodeRegistration>, TEdges extends Record<string, EdgeRegistration> = Record<string, EdgeRegistration>, TOntology extends readonly OntologyRelation[] = readonly OntologyRelation[], TIdentity extends GraphIdentityConfig | undefined = GraphIdentityConfig | undefined> = Readonly<{
     [GRAPH_DEF_BRAND]: true;
     id: string;
+    annotations: GraphAnnotations | undefined;
     nodes: TNodes;
     edges: TEdges;
     ontology: TOntology;
@@ -1173,6 +1191,7 @@ type GraphEntityWriteBackend = NodeEntityWriteBackend & EdgeEntityWriteBackend;
 // @public
 type GraphExtension = Readonly<{
     version?: GraphExtensionVersion;
+    annotations?: GraphAnnotations;
     nodes?: Readonly<Record<string, ExtensionNodeDef>>;
     edges?: Readonly<Record<string, ExtensionEdgeDef>>;
     ontology?: readonly ExtensionOntologyRelation[];
@@ -1728,7 +1747,7 @@ type NodeCreateCommandResult = Readonly<{
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -1999,6 +2018,7 @@ export type SchemaDiff = Readonly<{
     edges: readonly EdgeChange[];
     ontology: readonly OntologyChange[];
     identity?: IdentityChange;
+    annotations?: GraphAnnotationsChange;
     indexes: readonly IndexChange[];
     extension?: ExtensionChange;
     deprecatedKinds?: DeprecatedKindsChange;
@@ -2148,6 +2168,7 @@ type SerializedPredicate = Readonly<{
 // @public
 export type SerializedSchema = Readonly<{
     graphId: string;
+    annotations?: GraphAnnotations;
     version: number;
     generatedAt: string;
     nodes: Record<string, SerializedNodeDef>;

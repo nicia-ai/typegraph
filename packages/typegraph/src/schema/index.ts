@@ -84,6 +84,7 @@ export {
   type EdgeChange,
   type ExtensionChange,
   getMigrationActions,
+  type GraphAnnotationsChange,
   type IdentityChange,
   type IndexChange,
   isBackwardsCompatible,

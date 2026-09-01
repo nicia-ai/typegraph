@@ -127,7 +127,9 @@ cache.
 Dynamic call-level `matchOn`, constrained single-edge writes, history/revision
 stores, caller-owned transactions, and custom backends without the matching
 semantic program retain the transactional path required by their additional
-contracts. Eligible durable bulk endpoint
+contracts. In particular, writes made through `store.transaction()` remain on
+the interactive path and do not receive the root-path exchange-count reduction.
+Eligible durable bulk endpoint
 convergence now submits one closed native atomic exchange: the durable identity
 arbiter, endpoint validation, and ordered created/found
 results are all resolved by the program. This removes the outside probe, the

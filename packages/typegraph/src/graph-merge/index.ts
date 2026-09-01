@@ -13,11 +13,24 @@ export type {
 export type { IngestionImportTarget } from "../interchange/ingestion-import-target";
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
+export type {
+  CandidateWriteSet,
+  CandidateWriteSetTarget,
+  PlanCandidateWriteSetArgs,
+} from "./candidate-write-set";
+export {
+  CANDIDATE_WRITE_SET_FORMAT_VERSION,
+  CandidateWriteSetSchema,
+  CandidateWriteSetTargetSchema,
+  captureCandidateWriteSetTarget,
+  planCandidateWriteSet,
+} from "./candidate-write-set";
 export type { MergeConstraintConflictErrorDetails } from "./errors";
 export {
   BaseVersionMismatchError,
   BranchError,
   CandidateSourceError,
+  CandidateWriteSetError,
   IdentityMergeConflictError,
   InvalidMergeOptionsError,
   InvalidMergePlanError,

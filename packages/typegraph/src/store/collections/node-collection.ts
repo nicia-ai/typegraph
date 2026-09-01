@@ -231,6 +231,10 @@ export type NodeCollectionConfig = Readonly<{
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
+    options?: Readonly<{
+      operation?: "compareAndSet" | "updateWhere";
+      expected?: Record<string, unknown>;
+    }>,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
@@ -488,6 +492,31 @@ export function createNodeCollection<
         backend,
       );
       return narrowNode<N>(result);
+    },
+
+    async compareAndSet(id, params): Promise<boolean> {
+      if (createQuery === undefined) {
+        throw new ConfigurationError(
+          `store.nodes.${kind}.compareAndSet() requires a query-capable store`,
+          { kind, operation: "compareAndSet" },
+        );
+      }
+      const rootAlias = "compare_and_set_candidate";
+      const candidateIdColumn = `${rootAlias}_id`;
+      const candidateIds = createQuery()
+        .fromDynamic(kind, rootAlias)
+        .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
+        .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
+        .compile();
+      const result = await executeNodeUpdateWhere(
+        kind,
+        params.patch,
+        candidateIds,
+        candidateIdColumn,
+        backend,
+        { operation: "compareAndSet", expected: params.expected },
+      );
+      return result.affectedCount === 1;
     },
 
     async updateWhere(params): Promise<Readonly<{ affectedCount: number }>> {

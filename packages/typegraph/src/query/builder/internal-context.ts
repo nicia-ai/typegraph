@@ -7,12 +7,14 @@
  * free of internal-only fields while preserving clone-by-config behavior.
  */
 import { type ReadCoordinate } from "../../core/temporal";
+import { type RuntimeKindTokenResolver } from "../../store/runtime-kind";
 import { type RecordedReadBinding } from "../compiler/schema";
 import { type QueryBuilderConfig } from "./types";
 
 export type QueryBuilderInternalContext = Readonly<{
   recordedReadBinding?: RecordedReadBinding | undefined;
   sealedCoordinate?: ReadCoordinate | undefined;
+  runtimeKindTokenResolver?: RuntimeKindTokenResolver | undefined;
 }>;
 
 const contexts = new WeakMap<QueryBuilderConfig, QueryBuilderInternalContext>();
@@ -23,7 +25,8 @@ export function registerQueryBuilderInternalContext(
 ): void {
   if (
     context.recordedReadBinding === undefined &&
-    context.sealedCoordinate === undefined
+    context.sealedCoordinate === undefined &&
+    context.runtimeKindTokenResolver === undefined
   ) {
     return;
   }

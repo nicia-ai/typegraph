@@ -218,6 +218,42 @@ export const sqliteDialect: DialectAdapter = {
     return sql`COALESCE(json_type(${column}, ${pathSql}) <> 'null', 0)`;
   },
 
+  jsonPathEquals(column, pointer, value) {
+    const path = toSqlitePath(pointer);
+    const pathSql = sql.raw(escapeSqliteLiteral(path));
+    if (value === null) {
+      return sql`json_type(${column}, ${pathSql}) = 'null'`;
+    }
+    if (typeof value === "boolean") {
+      return sql`json_type(${column}, ${pathSql}) IN ('true', 'false') AND json_extract(${column}, ${pathSql}) = ${value ? 1 : 0}`;
+    }
+    if (typeof value === "object") {
+      const jsonType = Array.isArray(value) ? "array" : "object";
+      const expectedJson = JSON.stringify(value);
+      return sql`
+        json_type(${column}, ${pathSql}) = ${jsonType}
+        AND NOT EXISTS (
+          SELECT fullkey, type, atom
+          FROM json_tree(json_extract(${column}, ${pathSql}))
+          EXCEPT
+          SELECT fullkey, type, atom
+          FROM json_tree(${expectedJson})
+        )
+        AND NOT EXISTS (
+          SELECT fullkey, type, atom
+          FROM json_tree(${expectedJson})
+          EXCEPT
+          SELECT fullkey, type, atom
+          FROM json_tree(json_extract(${column}, ${pathSql}))
+        )
+      `;
+    }
+    if (typeof value === "number") {
+      return sql`json_type(${column}, ${pathSql}) IN ('integer', 'real') AND json_extract(${column}, ${pathSql}) = ${value}`;
+    }
+    return sql`json_type(${column}, ${pathSql}) = 'text' AND json_extract(${column}, ${pathSql}) = ${value}`;
+  },
+
   jsonSetProperties(column, patch, unsetProperties = []) {
     const entries = Object.entries(patch);
     let patchedColumn = column;

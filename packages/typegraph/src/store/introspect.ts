@@ -24,6 +24,7 @@ import {
   type Collation,
   type EdgeType,
   type EndpointExistence,
+  type GraphAnnotations,
   type KindAnnotations,
   type NodeRegistration,
   type NodeType,
@@ -45,6 +46,8 @@ export type SchemaIntrospection = Readonly<{
   schemaVersion: number | undefined;
   /** Hash of the active schema document, when known to the caller. */
   schemaHash: string | undefined;
+  /** Consumer-owned graph-scoped JSON metadata. */
+  annotations: GraphAnnotations | undefined;
   kinds: readonly KindIntrospection[];
   edges: readonly EdgeIntrospection[];
   ontology: readonly OntologyIntrospection[];
@@ -166,6 +169,7 @@ export function introspectSchema<G extends GraphDef>(
 
   return {
     graphId: context.graphId,
+    annotations: graph.annotations,
     schemaVersion: context.schemaVersion,
     schemaHash: context.schemaHash,
     kinds,

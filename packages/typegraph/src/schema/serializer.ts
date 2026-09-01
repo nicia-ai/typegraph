@@ -14,6 +14,7 @@ import {
 } from "../core/define-graph";
 import {
   type EdgeRegistration,
+  type GraphAnnotations,
   type KindAnnotations,
   type NodeRegistration,
   type NullCheckOp,
@@ -74,9 +75,11 @@ export function serializeSchema<G extends GraphDef>(
   const indexes = serializeIndexes(graph.indexes);
   const extension = canonicalExtension(graph.extension);
   const deprecatedKinds = serializeDeprecatedKinds(graph.deprecatedKinds);
+  const annotations = canonicalGraphAnnotations(graph.annotations);
 
   return {
     graphId: graph.id,
+    ...(annotations === undefined ? {} : { annotations }),
     version,
     generatedAt: nowIso(),
     nodes,
@@ -102,6 +105,43 @@ export function serializeSchema<G extends GraphDef>(
     // stability across insertion-order differences.
     ...(deprecatedKinds === undefined ? {} : { deprecatedKinds }),
   };
+}
+
+const SERIALIZED_SCHEMA_TOP_LEVEL_KEYS = new Set([
+  "graphId",
+  "annotations",
+  "version",
+  "generatedAt",
+  "nodes",
+  "edges",
+  "ontology",
+  "defaults",
+  "identity",
+  "indexes",
+  "extension",
+  "deprecatedKinds",
+]);
+
+/**
+ * Serializes a graph while retaining top-level fields authored by a newer
+ * schema-document format.
+ *
+ * Known fields always come from the current graph, including omission of
+ * optional slices. Only fields this version does not own are carried forward.
+ * Every recommit path uses this function so parsing a newer document can never
+ * turn a later, otherwise-valid schema write into silent metadata loss.
+ */
+export function serializeSchemaPreservingUnknownFields<G extends GraphDef>(
+  graph: G,
+  version: number,
+  previous: SerializedSchema,
+): SerializedSchema {
+  const unknownFields = Object.fromEntries(
+    Object.entries(previous).filter(
+      ([key]) => !SERIALIZED_SCHEMA_TOP_LEVEL_KEYS.has(key),
+    ),
+  );
+  return { ...unknownFields, ...serializeSchema(graph, version) };
 }
 
 function serializeDeprecatedKinds(
@@ -150,6 +190,12 @@ function canonicalAnnotations(
   if (annotations === undefined) return undefined;
   if (Object.keys(annotations).length === 0) return undefined;
   return annotations;
+}
+
+function canonicalGraphAnnotations(
+  annotations: GraphAnnotations | undefined,
+): GraphAnnotations | undefined {
+  return canonicalAnnotations(annotations);
 }
 
 // ============================================================

@@ -89,6 +89,13 @@ export type IdentityChange = Readonly<{
   details: string;
 }>;
 
+/** A safe metadata-only change to graph-scoped annotations. */
+export type GraphAnnotationsChange = Readonly<{
+  type: ChangeType;
+  severity: "safe";
+  details: string;
+}>;
+
 // ============================================================
 // Index Changes
 // ============================================================
@@ -162,7 +169,15 @@ export type DeprecatedKindsChange = Readonly<{
  * A complete diff between two schema versions.
  */
 export type SchemaDiff = Readonly<{
+  /** Version of the schema being compared from. */
   fromVersion: number;
+
+  /**
+   * Version of the schema being compared to. For `getSchemaChanges()`, this
+   * is the version a commit would produce and equals `fromVersion` when
+   * `hasChanges` is false. Direct `computeSchemaDiff()` calls preserve the
+   * supplied after-schema version.
+   */
   toVersion: number;
 
   /** Changes to node definitions */
@@ -176,6 +191,9 @@ export type SchemaDiff = Readonly<{
 
   /** Change to the graph-level identity capability, if any. */
   identity?: IdentityChange;
+
+  /** Change to consumer-owned graph-scoped annotations, if any. */
+  annotations?: GraphAnnotationsChange;
 
   /** Changes to index declarations */
   indexes: readonly IndexChange[];
@@ -224,6 +242,10 @@ export function computeSchemaDiff(
   const edgeChanges = diffEdges(before.edges, after.edges);
   const ontologyChanges = diffOntology(before.ontology, after.ontology);
   const identityChange = diffIdentity(before.identity, after.identity);
+  const annotationsChange = diffGraphAnnotations(
+    before.annotations,
+    after.annotations,
+  );
   const indexChanges = diffIndexes(before.indexes, after.indexes);
   const extensionChange = diffExtension(before.extension, after.extension);
   const deprecatedKindsChange = diffDeprecatedKinds(
@@ -243,6 +265,7 @@ export function computeSchemaDiff(
   const hasChanges =
     allChanges.length > 0 ||
     identityChange !== undefined ||
+    annotationsChange !== undefined ||
     extensionChange !== undefined ||
     deprecatedKindsChange !== undefined;
 
@@ -251,6 +274,7 @@ export function computeSchemaDiff(
     edgeChanges,
     ontologyChanges,
     identityChange,
+    annotationsChange,
     indexChanges,
     extensionChange,
     deprecatedKindsChange,
@@ -263,6 +287,9 @@ export function computeSchemaDiff(
     edges: edgeChanges,
     ontology: ontologyChanges,
     ...(identityChange === undefined ? {} : { identity: identityChange }),
+    ...(annotationsChange === undefined ?
+      {}
+    : { annotations: annotationsChange }),
     indexes: indexChanges,
     ...(extensionChange === undefined ? {} : { extension: extensionChange }),
     ...(deprecatedKindsChange === undefined ?
@@ -272,6 +299,21 @@ export function computeSchemaDiff(
     isBackwardsCompatible: !hasBreakingChanges,
     hasChanges,
     summary,
+  };
+}
+
+function diffGraphAnnotations(
+  before: SerializedSchema["annotations"],
+  after: SerializedSchema["annotations"],
+): GraphAnnotationsChange | undefined {
+  if (canonicalEqual(before ?? {}, after ?? {})) return undefined;
+  return {
+    type:
+      before === undefined ? "added"
+      : after === undefined ? "removed"
+      : "modified",
+    severity: "safe",
+    details: "Graph annotations changed",
   };
 }
 
@@ -1223,6 +1265,7 @@ function generateSummary(
   edgeChanges: readonly EdgeChange[],
   ontologyChanges: readonly OntologyChange[],
   identityChange: IdentityChange | undefined,
+  annotationsChange: GraphAnnotationsChange | undefined,
   indexChanges: readonly IndexChange[],
   extensionChange: ExtensionChange | undefined,
   deprecatedKindsChange: DeprecatedKindsChange | undefined,
@@ -1262,6 +1305,10 @@ function generateSummary(
 
   if (identityChange !== undefined) {
     parts.push(`Identity: ${identityChange.type}`);
+  }
+
+  if (annotationsChange !== undefined) {
+    parts.push(`Graph annotations: ${annotationsChange.type}`);
   }
 
   const indexAdded = indexChanges.filter((c) => c.type === "added").length;

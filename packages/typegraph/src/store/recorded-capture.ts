@@ -724,6 +724,20 @@ function createRecordedTransactionBackend(
         },
       }),
 
+    ...(target.compareAndSetNode === undefined ?
+      {}
+    : {
+        async compareAndSetNode(params) {
+          session.assertOpen();
+          await lockGraph(params.graphId);
+          const result = await requireDefined(target.compareAndSetNode)(params);
+          for (const row of result.rows) {
+            session.touchNode(row.graph_id, row.kind, row.id, row);
+          }
+          return result;
+        },
+      }),
+
     async deleteNode(params) {
       session.assertOpen();
       await lockGraph(params.graphId);
@@ -1076,6 +1090,23 @@ export function createRecordedBackend(
               );
             }
             return updateNodeSet(params);
+          });
+        },
+      }),
+
+    ...(backend.compareAndSetNode === undefined ?
+      {}
+    : {
+        async compareAndSetNode(params) {
+          return capture((target) => {
+            const compareAndSetNode = target.compareAndSetNode;
+            if (compareAndSetNode === undefined) {
+              throw new ConfigurationError(
+                "Recorded compareAndSetNode capability disappeared inside a transaction",
+                { operation: "compareAndSetNode" },
+              );
+            }
+            return compareAndSetNode(params);
           });
         },
       }),

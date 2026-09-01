@@ -828,6 +828,66 @@ them. Apply schema changes to the target first (or re-fork), then merge.
 
 ### Constraint-aware ingestion branches
 
+For a bounded candidate batch, `planCandidateWriteSet()` hides the transient
+branch lifecycle completely. It accepts a validated, versioned JSON document,
+stages it through the same constraint-aware ingestion implementation, delegates
+to incremental merge planning, and closes the working copy on every outcome.
+The result is the ordinary `MergePlanArtifact`, so review and application use
+the same APIs as every other merge plan.
+
+```typescript
+import {
+  captureCandidateWriteSetTarget,
+  planCandidateWriteSet,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const writeSet = {
+  formatVersion: 1,
+  sourceId: "provider-a",
+  target: await captureCandidateWriteSetTarget(store),
+  nodes: [
+    {
+      kind: "Patient",
+      id: "provider-a:123",
+      properties: { name: "Ana", mrn: "123" },
+      validFrom: "2026-01-01T00:00:00.000Z",
+    },
+  ],
+  edges: [],
+} as const;
+
+const plan = unwrap(
+  await planCandidateWriteSet({
+    target: store,
+    makeBackend,
+    writeSet: JSON.parse(JSON.stringify(writeSet)),
+    options: {
+      resolve: {
+        Patient: {
+          blockIndex: "patient_mrn_candidates",
+          similarity: { kind: "fulltext", fields: ["name"] },
+          threshold: 0.9,
+        },
+      },
+    },
+  }),
+);
+```
+
+`sourceId` is the stable attribution carried into conflicts, resolutions, and
+provenance; node and edge ids remain the contribution source ids. The target
+schema identity prevents a document authored against one graph contract from
+being staged against another. `validFrom` is required (and may be `null`) so
+replaying identical JSON cannot acquire a new import-time timestamp and change
+the plan digest.
+
+This adapter applies TypeGraph's existing entity/property merge semantics. Two
+distinct records that both validate do not conflict merely because an
+application interprets their subject, predicate, time, source, or value fields
+as disagreement. Domain-specific acceptance and Statement semantics remain in
+the consuming application.
+
 Use `ingestionBranch()` when an untrusted ingestion batch may contain aliases
 that deliberately repeat a canonical node's unique key. An ordinary `branch()`
 keeps the complete graph schema and rejects the duplicate during staging,
@@ -1068,6 +1128,7 @@ subclass you can branch on:
 | `StaleMergePlanError`        | The target revision changed after planning, or this plan was already applied. Review a newly-created plan.                                                                                                                                                                    |
 | `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
+| `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
 | `MatchEvidenceError`         | Evidence could not be constructed safely, including a custom scorer returning `NaN` or infinity.                                                                                                                                                                              |
 | `MergeError`                 | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes.                                                                                                                                            |
 

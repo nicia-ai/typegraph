@@ -115,6 +115,17 @@ export type JsonValue =
 export type KindAnnotations = Readonly<Record<string, JsonValue>>;
 
 /**
+ * Consumer-owned annotations for a graph as a whole.
+ *
+ * This is the schema-level counterpart to {@link KindAnnotations}: display
+ * names, descriptions, capability declarations, and other JSON metadata that
+ * describes the materialization itself rather than one node or edge kind.
+ * Values participate in canonical schema hashing and annotation-only changes
+ * are safe schema changes.
+ */
+export type GraphAnnotations = Readonly<Record<string, JsonValue>>;
+
+/**
  * A node type definition.
  *
  * Created via `defineNode()`. Represents a type of node in the graph

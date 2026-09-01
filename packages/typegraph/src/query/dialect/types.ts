@@ -356,6 +356,18 @@ export interface DialectAdapter {
   ) => SqlFragment;
 
   /**
+   * Compares one JSON value by structural JSON equality. Unlike text
+   * extraction this preserves the distinction between strings, numbers,
+   * booleans, arrays, objects, and the JSON `null` literal.
+   */
+  readonly jsonPathEquals: (
+    this: void,
+    column: SqlFragment,
+    pointer: JsonPointer,
+    value: JsonValue,
+  ) => SqlFragment;
+
+  /**
    * Checks if the JSON value at a path exists and is a JSON number.
    *
    * Never evaluates to SQL NULL: a missing path yields FALSE, so the

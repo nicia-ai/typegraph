@@ -286,7 +286,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
     didWrite?: (result: T) => boolean,
   ) => Promise<T>;
   createBulkOperationContext: (
-    operation: "updateWhere",
+    operation: "compareAndSet" | "updateWhere",
     kind: string,
   ) => BulkOperationHookContext;
   withBulkOperationHooks: <T extends Readonly<{ affectedCount: number }>>(
@@ -3083,25 +3083,39 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
   candidateIds: CompiledSelectSql,
   candidateIdColumn: string,
   backend: GraphBackend | TransactionBackend,
+  options: Readonly<{
+    operation?: "compareAndSet" | "updateWhere";
+    expected?: Record<string, unknown>;
+  }> = {},
 ): Promise<Readonly<{ affectedCount: number }>> {
+  const operation = options.operation ?? "updateWhere";
   const registration = getNodeRegistration(ctx.graph, kind);
   const schema = registration.type.schema;
   const uniqueConstraints = registration.unique ?? [];
 
   if (!backend.capabilities.execution.interactiveTransactions) {
     throw new ConfigurationError(
-      "updateWhere() requires a transactional backend so validation and sidecars are atomic",
+      `${operation}() requires a transactional backend so validation and sidecars are atomic`,
       { code: "SET_UPDATE_TRANSACTIONS_REQUIRED", kind },
     );
   }
-  if (backend.updateNodeSet === undefined) {
+  if (operation === "updateWhere" && backend.updateNodeSet === undefined) {
     throw new ConfigurationError(
       "This backend does not support set-based node updates",
       { code: "SET_UPDATE_UNSUPPORTED", kind },
     );
   }
+  if (
+    operation === "compareAndSet" &&
+    backend.compareAndSetNode === undefined
+  ) {
+    throw new ConfigurationError(
+      "This backend does not support node compare-and-set",
+      { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
+    );
+  }
   if (Object.keys(inputPatch).length === 0) {
-    throw new ValidationError("updateWhere() patch must not be empty", {
+    throw new ValidationError(`${operation}() patch must not be empty`, {
       entityType: "node",
       kind,
       operation: "update",
@@ -3113,7 +3127,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
   );
   if (unknownProperty !== undefined) {
     throw new ValidationError(
-      `Unknown ${kind} property in updateWhere() patch: ${unknownProperty}`,
+      `Unknown ${kind} property in ${operation}() patch: ${unknownProperty}`,
       {
         entityType: "node",
         kind,
@@ -3140,12 +3154,12 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
       unsetProperties.push(property);
       continue;
     }
-    assertJsonValue(value, property, `Node "${kind}" updateWhere patch`);
+    assertJsonValue(value, property, `Node "${kind}" ${operation} patch`);
     patch[property] = value as JsonValue;
   }
   if (Object.keys(patch).length === 0 && unsetProperties.length === 0) {
     throw new ValidationError(
-      "updateWhere() patch has no recognized properties",
+      `${operation}() patch has no recognized properties`,
       {
         entityType: "node",
         kind,
@@ -3155,6 +3169,57 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
         ],
       },
     );
+  }
+
+  const inputExpected = options.expected;
+  const expectedProperties = createDataKeyedBag<JsonValue>();
+  const expectedAbsentProperties: string[] = [];
+  if (inputExpected !== undefined) {
+    if (Object.keys(inputExpected).length === 0) {
+      throw new ValidationError("compareAndSet() expected must not be empty", {
+        entityType: "node",
+        kind,
+        operation: "update",
+        issues: [
+          { path: "expected", message: "Provide at least one property" },
+        ],
+      });
+    }
+    const unknownExpectedProperty = Object.keys(inputExpected).find(
+      (property) => !Object.hasOwn(schema.shape, property),
+    );
+    if (unknownExpectedProperty !== undefined) {
+      throw new ValidationError(
+        `Unknown ${kind} property in compareAndSet() expected state: ${unknownExpectedProperty}`,
+        {
+          entityType: "node",
+          kind,
+          operation: "update",
+          issues: [
+            {
+              path: unknownExpectedProperty,
+              message: "Property is not declared by the node schema",
+            },
+          ],
+        },
+      );
+    }
+    const parsedExpected = validateNodeProps(schema.partial(), inputExpected, {
+      kind,
+      operation: "update",
+    });
+    for (const [property, value] of Object.entries(parsedExpected)) {
+      if (value === undefined) {
+        expectedAbsentProperties.push(property);
+        continue;
+      }
+      assertJsonValue(
+        value,
+        property,
+        `Node "${kind}" compareAndSet expected state`,
+      );
+      expectedProperties[property] = value as JsonValue;
+    }
   }
 
   if (
@@ -3195,7 +3260,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
     );
   }
 
-  const hookContext = ctx.createBulkOperationContext("updateWhere", kind);
+  const hookContext = ctx.createBulkOperationContext(operation, kind);
   return ctx.withBulkOperationHooks(hookContext, () =>
     runWritePlan(
       nodeWritePlanContext(ctx),
@@ -3209,6 +3274,7 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
       (session) =>
         session.reviseNodeSet(
           {
+            operation,
             kind,
             schema,
             uniqueConstraints,
@@ -3216,6 +3282,8 @@ export async function executeNodeUpdateWhere<G extends GraphDef>(
             unsetProperties,
             candidateIds,
             candidateIdColumn,
+            expectedProperties,
+            expectedAbsentProperties,
           },
           // This path states no window — it patches properties — so the write
           // asserts no stored lower bound. The set UPDATE has no field to

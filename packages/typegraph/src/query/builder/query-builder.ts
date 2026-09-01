@@ -16,6 +16,11 @@ import {
   type TemporalMode,
 } from "../../core/types";
 import { ConfigurationError, KindNotFoundError } from "../../errors";
+import {
+  resolveRuntimeKindInput,
+  type RuntimeEdgeKind,
+  type RuntimeNodeKind,
+} from "../../store/runtime-kind";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -366,7 +371,7 @@ export class QueryBuilder<
    * the `n.field("name").number().gte(...)` discriminator.
    */
   fromDynamic<A extends string>(
-    kind: string,
+    kind: string | RuntimeNodeKind,
     alias: UniqueAlias<A, Aliases>,
     options?: { includeSubClasses?: boolean },
   ): QueryBuilder<
@@ -377,15 +382,22 @@ export class QueryBuilder<
     CoordinateState
   > {
     validateSqlIdentifier(alias);
-    if (!this.#config.registry.hasNodeType(kind)) {
-      throw new KindNotFoundError(kind, "node", {
+    const kindName = resolveRuntimeKindInput(
+      kind,
+      "node",
+      getQueryBuilderInternalContext(this.#config).runtimeKindTokenResolver,
+    );
+    if (!this.#config.registry.hasNodeType(kindName)) {
+      throw new KindNotFoundError(kindName, "node", {
         graphId: this.#config.graphId,
       });
     }
 
     const includeSubClasses = options?.includeSubClasses ?? false;
     const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+      includeSubClasses ?
+        this.#config.registry.expandSubClasses(kindName)
+      : [kindName];
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -595,7 +607,7 @@ export class QueryBuilder<
    * Throws `KindNotFoundError` if the edge kind is not registered.
    */
   traverseDynamic<EA extends string>(
-    edgeKind: string,
+    edgeKind: string | RuntimeEdgeKind,
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
@@ -750,7 +762,7 @@ export class QueryBuilder<
    * kind is not registered.
    */
   optionalTraverseDynamic<EA extends string>(
-    edgeKind: string,
+    edgeKind: string | RuntimeEdgeKind,
     edgeAlias: EA,
     options?: {
       direction?: TraversalDirection;
@@ -779,7 +791,7 @@ export class QueryBuilder<
    * `TraversalBuilder` constructor.
    */
   #beginDynamicTraversal<EA extends string, Optional extends boolean>(
-    edgeKind: string,
+    edgeKind: string | RuntimeEdgeKind,
     edgeAlias: EA,
     optional: Optional,
     options:
@@ -804,8 +816,13 @@ export class QueryBuilder<
     CoordinateState
   > {
     validateSqlIdentifier(edgeAlias);
-    if (!this.#config.registry.hasEdgeType(edgeKind)) {
-      throw new KindNotFoundError(edgeKind, "edge", {
+    const edgeKindName = resolveRuntimeKindInput(
+      edgeKind,
+      "edge",
+      getQueryBuilderInternalContext(this.#config).runtimeKindTokenResolver,
+    );
+    if (!this.#config.registry.hasEdgeType(edgeKindName)) {
+      throw new KindNotFoundError(edgeKindName, "edge", {
         graphId: this.#config.graphId,
       });
     }
@@ -819,7 +836,7 @@ export class QueryBuilder<
     const fromAlias = options?.from ?? this.#state.currentAlias;
 
     const edgeKinds = this.#expandTraversalEdgeKinds(
-      edgeKind,
+      edgeKindName,
       includeImplyingEdges,
     );
     const inverseEdgeKinds =

@@ -4,6 +4,10 @@
 import { type GraphDef } from "../../core/define-graph";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
 import { EndpointError, KindNotFoundError } from "../../errors";
+import {
+  resolveRuntimeKindInput,
+  type RuntimeNodeKind,
+} from "../../store/runtime-kind";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type NodePredicate,
@@ -29,6 +33,7 @@ import {
   type DynamicEdgeType,
   type DynamicNodeType,
 } from "./dynamic";
+import { getQueryBuilderInternalContext } from "./internal-context";
 import { type QueryBuilder } from "./query-builder";
 import {
   type AliasMap,
@@ -528,7 +533,7 @@ export class TraversalBuilder<
    * Throws `KindNotFoundError` if the kind is not registered.
    */
   toDynamic<A extends string>(
-    kind: string,
+    kind: string | RuntimeNodeKind,
     alias: UniqueAlias<A, Aliases>,
     options?: { includeSubClasses?: boolean },
   ): QueryBuilder<
@@ -539,16 +544,23 @@ export class TraversalBuilder<
     CoordinateState
   > {
     validateSqlIdentifier(alias);
-    if (!this.#config.registry.hasNodeType(kind)) {
-      throw new KindNotFoundError(kind, "node", {
+    const kindName = resolveRuntimeKindInput(
+      kind,
+      "node",
+      getQueryBuilderInternalContext(this.#config).runtimeKindTokenResolver,
+    );
+    if (!this.#config.registry.hasNodeType(kindName)) {
+      throw new KindNotFoundError(kindName, "node", {
         graphId: this.#config.graphId,
       });
     }
-    this.#assertValidEndpoint(kind);
+    this.#assertValidEndpoint(kindName);
 
     const includeSubClasses = options?.includeSubClasses ?? false;
     const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+      includeSubClasses ?
+        this.#config.registry.expandSubClasses(kindName)
+      : [kindName];
 
     const baseState = this.#stateWithTraversal(alias, kinds);
     const newState: QueryBuilderState = {

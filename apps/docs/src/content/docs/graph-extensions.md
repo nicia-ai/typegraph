@@ -579,6 +579,7 @@ durable-state metadata the store has loaded so far. Its shape:
 | Field                  | Type                                  | Notes                                                                                          |
 | ---------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `graphId`              | `string`                              | The graph's stable id.                                                                         |
+| `annotations`          | `GraphAnnotations \| undefined`       | Merged graph-scoped metadata from `defineGraph` and runtime extensions.                         |
 | `kinds`                | `readonly KindIntrospection[]`        | Merged node kinds with `origin: "compile-time" \| "runtime"`, description, annotations, etc.   |
 | `edges`                | `readonly EdgeIntrospection[]`        | Merged edge kinds with the same origin discriminator and endpoint information.                 |
 | `ontology`             | `readonly OntologyIntrospection[]`    | Ontology relations declared on either tier.                                                    |
@@ -590,6 +591,7 @@ durable-state metadata the store has loaded so far. Its shape:
 ```ts
 const intro = store.introspect();
 console.log(intro.schemaVersion); // e.g. 2
+console.log(intro.annotations?.displayName);
 console.log(intro.extension?.nodes?.Paper); // ExtensionNodeDef or undefined
 console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
 ```
@@ -597,6 +599,79 @@ console.log([...intro.deprecatedKinds]);    // ["LegacyDocument"]
 The `extension` field round-trips: passing it back through
 `defineGraphExtension(intro.extension!)` and `evolve()` against an
 empty graph reconstructs the same extension kinds.
+
+Graph extensions may also carry graph-scoped annotations:
+
+```ts
+const extension = defineGraphExtension({
+  annotations: {
+    displayName: "Customer knowledge",
+    capabilities: { semanticSearch: true },
+  },
+});
+```
+
+Annotation keys are shallow-merged. A later extension replaces the complete
+value of each key it supplies; it does not recursively merge nested objects.
+
+## Population statistics and stored-data validation
+
+`await store.describe()` pairs the merged schema introspection with population
+statistics taken in one repeatable-read snapshot. It returns current node and
+edge counts for every declared kind plus non-null coverage for each declared
+property (including nested property paths):
+
+```ts
+const description = await store.describe();
+const people = description.statistics.nodes.find(
+  (entry) => entry.kind === "Person",
+);
+
+console.log(people?.count);
+console.log(
+  people?.properties.find((property) => property.path === "/email")?.coverage,
+);
+```
+
+The snapshot includes the active schema version and hash when present, a
+`schemaFence`, a `dataFence`, and the pinned `validTime`. `describe()` submits
+one node scan and one edge scan regardless of vocabulary size; aggregation is
+shared across SQL dialects in TypeGraph.
+
+Use `validateStore()` to find rows that no longer satisfy a kind's current
+declared Zod schema, for example after tightening a rule around existing data:
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await store.validateStore({
+    entity: "node",
+    kind: "Person",
+    pageSize: 250,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+  for (const failure of page.violations) {
+    console.log(failure.id, failure.path, failure.reason);
+  }
+  cursor = page.nextCursor;
+} while (cursor !== undefined);
+```
+
+Undeclared properties are healthy semi-structured state and are never reported
+as violations, including when the authored Zod object is strict. Each failure
+names the record id, JSON-pointer path, top-level property when applicable,
+Zod issue code, and reason.
+
+Continuation cursors are bound to the entity, kind, schema fence, complete
+scoped-data fingerprint, and pinned valid-time coordinate. A schema or data
+change between pages throws `StoreAnalysisCursorStaleError`; restart without a
+cursor to establish a new snapshot. To verify that full data fence,
+`validateStore()` intentionally rescans the selected kind on every page before
+returning that page's violations. Its round-trip count is vocabulary-independent,
+but its per-page database and validation work scales with the selected kind's
+population. Both analysis methods require an interactive transactional backend
+that can hold a repeatable-read snapshot; non-transactional adapters refuse the
+operation rather than returning a result assembled across snapshots.
 
 ## `store.materializeIndexes(options?)`
 

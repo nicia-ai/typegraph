@@ -2,6 +2,7 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../../errors";
 import { getDialect } from "../../../query/dialect";
+import { jsonPointer } from "../../../query/json-pointer";
 import { sql as portableSql } from "../../../query/sql-fragment";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
@@ -13,6 +14,7 @@ import type {
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import type {
+  CompareAndSetNodeParams,
   DeleteNodeParams,
   HardDeleteNodeParams,
   InsertNodeParams,
@@ -980,7 +982,7 @@ export function buildReadAtomicNodeMutationPostimages(
 export function buildUpdateNodeSet(
   tables: Tables,
   dialect: "sqlite" | "postgres",
-  params: UpdateNodeSetParams,
+  params: CompareAndSetNodeParams | UpdateNodeSetParams,
   timestamp: string,
 ): SQL {
   const { nodes } = tables;
@@ -998,6 +1000,36 @@ export function buildUpdateNodeSet(
     portableSql.identifier(params.candidateIdColumn),
     dialect,
   );
+  const expectedPropertyPredicates = Object.entries(
+    "expectedProperties" in params ? params.expectedProperties : {},
+  ).map(([property, value]) =>
+    toDrizzleSql(
+      adapter.jsonPathEquals(
+        portableSql.identifier(nodes.props.name),
+        jsonPointer([property]),
+        value,
+      ),
+      dialect,
+    ),
+  );
+  const expectedAbsentPredicates = (
+    "expectedAbsentProperties" in params ? params.expectedAbsentProperties : []
+  ).map((property) =>
+    toDrizzleSql(
+      portableSql`NOT ${adapter.jsonHasPath(
+        portableSql.identifier(nodes.props.name),
+        jsonPointer([property]),
+      )}`,
+      dialect,
+    ),
+  );
+  const expectedPredicate =
+    expectedPropertyPredicates.length + expectedAbsentPredicates.length === 0 ?
+      sql.empty()
+    : sql` AND ${sql.join(
+        [...expectedPropertyPredicates, ...expectedAbsentPredicates],
+        sql` AND `,
+      )}`;
 
   return sql`
     UPDATE ${nodes}
@@ -1007,6 +1039,7 @@ export function buildUpdateNodeSet(
     WHERE ${nodes.graphId} = ${params.graphId}
       AND ${nodes.kind} = ${params.kind}
       AND ${nodes.deletedAt} IS NULL
+      ${expectedPredicate}
       AND ${nodes.id} IN (
         SELECT ${candidateIdColumn}
         FROM (${candidateIds}) AS tg_set_candidates

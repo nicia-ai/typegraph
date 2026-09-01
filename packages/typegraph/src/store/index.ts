@@ -1,10 +1,18 @@
 // Types
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "./runtime-kind";
 export {
   type AdapterTransactionContext,
   type BaseStoreOptions,
   type BulkEdgeSourceGroup,
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type BulkFindRuntimeEdgesFromParams,
+  type BulkFindRuntimeEdgesFromResult,
   type BulkOperationHookContext,
   type ConstraintNames,
   type CreateEdgeInput,
@@ -50,6 +58,11 @@ export {
   type RecordedStoreViewEdgeCollections,
   type RecordedStoreViewNodeCollection,
   type RecordedStoreViewNodeCollections,
+  type RuntimeBulkEdgeSourceGroup,
+  type RuntimeEdgeCollection,
+  type RuntimeEdgeFor,
+  type RuntimeNodeCollection,
+  type RuntimeNodeReferenceFor,
   type ScopedMeasure,
   type SqlAvailability,
   type StoreHooks,
@@ -120,14 +133,18 @@ export type {
   AdapterHistoryTransactionContext,
   AdapterRecordedReadStore,
   AdapterStore,
+  EdgeCollectionLookup,
   HistoryStore,
   MeasurableAdapterHistoryTransactionContext,
+  NodeCollectionLookup,
   RebuildContributionOptions,
   ReconciledSchema,
   RecordedReadStore,
   ReembedFunction,
   ReembedVectorFieldOptions,
   ReembedVectorFieldResult,
+  RequiredEdgeCollectionLookup,
+  RequiredNodeCollectionLookup,
   SchemaManagerOptions,
   SchemaValidationResult,
   Store,
@@ -162,6 +179,20 @@ export type {
   VectorSearchOptions,
 } from "./search";
 export { StoreSearch } from "./search-facade";
+
+// Snapshot-consistent population and declared-schema analysis
+export type {
+  KindPopulationStatistics,
+  PropertyPopulationStatistics,
+  StoreAnalysisCursorStaleErrorDetails,
+  StoreAnalysisSnapshot,
+  StoreDescription,
+  StorePopulationStatistics,
+  StoreValidationFailure,
+  StoreValidationPage,
+  ValidateStoreOptions,
+} from "./store-analysis";
+export { StoreAnalysisCursorStaleError } from "./store-analysis";
 
 // Fulltext rebuild
 export type {

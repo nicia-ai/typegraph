@@ -12,7 +12,11 @@
  * agent-induced schemas use in practice. Anything outside this set fails
  * loudly at `defineGraphExtension(...)`.
  */
-import { type KindAnnotations, type NullCheckOp } from "../core/types";
+import {
+  type GraphAnnotations,
+  type KindAnnotations,
+  type NullCheckOp,
+} from "../core/types";
 import { type MetaEdgeName } from "../ontology/constants";
 
 // ============================================================
@@ -365,6 +369,8 @@ export type GraphExtensionVersion = number;
  */
 export type GraphExtension = Readonly<{
   version?: GraphExtensionVersion;
+  /** Graph-scoped annotations shallow-merged into the host graph by key. */
+  annotations?: GraphAnnotations;
   nodes?: Readonly<Record<string, ExtensionNodeDef>>;
   edges?: Readonly<Record<string, ExtensionEdgeDef>>;
   ontology?: readonly ExtensionOntologyRelation[];
@@ -388,6 +394,7 @@ export type GraphExtension = Readonly<{
  */
 export const GRAPH_EXTENSION_TOP_LEVEL_KEYS = [
   "version",
+  "annotations",
   "nodes",
   "edges",
   "ontology",

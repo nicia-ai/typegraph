@@ -21,6 +21,7 @@ import { defineGraphExtension } from "../src/graph-extension";
 import {
   assertSchemaCurrent,
   classifySchemaChanges,
+  getActiveSchema,
   getSchemaChanges,
   requiresMigration,
 } from "../src/schema";
@@ -68,6 +69,8 @@ describe("classifySchemaChanges", () => {
 
     const diff = requireDefined(await getSchemaChanges(backend, baseGraph));
     expect(classifySchemaChanges(diff)).toBe("identical");
+    expect(diff.fromVersion).toBe(1);
+    expect(diff.toVersion).toBe(1);
   });
 
   it("classifies an added optional property as additive", async () => {
@@ -77,6 +80,8 @@ describe("classifySchemaChanges", () => {
     const diff = requireDefined(await getSchemaChanges(backend, additiveGraph));
     expect(classifySchemaChanges(diff)).toBe("additive");
     expect(diff.hasBreakingChanges).toBe(false);
+    expect(diff.fromVersion).toBe(1);
+    expect(diff.toVersion).toBe(2);
   });
 
   it("classifies an added required property as incompatible", async () => {
@@ -86,6 +91,8 @@ describe("classifySchemaChanges", () => {
     const diff = requireDefined(await getSchemaChanges(backend, breakingGraph));
     expect(classifySchemaChanges(diff)).toBe("incompatible");
     expect(diff.hasBreakingChanges).toBe(true);
+    expect(diff.fromVersion).toBe(1);
+    expect(diff.toVersion).toBe(2);
   });
 });
 
@@ -120,6 +127,30 @@ describe("store-handle pre-flight", () => {
     expect(await store.requiresMigration()).toBe(false);
     const diff = requireDefined(await store.schemaChanges());
     expect(diff.hasChanges).toBe(false);
+    expect(diff.fromVersion).toBe(1);
+    expect(diff.toVersion).toBe(1);
+  });
+
+  it("keeps the no-change boundary stable across repeated opens", async () => {
+    const backend = createTestBackend();
+    await createStoreWithSchema(baseGraph, backend);
+
+    for (const expectedVersion of [1, 1]) {
+      const [store] = await createStoreWithSchema(baseGraph, backend);
+      const diff = requireDefined(await store.schemaChanges());
+
+      expect(await store.requiresMigration()).toBe(false);
+      expect(diff).toMatchObject({
+        fromVersion: expectedVersion,
+        toVersion: expectedVersion,
+        hasChanges: false,
+        hasBreakingChanges: false,
+        summary: "No changes",
+      });
+      expect(
+        requireDefined(await getActiveSchema(backend, GRAPH_ID)).version,
+      ).toBe(expectedVersion);
+    }
   });
 
   it("ignores runtime-committed kinds absent from the compile-time graph", async () => {

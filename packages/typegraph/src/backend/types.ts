@@ -745,6 +745,24 @@ export type UpdateNodeSetParams = Readonly<{
   candidateIdColumn: string;
 }>;
 
+/**
+ * A guarded set update whose exact current-value predicates are applied by the
+ * same outer UPDATE that writes the row. Kept as a distinct backend port so an
+ * older/custom `updateNodeSet` implementation can never silently ignore the
+ * compare-and-set fence.
+ */
+export type CompareAndSetNodeParams = UpdateNodeSetParams &
+  Readonly<{
+    /**
+     * Exact property values re-checked on the target row by the outer UPDATE.
+     * These are write fences, not candidate-selection hints: a backend that
+     * accepts them MUST apply them directly to the row being updated.
+     */
+    expectedProperties: Readonly<Record<string, JsonValue>>;
+    /** Top-level properties that the outer UPDATE requires to be absent. */
+    expectedAbsentProperties: readonly string[];
+  }>;
+
 /** The after-images changed by {@link GraphBackend.updateNodeSet}. */
 export type UpdateNodeSetResult = Readonly<{
   affectedCount: number;
@@ -2177,6 +2195,10 @@ export type GraphBackend = Readonly<{
     this: void,
     params: UpdateNodeSetParams,
   ) => Promise<UpdateNodeSetResult>;
+  compareAndSetNode?: (
+    this: void,
+    params: CompareAndSetNodeParams,
+  ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   getNode: (
@@ -3419,6 +3441,7 @@ export type NodeEntityWriteBackend = Pick<
   | "insertNodesBatch"
   | "insertNodesBatchReturning"
   | "updateNode"
+  | "compareAndSetNode"
   | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"

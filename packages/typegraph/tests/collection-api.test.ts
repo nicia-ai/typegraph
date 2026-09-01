@@ -213,6 +213,53 @@ describe("Node Collections (SQLite)", () => {
     });
   });
 
+  describe("store.nodes.*.compareAndSet()", () => {
+    it("updates only while the id and exact current-value predicate match", async () => {
+      const person = await store.nodes.Person.create({
+        name: "Alice",
+        age: 30,
+      });
+
+      const updated = await store.nodes.Person.compareAndSet(person.id, {
+        expected: { name: "Alice", age: 30 },
+        patch: { age: 31 },
+      });
+      const staleRetry = await store.nodes.Person.compareAndSet(person.id, {
+        expected: { age: 30 },
+        patch: { age: 32 },
+      });
+
+      expect(updated).toBe(true);
+      expect(staleRetry).toBe(false);
+      expect(await store.nodes.Person.getById(person.id)).toMatchObject({
+        name: "Alice",
+        age: 31,
+        meta: { version: 2 },
+      });
+    });
+
+    it("refuses a backend without the dedicated guarded-write port", async () => {
+      const unsupported = createStore(
+        testGraph,
+        projectBackendWithout(backend, ["compareAndSetNode"]),
+      );
+      const person = await unsupported.nodes.Person.create({ name: "Alice" });
+
+      await expect(
+        unsupported.nodes.Person.compareAndSet(person.id, {
+          expected: { name: "Alice" },
+          patch: { age: 31 },
+        }),
+      ).rejects.toMatchObject({
+        details: { code: "COMPARE_AND_SET_UNSUPPORTED" },
+      });
+      expect(await unsupported.nodes.Person.getById(person.id)).toMatchObject({
+        name: "Alice",
+        meta: { version: 1 },
+      });
+    });
+  });
+
   describe("store.nodes.*.updateWhere()", () => {
     it("ANDs property filters with independent relationship predicates", async () => {
       const acme = await store.nodes.Company.create({
@@ -393,9 +440,18 @@ describe("Node Collections (SQLite)", () => {
       await hooked.nodes.Person.create({ name: "Bob" });
 
       await hooked.nodes.Person.updateWhere({ patch: { age: 30 }, all: true });
+      const alice = requireDefined(
+        await hooked.nodes.Person.find({
+          where: (person) => person.name.eq("Alice"),
+        }),
+      )[0];
+      await hooked.nodes.Person.compareAndSet(requireDefined(alice).id, {
+        expected: { age: 30 },
+        patch: { age: 31 },
+      });
 
-      expect(starts).toEqual(["updateWhere"]);
-      expect(counts).toEqual([2]);
+      expect(starts).toEqual(["updateWhere", "compareAndSet"]);
+      expect(counts).toEqual([2, 1]);
     });
   });
 

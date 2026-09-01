@@ -47,6 +47,7 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
+import { requireDefined } from "../../utils/presence";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
@@ -594,6 +595,7 @@ export async function applyNodeResurrect(
  * accepted into a record that would quietly drop it.
  */
 export type NodeSetUpdateWork = Readonly<{
+  operation?: "compareAndSet" | "updateWhere";
   kind: string;
   schema: z.ZodType<Record<string, unknown>>;
   uniqueConstraints: readonly UniqueConstraint[];
@@ -601,6 +603,8 @@ export type NodeSetUpdateWork = Readonly<{
   unsetProperties: readonly string[];
   candidateIds: CompiledSelectSql;
   candidateIdColumn: string;
+  expectedProperties?: Readonly<Record<string, JsonValue>>;
+  expectedAbsentProperties?: readonly string[];
 }>;
 
 /** What a set update reports: how many live rows it rewrote. */
@@ -636,11 +640,19 @@ export async function applyNodeSetUpdate(
   backend: Backend,
 ): Promise<NodeSetUpdateResult> {
   const { kind, schema, uniqueConstraints } = args;
+  const operation = args.operation ?? "updateWhere";
   const updateNodeSet = backend.updateNodeSet;
-  if (updateNodeSet === undefined) {
+  const compareAndSetNode = backend.compareAndSetNode;
+  if (operation === "updateWhere" && updateNodeSet === undefined) {
     throw new ConfigurationError(
       "The transaction backend does not support set-based node updates",
       { code: "SET_UPDATE_UNSUPPORTED", kind },
+    );
+  }
+  if (operation === "compareAndSet" && compareAndSetNode === undefined) {
+    throw new ConfigurationError(
+      "The transaction backend does not support node compare-and-set",
+      { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
     );
   }
   if (
@@ -680,14 +692,22 @@ export async function applyNodeSetUpdate(
       { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
     );
   }
-  const result = await updateNodeSet({
+  const commonParams = {
     graphId: ctx.graphId,
     kind,
     patch: args.patch,
     unsetProperties: args.unsetProperties,
     candidateIds: args.candidateIds,
     candidateIdColumn: args.candidateIdColumn,
-  });
+  } as const;
+  const result =
+    operation === "compareAndSet" ?
+      await requireDefined(compareAndSetNode)({
+        ...commonParams,
+        expectedProperties: requireDefined(args.expectedProperties),
+        expectedAbsentProperties: requireDefined(args.expectedAbsentProperties),
+      })
+    : await requireDefined(updateNodeSet)(commonParams);
   if (result.affectedCount === 0) return { affectedCount: 0 };
 
   const sidecarItems = result.rows.map((row) => {

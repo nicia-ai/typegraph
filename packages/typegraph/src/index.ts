@@ -148,6 +148,7 @@ export type {
   CommitSchemaVersionExpected,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
+  CompareAndSetNodeParams,
   ContributionCapabilities,
   ContributionDiagnostic,
   ContributionDiagnosticState,
@@ -301,6 +302,7 @@ export type {
   EdgeType,
   EdgeTypeWithEndpoints,
   EndpointExistence,
+  GraphAnnotations,
   GraphDefaults,
   JsonValue,
   KindAnnotations,
@@ -382,6 +384,7 @@ export type {
   RecordedCaptureGuardCode,
   RecordedCaptureGuardError,
   RestrictedDeleteErrorDetails,
+  RuntimeKindTokenFailure,
   SchemaContentConflictErrorDetails,
   SchemaMismatchErrorDetails,
   StaleVersionErrorDetails,
@@ -438,6 +441,7 @@ export {
   NodeNotFoundError,
   RECORDED_CAPTURE_GUARD_CODES,
   RestrictedDeleteError,
+  RuntimeKindTokenError,
   SchemaContentConflictError,
   SchemaMismatchError,
   StaleVersionError,
@@ -469,6 +473,8 @@ export type {
   BulkEdgeSourceGroup,
   BulkFindEdgesFromParams,
   BulkFindEdgesFromResult,
+  BulkFindRuntimeEdgesFromParams,
+  BulkFindRuntimeEdgesFromResult,
   ClaimOwner,
   ClaimTarget,
   ConstraintFenceViolation,
@@ -485,6 +491,7 @@ export type {
   HybridSearchOptions,
   HybridVectorOptions,
   KindIntrospection,
+  KindPopulationStatistics,
   MaterializeIndexesEntry,
   MaterializeIndexesOptions,
   MaterializeIndexesResult,
@@ -494,6 +501,7 @@ export type {
   MaterializeSystemIndexesOptions,
   MeasurableAdapterHistoryTransactionContext,
   OntologyIntrospection,
+  PropertyPopulationStatistics,
   RebuildContributionOptions,
   RebuildFulltextOptions,
   RebuildFulltextResult,
@@ -510,14 +518,23 @@ export type {
   SchemaValidationResult,
   SearchScopeOptions,
   Store,
+  StoreAnalysisCursorStaleErrorDetails,
+  StoreAnalysisSnapshot,
+  StoreDescription,
+  StorePopulationStatistics,
+  StoreValidationFailure,
+  StoreValidationPage,
   UniqueIntrospection,
+  ValidateStoreOptions,
   VectorSearchHit,
   VectorSearchOptions,
 } from "./store";
 export type {
   EdgeBatchReads,
+  EdgeCollectionLookup,
   EdgeTemporalReads,
   EdgeWrites,
+  NodeCollectionLookup,
   NodeCurrentReads,
   NodeTemporalReads,
   NodeWrites,
@@ -525,6 +542,8 @@ export type {
   RecordedStoreViewEdgeCollections,
   RecordedStoreViewNodeCollection,
   RecordedStoreViewNodeCollections,
+  RequiredEdgeCollectionLookup,
+  RequiredNodeCollectionLookup,
   StoreViewCanReachOptions,
   StoreViewCoordinate,
   StoreViewDegreeOptions,
@@ -553,13 +572,18 @@ export {
   createVerifiedAdapterStore,
   createVerifiedStore,
   RecordedStoreView,
+  StoreAnalysisCursorStaleError,
   StoreSearch,
   StoreView,
 } from "./store";
 // Reads of the committed schema: the document, its version, and whether one
 // exists at all. Also available from the "./schema" subpath alongside the
 // migration machinery.
-export type { IdentityChange, SerializedSchema } from "./schema";
+export type {
+  GraphAnnotationsChange,
+  IdentityChange,
+  SerializedSchema,
+} from "./schema";
 export type { GraphTemplate, InstantiateGraphTemplateResult } from "./schema";
 export {
   getActiveSchema,
@@ -594,6 +618,12 @@ export type {
   WeightedShortestPathOptions,
   WeightedShortestPathResult,
 } from "./store/algorithms";
+export type {
+  RuntimeEdgeKind,
+  RuntimeEdgeTypeFor,
+  RuntimeNodeKind,
+  RuntimeNodeTypeFor,
+} from "./store/runtime-kind";
 export type {
   AnyEdge,
   AnyNode,
@@ -643,6 +673,11 @@ export type {
   QueryHookContext,
   QueryOptions,
   RecordedReadStoreOptions,
+  RuntimeBulkEdgeSourceGroup,
+  RuntimeEdgeCollection,
+  RuntimeEdgeFor,
+  RuntimeNodeCollection,
+  RuntimeNodeReferenceFor,
   ScopedMeasure,
   SqlAvailability,
   StoreHooks,

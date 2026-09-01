@@ -489,6 +489,27 @@ const TRUTH_REPLACEMENT_EXAMPLE: SnapshotScenario = {
 };
 
 /**
+ * Repeating a resurrection after the fork point has already resurrected the
+ * same row must still move the lower bound. If the fixture reused one constant
+ * lower bound, the branch artifact was indistinguishable from an authored
+ * `clearValidTo` and the window oracle judged the merge against the wrong
+ * operation.
+ */
+const REPEATED_RESURRECTION_WINDOW_EXAMPLE: SnapshotScenario = {
+  baseOps: [{ op: "hardDeleteRecreate", node: 1 }],
+  branchAOps: [{ op: "hardDeleteRecreate", node: 1 }],
+  branchBOps: [{ op: "different", left: 0, right: 1 }],
+  focus: {
+    entity: "node",
+    index: 1,
+    fork: 0,
+    target: 0,
+    branchA: undefined,
+    branchB: 0,
+  },
+};
+
+/**
  * The earliest-end tie-break on a NODE as a pinned example: two branches end the
  * same inherited row at different instants, with the LATER claim on the branch
  * `branchOrder` prefers — so a branch-rank tie-break would commit the later end
@@ -789,6 +810,17 @@ async function applyOp(
       }
       case "hardDeleteRecreate": {
         const id = requireDefined(NODE_IDS[op.node]);
+        const current = await storeBackend(store).getNode(
+          store.graphId,
+          "Agent",
+          id,
+        );
+        const nextValidFrom =
+          current?.valid_from === undefined ?
+            "2021-01-01T00:00:00.000Z"
+          : new Date(
+              Date.parse(current.valid_from) + 24 * 60 * 60 * 1000,
+            ).toISOString();
         // The physical delete kills exactly the rows CURRENTLY touching the
         // node on THIS store — record those truths rather than exempting the
         // (recreated, live) node wholesale, which would excuse over half the
@@ -805,7 +837,7 @@ async function applyOp(
             // A distinct lower bound makes the resurrection observable from
             // snapshots; otherwise it is indistinguishable from an authored
             // validTo clear and the law would classify the wrong operation.
-            validFrom: "2021-01-01T00:00:00.000Z",
+            validFrom: nextValidFrom,
           },
         );
         for (const row of killed) {
@@ -1391,6 +1423,7 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           examples: [
             [VALIDITY_COLLISION_EXAMPLE],
             [TRUTH_REPLACEMENT_EXAMPLE],
+            [REPEATED_RESURRECTION_WINDOW_EXAMPLE],
             [NODE_END_TIE_BREAK_EXAMPLE],
             [EDGE_END_TIE_BREAK_EXAMPLE],
           ],

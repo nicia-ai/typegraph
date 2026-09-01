@@ -24,13 +24,16 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import type { GraphBackend } from "../src/backend/types";
 import type { MigrationHookContext } from "../src/schema";
 import {
+  computeSchemaHash,
   ensureSchema,
   getActiveSchema,
   getSchemaChanges,
   initializeSchema,
   isSchemaInitialized,
   migrateSchema,
+  parseSerializedSchema,
   rollbackSchema,
+  serializeSchema,
 } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -170,6 +173,43 @@ describe("Schema Initialization", () => {
 });
 
 describe("Safe Migration", () => {
+  it("preserves newer top-level fields through a 0.54 schema recommit", async () => {
+    const backend = createTestBackend();
+    const graphV1 = createGraphV1();
+    await createStoreWithSchema(graphV1, backend);
+
+    const futureSchema = {
+      ...serializeSchema(graphV1, 2),
+      futureTopLevelSlice: {
+        annotations: { title: "Authored by a newer writer" },
+      },
+    };
+    await backend.commitSchemaVersion({
+      graphId: graphV1.id,
+      expected: { kind: "active", version: 1 },
+      version: 2,
+      schemaHash: await computeSchemaHash(futureSchema),
+      schemaDoc: futureSchema,
+    });
+
+    const [, unchanged] = await createStoreWithSchema(graphV1, backend);
+    expect(unchanged).toMatchObject({ status: "unchanged", version: 2 });
+
+    const [, migrated] = await createStoreWithSchema(createGraphV2(), backend);
+    expect(migrated).toMatchObject({
+      status: "migrated",
+      fromVersion: 2,
+      toVersion: 3,
+    });
+
+    const active = requireDefined(await backend.getActiveSchema(graphV1.id));
+    const recommitted = parseSerializedSchema(active.schema_doc);
+    expect(Object.entries(recommitted)).toContainEqual([
+      "futureTopLevelSlice",
+      futureSchema.futureTopLevelSlice,
+    ]);
+  });
+
   it("auto-migrates when adding optional properties", async () => {
     const backend = createTestBackend();
 

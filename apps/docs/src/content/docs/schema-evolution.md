@@ -32,6 +32,7 @@ These changes are backwards compatible and auto-migrate without intervention:
 - Adding optional properties (with defaults)
 - Adding ontology relations
 - Changing per-kind annotations (UI hints, audit policy, etc.)
+- Changing graph-scoped annotations (display metadata, capabilities, etc.)
 
 ### Adding an Optional Property
 
@@ -138,6 +139,22 @@ A few things worth knowing:
 
 See the [schemas-stores reference](/schemas-stores#per-kind-annotations) for the
 full annotations contract.
+
+### Rolling out graph-scoped annotations
+
+Graph-scoped annotations use a top-level `SerializedSchema` field. During a
+mixed-version rollout, an older schema writer can otherwise recommit a document
+without a field it does not understand. Use this two-step deployment invariant:
+
+1. Upgrade **every process that can write schema versions** to TypeGraph 0.54 or
+   newer, without adding graph annotations yet.
+2. After no older schema writer remains, enable `defineGraph({ annotations })`
+   or `defineGraphExtension({ annotations })` and commit the safe schema change.
+
+Readers may be upgraded independently, but the writer floor must be complete
+before annotations are enabled. TypeGraph 0.54+ preserves unknown top-level
+schema fields across parse-and-recommit cycles, so later additive metadata
+slices follow the same rollout rule.
 
 ## Breaking Changes
 

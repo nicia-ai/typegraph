@@ -27,6 +27,7 @@ export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-
 export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
+export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
@@ -50,6 +51,7 @@ export { registerRemovalMaterializationIntegrationTests } from "./removal-materi
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";
+export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerTemporalIntegrationTests } from "./temporal";

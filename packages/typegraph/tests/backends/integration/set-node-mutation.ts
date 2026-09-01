@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ConfigurationError } from "../../../src";
 import type {
+  CompareAndSetNodeParams,
   GraphBackend,
   UpdateNodeSetParams,
 } from "../../../src/backend/types";
@@ -41,6 +42,13 @@ async function updateNodeSet(
   return requireDefined(backend.updateNodeSet)(params);
 }
 
+async function compareAndSetNode(
+  backend: Pick<GraphBackend, "compareAndSetNode">,
+  params: CompareAndSetNodeParams,
+) {
+  return requireDefined(backend.compareAndSetNode)(params);
+}
+
 /**
  * Shared SQLite/PostgreSQL coverage for the storage primitive that the public
  * set-based Store mutation composes with validation and sidecar maintenance.
@@ -49,6 +57,103 @@ export function registerSetNodeMutationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("set-based node mutation substrate", () => {
+    it("compareAndSet atomically applies one exact guarded transition", async () => {
+      const store = context.getStore();
+      const person = await store.nodes.Person.create({
+        name: "Guarded",
+        age: 40,
+        email: "guarded@example.com",
+      });
+
+      expect(
+        await store.nodes.Person.compareAndSet(person.id, {
+          expected: {
+            name: "Guarded",
+            age: 40,
+            email: "guarded@example.com",
+          },
+          patch: { age: 41 },
+        }),
+      ).toBe(true);
+      expect(
+        await store.nodes.Person.compareAndSet(person.id, {
+          expected: { age: 40 },
+          patch: { age: 42 },
+        }),
+      ).toBe(false);
+      expect(await store.nodes.Person.getById(person.id)).toMatchObject({
+        age: 41,
+        meta: { version: 2 },
+      });
+    });
+
+    it("compares nested JSON structurally across dialects", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const document = await store.nodes.Document.create({
+        title: "Guarded document",
+        metadata: { author: "Ada", version: 1 },
+      });
+      const candidateIds = compileCandidateIds(
+        store.graphId,
+        backend,
+        store
+          .query()
+          .from("Document", "document")
+          .whereNode("document", (node) => node.id.eq(document.id))
+          .select((ctx) => ctx.document.id)
+          .toAst(),
+      );
+
+      const result = await compareAndSetNode(backend, {
+        graphId: store.graphId,
+        kind: "Document",
+        patch: { title: "Updated document" },
+        candidateIds,
+        candidateIdColumn: "document_id",
+        expectedProperties: {
+          metadata: { version: 1, author: "Ada" },
+        },
+        expectedAbsentProperties: [],
+      });
+
+      expect(result.affectedCount).toBe(1);
+    });
+
+    it("refuses a compare-and-set without a property patch", async () => {
+      const store = context.getStore();
+      const backend = context.getBackend();
+      const person = await store.nodes.Person.create({
+        name: "Alice",
+        age: 40,
+        email: "alice@example.com",
+      });
+      const candidateIds = compileCandidateIds(
+        store.graphId,
+        backend,
+        store
+          .query()
+          .from("Person", "person")
+          .whereNode("person", (node) => node.id.eq(person.id))
+          .select((ctx) => ctx.person.id)
+          .toAst(),
+      );
+
+      await expect(
+        compareAndSetNode(backend, {
+          graphId: store.graphId,
+          kind: "Person",
+          patch: {},
+          candidateIds,
+          candidateIdColumn: "person_id",
+          expectedProperties: { age: 40 },
+          expectedAbsentProperties: [],
+        }),
+      ).rejects.toThrow(
+        "Node compare-and-set requires at least one property patch",
+      );
+    });
+
     it("exposes cross-backend property and relationship updates through the Store", async () => {
       const store = context.getStore();
       const acme = await store.nodes.Company.create({

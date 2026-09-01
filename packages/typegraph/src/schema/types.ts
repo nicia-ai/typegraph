@@ -15,6 +15,7 @@ import {
   type Collation,
   type DeleteBehavior,
   type EndpointExistence,
+  type GraphAnnotations,
   type KindAnnotations,
   type TemporalMode,
   type UniquenessScope,
@@ -330,6 +331,7 @@ const graphExtensionZod = z
     // the version check and produces actionable errors. Documents
     // that pre-date the field round-trip as `version: undefined`.
     version: z.number().optional(),
+    annotations: z.record(z.string(), z.json()).optional(),
     nodes: z.record(z.string(), runtimeNodeDocumentZod).optional(),
     edges: z.record(z.string(), runtimeEdgeDocumentZod).optional(),
     ontology: z.array(runtimeOntologyRelationZod).optional(),
@@ -528,143 +530,153 @@ function checkRecordKeyMatchesField(
  * versions are accepted without failing validation (forward compatibility for
  * shape, strict for semantics).
  */
-export const serializedSchemaZod = z.object({
-  graphId: z.string(),
-  version: z.number(),
-  generatedAt: z.string(),
-  nodes: z
-    .record(
-      z.string(),
-      z
-        .object({
-          kind: z.string(),
-          properties: z.record(z.string(), z.unknown()),
-          uniqueConstraints: z.array(
+export const serializedSchemaZod = z
+  .object({
+    graphId: z.string(),
+    annotations: z.record(z.string(), z.json()).optional(),
+    version: z.number(),
+    generatedAt: z.string(),
+    nodes: z
+      .record(
+        z.string(),
+        z
+          .object({
+            kind: z.string(),
+            properties: z.record(z.string(), z.unknown()),
+            uniqueConstraints: z.array(
+              z
+                .object({
+                  name: z.string(),
+                  fields: z.array(z.string()),
+                  where: z.string().optional(),
+                  scope: uniquenessScopeZod.default("kind"),
+                  collation: collationZod.default("binary"),
+                })
+                .loose(),
+            ),
+            onDelete: deleteBehaviorZod,
+            description: z.string().optional(),
+            annotations: z.record(z.string(), z.json()).optional(),
+          })
+          .loose(),
+      )
+      .superRefine(checkRecordKeyMatchesField("kind", "nodes")),
+    edges: z
+      .record(
+        z.string(),
+        z
+          .object({
+            kind: z.string(),
+            fromKinds: z.array(z.string()),
+            toKinds: z.array(z.string()),
+            properties: z.record(z.string(), z.unknown()),
+            cardinality: cardinalityZod,
+            endpointExistence: endpointExistenceZod,
+            matchIdentity: z
+              .object({
+                name: z.string().min(1),
+                fields: z.array(z.string()),
+              })
+              .loose()
+              .optional(),
+            description: z.string().optional(),
+            annotations: z.record(z.string(), z.json()).optional(),
+          })
+          .loose(),
+      )
+      .superRefine(checkRecordKeyMatchesField("kind", "edges")),
+    ontology: z
+      .object({
+        metaEdges: z
+          .record(
+            z.string(),
             z
               .object({
                 name: z.string(),
-                fields: z.array(z.string()),
-                where: z.string().optional(),
-                scope: uniquenessScopeZod.default("kind"),
-                collation: collationZod.default("binary"),
+                transitive: z.boolean(),
+                symmetric: z.boolean(),
+                reflexive: z.boolean(),
+                inference: inferenceTypeZod,
+                inverse: z.string().optional(),
+                description: z.string().optional(),
               })
               .loose(),
+          )
+          .superRefine(
+            checkRecordKeyMatchesField("name", "ontology.metaEdges"),
           ),
-          onDelete: deleteBehaviorZod,
-          description: z.string().optional(),
-          annotations: z.record(z.string(), z.json()).optional(),
-        })
-        .loose(),
-    )
-    .superRefine(checkRecordKeyMatchesField("kind", "nodes")),
-  edges: z
-    .record(
-      z.string(),
-      z
-        .object({
-          kind: z.string(),
-          fromKinds: z.array(z.string()),
-          toKinds: z.array(z.string()),
-          properties: z.record(z.string(), z.unknown()),
-          cardinality: cardinalityZod,
-          endpointExistence: endpointExistenceZod,
-          matchIdentity: z
-            .object({
-              name: z.string().min(1),
-              fields: z.array(z.string()),
-            })
-            .loose()
-            .optional(),
-          description: z.string().optional(),
-          annotations: z.record(z.string(), z.json()).optional(),
-        })
-        .loose(),
-    )
-    .superRefine(checkRecordKeyMatchesField("kind", "edges")),
-  ontology: z
-    .object({
-      metaEdges: z
-        .record(
-          z.string(),
+        relations: z.array(
           z
             .object({
-              name: z.string(),
-              transitive: z.boolean(),
-              symmetric: z.boolean(),
-              reflexive: z.boolean(),
-              inference: inferenceTypeZod,
-              inverse: z.string().optional(),
-              description: z.string().optional(),
+              metaEdge: z.string(),
+              from: z.string(),
+              to: z.string(),
             })
             .loose(),
-        )
-        .superRefine(checkRecordKeyMatchesField("name", "ontology.metaEdges")),
-      relations: z.array(
-        z
+        ),
+        closures: z
           .object({
-            metaEdge: z.string(),
-            from: z.string(),
-            to: z.string(),
+            subClassAncestors: z.record(z.string(), z.array(z.string())),
+            subClassDescendants: z.record(z.string(), z.array(z.string())),
+            broaderClosure: z.record(z.string(), z.array(z.string())),
+            narrowerClosure: z.record(z.string(), z.array(z.string())),
+            equivalenceSets: z.record(z.string(), z.array(z.string())),
+            disjointPairs: z.array(z.string()),
+            partOfClosure: z.record(z.string(), z.array(z.string())),
+            hasPartClosure: z.record(z.string(), z.array(z.string())),
+            iriToKind: z.record(z.string(), z.string()),
+            edgeInverses: z.record(z.string(), z.string()),
+            edgeImplicationsClosure: z.record(z.string(), z.array(z.string())),
+            edgeImplyingClosure: z.record(z.string(), z.array(z.string())),
           })
           .loose(),
-      ),
-      closures: z
-        .object({
-          subClassAncestors: z.record(z.string(), z.array(z.string())),
-          subClassDescendants: z.record(z.string(), z.array(z.string())),
-          broaderClosure: z.record(z.string(), z.array(z.string())),
-          narrowerClosure: z.record(z.string(), z.array(z.string())),
-          equivalenceSets: z.record(z.string(), z.array(z.string())),
-          disjointPairs: z.array(z.string()),
-          partOfClosure: z.record(z.string(), z.array(z.string())),
-          hasPartClosure: z.record(z.string(), z.array(z.string())),
-          iriToKind: z.record(z.string(), z.string()),
-          edgeInverses: z.record(z.string(), z.string()),
-          edgeImplicationsClosure: z.record(z.string(), z.array(z.string())),
-          edgeImplyingClosure: z.record(z.string(), z.array(z.string())),
-        })
-        .loose(),
-    })
-    .loose(),
-  defaults: z
-    .object({
-      onNodeDelete: deleteBehaviorZod,
-      temporalMode: temporalModeZod,
-    })
-    .loose(),
-  identity: z
-    .object({ sameIdAcrossKinds: z.enum(["fold", "ignore"]) })
-    .readonly()
-    .optional(),
-  /**
-   * Index declarations attached to the graph.
-   *
-   * Optional: graphs that never declared the slice omit the field
-   * entirely so their canonical-form hash is byte-identical to graphs
-   * authored before `indexes` existed.
-   */
-  indexes: z.array(indexDeclarationZod).optional(),
-  /**
-   * Graph extension persisted alongside the compiled `nodes` / `edges`
-   * / `ontology` slices. The loader rebuilds extension-kind Zod
-   * validators from this value (the only durable source); legacy
-   * graphs omit the field and hash byte-identically to before
-   * extensions existed.
-   *
-   * `.loose()` on the inner shape accepts forward-compatible additions
-   * without breaking older readers.
-   */
-  extension: graphExtensionZod.optional(),
-  /**
-   * Names of node and edge kinds the operator has soft-deprecated via
-   * `store.deprecateKinds(...)`. Surfaces in introspection so consumers
-   * (codegen, UI tooling, lints) can route around them. Does not affect
-   * reads, writes, or queries.
-   *
-   * Omitted when empty so legacy schemas hash byte-identically.
-   */
-  deprecatedKinds: z.array(z.string()).optional(),
-});
+      })
+      .loose(),
+    defaults: z
+      .object({
+        onNodeDelete: deleteBehaviorZod,
+        temporalMode: temporalModeZod,
+      })
+      .loose(),
+    identity: z
+      .object({ sameIdAcrossKinds: z.enum(["fold", "ignore"]) })
+      .readonly()
+      .optional(),
+    /**
+     * Index declarations attached to the graph.
+     *
+     * Optional: graphs that never declared the slice omit the field
+     * entirely so their canonical-form hash is byte-identical to graphs
+     * authored before `indexes` existed.
+     */
+    indexes: z.array(indexDeclarationZod).optional(),
+    /**
+     * Graph extension persisted alongside the compiled `nodes` / `edges`
+     * / `ontology` slices. The loader rebuilds extension-kind Zod
+     * validators from this value (the only durable source); legacy
+     * graphs omit the field and hash byte-identically to before
+     * extensions existed.
+     *
+     * `.loose()` on the inner shape accepts forward-compatible additions
+     * without breaking older readers.
+     */
+    extension: graphExtensionZod.optional(),
+    /**
+     * Names of node and edge kinds the operator has soft-deprecated via
+     * `store.deprecateKinds(...)`. Surfaces in introspection so consumers
+     * (codegen, UI tooling, lints) can route around them. Does not affect
+     * reads, writes, or queries.
+     *
+     * Omitted when empty so legacy schemas hash byte-identically.
+     */
+    deprecatedKinds: z.array(z.string()).optional(),
+  })
+  // Top-level additions from newer TypeGraph versions must survive an older
+  // schema writer's parse-and-recommit cycle. Nested schema shapes already use
+  // the same forward-compatible posture; keeping the root strict would still
+  // strip a newly introduced top-level slice before the writer could preserve
+  // it. TypeGraph 0.54 is the oldest writer floor with this guarantee.
+  .loose();
 
 /**
  * Complete serialized schema document.
@@ -677,6 +689,8 @@ export const serializedSchemaZod = z.object({
  */
 export type SerializedSchema = Readonly<{
   graphId: string;
+  /** Consumer-owned graph-scoped JSON metadata. */
+  annotations?: GraphAnnotations;
   version: number;
   generatedAt: string;
   nodes: Record<string, SerializedNodeDef>;
