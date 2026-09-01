@@ -664,13 +664,17 @@ console.log(
 );
 ```
 
-The snapshot includes the active schema version and hash when present and a
-`schemaFence`. TypeGraph reads that schema coordinate before and after one SQL
-aggregate statement and refuses the result if it changed. The database, rather
-than TypeGraph's JavaScript process, computes all counts. Coverage follows
-ordinary nested JSON Schema `properties`; TypeGraph intentionally does not
-invent population semantics through `$ref`, unions, intersections, arrays, or
-conditionals. `validateStore()` remains authoritative for those schemas.
+The schema coordinate includes the active schema version and hash when present
+and a `schemaFence`. TypeGraph reads that coordinate before and after the
+bounded, sequential SQL aggregate statements and refuses the result if it
+changed. Node and edge properties are queried separately, and wide schemas are
+split into fixed-width path batches. The database, rather than TypeGraph's
+JavaScript process, computes all counts. Coverage follows ordinary nested JSON
+Schema `properties`; TypeGraph intentionally does not invent population
+semantics through `$ref`, unions, intersections, arrays, or conditionals.
+`validateStore()` remains authoritative for those schemas. Concurrent writes
+can affect different `describe()` path batches differently; the schema fence
+detects schema changes, not data changes.
 
 Use `validateStore()` to find rows that no longer satisfy a kind's current
 declared Zod schema, for example after tightening a rule around existing data:
@@ -709,8 +713,11 @@ its data statement and refuses a concurrent schema flip.
 Both analysis methods are current-only. They are absent from `StoreView` and
 transaction callback facades; recorded/as-of population analysis is deferred
 until it can be backed by an equally explicit temporal contract. Because the
-consistency boundary is a SQL statement plus schema bracketing, these methods
-also work on non-interactive transactional adapters.
+consistency boundary is sequential SQL statements plus schema bracketing, these
+methods also work on non-interactive transactional adapters. Calling
+`store.describe()` through an enclosing root `store` inside a transaction
+callback does not join that transaction: where the adapter permits the call,
+it reads through the root backend outside the callback's transaction.
 
 ## `store.materializeIndexes(options?)`
 

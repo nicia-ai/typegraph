@@ -4541,7 +4541,7 @@ type Store<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvol
 const STORE_RUNTIME: unique symbol;
 
 // @public (undocumented)
-type StoreAnalysisSnapshot = Readonly<{
+type StoreAnalysisSchemaCoordinate = Readonly<{
     schemaVersion?: number;
     schemaHash?: string;
     schemaFence: string;
@@ -4642,7 +4642,7 @@ type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdenti
 
 // @public (undocumented)
 type StorePopulationStatistics = Readonly<{
-    snapshot: StoreAnalysisSnapshot;
+    snapshot: StoreAnalysisSchemaCoordinate;
     nodes: readonly KindPopulationStatistics[];
     edges: readonly KindPopulationStatistics[];
 }>;
@@ -4883,7 +4883,7 @@ type StoreValidationFailure = Readonly<{
 
 // @public (undocumented)
 type StoreValidationPage = Readonly<{
-    snapshot: StoreAnalysisSnapshot;
+    snapshot: StoreAnalysisSchemaCoordinate;
     scannedCount: number;
     violations: readonly StoreValidationFailure[];
     nextCursor?: string;

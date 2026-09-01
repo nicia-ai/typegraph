@@ -6552,7 +6552,7 @@ export type StoreAnalysisCursorStaleErrorDetails = Readonly<{
 }>;
 
 // @public (undocumented)
-export type StoreAnalysisSnapshot = Readonly<{
+export type StoreAnalysisSchemaCoordinate = Readonly<{
     schemaVersion?: number;
     schemaHash?: string;
     schemaFence: string;
@@ -6698,7 +6698,7 @@ export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 
 // @public (undocumented)
 export type StorePopulationStatistics = Readonly<{
-    snapshot: StoreAnalysisSnapshot;
+    snapshot: StoreAnalysisSchemaCoordinate;
     nodes: readonly KindPopulationStatistics[];
     edges: readonly KindPopulationStatistics[];
 }>;
@@ -6947,7 +6947,7 @@ export type StoreValidationFailure = Readonly<{
 
 // @public (undocumented)
 export type StoreValidationPage = Readonly<{
-    snapshot: StoreAnalysisSnapshot;
+    snapshot: StoreAnalysisSchemaCoordinate;
     scannedCount: number;
     violations: readonly StoreValidationFailure[];
     nextCursor?: string;

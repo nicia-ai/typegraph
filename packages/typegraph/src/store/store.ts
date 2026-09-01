@@ -287,8 +287,8 @@ import {
   executeNodeHardDelete,
   executeNodeReplacementBatch,
   executeNodeResolvedMutationSet,
+  executeNodeSetUpdate,
   executeNodeUpdate,
-  executeNodeUpdateWhere,
   executeNodeUpsertUpdateBatch,
   lockSchemaVersionForStoreWrite,
   type NodeOperationContext,
@@ -682,7 +682,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getEdgePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   introspect: () => SchemaIntrospection;
-  /** Describe the schema and current population with one aggregate statement. */
+  /** Describe the schema and current population with bounded aggregate statements. */
   describe: () => Promise<StoreDescription>;
   /** Page declared-schema violations without treating undeclared fields as invalid. */
   validateStore: (
@@ -2046,8 +2046,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * Describes the merged schema and current population statistics. One SQL
-   * aggregate computes the data observation, bracketed by active-schema reads.
+   * Describes the merged schema and current population statistics. Bounded SQL
+   * aggregates compute the data observation, bracketed by active-schema reads.
    */
   async describe(): Promise<StoreDescription> {
     return describeStore(this.#analysisContext());
@@ -2141,7 +2141,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         executeNodeCreateNoReturnBatch(ctx, inputs, backend),
       executeUpdate: (input, backend, options) =>
         executeNodeUpdate(ctx, { ...input, id: input.id }, backend, options),
-      executeUpdateWhere: (
+      executeNodeSetUpdate: (
         kind,
         patch,
         candidateIds,
@@ -2149,7 +2149,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         backend,
         options,
       ) =>
-        executeNodeUpdateWhere(
+        executeNodeSetUpdate(
           ctx,
           kind,
           patch,

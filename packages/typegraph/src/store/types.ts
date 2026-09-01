@@ -37,6 +37,29 @@ import {
 } from "../core/types";
 import type { IdentityFacade, IdentityWriteSummary } from "../identity/types";
 import type { TraversalExpansion } from "../query/ast";
+import type {
+  DynamicEdgeAccessor,
+  DynamicNodeAccessor,
+  DynamicNodeKind,
+  DynamicNodeType,
+} from "../query/builder";
+import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
+import {
+  type ExternalRecordedReadSource,
+  type SqlSchema,
+} from "../query/compiler/schema";
+import type { Predicate } from "../query/predicates";
+import { typeGraphGlobalSymbol } from "../utils/global-symbol";
+import type {
+  CURRENT_ONLY_READ_NAMES,
+  EDGE_BATCH_READ_NAMES,
+  EDGE_TEMPORAL_READ_NAMES,
+  EDGE_WRITE_NAMES,
+  NODE_TEMPORAL_READ_NAMES,
+  NODE_WRITE_NAMES,
+  RECORDED_POINT_READ_NAMES,
+} from "./collection-surface";
+
 /**
  * An explicit validity-end mutation. Omission preserves the stored end,
  * `validTo` sets it, and `clearValidTo` reopens the window. The union keeps the
@@ -62,28 +85,6 @@ export type CompareAndSetExpected<Props> = Readonly<{
     | Extract<Exclude<Props[Property], undefined>, JsonScalar>
     | CompareAndSetAbsent;
 }>;
-import type {
-  DynamicEdgeAccessor,
-  DynamicNodeAccessor,
-  DynamicNodeKind,
-  DynamicNodeType,
-} from "../query/builder";
-import type { BatchableQuery, NodeAccessor } from "../query/builder/types";
-import {
-  type ExternalRecordedReadSource,
-  type SqlSchema,
-} from "../query/compiler/schema";
-import type { Predicate } from "../query/predicates";
-import { typeGraphGlobalSymbol } from "../utils/global-symbol";
-import type {
-  CURRENT_ONLY_READ_NAMES,
-  EDGE_BATCH_READ_NAMES,
-  EDGE_TEMPORAL_READ_NAMES,
-  EDGE_WRITE_NAMES,
-  NODE_TEMPORAL_READ_NAMES,
-  NODE_WRITE_NAMES,
-  RECORDED_POINT_READ_NAMES,
-} from "./collection-surface";
 
 // ============================================================
 // Row-to-Meta Field Mapping

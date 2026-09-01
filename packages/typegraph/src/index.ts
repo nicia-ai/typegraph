@@ -527,7 +527,7 @@ export type {
   SearchScopeOptions,
   Store,
   StoreAnalysisCursorStaleErrorDetails,
-  StoreAnalysisSnapshot,
+  StoreAnalysisSchemaCoordinate,
   StoreDescription,
   StorePopulationStatistics,
   StoreValidationFailure,

@@ -27,12 +27,24 @@ import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
 import { serializeSchemaProperties } from "../schema/serializer";
 import type { JsonSchema } from "../schema/types";
+import { chunk } from "../utils/array";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import type { SchemaIntrospection } from "./introspect";
 
 const DEFAULT_VALIDATION_PAGE_SIZE = 100;
 const MAX_VALIDATION_PAGE_SIZE = 1000;
+/**
+ * Conservative width limit for each population query. PostgreSQL permits at
+ * most 1,664 result columns and SQLite commonly permits 2,000.
+ */
+const STORE_ANALYSIS_RESULT_COLUMN_BUDGET = 512;
+const POPULATION_FIXED_COLUMN_COUNT = 2;
+const POPULATION_COLUMNS_PER_PATH = 2;
+const POPULATION_PATH_BATCH_SIZE = Math.floor(
+  (STORE_ANALYSIS_RESULT_COLUMN_BUDGET - POPULATION_FIXED_COLUMN_COUNT) /
+    POPULATION_COLUMNS_PER_PATH,
+);
 const VALIDATION_CURSOR_COLUMNS = [
   "typegraph.validateStore.entity",
   "typegraph.validateStore.kind",
@@ -40,7 +52,7 @@ const VALIDATION_CURSOR_COLUMNS = [
   "typegraph.validateStore.afterId",
 ] as const;
 
-export type StoreAnalysisSnapshot = Readonly<{
+export type StoreAnalysisSchemaCoordinate = Readonly<{
   schemaVersion?: number;
   schemaHash?: string;
   /** Fingerprint of both the Store declarations and active schema row. */
@@ -67,8 +79,8 @@ export type KindPopulationStatistics = Readonly<{
 }>;
 
 export type StorePopulationStatistics = Readonly<{
-  /** Schema coordinate observed before and after the aggregate statement. */
-  snapshot: StoreAnalysisSnapshot;
+  /** Schema coordinate observed before and after the aggregate statements. */
+  snapshot: StoreAnalysisSchemaCoordinate;
   nodes: readonly KindPopulationStatistics[];
   edges: readonly KindPopulationStatistics[];
 }>;
@@ -101,7 +113,7 @@ export type StoreValidationFailure = Readonly<{
 
 export type StoreValidationPage = Readonly<{
   /** Schema coordinate observed before and after this page scan. */
-  snapshot: StoreAnalysisSnapshot;
+  snapshot: StoreAnalysisSchemaCoordinate;
   /** Number of records scanned, independent of the number of violations. */
   scannedCount: number;
   violations: readonly StoreValidationFailure[];
@@ -152,12 +164,19 @@ type ValidationCursor = Readonly<{
 
 type ValidationRow = Readonly<{ id: string; props: RowProps }>;
 type PopulationRow = Readonly<{
-  entity: KindEntity;
   kind: string;
   row_count: number | string | bigint;
 }> &
   Readonly<Record<string, unknown>>;
-type SchemaCoordinate = StoreAnalysisSnapshot;
+type SchemaCoordinate = StoreAnalysisSchemaCoordinate;
+type PopulationCounts = Readonly<{
+  presentCount: number;
+  nonNullCount: number;
+}>;
+type KindPopulationAggregate = Readonly<{
+  count: number;
+  properties: ReadonlyMap<string, PopulationCounts>;
+}>;
 
 /**
  * Only ordinary nested `properties` members have an unambiguous portable SQL
@@ -337,18 +356,20 @@ function numberFromSql(value: unknown, label: string): number {
   return converted;
 }
 
-function allDeclaredPaths<G extends GraphDef>(graph: G): readonly string[] {
+function declaredPathsForEntity<G extends GraphDef>(
+  graph: G,
+  entity: KindEntity,
+): readonly string[] {
   const paths = new Set<string>();
-  for (const registration of Object.values(graph.nodes)) {
+  const schemas: readonly z.ZodType[] =
+    entity === "node" ?
+      Object.values(graph.nodes).map((registration) => registration.type.schema)
+    : Object.values(graph.edges).map(
+        (registration) => registration.type.schema,
+      );
+  for (const schema of schemas) {
     for (const path of declaredPropertyPaths(
-      serializeSchemaProperties(registration.type.schema),
-    )) {
-      paths.add(pathToPointer(path));
-    }
-  }
-  for (const registration of Object.values(graph.edges)) {
-    for (const path of declaredPropertyPaths(
-      serializeSchemaProperties(registration.type.schema),
+      serializeSchemaProperties(schema),
     )) {
       paths.add(pathToPointer(path));
     }
@@ -380,57 +401,81 @@ function populationSelect<G extends GraphDef>(
   });
   const aggregateColumns =
     aggregates.length === 0 ? sql`` : sql`, ${sql.join(aggregates, sql`, `)}`;
-  return sql`SELECT ${entity} AS entity, kind, COUNT(*) AS row_count${aggregateColumns} FROM ${table} WHERE graph_id = ${ctx.graphId} AND ${temporal} GROUP BY kind`;
+  return sql`SELECT kind, COUNT(*) AS row_count${aggregateColumns} FROM ${table} WHERE graph_id = ${ctx.graphId} AND ${temporal} GROUP BY kind ORDER BY kind`;
 }
 
-async function readPopulationRows<G extends GraphDef>(
+function pathBatches(paths: readonly string[]): readonly (readonly string[])[] {
+  if (paths.length === 0) return [[]];
+  return chunk(paths, POPULATION_PATH_BATCH_SIZE);
+}
+
+async function readEntityPopulation<G extends GraphDef>(
   ctx: AnalysisContext<G>,
+  entity: KindEntity,
   paths: readonly string[],
-): Promise<readonly PopulationRow[]> {
-  const currentTimestamp = nowIso();
-  const query = sql`${populationSelect(ctx, "node", paths, currentTimestamp)} UNION ALL ${populationSelect(ctx, "edge", paths, currentTimestamp)} ORDER BY entity, kind`;
-  return ctx.backend.execute<PopulationRow>(asCompiledRowsSql(query));
+  currentTimestamp: string,
+): Promise<ReadonlyMap<string, KindPopulationAggregate>> {
+  const aggregates = new Map<
+    string,
+    { count: number; properties: Map<string, PopulationCounts> }
+  >();
+  const batches = pathBatches(paths);
+  for (const [batchIndex, batch] of batches.entries()) {
+    const rows = await ctx.backend.execute<PopulationRow>(
+      asCompiledRowsSql(populationSelect(ctx, entity, batch, currentTimestamp)),
+    );
+    for (const row of rows) {
+      const aggregate = aggregates.get(row.kind) ?? {
+        count: 0,
+        properties: new Map<string, PopulationCounts>(),
+      };
+      if (batchIndex === 0) {
+        aggregate.count = numberFromSql(row.row_count, "count");
+      }
+      for (const [pathIndex, path] of batch.entries()) {
+        aggregate.properties.set(path, {
+          presentCount: numberFromSql(
+            row[`p${pathIndex}_present`],
+            "present count",
+          ),
+          nonNullCount: numberFromSql(
+            row[`p${pathIndex}_non_null`],
+            "non-null count",
+          ),
+        });
+      }
+      aggregates.set(row.kind, aggregate);
+    }
+  }
+  return aggregates;
 }
 
 function populationForKind(
   entity: KindEntity,
   kind: string,
   schema: z.ZodType,
-  paths: readonly string[],
-  rows: readonly PopulationRow[],
+  populations: ReadonlyMap<string, KindPopulationAggregate>,
 ): KindPopulationStatistics {
-  const row = rows.find(
-    (candidate) => candidate.entity === entity && candidate.kind === kind,
-  );
-  const count = row === undefined ? 0 : numberFromSql(row.row_count, "count");
-  const declaredPaths = new Set(
-    declaredPropertyPaths(serializeSchemaProperties(schema)).map((path) =>
-      pathToPointer(path),
-    ),
-  );
+  const population = populations.get(kind);
+  const count = population?.count ?? 0;
+  const declaredPaths = declaredPropertyPaths(serializeSchemaProperties(schema))
+    .map((path) => pathToPointer(path))
+    .toSorted();
   return {
     entity,
     kind,
     count,
-    properties: paths.flatMap((path, index) => {
-      if (!declaredPaths.has(path)) return [];
-      const presentCount =
-        row === undefined ? 0 : (
-          numberFromSql(row[`p${index}_present`], "present count")
-        );
-      const nonNullCount =
-        row === undefined ? 0 : (
-          numberFromSql(row[`p${index}_non_null`], "non-null count")
-        );
-      return [
-        {
-          path,
-          presentCount,
-          nullCount: presentCount - nonNullCount,
-          nonNullCount,
-          coverage: count === 0 ? 0 : nonNullCount / count,
-        },
-      ];
+    properties: declaredPaths.map((path) => {
+      const counts = population?.properties.get(path);
+      const presentCount = counts?.presentCount ?? 0;
+      const nonNullCount = counts?.nonNullCount ?? 0;
+      return {
+        path,
+        presentCount,
+        nullCount: presentCount - nonNullCount,
+        nonNullCount,
+        coverage: count === 0 ? 0 : nonNullCount / count,
+      };
     }),
   };
 }
@@ -484,15 +529,24 @@ export async function describeStore<G extends GraphDef>(
   ctx: AnalysisContext<G>,
 ): Promise<StoreDescription> {
   const before = await schemaCoordinateFor(ctx);
-  const paths = allDeclaredPaths(ctx.graph);
-  const rows = await readPopulationRows(ctx, paths);
+  const currentTimestamp = nowIso();
+  const nodePaths = declaredPathsForEntity(ctx.graph, "node");
+  const edgePaths = declaredPathsForEntity(ctx.graph, "edge");
+  const nodePopulations =
+    Object.keys(ctx.graph.nodes).length === 0 ?
+      new Map<string, KindPopulationAggregate>()
+    : await readEntityPopulation(ctx, "node", nodePaths, currentTimestamp);
+  const edgePopulations =
+    Object.keys(ctx.graph.edges).length === 0 ?
+      new Map<string, KindPopulationAggregate>()
+    : await readEntityPopulation(ctx, "edge", edgePaths, currentTimestamp);
   const after = await schemaCoordinateFor(ctx);
   assertStableSchema(before, after);
   const nodes = Object.entries(ctx.graph.nodes).map(([kind, registration]) =>
-    populationForKind("node", kind, registration.type.schema, paths, rows),
+    populationForKind("node", kind, registration.type.schema, nodePopulations),
   );
   const edges = Object.entries(ctx.graph.edges).map(([kind, registration]) =>
-    populationForKind("edge", kind, registration.type.schema, paths, rows),
+    populationForKind("edge", kind, registration.type.schema, edgePopulations),
   );
   return {
     schema: ctx.introspect(),

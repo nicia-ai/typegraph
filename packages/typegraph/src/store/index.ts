@@ -188,7 +188,7 @@ export type {
   KindPopulationStatistics,
   PropertyPopulationStatistics,
   StoreAnalysisCursorStaleErrorDetails,
-  StoreAnalysisSnapshot,
+  StoreAnalysisSchemaCoordinate,
   StoreDescription,
   StorePopulationStatistics,
   StoreValidationFailure,

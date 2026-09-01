@@ -27,7 +27,7 @@ export function registerStoreAnalysisIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Store analysis", () => {
-    it("describes per-kind counts and declared-property coverage in one snapshot", async () => {
+    it("describes per-kind counts and declared-property coverage at one schema coordinate", async () => {
       const store = context.getStore();
       const alice = await store.nodes.Person.create({
         name: "Alice",

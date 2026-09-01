@@ -1,450 +1,1474 @@
 [
   {
-    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
+    "entrypoint": "typegraph-core.api.md",
+    "declaration": "GraphDef",
+    "member": "annotations",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
+    "declaration": "NodeCollection",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
   },
   {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   },
   {
-    "entrypoint": "typegraph-interchange.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
-    "entrypoint": "typegraph-postgres-pglite.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-profiler.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-provenance.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-schema.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-sqlite-local.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.atomicBatch",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution.interactiveTransactions",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "execution",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph.api.md",
-    "declaration": "BackendCapabilities",
-    "member": "transactions",
-    "kind": "member-removed",
-    "reason": "Pre-1.0 clean break: replace the ambiguous transactions flag with independent interactive-transaction and exact-root atomic-batch facts so serverless execution cannot be misclassified.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicEdgeDeleteBatchInput",
-    "member": "graphId",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicEdgeDeleteBatchInput",
-    "member": "expectedKind",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicEdgeDeleteBatchInput",
-    "member": "ids",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicEdgeDeleteBatchInput",
-    "member": "schemaFence",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicNodeDeleteBatchInput",
-    "member": "graphId",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicNodeDeleteBatchInput",
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RuntimeEdgeKind",
     "member": "kind",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicNodeDeleteBatchInput",
-    "member": "ids",
-    "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
   },
   {
     "entrypoint": "typegraph-graph-merge.api.md",
-    "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   },
   {
     "entrypoint": "typegraph-interchange.api.md",
     "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   },
   {
     "entrypoint": "typegraph-postgres-pglite.api.md",
     "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   },
   {
     "entrypoint": "typegraph-profiler.api.md",
     "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   },
   {
     "entrypoint": "typegraph-provenance.api.md",
     "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   },
   {
     "entrypoint": "typegraph-sqlite-local.api.md",
     "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
+    "member": "schemaFence",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphDef",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
   },
   {
     "entrypoint": "typegraph.api.md",
     "declaration": "NodeCollection",
-    "member": "bulkReplaceById",
+    "member": "compareAndSet",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 clean break: expose complete-document replacement as a distinct operation instead of weakening bulkUpsertById with a mode flag; every Store-produced collection implements it.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add scalar-or-absence compare-and-set updates to node collections.",
+    "issue": "#600"
   },
   {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "AtomicNodeDeleteBatchInput",
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SchemaIntrospection",
+    "member": "annotations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add graph-scoped annotations to definitions and introspection as a required resolved property.",
+    "issue": "#594"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeNodeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "runtimeEdgeKind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "describe",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "validateStore",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreCore",
+    "member": "bulkFindRuntimeEdgesFrom",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "sources",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BulkFindRuntimeEdgesFromParams",
+    "member": "edgeKinds",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeEdgeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "RuntimeNodeKind",
+    "member": "[RUNTIME_KIND_TOKEN_BRAND]",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store-issued runtime-kind evidence and narrowed dynamic traversal contracts to the resolved Store surface.",
+    "issue": "#599"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreAnalysisSchemaCoordinate",
     "member": "schemaFence",
     "kind": "required-member-added",
-    "reason": "Pre-1.0 public semantic executor contract: custom exact-root programs receive a complete delete command, and weakening its required fence or target fields would make the registration boundary dishonest.",
-    "issue": "#533"
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreDescription",
+    "member": "schema",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreDescription",
+    "member": "statistics",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "nodes",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StorePopulationStatistics",
+    "member": "edges",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add Store population analysis and its schema-coordinate result contracts to the resolved Store surface.",
+    "issue": "#595"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "snapshot",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "scannedCount",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreValidationPage",
+    "member": "violations",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "entity",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ValidateStoreOptions",
+    "member": "kind",
+    "kind": "required-member-added",
+    "reason": "Pre-1.0 clean break: add pageable Store validation and its bounded-page contracts to the resolved Store surface.",
+    "issue": "#596"
   }
 ]

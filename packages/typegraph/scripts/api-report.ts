@@ -204,12 +204,12 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * `SchemaKindEmptinessProbe`, `PopulatedSchemaKind`, and
  * `CommitSchemaVersionIfKindsEmptyResult` (+4 each).
  *
- * TypeGraph 0.54 clean-surface batch: schema annotations, snapshot analysis,
+ * TypeGraph 0.54 clean-surface batch: schema annotations, store analysis,
  * runtime kind tokens, candidate-write planning, and the dedicated guarded
  * update port widen the type graph rendered by Store- and Backend-bearing
  * entrypoints. The entrypoint-specific counts and fingerprints below are the
  * measured API Extractor result after exporting the intended public contracts;
- * `./backend`, `./core`, and the Drizzle indexes entrypoint are unchanged.
+ * `./core` and the Drizzle indexes entrypoint are unchanged.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -254,7 +254,7 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   "./graph-merge": {
     count: 690,
-    sha256: "90873c180a880976501c78a78efc08a4b87afc85e763e056be1cd68a96fc3895",
+    sha256: "22c4c42c13480468b98cb406733d60388188fecf5f0b73d1e8d15972a451fd7b",
   },
   "./indexes": {
     count: 44,
@@ -262,19 +262,19 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   "./interchange": {
     count: 676,
-    sha256: "1113ca5251a63f6959f9cbaf7b35599a077e224ad66860332ede79a7b45f42ef",
+    sha256: "ae315aab063ce17afe3397d1f782d4c27e9774e70432300346a7fc4ede6b9b99",
   },
   "./postgres/pglite": {
     count: 680,
-    sha256: "5a345cddae297778444bbce694752e28828760b24b3a7fd00de05878210eb4c6",
+    sha256: "9ffda28a91364c5738c14ed1a31060ec991c78371a5fb78fe7bc0158f0bc4ff9",
   },
   "./profiler": {
     count: 678,
-    sha256: "8aec1263a38a7cbcc830a2872bc0758a6e6df135e9d5e8d62fe7844f2a77e76a",
+    sha256: "10703f06a798431ec22aac3f0a8bafcd0cb79a8b31bd3c5ebec9f13e3868ebe0",
   },
   "./provenance": {
     count: 684,
-    sha256: "2a564ebb8c0645922629ed5bc5ac219a7a93df4ba18d55174bf62e9ef96ddef8",
+    sha256: "3647986b4142817d30f89e3ed7abb5337473abb1777018fe2323800e2b1b6a21",
   },
   "./schema": {
     count: 261,
@@ -282,7 +282,7 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   },
   "./sqlite/local": {
     count: 680,
-    sha256: "5a345cddae297778444bbce694752e28828760b24b3a7fd00de05878210eb4c6",
+    sha256: "9ffda28a91364c5738c14ed1a31060ec991c78371a5fb78fe7bc0158f0bc4ff9",
   },
 };
 

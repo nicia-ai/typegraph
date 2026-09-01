@@ -92,6 +92,13 @@ type NodeUpsertOptions = Readonly<{
 }> &
   ValidityEndMutation;
 
+export type NodeSetUpdateRequest =
+  | Readonly<{ operation: "updateWhere" }>
+  | Readonly<{
+      operation: "compareAndSet";
+      expected: Record<string, unknown>;
+    }>;
+
 /**
  * Narrows unparameterized Node to Node<N>.
  * Safe: props are validated by Zod at creation/update boundaries.
@@ -225,18 +232,13 @@ export type NodeCollectionConfig = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
-  executeUpdateWhere: (
+  executeNodeSetUpdate: (
     kind: string,
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
-    request:
-      | Readonly<{ operation: "updateWhere" }>
-      | Readonly<{
-          operation: "compareAndSet";
-          expected: Record<string, unknown>;
-        }>,
+    request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
@@ -415,7 +417,7 @@ export function createNodeCollection<
     executeCreateNoReturnBatch: executeNodeCreateNoReturnBatch,
     executeCreateBatch: executeNodeCreateBatch,
     executeUpdate: executeNodeUpdate,
-    executeUpdateWhere: executeNodeUpdateWhere,
+    executeNodeSetUpdate,
     executeUpsertUpdateBatch: executeNodeUpsertUpdateBatch,
     executeResolvedMutationSet: executeNodeResolvedMutationSet,
     prepareReplacement,
@@ -510,7 +512,7 @@ export function createNodeCollection<
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
-      const result = await executeNodeUpdateWhere(
+      const result = await executeNodeSetUpdate(
         kind,
         params.patch,
         candidateIds,
@@ -602,7 +604,7 @@ export function createNodeCollection<
       }
       const compiledCandidates = asCompiledSelectSql(combinedCandidates);
 
-      const result = await executeNodeUpdateWhere(
+      const result = await executeNodeSetUpdate(
         kind,
         params.patch,
         compiledCandidates,

@@ -17,6 +17,7 @@ import { createEdgeCollection, createNodeCollection } from "./collections";
 import { type UpsertDirtyCheckFunction } from "./collections/coalesce";
 import { type EdgeUpsertUpdateBatchEntry } from "./collections/edge-collection";
 import {
+  type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
 } from "./collections/node-collection";
@@ -67,18 +68,13 @@ export type NodeOperations = Readonly<{
     backend: GraphBackend | TransactionBackend,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
-  executeUpdateWhere: (
+  executeNodeSetUpdate: (
     kind: string,
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
     backend: GraphBackend | TransactionBackend,
-    request:
-      | Readonly<{ operation: "updateWhere" }>
-      | Readonly<{
-          operation: "compareAndSet";
-          expected: Record<string, unknown>;
-        }>,
+    request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],

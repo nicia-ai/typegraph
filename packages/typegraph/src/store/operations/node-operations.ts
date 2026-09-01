@@ -164,6 +164,7 @@ import {
 } from "../claims/node-claims";
 import { type UpsertDirtyCheck } from "../collections/coalesce";
 import {
+  type NodeSetUpdateRequest,
   type NodeUpsertUpdateBatchEntry,
   type UpsertUpdateNodeInput,
 } from "../collections/node-collection";
@@ -3167,19 +3168,14 @@ function normalizeCompareAndSetExpectations(
  * every after-image so the Store can validate the complete rows before
  * rebuilding all derived sidecars inside the same transaction.
  */
-export async function executeNodeUpdateWhere<G extends GraphDef>(
+export async function executeNodeSetUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   inputPatch: Record<string, unknown>,
   candidateIds: CompiledSelectSql,
   candidateIdColumn: string,
   backend: GraphBackend | TransactionBackend,
-  request:
-    | Readonly<{ operation: "updateWhere" }>
-    | Readonly<{
-        operation: "compareAndSet";
-        expected: Record<string, unknown>;
-      }>,
+  request: NodeSetUpdateRequest,
 ): Promise<Readonly<{ affectedCount: number }>> {
   const operation = request.operation;
   const registration = getNodeRegistration(ctx.graph, kind);
