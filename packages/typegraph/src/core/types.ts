@@ -457,24 +457,19 @@ export function isEdgeType(value: unknown): value is AnyEdgeType {
 export function isEdgeTypeWithEndpoints(
   value: unknown,
 ): value is EdgeTypeWithEndpoints {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    !(EDGE_TYPE_BRAND in value) ||
-    (value as Record<string, unknown>)[EDGE_TYPE_BRAND] !== true
-  ) {
+  if (!isEdgeType(value)) {
     return false;
   }
   const candidate = value as Record<string, unknown>;
   if (
-    !Array.isArray(candidate.from) ||
-    candidate.from.length === 0 ||
-    typeof candidate.to !== "object" ||
-    candidate.to === null
+    !Array.isArray(candidate["from"]) ||
+    candidate["from"].length === 0 ||
+    typeof candidate["to"] !== "object" ||
+    candidate["to"] === null
   ) {
     return false;
   }
-  return Array.isArray(candidate.to) ?
-      candidate.to.length > 0
-    : Object.keys(candidate.to).length > 0;
+  return Array.isArray(candidate["to"]) ?
+      candidate["to"].length > 0
+    : Object.keys(candidate["to"]).length > 0;
 }
