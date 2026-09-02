@@ -92,11 +92,7 @@ import {
   type ContributionRepopulationStats,
   type CreateVectorIndexParams,
   type DeleteEmbeddingParams,
-  type DeleteFulltextBatchParams,
-  type DeleteFulltextParams,
   type DropVectorIndexParams,
-  type FulltextSearchParams,
-  type FulltextSearchResult,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
   type GraphTemplateRow,
@@ -125,8 +121,6 @@ import {
   type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
-  type UpsertFulltextBatchParams,
-  type UpsertFulltextParams,
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
@@ -156,7 +150,6 @@ import {
 } from "./vector-runtime";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
 import {
-  coerceNumericScore,
   createEdgeRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
@@ -193,6 +186,7 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import { createFulltextMembers } from "./engine/members/fulltext-members";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -774,6 +768,13 @@ function createSqliteOperationBackend(
   const batchConfig = computeSqliteBatchChunkSizes(
     capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
   );
+
+  const fulltextMembers = createFulltextMembers({
+    strategy: operationStrategy,
+    execution: { execAll, execRun },
+    batchConfig,
+  });
+
   const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     commandSession: transactionScoped ? "transaction" : "root",
@@ -1197,81 +1198,7 @@ function createSqliteOperationBackend(
     },
 
     // === Fulltext Operations ===
-
-    async upsertFulltext(params: UpsertFulltextParams): Promise<void> {
-      const timestamp = nowIso();
-      const statements = operationStrategy.buildUpsertFulltext(
-        params,
-        timestamp,
-      );
-      for (const stmt of statements) {
-        await execRun(stmt);
-      }
-    },
-
-    async deleteFulltext(params: DeleteFulltextParams): Promise<void> {
-      const statements = operationStrategy.buildDeleteFulltext(params);
-      for (const stmt of statements) {
-        await execRun(stmt);
-      }
-    },
-
-    async upsertFulltextBatch(
-      params: UpsertFulltextBatchParams,
-    ): Promise<void> {
-      if (params.rows.length === 0) return;
-      const timestamp = nowIso();
-      // The strategy emits ONE statement over every row it is given, so
-      // the bind budget is enforced here — same contract as node/edge
-      // batch inserts.
-      for (const rows of chunkArray(
-        params.rows,
-        batchConfig.fulltextUpsertBatchSize,
-      )) {
-        const statements = operationStrategy.buildUpsertFulltextBatch(
-          { ...params, rows },
-          timestamp,
-        );
-        for (const stmt of statements) {
-          await execRun(stmt);
-        }
-      }
-    },
-
-    async deleteFulltextBatch(
-      params: DeleteFulltextBatchParams,
-    ): Promise<void> {
-      if (params.nodeIds.length === 0) return;
-      for (const nodeIds of chunkArray(
-        params.nodeIds,
-        batchConfig.fulltextDeleteChunkSize,
-      )) {
-        const statements = operationStrategy.buildDeleteFulltextBatch({
-          ...params,
-          nodeIds,
-        });
-        for (const stmt of statements) {
-          await execRun(stmt);
-        }
-      }
-    },
-
-    async fulltextSearch(
-      params: FulltextSearchParams,
-    ): Promise<readonly FulltextSearchResult[]> {
-      const query = operationStrategy.buildFulltextSearch(params);
-      const rows = await execAll<{
-        node_id: string;
-        score: number | string;
-        snippet: string | null;
-      }>(query);
-      return rows.map((row, index) => ({
-        nodeId: row.node_id,
-        score: coerceNumericScore(row.score),
-        rank: index + 1,
-        ...(row.snippet === null ? {} : { snippet: row.snippet }),
-      }));
-    },
+    ...fulltextMembers,
 
     // === Query Execution ===
 

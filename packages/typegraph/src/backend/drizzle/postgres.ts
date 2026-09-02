@@ -111,7 +111,6 @@ import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
-  coerceNumericScore,
   createEdgeRowMapper,
   createNodeRowMapper,
   createSchemaVersionRowMapper,
@@ -142,11 +141,7 @@ import {
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type DeleteEmbeddingParams,
-  type DeleteFulltextBatchParams,
-  type DeleteFulltextParams,
   type DropVectorIndexParams,
-  type FulltextSearchParams,
-  type FulltextSearchResult,
   type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -176,8 +171,6 @@ import {
   type TrustedImportSession,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
-  type UpsertFulltextBatchParams,
-  type UpsertFulltextParams,
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../types";
@@ -209,6 +202,7 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import { createFulltextMembers } from "./engine/members/fulltext-members";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -2861,6 +2855,12 @@ function createPostgresOperationBackend(
     capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   );
 
+  const fulltextMembers = createFulltextMembers({
+    strategy: operationStrategy,
+    execution: { execAll, execRun },
+    batchConfig,
+  });
+
   /**
    * The third consumer of the schema fence's `FOR SHARE`, and the
    * writer-side half that managed entity inserts carry INSIDE their own
@@ -3452,83 +3452,7 @@ function createPostgresOperationBackend(
     },
 
     // === Fulltext Operations ===
-
-    async upsertFulltext(params: UpsertFulltextParams): Promise<void> {
-      const timestamp = nowIso();
-      const statements = operationStrategy.buildUpsertFulltext(
-        params,
-        timestamp,
-      );
-      for (const stmt of statements) {
-        await execRun(stmt);
-      }
-    },
-
-    async deleteFulltext(params: DeleteFulltextParams): Promise<void> {
-      const statements = operationStrategy.buildDeleteFulltext(params);
-      for (const stmt of statements) {
-        await execRun(stmt);
-      }
-    },
-
-    async upsertFulltextBatch(
-      params: UpsertFulltextBatchParams,
-    ): Promise<void> {
-      if (params.rows.length === 0) return;
-      const timestamp = nowIso();
-      // The strategy emits ONE statement over every row it is given, so
-      // the bind budget is enforced here — same contract as node/edge
-      // batch inserts.
-      for (const rows of chunkArray(
-        params.rows,
-        batchConfig.fulltextUpsertBatchSize,
-      )) {
-        const statements = operationStrategy.buildUpsertFulltextBatch(
-          { ...params, rows },
-          timestamp,
-        );
-        for (const stmt of statements) {
-          await execRun(stmt);
-        }
-      }
-    },
-
-    async deleteFulltextBatch(
-      params: DeleteFulltextBatchParams,
-    ): Promise<void> {
-      if (params.nodeIds.length === 0) return;
-      for (const nodeIds of chunkArray(
-        params.nodeIds,
-        batchConfig.fulltextDeleteChunkSize,
-      )) {
-        const statements = operationStrategy.buildDeleteFulltextBatch({
-          ...params,
-          nodeIds,
-        });
-        for (const stmt of statements) {
-          await execRun(stmt);
-        }
-      }
-    },
-
-    async fulltextSearch(
-      params: FulltextSearchParams,
-    ): Promise<readonly FulltextSearchResult[]> {
-      const query = operationStrategy.buildFulltextSearch(params);
-      // pg returns `numeric` as a string to preserve precision; coerce at the
-      // backend boundary so FulltextSearchResult.score is always `number`.
-      const rows = await execAll<{
-        node_id: string;
-        score: number | string;
-        snippet: string | null;
-      }>(query);
-      return rows.map((row, index) => ({
-        nodeId: row.node_id,
-        score: coerceNumericScore(row.score),
-        rank: index + 1,
-        ...(row.snippet === null ? {} : { snippet: row.snippet }),
-      }));
-    },
+    ...fulltextMembers,
 
     async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
       if (vectorStrategy === undefined) return;
