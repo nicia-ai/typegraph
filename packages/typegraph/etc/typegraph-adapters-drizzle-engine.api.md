@@ -2412,6 +2412,7 @@ export type SqlEngineProfile<TTx> = Readonly<{
     fulltext: FulltextStrategy;
     vector: VectorStrategy | undefined;
     declaredCapabilities: BackendCapabilities;
+    contributionRebuildSupported: (interactiveTransactions: boolean) => boolean;
     limits: Readonly<{
         maxBindParameters: number;
         batchConfig: OperationBackendBatchConfig;
@@ -2427,7 +2428,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
     lateMembers: (ctx: EngineAssemblyContext<TTx>) => EngineLateMembers<TTx>;
     operations: InternalOperationBackend;
     contributionMaterializer: ContributionMaterializer;
-    finalizeCapabilities: (declared: BackendCapabilities) => BackendCapabilities;
     inlineMembers: (ctx: EngineAssemblyContext<TTx>) => Partial<AdapterBackend<TTx>>;
 }>;
 

@@ -65,10 +65,7 @@ import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
 } from "../capabilities/atomic-sql-program";
-import {
-  assertBundledCapabilityDeclarations,
-  assertNoLegacyTransactionCapability,
-} from "../capabilities/declarations";
+import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
 import { markFirstPartyFactory } from "../capabilities/write-fence";
@@ -149,6 +146,7 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import { finalizeEngineCapabilities } from "./engine/capabilities";
 import { createBaseSchemaMembers } from "./engine/members/base-schema-members";
 import {
   createContributionMembers,
@@ -1165,40 +1163,36 @@ export function buildSqliteEngineProfile(
   // (durable markers, a catalog probe, a strategy that declares teardown
   // DDL, a transactional schema fence), and a caller who declared a
   // rebuild this backend cannot perform would be advertising a lie.
-  // The capability tail: exposed on the profile as `finalizeCapabilities`
-  // as well as applied here, since `capabilities` below feeds the fence
-  // target, the operation backend, and the contribution materializer this
-  // factory still builds inline. `createSqlBackend` calls this again with
-  // `profile.declaredCapabilities` to resolve `ctx.capabilities` — a
-  // profile variant built by overriding `declaredCapabilities` (as the
-  // refusal tests do) is re-derived correctly only because this stays a
-  // function of its argument rather than a cached value; the resulting
-  // duplicated derivation is a known, harmless-today identity gap between
-  // `ctx.capabilities` and the `capabilities` object already baked into
-  // `operations` below.
-  function finalizeCapabilities(
-    declared: BackendCapabilities,
-  ): BackendCapabilities {
-    return assertBundledCapabilityDeclarations({
-      ...declared,
-      contributions: {
-        supported: true,
-        probe: true,
-        rebuild: contributionRebuildSupported(
-          fulltextStrategy,
-          tables.fulltextTableName,
-          declared.execution.interactiveTransactions,
-        ),
-      },
-      execution: {
-        ...declared.execution,
-        atomicBatch:
-          atomicSqlProgramExecutor === undefined ? "none" : ("root" as const),
-      },
-    });
-  }
-  const capabilities: BackendCapabilities =
-    finalizeCapabilities(declaredCapabilities);
+  // The rebuild-support predicate this profile hands
+  // `finalizeEngineCapabilities` as a dep (`./engine/capabilities`) rather
+  // than letting that shared tail import `contributionRebuildSupported`
+  // itself — see that module's doc comment for why.
+  const contributionRebuildSupportedForThisConnection = (
+    interactiveTransactions: boolean,
+  ): boolean =>
+    contributionRebuildSupported(
+      fulltextStrategy,
+      tables.fulltextTableName,
+      interactiveTransactions,
+    );
+  // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
+  // runs here as well as inside `createSqlBackend`, since `capabilities`
+  // below feeds the fence target, the operation backend, and the
+  // contribution materializer this factory still builds inline.
+  // `createSqlBackend` calls it again with `profile.declaredCapabilities` to
+  // resolve `ctx.capabilities` — a profile variant built by overriding
+  // `declaredCapabilities` (as the refusal tests do) is re-derived correctly
+  // only because that function stays pure in its arguments rather than a
+  // cached value; the resulting duplicated derivation is a known,
+  // harmless-today identity gap between `ctx.capabilities` and the
+  // `capabilities` object already baked into `operations` below.
+  const capabilities: BackendCapabilities = finalizeEngineCapabilities(
+    declaredCapabilities,
+    {
+      execution: executionAdapter,
+      contributionRebuildSupported: contributionRebuildSupportedForThisConnection,
+    },
+  );
 
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -2120,6 +2114,7 @@ export function buildSqliteEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
+    contributionRebuildSupported: contributionRebuildSupportedForThisConnection,
     limits,
     rowMappers,
     resourceAudit,
@@ -2130,7 +2125,6 @@ export function buildSqliteEngineProfile(
     lateMembers,
     operations,
     contributionMaterializer,
-    finalizeCapabilities,
     inlineMembers,
   };
 }

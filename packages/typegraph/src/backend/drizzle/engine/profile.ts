@@ -100,7 +100,15 @@ export type OperationFusionHooks = Readonly<{
  * profile's own construction).
  */
 export type EngineAssemblyContext<TTx> = Readonly<{
-  /** The backend's capabilities after the dialect's capability tail runs. */
+  /**
+   * The backend's capabilities after `finalizeEngineCapabilities`
+   * (`./capabilities`) runs the shared capability tail on
+   * `declaredCapabilities`. Each dialect builder resolves this same value a
+   * second time, for the local `capabilities` its still-inline
+   * operation-backend construction needs — a deliberate, harmless-today
+   * duplication (see that module's doc comment) that goes away once the
+   * operation layer stops being built inline.
+   */
   capabilities: BackendCapabilities;
   /** The write-fence decision, resolved once from the capabilities above. */
   fencePlan: WriteFencePlan;
@@ -219,12 +227,15 @@ export type EngineLateMembers<TTx> = Readonly<{
  * Four fields are scaffolding, not part of this type's steady-state shape:
  * `operations` / `contributionMaterializer` are already-built values rather
  * than something `createSqlBackend` assembles itself (the operation-backend
- * layer is still fully dialect-owned), `finalizeCapabilities` is the
- * dialect's own capability-tail derivation, and `inlineMembers` is
- * everything else this profile's dialect still builds inline — the
- * mirrored adapter members later extractions move into `members/*.ts`
- * files one group at a time. All four are drained as each extraction
- * lands; none survives past the operation-layer and member extractions.
+ * layer is still fully dialect-owned), `inlineMembers` is everything else
+ * this profile's dialect still builds inline — the mirrored adapter
+ * members later extractions move into `members/*.ts` files one group at a
+ * time — and `contributionRebuildSupported` exists only because
+ * `create-sql-backend.ts` must stay free of a real Drizzle import (see its
+ * own doc comment). All four are drained as each extraction lands: the
+ * first three by the operation-layer and member extractions, the fourth
+ * once the shared capability tail can import the real predicate directly
+ * instead of receiving it as a closure; none survives past that point.
  */
 export type SqlEngineProfile<TTx> = Readonly<{
   // ---- head: data and dialect closures with no dependency on the backend ----
@@ -253,6 +264,16 @@ export type SqlEngineProfile<TTx> = Readonly<{
   vector: VectorStrategy | undefined;
   /** The dialect's declared capabilities, before its capability tail runs. */
   declaredCapabilities: BackendCapabilities;
+  /**
+   * Whether this profile can rebuild a durable contribution marker outright,
+   * given whether the connection supports interactive transactions — the
+   * one input `finalizeEngineCapabilities` (`./capabilities`) cannot derive
+   * itself. See that module's doc comment for why this is a closure the
+   * profile supplies rather than a shared import: the real predicate lives
+   * in `contribution-materializations.ts`, which imports `drizzle-orm` at
+   * module scope, and this profile's own head data must not.
+   */
+  contributionRebuildSupported: (interactiveTransactions: boolean) => boolean;
   /** Bind-parameter and batch-sizing limits the operation-backend layer partitions its writes against. */
   limits: Readonly<{
     maxBindParameters: number;
@@ -289,7 +310,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
   // ---- temporary: fields a later extraction removes (see the type doc comment) ----
   operations: InternalOperationBackend;
   contributionMaterializer: ContributionMaterializer;
-  finalizeCapabilities: (declared: BackendCapabilities) => BackendCapabilities;
   inlineMembers: (
     ctx: EngineAssemblyContext<TTx>,
   ) => Partial<AdapterBackend<TTx>>;

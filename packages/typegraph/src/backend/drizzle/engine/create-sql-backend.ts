@@ -20,6 +20,7 @@ import {
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
 import { type AdapterBackend, supportsRootAtomicBatch } from "../../types";
+import { finalizeEngineCapabilities } from "./capabilities";
 import { createSchemaVersionMembers } from "./members/schema-version-members";
 import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 
@@ -44,9 +45,10 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
 ): AdapterBackend<TTx> {
-  const capabilities = profile.finalizeCapabilities(
-    profile.declaredCapabilities,
-  );
+  const capabilities = finalizeEngineCapabilities(profile.declaredCapabilities, {
+    execution: profile.execution,
+    contributionRebuildSupported: profile.contributionRebuildSupported,
+  });
 
   if (capabilities.pessimisticLocks === undefined) {
     throw new ConfigurationError(
