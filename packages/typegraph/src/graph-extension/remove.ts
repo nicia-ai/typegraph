@@ -147,12 +147,37 @@ export function planRemovals<G extends GraphDef>(
     const newFrom = edgeDocument.from.filter(
       (kind) => !removedNodeKindsSet.has(kind),
     );
-    const newTo = edgeDocument.to.filter(
-      (kind) => !removedNodeKindsSet.has(kind),
-    );
-    if (newFrom.length === 0 || newTo.length === 0) {
-      cascadeEdges.add(edgeName);
-      continue;
+    const edgeTo = edgeDocument.to;
+    let newTo: readonly string[] | Record<string, readonly string[]>;
+    if (Array.isArray(edgeTo)) {
+      newTo = edgeTo.filter((kind) => !removedNodeKindsSet.has(kind));
+      if (newFrom.length === 0 || newTo.length === 0) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+    } else {
+      if (newFrom.length === 0) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+      const updatedMap: Record<string, readonly string[]> = {};
+      let hasEmptyTarget = false;
+      const targetMap = edgeTo as Readonly<Record<string, readonly string[]>>;
+      for (const sourceKind of newFrom) {
+        const targets = (targetMap[sourceKind] ?? []).filter(
+          (kind) => !removedNodeKindsSet.has(kind),
+        );
+        if (targets.length === 0) {
+          hasEmptyTarget = true;
+          break;
+        }
+        updatedMap[sourceKind] = targets;
+      }
+      if (hasEmptyTarget) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+      newTo = updatedMap;
     }
     updatedEdges[edgeName] = {
       ...edgeDocument,

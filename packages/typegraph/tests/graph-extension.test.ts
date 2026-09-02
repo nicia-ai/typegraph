@@ -614,9 +614,11 @@ describe("edge compilation", () => {
     expect(edge.from.map((endpoint) => endpointKind(endpoint))).toEqual([
       "Paper",
     ]);
-    expect(edge.to.map((endpoint) => endpointKind(endpoint))).toEqual([
-      "Author",
-    ]);
+    expect(
+      Array.isArray(edge.to) ?
+        edge.to.map((endpoint) => endpointKind(endpoint))
+      : undefined,
+    ).toEqual(["Author"]);
   });
 
   it("preserves unresolved endpoints as raw strings for host-graph merge", () => {

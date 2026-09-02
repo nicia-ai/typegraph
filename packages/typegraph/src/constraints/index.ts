@@ -17,6 +17,7 @@ const UNIQUE_KEY_SEPARATOR = "\u001E";
 
 /** Marker for undefined/null field values in unique keys. */
 const UNIQUE_KEY_NULL_MARKER = "\u001F"; // ASCII Unit Separator
+import { getEdgeEndpointPairs, isEdgeTargetMap } from "../core/edge-endpoints";
 import {
   type Cardinality,
   type Collation,
@@ -30,6 +31,7 @@ import {
   ConfigurationError,
   DisjointError,
   EndpointError,
+  EndpointPairError,
   UniquenessError,
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
@@ -519,7 +521,7 @@ export function validateEdgeEndpoints(
   toKind: string,
   registration: EdgeRegistration,
   registry: KindRegistry,
-): EndpointError | undefined {
+): EndpointError | EndpointPairError | undefined {
   // Check from kinds
   const validFromKinds = registration.from.map((node) => node.kind);
   if (!registry.isAssignableToAny(fromKind, validFromKinds)) {
@@ -531,7 +533,31 @@ export function validateEdgeEndpoints(
     });
   }
 
-  // Check to kinds
+  // If to is a map: validate conditional source-dependent targets
+  if (isEdgeTargetMap(registration.to)) {
+    const allowedTargetKinds = new Set<string>();
+    for (const fromNode of registration.from) {
+      if (registry.isAssignableTo(fromKind, fromNode.kind)) {
+        const targets = registration.to[fromNode.kind] ?? [];
+        for (const target of targets) {
+          allowedTargetKinds.add(target.kind);
+        }
+      }
+    }
+
+    if (!registry.isAssignableToAny(toKind, [...allowedTargetKinds])) {
+      return new EndpointPairError({
+        edgeKind,
+        fromKind,
+        toKind,
+        allowedPairs: getEdgeEndpointPairs(registration.from, registration.to),
+      });
+    }
+
+    return undefined;
+  }
+
+  // Check to kinds for Cartesian array
   const validToKinds = registration.to.map((node) => node.kind);
   if (!registry.isAssignableToAny(toKind, validToKinds)) {
     return new EndpointError({

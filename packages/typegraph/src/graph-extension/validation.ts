@@ -599,7 +599,20 @@ function validateEdgeDocument(
   );
 
   const from = validateEndpointList(raw["from"], `${path}/from`, issues);
-  const to = validateEndpointList(raw["to"], `${path}/to`, issues);
+  let to:
+    readonly string[] | Readonly<Record<string, readonly string[]>> | undefined;
+  if (Array.isArray(raw["to"])) {
+    to = validateEndpointList(raw["to"], `${path}/to`, issues);
+  } else if (isPlainObject(raw["to"])) {
+    to = validateTargetMapping(raw["to"], from, `${path}/to`, issues);
+  } else {
+    issues.push({
+      path: `${path}/to`,
+      message:
+        "Edge 'to' must be an array of node-kind names or an object mapping source kinds to target kinds.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+  }
   if (from === undefined || to === undefined) return undefined;
 
   const propertiesRaw = raw["properties"];
@@ -659,6 +672,61 @@ function validateEndpointList(
     names.push(value);
   }
   return names;
+}
+
+function validateTargetMapping(
+  raw: unknown,
+  from: readonly string[] | undefined,
+  path: string,
+  issues: GraphExtensionIssue[],
+): Readonly<Record<string, readonly string[]>> | undefined {
+  if (!isPlainObject(raw)) {
+    issues.push({
+      path,
+      message:
+        "Edge 'to' mapping must be an object mapping source-kind names to target-kind name arrays.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+    return undefined;
+  }
+  if (from === undefined || from.length === 0) {
+    issues.push({
+      path,
+      message:
+        "Edge declares source-dependent targets in 'to', but 'from' is missing or empty.",
+      code: "INVALID_DOCUMENT_SHAPE",
+    });
+    return undefined;
+  }
+  const fromSet = new Set(from);
+  const keys = Object.keys(raw);
+  for (const sourceKind of fromSet) {
+    if (!Object.hasOwn(raw, sourceKind)) {
+      issues.push({
+        path: `${path}/${sourceKind}`,
+        message: `Edge is missing target mapping for declared source kind "${sourceKind}".`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      return undefined;
+    }
+  }
+  for (const key of keys) {
+    if (!fromSet.has(key)) {
+      issues.push({
+        path: `${path}/${key}`,
+        message: `Edge target mapping key "${key}" is not in declared 'from' kinds.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      return undefined;
+    }
+  }
+  const result: Record<string, readonly string[]> = {};
+  for (const [key, val] of Object.entries(raw)) {
+    const targets = validateEndpointList(val, `${path}/${key}`, issues);
+    if (targets === undefined) return undefined;
+    result[key] = targets;
+  }
+  return result;
 }
 
 // ============================================================

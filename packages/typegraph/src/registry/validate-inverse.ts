@@ -34,25 +34,83 @@ export function validateInverseEndpointCompatibility(
       right.from,
       registry,
     );
-    if (relation.from === relation.to) continue;
-    assertInverseSideCompatible(
-      relation.to,
-      "from",
-      right.from,
-      relation.from,
-      "to",
-      left.to,
-      registry,
+    if (relation.from !== relation.to) {
+      assertInverseSideCompatible(
+        relation.to,
+        "from",
+        right.from,
+        relation.from,
+        "to",
+        left.to,
+        registry,
+      );
+      assertInverseSideCompatible(
+        relation.to,
+        "to",
+        right.to,
+        relation.from,
+        "from",
+        left.from,
+        registry,
+      );
+    }
+
+    if (left.pairs !== undefined && right.pairs !== undefined) {
+      assertInversePairsCompatible(
+        relation.from,
+        left.pairs,
+        relation.to,
+        right.pairs,
+        registry,
+      );
+      if (relation.from !== relation.to) {
+        assertInversePairsCompatible(
+          relation.to,
+          right.pairs,
+          relation.from,
+          left.pairs,
+          registry,
+        );
+      }
+    }
+  }
+}
+
+function assertInversePairsCompatible(
+  sourceEdge: string,
+  sourcePairs: readonly Readonly<{ from: string; to: string }>[],
+  inverseEdge: string,
+  inversePairs: readonly Readonly<{ from: string; to: string }>[],
+  registry: KindRegistry,
+): void {
+  for (const sourcePair of sourcePairs) {
+    const reversed = { from: sourcePair.to, to: sourcePair.from };
+    const compatible = inversePairs.some(
+      (inversePair) =>
+        registry.isAssignableTo(reversed.from, inversePair.from) &&
+        registry.isAssignableTo(reversed.to, inversePair.to),
     );
-    assertInverseSideCompatible(
-      relation.to,
-      "to",
-      right.to,
-      relation.from,
-      "from",
-      left.from,
-      registry,
-    );
+    if (!compatible) {
+      const allowedStr = inversePairs
+        .map((p) => `(${p.from} -> ${p.to})`)
+        .join(", ");
+      throw new ConfigurationError(
+        `inverseOf("${sourceEdge}", "${inverseEdge}") is endpoint-incompatible: ` +
+          `endpoint pair (${sourcePair.from} -> ${sourcePair.to}) on "${sourceEdge}" ` +
+          `reversed to (${reversed.from} -> ${reversed.to}) cannot be assigned to any allowed pair of "${inverseEdge}".`,
+        {
+          metaEdge: META_EDGE_INVERSE_OF,
+          sourceEdge,
+          inverseEdge,
+          sourcePair,
+          reversedPair: reversed,
+          allowedPairs: inversePairs,
+        },
+        {
+          suggestion: `Ensure every reversed pair of "${sourceEdge}" matches an allowed pair of "${inverseEdge}" (allowed: [${allowedStr}]), or remove the inverseOf relation.`,
+        },
+      );
+    }
   }
 }
 

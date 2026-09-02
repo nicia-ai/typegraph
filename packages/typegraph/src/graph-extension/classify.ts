@@ -220,9 +220,15 @@ function classifyEdgeEndpoints(
   // endpoint-kind) row probe today; v1 stays conservative by treating
   // endpoint-kind removal as allowed-on-empty for the whole edge kind.
   const fromExisting = new Set(existing.from);
-  const toExisting = new Set(existing.to);
+  const toExisting = new Set(
+    Array.isArray(existing.to) ?
+      existing.to
+    : Object.values(existing.to).flat(),
+  );
   const fromNext = new Set(next.from);
-  const toNext = new Set(next.to);
+  const toNext = new Set(
+    Array.isArray(next.to) ? next.to : Object.values(next.to).flat(),
+  );
 
   for (const removed of [...fromExisting].filter(
     (entry) => !fromNext.has(entry),

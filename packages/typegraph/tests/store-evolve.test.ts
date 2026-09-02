@@ -452,7 +452,11 @@ describe("Store.evolve — round-trip parity matrix", () => {
 
     const edgeType = evolved.registry.getEdgeType("appliesTo");
     expect(edgeType?.from?.map((node) => node.kind)).toEqual(["Tag"]);
-    expect(edgeType?.to?.map((node) => node.kind)).toEqual(["Person"]);
+    expect(
+      Array.isArray(edgeType?.to) ?
+        edgeType.to.map((node) => node.kind)
+      : undefined,
+    ).toEqual(["Person"]);
 
     // Compile-time `Person` is reachable through the merged registry
     // unchanged, and the runtime `Tag` shows up alongside it.

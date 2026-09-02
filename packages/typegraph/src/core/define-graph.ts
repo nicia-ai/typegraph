@@ -13,6 +13,11 @@ import { assertClaimAxisSafe } from "../store/claims/axis";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
+  isEdgeTargetMap,
+  normalizeTargetMap,
+  validateTargetMapEntries,
+} from "./edge-endpoints";
+import {
   assertGraphAnnotations,
   cloneAndFreezeGraphAnnotations,
 } from "./json-value";
@@ -20,6 +25,7 @@ import {
   type AnyEdgeType,
   type DeleteBehavior,
   type EdgeRegistration,
+  type EdgeTargets,
   type EdgeTypeWithEndpoints,
   type GraphAnnotations,
   type GraphDefaults,
@@ -66,7 +72,13 @@ type NormalizedEdges<
       TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N
       : TNodes[keyof TNodes]["type"],
       TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N
-      : TNodes[keyof TNodes]["type"]
+      : TEdges[K]["to"] extends (
+        Record<string, readonly (infer N extends NodeType)[]>
+      ) ?
+        N
+      : TNodes[keyof TNodes]["type"],
+      TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"]
+      : readonly TNodes[keyof TNodes]["type"][]
     >
   : never;
 };
@@ -102,21 +114,46 @@ function validateConstraintNarrowing(
     }
   }
 
-  const builtInToNames = new Set(edgeType.to.map((node) => node.kind));
-  for (const toNode of registration.to) {
-    if (!builtInToNames.has(toNode.kind)) {
-      throw new ConfigurationError(
-        `Edge "${name}" registration has 'to' kind "${toNode.kind}" ` +
-          `not in edge's built-in range: [${[...builtInToNames].join(", ")}]`,
-        {
-          edgeName: name,
-          invalidTo: toNode.kind,
-          allowedTo: [...builtInToNames],
-        },
-        {
-          suggestion: `Edge registration can only narrow, not widen, the edge type's built-in constraints.`,
-        },
-      );
+  if (isEdgeTargetMap(registration.to)) {
+    validateTargetMapEntries(name, registration.from, registration.to);
+  }
+
+  const builtInIsMap = isEdgeTargetMap(edgeType.to);
+  const registrationIsMap = isEdgeTargetMap(registration.to);
+
+  for (const fromNode of registration.from) {
+    const allowedTargets =
+      builtInIsMap ?
+        new Set((edgeType.to[fromNode.kind] ?? []).map((node) => node.kind))
+      : new Set(edgeType.to.map((node) => node.kind));
+
+    const declaredTargets =
+      registrationIsMap ?
+        (registration.to[fromNode.kind] ?? [])
+      : registration.to;
+
+    for (const targetNode of declaredTargets) {
+      if (!allowedTargets.has(targetNode.kind)) {
+        const message =
+          !builtInIsMap ?
+            `Edge "${name}" registration has 'to' kind "${targetNode.kind}" not in edge's built-in range: [${[...allowedTargets].join(", ")}]`
+          : !registrationIsMap ?
+            `Edge "${name}" registration has 'to' kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in source-dependent targets: [${[...allowedTargets].join(", ")}]. An array-valued registration must not erase built-in endpoint correlation.`
+          : `Edge "${name}" registration has target kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in mapping: [${[...allowedTargets].join(", ")}]`;
+
+        throw new ConfigurationError(
+          message,
+          {
+            edgeName: name,
+            sourceKind: fromNode.kind,
+            invalidTo: targetNode.kind,
+            allowedTo: [...allowedTargets],
+          },
+          {
+            suggestion: `Edge registration can only narrow, not widen, the edge type's built-in constraints.`,
+          },
+        );
+      }
     }
   }
 }
@@ -138,7 +175,13 @@ function normalizeEdgeEntry(
     return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
 
-  // Already EdgeRegistration — validate narrowing if edge has built-in constraints
+  // Already EdgeRegistration — validate target mapping if map form
+  if (isEdgeTargetMap(entry.to)) {
+    validateTargetMapEntries(name, entry.from, entry.to);
+    entry = { ...entry, to: normalizeTargetMap(entry.to) };
+  }
+
+  // Validate narrowing if edge has built-in constraints
   if (isEdgeTypeWithEndpoints(entry.type)) {
     validateConstraintNarrowing(name, entry.type, entry);
   }

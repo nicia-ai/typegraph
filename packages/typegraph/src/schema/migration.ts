@@ -582,6 +582,21 @@ function endpointKindsEqual(
   return canonicalEqual(before?.toSorted(), after?.toSorted());
 }
 
+function targetKindsBySourceEqual(
+  before: Readonly<Record<string, readonly string[]>> | undefined,
+  after: Readonly<Record<string, readonly string[]>> | undefined,
+): boolean {
+  if (before === undefined && after === undefined) return true;
+  if (before === undefined || after === undefined) return false;
+  const beforeKeys = Object.keys(before).toSorted();
+  const afterKeys = Object.keys(after).toSorted();
+  if (!canonicalEqual(beforeKeys, afterKeys)) return false;
+  for (const key of beforeKeys) {
+    if (!endpointKindsEqual(before[key], after[key])) return false;
+  }
+  return true;
+}
+
 /**
  * Computes changes to a single node definition.
  */
@@ -920,6 +935,23 @@ function diffEdgeDef(
       kind: name,
       severity: "warning",
       details: `toKinds changed for "${name}"`,
+      before,
+      after,
+    });
+  }
+
+  // Check targetKindsBySource
+  if (
+    !targetKindsBySourceEqual(
+      before.targetKindsBySource,
+      after.targetKindsBySource,
+    )
+  ) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "warning",
+      details: `targetKindsBySource changed for "${name}"`,
       before,
       after,
     });

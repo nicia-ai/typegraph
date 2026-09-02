@@ -165,7 +165,27 @@ function buildEdgeEndpointKinds(
 ): ReadonlyMap<string, EdgeEndpointKinds> {
   const result = new Map<string, EdgeEndpointKinds>();
   for (const [kind, def] of Object.entries(edges)) {
-    result.set(kind, { from: def.fromKinds, to: def.toKinds });
+    const pairs: { from: string; to: string }[] = [];
+    if (def.targetKindsBySource !== undefined) {
+      for (const [sourceKind, targetKinds] of Object.entries(
+        def.targetKindsBySource,
+      )) {
+        for (const targetKind of targetKinds) {
+          pairs.push({ from: sourceKind, to: targetKind });
+        }
+      }
+    } else {
+      for (const fromKind of def.fromKinds) {
+        for (const toKind of def.toKinds) {
+          pairs.push({ from: fromKind, to: toKind });
+        }
+      }
+    }
+    result.set(kind, {
+      from: def.fromKinds,
+      to: def.toKinds,
+      pairs,
+    });
   }
   return result;
 }

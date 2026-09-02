@@ -4,6 +4,7 @@ import { mergeGraphAnnotations } from "../core/json-value";
 import {
   type AnyEdgeType,
   type EdgeRegistration,
+  type EdgeTargetMap,
   type EdgeType,
   type KindEntity,
   type NodeRegistration,
@@ -181,11 +182,22 @@ export function mergeGraphExtension<G extends GraphDef>(
       edgeKind: edge.kindName,
       side: "from",
     });
-    const to = resolveEndpoints(edge.to, nodeKinds, {
-      graphId: graph.id,
-      edgeKind: edge.kindName,
-      side: "to",
-    });
+    const edgeTo = edge.to;
+    const to =
+      Array.isArray(edgeTo) ?
+        resolveEndpoints(edgeTo, nodeKinds, {
+          graphId: graph.id,
+          edgeKind: edge.kindName,
+          side: "to",
+        })
+      : resolveTargetMap(
+          edgeTo as Readonly<Record<string, readonly (NodeType | string)[]>>,
+          nodeKinds,
+          {
+            graphId: graph.id,
+            edgeKind: edge.kindName,
+          },
+        );
     // Build the EdgeType once with the cross-graph-resolved endpoints.
     // The compiler intentionally doesn't construct an EdgeType — its
     // view is graph-extension-only, so endpoint resolution against
@@ -198,7 +210,7 @@ export function mergeGraphExtension<G extends GraphDef>(
         annotations: edge.annotations,
         from,
         to,
-      }),
+      }) as any,
     ) as unknown as EdgeType;
     mergedEdges[edge.kindName] = { type, from, to };
   }
@@ -577,6 +589,22 @@ function resolveEndpoints(
     }
     return resolved;
   });
+}
+
+function resolveTargetMap(
+  map: Readonly<Record<string, readonly (NodeType | string)[]>>,
+  nodeKinds: ReadonlyMap<string, NodeType>,
+  context: Readonly<{ graphId: string; edgeKind: string }>,
+): EdgeTargetMap {
+  const result: Record<string, readonly NodeType[]> = {};
+  for (const [sourceKind, targets] of Object.entries(map)) {
+    result[sourceKind] = resolveEndpoints(targets, nodeKinds, {
+      graphId: context.graphId,
+      edgeKind: context.edgeKind,
+      side: "to",
+    });
+  }
+  return result;
 }
 
 function resolveOntologyEndpoints(

@@ -2,6 +2,7 @@
  * TraversalBuilder - Intermediate builder for edge traversals.
  */
 import { type GraphDef } from "../../core/define-graph";
+import { isEdgeTargetMap } from "../../core/edge-endpoints";
 import {
   resolveRuntimeKindInput,
   type RuntimeNodeKind,
@@ -662,8 +663,16 @@ export class TraversalBuilder<
       const edgeType = this.#config.registry.getEdgeType(edgeName);
       const endpoints = edgeType?.[side];
       if (!endpoints) return;
-      for (const endpoint of endpoints) {
-        expectedKinds.add(endpoint.kind);
+      if (side === "to" && isEdgeTargetMap(endpoints)) {
+        for (const targets of Object.values(endpoints)) {
+          for (const endpoint of targets) {
+            expectedKinds.add(endpoint.kind);
+          }
+        }
+      } else if (Array.isArray(endpoints)) {
+        for (const endpoint of endpoints) {
+          expectedKinds.add(endpoint.kind);
+        }
       }
     };
     const forwardSide = this.#direction === "out" ? "to" : "from";

@@ -90,7 +90,9 @@ type CompiledEdge = Readonly<{
   description?: string;
   annotations?: KindAnnotations;
   from: readonly (NodeType | string)[];
-  to: readonly (NodeType | string)[];
+  to:
+    | readonly (NodeType | string)[]
+    | Readonly<Record<string, readonly (NodeType | string)[]>>;
 }>;
 
 // ============================================================
@@ -227,9 +229,26 @@ function compileEdge(
   const from = document.from.map(
     (name): NodeType | string => nodeTypeByName.get(name) ?? name,
   );
-  const to = document.to.map(
-    (name): NodeType | string => nodeTypeByName.get(name) ?? name,
-  );
+  let to:
+    | readonly (NodeType | string)[]
+    | Readonly<Record<string, readonly (NodeType | string)[]>>;
+  if (Array.isArray(document.to)) {
+    to = Object.freeze(
+      document.to.map(
+        (name): NodeType | string => nodeTypeByName.get(name) ?? name,
+      ),
+    );
+  } else {
+    const map: Record<string, readonly (NodeType | string)[]> = {};
+    for (const [sourceKind, targets] of Object.entries(document.to)) {
+      map[sourceKind] = Object.freeze(
+        (targets as readonly string[]).map(
+          (name: string): NodeType | string => nodeTypeByName.get(name) ?? name,
+        ),
+      );
+    }
+    to = Object.freeze(map);
+  }
 
   return Object.freeze(
     compactUndefined<CompiledEdge>({
@@ -238,7 +257,7 @@ function compileEdge(
       description: document.description,
       annotations: document.annotations,
       from: Object.freeze(from),
-      to: Object.freeze(to),
+      to,
     }),
   );
 }

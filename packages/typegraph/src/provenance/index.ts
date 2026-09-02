@@ -11,6 +11,7 @@ import {
   type TransactionBackend,
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
+import { projectTargetKinds } from "../core/edge-endpoints";
 import type { NodeRegistration } from "../core/types";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
 import {
@@ -415,7 +416,7 @@ function assertEdgeEndpoints<G extends GraphDef>(
   const registration = graph.edges[edgeKind];
   if (registration === undefined) return;
   const fromKinds = new Set(registration.from.map((node) => node.kind));
-  const toKinds = new Set(registration.to.map((node) => node.kind));
+  const toKinds = new Set(projectTargetKinds(registration.to));
   for (const kind of expected.fromKinds) {
     if (fromKinds.has(kind)) continue;
     throw new ConfigurationError(

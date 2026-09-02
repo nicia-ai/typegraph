@@ -7,6 +7,10 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import {
+  getEdgeEndpointPairs,
+  projectTargetKinds,
+} from "../core/edge-endpoints";
+import {
   type AnyEdgeType,
   type EdgeRegistration,
   type NodeRegistration,
@@ -81,7 +85,8 @@ function buildEdgeEndpointKinds(
   for (const [kind, registration] of Object.entries(edges)) {
     result.set(kind, {
       from: registration.from.map((node) => node.kind),
-      to: registration.to.map((node) => node.kind),
+      to: projectTargetKinds(registration.to),
+      pairs: getEdgeEndpointPairs(registration.from, registration.to),
     });
   }
   return result;

@@ -1,4 +1,4 @@
-import { type EdgeType, type NodeType } from "../core/types";
+import { type AnyEdgeType, type EdgeType, type NodeType } from "../core/types";
 
 // ============================================================
 // Brand Key
@@ -73,8 +73,8 @@ export type MetaEdge<K extends string = string> = Readonly<{
  */
 export type OntologyRelation = Readonly<{
   metaEdge: MetaEdge;
-  from: NodeType | EdgeType | string; // string for external IRIs
-  to: NodeType | EdgeType | string;
+  from: NodeType | AnyEdgeType | string; // string for external IRIs
+  to: NodeType | AnyEdgeType | string;
 }>;
 
 // ============================================================
@@ -96,7 +96,9 @@ export function isMetaEdge(value: unknown): value is MetaEdge {
 /**
  * Gets the type name from a NodeType, EdgeType, or IRI string.
  */
-export function getTypeName(typeOrIri: NodeType | EdgeType | string): string {
+export function getTypeName(
+  typeOrIri: NodeType | AnyEdgeType | string,
+): string {
   if (typeof typeOrIri === "string") {
     return typeOrIri;
   }
