@@ -65,6 +65,7 @@ import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strate
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
+import { requireDefined } from "../src/utils/presence";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -665,5 +666,43 @@ describe("engine-profile parity: SQLite serialization probe", () => {
     await Promise.all([first, second]);
 
     expect(order).toEqual(["start-1", "finish-1", "start-2", "finish-2"]);
+  });
+});
+
+// ============================================================
+// Part 5: index-materializations additive-column migration
+// ============================================================
+
+describe("engine-profile parity: index-materialization column migration", () => {
+  it("PGlite: ensureIndexMaterializationsTable still issues the additive-column ALTERs", async () => {
+    // #445's fix lives behind `EngineProvisioning.ensureIndexMaterializationColumns`,
+    // an optional hook only the PostgreSQL profile supplies. A moved
+    // `ensureIndexMaterializationsTable` that forgets to call it would still
+    // pass every other test in this file (the CREATE already declares the
+    // build-claim columns on a fresh install, so nothing downstream would
+    // notice a missing migration) — this asserts the ALTERs are issued
+    // directly, so the hook cannot be silently dropped in a later step.
+    const client = await PGlite.create();
+    cleanups.push(() => client.close());
+
+    const collected: CapturedStatement[] = [];
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    instrumentPostgresCapture(client, collected);
+
+    await requireDefined(backend.ensureIndexMaterializationsTable)();
+
+    const statementTexts = collected.map((statement) => statement.sql);
+    expect(
+      statementTexts.some((text) =>
+        text.includes('ADD COLUMN IF NOT EXISTS "building_since" timestamptz'),
+      ),
+    ).toBe(true);
+    expect(
+      statementTexts.some((text) =>
+        text.includes('ADD COLUMN IF NOT EXISTS "claim_token" text'),
+      ),
+    ).toBe(true);
   });
 });

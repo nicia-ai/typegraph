@@ -85,13 +85,11 @@ import {
   type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
-  type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
-  type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type SchemaKindEmptinessProbe,
   type SchemaVersionRow,
@@ -168,11 +166,11 @@ import {
 } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createIdentityMembers } from "./engine/members/identity-members";
+import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
-  mapMaterializationRow,
   SQLITE_INDEX_MAT_TIMESTAMPS,
 } from "./index-materializations";
 import {
@@ -1709,6 +1707,43 @@ export function buildSqliteEngineProfile(
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy),
   };
 
+  const indexMaterializationMembers = createIndexMaterializationMembers({
+    indexMaterializationsTableDdl: generateSqliteCreateTableSQL(
+      tables.indexMaterializations,
+    ),
+    ensureTable: runDdlStatement,
+    tableName: getTableName(tables.indexMaterializations),
+    timestamps: SQLITE_INDEX_MAT_TIMESTAMPS,
+    rowAccess: {
+      async selectByIndexName(indexName) {
+        const t = tables.indexMaterializations;
+        return db.select().from(t).where(eq(t.indexName, indexName));
+      },
+      async selectByIndexNames(indexNames) {
+        const t = tables.indexMaterializations;
+        return db
+          .select()
+          .from(t)
+          .where(inArray(t.indexName, [...indexNames]));
+      },
+      async upsert(params) {
+        const t = tables.indexMaterializations;
+        await db
+          .insert(t)
+          .values(
+            buildMaterializationInsertValues(
+              params,
+              SQLITE_INDEX_MAT_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: t.indexName,
+            set: buildMaterializationOnConflictSet(params.materializedAt),
+          });
+      },
+    },
+  });
+
   function lateMembers(
     ctx: EngineAssemblyContext<AnySqliteDatabase>,
   ): EngineLateMembers<AnySqliteDatabase> {
@@ -2076,56 +2111,7 @@ export function buildSqliteEngineProfile(
         await db.run(sql.raw(ddl));
       },
 
-      async ensureIndexMaterializationsTable(): Promise<void> {
-        await db.run(
-          sql.raw(generateSqliteCreateTableSQL(tables.indexMaterializations)),
-        );
-      },
-
-      async getIndexMaterialization(
-        indexName: string,
-      ): Promise<IndexMaterializationRow | undefined> {
-        const t = tables.indexMaterializations;
-        const rows = await db
-          .select()
-          .from(t)
-          .where(eq(t.indexName, indexName));
-        const row = rows[0];
-        if (row === undefined) return undefined;
-        return mapMaterializationRow(row, SQLITE_INDEX_MAT_TIMESTAMPS.decode);
-      },
-
-      async getIndexMaterializations(
-        statusKeys: readonly string[],
-      ): Promise<readonly IndexMaterializationRow[]> {
-        if (statusKeys.length === 0) return [];
-        const t = tables.indexMaterializations;
-        const rows = await db
-          .select()
-          .from(t)
-          .where(inArray(t.indexName, [...statusKeys]));
-        return rows.map((row) =>
-          mapMaterializationRow(row, SQLITE_INDEX_MAT_TIMESTAMPS.decode),
-        );
-      },
-
-      async recordIndexMaterialization(
-        params: RecordIndexMaterializationParams,
-      ): Promise<void> {
-        const t = tables.indexMaterializations;
-        await db
-          .insert(t)
-          .values(
-            buildMaterializationInsertValues(
-              params,
-              SQLITE_INDEX_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: t.indexName,
-            set: buildMaterializationOnConflictSet(params.materializedAt),
-          });
-      },
+      ...indexMaterializationMembers,
 
       ...contributionMembers,
 
