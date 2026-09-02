@@ -7,6 +7,7 @@ import {
   defineNode,
   isEdgeTypeWithEndpoints,
 } from "../src";
+import { EDGE_TYPE_BRAND } from "../src/core/types";
 import { createStore } from "../src/store";
 import { createTestBackend } from "./test-utils";
 
@@ -85,6 +86,27 @@ describe("defineEdge() with domain/range", () => {
       expect(isEdgeTypeWithEndpoints(undefined)).toBe(false);
       expect(isEdgeTypeWithEndpoints({})).toBe(false);
       expect(isEdgeTypeWithEndpoints("worksAt")).toBe(false);
+    });
+
+    it("returns false for branded edge with null or non-object 'to'", () => {
+      const brandedWithNull = {
+        [EDGE_TYPE_BRAND]: true,
+        kind: "test",
+        schema: z.object({}),
+        from: [Person],
+        // eslint-disable-next-line unicorn/no-null -- testing null handling
+        to: null,
+      };
+      expect(isEdgeTypeWithEndpoints(brandedWithNull)).toBe(false);
+
+      const brandedWithString = {
+        [EDGE_TYPE_BRAND]: true,
+        kind: "test",
+        schema: z.object({}),
+        from: [Person],
+        to: "Node",
+      };
+      expect(isEdgeTypeWithEndpoints(brandedWithString)).toBe(false);
     });
   });
 
