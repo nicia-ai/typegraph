@@ -146,7 +146,6 @@ import {
   type TrustedImportSession,
   type VectorSearchParams,
 } from "../types";
-import { createBaseSchemaLifecycle } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -172,6 +171,7 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import { createBaseSchemaMembers } from "./engine/members/base-schema-members";
 import {
   createContributionMembers,
   createContributionOperationMembers,
@@ -1334,12 +1334,6 @@ function buildPostgresEngineProfile(
     }
   }
 
-  async function ensureBaseSchemaVersionTable(): Promise<void> {
-    await executeConcurrentCreateDdl(
-      generatePgCreateTableSQL(tables.baseSchemaVersions),
-    );
-  }
-
   async function writeBaseSchemaVersion(
     version: number,
   ): Promise<number | undefined> {
@@ -1358,6 +1352,39 @@ function buildPostgresEngineProfile(
     // this two-statement observation safe when a concurrent adopter is ahead.
     return readBaseSchemaVersion();
   }
+
+  /**
+   * PostgreSQL's additive-column migration for an index-materializations
+   * table created before the build-claim columns existed; fresh installs
+   * already have them from `ensureIndexMaterializationsTable`'s CREATE
+   * TABLE. These take the concurrent-DDL retry for the same reason the
+   * CREATE does, and it is the same loop two replicas run at boot: ADD
+   * COLUMN IF NOT EXISTS cannot see another session's uncommitted
+   * pg_attribute row, so the loser waits and is then handed 42701 (or
+   * `tuple concurrently updated`) instead of the notice — a spuriously
+   * failed boot (#445).
+   */
+  async function ensureIndexMaterializationColumns(
+    tableName: string,
+  ): Promise<void> {
+    await executeConcurrentCreateDdl(
+      `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
+    );
+    await executeConcurrentCreateDdl(
+      `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
+    );
+  }
+
+  const provisioning: EngineProvisioning = {
+    async executeDdl(ddl: string): Promise<void> {
+      await db.execute(sql.raw(ddl));
+    },
+    ensureTable: executeConcurrentCreateDdl,
+    generateDdl: () => generatePostgresDDL(tables, fulltextStrategy),
+    ensureIndexMaterializationColumns,
+    ensureExtension: ensureDatabaseExtension,
+    ensureTrigramExtension: () => ensureDatabaseExtension("pg_trgm"),
+  };
 
   const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
     createGraphTemplateMembers({
@@ -1407,23 +1434,17 @@ function buildPostgresEngineProfile(
       // so this profile supplies no `copyContributionMarkers` dep.
     });
 
-  const baseSchemaLifecycle = createBaseSchemaLifecycle({
+  const baseSchemaMembers = createBaseSchemaMembers({
+    baseSchemaVersionsTableDdl: generatePgCreateTableSQL(
+      tables.baseSchemaVersions,
+    ),
+    ensureTable: provisioning.ensureTable,
+    executeDdl: provisioning.executeDdl,
+    generateDdl: provisioning.generateDdl,
     readVersion: readBaseSchemaVersion,
-    ensureVersionTable: ensureBaseSchemaVersionTable,
     writeVersion: writeBaseSchemaVersion,
-    steps: [
-      {
-        version: 1,
-        async adopt(): Promise<void> {
-          await ensureGraphTemplatesTable();
-          await ensureEdgeMatchIdentityStorage();
-        },
-        bootstrap: {
-          phase: "before",
-          adopt: ensureEdgeMatchIdentityStorage,
-        },
-      },
-    ],
+    ensureGraphTemplatesTable,
+    ensureEdgeMatchIdentityStorage,
   });
 
   const limits = {
@@ -1438,39 +1459,6 @@ function buildPostgresEngineProfile(
     toNodeRow,
     toSchemaVersionRow,
     toUniqueRow,
-  };
-
-  /**
-   * PostgreSQL's additive-column migration for an index-materializations
-   * table created before the build-claim columns existed; fresh installs
-   * already have them from `ensureIndexMaterializationsTable`'s CREATE
-   * TABLE. These take the concurrent-DDL retry for the same reason the
-   * CREATE does, and it is the same loop two replicas run at boot: ADD
-   * COLUMN IF NOT EXISTS cannot see another session's uncommitted
-   * pg_attribute row, so the loser waits and is then handed 42701 (or
-   * `tuple concurrently updated`) instead of the notice — a spuriously
-   * failed boot (#445).
-   */
-  async function ensureIndexMaterializationColumns(
-    tableName: string,
-  ): Promise<void> {
-    await executeConcurrentCreateDdl(
-      `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;`,
-    );
-    await executeConcurrentCreateDdl(
-      `ALTER TABLE "${tableName}" ADD COLUMN IF NOT EXISTS "claim_token" text;`,
-    );
-  }
-
-  const provisioning: EngineProvisioning = {
-    async executeDdl(ddl: string): Promise<void> {
-      await db.execute(sql.raw(ddl));
-    },
-    ensureTable: executeConcurrentCreateDdl,
-    generateDdl: () => generatePostgresDDL(tables, fulltextStrategy),
-    ensureIndexMaterializationColumns,
-    ensureExtension: ensureDatabaseExtension,
-    ensureTrigramExtension: () => ensureDatabaseExtension("pg_trgm"),
   };
 
   const indexMaterializationMembers = createIndexMaterializationMembers({
@@ -1837,28 +1825,7 @@ function buildPostgresEngineProfile(
     _ctx: EngineAssemblyContext<AnyPgTransaction>,
   ): Partial<AdapterBackend<AnyPgTransaction>> {
     return {
-      adoptBaseSchema: baseSchemaLifecycle.adopt,
-      assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
-
-      async bootstrapTables(): Promise<void> {
-        const startingBaseSchemaVersion =
-          await baseSchemaLifecycle.prepareBootstrap();
-        await baseSchemaLifecycle.adoptBeforeBootstrap(
-          startingBaseSchemaVersion,
-        );
-        const statements = generatePostgresDDL(tables, fulltextStrategy);
-        for (const statement of statements) {
-          // Cold boot is the single most contended DDL path there is — two
-          // replicas starting at once run exactly this loop against the same
-          // database — so it takes the concurrent-create retry rather than
-          // trusting IF NOT EXISTS, for the reason `executeConcurrentCreateDdl`
-          // documents.
-          await executeConcurrentCreateDdl(statement);
-        }
-        await baseSchemaLifecycle.adoptAfterBootstrap(
-          startingBaseSchemaVersion,
-        );
-      },
+      ...baseSchemaMembers,
 
       ...graphTemplateMembers,
 
@@ -1874,10 +1841,6 @@ function buildPostgresEngineProfile(
         contributionMaterializer.assertInitialized,
         contributionMaterializer.refuseUnavailableFulltext,
       ),
-
-      async executeDdl(ddl: string): Promise<void> {
-        await db.execute(sql.raw(ddl));
-      },
 
       ...indexMaterializationMembers,
 

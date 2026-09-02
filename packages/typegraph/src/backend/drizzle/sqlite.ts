@@ -127,7 +127,6 @@ import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
-import { createBaseSchemaLifecycle } from "./base-schema";
 import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
@@ -150,6 +149,7 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import { createBaseSchemaMembers } from "./engine/members/base-schema-members";
 import {
   createContributionMembers,
   createContributionOperationMembers,
@@ -1632,12 +1632,6 @@ export function buildSqliteEngineProfile(
     }
   }
 
-  async function ensureBaseSchemaVersionTable(): Promise<void> {
-    await db.run(
-      sql.raw(generateSqliteCreateTableSQL(tables.baseSchemaVersions)),
-    );
-  }
-
   async function writeBaseSchemaVersion(
     version: number,
   ): Promise<number | undefined> {
@@ -1656,6 +1650,14 @@ export function buildSqliteEngineProfile(
     // this two-statement observation safe when a concurrent adopter is ahead.
     return readBaseSchemaVersion();
   }
+
+  const provisioning: EngineProvisioning = {
+    executeDdl: async (ddl) => {
+      await db.run(sql.raw(ddl));
+    },
+    ensureTable: runDdlStatement,
+    generateDdl: () => generateSqliteDDL(tables, fulltextStrategy),
+  };
 
   const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
     createGraphTemplateMembers({
@@ -1712,23 +1714,17 @@ export function buildSqliteEngineProfile(
       },
     });
 
-  const baseSchemaLifecycle = createBaseSchemaLifecycle({
+  const baseSchemaMembers = createBaseSchemaMembers({
+    baseSchemaVersionsTableDdl: generateSqliteCreateTableSQL(
+      tables.baseSchemaVersions,
+    ),
+    ensureTable: provisioning.ensureTable,
+    executeDdl: provisioning.executeDdl,
+    generateDdl: provisioning.generateDdl,
     readVersion: readBaseSchemaVersion,
-    ensureVersionTable: ensureBaseSchemaVersionTable,
     writeVersion: writeBaseSchemaVersion,
-    steps: [
-      {
-        version: 1,
-        async adopt(): Promise<void> {
-          await ensureGraphTemplatesTable();
-          await ensureEdgeMatchIdentityStorage();
-        },
-        bootstrap: {
-          phase: "before",
-          adopt: ensureEdgeMatchIdentityStorage,
-        },
-      },
-    ],
+    ensureGraphTemplatesTable,
+    ensureEdgeMatchIdentityStorage,
   });
 
   const limits = {
@@ -1743,14 +1739,6 @@ export function buildSqliteEngineProfile(
     toNodeRow,
     toSchemaVersionRow,
     toUniqueRow,
-  };
-
-  const provisioning: EngineProvisioning = {
-    executeDdl: async (ddl) => {
-      await db.run(sql.raw(ddl));
-    },
-    ensureTable: runDdlStatement,
-    generateDdl: () => generateSqliteDDL(tables, fulltextStrategy),
   };
 
   const indexMaterializationMembers = createIndexMaterializationMembers({
@@ -2094,23 +2082,7 @@ export function buildSqliteEngineProfile(
     _ctx: EngineAssemblyContext<AnySqliteDatabase>,
   ): Partial<AdapterBackend<AnySqliteDatabase>> {
     return {
-      adoptBaseSchema: baseSchemaLifecycle.adopt,
-      assertBaseSchemaCurrent: baseSchemaLifecycle.assertCurrent,
-
-      async bootstrapTables(): Promise<void> {
-        const startingBaseSchemaVersion =
-          await baseSchemaLifecycle.prepareBootstrap();
-        await baseSchemaLifecycle.adoptBeforeBootstrap(
-          startingBaseSchemaVersion,
-        );
-        const statements = generateSqliteDDL(tables, fulltextStrategy);
-        for (const statement of statements) {
-          await db.run(sql.raw(statement));
-        }
-        await baseSchemaLifecycle.adoptAfterBootstrap(
-          startingBaseSchemaVersion,
-        );
-      },
+      ...baseSchemaMembers,
 
       ...graphTemplateMembers,
 
@@ -2126,10 +2098,6 @@ export function buildSqliteEngineProfile(
         contributionMaterializer.assertInitialized,
         contributionMaterializer.refuseUnavailableFulltext,
       ),
-
-      async executeDdl(ddl: string): Promise<void> {
-        await db.run(sql.raw(ddl));
-      },
 
       ...indexMaterializationMembers,
 
