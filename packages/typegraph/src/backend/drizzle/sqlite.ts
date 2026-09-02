@@ -85,15 +85,12 @@ import {
   type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
-  type IdentityTableNames,
   type IndexMaterializationRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
-  type RecordedRelationDdl,
-  type RecordedTableNames,
   type RecordIndexMaterializationParams,
   type RecordKindRemovalParams,
   type SchemaKindEmptinessProbe,
@@ -170,6 +167,7 @@ import {
   createContributionOperationMembers,
 } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
+import { createIdentityMembers } from "./engine/members/identity-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
   buildMaterializationInsertValues,
@@ -292,31 +290,6 @@ const UNIQUE_INSERT_PARAM_COUNT = 6;
  * 1000 is SQLite's own documented suggestion for large databases.
  */
 export const SQLITE_ANALYZE_ROW_LIMIT = 1000;
-
-/**
- * Barrel keys (contribution logical names) of the four relations that hold
- * Operational Identity state: current assertions, recorded-time assertions,
- * the derived closure, and the derived separation relation.
- * `ensureIdentityTables()` scopes its idempotent CREATE TABLE / CREATE INDEX
- * to exactly these when identity is first enabled on an existing database.
- */
-const IDENTITY_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
-  "identityAssertions",
-  "recordedIdentityAssertions",
-  "identityClosure",
-  "identitySeparation",
-]);
-
-/**
- * Barrel keys (contribution logical names) of the three relations that hold
- * timestamp-only recorded-time state. `recordedTableDdl()` scopes its
- * projected DDL to exactly these.
- */
-const RECORDED_TABLE_LOGICAL_NAMES: ReadonlySet<string> = new Set([
-  "recordedNodes",
-  "recordedEdges",
-  "recordedClock",
-]);
 
 /**
  * Batch chunk sizes for the SQLite operation backend, derived from the
@@ -1303,49 +1276,6 @@ export function buildSqliteEngineProfile(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
-  /**
-   * The contribution descriptors for exactly the identity relations, under
-   * caller-supplied physical names. Pure — nothing is executed here — and the
-   * single owner of "which DDL belongs to the identity relations", shared by
-   * `ensureIdentityTables` (which runs it) and `identityTableDdl` (which hands
-   * it to a transaction).
-   */
-  function identityContributionsFor(
-    identityTableNames: IdentityTableNames,
-  ): ReturnType<typeof sqliteContributions> {
-    const identityTables = buildSqliteTables({
-      identityAssertions: identityTableNames.identityAssertions,
-      recordedIdentityAssertions: identityTableNames.recordedIdentityAssertions,
-      identityClosure: identityTableNames.identityClosure,
-      identitySeparation: identityTableNames.identitySeparation,
-    });
-    return sqliteContributions(identityTables, fulltextStrategy).filter(
-      (contribution) =>
-        IDENTITY_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
-    );
-  }
-
-  /**
-   * The contribution descriptors for exactly the three recorded relations,
-   * under caller-supplied physical names. Pure — nothing is executed here —
-   * and the single owner of "which DDL belongs to the recorded relations",
-   * handed to `recordedTableDdl`'s caller (the offline legacy-schema
-   * migration) rather than executed directly.
-   */
-  function recordedContributionsFor(
-    recordedTableNames: RecordedTableNames,
-  ): ReturnType<typeof sqliteContributions> {
-    const recordedTables = buildSqliteTables({
-      recordedNodes: recordedTableNames.recordedNodes,
-      recordedEdges: recordedTableNames.recordedEdges,
-      recordedClock: recordedTableNames.recordedClock,
-    });
-    return sqliteContributions(recordedTables, fulltextStrategy).filter(
-      (contribution) =>
-        RECORDED_TABLE_LOGICAL_NAMES.has(contribution.logicalName),
-    );
-  }
-
   // Runs one idempotent DDL statement — `CREATE ... IF NOT EXISTS`. SQLite
   // has no concurrent-create race to retry, so this needs no retry logic,
   // unlike PostgreSQL's `executeConcurrentCreateDdl`; it backs both the
@@ -1429,6 +1359,16 @@ export function buildSqliteEngineProfile(
         ) => runSchemaWriteTransaction((target) => fn(target)),
       }
     : {}),
+  });
+
+  const identityMembers = createIdentityMembers({
+    revisionOriginsTableDdl: generateSqliteCreateTableSQL(
+      tables.revisionOrigins,
+    ),
+    ensureTable: runDdlStatement,
+    contributionTableExists,
+    contributionsForTableNames: (overrides) =>
+      sqliteContributions(buildSqliteTables(overrides), fulltextStrategy),
   });
 
   const operations = createSqliteOperationBackend({
@@ -2119,75 +2059,7 @@ export function buildSqliteEngineProfile(
         return { status: "ready", row: toSchemaVersionRow(row) } as const;
       },
 
-      async ensureRevisionOriginsTable(): Promise<void> {
-        await db.run(
-          sql.raw(generateSqliteCreateTableSQL(tables.revisionOrigins)),
-        );
-      },
-
-      async ensureIdentityTables(
-        identityTableNames,
-        options,
-      ): Promise<readonly string[]> {
-        // First enablement of Operational Identity on an existing populated
-        // database: createStore / createSqliteBackend run no DDL, so the four
-        // identity relations the enablement preflight reads/writes may not
-        // exist yet. Ensure them (and their indexes and CHECK constraints)
-        // idempotently — CREATE TABLE / CREATE INDEX IF NOT EXISTS — reusing the same contribution
-        // DDL bootstrapTables emits, scoped to the identity relations.
-        const identityContributions =
-          identityContributionsFor(identityTableNames);
-        const missing = [] as string[];
-        for (const contribution of identityContributions) {
-          if (!(await contributionTableExists(contribution.tableName))) {
-            missing.push(contribution.logicalName);
-          }
-        }
-        // Preserve missing ledger storage on already-enabled graphs so a retry
-        // cannot silently accept tables created empty by an earlier failed open.
-        // First enablement opts into provisioning; when every table exists,
-        // idempotent DDL still repairs missing secondary indexes.
-        if (missing.length === 0 || options.provisionMissing) {
-          for (const contribution of identityContributions) {
-            for (const ddl of contribution.createDdl) {
-              await db.run(sql.raw(ddl));
-            }
-          }
-        }
-        return missing;
-      },
-
-      identityTableDdl(identityTableNames): readonly string[] {
-        return identityContributionsFor(identityTableNames).flatMap(
-          (contribution) => [...contribution.createDdl],
-        );
-      },
-
-      recordedTableDdl(
-        recordedTableNames,
-      ): Readonly<Record<keyof RecordedTableNames, RecordedRelationDdl>> {
-        const contributions = recordedContributionsFor(recordedTableNames);
-        function ddlFor(
-          logicalName: keyof RecordedTableNames,
-        ): RecordedRelationDdl {
-          const contribution = requireDefined(
-            contributions.find((entry) => entry.logicalName === logicalName),
-            `recordedTableDdl: no contribution for ${logicalName}.`,
-          );
-          return {
-            createTable: requireDefined(
-              contribution.createDdl[0],
-              `recordedTableDdl: empty DDL for ${logicalName}.`,
-            ),
-            indexes: contribution.createDdl.slice(1),
-          };
-        }
-        return {
-          recordedClock: ddlFor("recordedClock"),
-          recordedEdges: ddlFor("recordedEdges"),
-          recordedNodes: ddlFor("recordedNodes"),
-        };
-      },
+      ...identityMembers,
 
       // Every fulltext-touching method asserts the durable marker instead
       // of lazily emitting DDL. Steady state performs zero ensure; an
