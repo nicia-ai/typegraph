@@ -11,12 +11,32 @@
  * evidence callbacks below — byte-identical between dialects once
  * `contributionMaterializer` is threaded through as a dependency instead of
  * a closed-over binding.
+ *
+ * `createEngineOperationBackend` is the literal-assembly half: the object
+ * every dialect's `create{Postgres,Sqlite}OperationBackend` returns, minus
+ * the two members that genuinely cannot be shared (see its own doc
+ * comment).
  */
+import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
+import type { SqlDialect } from "../../../query/dialect/types";
+import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
+import type { SqlFragment } from "../../../query/sql-fragment";
 import type { AtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
+import type { BackendCapabilities, TransactionBackend } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
-import type { createCommonOperationBackend } from "../operation-backend-core";
+import type {
+  CompiledSqlQuery,
+  ExecutableSql,
+} from "../execution/types";
+import {
+  type createCommonOperationBackend,
+  type InternalOperationBackend,
+} from "../operation-backend-core";
 import { resolveAtomicNodeProjectionRequirements } from "../operations/node-projections";
-import type { OperationFusionHooks } from "./profile";
+import type { ContributionOperationMembers } from "./members/contribution-members";
+import type { FulltextMembers } from "./members/fulltext-members";
+import type { VectorMembers } from "./members/vector-members";
+import type { EngineTableNames, OperationFusionHooks } from "./profile";
 
 /**
  * The options `createCommonOperationBackend` accepts, recovered through its
@@ -153,5 +173,100 @@ export function buildCommonOperationOptions(
     ...(fusion.tableExistenceCache === undefined ?
       {}
     : { tableExistenceCache: fusion.tableExistenceCache }),
+  };
+}
+
+/**
+ * What `createEngineOperationBackend` assembles into one
+ * {@link InternalOperationBackend} literal, identically for either dialect.
+ *
+ * Every dependency here is already a finished member group or a single
+ * dialect-owned closure — this function does no SQL of its own. The two
+ * members it deliberately does NOT assemble are `execute` and `executeRaw`:
+ * PostgreSQL's `execute` inspects the statement for an ANN index-scan brand
+ * and re-wraps a filtered vector search in transaction-local GUC overrides,
+ * and SQLite's `execute` / `executeRaw` both serialize through its queue —
+ * neither is a body a shared assembly may pick between, so both stay
+ * dialect-owned and arrive here pre-built as `rawSqlMembers`. `hybridSearch`
+ * is the other member left out for the same reason (see each dialect
+ * factory's own comment on `vectorEmbeddingMethods`): its dialect factory
+ * spreads it onto this function's result afterward.
+ */
+export type CreateEngineOperationBackendDeps = Readonly<{
+  /** `createCommonOperationBackend(buildCommonOperationOptions(...))` — still built by the dialect factory, which owns the execution primitives that options object closes over. */
+  commonOperationMembers: ReturnType<typeof createCommonOperationBackend>;
+  /** The transaction-scoped contribution stamp; see `./members/contribution-members`. */
+  contributionOperationMembers: ContributionOperationMembers;
+  /** The embedding CRUD/search/index group; see `./members/vector-members`. */
+  vectorMembers: VectorMembers;
+  /** The fulltext CRUD/search group; see `./members/fulltext-members`. */
+  fulltextMembers: FulltextMembers;
+  /** The dialect's raw-SQL escape hatch, built and bound to its own serialization story by the caller. */
+  rawSqlMembers: Pick<TransactionBackend, "execute" | "executeRaw">;
+  /**
+   * The write-fence-holding half of a managed write: PostgreSQL's asserts
+   * and holds a `FOR SHARE` row lock (or refuses, per the resolved fence
+   * plan); SQLite's re-reads the active version under the writer slot its
+   * own transaction framing already holds. Genuinely different bodies, so
+   * threaded through as a finished closure rather than assembled here.
+   */
+  lockSchemaVersionForWrite: NonNullable<
+    InternalOperationBackend["lockSchemaVersionForWrite"]
+  >;
+  /** The dialect's execution adapter's own `compile` — byte-identical wiring on both sides. */
+  compile: (query: ExecutableSql) => CompiledSqlQuery;
+  capabilities: BackendCapabilities;
+  dialect: SqlDialect;
+  tableNames: EngineTableNames;
+  fulltextStrategy: FulltextStrategy;
+  /** Absent when this connection has no vector extension loaded. */
+  vectorStrategy?: VectorStrategy;
+}>;
+
+/**
+ * Assembles one dialect's {@link InternalOperationBackend} from its already-
+ * built member groups and closures — the shared half of what
+ * `create{Postgres,Sqlite}OperationBackend` return. See
+ * {@link CreateEngineOperationBackendDeps} for what stays out and why.
+ */
+export function createEngineOperationBackend(
+  deps: CreateEngineOperationBackendDeps,
+): InternalOperationBackend {
+  const {
+    commonOperationMembers,
+    contributionOperationMembers,
+    vectorMembers,
+    fulltextMembers,
+    rawSqlMembers,
+    lockSchemaVersionForWrite,
+    compile,
+    capabilities,
+    dialect,
+    tableNames,
+    fulltextStrategy,
+    vectorStrategy,
+  } = deps;
+
+  return {
+    ...commonOperationMembers,
+    ...rawSqlMembers,
+    ...vectorMembers,
+    ...contributionOperationMembers,
+
+    capabilities,
+    dialect,
+    tableNames,
+    fulltextStrategy,
+    ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
+
+    lockSchemaVersionForWrite,
+
+    ...fulltextMembers,
+
+    compileSql(
+      query: SqlFragment,
+    ): Readonly<{ sql: string; params: readonly unknown[] }> {
+      return compile(query);
+    },
   };
 }

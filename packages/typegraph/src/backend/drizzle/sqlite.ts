@@ -49,11 +49,7 @@ import {
   vectorSearchFrontierTuning,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import {
-  isSqlFragment,
-  sql as portableSql,
-  type SqlFragment,
-} from "../../query/sql-fragment";
+import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
 import { type CompiledRowsSql } from "../../query/sql-intent";
 import { requireDefined } from "../../utils/presence";
 import {
@@ -158,7 +154,10 @@ import { createIdentityMembers } from "./engine/members/identity-members";
 import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
 import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
-import { buildCommonOperationOptions } from "./engine/operation-layer";
+import {
+  buildCommonOperationOptions,
+  createEngineOperationBackend,
+} from "./engine/operation-layer";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -896,66 +895,62 @@ function createSqliteOperationBackend(
         : {}),
       };
 
-  const operationBackend: InternalOperationBackend = {
-    ...commonOperationMembers,
-    ...executeRawMethod,
-    ...vectorMembers,
-    ...vectorEmbeddingMethods,
-    ...contributionOperationMembers,
+  /**
+   * The write-fence half of a managed write on SQLite: an ordinary read
+   * suffices, unlike Postgres' `FOR SHARE` fence, because SQLite serializes
+   * writers through BEGIN IMMEDIATE — no schema commit can be mid-flight
+   * while this transaction holds the writer slot, and a SQLite read has no
+   * post-wait row recheck that could drop the active row from its own
+   * snapshot. An absent row here therefore always means the graph
+   * genuinely has no active schema.
+   */
+  async function lockSchemaVersionForWrite(
+    params: LockSchemaVersionForWriteParams,
+  ): Promise<void> {
+    if (!transactionScoped) {
+      throw new ConfigurationError(
+        "The schema write fence requires an explicit SQLite transaction.",
+        {
+          code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
+          graphId: params.graphId,
+        },
+      );
+    }
+    const active = await commonOperationMembers.getActiveSchema(
+      params.graphId,
+    );
+    assertActiveSchemaVersion(
+      params.graphId,
+      params.expectedVersion,
+      active?.version ?? 0,
+    );
+  }
 
+  const operations = createEngineOperationBackend({
+    commonOperationMembers,
+    contributionOperationMembers,
+    vectorMembers,
+    fulltextMembers,
+    rawSqlMembers: {
+      ...executeRawMethod,
+      async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
+        return runWithSerializedQueue(serializedQueue, async () =>
+          executionAdapter.execute<T>(query),
+        );
+      },
+    },
+    lockSchemaVersionForWrite,
+    compile: executionAdapter.compile,
     capabilities,
     dialect: "sqlite",
     tableNames,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
+  });
 
-    async lockSchemaVersionForWrite(
-      params: LockSchemaVersionForWriteParams,
-    ): Promise<void> {
-      if (!transactionScoped) {
-        throw new ConfigurationError(
-          "The schema write fence requires an explicit SQLite transaction.",
-          {
-            code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
-            graphId: params.graphId,
-          },
-        );
-      }
-      // An ordinary read suffices, unlike Postgres' `FOR SHARE` fence: SQLite
-      // serializes writers through BEGIN IMMEDIATE, so no schema commit can be
-      // mid-flight while this transaction holds the writer slot, and a SQLite
-      // read has no post-wait row recheck that could drop the active row from
-      // its own snapshot. An absent row here therefore always means the graph
-      // genuinely has no active schema.
-      const active = await commonOperationMembers.getActiveSchema(
-        params.graphId,
-      );
-      assertActiveSchemaVersion(
-        params.graphId,
-        params.expectedVersion,
-        active?.version ?? 0,
-      );
-    },
-
-    // === Fulltext Operations ===
-    ...fulltextMembers,
-
-    // === Query Execution ===
-
-    async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
-      return runWithSerializedQueue(serializedQueue, async () =>
-        executionAdapter.execute<T>(query),
-      );
-    },
-
-    compileSql(
-      query: SqlFragment,
-    ): Readonly<{ sql: string; params: readonly unknown[] }> {
-      return executionAdapter.compile(query);
-    },
-  };
-
-  return operationBackend;
+  // `hybridSearch` is not part of the shared assembly — see
+  // `vectorEmbeddingMethods`'s own comment above.
+  return { ...operations, ...vectorEmbeddingMethods };
 }
 
 /**

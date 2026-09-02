@@ -64,11 +64,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import {
-  isSqlFragment,
-  sql as portableSql,
-  type SqlFragment,
-} from "../../query/sql-fragment";
+import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
 import {
   annIndexScanTypes,
   type CompiledRowsSql,
@@ -180,7 +176,10 @@ import { createIdentityMembers } from "./engine/members/identity-members";
 import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
 import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
-import { buildCommonOperationOptions } from "./engine/operation-layer";
+import {
+  buildCommonOperationOptions,
+  createEngineOperationBackend,
+} from "./engine/operation-layer";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -2725,109 +2724,108 @@ function createPostgresOperationBackend(
     return active?.version;
   }
 
-  const operationBackend: InternalOperationBackend = {
-    ...commonOperationMembers,
-    ...executeRawMethod,
-    ...vectorMembers,
-    ...vectorEmbeddingMethods,
-    ...contributionOperationMembers,
+  /**
+   * The write-fence half of a managed write on PostgreSQL: locks the active
+   * schema row (or refuses, per the resolved fence plan) and asserts the
+   * version it holds. An empty locked read is not evidence of an absent
+   * active version — see `lockActiveSchemaVersion`'s own comment — so the
+   * settled-version read below is a fresh, unlocked read naming the version
+   * honestly rather than a retry of the locked one.
+   */
+  async function lockSchemaVersionForWrite(
+    params: LockSchemaVersionForWriteParams,
+  ): Promise<void> {
+    if (!transactionScoped) {
+      throw new ConfigurationError(
+        "The schema write fence requires an explicit PostgreSQL transaction.",
+        {
+          code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
+          graphId: params.graphId,
+        },
+      );
+    }
+    const locked = await lockActiveSchemaVersion(params.graphId);
+    if (locked !== undefined) {
+      assertActiveSchemaVersion(params.graphId, params.expectedVersion, locked);
+      return;
+    }
 
+    // An empty locked read is not evidence of an absent active version. At
+    // `read committed`, a `FOR SHARE` read that blocks behind an in-flight
+    // schema commit rechecks only the row versions its own statement snapshot
+    // saw: once that commit lands, the row this statement waited on no longer
+    // satisfies `is_active = TRUE`, and the winner's freshly inserted active
+    // row was never in the snapshot to be substituted in.
+    //
+    // Either way this transaction holds no share lock on an active row, so the
+    // write is rejected. That is why the version reported below needs no lock
+    // of its own — and why the fence must NOT retry the locked read: the
+    // dropped row keeps the share lock the first read took on it, so a second
+    // `FOR SHARE` waits on the row the *next* schema commit has already taken
+    // `FOR UPDATE` while that commit waits on the dropped row in its
+    // deactivate-all. PostgreSQL breaks the cycle by killing one of the two,
+    // and the schema commit — waiting first, so timing out first — is the one
+    // that dies.
+    //
+    // A non-locking read names the version honestly: a schema commit's
+    // deactivate-then-insert pair is atomic, so no committed state has zero
+    // active rows for a graph that has one, and an ordinary read never waits
+    // and so has no recheck to be fooled by. It yields `0` only for a graph
+    // that genuinely has no active version. A rollback landing back on
+    // `expectedVersion` reports `expected === actual`; the rejection stands,
+    // because nothing is holding the fence.
+    const settled = await commonOperationMembers.getActiveSchema(
+      params.graphId,
+    );
+    throw new StaleVersionError({
+      graphId: params.graphId,
+      expected: params.expectedVersion,
+      actual: settled?.version ?? 0,
+    });
+  }
+
+  const operations = createEngineOperationBackend({
+    commonOperationMembers,
+    contributionOperationMembers,
+    vectorMembers,
+    fulltextMembers,
+    rawSqlMembers: {
+      ...executeRawMethod,
+      async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
+        // Statements the compiler branded as containing an ANN index scan
+        // (inline `approximate: true`) get the same pgvector GUC wrapping
+        // the search facade applies — most importantly
+        // `hnsw.iterative_scan = strict_order`, without which a filtered
+        // approximate query starves at the default ef_search frontier.
+        // On pgvector < 0.8 the override list is empty and this falls
+        // through to the plain fast path.
+        const annTypes =
+          isSqlFragment(query) ? annIndexScanTypes(query) : undefined;
+        if (annTypes !== undefined && vectorStrategy !== undefined) {
+          const overrides: SearchGucOverride[] = [];
+          for (const indexType of annTypes) {
+            if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
+            overrides.push(
+              ...(await vectorSearchGucOverrides({ indexType })),
+            );
+          }
+          return runVectorSearch<T>(overrides, query);
+        }
+        return executionAdapter.execute<T>(query);
+      },
+    },
+    lockSchemaVersionForWrite,
+    compile: executionAdapter.compile,
     capabilities,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
     dialect: "postgres",
     tableNames,
+  });
 
-    async lockSchemaVersionForWrite(
-      params: LockSchemaVersionForWriteParams,
-    ): Promise<void> {
-      if (!transactionScoped) {
-        throw new ConfigurationError(
-          "The schema write fence requires an explicit PostgreSQL transaction.",
-          {
-            code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
-            graphId: params.graphId,
-          },
-        );
-      }
-      const locked = await lockActiveSchemaVersion(params.graphId);
-      if (locked !== undefined) {
-        assertActiveSchemaVersion(
-          params.graphId,
-          params.expectedVersion,
-          locked,
-        );
-        return;
-      }
-
-      // An empty locked read is not evidence of an absent active version. At
-      // `read committed`, a `FOR SHARE` read that blocks behind an in-flight
-      // schema commit rechecks only the row versions its own statement snapshot
-      // saw: once that commit lands, the row this statement waited on no longer
-      // satisfies `is_active = TRUE`, and the winner's freshly inserted active
-      // row was never in the snapshot to be substituted in.
-      //
-      // Either way this transaction holds no share lock on an active row, so the
-      // write is rejected. That is why the version reported below needs no lock
-      // of its own — and why the fence must NOT retry the locked read: the
-      // dropped row keeps the share lock the first read took on it, so a second
-      // `FOR SHARE` waits on the row the *next* schema commit has already taken
-      // `FOR UPDATE` while that commit waits on the dropped row in its
-      // deactivate-all. PostgreSQL breaks the cycle by killing one of the two,
-      // and the schema commit — waiting first, so timing out first — is the one
-      // that dies.
-      //
-      // A non-locking read names the version honestly: a schema commit's
-      // deactivate-then-insert pair is atomic, so no committed state has zero
-      // active rows for a graph that has one, and an ordinary read never waits
-      // and so has no recheck to be fooled by. It yields `0` only for a graph
-      // that genuinely has no active version. A rollback landing back on
-      // `expectedVersion` reports `expected === actual`; the rejection stands,
-      // because nothing is holding the fence.
-      const settled = await commonOperationMembers.getActiveSchema(
-        params.graphId,
-      );
-      throw new StaleVersionError({
-        graphId: params.graphId,
-        expected: params.expectedVersion,
-        actual: settled?.version ?? 0,
-      });
-    },
-
-    // === Fulltext Operations ===
-    ...fulltextMembers,
-
-    // === Query Execution ===
-
-    async execute<T>(query: CompiledRowsSql): Promise<readonly T[]> {
-      // Statements the compiler branded as containing an ANN index scan
-      // (inline `approximate: true`) get the same pgvector GUC wrapping
-      // the search facade applies — most importantly
-      // `hnsw.iterative_scan = strict_order`, without which a filtered
-      // approximate query starves at the default ef_search frontier.
-      // On pgvector < 0.8 the override list is empty and this falls
-      // through to the plain fast path.
-      const annTypes =
-        isSqlFragment(query) ? annIndexScanTypes(query) : undefined;
-      if (annTypes !== undefined && vectorStrategy !== undefined) {
-        const overrides: SearchGucOverride[] = [];
-        for (const indexType of annTypes) {
-          if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
-          overrides.push(...(await vectorSearchGucOverrides({ indexType })));
-        }
-        return runVectorSearch<T>(overrides, query);
-      }
-      return executionAdapter.execute<T>(query);
-    },
-
-    compileSql(
-      query: SqlFragment,
-    ): Readonly<{ sql: string; params: readonly unknown[] }> {
-      return executionAdapter.compile(query);
-    },
-  };
-
-  return operationBackend;
+  // `hybridSearch` is not part of the shared assembly — see
+  // `vectorEmbeddingMethods`'s own comment above.
+  return { ...operations, ...vectorEmbeddingMethods };
 }
 
 /**
