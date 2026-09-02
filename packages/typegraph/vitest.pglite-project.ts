@@ -20,6 +20,7 @@ export const PGLITE_TEST_FILES = [
   "tests/durable-edge-match-identity.test.ts",
   "tests/edge-convergence-command.test.ts",
   "tests/edge-match-identity-ddl.test.ts",
+  "tests/engine-profile-parity.test.ts",
   "tests/fused-edge-endpoints.test.ts",
   "tests/guarded-edge-cardinality-claim.test.ts",
   "tests/import-edge-match-identity-atomicity.test.ts",
