@@ -294,7 +294,10 @@ const runtimeEdgeDocumentZod = z
     description: z.string().optional(),
     annotations: annotationsZod.optional(),
     from: z.array(z.string()),
-    to: z.array(z.string()),
+    to: z.union([
+      z.array(z.string()),
+      z.record(z.string(), z.array(z.string())),
+    ]),
     properties: z.record(z.string(), runtimePropertyZod).optional(),
   })
   .loose();

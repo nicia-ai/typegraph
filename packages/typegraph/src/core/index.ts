@@ -77,6 +77,7 @@ export {
 
 // Core types
 export {
+  type AnyEdgeRegistration,
   type AnyEdgeType,
   asEdgeId,
   asNodeId,

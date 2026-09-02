@@ -389,7 +389,8 @@ export type EdgeRegistration<
   E extends AnyEdgeType = AnyEdgeType,
   FromTypes extends NodeType = NodeType,
   ToTypes extends NodeType = NodeType,
-  ToDef extends EdgeTargets = readonly ToTypes[] | EdgeTargetMap,
+  ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets
+  : readonly ToTypes[],
 > = Readonly<{
   type: E;
   from: readonly FromTypes[];
@@ -398,6 +399,16 @@ export type EdgeRegistration<
   endpointExistence?: EndpointExistence;
   matchIdentity?: EdgeMatchIdentity<E>;
 }>;
+
+/**
+ * Base edge registration type for use in constraints - accepts any endpoint configuration.
+ */
+export type AnyEdgeRegistration = EdgeRegistration<
+  AnyEdgeType,
+  NodeType,
+  NodeType,
+  EdgeTargets
+>;
 
 // ============================================================
 // Graph Defaults

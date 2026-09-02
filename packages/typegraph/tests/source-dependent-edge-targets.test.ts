@@ -8,6 +8,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  type EdgeRegistration,
   EndpointError,
   EndpointPairError,
   implies,
@@ -21,6 +22,7 @@ import { importGraph } from "../src/interchange/import";
 import { buildKindRegistry } from "../src/registry";
 import { computeSchemaHash, serializeSchema } from "../src/schema";
 import { computeSchemaDiff } from "../src/schema/migration";
+import { type NodeRef, type TypedEdgeCollection } from "../src/store/types";
 import { createTestBackend } from "./test-utils";
 
 describe("Source-dependent edge targets (Issue #603)", () => {
@@ -822,6 +824,241 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       await expect(edges.dependsOn.create(t1, c1)).rejects.toThrow(
         EndpointPairError,
       );
+    });
+  });
+
+  describe("Review Findings Hardening", () => {
+    // Finding 1: Mapped runtime extensions can be reloaded
+    it("finding 1: mapped runtime extensions can be persisted and reloaded from schema", async () => {
+      const backend = createTestBackend();
+      const baseGraph = defineGraph({
+        id: "reload_ext_test",
+        nodes: { Task: { type: Task }, Course: { type: Course } },
+        edges: {},
+      });
+
+      const [store] = await createStoreWithSchema(baseGraph, backend);
+      await store.evolve(
+        defineGraphExtension({
+          edges: {
+            dependsOn: {
+              from: ["Task", "Course"],
+              to: {
+                Task: ["Task"],
+                Course: ["Course"],
+              },
+            },
+          },
+        }),
+      );
+
+      // Reopen store from the persisted schema in the database
+      const [reopened] = await createStoreWithSchema(baseGraph, backend);
+      const edgeType = reopened.registry.getEdgeType("dependsOn");
+      expect(edgeType).toBeDefined();
+      expect(isEdgeTargetMap(edgeType?.to)).toBe(true);
+    });
+
+    // Finding 2: Narrowing existing edges reports breaking change and requires empty
+    it("finding 2: narrowing Cartesian declaration to mapping is breaking and requires empty", () => {
+      const graphBefore = defineGraph({
+        id: "narrow_diff_test",
+        nodes: { Task: { type: Task }, Course: { type: Course } },
+        edges: {
+          dependsOn: {
+            type: defineEdge("dependsOn"),
+            from: [Task, Course],
+            to: [Task, Course],
+          },
+        },
+      });
+
+      const graphAfter = defineGraph({
+        id: "narrow_diff_test",
+        nodes: { Task: { type: Task }, Course: { type: Course } },
+        edges: {
+          dependsOn: {
+            type: defineEdge("dependsOn"),
+            from: [Task, Course],
+            to: {
+              Task: [Task],
+              Course: [Course],
+            },
+          },
+        },
+      });
+
+      const diff = computeSchemaDiff(
+        serializeSchema(graphBefore, 1),
+        serializeSchema(graphAfter, 2),
+      );
+      expect(diff.hasBreakingChanges).toBe(true);
+      expect(diff.isBackwardsCompatible).toBe(false);
+      const edgeChange = diff.edges.find((c) => c.kind === "dependsOn");
+      expect(edgeChange?.severity).toBe("breaking");
+      expect(edgeChange?.details).toContain("removed pairs");
+    });
+
+    // Finding 3: Removing one target prunes exhausted source entry, retaining surviving pairs
+    it("finding 3: removing one target prunes exhausted source entry and retains surviving relationship", async () => {
+      const backend = createTestBackend();
+      const baseGraph = defineGraph({
+        id: "remove_target_test",
+        nodes: {},
+        edges: {},
+      });
+
+      const [store] = await createStoreWithSchema(baseGraph, backend);
+      await store.evolve(
+        defineGraphExtension({
+          nodes: {
+            NodeA: { properties: { label: { type: "string" } } },
+            NodeB: { properties: { label: { type: "string" } } },
+            NodeX: { properties: { label: { type: "string" } } },
+            NodeY: { properties: { label: { type: "string" } } },
+          },
+          edges: {
+            rel: {
+              from: ["NodeA", "NodeB"],
+              to: {
+                NodeA: ["NodeX"],
+                NodeB: ["NodeY"],
+              },
+            },
+          },
+        }),
+      );
+
+      // Remove NodeX (only NodeA's target)
+      const after = await store.removeKinds(["NodeX"]);
+
+      // Verify NodeA is pruned from rel, but rel SURVIVES with NodeB -> NodeY!
+      const relEdge = after.registry.getEdgeType("rel");
+      expect(relEdge).toBeDefined();
+      expect(relEdge?.from?.map((n) => n.kind)).toEqual(["NodeB"]);
+      expect(relEdge?.to).toEqual({
+        NodeB: [expect.objectContaining({ kind: "NodeY" })],
+      });
+    });
+
+    // Finding 4: Existing typed registrations retain endpoint safety
+    it("finding 4: EdgeRegistration with 3 type arguments retains endpoint safety", () => {
+      const worksAt = defineEdge("worksAt", {
+        schema: z.object({ role: z.string() }),
+      });
+
+      type TestRegistration = EdgeRegistration<
+        typeof worksAt,
+        typeof Employee,
+        typeof Department
+      >;
+
+      type TestCollection = TypedEdgeCollection<TestRegistration>;
+
+      // findTo accepts Department
+      expectTypeOf<Parameters<TestCollection["findTo"]>[0]>().toEqualTypeOf<
+        NodeRef<typeof Department>
+      >();
+
+      // Valid create args
+      type CreateArgs = Parameters<TestCollection["create"]>;
+      expectTypeOf<CreateArgs[0]>().toEqualTypeOf<NodeRef<typeof Employee>>();
+      expectTypeOf<CreateArgs[1]>().toEqualTypeOf<NodeRef<typeof Department>>();
+    });
+
+    // Finding 5: Legal __proto__ source kind works safely
+    it("finding 5: legal __proto__ source kind normalizes and enforces safely", async () => {
+      const PROTO_KEY = "__proto__";
+      const ProtoNode = defineNode(PROTO_KEY, {
+        schema: z.object({ val: z.string() }),
+      });
+      const edge = defineEdge("protoEdge", {
+        from: [ProtoNode],
+        to: {
+          [PROTO_KEY]: [ProtoNode],
+        },
+      });
+
+      expect(isEdgeTargetMap(edge.to)).toBe(true);
+      expect(Object.hasOwn(edge.to as object, PROTO_KEY)).toBe(true);
+
+      const protoGraph = defineGraph({
+        id: "proto_graph",
+        nodes: {
+          [PROTO_KEY]: { type: ProtoNode },
+          Task: { type: Task },
+        },
+        edges: { protoEdge: edge },
+      });
+
+      const backend = createTestBackend();
+      const store = createStore(protoGraph, backend);
+
+      const nodeCollections = store.nodes as Record<string, any>;
+      const p1 = await nodeCollections[PROTO_KEY].create({ val: "p1" });
+      const p2 = await nodeCollections[PROTO_KEY].create({ val: "p2" });
+      const t1 = await store.nodes.Task.create({ title: "t1" });
+
+      const createdEdge = await store.edges.protoEdge.create(p1, p2);
+      expect(createdEdge.id).toBeDefined();
+
+      // Unrelated source or target rejected
+      await expect(
+        // @ts-expect-error invalid endpoint
+        store.edges.protoEdge.create(t1, p2),
+      ).rejects.toThrow(EndpointError);
+    });
+
+    // Finding 6: Compile-time mapped edges during unrelated kind removal
+    it("finding 6: compile-time mapped edges do not break unrelated runtime kind removal", async () => {
+      const backend = createTestBackend();
+      const hostGraph = defineGraph({
+        id: "unrelated_remove_test",
+        nodes: { Task: { type: Task }, Course: { type: Course } },
+        edges: {
+          dependsOn: {
+            type: defineEdge("dependsOn"),
+            from: [Task, Course],
+            to: {
+              Task: [Task],
+              Course: [Course],
+            },
+          },
+        },
+      });
+
+      const [store] = await createStoreWithSchema(hostGraph, backend);
+      await store.evolve(
+        defineGraphExtension({
+          nodes: {
+            RuntimeExtra: { properties: { label: { type: "string" } } },
+          },
+        }),
+      );
+
+      // Removing RuntimeExtra must not fail on hostGraph's dependsOn mapped edge
+      await expect(store.removeKinds(["RuntimeExtra"])).resolves.not.toThrow();
+    });
+
+    // Finding 7: Malformed graph-local mappings fail validation
+    it("finding 7: malformed graph-local mappings fail validation in defineGraph", () => {
+      const baseEdge = defineEdge("dependsOn");
+      expect(() =>
+        defineGraph({
+          id: "malformed_mapping_test",
+          nodes: { Task: { type: Task } },
+          edges: {
+            dependsOn: {
+              type: baseEdge,
+              from: [Task],
+              // @ts-expect-error empty target array
+              to: {
+                Task: [],
+              },
+            },
+          },
+        }),
+      ).toThrow(ConfigurationError);
     });
   });
 });

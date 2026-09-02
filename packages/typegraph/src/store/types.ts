@@ -1760,36 +1760,40 @@ type EdgeFromTypes<R extends EdgeRegistration> =
  * Extract the union of 'to' node types from an EdgeRegistration.
  */
 type EdgeToTypes<R extends EdgeRegistration> =
-  R["to"] extends readonly (infer N)[] ? N
-  : R["to"] extends Record<string, readonly (infer N)[]> ? N
+  R["to"] extends any ?
+    R["to"] extends readonly (infer N)[] ? N
+    : R["to"] extends Record<string, readonly (infer N)[]> ? N
+    : never
   : never;
 
 /**
  * Extract the allowed endpoint pairs from an EdgeRegistration.
  */
 type EdgeAllowedPairs<R extends EdgeRegistration> =
-  R["to"] extends readonly (infer ToNode extends NodeType)[] ?
-    {
-      from: R["from"] extends readonly (infer FromNode extends NodeType)[] ?
-        FromNode
-      : NodeType;
-      to: ToNode;
-    }
-  : R["to"] extends Record<string, readonly NodeType[]> ?
-    {
-      [K in keyof R["to"] & string]: {
-        from: Extract<
-          R["from"] extends readonly (infer FromNode extends NodeType)[] ?
-            FromNode
-          : NodeType,
-          { kind: K }
-        >;
-        to: R["to"][K] extends readonly (infer ToNode extends NodeType)[] ?
-          ToNode
+  R["to"] extends any ?
+    R["to"] extends readonly (infer ToNode extends NodeType)[] ?
+      {
+        from: R["from"] extends readonly (infer FromNode extends NodeType)[] ?
+          FromNode
         : NodeType;
-      };
-    }[keyof R["to"] & string]
-  : { from: NodeType; to: NodeType };
+        to: ToNode;
+      }
+    : R["to"] extends Record<string, readonly NodeType[]> ?
+      {
+        [K in keyof R["to"] & string]: {
+          from: Extract<
+            R["from"] extends readonly (infer FromNode extends NodeType)[] ?
+              FromNode
+            : NodeType,
+            { kind: K }
+          >;
+          to: R["to"][K] extends readonly (infer ToNode extends NodeType)[] ?
+            ToNode
+          : NodeType;
+        };
+      }[keyof R["to"] & string]
+    : { from: NodeType; to: NodeType }
+  : never;
 
 /**
  * Create a type-safe EdgeCollection from an EdgeRegistration.

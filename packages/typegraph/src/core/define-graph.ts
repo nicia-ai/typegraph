@@ -22,6 +22,7 @@ import {
   cloneAndFreezeGraphAnnotations,
 } from "./json-value";
 import {
+  type AnyEdgeRegistration,
   type AnyEdgeType,
   type DeleteBehavior,
   type EdgeRegistration,
@@ -114,7 +115,11 @@ function validateConstraintNarrowing(
     }
   }
 
-  if (isEdgeTargetMap(registration.to)) {
+  if (
+    typeof registration.to === "object" &&
+    registration.to !== null &&
+    !Array.isArray(registration.to)
+  ) {
     validateTargetMapEntries(name, registration.from, registration.to);
   }
 
@@ -165,7 +170,7 @@ function normalizeEdgeEntry(
   name: string,
   entry: EdgeEntry,
   allNodeTypes: readonly NodeType[],
-): EdgeRegistration {
+): AnyEdgeRegistration {
   if (isEdgeType(entry)) {
     if (isEdgeTypeWithEndpoints(entry)) {
       // EdgeType with from/to — convert to EdgeRegistration
@@ -176,7 +181,11 @@ function normalizeEdgeEntry(
   }
 
   // Already EdgeRegistration — validate target mapping if map form
-  if (isEdgeTargetMap(entry.to)) {
+  if (
+    typeof entry.to === "object" &&
+    entry.to !== null &&
+    !Array.isArray(entry.to)
+  ) {
     validateTargetMapEntries(name, entry.from, entry.to);
     entry = { ...entry, to: normalizeTargetMap(entry.to) };
   }
@@ -331,8 +340,8 @@ function isPortableMatchIdentityFieldSchema(fieldSchema: unknown): boolean {
 function normalizeEdges(
   edges: Record<string, EdgeEntry>,
   allNodeTypes: readonly NodeType[],
-): Record<string, EdgeRegistration> {
-  const result = createDataKeyedBag<EdgeRegistration>();
+): Record<string, AnyEdgeRegistration> {
+  const result = createDataKeyedBag<AnyEdgeRegistration>();
   for (const [name, entry] of Object.entries(edges)) {
     result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }

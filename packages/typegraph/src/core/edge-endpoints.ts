@@ -5,6 +5,7 @@
  * and source-dependent target declarations (map-valued `to`).
  */
 import { ConfigurationError } from "../errors";
+import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import {
   type EdgeTargetMap,
   type EdgeTargets,
@@ -110,7 +111,7 @@ export function formatEndpointPairs(pairs: readonly EndpointPair[]): string {
  * Normalizes a target map by deduplicating target nodes by kind.
  */
 export function normalizeTargetMap(to: EdgeTargetMap): EdgeTargetMap {
-  const result: Record<string, readonly NodeType[]> = {};
+  const result = createDataKeyedBag<readonly NodeType[]>();
   for (const [key, targets] of Object.entries(to)) {
     const seen = new Set<string>();
     const uniqueTargets: NodeType[] = [];
@@ -122,7 +123,7 @@ export function normalizeTargetMap(to: EdgeTargetMap): EdgeTargetMap {
     }
     result[key] = Object.freeze(uniqueTargets);
   }
-  return Object.freeze(result);
+  return Object.freeze({ ...result });
 }
 
 /**
@@ -156,7 +157,7 @@ export function validateTargetMapEntries(
 
   // Check for missing keys
   for (const sourceKind of declaredSourceKinds) {
-    if (!Object.hasOwn(to, sourceKind)) {
+    if (!hasOwnKey(to as Readonly<Record<string, unknown>>, sourceKind)) {
       throw new ConfigurationError(
         `Edge "${name}" is missing target mapping for declared source kind "${sourceKind}".`,
         {

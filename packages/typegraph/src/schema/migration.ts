@@ -575,6 +575,26 @@ function propertySchemasEqual(before: unknown, after: unknown): boolean {
  * Endpoint kind lists are sets — the order edge endpoints are declared in
  * carries no meaning.
  */
+function getSerializedEdgePairs(edge: SerializedEdgeDef): ReadonlySet<string> {
+  const pairs = new Set<string>();
+  if (edge.targetKindsBySource !== undefined) {
+    for (const [sourceKind, targetKinds] of Object.entries(
+      edge.targetKindsBySource,
+    )) {
+      for (const targetKind of targetKinds) {
+        pairs.add(`${sourceKind}\0${targetKind}`);
+      }
+    }
+  } else {
+    for (const fromKind of edge.fromKinds) {
+      for (const toKind of edge.toKinds) {
+        pairs.add(`${fromKind}\0${toKind}`);
+      }
+    }
+  }
+  return pairs;
+}
+
 function endpointKindsEqual(
   before: readonly string[] | undefined,
   after: readonly string[] | undefined,
@@ -947,11 +967,27 @@ function diffEdgeDef(
       after.targetKindsBySource,
     )
   ) {
+    const beforePairs = getSerializedEdgePairs(before);
+    const afterPairs = getSerializedEdgePairs(after);
+    const removedPairs: string[] = [];
+    for (const pair of beforePairs) {
+      if (!afterPairs.has(pair)) {
+        const [from, to] = pair.split("\0");
+        removedPairs.push(`(${from} -> ${to})`);
+      }
+    }
+
+    const isBreaking = removedPairs.length > 0;
+    const details =
+      isBreaking ?
+        `targetKindsBySource narrowed for "${name}"; removed pairs: [${removedPairs.join(", ")}]`
+      : `targetKindsBySource changed for "${name}"`;
+
     changes.push({
       type: "modified",
       kind: name,
-      severity: "warning",
-      details: `targetKindsBySource changed for "${name}"`,
+      severity: isBreaking ? "breaking" : "warning",
+      details,
       before,
       after,
     });

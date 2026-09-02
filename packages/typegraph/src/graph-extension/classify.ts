@@ -208,43 +208,47 @@ function classifyEdge(
   classifyEdgeEndpoints(kind, existing, next, recorders);
 }
 
+function getExtensionEdgePairs(edge: ExtensionEdgeDef): ReadonlySet<string> {
+  const pairs = new Set<string>();
+  if (Array.isArray(edge.to)) {
+    for (const f of edge.from) {
+      for (const t of edge.to) {
+        pairs.add(`${f}\0${t}`);
+      }
+    }
+  } else {
+    for (const [sourceKind, targets] of Object.entries(edge.to)) {
+      for (const t of targets) {
+        pairs.add(`${sourceKind}\0${t}`);
+      }
+    }
+  }
+  return pairs;
+}
+
 function classifyEdgeEndpoints(
   kind: string,
   existing: ExtensionEdgeDef,
   next: ExtensionEdgeDef,
   recorders: Recorders,
 ): void {
-  // Adding kinds to from/to is broadening — always allowed.
-  // Removing kinds with no existing edges of that endpoint would be
+  // Adding pairs to from/to is broadening — always allowed.
+  // Removing endpoint pairs with no existing edges of that pair would be
   // allowed in the spec, but TypeGraph doesn't have a per-(edge,
   // endpoint-kind) row probe today; v1 stays conservative by treating
   // endpoint-kind removal as allowed-on-empty for the whole edge kind.
-  const fromExisting = new Set(existing.from);
-  const toExisting = new Set(
-    Array.isArray(existing.to) ?
-      existing.to
-    : Object.values(existing.to).flat(),
-  );
-  const fromNext = new Set(next.from);
-  const toNext = new Set(
-    Array.isArray(next.to) ? next.to : Object.values(next.to).flat(),
-  );
+  const existingPairs = getExtensionEdgePairs(existing);
+  const nextPairs = getExtensionEdgePairs(next);
 
-  for (const removed of [...fromExisting].filter(
-    (entry) => !fromNext.has(entry),
-  )) {
-    recorders.recordRequireEmpty({
-      kind,
-      type: "TIGHTEN_EDGE_ENDPOINTS",
-      detail: `removed "${removed}" from \`from\``,
-    });
-  }
-  for (const removed of [...toExisting].filter((entry) => !toNext.has(entry))) {
-    recorders.recordRequireEmpty({
-      kind,
-      type: "TIGHTEN_EDGE_ENDPOINTS",
-      detail: `removed "${removed}" from \`to\``,
-    });
+  for (const pairKey of existingPairs) {
+    if (!nextPairs.has(pairKey)) {
+      const [from, to] = pairKey.split("\0");
+      recorders.recordRequireEmpty({
+        kind,
+        type: "TIGHTEN_EDGE_ENDPOINTS",
+        detail: `removed endpoint pair "(${from} -> ${to})"`,
+      });
+    }
   }
 }
 
