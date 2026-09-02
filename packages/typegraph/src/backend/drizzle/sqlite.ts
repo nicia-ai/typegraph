@@ -78,8 +78,6 @@ import {
   type AdapterBackend,
   type BackendCapabilities,
   type BundledBackendCapabilityOverrides,
-  type CommitSchemaVersionIfKindsEmptyResult,
-  type CommitSchemaVersionParams,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
   type HybridSearchParams,
@@ -89,10 +87,7 @@ import {
   type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
   type RecordKindRemovalParams,
-  type SchemaKindEmptinessProbe,
-  type SchemaVersionRow,
   type SchemaWriteTransactionBackend,
-  type SetActiveVersionParams,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
   type TransactionBackend,
@@ -1111,10 +1106,10 @@ export function createSqliteBackend(
  * Builds the SQLite {@link SqlEngineProfile} `createSqlBackend` (from
  * `./engine`) assembles into a backend. Everything below is today's SQLite
  * backend construction, unchanged, reorganized into the profile's head
- * data, its dialect-owned late members (`transactions`, `fence`, `rawSql`,
- * `maintenance`, `trustedImport`, `extensions`), and the remaining adapter
- * members not yet extracted into a shared `members/*.ts` file
- * (`inlineMembers`).
+ * data, its dialect-owned late members (`transactions`, `fence`,
+ * `schemaCommit`, `rawSql`, `maintenance`, `trustedImport`, `extensions`),
+ * and the remaining adapter members not yet extracted into a shared
+ * `members/*.ts` file (`inlineMembers`).
  */
 export function buildSqliteEngineProfile(
   db: AnySqliteDatabase,
@@ -1469,7 +1464,11 @@ export function buildSqliteEngineProfile(
    * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
    * is serialized against concurrent writers — a deferred BEGIN would let
    * two transactions race past the CAS read and one would later fail
-   * with SQLITE_BUSY instead of producing a clean StaleVersionError.
+   * with SQLITE_BUSY instead of producing a clean StaleVersionError. The
+   * same BEGIN IMMEDIATE already owns SQLite's serialized writer slot for
+   * `commitSchemaVersionIfKindsEmpty`'s populated-kind counts and its final
+   * schema CAS, so that multi-statement read-then-write shares this one
+   * ordinary-write fence too, with no locking of its own to add.
    *
    * Refuses on `transactionMode: "none"`. The orphan-row crash window
    * cannot be eliminated without atomicity.
@@ -1986,6 +1985,10 @@ export function buildSqliteEngineProfile(
           runSchemaWriteTransaction(fn),
       },
 
+      schemaCommit: {
+        commitSchemaVersionIfKindsEmpty,
+      },
+
       rawSql: {
         execute: operations.execute,
         ...(operations.executeRaw === undefined ?
@@ -2133,44 +2136,6 @@ export function buildSqliteEngineProfile(
       ...contributionMembers,
 
       ...kindRemovalMembers,
-
-      async commitSchemaVersion(
-        params: CommitSchemaVersionParams,
-      ): Promise<SchemaVersionRow> {
-        return runSchemaWriteTransaction((target) =>
-          target.commitSchemaVersion(params),
-        );
-      },
-
-      async commitSchemaVersionIfKindsEmpty(
-        params: CommitSchemaVersionParams,
-        probes: readonly SchemaKindEmptinessProbe[],
-      ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
-        // BEGIN IMMEDIATE already owns SQLite's serialized writer slot, so the
-        // counts and schema CAS below share the same ordinary-write fence.
-        return runSchemaWriteTransaction((target) =>
-          commitSchemaVersionIfKindsEmpty(target, params, probes),
-        );
-      },
-
-      async commitSchemaVersionWithPreflight(
-        params: CommitSchemaVersionParams,
-        // The schema-write target, not the narrowed transaction backend: a
-        // preflight may have to CREATE the storage it then fills, and that DDL
-        // belongs in this transaction rather than before it.
-        preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
-      ): Promise<SchemaVersionRow> {
-        return runSchemaWriteTransaction(async (target) => {
-          await preflight(target);
-          return target.commitSchemaVersion(params);
-        });
-      },
-
-      async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
-        await runSchemaWriteTransaction((target) =>
-          target.setActiveVersion(params),
-        );
-      },
 
       close(): Promise<void> {
         serializedQueue?.dispose();

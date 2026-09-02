@@ -216,6 +216,16 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * ports, row shapes, capability records — that this entrypoint deliberately
  * does not republish, so nearly all of it surfaces as forgotten-export debt
  * rather than a direct export, in family with the other adapter entrypoints.
+ *
+ * `EngineLateMembers.fence.runSchemaWriteTransaction`'s callback now
+ * receives `InternalOperationBackend` instead of the narrower, `@internal`
+ * `SchemaWriteTransactionBackend`, and the new sibling `schemaCommit` group
+ * carries `commitSchemaVersionIfKindsEmpty` (typed over
+ * `InternalOperationBackend`, `CommitSchemaVersionParams`, and
+ * `SchemaKindEmptinessProbe` — all three already forgotten-referenced
+ * elsewhere in this entrypoint). `SchemaWriteTransactionBackend` was this
+ * entrypoint's only reference to that type, so it drops out of the
+ * forgotten-export set entirely rather than adding to it (301 → 300).
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -223,8 +233,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "576b2d133f48d9c2fdd754ad72cc8b0d73741510de9950ce28b2392682e71c6b",
   },
   "./adapters/drizzle/engine": {
-    count: 301,
-    sha256: "41063afd2acaa5811dad4a5619caa6620a55d60c865746989fe8eb538cccdde2",
+    count: 300,
+    sha256: "8831053e553eff3393fc94d6110c48cedaab3a8a91bad0ee721a3ab9481ddc9b",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

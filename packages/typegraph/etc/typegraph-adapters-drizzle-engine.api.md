@@ -1100,7 +1100,10 @@ export type EngineLateMembers<TTx> = Readonly<{
     transactions: Pick<AdapterBackend<TTx>, "transaction" | "transactionWithNative" | "adoptTransaction" | "schemaWriteTransaction">;
     fence: Readonly<{
         lockSchemaVersionForWrite: NonNullable<AdapterBackend<TTx>["lockSchemaVersionForWrite"]>;
-        runSchemaWriteTransaction: <T>(graphId: string, fn: (target: SchemaWriteTransactionBackend) => Promise<T>) => Promise<T>;
+        runSchemaWriteTransaction: <T>(graphId: string, fn: (target: InternalOperationBackend) => Promise<T>) => Promise<T>;
+    }>;
+    schemaCommit: Readonly<{
+        commitSchemaVersionIfKindsEmpty: (target: InternalOperationBackend, params: CommitSchemaVersionParams, probes: readonly SchemaKindEmptinessProbe[]) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
     }>;
     rawSql: Pick<TransactionBackend, "execute" | "executeRaw">;
     maintenance: Pick<AdapterBackend<TTx>, "refreshStatistics">;
@@ -2285,14 +2288,6 @@ type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite" | 
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
-
-// @internal
-type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
-    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
-    tableExists: (this: void, tableName: string) => Promise<boolean>;
-    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
-}>;
 
 // @public
 type SerializedClosures = Readonly<{

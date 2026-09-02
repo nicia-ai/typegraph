@@ -21,8 +21,10 @@ import type { BackendResourceAudit } from "../../transaction-resource";
 import type {
   AdapterBackend,
   BackendCapabilities,
+  CommitSchemaVersionIfKindsEmptyResult,
+  CommitSchemaVersionParams,
   DatabaseExtensionName,
-  SchemaWriteTransactionBackend,
+  SchemaKindEmptinessProbe,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
@@ -112,12 +114,17 @@ export type EngineAssemblyContext<TTx> = Readonly<{
 
 /**
  * The late-bound member groups a profile supplies, assembled by
- * {@link createSqlBackend} from `EngineAssemblyContext`. These stay
- * dialect-owned forever — none is a mirror waiting to be extracted into a
- * shared `members/*.ts` file, because each genuinely differs in body
- * between engines (self-referential transaction framing, the raw-SQL escape
- * hatch's driver-level binding and decoding, a lock clause resolved from the
- * fence plan).
+ * {@link createSqlBackend} from `EngineAssemblyContext`. `transactions`,
+ * `fence.lockSchemaVersionForWrite`, `rawSql`, `maintenance`,
+ * `trustedImport`, and `extensions` stay dialect-owned forever — none of
+ * them is a mirror waiting to be extracted into a shared `members/*.ts`
+ * file, because each genuinely differs in body between engines
+ * (self-referential transaction framing, the raw-SQL escape hatch's
+ * driver-level binding and decoding, a lock clause resolved from the fence
+ * plan). `schemaCommit` is the one exception: both dialects call it
+ * identically, and it lives here only for as long as the entrypoint it
+ * feeds must stay clear of a real Drizzle package — see its own doc
+ * comment.
  */
 export type EngineLateMembers<TTx> = Readonly<{
   /**
@@ -139,15 +146,39 @@ export type EngineLateMembers<TTx> = Readonly<{
     >;
     /**
      * The internal, write-fence-holding transaction runner every
-     * schema-commit method delegates to. Not itself an `AdapterBackend`
-     * member — SQLite's schema lock is per-connection, so its
-     * implementation ignores `graphId`, exactly like the uniform-signature
-     * wrapper it already exposes to its contribution materializer.
+     * schema-commit method delegates to. `fn` receives the full
+     * `InternalOperationBackend` — including `commitSchemaVersion` and
+     * `setActiveVersion`, which the narrower, publicly-reachable
+     * `SchemaWriteTransactionBackend` deliberately omits — because this
+     * runner is the trusted internal caller the lock exists to gate, not
+     * the public `schemaWriteTransaction` surface a caller's preflight
+     * runs against. Not itself an `AdapterBackend` member — SQLite's schema
+     * lock is per-connection, so its implementation ignores `graphId`,
+     * exactly like the uniform-signature wrapper it already exposes to its
+     * contribution materializer.
      */
     runSchemaWriteTransaction: <T>(
       graphId: string,
-      fn: (target: SchemaWriteTransactionBackend) => Promise<T>,
+      fn: (target: InternalOperationBackend) => Promise<T>,
     ) => Promise<T>;
+  }>;
+  /**
+   * The populated-kind guard plus commit `operation-backend-core.ts`
+   * implements once and both dialects call identically — not a fence
+   * primitive itself (it issues no lock), just the one helper the schema-
+   * commit member group needs alongside `fence.runSchemaWriteTransaction`.
+   * Threaded through here rather than imported directly by
+   * `members/schema-version-members.ts`: that module is wired into
+   * `createSqlBackend` itself, a published entrypoint root that must not
+   * reach a real Drizzle package until the operation-layer extraction folds
+   * this module in for good.
+   */
+  schemaCommit: Readonly<{
+    commitSchemaVersionIfKindsEmpty: (
+      target: InternalOperationBackend,
+      params: CommitSchemaVersionParams,
+      probes: readonly SchemaKindEmptinessProbe[],
+    ) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
   }>;
   /**
    * The backend's raw-SQL escape hatch. Dialect-owned because parameter

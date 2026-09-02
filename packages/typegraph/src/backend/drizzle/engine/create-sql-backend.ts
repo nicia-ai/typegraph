@@ -20,6 +20,7 @@ import {
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
 import { type AdapterBackend, supportsRootAtomicBatch } from "../../types";
+import { createSchemaVersionMembers } from "./members/schema-version-members";
 import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 
 /**
@@ -82,6 +83,29 @@ export function createSqlBackend<TTx>(
   const late = profile.lateMembers(ctx);
   const inline = profile.inlineMembers(ctx);
 
+  // Annotated against the real `AdapterBackend<TTx>` declarations (`this:
+  // void` included, and `commitSchemaVersionWithPreflight`'s
+  // `SchemaCommitPreflightBackend` preflight parameter) rather than left to
+  // infer `SchemaVersionMembers`. Once this group is spread into the `as
+  // AdapterBackend<TTx>` literal below, that cast can no longer catch a
+  // divergence between `SchemaVersionMembers` and the four keys it fills —
+  // this annotation is what still does. Every later group assembled here
+  // rather than inside a profile's own `inlineMembers` gets the same
+  // treatment.
+  const schemaVersionMembers: Required<
+    Pick<
+      AdapterBackend<TTx>,
+      | "commitSchemaVersion"
+      | "commitSchemaVersionIfKindsEmpty"
+      | "commitSchemaVersionWithPreflight"
+      | "setActiveVersion"
+    >
+  > = createSchemaVersionMembers({
+    runSchemaWriteTransaction: late.fence.runSchemaWriteTransaction,
+    commitSchemaVersionIfKindsEmpty:
+      late.schemaCommit.commitSchemaVersionIfKindsEmpty,
+  });
+
   // `inline` is a `Partial<AdapterBackend<TTx>>` (it drains toward empty as
   // later steps extract its members into shared factories), so TypeScript
   // sees every key it contributes as optional in the object literal below —
@@ -93,12 +117,23 @@ export function createSqlBackend<TTx>(
   // tests/engine-profile-parity.test.ts is what actually catches a missing
   // member group in the meantime, and this cast must go when
   // `inlineMembers` does.
-
+  //
+  // `inline` is spread LAST on purpose: while any group extracted out of it
+  // still has a same-named body left behind in a profile's own
+  // `inlineMembers` (a deletion an extraction step forgot), `inline` wins
+  // the key and the stale body keeps running unnoticed, because a spread's
+  // duplicate keys are invisible to both TypeScript and this cast. Placing
+  // every extracted group — `schemaVersionMembers` included — before
+  // `inline` means a forgotten deletion is caught the moment a
+  // characterization test exercises the member, rather than silently
+  // reintroducing the old body. Keep new groups assembled here ahead of
+  // `inline` for the same reason.
   const backend = {
     ...ctx.operations,
     ...late.transactions,
     ...late.rawSql,
     lockSchemaVersionForWrite: late.fence.lockSchemaVersionForWrite,
+    ...schemaVersionMembers,
     ...late.maintenance,
     ...(late.trustedImport === undefined ?
       {}

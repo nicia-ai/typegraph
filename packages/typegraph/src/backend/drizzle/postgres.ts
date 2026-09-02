@@ -126,8 +126,6 @@ import {
   type BackendCapabilities,
   type BundledBackendCapabilityOverrides,
   type ClaimIndexMaterializationParams,
-  type CommitSchemaVersionIfKindsEmptyResult,
-  type CommitSchemaVersionParams,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type HybridSearchParams,
@@ -142,10 +140,7 @@ import {
   POSTGRES_MAX_BIND_PARAMETERS,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
-  type SchemaKindEmptinessProbe,
-  type SchemaVersionRow,
   type SchemaWriteTransactionBackend,
-  type SetActiveVersionParams,
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
@@ -694,9 +689,9 @@ export function createPostgresBackend(
  * `./engine`) assembles into a backend. Everything below is today's
  * PostgreSQL backend construction, unchanged, reorganized into the
  * profile's head data, its dialect-owned late members (`transactions`,
- * `fence`, `rawSql`, `maintenance`, `trustedImport`, `extensions`), and the
- * remaining adapter members not yet extracted into a shared `members/*.ts`
- * file (`inlineMembers`).
+ * `fence`, `schemaCommit`, `rawSql`, `maintenance`, `trustedImport`,
+ * `extensions`), and the remaining adapter members not yet extracted into a
+ * shared `members/*.ts` file (`inlineMembers`).
  */
 function buildPostgresEngineProfile(
   db: AnyPgDatabase,
@@ -1680,6 +1675,10 @@ function buildPostgresEngineProfile(
         runSchemaWriteTransaction,
       },
 
+      schemaCommit: {
+        commitSchemaVersionIfKindsEmpty,
+      },
+
       rawSql: {
         execute: operations.execute,
         ...(operations.executeRaw === undefined ?
@@ -1885,42 +1884,6 @@ function buildPostgresEngineProfile(
       ...contributionMembers,
 
       ...kindRemovalMembers,
-
-      async commitSchemaVersion(
-        params: CommitSchemaVersionParams,
-      ): Promise<SchemaVersionRow> {
-        return runSchemaWriteTransaction(params.graphId, (target) =>
-          target.commitSchemaVersion(params),
-        );
-      },
-
-      async commitSchemaVersionIfKindsEmpty(
-        params: CommitSchemaVersionParams,
-        probes: readonly SchemaKindEmptinessProbe[],
-      ): Promise<CommitSchemaVersionIfKindsEmptyResult> {
-        return runSchemaWriteTransaction(params.graphId, (target) =>
-          commitSchemaVersionIfKindsEmpty(target, params, probes),
-        );
-      },
-
-      async commitSchemaVersionWithPreflight(
-        params: CommitSchemaVersionParams,
-        // The schema-write target, not the narrowed transaction backend: a
-        // preflight may have to CREATE the storage it then fills, and that DDL
-        // belongs in this transaction rather than before it.
-        preflight: (target: SchemaWriteTransactionBackend) => Promise<void>,
-      ): Promise<SchemaVersionRow> {
-        return runSchemaWriteTransaction(params.graphId, async (target) => {
-          await preflight(target);
-          return target.commitSchemaVersion(params);
-        });
-      },
-
-      async setActiveVersion(params: SetActiveVersionParams): Promise<void> {
-        await runSchemaWriteTransaction(params.graphId, (target) =>
-          target.setActiveVersion(params),
-        );
-      },
 
       async close(): Promise<void> {
         // Drizzle doesn't expose a close method
