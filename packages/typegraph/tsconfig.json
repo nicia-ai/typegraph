@@ -39,6 +39,9 @@
       ],
       "@nicia-ai/typegraph/adapters/drizzle/indexes": [
         "./src/backend/drizzle/indexes.ts"
+      ],
+      "@nicia-ai/typegraph/adapters/drizzle/engine": [
+        "./src/backend/drizzle/engine/index.ts"
       ]
     }
   },

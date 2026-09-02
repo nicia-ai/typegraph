@@ -12,6 +12,7 @@ import { classifyEntrypoints } from "../scripts/drizzle-reachability-scan";
 import {
   FIXTURE_PLAN,
   fixtureExpectations,
+  LOADS_WITHOUT_PEER_FACTORIES,
   portableFixtureEntrypoints,
   renderLedgerWalkModule,
   renderPortableCjsRunner,
@@ -94,6 +95,17 @@ describe("strict consumer fixture contract", () => {
     const factoryEntrypoints = Object.keys(TYPED_REFUSAL_FACTORIES).toSorted();
 
     expect(factoryEntrypoints).toEqual(typedRefusalEntrypoints);
+  });
+
+  it("every loads-without-peer ledger row names the factory the fixture asserts, both directions", () => {
+    const loadsWithoutPeerEntrypoints = MISSING_PEER_LEDGER.filter(
+      (entry) => entry.arm === "loads-without-peer",
+    )
+      .map((entry) => entry.entrypoint)
+      .toSorted();
+    expect(Object.keys(LOADS_WITHOUT_PEER_FACTORIES).toSorted()).toEqual(
+      loadsWithoutPeerEntrypoints,
+    );
   });
 
   it("the generated fixture index imports every portable entrypoint and no ledger entrypoint", () => {

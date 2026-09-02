@@ -20,6 +20,14 @@
  * importer's own path (`… imported from …/node_modules/drizzle-orm/bs3.js`),
  * and a whole-message regex would launder a genuinely missing dependency OF
  * `drizzle-orm` into a false "install drizzle-orm" instruction.
+ *
+ * A third, published entrypoint (`./adapters/drizzle/engine`) reaches
+ * neither arm above: its factory takes a caller-assembled engine profile,
+ * never a raw Drizzle handle or connection, so its module never imports
+ * `drizzle-orm` at runtime and loads cleanly whether or not the peer is
+ * installed. It is recorded in {@link MISSING_PEER_LEDGER} under the
+ * `loads-without-peer` arm — a fact about the entrypoint, not a refusal or
+ * an exemption.
  */
 import { ConfigurationError } from "../errors";
 
@@ -35,7 +43,8 @@ export const MISSING_PEER_INSTALL_COMMAND = "npm install drizzle-orm";
  * a `typed-refusal` row cannot carry (and a `documented-resolution-error`
  * row cannot omit) `reason`/`documentedIn`, so "each exempt row names where
  * it is documented" is structural rather than a convention a future row
- * could silently drop.
+ * could silently drop. A `loads-without-peer` row names, in `reason`, why
+ * its entrypoint's module never imports `drizzle-orm` at runtime.
  */
 export type MissingPeerLedgerEntry =
   | Readonly<{
@@ -49,6 +58,12 @@ export type MissingPeerLedgerEntry =
       formats: readonly ("import" | "require")[];
       reason: string;
       documentedIn: readonly string[];
+    }>
+  | Readonly<{
+      entrypoint: string;
+      arm: "loads-without-peer";
+      formats: readonly ("import" | "require")[];
+      reason: string;
     }>;
 
 const SYNCHRONOUS_HANDLE_ADAPTER_REASON =
@@ -62,6 +77,9 @@ const ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON =
 
 const DRIZZLE_INDEX_BUILDERS_REASON =
   "Drizzle-native schema-builder entrypoint with no factory boundary at which to translate a missing drizzle-orm import";
+
+const ASSEMBLED_PROFILE_FACTORY_REASON =
+  "the factory takes a caller-assembled engine profile, never a raw Drizzle handle or connection, so its module tree never imports drizzle-orm at runtime";
 
 /**
  * Repo-root-relative, POSIX paths (matching `scripts/drizzle-claim-inventory.ts`'s
@@ -77,11 +95,12 @@ const SYNCHRONOUS_ADAPTER_DOCUMENTED_IN: readonly string[] = [
 /**
  * Every non-portable published entrypoint, in exactly one arm. The two
  * "batteries included" entrypoints get the typed refusal because their
- * factory owns the connection; the six `./adapters/drizzle/*` entrypoints
- * are the documented, accepted exemption. `tests/missing-peer-refusal.test.ts`
- * asserts this set equals `Object.keys(classifyEntrypoints())` minus the ten
- * portable entrypoints, both directions — so the covered set and the
- * asserted set are one object.
+ * factory owns the connection; six `./adapters/drizzle/*` entrypoints are
+ * the documented, accepted exemption; `./adapters/drizzle/engine` loads
+ * without the peer at all. `tests/missing-peer-refusal.test.ts` asserts this
+ * set equals `Object.keys(classifyEntrypoints())` minus the ten portable
+ * entrypoints, both directions — so the covered set and the asserted set
+ * are one object.
  */
 export const MISSING_PEER_LEDGER = [
   {
@@ -135,6 +154,12 @@ export const MISSING_PEER_LEDGER = [
     formats: ["import", "require"],
     reason: DRIZZLE_INDEX_BUILDERS_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
+  },
+  {
+    entrypoint: "./adapters/drizzle/engine",
+    arm: "loads-without-peer",
+    formats: ["import", "require"],
+    reason: ASSEMBLED_PROFILE_FACTORY_REASON,
   },
 ] as const satisfies readonly MissingPeerLedgerEntry[];
 

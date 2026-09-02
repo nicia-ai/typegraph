@@ -97,6 +97,10 @@ export default defineConfig({
         __dirname,
         "src/backend/drizzle/indexes.ts",
       ),
+      "@nicia-ai/typegraph/adapters/drizzle/engine": resolve(
+        __dirname,
+        "src/backend/drizzle/engine/index.ts",
+      ),
       "@nicia-ai/typegraph": resolve(__dirname, "src/index.ts"),
     },
   },

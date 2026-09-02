@@ -210,11 +210,21 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * entrypoints. The entrypoint-specific counts and fingerprints below are the
  * measured API Extractor result after exporting the intended public contracts;
  * `./core` and the Drizzle indexes entrypoint are unchanged.
+ *
+ * `./adapters/drizzle/engine`: its two head types (`SqlEngineProfile`,
+ * `EngineAssemblyContext`) name the internal backend vocabulary — command
+ * ports, row shapes, capability records — that this entrypoint deliberately
+ * does not republish, so nearly all of it surfaces as forgotten-export debt
+ * rather than a direct export, in family with the other adapter entrypoints.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 367,
     sha256: "576b2d133f48d9c2fdd754ad72cc8b0d73741510de9950ce28b2392682e71c6b",
+  },
+  "./adapters/drizzle/engine": {
+    count: 301,
+    sha256: "41063afd2acaa5811dad4a5619caa6620a55d60c865746989fe8eb538cccdde2",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

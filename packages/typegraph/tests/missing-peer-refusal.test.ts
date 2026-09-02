@@ -218,7 +218,7 @@ describe("missing-peer-ledger", () => {
   });
 
   describe("MISSING_PEER_LEDGER", () => {
-    it("the ledger's typed-refusal arm equals the adapter-dynamic-only classification", () => {
+    it("each ledger arm equals its matching classification, both directions", () => {
       const classification = classifyEntrypoints();
 
       const typedRefusalEntrypoints = new Set(
@@ -246,6 +246,18 @@ describe("missing-peer-ledger", () => {
       expect(documentedResolutionErrorEntrypoints).toEqual(
         adapterStaticEntrypoints,
       );
+
+      const loadsWithoutPeerEntrypoints = new Set(
+        MISSING_PEER_LEDGER.filter(
+          (entry) => entry.arm === "loads-without-peer",
+        ).map((entry) => entry.entrypoint),
+      );
+      const adapterTypeOnlyEntrypoints = new Set(
+        Object.entries(classification)
+          .filter(([, value]) => value === "adapter-type-only")
+          .map(([entrypoint]) => entrypoint),
+      );
+      expect(loadsWithoutPeerEntrypoints).toEqual(adapterTypeOnlyEntrypoints);
     });
 
     it("every non-portable published entrypoint has exactly one ledger row", () => {

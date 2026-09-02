@@ -61,6 +61,10 @@ const PUBLIC_SUBPATHS = [
     subpath: "/adapters/drizzle/indexes",
     expectedExport: "buildSqliteNodeIndexBuilders",
   },
+  {
+    subpath: "/adapters/drizzle/engine",
+    expectedExport: "createSqlBackend",
+  },
 ];
 
 function findPackageManifest(startPath, packageName) {

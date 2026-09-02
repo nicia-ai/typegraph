@@ -4,7 +4,7 @@
  * `vitest.config.ts#resolve.alias`) with one owner: `exports`. This batch
  * (B4) closed the gap the two other renderings had accumulated (four missing
  * `tsconfig` paths, five missing `vitest` aliases), so every rendering now
- * names all 18 published entrypoints. Both directions stay asserted — a new
+ * names all 19 published entrypoints. Both directions stay asserted — a new
  * `exports` key with no matching `tsconfig`/`vitest` entry, or a rendering
  * entry naming a since-removed entrypoint, both fail — and every PRESENT
  * rendering's target is checked against the source root

@@ -20,6 +20,7 @@ export default defineConfig({
     "backend/postgres/index": "src/backend/postgres/index.ts",
     "backend/postgres/pglite": "src/backend/postgres/pglite.ts",
     "backend/postgres/pglite-store": "src/backend/postgres/pglite-store.ts",
+    "backend/drizzle/engine/index": "src/backend/drizzle/engine/index.ts",
   },
   format: ["esm", "cjs"],
   dts: true,

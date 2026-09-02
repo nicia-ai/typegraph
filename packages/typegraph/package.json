@@ -96,6 +96,11 @@
       "types": "./dist/backend/drizzle/indexes.d.ts",
       "import": "./dist/backend/drizzle/indexes.js",
       "require": "./dist/backend/drizzle/indexes.cjs"
+    },
+    "./adapters/drizzle/engine": {
+      "types": "./dist/backend/drizzle/engine/index.d.ts",
+      "import": "./dist/backend/drizzle/engine/index.js",
+      "require": "./dist/backend/drizzle/engine/index.cjs"
     }
   },
   "files": [

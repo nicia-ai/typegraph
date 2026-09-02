@@ -22,7 +22,7 @@
  * to unify. The four `render*` functions build the portable fixture's
  * generated files as strings (no new repo-level `.mjs`/`.cjs` file), and
  * {@link renderLedgerWalkModule}'s output, `walk.cjs`, is the SINGLE owner of
- * the two ledger arms' distinguishing assertions — neither generated runner
+ * the ledger arms' distinguishing assertions — neither generated runner
  * (`run.mjs`, `run.cjs`) contains that decision, only a reference to it.
  */
 import { spawn } from "node:child_process";
@@ -84,6 +84,16 @@ export const TYPED_REFUSAL_FACTORIES: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The published factory each `loads-without-peer` ledger row's entrypoint
+ * exports. Looked up by entrypoint for the same reason as
+ * {@link TYPED_REFUSAL_FACTORIES}: a ledger row with no matching factory
+ * fails loudly instead of the walk silently skipping its assertion.
+ */
+export const LOADS_WITHOUT_PEER_FACTORIES: Readonly<Record<string, string>> = {
+  "./adapters/drizzle/engine": "createSqlBackend",
+};
+
+/**
  * The two Node module-resolution error codes a missing CommonJS/ESM
  * specifier can raise (`isMissingDrizzlePeerError`'s own accepted set,
  * `src/backend/missing-peer-ledger.ts`). Not re-exported from there — that
@@ -113,6 +123,7 @@ export type FixtureExpectations = Readonly<{
   portableEntrypoints: readonly string[];
   ledger: readonly MissingPeerLedgerEntry[];
   typedRefusalFactories: Readonly<Record<string, string>>;
+  loadsWithoutPeerFactories: Readonly<Record<string, string>>;
   missingPeerPackage: string;
   missingPeerInstallCommand: string;
   refusalDetailsCode: typeof REFUSAL_DETAILS_CODE;
@@ -389,6 +400,7 @@ export function fixtureExpectations(): FixtureExpectations {
     portableEntrypoints: portableFixtureEntrypoints(),
     ledger: MISSING_PEER_LEDGER,
     typedRefusalFactories: TYPED_REFUSAL_FACTORIES,
+    loadsWithoutPeerFactories: LOADS_WITHOUT_PEER_FACTORIES,
     missingPeerPackage: MISSING_PEER_PACKAGE,
     missingPeerInstallCommand: MISSING_PEER_INSTALL_COMMAND,
     refusalDetailsCode: REFUSAL_DETAILS_CODE,
@@ -505,7 +517,7 @@ export function renderPortableFixtureIndex(
 }
 
 /**
- * `walk.cjs` — the SINGLE owner of the two ledger arms' distinguishing
+ * `walk.cjs` — the SINGLE owner of the ledger arms' distinguishing
  * assertions (design §4.4c step 5, §5). CommonJS so both runners can consume
  * it with one form (`require` in CJS, a static `import` in ESM — Node's
  * CJS/ESM interop statically analyzes this file's `module.exports` object
@@ -695,6 +707,25 @@ export function renderLedgerWalkModule(): string {
     "        caught.details && caught.details.code,",
     "        expectations.refusalDetailsCode,",
     "        `${row.entrypoint} (${format}): the documented-resolution-error arm must not carry ${expectations.refusalDetailsCode}`,",
+    "      );",
+    "      asserted.push(row.entrypoint);",
+    "      continue;",
+    "    }",
+    "",
+    '    if (row.arm === "loads-without-peer") {',
+    "      const moduleExports = await loadEntrypoint(specifier);",
+    "      const factoryName =",
+    "        expectations.loadsWithoutPeerFactories[row.entrypoint];",
+    "      if (factoryName === undefined) {",
+    "        throw new Error(",
+    "          `No LOADS_WITHOUT_PEER_FACTORIES entry for ${row.entrypoint}`,",
+    "        );",
+    "      }",
+    "      const factory = moduleExports[factoryName];",
+    "      assert.equal(",
+    "        typeof factory,",
+    '        "function",',
+    "        `${row.entrypoint} (${format}): ${factoryName} is not a function`,",
     "      );",
     "      asserted.push(row.entrypoint);",
     "      continue;",
