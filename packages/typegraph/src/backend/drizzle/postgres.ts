@@ -180,6 +180,7 @@ import { createIdentityMembers } from "./engine/members/identity-members";
 import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
 import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
+import { buildCommonOperationOptions } from "./engine/operation-layer";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -215,7 +216,6 @@ import {
   type OperationBackendRowMappers,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
-import { resolveAtomicNodeProjectionRequirements } from "./operations/node-projections";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
@@ -2441,122 +2441,89 @@ function createPostgresOperationBackend(
     return plan.kind === "lock" ? sql.raw("FOR SHARE") : sql.raw("");
   })();
 
-  const commonOperationMembers = createCommonOperationBackend({
-    batchConfig,
-    commandSession: transactionScoped ? "transaction" : "root",
-    execution: {
-      compile: executionAdapter.compile,
-      execAll,
-      execGet,
-      execRun,
-    },
-    ...(atomicSqlProgramExecutor === undefined ?
-      {}
-    : { atomicSqlProgramExecutor }),
-    nowIso,
-    maxBindParameters:
-      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
-    operationStrategy,
-    rowMappers: {
-      toEdgeRow,
-      toNodeRow,
-      toSchemaVersionRow,
-      toUniqueRow,
-    },
-    schemaFenceLockClause: schemaFenceInsertLockClause,
-    async resolveAtomicNodeProjectionEvidence(creates, updates) {
-      const requirements = resolveAtomicNodeProjectionRequirements(
-        creates,
-        updates,
-      );
-      if (requirements === undefined) return [];
-      return contributionMaterializer.resolveNodeProjectionEvidence(
-        requirements.graphId,
-        requirements,
-      );
-    },
-    async diagnoseAtomicNodeProjectionEvidence(
-      creates,
-      updates,
-    ): Promise<void> {
-      const requirements = resolveAtomicNodeProjectionRequirements(
-        creates,
-        updates,
-      );
-      if (requirements === undefined) return;
-      await contributionMaterializer.diagnoseNodeProjectionEvidence(
-        requirements.graphId,
-        requirements,
-      );
-    },
-    async refuseAtomicNodeProjectionError(
-      creates,
-      updates,
-      error,
-    ): Promise<never> {
-      const requirements = resolveAtomicNodeProjectionRequirements(
-        creates,
-        updates,
-      );
-      if (requirements === undefined) throw error;
-      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
-        requirements.graphId,
-        requirements,
-        error,
-      );
-    },
-    nodeProjectionInsertFusion: true,
-    async beforeNodeProjectionInsert(params, plan): Promise<void> {
-      const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(params, plan);
-      await contributionMaterializer.assertNodeInsertProjections(
-        params.graphId,
-        {
-          fulltext: plan.projections.some(
-            (projection) => projection.kind === "fulltext",
-          ),
-          vectorSlots,
+  const commonOperationMembers = createCommonOperationBackend(
+    buildCommonOperationOptions({
+      batchConfig,
+      commandSession: transactionScoped ? "transaction" : "root",
+      execution: {
+        compile: executionAdapter.compile,
+        execAll,
+        execGet,
+        execRun,
+      },
+      atomicSqlProgramExecutor,
+      nowIso,
+      maxBindParameters:
+        capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+      operationStrategy,
+      rowMappers: {
+        toEdgeRow,
+        toNodeRow,
+        toSchemaVersionRow,
+        toUniqueRow,
+      },
+      schemaFenceLockClause: schemaFenceInsertLockClause,
+      contributionMaterializer,
+      fusion: {
+        atomicProgramsAtTransactionScope: true,
+        nodeProjectionInsertFusion: true,
+        async beforeNodeProjectionInsert(params, plan): Promise<void> {
+          const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
+            params,
+            plan,
+          );
+          await contributionMaterializer.assertNodeInsertProjections(
+            params.graphId,
+            {
+              fulltext: plan.projections.some(
+                (projection) => projection.kind === "fulltext",
+              ),
+              vectorSlots,
+            },
+          );
         },
-      );
-    },
-    async refuseNodeProjectionError(params, plan, error): Promise<never> {
-      const embeddingProjections = plan.projections.filter(
-        (projection) => projection.kind === "embedding",
-      );
-      const dimensionProjection =
-        embeddingProjections.find(
-          (projection) => projection.embedding.length !== projection.dimensions,
-        ) ??
-        (embeddingProjections.length === 1 ?
-          embeddingProjections[0]
-        : undefined);
-      if (dimensionProjection !== undefined) {
-        const mapped = mapVectorWriteError(error, {
-          nodeKind: params.kind,
-          fieldPath: dimensionProjection.fieldPath,
-        });
-        if (mapped !== error) throw mapped;
-      }
-      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
-        params.graphId,
-        {
-          fulltext: plan.projections.some(
-            (projection) => projection.kind === "fulltext",
-          ),
-          vectorSlots: vectorSlotsFromManagedNodeCreatePlan(params, plan),
+        async refuseNodeProjectionError(params, plan, error): Promise<never> {
+          const embeddingProjections = plan.projections.filter(
+            (projection) => projection.kind === "embedding",
+          );
+          const dimensionProjection =
+            embeddingProjections.find(
+              (projection) =>
+                projection.embedding.length !== projection.dimensions,
+            ) ??
+            (embeddingProjections.length === 1 ?
+              embeddingProjections[0]
+            : undefined);
+          if (dimensionProjection !== undefined) {
+            const mapped = mapVectorWriteError(error, {
+              nodeKind: params.kind,
+              fieldPath: dimensionProjection.fieldPath,
+            });
+            if (mapped !== error) throw mapped;
+          }
+          return contributionMaterializer.refuseUnavailableNodeInsertProjections(
+            params.graphId,
+            {
+              fulltext: plan.projections.some(
+                (projection) => projection.kind === "fulltext",
+              ),
+              vectorSlots: vectorSlotsFromManagedNodeCreatePlan(params, plan),
+            },
+            error,
+          );
         },
-        error,
-      );
-    },
-    ...(transactionScoped ?
-      {
-        schemaGraphWriteLockNamespace:
-          RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
-        edgeCardinalityInsertFusion: true,
-        nodeClaimInsertFusion: true,
-      }
-    : {}),
-    tableExistenceCache: { cacheExisting: false },
-  });
+        ...(transactionScoped ?
+          {
+            schemaGraphWriteLockNamespace:
+              RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+            edgeCardinalityInsertFusion: true,
+            nodeClaimInsertFusion: true,
+          }
+        : {}),
+        tableExistenceCache: { cacheExisting: false },
+      },
+    }),
+  );
 
   const executeCompiled = executionAdapter.executeCompiled;
   const executeRawMethod: Pick<TransactionBackend, "executeRaw"> =

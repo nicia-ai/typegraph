@@ -24,6 +24,8 @@ import type {
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
   DatabaseExtensionName,
+  InsertNodeParams,
+  ManagedNodeCreatePlan,
   SchemaKindEmptinessProbe,
   TransactionBackend,
 } from "../../types";
@@ -34,7 +36,10 @@ import type {
   OperationBackendBatchConfig,
   OperationBackendRowMappers,
 } from "../operation-backend-core";
-import type { CommonOperationStrategy } from "../operations/strategy";
+import type {
+  CommonOperationStrategy,
+  TableExistenceCacheOptions,
+} from "../operations/strategy";
 
 /** Resolved physical table names, uniform across dialects. */
 export type EngineTableNames = ResolvedSqlTableNames;
@@ -76,18 +81,46 @@ export type EngineProvisioning = Readonly<{
 }>;
 
 /**
- * The PostgreSQL-only operation-layer knobs the shared
- * `createCommonOperationBackend` assembly (`operations/`) still needs a
- * per-profile answer for, plus the one fact both dialects report:
- * whether the atomic SQL program executor is threaded into a
- * transaction-scoped operation backend at all (PostgreSQL always does;
- * SQLite's transaction-scoped backend excludes it — a real capability gap,
- * not drift). Unused until the shared operation-layer assembly is built;
- * kept minimal until then rather than speculatively naming every
- * PostgreSQL-only key up front.
+ * The operation-layer fusion knobs `buildCommonOperationOptions`
+ * (`./operation-layer`) reads to assemble one `createCommonOperationBackend`
+ * options object for either dialect. `atomicProgramsAtTransactionScope` is
+ * the one fact both dialects report: whether the atomic SQL program executor
+ * is threaded into a transaction-scoped operation backend at all (PostgreSQL
+ * always does; SQLite's transaction-scoped backend excludes it — a real
+ * capability gap, not drift). Every other member is PostgreSQL-only and
+ * optional for that reason: SQLite's dialect factory builds a value with
+ * only `atomicProgramsAtTransactionScope` set, and PostgreSQL's builds one
+ * with every member present except the three transaction-scope-only keys
+ * (`schemaGraphWriteLockNamespace`, `edgeCardinalityInsertFusion`,
+ * `nodeClaimInsertFusion`), which its dialect factory itself omits outside a
+ * transaction-scoped operation backend. `buildCommonOperationOptions` spreads
+ * each optional member into the assembled options only when the dialect
+ * supplied it, so the presence-or-absence decision stays where the
+ * asymmetry actually lives — in what each dialect factory constructs — and
+ * the shared assembly never branches on which dialect it was called for.
  */
 export type OperationFusionHooks = Readonly<{
   atomicProgramsAtTransactionScope: boolean;
+  /** Always `true` when present; a bundled projection-aware backend fuses managed-node projections into its INSERT. */
+  nodeProjectionInsertFusion?: true;
+  /** Read-only prerequisite gate run before a fused projection statement. */
+  beforeNodeProjectionInsert?: (
+    params: InsertNodeParams,
+    plan: ManagedNodeCreatePlan,
+  ) => Promise<void>;
+  /** Error-path projection storage classifier; must rethrow or return never. */
+  refuseNodeProjectionError?: (
+    params: InsertNodeParams,
+    plan: ManagedNodeCreatePlan,
+    error: unknown,
+  ) => Promise<never>;
+  /** Present only for a transaction-scoped operation backend. */
+  schemaGraphWriteLockNamespace?: string;
+  /** Present only for a transaction-scoped operation backend. */
+  edgeCardinalityInsertFusion?: true;
+  /** Present only for a transaction-scoped operation backend; claim plans require a caller-owned transaction to roll back refusals. */
+  nodeClaimInsertFusion?: true;
+  tableExistenceCache?: TableExistenceCacheOptions;
 }>;
 
 /**

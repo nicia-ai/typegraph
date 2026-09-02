@@ -158,6 +158,7 @@ import { createIdentityMembers } from "./engine/members/identity-members";
 import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
 import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
+import { buildCommonOperationOptions } from "./engine/operation-layer";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -177,7 +178,6 @@ import {
   type OperationBackendRowMappers,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
-import { resolveAtomicNodeProjectionRequirements } from "./operations/node-projections";
 import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   createSqliteTables as buildSqliteTables,
@@ -721,71 +721,32 @@ function createSqliteOperationBackend(
     operationStrategy,
   });
 
-  const commonOperationMembers = createCommonOperationBackend({
-    batchConfig,
-    commandSession: transactionScoped ? "transaction" : "root",
-    execution: {
-      compile: executionAdapter.compile,
-      execAll,
-      execGet,
-      execRun,
-    },
-    ...(transactionScoped || atomicSqlProgramExecutor === undefined ?
-      {}
-    : { atomicSqlProgramExecutor }),
-    nowIso,
-    maxBindParameters:
-      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
-    operationStrategy,
-    rowMappers: {
-      toEdgeRow,
-      toNodeRow,
-      toSchemaVersionRow,
-      toUniqueRow,
-    },
-    schemaFenceLockClause: sql.raw(""),
-    async resolveAtomicNodeProjectionEvidence(creates, updates) {
-      const requirements = resolveAtomicNodeProjectionRequirements(
-        creates,
-        updates,
-      );
-      if (requirements === undefined) return [];
-      return contributionMaterializer.resolveNodeProjectionEvidence(
-        requirements.graphId,
-        requirements,
-      );
-    },
-    async diagnoseAtomicNodeProjectionEvidence(
-      creates,
-      updates,
-    ): Promise<void> {
-      const requirements = resolveAtomicNodeProjectionRequirements(
-        creates,
-        updates,
-      );
-      if (requirements === undefined) return;
-      await contributionMaterializer.diagnoseNodeProjectionEvidence(
-        requirements.graphId,
-        requirements,
-      );
-    },
-    async refuseAtomicNodeProjectionError(
-      creates,
-      updates,
-      error,
-    ): Promise<never> {
-      const requirements = resolveAtomicNodeProjectionRequirements(
-        creates,
-        updates,
-      );
-      if (requirements === undefined) throw error;
-      return contributionMaterializer.refuseUnavailableNodeInsertProjections(
-        requirements.graphId,
-        requirements,
-        error,
-      );
-    },
-  });
+  const commonOperationMembers = createCommonOperationBackend(
+    buildCommonOperationOptions({
+      batchConfig,
+      commandSession: transactionScoped ? "transaction" : "root",
+      execution: {
+        compile: executionAdapter.compile,
+        execAll,
+        execGet,
+        execRun,
+      },
+      atomicSqlProgramExecutor,
+      nowIso,
+      maxBindParameters:
+        capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
+      operationStrategy,
+      rowMappers: {
+        toEdgeRow,
+        toNodeRow,
+        toSchemaVersionRow,
+        toUniqueRow,
+      },
+      schemaFenceLockClause: sql.raw(""),
+      contributionMaterializer,
+      fusion: { atomicProgramsAtTransactionScope: false },
+    }),
+  );
 
   const executeCompiled = executionAdapter.executeCompiled;
   const executeRawMethod: Pick<TransactionBackend, "executeRaw"> =
