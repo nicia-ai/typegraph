@@ -510,6 +510,7 @@ console.log("Current version:", active?.version);
 | Change unique constraints      | Warning        | Yes            |
 | Change edge cardinality        | Warning        | Yes            |
 | Change edge endpoint kinds     | Warning        | Yes            |
+| Remove allowed source-dependent endpoint pairs | Breaking | No |
 
 ## Rollback
 

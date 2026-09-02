@@ -264,6 +264,26 @@ These changes require manual migration:
 - Changing property types
 - Removing properties
 - Changing cardinality constraints to be more restrictive
+- Removing allowed endpoint pairs from a source-dependent edge
+
+### Endpoint Pair Changes
+
+[Source-dependent targets](/core-concepts#source-dependent-targets) are part of
+the serialized schema. The `targetKindsBySource` field preserves the allowed
+pairs alongside the source and target kind lists, so export/import and schema
+round trips retain the restriction. For compile-time declarations, reordering
+map entries or target arrays does not change the schema hash. Persisted runtime
+extension documents also contribute to the hash and retain their array order.
+
+Narrowing a target map is breaking even when the overall source and target kind
+sets remain unchanged. For example, changing an edge from allowing every
+`Employee`/`Student` to `Department`/`Course` combination to allowing only
+`Employee → Department` and `Student → Course` removes two pairs. Existing rows
+using those pairs need migration before adopting the narrower schema.
+
+Adding allowed pairs, or changing the representation without removing any pairs,
+is nonbreaking. Runtime extension changes have an additional empty-kind check
+when tightening endpoints; see [extension edges](/graph-extensions#edges).
 
 ## Handling Breaking Changes
 

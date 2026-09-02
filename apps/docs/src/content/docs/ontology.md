@@ -219,9 +219,11 @@ For symmetric relationships, declare an edge as its own inverse:
 inverseOf(collaboratesWith, collaboratesWith);
 ```
 
-An edge may have only one distinct inverse partner. Both endpoint declarations
-must be compatible in reverse (`A.from` with `B.to`, `A.to` with `B.from`, in
-both traversal directions). Self-inverse edges remain valid.
+An edge may have only one distinct inverse partner. Every allowed pair must be
+compatible with a reversed pair in its partner, in both traversal directions,
+using equal kinds or `subClassOf` assignability. Matching the independent source
+and target unions is insufficient for source-dependent edges. A self-inverse
+edge must satisfy the same reversed-pair check against itself.
 
 **`implies`**: Declares that one edge kind implies another exists.
 
@@ -247,9 +249,12 @@ const connections = await store
 sense if every node kind `edgeA` can connect could also, in principle,
 satisfy `edgeB`'s own domain/range — otherwise `expand: "implying"` would
 traverse rows whose kinds don't match what the traversal actually asked for.
-Every kind `edgeA` allows on a side (`from`/`to`) must be assignable — equal,
-or a `subClassOf` descendant — to at least one kind `edgeB` allows on that
-same side. An incompatible pair (say, `Author -> Paper` implying
+Every allowed pair in `edgeA` must match a single allowed pair in `edgeB`:
+both endpoints must be assignable — equal, or a `subClassOf` descendant —
+to their corresponding endpoint in that pair. For
+[source-dependent targets](/core-concepts#source-dependent-targets), finding
+the source in one entry and the target in another does not suffice.
+An incompatible pair (say, `Author -> Paper` implying
 `Paper -> Topic`) throws `ConfigurationError` wherever the graph is built
 into a store or committed as a schema version (`createStore`,
 `createStoreWithSchema`, `store.evolve({ ontology })`) — including relations
@@ -529,7 +534,7 @@ function relatedTo(a: NodeType, b: NodeType): OntologyRelation;
 Declares edge types as inverses of each other.
 
 ```typescript
-function inverseOf(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation;
+function inverseOf(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
 ```
 
 #### `implies(edgeA, edgeB)`
@@ -537,11 +542,11 @@ function inverseOf(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation;
 Declares that one edge type implies another exists.
 
 ```typescript
-function implies(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation;
+function implies(edgeA: AnyEdgeType, edgeB: AnyEdgeType): OntologyRelation;
 ```
 
-`edgeA`'s endpoints must be assignable to `edgeB`'s endpoints (equal, or a
-`subClassOf` descendant) on both the `from` and `to` side. Throws
+Each allowed pair in `edgeA` must be assignable to one allowed pair in `edgeB`
+(equal, or a `subClassOf` descendant, on both endpoints). Throws
 `ConfigurationError` when the graph is built into a store or committed as a
 schema version if they aren't — see [Edge Relationships](#edge-relationships)
 above.
