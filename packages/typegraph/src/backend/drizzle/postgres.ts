@@ -130,13 +130,11 @@ import {
   type CommitSchemaVersionParams,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
-  type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
   type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
-  type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
   type ManagedNodeCreatePlan,
   normalizeGraphAnalyticsCapabilities,
@@ -184,8 +182,10 @@ import {
   createContributionOperationMembers,
 } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
+import { createGraphTemplateMembers } from "./engine/members/graph-template-members";
 import { createIdentityMembers } from "./engine/members/identity-members";
 import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
+import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
   type AnyPgDatabase,
@@ -203,7 +203,6 @@ import {
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
-import { instantiateGraphTemplateSql } from "./graph-template-sql";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -212,7 +211,6 @@ import {
 import {
   buildKindRemovalInsertValues,
   buildKindRemovalOnConflictSet,
-  mapKindRemovalRow,
   POSTGRES_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
@@ -942,12 +940,6 @@ function buildPostgresEngineProfile(
     });
   }
 
-  async function ensureTableWithConcurrentCreateRetry(
-    table: Parameters<typeof generatePgCreateTableSQL>[0],
-  ): Promise<void> {
-    await executeConcurrentCreateDdl(generatePgCreateTableSQL(table));
-  }
-
   /**
    * THE one place this backend installs a database extension, for every
    * extension and every caller.
@@ -1372,11 +1364,53 @@ function buildPostgresEngineProfile(
     return readBaseSchemaVersion();
   }
 
-  async function ensureGraphTemplatesTable(): Promise<void> {
-    await executeConcurrentCreateDdl(
-      generatePgCreateTableSQL(tables.graphTemplates),
-    );
-  }
+  const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
+    createGraphTemplateMembers({
+      dialect: "postgres",
+      graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
+      ensureTable: executeConcurrentCreateDdl,
+      execute: operations.execute,
+      tableNames: {
+        schemaVersions: getTableName(tables.schemaVersions),
+        graphTemplates: getTableName(tables.graphTemplates),
+        contributionMaterializations: getTableName(
+          tables.contributionMaterializations,
+        ),
+      },
+      toSchemaVersionRow,
+      rowAccess: {
+        async insertIgnoringConflict(params) {
+          const t = tables.graphTemplates;
+          await db
+            .insert(t)
+            .values({
+              templateId: params.templateId,
+              schemaHash: params.schemaHash,
+              schemaDoc: params.schemaDoc,
+              createdAt: new Date(),
+            })
+            .onConflictDoNothing();
+        },
+        async selectByTemplateId(templateId) {
+          const t = tables.graphTemplates;
+          const templateRows = await db
+            .select()
+            .from(t)
+            .where(eq(t.templateId, templateId));
+          const row = templateRows.at(0);
+          if (row === undefined) return;
+          return {
+            templateId: row.templateId,
+            schemaHash: row.schemaHash,
+            schemaDoc: JSON.stringify(row.schemaDoc),
+            createdAt: row.createdAt.toISOString(),
+          };
+        },
+      },
+      // PostgreSQL's own statement already copies the template's
+      // contribution markers inside its CTE (see `graph-template-sql.ts`),
+      // so this profile supplies no `copyContributionMarkers` dep.
+    });
 
   const baseSchemaLifecycle = createBaseSchemaLifecycle({
     readVersion: readBaseSchemaVersion,
@@ -1477,6 +1511,40 @@ function buildPostgresEngineProfile(
           .onConflictDoUpdate({
             target: t.indexName,
             set: buildMaterializationOnConflictSet(params.materializedAt),
+          });
+      },
+    },
+  });
+
+  const kindRemovalMembers = createKindRemovalMembers({
+    kindRemovalsTableDdl: generatePgCreateTableSQL(tables.kindRemovals),
+    ensureTable: executeConcurrentCreateDdl,
+    timestamps: POSTGRES_KIND_REMOVAL_TIMESTAMPS,
+    rowAccess: {
+      async selectPending(graphId) {
+        const t = tables.kindRemovals;
+        return db
+          .select()
+          .from(t)
+          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+      },
+      async selectAll(graphId) {
+        const t = tables.kindRemovals;
+        return db.select().from(t).where(eq(t.graphId, graphId));
+      },
+      async upsert(params: RecordKindRemovalParams) {
+        const t = tables.kindRemovals;
+        await db
+          .insert(t)
+          .values(
+            buildKindRemovalInsertValues(
+              params,
+              POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
           });
       },
     },
@@ -1793,58 +1861,7 @@ function buildPostgresEngineProfile(
         );
       },
 
-      async registerGraphTemplate(params): Promise<GraphTemplateRow> {
-        const t = tables.graphTemplates;
-        await db
-          .insert(t)
-          .values({
-            templateId: params.templateId,
-            schemaHash: params.schemaHash,
-            schemaDoc: params.schemaDoc,
-            createdAt: new Date(),
-          })
-          .onConflictDoNothing();
-        const templateRows = await db
-          .select()
-          .from(t)
-          .where(eq(t.templateId, params.templateId));
-        const row = templateRows.at(0);
-        if (row?.schemaHash !== params.schemaHash) {
-          throw new ConfigurationError(
-            `Graph template "${params.templateId}" already exists with different schema content.`,
-            {
-              code: "GRAPH_TEMPLATE_CONTENT_CONFLICT",
-              templateId: params.templateId,
-            },
-          );
-        }
-        return {
-          template_id: row.templateId,
-          schema_hash: row.schemaHash,
-          schema_doc: JSON.stringify(row.schemaDoc),
-          created_at: row.createdAt.toISOString(),
-        };
-      },
-
-      async instantiateGraphTemplate(params) {
-        const rows = await operations.execute<Record<string, unknown>>(
-          instantiateGraphTemplateSql({
-            dialect: "postgres",
-            graphId: params.graphId,
-            schemaHash: params.schemaHash,
-            schemaVersionsTableName: getTableName(tables.schemaVersions),
-            templatesTableName: getTableName(tables.graphTemplates),
-            contributionMaterializationsTableName: getTableName(
-              tables.contributionMaterializations,
-            ),
-            templateId: params.templateId,
-            templateSchemaHash: params.templateSchemaHash,
-          }),
-        );
-        const row = rows[0];
-        if (row === undefined) return { status: "refused" } as const;
-        return { status: "ready", row: toSchemaVersionRow(row) } as const;
-      },
+      ...graphTemplateMembers,
 
       ...identityMembers,
 
@@ -1867,48 +1884,7 @@ function buildPostgresEngineProfile(
 
       ...contributionMembers,
 
-      async ensureKindRemovalsTable(): Promise<void> {
-        await ensureTableWithConcurrentCreateRetry(tables.kindRemovals);
-      },
-
-      async getPendingKindRemovals(
-        graphId: string,
-      ): Promise<readonly KindRemovalRow[]> {
-        const t = tables.kindRemovals;
-        const rows = await db
-          .select()
-          .from(t)
-          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
-        return rows.map((row) =>
-          mapKindRemovalRow(row, POSTGRES_KIND_REMOVAL_TIMESTAMPS.decode),
-        );
-      },
-
-      async getAllKindRemovals(
-        graphId: string,
-      ): Promise<readonly KindRemovalRow[]> {
-        const t = tables.kindRemovals;
-        const rows = await db.select().from(t).where(eq(t.graphId, graphId));
-        return rows.map((row) =>
-          mapKindRemovalRow(row, POSTGRES_KIND_REMOVAL_TIMESTAMPS.decode),
-        );
-      },
-
-      async recordKindRemoval(params: RecordKindRemovalParams): Promise<void> {
-        const t = tables.kindRemovals;
-        await db
-          .insert(t)
-          .values(
-            buildKindRemovalInsertValues(
-              params,
-              POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
-            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
-      },
+      ...kindRemovalMembers,
 
       async commitSchemaVersion(
         params: CommitSchemaVersionParams,

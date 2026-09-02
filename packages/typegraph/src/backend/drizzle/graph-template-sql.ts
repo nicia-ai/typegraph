@@ -16,7 +16,7 @@ type InstantiateGraphTemplateSqlParams = Readonly<{
   templateSchemaHash: string;
 }>;
 
-type CopyGraphTemplateContributionMarkersSqlParams = Readonly<{
+export type CopyGraphTemplateContributionMarkersSqlParams = Readonly<{
   graphId: string;
   schemaHash: string;
   schemaVersionsTableName: string;

@@ -82,12 +82,10 @@ import {
   type CommitSchemaVersionParams,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
-  type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
-  type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
   type RecordKindRemovalParams,
@@ -114,10 +112,7 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
-import {
-  copyGraphTemplateContributionMarkersStatement,
-  instantiateGraphTemplateSql,
-} from "./graph-template-sql";
+import { copyGraphTemplateContributionMarkersStatement } from "./graph-template-sql";
 import { isLocalLibsqlClient } from "./libsql-client";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
@@ -165,8 +160,10 @@ import {
   createContributionOperationMembers,
 } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
+import { createGraphTemplateMembers } from "./engine/members/graph-template-members";
 import { createIdentityMembers } from "./engine/members/identity-members";
 import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
+import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
   buildMaterializationInsertValues,
@@ -176,7 +173,6 @@ import {
 import {
   buildKindRemovalInsertValues,
   buildKindRemovalOnConflictSet,
-  mapKindRemovalRow,
   SQLITE_KIND_REMOVAL_TIMESTAMPS,
 } from "./kind-removals";
 import {
@@ -1662,9 +1658,60 @@ export function buildSqliteEngineProfile(
     return readBaseSchemaVersion();
   }
 
-  async function ensureGraphTemplatesTable(): Promise<void> {
-    await db.run(sql.raw(generateSqliteCreateTableSQL(tables.graphTemplates)));
-  }
+  const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
+    createGraphTemplateMembers({
+      dialect: "sqlite",
+      graphTemplatesTableDdl: generateSqliteCreateTableSQL(
+        tables.graphTemplates,
+      ),
+      ensureTable: runDdlStatement,
+      execute: operations.execute,
+      tableNames: {
+        schemaVersions: getTableName(tables.schemaVersions),
+        graphTemplates: getTableName(tables.graphTemplates),
+        contributionMaterializations: getTableName(
+          tables.contributionMaterializations,
+        ),
+      },
+      toSchemaVersionRow,
+      rowAccess: {
+        async insertIgnoringConflict(params) {
+          const t = tables.graphTemplates;
+          await db
+            .insert(t)
+            .values({
+              templateId: params.templateId,
+              schemaHash: params.schemaHash,
+              schemaDoc: JSON.stringify(params.schemaDoc),
+              createdAt: nowIso(),
+            })
+            .onConflictDoNothing();
+        },
+        async selectByTemplateId(templateId) {
+          const t = tables.graphTemplates;
+          const templateRows = await db
+            .select()
+            .from(t)
+            .where(eq(t.templateId, templateId));
+          const row = templateRows.at(0);
+          if (row === undefined) return;
+          return {
+            templateId: row.templateId,
+            schemaHash: row.schemaHash,
+            schemaDoc: row.schemaDoc,
+            createdAt: row.createdAt,
+          };
+        },
+      },
+      // SQLite cannot put a data-modifying CTE beside the schema INSERT, so
+      // the marker copy runs as a second DML statement after the schema row
+      // is confirmed (see `graph-template-sql.ts`).
+      async copyContributionMarkers(params) {
+        await operations.execute<Record<string, unknown>>(
+          copyGraphTemplateContributionMarkersStatement(params),
+        );
+      },
+    });
 
   const baseSchemaLifecycle = createBaseSchemaLifecycle({
     readVersion: readBaseSchemaVersion,
@@ -1739,6 +1786,40 @@ export function buildSqliteEngineProfile(
           .onConflictDoUpdate({
             target: t.indexName,
             set: buildMaterializationOnConflictSet(params.materializedAt),
+          });
+      },
+    },
+  });
+
+  const kindRemovalMembers = createKindRemovalMembers({
+    kindRemovalsTableDdl: generateSqliteCreateTableSQL(tables.kindRemovals),
+    ensureTable: runDdlStatement,
+    timestamps: SQLITE_KIND_REMOVAL_TIMESTAMPS,
+    rowAccess: {
+      async selectPending(graphId) {
+        const t = tables.kindRemovals;
+        return db
+          .select()
+          .from(t)
+          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+      },
+      async selectAll(graphId) {
+        const t = tables.kindRemovals;
+        return db.select().from(t).where(eq(t.graphId, graphId));
+      },
+      async upsert(params: RecordKindRemovalParams) {
+        const t = tables.kindRemovals;
+        await db
+          .insert(t)
+          .values(
+            buildKindRemovalInsertValues(
+              params,
+              SQLITE_KIND_REMOVAL_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
           });
       },
     },
@@ -2028,71 +2109,7 @@ export function buildSqliteEngineProfile(
         );
       },
 
-      async registerGraphTemplate(params): Promise<GraphTemplateRow> {
-        const t = tables.graphTemplates;
-        await db
-          .insert(t)
-          .values({
-            templateId: params.templateId,
-            schemaHash: params.schemaHash,
-            schemaDoc: JSON.stringify(params.schemaDoc),
-            createdAt: nowIso(),
-          })
-          .onConflictDoNothing();
-        const templateRows = await db
-          .select()
-          .from(t)
-          .where(eq(t.templateId, params.templateId));
-        const row = templateRows.at(0);
-        if (row?.schemaHash !== params.schemaHash) {
-          throw new ConfigurationError(
-            `Graph template "${params.templateId}" already exists with different schema content.`,
-            {
-              code: "GRAPH_TEMPLATE_CONTENT_CONFLICT",
-              templateId: params.templateId,
-            },
-          );
-        }
-        return {
-          template_id: row.templateId,
-          schema_hash: row.schemaHash,
-          schema_doc: row.schemaDoc,
-          created_at: row.createdAt,
-        };
-      },
-
-      async instantiateGraphTemplate(params) {
-        const rows = await operations.execute<Record<string, unknown>>(
-          instantiateGraphTemplateSql({
-            dialect: "sqlite",
-            graphId: params.graphId,
-            schemaHash: params.schemaHash,
-            schemaVersionsTableName: getTableName(tables.schemaVersions),
-            templatesTableName: getTableName(tables.graphTemplates),
-            contributionMaterializationsTableName: getTableName(
-              tables.contributionMaterializations,
-            ),
-            templateId: params.templateId,
-            templateSchemaHash: params.templateSchemaHash,
-          }),
-        );
-        const row = rows[0];
-        if (row === undefined) return { status: "refused" } as const;
-        await operations.execute<Record<string, unknown>>(
-          copyGraphTemplateContributionMarkersStatement({
-            graphId: params.graphId,
-            schemaHash: params.schemaHash,
-            schemaVersionsTableName: getTableName(tables.schemaVersions),
-            templatesTableName: getTableName(tables.graphTemplates),
-            contributionMaterializationsTableName: getTableName(
-              tables.contributionMaterializations,
-            ),
-            templateId: params.templateId,
-            templateSchemaHash: params.templateSchemaHash,
-          }),
-        );
-        return { status: "ready", row: toSchemaVersionRow(row) } as const;
-      },
+      ...graphTemplateMembers,
 
       ...identityMembers,
 
@@ -2115,50 +2132,7 @@ export function buildSqliteEngineProfile(
 
       ...contributionMembers,
 
-      async ensureKindRemovalsTable(): Promise<void> {
-        await db.run(
-          sql.raw(generateSqliteCreateTableSQL(tables.kindRemovals)),
-        );
-      },
-
-      async getPendingKindRemovals(
-        graphId: string,
-      ): Promise<readonly KindRemovalRow[]> {
-        const t = tables.kindRemovals;
-        const rows = await db
-          .select()
-          .from(t)
-          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
-        return rows.map((row) =>
-          mapKindRemovalRow(row, SQLITE_KIND_REMOVAL_TIMESTAMPS.decode),
-        );
-      },
-
-      async getAllKindRemovals(
-        graphId: string,
-      ): Promise<readonly KindRemovalRow[]> {
-        const t = tables.kindRemovals;
-        const rows = await db.select().from(t).where(eq(t.graphId, graphId));
-        return rows.map((row) =>
-          mapKindRemovalRow(row, SQLITE_KIND_REMOVAL_TIMESTAMPS.decode),
-        );
-      },
-
-      async recordKindRemoval(params: RecordKindRemovalParams): Promise<void> {
-        const t = tables.kindRemovals;
-        await db
-          .insert(t)
-          .values(
-            buildKindRemovalInsertValues(
-              params,
-              SQLITE_KIND_REMOVAL_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
-            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
-      },
+      ...kindRemovalMembers,
 
       async commitSchemaVersion(
         params: CommitSchemaVersionParams,
