@@ -10,9 +10,10 @@
  * reports the seven-bucket partition `tests/bundle-member-access.test.ts`
  * pins: `pilot`, `annotated-residue`, `statically-required`, `reasoned`,
  * `deferred`, `excluded` ({@link EXCLUDED_ACCESS_SITES} — the WS1-era
- * `backend/drizzle/trusted-import.ts` carve-out, made visible and exactly
- * pinned rather than hidden behind a file-pattern exclusion), and
- * (implicitly, by omission) not-an-access.
+ * `backend/drizzle/trusted-import.ts` carve-out plus the `create-sql-backend.ts`
+ * self-reference, each made visible and individually pinned rather than
+ * hidden behind a file-pattern exclusion), and (implicitly, by omission)
+ * not-an-access.
  *
  * ## The receiver test, in two arms
  *
@@ -221,10 +222,21 @@ export const NOT_AN_ACCESS_SITES: readonly Readonly<{
  * `executeStatement` on the always-present `SchemaWriteTransactionBackend`).
  * Those are named below, individually.
  *
- * `backend/drizzle/trusted-import.ts` is NOT excluded by file pattern (B10):
- * its four accesses are classified `excluded` instead, via
- * {@link EXCLUDED_ACCESS_SITES} — a pinned, exactly-four inventory rather than
- * a glob hole, per the B9-checkpoint ruling ("Trusted-import gap: INVENTORIED
+ * `create-sql-backend.ts` is NOT given a file-pattern exclusion, even though
+ * its one current access (`operations.lockSchemaVersionForWrite`, read off
+ * the operation-backend layer this same factory just built, to republish as
+ * the assembled backend's own member) is the same Contract-I2 self-reference
+ * shape as the two files above: this factory assembles the ENTIRE adapter
+ * literal, so its access surface is expected to keep growing, and a glob
+ * here would make every future read invisible to the scanner rather than
+ * one. Its single site is named individually in
+ * {@link EXCLUDED_ACCESS_SITES} instead, so a second read in this factory
+ * is a new row the scan reports rather than silent debt.
+ *
+ * `backend/drizzle/trusted-import.ts` is NOT excluded by file pattern (B10)
+ * either: its four accesses are classified `excluded` the same way, via
+ * {@link EXCLUDED_ACCESS_SITES} — a pinned inventory rather than a glob
+ * hole, per the B9-checkpoint ruling ("Trusted-import gap: INVENTORIED
  * EXCLUSION, ruled"). Any OTHER file added under `backend/drizzle/**` is
  * in-scope by default — only these are named here.
  */
@@ -254,13 +266,25 @@ const EXCLUDED_FILE_PATTERNS: readonly RegExp[] = [
  * is a second, backend-owned write path by design (a bulk, all-or-nothing
  * ingestion session that takes the managed-write fence itself, per its own
  * `WRITE_PIPELINE_EXEMPTIONS` entry in `eslint/write-pipeline-inventory.mjs`),
- * never routed through the bundle model's verdict/binding split. Classified
- * `excluded` FIRST, before statically-required/annotated-residue/pilot/
- * reasoned/deferred, and never absorbed into the reasoned floor or the
- * deferred ceiling — this is a SEVENTH bucket with its own exactly-four pin,
+ * never routed through the bundle model's verdict/binding split.
+ *
+ * The fifth entry is the opposite shape: `create-sql-backend.ts`'s
+ * `operations.lockSchemaVersionForWrite` IS a Contract-I2 self-reference (the
+ * factory reading a member off the operation backend it just built, to
+ * republish under the same name on the assembled adapter literal) — the same
+ * shape the file-pattern exclusions above cover for `contribution-members.ts`
+ * and `contribution-materializations.ts`. It is pinned here instead of
+ * folded into a file-pattern exclusion because `create-sql-backend.ts`
+ * assembles the entire adapter literal and its access surface is expected to
+ * keep growing; a glob would make every future read invisible to the scanner
+ * rather than only this one.
+ *
+ * Classified `excluded` FIRST, before statically-required/annotated-residue/
+ * pilot/reasoned/deferred, and never absorbed into the reasoned floor or the
+ * deferred ceiling — this is a SEVENTH bucket with its own exactly-five pin,
  * asserted both directions by `tests/bundle-member-access.test.ts`: every
  * `snippet` occurs verbatim in the file (a vacuity guard), and every one of
- * these four appears in the scan with class `excluded`.
+ * these five appears in the scan with class `excluded`.
  */
 export const EXCLUDED_ACCESS_SITES: readonly Readonly<{
   file: string;
@@ -300,6 +324,14 @@ export const EXCLUDED_ACCESS_SITES: readonly Readonly<{
     snippet: "return backend.executeStatement;",
     reason:
       "requireStatementExecution's return (:58) — a second, backend-owned write path by design, never routed through the bundle model.",
+  },
+  {
+    file: "backend/drizzle/engine/create-sql-backend.ts",
+    member: "lockSchemaVersionForWrite",
+    count: 1,
+    snippet: "operations.lockSchemaVersionForWrite,",
+    reason:
+      "a Contract-I2 self-reference — the factory reads this member off the operation backend it just built, to republish it under the same name on the assembled adapter literal, not a consumer reading a foreign backend's member.",
   },
 ];
 

@@ -143,9 +143,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
-  contributionRebuildSupported,
   gateFulltext,
-  gateFulltextMethods,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
@@ -158,23 +156,21 @@ import {
   postgresIdentifierRegclassName,
 } from "./ddl";
 import {
+  type BaseSchemaRuntime,
+  type ContributionRuntime,
   createSqlBackend,
   type EngineAssemblyContext,
   type EngineLateMembers,
   type EngineProvisioning,
+  type GraphTemplateRuntime,
+  type IdentityRuntime,
+  type IndexMaterializationRuntime,
+  type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
 import { finalizeEngineCapabilities } from "./engine/capabilities";
-import { createBaseSchemaMembers } from "./engine/members/base-schema-members";
-import {
-  createContributionMembers,
-  createContributionOperationMembers,
-} from "./engine/members/contribution-members";
+import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
-import { createGraphTemplateMembers } from "./engine/members/graph-template-members";
-import { createIdentityMembers } from "./engine/members/identity-members";
-import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
-import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
   buildCommonOperationOptions,
@@ -209,7 +205,6 @@ import {
 import {
   assertActiveSchemaVersion,
   assertAdoptedDialect,
-  commitSchemaVersionIfKindsEmpty,
   createCommonOperationBackend,
   type InternalOperationBackend,
   type OperationBackendRowMappers,
@@ -685,10 +680,13 @@ export function createPostgresBackend(
  * Builds the PostgreSQL {@link SqlEngineProfile} `createSqlBackend` (from
  * `./engine`) assembles into a backend. Everything below is today's
  * PostgreSQL backend construction, unchanged, reorganized into the
- * profile's head data, its dialect-owned late members (`transactions`,
- * `fence`, `schemaCommit`, `rawSql`, `maintenance`, `trustedImport`,
- * `extensions`), and the remaining adapter members not yet extracted into a
- * shared `members/*.ts` file (`inlineMembers`).
+ * profile's head data and its dialect-owned late members (`transactions`,
+ * `fence`, `rawSql`, `maintenance`, `trustedImport`, `extensions`) — every
+ * mirrored member group has been extracted into `members/*.ts` and is
+ * assembled by `createSqlBackend` itself from head-data runtime deps this
+ * profile supplies (`contributionRuntime`, `identityRuntime`,
+ * `graphTemplateRuntime`, `baseSchemaRuntime`,
+ * `indexMaterializationRuntime`, `kindRemovalRuntime`).
  */
 function buildPostgresEngineProfile(
   db: AnyPgDatabase,
@@ -804,34 +802,23 @@ function buildPostgresEngineProfile(
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
-  // The rebuild-support predicate this profile hands `finalizeEngineCapabilities`
-  // as a dep (`./engine/capabilities`) rather than letting that shared tail
-  // import `contributionRebuildSupported` itself — see that module's doc
-  // comment for why.
-  const contributionRebuildSupportedForThisConnection = (
-    interactiveTransactions: boolean,
-  ): boolean =>
-    contributionRebuildSupported(
-      fulltextStrategy,
-      tables.fulltextTableName,
-      interactiveTransactions,
-    );
   // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
   // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target, the operation backend, and the
-  // contribution materializer this factory still builds inline.
-  // `createSqlBackend` calls it again with `profile.declaredCapabilities` to
-  // resolve `ctx.capabilities` — a profile variant built by overriding
-  // `declaredCapabilities` (as the refusal tests do) is re-derived correctly
-  // only because that function stays pure in its arguments rather than a
-  // cached value; the resulting duplicated derivation is a known,
-  // harmless-today identity gap between `ctx.capabilities` and the
-  // `capabilities` object already baked into `operations` below.
+  // below feeds the fence target and the operation backend this factory
+  // still builds inline. `createSqlBackend` calls it again with
+  // `profile.declaredCapabilities` to resolve `ctx.capabilities` — a profile
+  // variant built by overriding `declaredCapabilities` (as the refusal tests
+  // do) is re-derived correctly only because that function stays pure in its
+  // arguments rather than a cached value; the resulting duplicated
+  // derivation is a known, harmless-today identity gap between
+  // `ctx.capabilities` and the `capabilities` object already baked into
+  // `operations` below.
   const capabilities: BackendCapabilities = finalizeEngineCapabilities(
     declaredCapabilities,
     {
       execution: executionAdapter,
-      contributionRebuildSupported: contributionRebuildSupportedForThisConnection,
+      fulltextStrategy,
+      fulltextTableName: tables.fulltextTableName,
     },
   );
   const tableNames: ResolvedSqlTableNames = {
@@ -994,23 +981,17 @@ function buildPostgresEngineProfile(
     capabilities,
   });
 
-  const {
-    contributionMaterializer,
-    contributionTableExists,
-    members: contributionMembers,
-  } = createContributionMembers({
-    dialect: "postgres",
-    fulltextStrategy,
+  // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
+  // beyond what `createSqlBackend` supplies itself: `dialect`/`fulltextStrategy`/
+  // `vectorStrategy` (the profile head), `fenceTarget` above, `ensureTable`/
+  // `execute`/`operationStrategy` (`provisioning`/`execution`/`strategy`), and
+  // `schemaWriteTransaction` (the fence's own late member, once it exists).
+  const contributionRuntime: ContributionRuntime = {
     fulltextTableName: tables.fulltextTableName,
-    vectorStrategy,
-    fenceTarget,
     contributionTableDdl: generatePgCreateTableSQL(matTable),
     reconciliationMarkersTableDdl: generatePgCreateTableSQL(
       tables.reconciliationMarkers,
     ),
-    ensureTable: executeConcurrentCreateDdl,
-    execute: executionAdapter.execute,
-    operationStrategy,
     timestamps: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
     contributionMarkerColumns: matTable,
     contributionMarkerRows: {
@@ -1055,199 +1036,34 @@ function buildPostgresEngineProfile(
           });
       },
     },
-    // Withheld rather than wired-and-throwing when the driver cannot hold
-    // a session: the rebuild must refuse with its own typed error naming
-    // the absent fence, matching `capabilities.contributions.rebuild`.
-    ...(capabilities.execution.interactiveTransactions ?
-      {
-        schemaWriteTransaction: <T>(
-          graphId: string,
-          fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
-        ) => runSchemaWriteTransaction(graphId, (target) => fn(target)),
-      }
-    : {}),
-  });
+  };
 
-  const identityMembers = createIdentityMembers({
+  // Deps for `createIdentityMembers`, beyond `ensureTable` (`provisioning`)
+  // and `contributionTableExists` (from the contribution member group
+  // `createSqlBackend` builds first).
+  const identityRuntime: IdentityRuntime = {
     revisionOriginsTableDdl: generatePgCreateTableSQL(tables.revisionOrigins),
-    ensureTable: executeConcurrentCreateDdl,
-    contributionTableExists,
     contributionsForTableNames: (overrides) =>
       postgresContributions(buildPostgresTables(overrides), fulltextStrategy),
     primaryKeyConstraintNameFor: (tableName) => `${tableName}_pkey`,
-  });
-
-  const operations = createPostgresOperationBackend({
-    db,
-    executionAdapter,
-    ...(atomicSqlProgramExecutor === undefined ?
-      {}
-    : { atomicSqlProgramExecutor }),
-    adapterOptions,
-    operationStrategy,
-    tableNames,
-    capabilities,
-    fulltextStrategy,
-    vectorStrategy,
-    contributionMaterializer,
-    iterativeScanProbe,
-    schemaVersionsTable: tables.schemaVersions,
-    fenceTarget,
-    transactionScoped: false,
-  });
+  };
 
   /**
-   * The per-graph schema-commit fence.
-   *
-   * Resolves a {@link resolveWriteFencePlan} rather than emitting the lock
-   * unconditionally, so the decision has the same one owner every other lock
-   * site reads — and then REFUSES, like every other fence that guards a
-   * read-then-write spanning statements, rather than degrading.
-   *
-   * It fences a read-then-write sequence that spans STATEMENTS, not a
-   * predicate carried inside one. `commitSchemaVersion` reads the row for the
-   * incoming version, reads the active version, and only then runs the
-   * `deactivateAll` / `activateVersion` pair — and its own comment names this
-   * fence as what serializes that ("BEGIN IMMEDIATE on SQLite,
-   * pg_advisory_xact_lock on Postgres"). Skipping the lock does not leave a
-   * slower-but-correct path, it leaves a check-then-write window in which a
-   * concurrent commit lands between the read and the flip. The partial unique
-   * index on `(graph_id) WHERE is_active` still refuses a SECOND active row,
-   * but it cannot order two commits that each read a version the other is
-   * about to replace.
-   *
-   * `engine-serialized` is the exception `requireWriteFence` already encodes:
-   * the writer slot IS the fence, so there is no concurrent commit to order.
-   *
-   * The row-locking clause rides the `lock` arm rather than a fact of its
-   * own: it is never taken without the advisory lock above it, so no shipped
-   * or plausible engine distinguishes them. An engine that implements
-   * `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks`
-   * member of `PessimisticLockCapabilities` would earn its place.
+   * Builds this profile's top-level `InternalOperationBackend`, deferred
+   * until `createSqlBackend` has built the contribution materializer (its
+   * `buildCommonOperationOptions` assembly needs it for the projection-
+   * evidence callbacks) — everything else here is a plain closure capture,
+   * unchanged from when this call site built `operations` directly.
    */
-  async function acquireSchemaWriteFence(
-    tx: AnyPgTransaction,
-    graphId: string,
-  ): Promise<void> {
-    const plan = requireWriteFence(
-      resolveWriteFencePlan(fenceTarget),
-      "The PostgreSQL schema-commit fence",
-      "advisory-lock",
-    );
-    switch (plan.kind) {
-      case "lock": {
-        // Advisory lock: hashtext($graphId) is collision-tolerant for the
-        // size of an active graph set; collisions just serialize unrelated
-        // graphs which is harmless. Held until the transaction commits.
-        //
-        // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
-        // occupies a different lock space than the two-argument (int4, int4)
-        // form every namespaced TypeGraph lock uses (`typegraph:identity`,
-        // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL
-        // stores the two forms with different locktag field4 values, so a
-        // bigint key can never collide with an (int4, int4) key however the
-        // hashes land — the schema fence is therefore independent of every
-        // lock taken INSIDE it. Normalizing this to the two-argument form
-        // would merge the spaces and put that independence at the mercy of
-        // `hashtext` collisions.
-        await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
-        );
-        // Managed entity writers lock this row FOR SHARE. Locking it FOR
-        // UPDATE before any emptiness probe makes a writer-first commit
-        // wait; a schema-first snapshot-isolated writer gets PostgreSQL's
-        // native serialization failure instead of validating a stale row
-        // version.
-        await tx.execute(sql`
-          SELECT ${tables.schemaVersions.version}
-          FROM ${tables.schemaVersions}
-          WHERE ${tables.schemaVersions.graphId} = ${graphId}
-            AND ${tables.schemaVersions.isActive} = TRUE
-          FOR UPDATE
-        `);
-        return;
-      }
-      case "engine-serialized": {
-        // The writer slot IS the fence; the commit already runs alone, which
-        // is the guarantee `commitSchemaVersion`'s own comment names
-        // ("BEGIN IMMEDIATE on SQLite"). Nothing to take.
-        return;
-      }
-      default: {
-        plan satisfies never;
-      }
-    }
-  }
-
-  /**
-   * Runs `fn` inside a Postgres transaction, under whatever fence
-   * {@link acquireSchemaWriteFence} resolves. On a `lock` backend that is an
-   * `pg_advisory_xact_lock` keyed on the graph id, which serializes all
-   * schema commits per-graph: the read-then-write CAS in
-   * `commitSchemaVersion` is safe even for the initial-commit case where
-   * there is no row yet to `SELECT ... FOR UPDATE`. On an `unfenced` one
-   * that initial-commit case falls back to the storage layer — the partial
-   * unique index on `(graph_id) WHERE is_active` fails the loser of a
-   * concurrent first commit rather than admitting two active rows.
-   *
-   * Refuses on backends that don't support transactions
-   * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
-   * eliminated without atomicity, so silent best-effort degradation is
-   * worse than a typed error.
-   */
-  function runSchemaWriteTransaction<T>(
-    graphId: string,
-    fn: (tx: InternalOperationBackend) => Promise<T>,
-  ): Promise<T> {
-    if (!capabilities.execution.interactiveTransactions) {
-      throw new ConfigurationError(
-        "Schema writes and removal cleanup require atomic transactions, " +
-          "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
-          "driver communicates over HTTP and cannot hold a session across statements; " +
-          "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
-        {
-          backend: "postgres",
-          capability: "execution.interactiveTransactions",
-          supportsInteractiveTransactions: false,
-        },
-      );
-    }
-
-    return db.transaction(async (tx) => {
-      await acquireSchemaWriteFence(tx, graphId);
-      // The fence resolved above is held here, so the schema-write-capable
-      // InternalOperationBackend is used intentionally (see its type).
-      const { backend: txBackend, drainAndClose } = createTransactionBackend({
-        db: tx,
-        adapterOptions,
-        operationStrategy,
-        tableNames,
-        capabilities,
-        fulltextStrategy,
-        vectorStrategy,
-        contributionMaterializer,
-        iterativeScanProbe,
-        schemaVersionsTable: tables.schemaVersions,
-        fenceTarget,
-      });
-      try {
-        return await fn(txBackend);
-      } finally {
-        await drainAndClose();
-      }
-    });
-  }
-
-  // Shared by `transaction()` (TypeGraph opens the tx) and
-  // `adoptTransaction()` (#134 — the caller already opened it): bind a
-  // tx-scoped backend to the *literal* `tx` client and gate fulltext on
-  // the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
-    backend: TransactionBackend;
-    drainAndClose: () => Promise<void>;
-  }> {
-    const { backend, drainAndClose } = createTransactionBackend({
-      db: tx,
+  function buildOperations(
+    contributionMaterializer: ContributionMaterializer,
+  ): InternalOperationBackend {
+    return createPostgresOperationBackend({
+      db,
+      executionAdapter,
+      ...(atomicSqlProgramExecutor === undefined ?
+        {}
+      : { atomicSqlProgramExecutor }),
       adapterOptions,
       operationStrategy,
       tableNames,
@@ -1258,19 +1074,8 @@ function buildPostgresEngineProfile(
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
       fenceTarget,
+      transactionScoped: false,
     });
-    const gatedBackend = carryAtomicMutationSessionRegistration(
-      backend,
-      gateFulltext(
-        backend,
-        contributionMaterializer.assertInitialized,
-        contributionMaterializer.refuseUnavailableFulltext,
-      ),
-    );
-    return {
-      backend: gatedBackend,
-      drainAndClose,
-    };
   }
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
@@ -1380,66 +1185,65 @@ function buildPostgresEngineProfile(
     ensureTrigramExtension: () => ensureDatabaseExtension("pg_trgm"),
   };
 
-  const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
-    createGraphTemplateMembers({
-      dialect: "postgres",
-      graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
-      ensureTable: executeConcurrentCreateDdl,
-      execute: operations.execute,
-      tableNames: {
-        schemaVersions: getTableName(tables.schemaVersions),
-        graphTemplates: getTableName(tables.graphTemplates),
-        contributionMaterializations: getTableName(
-          tables.contributionMaterializations,
-        ),
+  // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
+  // head), `ensureTable` (`provisioning`), and `execute` (the operation
+  // layer's own `execute`, built once `createSqlBackend` has a contribution
+  // materializer to hand `buildOperations`).
+  const graphTemplateRuntime: GraphTemplateRuntime = {
+    graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
+    tableNames: {
+      schemaVersions: getTableName(tables.schemaVersions),
+      graphTemplates: getTableName(tables.graphTemplates),
+      contributionMaterializations: getTableName(
+        tables.contributionMaterializations,
+      ),
+    },
+    toSchemaVersionRow,
+    rowAccess: {
+      async insertIgnoringConflict(params) {
+        const t = tables.graphTemplates;
+        await db
+          .insert(t)
+          .values({
+            templateId: params.templateId,
+            schemaHash: params.schemaHash,
+            schemaDoc: params.schemaDoc,
+            createdAt: new Date(),
+          })
+          .onConflictDoNothing();
       },
-      toSchemaVersionRow,
-      rowAccess: {
-        async insertIgnoringConflict(params) {
-          const t = tables.graphTemplates;
-          await db
-            .insert(t)
-            .values({
-              templateId: params.templateId,
-              schemaHash: params.schemaHash,
-              schemaDoc: params.schemaDoc,
-              createdAt: new Date(),
-            })
-            .onConflictDoNothing();
-        },
-        async selectByTemplateId(templateId) {
-          const t = tables.graphTemplates;
-          const templateRows = await db
-            .select()
-            .from(t)
-            .where(eq(t.templateId, templateId));
-          const row = templateRows.at(0);
-          if (row === undefined) return;
-          return {
-            templateId: row.templateId,
-            schemaHash: row.schemaHash,
-            schemaDoc: JSON.stringify(row.schemaDoc),
-            createdAt: row.createdAt.toISOString(),
-          };
-        },
+      async selectByTemplateId(templateId) {
+        const t = tables.graphTemplates;
+        const templateRows = await db
+          .select()
+          .from(t)
+          .where(eq(t.templateId, templateId));
+        const row = templateRows.at(0);
+        if (row === undefined) return;
+        return {
+          templateId: row.templateId,
+          schemaHash: row.schemaHash,
+          schemaDoc: JSON.stringify(row.schemaDoc),
+          createdAt: row.createdAt.toISOString(),
+        };
       },
-      // PostgreSQL's own statement already copies the template's
-      // contribution markers inside its CTE (see `graph-template-sql.ts`),
-      // so this profile supplies no `copyContributionMarkers` dep.
-    });
+    },
+    // PostgreSQL's own statement already copies the template's
+    // contribution markers inside its CTE (see `graph-template-sql.ts`),
+    // so this profile supplies no `copyContributionMarkers` dep.
+  };
 
-  const baseSchemaMembers = createBaseSchemaMembers({
+  // Deps for `createBaseSchemaMembers`, beyond `ensureTable`/`executeDdl`/
+  // `generateDdl` (`provisioning`) and `ensureGraphTemplatesTable` (from the
+  // graph-template member group `createSqlBackend` builds first).
+  const baseSchemaRuntime: BaseSchemaRuntime = {
     baseSchemaVersionsTableDdl: generatePgCreateTableSQL(
       tables.baseSchemaVersions,
     ),
-    ensureTable: provisioning.ensureTable,
-    executeDdl: provisioning.executeDdl,
-    generateDdl: provisioning.generateDdl,
     readVersion: readBaseSchemaVersion,
     writeVersion: writeBaseSchemaVersion,
-    ensureGraphTemplatesTable,
     ensureEdgeMatchIdentityStorage,
-  });
+  };
 
   const limits = {
     maxBindParameters:
@@ -1455,12 +1259,12 @@ function buildPostgresEngineProfile(
     toUniqueRow,
   };
 
-  const indexMaterializationMembers = createIndexMaterializationMembers({
+  // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
+  // `ensureIndexMaterializationColumns` (both `provisioning`).
+  const indexMaterializationRuntime: IndexMaterializationRuntime = {
     indexMaterializationsTableDdl: generatePgCreateTableSQL(
       tables.indexMaterializations,
     ),
-    ensureTable: executeConcurrentCreateDdl,
-    ensureIndexMaterializationColumns,
     tableName: getTableName(tables.indexMaterializations),
     timestamps: POSTGRES_INDEX_MAT_TIMESTAMPS,
     rowAccess: {
@@ -1491,11 +1295,11 @@ function buildPostgresEngineProfile(
           });
       },
     },
-  });
+  };
 
-  const kindRemovalMembers = createKindRemovalMembers({
+  // Deps for `createKindRemovalMembers`, beyond `ensureTable` (`provisioning`).
+  const kindRemovalRuntime: KindRemovalRuntime = {
     kindRemovalsTableDdl: generatePgCreateTableSQL(tables.kindRemovals),
-    ensureTable: executeConcurrentCreateDdl,
     timestamps: POSTGRES_KIND_REMOVAL_TIMESTAMPS,
     rowAccess: {
       async selectPending(graphId) {
@@ -1525,11 +1329,189 @@ function buildPostgresEngineProfile(
           });
       },
     },
-  });
+  };
 
   function lateMembers(
     ctx: EngineAssemblyContext<AnyPgTransaction>,
   ): EngineLateMembers<AnyPgTransaction> {
+    /**
+     * The per-graph schema-commit fence.
+     *
+     * Resolves a {@link resolveWriteFencePlan} rather than emitting the lock
+     * unconditionally, so the decision has the same one owner every other lock
+     * site reads — and then REFUSES, like every other fence that guards a
+     * read-then-write spanning statements, rather than degrading.
+     *
+     * It fences a read-then-write sequence that spans STATEMENTS, not a
+     * predicate carried inside one. `commitSchemaVersion` reads the row for the
+     * incoming version, reads the active version, and only then runs the
+     * `deactivateAll` / `activateVersion` pair — and its own comment names this
+     * fence as what serializes that ("BEGIN IMMEDIATE on SQLite,
+     * pg_advisory_xact_lock on Postgres"). Skipping the lock does not leave a
+     * slower-but-correct path, it leaves a check-then-write window in which a
+     * concurrent commit lands between the read and the flip. The partial unique
+     * index on `(graph_id) WHERE is_active` still refuses a SECOND active row,
+     * but it cannot order two commits that each read a version the other is
+     * about to replace.
+     *
+     * `engine-serialized` is the exception `requireWriteFence` already encodes:
+     * the writer slot IS the fence, so there is no concurrent commit to order.
+     *
+     * The row-locking clause rides the `lock` arm rather than a fact of its
+     * own: it is never taken without the advisory lock above it, so no shipped
+     * or plausible engine distinguishes them. An engine that implements
+     * `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks`
+     * member of `PessimisticLockCapabilities` would earn its place.
+     */
+    async function acquireSchemaWriteFence(
+      tx: AnyPgTransaction,
+      graphId: string,
+    ): Promise<void> {
+      const plan = requireWriteFence(
+        resolveWriteFencePlan(fenceTarget),
+        "The PostgreSQL schema-commit fence",
+        "advisory-lock",
+      );
+      switch (plan.kind) {
+        case "lock": {
+          // Advisory lock: hashtext($graphId) is collision-tolerant for the
+          // size of an active graph set; collisions just serialize unrelated
+          // graphs which is harmless. Held until the transaction commits.
+          //
+          // The ONE-ARGUMENT (bigint) form is deliberate and load-bearing: it
+          // occupies a different lock space than the two-argument (int4, int4)
+          // form every namespaced TypeGraph lock uses (`typegraph:identity`,
+          // `typegraph:identity-ddl`, the recorded-write clock). PostgreSQL
+          // stores the two forms with different locktag field4 values, so a
+          // bigint key can never collide with an (int4, int4) key however the
+          // hashes land — the schema fence is therefore independent of every
+          // lock taken INSIDE it. Normalizing this to the two-argument form
+          // would merge the spaces and put that independence at the mercy of
+          // `hashtext` collisions.
+          await tx.execute(
+            sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
+          );
+          // Managed entity writers lock this row FOR SHARE. Locking it FOR
+          // UPDATE before any emptiness probe makes a writer-first commit
+          // wait; a schema-first snapshot-isolated writer gets PostgreSQL's
+          // native serialization failure instead of validating a stale row
+          // version.
+          // eslint-disable-next-line unicorn/template-indent -- this SQL text is snapshot-asserted verbatim (tests/engine-profile-parity.test.ts); autofix would reindent it to this closure's nesting depth and change the captured statement text.
+          await tx.execute(sql`
+          SELECT ${tables.schemaVersions.version}
+          FROM ${tables.schemaVersions}
+          WHERE ${tables.schemaVersions.graphId} = ${graphId}
+            AND ${tables.schemaVersions.isActive} = TRUE
+          FOR UPDATE
+        `);
+          return;
+        }
+        case "engine-serialized": {
+          // The writer slot IS the fence; the commit already runs alone, which
+          // is the guarantee `commitSchemaVersion`'s own comment names
+          // ("BEGIN IMMEDIATE on SQLite"). Nothing to take.
+          return;
+        }
+        default: {
+          plan satisfies never;
+        }
+      }
+    }
+
+    /**
+     * Runs `fn` inside a Postgres transaction, under whatever fence
+     * {@link acquireSchemaWriteFence} resolves. On a `lock` backend that is an
+     * `pg_advisory_xact_lock` keyed on the graph id, which serializes all
+     * schema commits per-graph: the read-then-write CAS in
+     * `commitSchemaVersion` is safe even for the initial-commit case where
+     * there is no row yet to `SELECT ... FOR UPDATE`. On an `unfenced` one
+     * that initial-commit case falls back to the storage layer — the partial
+     * unique index on `(graph_id) WHERE is_active` fails the loser of a
+     * concurrent first commit rather than admitting two active rows.
+     *
+     * Refuses on backends that don't support transactions
+     * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
+     * eliminated without atomicity, so silent best-effort degradation is
+     * worse than a typed error.
+     */
+    function runSchemaWriteTransaction<T>(
+      graphId: string,
+      fn: (tx: InternalOperationBackend) => Promise<T>,
+    ): Promise<T> {
+      if (!capabilities.execution.interactiveTransactions) {
+        throw new ConfigurationError(
+          "Schema writes and removal cleanup require atomic transactions, " +
+            "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
+            "driver communicates over HTTP and cannot hold a session across statements; " +
+            "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
+          {
+            backend: "postgres",
+            capability: "execution.interactiveTransactions",
+            supportsInteractiveTransactions: false,
+          },
+        );
+      }
+
+      return db.transaction(async (tx) => {
+        await acquireSchemaWriteFence(tx, graphId);
+        // The fence resolved above is held here, so the schema-write-capable
+        // InternalOperationBackend is used intentionally (see its type).
+        const { backend: txBackend, drainAndClose } = createTransactionBackend({
+          db: tx,
+          adapterOptions,
+          operationStrategy,
+          tableNames,
+          capabilities,
+          fulltextStrategy,
+          vectorStrategy,
+          contributionMaterializer: ctx.contributionMaterializer,
+          iterativeScanProbe,
+          schemaVersionsTable: tables.schemaVersions,
+          fenceTarget,
+        });
+        try {
+          return await fn(txBackend);
+        } finally {
+          await drainAndClose();
+        }
+      });
+    }
+
+    // Shared by `transaction()` (TypeGraph opens the tx) and
+    // `adoptTransaction()` (#134 — the caller already opened it): bind a
+    // tx-scoped backend to the *literal* `tx` client and gate fulltext on
+    // the durable marker (a cached SELECT, never DDL).
+    function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
+      backend: TransactionBackend;
+      drainAndClose: () => Promise<void>;
+    }> {
+      const { backend, drainAndClose } = createTransactionBackend({
+        db: tx,
+        adapterOptions,
+        operationStrategy,
+        tableNames,
+        capabilities,
+        fulltextStrategy,
+        vectorStrategy,
+        contributionMaterializer: ctx.contributionMaterializer,
+        iterativeScanProbe,
+        schemaVersionsTable: tables.schemaVersions,
+        fenceTarget,
+      });
+      const gatedBackend = carryAtomicMutationSessionRegistration(
+        backend,
+        gateFulltext(
+          backend,
+          ctx.contributionMaterializer.assertInitialized,
+          ctx.contributionMaterializer.refuseUnavailableFulltext,
+        ),
+      );
+      return {
+        backend: gatedBackend,
+        drainAndClose,
+      };
+    }
+
     return {
       transactions: {
         async transaction<T>(
@@ -1651,21 +1633,14 @@ function buildPostgresEngineProfile(
       },
 
       fence: {
-        lockSchemaVersionForWrite: requireDefined(
-          operations.lockSchemaVersionForWrite,
-        ),
         runSchemaWriteTransaction,
       },
 
-      schemaCommit: {
-        commitSchemaVersionIfKindsEmpty,
-      },
-
       rawSql: {
-        execute: operations.execute,
-        ...(operations.executeRaw === undefined ?
+        execute: ctx.operations.execute,
+        ...(ctx.operations.executeRaw === undefined ?
           {}
-        : { executeRaw: operations.executeRaw }),
+        : { executeRaw: ctx.operations.executeRaw }),
       },
 
       maintenance: {
@@ -1815,40 +1790,6 @@ function buildPostgresEngineProfile(
     };
   }
 
-  function inlineMembers(
-    _ctx: EngineAssemblyContext<AnyPgTransaction>,
-  ): Partial<AdapterBackend<AnyPgTransaction>> {
-    return {
-      ...baseSchemaMembers,
-
-      ...graphTemplateMembers,
-
-      ...identityMembers,
-
-      // Every fulltext-touching method asserts the durable marker instead
-      // of lazily emitting DDL. Steady state performs zero ensure; an
-      // uninitialized database throws `StoreNotInitializedError` loudly
-      // rather than self-healing on a read/write path (#135). Shared
-      // verbatim with the tx-scoped gate via `gateFulltextMethods`.
-      ...gateFulltextMethods(
-        operations,
-        contributionMaterializer.assertInitialized,
-        contributionMaterializer.refuseUnavailableFulltext,
-      ),
-
-      ...indexMaterializationMembers,
-
-      ...contributionMembers,
-
-      ...kindRemovalMembers,
-
-      async close(): Promise<void> {
-        // Drizzle doesn't expose a close method
-        // Users manage connection lifecycle themselves
-      },
-    };
-  }
-
   return {
     dialect: "postgres",
     tableNames,
@@ -1857,7 +1798,6 @@ function buildPostgresEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
-    contributionRebuildSupported: contributionRebuildSupportedForThisConnection,
     limits,
     rowMappers,
     resourceAudit,
@@ -1865,10 +1805,19 @@ function buildPostgresEngineProfile(
     nowIso,
     provisioning,
     fusion: { atomicProgramsAtTransactionScope: true },
+    fenceTarget,
+    contributionRuntime,
+    identityRuntime,
+    graphTemplateRuntime,
+    baseSchemaRuntime,
+    indexMaterializationRuntime,
+    kindRemovalRuntime,
+    buildOperations,
+    async close(): Promise<void> {
+      // Drizzle doesn't expose a close method
+      // Users manage connection lifecycle themselves
+    },
     lateMembers,
-    operations,
-    contributionMaterializer,
-    inlineMembers,
   };
 }
 

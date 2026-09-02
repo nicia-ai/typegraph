@@ -16,17 +16,14 @@ import type { ResolvedSqlTableNames } from "../../../query/compiler/schema";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
-import type { WriteFencePlan } from "../../capabilities/write-fence";
+import type { WriteFencePlan, WriteFenceTarget } from "../../capabilities/write-fence";
 import type { BackendResourceAudit } from "../../transaction-resource";
 import type {
   AdapterBackend,
   BackendCapabilities,
-  CommitSchemaVersionIfKindsEmptyResult,
-  CommitSchemaVersionParams,
   DatabaseExtensionName,
   InsertNodeParams,
   ManagedNodeCreatePlan,
-  SchemaKindEmptinessProbe,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
@@ -40,6 +37,12 @@ import type {
   CommonOperationStrategy,
   TableExistenceCacheOptions,
 } from "../operations/strategy";
+import type { CreateBaseSchemaMembersDeps } from "./members/base-schema-members";
+import type { CreateContributionMembersDeps } from "./members/contribution-members";
+import type { CreateGraphTemplateMembersDeps } from "./members/graph-template-members";
+import type { CreateIdentityMembersDeps } from "./members/identity-members";
+import type { CreateIndexMaterializationMembersDeps } from "./members/index-materialization-members";
+import type { CreateKindRemovalMembersDeps } from "./members/kind-removal-members";
 
 /** Resolved physical table names, uniform across dialects. */
 export type EngineTableNames = ResolvedSqlTableNames;
@@ -127,10 +130,10 @@ export type OperationFusionHooks = Readonly<{
  * What a profile's late-bound members receive instead of the whole profile
  * or a partially built backend: the facts and collaborators
  * {@link createSqlBackend} has already assembled by the time it calls
- * `lateMembers` / `inlineMembers`, plus `self()` — a thunk resolving to the
- * exact backend object being built, safe to call only once that object has
- * been returned to a caller who could invoke it (i.e., never during the
- * profile's own construction).
+ * `lateMembers`, plus `self()` — a thunk resolving to the exact backend
+ * object being built, safe to call only once that object has been returned
+ * to a caller who could invoke it (i.e., never during the profile's own
+ * construction).
  */
 export type EngineAssemblyContext<TTx> = Readonly<{
   /**
@@ -139,15 +142,14 @@ export type EngineAssemblyContext<TTx> = Readonly<{
    * `declaredCapabilities`. Each dialect builder resolves this same value a
    * second time, for the local `capabilities` its still-inline
    * operation-backend construction needs — a deliberate, harmless-today
-   * duplication (see that module's doc comment) that goes away once the
-   * operation layer stops being built inline.
+   * duplication (see that module's doc comment).
    */
   capabilities: BackendCapabilities;
   /** The write-fence decision, resolved once from the capabilities above. */
   fencePlan: WriteFencePlan;
-  /** The operation-backend layer this profile's dialect assembled. */
+  /** The operation-backend layer `createSqlBackend` built from `profile.buildOperations`. */
   operations: InternalOperationBackend;
-  /** The contribution materializer this profile's dialect assembled. */
+  /** The contribution materializer `createSqlBackend` built from `profile.contributionRuntime`. */
   contributionMaterializer: ContributionMaterializer;
   /** Resolves to the backend `createSqlBackend` is building. */
   self: () => AdapterBackend<TTx>;
@@ -156,23 +158,22 @@ export type EngineAssemblyContext<TTx> = Readonly<{
 /**
  * The late-bound member groups a profile supplies, assembled by
  * {@link createSqlBackend} from `EngineAssemblyContext`. `transactions`,
- * `fence.lockSchemaVersionForWrite`, `rawSql`, `maintenance`,
- * `trustedImport`, and `extensions` stay dialect-owned forever — none of
- * them is a mirror waiting to be extracted into a shared `members/*.ts`
- * file, because each genuinely differs in body between engines
- * (self-referential transaction framing, the raw-SQL escape hatch's
- * driver-level binding and decoding, a lock clause resolved from the fence
- * plan). `schemaCommit` is the one exception: both dialects call it
- * identically, and it lives here only for as long as the entrypoint it
- * feeds must stay clear of a real Drizzle package — see its own doc
- * comment.
+ * `rawSql`, `maintenance`, `trustedImport`, and `extensions` stay
+ * dialect-owned forever — none of them is a mirror waiting to be extracted
+ * into a shared `members/*.ts` file, because each genuinely differs in body
+ * between engines (self-referential transaction framing, the raw-SQL escape
+ * hatch's driver-level binding and decoding, a lock clause resolved from the
+ * fence plan).
  */
 export type EngineLateMembers<TTx> = Readonly<{
   /**
    * The backend's transaction-opening surface. Self-referential — a
    * transaction's own body calls back into the backend that opened it —
    * which is why these are late members reached through
-   * `EngineAssemblyContext.self()` rather than head data.
+   * `EngineAssemblyContext.self()` rather than head data. Also where
+   * `contributionMaterializer`-dependent construction (a transaction-scoped
+   * operation backend) stays dialect-owned, reached through
+   * `ctx.contributionMaterializer` rather than a closed-over local.
    */
   transactions: Pick<
     AdapterBackend<TTx>,
@@ -182,12 +183,10 @@ export type EngineLateMembers<TTx> = Readonly<{
     | "schemaWriteTransaction"
   >;
   fence: Readonly<{
-    lockSchemaVersionForWrite: NonNullable<
-      AdapterBackend<TTx>["lockSchemaVersionForWrite"]
-    >;
     /**
      * The internal, write-fence-holding transaction runner every
-     * schema-commit method delegates to. `fn` receives the full
+     * schema-commit method — and `createSqlBackend`'s own contribution-
+     * rebuild wiring — delegates to. `fn` receives the full
      * `InternalOperationBackend` — including `commitSchemaVersion` and
      * `setActiveVersion`, which the narrower, publicly-reachable
      * `SchemaWriteTransactionBackend` deliberately omits — because this
@@ -202,24 +201,6 @@ export type EngineLateMembers<TTx> = Readonly<{
       graphId: string,
       fn: (target: InternalOperationBackend) => Promise<T>,
     ) => Promise<T>;
-  }>;
-  /**
-   * The populated-kind guard plus commit `operation-backend-core.ts`
-   * implements once and both dialects call identically — not a fence
-   * primitive itself (it issues no lock), just the one helper the schema-
-   * commit member group needs alongside `fence.runSchemaWriteTransaction`.
-   * Threaded through here rather than imported directly by
-   * `members/schema-version-members.ts`: that module is wired into
-   * `createSqlBackend` itself, a published entrypoint root that must not
-   * reach a real Drizzle package until the operation-layer extraction folds
-   * this module in for good.
-   */
-  schemaCommit: Readonly<{
-    commitSchemaVersionIfKindsEmpty: (
-      target: InternalOperationBackend,
-      params: CommitSchemaVersionParams,
-      probes: readonly SchemaKindEmptinessProbe[],
-    ) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
   }>;
   /**
    * The backend's raw-SQL escape hatch. Dialect-owned because parameter
@@ -252,23 +233,83 @@ export type EngineLateMembers<TTx> = Readonly<{
 }>;
 
 /**
+ * What a profile supplies `createSqlBackend` to build the contribution
+ * member group, beyond what the profile's own head already carries
+ * (`dialect`, `fulltext`, `vector`, `fenceTarget`) and what `createSqlBackend`
+ * derives itself (`ensureTable`/`execute`/`operationStrategy` from
+ * `provisioning`/`execution`/`strategy`, and `schemaWriteTransaction` from
+ * the fence's own late member, once it exists). See
+ * `members/contribution-members.ts` for what each field does.
+ */
+export type ContributionRuntime = Omit<
+  CreateContributionMembersDeps,
+  | "dialect"
+  | "fulltextStrategy"
+  | "vectorStrategy"
+  | "fenceTarget"
+  | "ensureTable"
+  | "execute"
+  | "operationStrategy"
+  | "schemaWriteTransaction"
+>;
+
+/**
+ * What a profile supplies `createSqlBackend` to build the identity/
+ * recorded-relation member group, beyond `ensureTable` (from `provisioning`)
+ * and `contributionTableExists` (from the contribution member group
+ * `createSqlBackend` builds first). See `members/identity-members.ts`.
+ */
+export type IdentityRuntime = Omit<
+  CreateIdentityMembersDeps,
+  "ensureTable" | "contributionTableExists"
+>;
+
+/**
+ * What a profile supplies `createSqlBackend` to build the graph-template
+ * member group, beyond `dialect` (the profile head), `ensureTable` (from
+ * `provisioning`), and `execute` (the operation layer's own `execute`, once
+ * `createSqlBackend` has built it). See `members/graph-template-members.ts`.
+ */
+export type GraphTemplateRuntime = Omit<
+  CreateGraphTemplateMembersDeps,
+  "dialect" | "ensureTable" | "execute"
+>;
+
+/**
+ * What a profile supplies `createSqlBackend` to build the base-schema
+ * lifecycle member group, beyond `ensureTable`/`executeDdl`/`generateDdl`
+ * (from `provisioning`) and `ensureGraphTemplatesTable` (from the
+ * graph-template member group `createSqlBackend` builds first). See
+ * `members/base-schema-members.ts`.
+ */
+export type BaseSchemaRuntime = Omit<
+  CreateBaseSchemaMembersDeps,
+  "ensureTable" | "executeDdl" | "generateDdl" | "ensureGraphTemplatesTable"
+>;
+
+/**
+ * What a profile supplies `createSqlBackend` to build the index-
+ * materializations member group, beyond `ensureTable` /
+ * `ensureIndexMaterializationColumns` (both from `provisioning`). See
+ * `members/index-materialization-members.ts`.
+ */
+export type IndexMaterializationRuntime = Omit<
+  CreateIndexMaterializationMembersDeps,
+  "ensureTable" | "ensureIndexMaterializationColumns"
+>;
+
+/**
+ * What a profile supplies `createSqlBackend` to build the kind-removals
+ * member group, beyond `ensureTable` (from `provisioning`). See
+ * `members/kind-removal-members.ts`.
+ */
+export type KindRemovalRuntime = Omit<CreateKindRemovalMembersDeps, "ensureTable">;
+
+/**
  * Everything one SQL engine contributes to `createSqlBackend`: a HEAD of
  * data and dialect closures that exist before any backend object does, and
  * a `lateMembers` factory for the members that need the assembled
  * pipeline (see the module doc comment for why the split exists).
- *
- * Four fields are scaffolding, not part of this type's steady-state shape:
- * `operations` / `contributionMaterializer` are already-built values rather
- * than something `createSqlBackend` assembles itself (the operation-backend
- * layer is still fully dialect-owned), `inlineMembers` is everything else
- * this profile's dialect still builds inline — the mirrored adapter
- * members later extractions move into `members/*.ts` files one group at a
- * time — and `contributionRebuildSupported` exists only because
- * `create-sql-backend.ts` must stay free of a real Drizzle import (see its
- * own doc comment). All four are drained as each extraction lands: the
- * first three by the operation-layer and member extractions, the fourth
- * once the shared capability tail can import the real predicate directly
- * instead of receiving it as a closure; none survives past that point.
  */
 export type SqlEngineProfile<TTx> = Readonly<{
   // ---- head: data and dialect closures with no dependency on the backend ----
@@ -297,16 +338,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
   vector: VectorStrategy | undefined;
   /** The dialect's declared capabilities, before its capability tail runs. */
   declaredCapabilities: BackendCapabilities;
-  /**
-   * Whether this profile can rebuild a durable contribution marker outright,
-   * given whether the connection supports interactive transactions — the
-   * one input `finalizeEngineCapabilities` (`./capabilities`) cannot derive
-   * itself. See that module's doc comment for why this is a closure the
-   * profile supplies rather than a shared import: the real predicate lives
-   * in `contribution-materializations.ts`, which imports `drizzle-orm` at
-   * module scope, and this profile's own head data must not.
-   */
-  contributionRebuildSupported: (interactiveTransactions: boolean) => boolean;
   /** Bind-parameter and batch-sizing limits the operation-backend layer partitions its writes against. */
   limits: Readonly<{
     maxBindParameters: number;
@@ -331,6 +362,39 @@ export type SqlEngineProfile<TTx> = Readonly<{
   nowIso?: () => string;
   provisioning: EngineProvisioning;
   fusion?: OperationFusionHooks;
+  /**
+   * ONE fence target for the whole backend and every transaction-scoped one
+   * it builds, marked first-party by the profile itself, so every lock
+   * `createSqlBackend`'s contribution-member construction and this
+   * profile's own dialect-owned fence sites can take resolves the SAME
+   * `resolveWriteFencePlan` decision.
+   */
+  fenceTarget: WriteFenceTarget;
+  /** Deps for the contribution-marker member group; see {@link ContributionRuntime}. */
+  contributionRuntime: ContributionRuntime;
+  /** Deps for the identity/recorded-relation member group; see {@link IdentityRuntime}. */
+  identityRuntime: IdentityRuntime;
+  /** Deps for the graph-template member group; see {@link GraphTemplateRuntime}. */
+  graphTemplateRuntime: GraphTemplateRuntime;
+  /** Deps for the base-schema lifecycle member group; see {@link BaseSchemaRuntime}. */
+  baseSchemaRuntime: BaseSchemaRuntime;
+  /** Deps for the index-materializations member group; see {@link IndexMaterializationRuntime}. */
+  indexMaterializationRuntime: IndexMaterializationRuntime;
+  /** Deps for the kind-removals member group; see {@link KindRemovalRuntime}. */
+  kindRemovalRuntime: KindRemovalRuntime;
+  /**
+   * Builds this dialect's `InternalOperationBackend` once the contribution
+   * materializer exists — deferred rather than head data because the
+   * operation layer's own assembly (`buildCommonOperationOptions`) needs
+   * the materializer to build its projection-evidence callbacks, and that
+   * materializer is now built by `createSqlBackend` itself, from
+   * `contributionRuntime`, rather than by the profile ahead of time.
+   */
+  buildOperations: (
+    contributionMaterializer: ContributionMaterializer,
+  ) => InternalOperationBackend;
+  /** The `GraphBackend` member of the same name. */
+  close: () => Promise<void>;
   // ---- late: everything that needs the assembled pipeline ----
   /**
    * Builds the member groups that need the assembled pipeline — the
@@ -339,11 +403,4 @@ export type SqlEngineProfile<TTx> = Readonly<{
    * and {@link EngineLateMembers}.
    */
   lateMembers: (ctx: EngineAssemblyContext<TTx>) => EngineLateMembers<TTx>;
-
-  // ---- temporary: fields a later extraction removes (see the type doc comment) ----
-  operations: InternalOperationBackend;
-  contributionMaterializer: ContributionMaterializer;
-  inlineMembers: (
-    ctx: EngineAssemblyContext<TTx>,
-  ) => Partial<AdapterBackend<TTx>>;
 }>;

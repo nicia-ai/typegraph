@@ -3,20 +3,30 @@
  *
  * `createSqlBackend` owns what is the same for every SQL engine: deriving
  * the final capabilities, resolving the write-fence decision once, refusing
- * a profile that cannot back the marks it is about to earn, assembling the
- * backend object literal from a profile's members, auditing its resource
- * shape, and applying the trust marks and atomic-program registrations. A
- * profile owns only what genuinely differs between engines.
+ * a profile that cannot back the marks it is about to earn, building the
+ * contribution-marker and operation-backend layers from the profile's own
+ * deps, assembling every mirrored adapter member group, auditing the
+ * backend's resource shape, and applying the trust marks and atomic-program
+ * registrations. A profile owns only what genuinely differs between
+ * engines.
  */
 import { ConfigurationError } from "../../../errors";
+import { requireDefined } from "../../../utils/presence";
 import {
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
-import type { AdapterBackend } from "../../types";
+import type { AdapterBackend, SchemaWriteTransactionBackend } from "../../types";
+import { gateFulltextMethods } from "../contribution-materializations";
 import { finalizeEngineCapabilities } from "./capabilities";
 import { applyEngineMarks } from "./marks";
+import { createBaseSchemaMembers } from "./members/base-schema-members";
+import { createContributionMembers } from "./members/contribution-members";
+import { createGraphTemplateMembers } from "./members/graph-template-members";
+import { createIdentityMembers } from "./members/identity-members";
+import { createIndexMaterializationMembers } from "./members/index-materialization-members";
+import { createKindRemovalMembers } from "./members/kind-removal-members";
 import { createSchemaVersionMembers } from "./members/schema-version-members";
 import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 
@@ -39,7 +49,8 @@ export function createSqlBackend<TTx>(
 ): AdapterBackend<TTx> {
   const capabilities = finalizeEngineCapabilities(profile.declaredCapabilities, {
     execution: profile.execution,
-    contributionRebuildSupported: profile.contributionRebuildSupported,
+    fulltextStrategy: profile.fulltext,
+    fulltextTableName: profile.tableNames.fulltext,
   });
 
   if (capabilities.pessimisticLocks === undefined) {
@@ -66,26 +77,99 @@ export function createSqlBackend<TTx>(
     capabilities,
   });
 
+  // The contribution materializer's destructive rebuild runs under the SAME
+  // per-graph fence a schema commit does — `late.fence.runSchemaWriteTransaction`
+  // — but `late` does not exist until `profile.lateMembers(ctx)` runs, which
+  // in turn needs the materializer this call is building (through
+  // `ctx.contributionMaterializer`). This forward reference is how that
+  // circularity resolves: the wrapper below only READS `late` once a caller
+  // actually invokes a rebuild, long after `late` is assigned below: nothing
+  // during construction calls it.
+  const {
+    contributionMaterializer,
+    contributionTableExists,
+    members: contributionMembers,
+  } = createContributionMembers({
+    ...profile.contributionRuntime,
+    dialect: profile.dialect,
+    fulltextStrategy: profile.fulltext,
+    vectorStrategy: profile.vector,
+    fenceTarget: profile.fenceTarget,
+    ensureTable: profile.provisioning.ensureTable,
+    execute: profile.execution.execute,
+    operationStrategy: profile.strategy,
+    // Withheld rather than wired-and-throwing when the driver cannot hold a
+    // session: the rebuild must refuse with its own typed error naming the
+    // absent fence, matching `capabilities.contributions.rebuild`.
+    ...(capabilities.execution.interactiveTransactions ?
+      {
+        schemaWriteTransaction: <T>(
+          graphId: string,
+          fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
+        ) => late.fence.runSchemaWriteTransaction(graphId, (target) => fn(target)),
+      }
+    : {}),
+  });
+
+  const identityMembers = createIdentityMembers({
+    ...profile.identityRuntime,
+    ensureTable: profile.provisioning.ensureTable,
+    contributionTableExists,
+  });
+
+  const operations = profile.buildOperations(contributionMaterializer);
+
+  const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
+    createGraphTemplateMembers({
+      ...profile.graphTemplateRuntime,
+      dialect: profile.dialect,
+      ensureTable: profile.provisioning.ensureTable,
+      execute: operations.execute,
+    });
+
+  const baseSchemaMembers = createBaseSchemaMembers({
+    ...profile.baseSchemaRuntime,
+    ensureTable: profile.provisioning.ensureTable,
+    executeDdl: profile.provisioning.executeDdl,
+    generateDdl: profile.provisioning.generateDdl,
+    ensureGraphTemplatesTable,
+  });
+
+  const indexMaterializationMembers = createIndexMaterializationMembers({
+    ...profile.indexMaterializationRuntime,
+    ensureTable: profile.provisioning.ensureTable,
+    ...(profile.provisioning.ensureIndexMaterializationColumns === undefined ?
+      {}
+    : {
+        ensureIndexMaterializationColumns:
+          profile.provisioning.ensureIndexMaterializationColumns,
+      }),
+  });
+
+  const kindRemovalMembers = createKindRemovalMembers({
+    ...profile.kindRemovalRuntime,
+    ensureTable: profile.provisioning.ensureTable,
+  });
+
   const ctx: EngineAssemblyContext<TTx> = {
     capabilities,
     fencePlan,
-    operations: profile.operations,
-    contributionMaterializer: profile.contributionMaterializer,
+    operations,
+    contributionMaterializer,
     self: () => backend,
   };
 
   const late = profile.lateMembers(ctx);
-  const inline = profile.inlineMembers(ctx);
 
   // Annotated against the real `AdapterBackend<TTx>` declarations (`this:
   // void` included, and `commitSchemaVersionWithPreflight`'s
   // `SchemaCommitPreflightBackend` preflight parameter) rather than left to
-  // infer `SchemaVersionMembers`. Once this group is spread into the `as
-  // AdapterBackend<TTx>` literal below, that cast can no longer catch a
+  // infer `SchemaVersionMembers`. Once this group is spread into the
+  // `backend` literal below, that inference can no longer catch a
   // divergence between `SchemaVersionMembers` and the four keys it fills —
-  // this annotation is what still does. Every later group assembled here
-  // rather than inside a profile's own `inlineMembers` gets the same
-  // treatment.
+  // this annotation is what still does. Every other group assembled here
+  // gets the same treatment implicitly, through the literal's own
+  // `satisfies AdapterBackend<TTx>` check below.
   const schemaVersionMembers: Required<
     Pick<
       AdapterBackend<TTx>,
@@ -96,45 +180,39 @@ export function createSqlBackend<TTx>(
     >
   > = createSchemaVersionMembers({
     runSchemaWriteTransaction: late.fence.runSchemaWriteTransaction,
-    commitSchemaVersionIfKindsEmpty:
-      late.schemaCommit.commitSchemaVersionIfKindsEmpty,
   });
 
-  // `inline` is a `Partial<AdapterBackend<TTx>>` (it drains toward empty as
-  // later steps extract its members into shared factories), so TypeScript
-  // sees every key it contributes as optional in the object literal below —
-  // including `close`, which every profile always supplies today. The cast
-  // is the one place that gap is bridged; `AdapterBackend<TTx>` is not
-  // otherwise narrowed or reconstructed here. Until `inlineMembers` is
-  // removed, this cast is the only place completeness could silently break;
-  // the member-key-set characterization snapshot in
-  // tests/engine-profile-parity.test.ts is what actually catches a missing
-  // member group in the meantime, and this cast must go when
-  // `inlineMembers` does.
-  //
-  // `inline` is spread LAST on purpose: while any group extracted out of it
-  // still has a same-named body left behind in a profile's own
-  // `inlineMembers` (a deletion an extraction step forgot), `inline` wins
-  // the key and the stale body keeps running unnoticed, because a spread's
-  // duplicate keys are invisible to both TypeScript and this cast. Placing
-  // every extracted group — `schemaVersionMembers` included — before
-  // `inline` means a forgotten deletion is caught the moment a
-  // characterization test exercises the member, rather than silently
-  // reintroducing the old body. Keep new groups assembled here ahead of
-  // `inline` for the same reason.
   const backend = {
-    ...ctx.operations,
+    ...operations,
     ...late.transactions,
     ...late.rawSql,
-    lockSchemaVersionForWrite: late.fence.lockSchemaVersionForWrite,
+    lockSchemaVersionForWrite: requireDefined(
+      operations.lockSchemaVersionForWrite,
+    ),
     ...schemaVersionMembers,
     ...late.maintenance,
     ...(late.trustedImport === undefined ?
       {}
     : { trustedImport: late.trustedImport }),
     ...late.extensions,
-    ...inline,
-  } as AdapterBackend<TTx>;
+    ...baseSchemaMembers,
+    ...graphTemplateMembers,
+    ...identityMembers,
+    // Every fulltext-touching method asserts the durable marker instead of
+    // lazily emitting DDL. Steady state performs zero ensure; an
+    // uninitialized database throws `StoreNotInitializedError` rather
+    // than self-healing (#135). Shared verbatim with the tx-scoped gate
+    // via `gateFulltextMethods`.
+    ...gateFulltextMethods(
+      operations,
+      contributionMaterializer.assertInitialized,
+      contributionMaterializer.refuseUnavailableFulltext,
+    ),
+    ...indexMaterializationMembers,
+    ...contributionMembers,
+    ...kindRemovalMembers,
+    close: profile.close,
+  } satisfies AdapterBackend<TTx>;
 
   // INVARIANT: audit before any wrapper can observe this backend — see
   // transaction-resource.ts. Unconditional: an abstention recorded as
@@ -147,15 +225,15 @@ export function createSqlBackend<TTx>(
     autocommit: profile.autocommit,
     execution: profile.execution,
     atomicMutationPrograms: {
-      createNodes: ctx.operations.executeAtomicNodeBatch,
-      replaceNodes: ctx.operations.executeAtomicNodeReplacementBatch,
-      createEdges: ctx.operations.executeAtomicEdgeBatch,
-      deleteNodes: ctx.operations.executeAtomicNodeDeleteBatch,
-      deleteEdges: ctx.operations.executeAtomicEdgeDeleteBatch,
-      updateNodes: ctx.operations.executeAtomicNodeResolvedUpdateBatch,
-      updateEdges: ctx.operations.executeAtomicEdgeResolvedUpdateBatch,
-      mutateNodes: ctx.operations.executeAtomicNodeResolvedMutationSet,
-      mutateEdges: ctx.operations.executeAtomicEdgeMutationProgram,
+      createNodes: operations.executeAtomicNodeBatch,
+      replaceNodes: operations.executeAtomicNodeReplacementBatch,
+      createEdges: operations.executeAtomicEdgeBatch,
+      deleteNodes: operations.executeAtomicNodeDeleteBatch,
+      deleteEdges: operations.executeAtomicEdgeDeleteBatch,
+      updateNodes: operations.executeAtomicNodeResolvedUpdateBatch,
+      updateEdges: operations.executeAtomicEdgeResolvedUpdateBatch,
+      mutateNodes: operations.executeAtomicNodeResolvedMutationSet,
+      mutateEdges: operations.executeAtomicEdgeMutationProgram,
     },
   });
 

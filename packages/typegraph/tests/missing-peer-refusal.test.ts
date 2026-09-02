@@ -246,18 +246,6 @@ describe("missing-peer-ledger", () => {
       expect(documentedResolutionErrorEntrypoints).toEqual(
         adapterStaticEntrypoints,
       );
-
-      const loadsWithoutPeerEntrypoints = new Set(
-        MISSING_PEER_LEDGER.filter(
-          (entry) => entry.arm === "loads-without-peer",
-        ).map((entry) => entry.entrypoint),
-      );
-      const adapterTypeOnlyEntrypoints = new Set(
-        Object.entries(classification)
-          .filter(([, value]) => value === "adapter-type-only")
-          .map(([entrypoint]) => entrypoint),
-      );
-      expect(loadsWithoutPeerEntrypoints).toEqual(adapterTypeOnlyEntrypoints);
     });
 
     it("every non-portable published entrypoint has exactly one ledger row", () => {

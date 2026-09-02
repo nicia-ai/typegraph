@@ -226,6 +226,15 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * elsewhere in this entrypoint). `SchemaWriteTransactionBackend` was this
  * entrypoint's only reference to that type, so it drops out of the
  * forgotten-export set entirely rather than adding to it (301 → 300).
+ *
+ * `createSqlBackend` now assembles the adapter literal itself, from the six
+ * new `*Runtime` head types (`ContributionRuntime`, `IdentityRuntime`,
+ * `GraphTemplateRuntime`, `BaseSchemaRuntime`, `IndexMaterializationRuntime`,
+ * `KindRemovalRuntime`) plus `WriteFenceTarget` — each one a `Create*MembersDeps`
+ * shape this entrypoint already forgotten-referenced through `profile.ts`'s
+ * doc comments, now reached for real — plus `GraphTemplateExecute`, the named
+ * function-type alias `graph-template-members.ts` introduces for its
+ * `execute` member (300 → 324).
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -233,8 +242,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "576b2d133f48d9c2fdd754ad72cc8b0d73741510de9950ce28b2392682e71c6b",
   },
   "./adapters/drizzle/engine": {
-    count: 300,
-    sha256: "8831053e553eff3393fc94d6110c48cedaab3a8a91bad0ee721a3ab9481ddc9b",
+    count: 324,
+    sha256: "810c84984aae97940d6332571f76f7b900041f8ecf3f5bb54fd10c9513c0efca",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

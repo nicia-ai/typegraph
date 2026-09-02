@@ -98,6 +98,11 @@ type GraphTemplateTableNames = Readonly<{
   contributionMaterializations: string;
 }>;
 
+/** Runs a compiled statement through the operation-backend layer's row-returning execution path. */
+type GraphTemplateExecute = <TRow>(
+  query: CompiledRowsSql,
+) => Promise<readonly TRow[]>;
+
 export type CreateGraphTemplateMembersDeps = Readonly<{
   /** The dialect `instantiateGraphTemplateSql` compiles its statement for. */
   dialect: SqlDialect;
@@ -105,8 +110,7 @@ export type CreateGraphTemplateMembersDeps = Readonly<{
   graphTemplatesTableDdl: string;
   /** Runs one idempotent CREATE-shaped DDL statement — the same closure the profile's own `EngineProvisioning.ensureTable` uses. */
   ensureTable: (ddl: string) => Promise<void>;
-  /** Runs a compiled statement through the operation-backend layer's row-returning execution path. */
-  execute: <TRow>(query: CompiledRowsSql) => Promise<readonly TRow[]>;
+  execute: GraphTemplateExecute;
   tableNames: GraphTemplateTableNames;
   /** Decodes a raw driver row into a `SchemaVersionRow` — the same mapper `OperationBackendRowMappers.toSchemaVersionRow` is. */
   toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
@@ -115,9 +119,15 @@ export type CreateGraphTemplateMembersDeps = Readonly<{
    * SQLite's second DML statement copying contribution markers after the
    * schema row is confirmed (see the module doc comment). Absent on a
    * dialect whose `instantiateGraphTemplateSql` already folds the marker
-   * copy into its own statement (PostgreSQL).
+   * copy into its own statement (PostgreSQL). Receives this same group's
+   * own `execute` dep as its first argument rather than closing over one:
+   * the profile head builds this closure before the operation layer
+   * exists, so it cannot capture `execute` directly, and by the time
+   * `instantiateGraphTemplate` actually invokes it below, this function's
+   * own `execute` parameter is already the resolved one.
    */
   copyContributionMarkers?: (
+    execute: GraphTemplateExecute,
     params: CopyGraphTemplateContributionMarkersSqlParams,
   ) => Promise<void>;
 }>;
@@ -208,7 +218,7 @@ export function createGraphTemplateMembers(
         );
         const row = rows[0];
         if (row === undefined) return { status: "refused" } as const;
-        await copyContributionMarkers?.(sqlParams);
+        await copyContributionMarkers?.(execute, sqlParams);
         return { status: "ready", row: toSchemaVersionRow(row) } as const;
       },
     },

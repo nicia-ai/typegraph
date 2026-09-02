@@ -64,7 +64,10 @@ import {
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
-import { markFirstPartyFactory } from "../capabilities/write-fence";
+import {
+  markFirstPartyFactory,
+  type WriteFenceTarget,
+} from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
@@ -124,9 +127,7 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
-  contributionRebuildSupported,
   gateFulltext,
-  gateFulltextMethods,
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
@@ -136,23 +137,21 @@ import {
   sqliteContributions,
 } from "./ddl";
 import {
+  type BaseSchemaRuntime,
+  type ContributionRuntime,
   createSqlBackend,
   type EngineAssemblyContext,
   type EngineLateMembers,
   type EngineProvisioning,
+  type GraphTemplateRuntime,
+  type IdentityRuntime,
+  type IndexMaterializationRuntime,
+  type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
 import { finalizeEngineCapabilities } from "./engine/capabilities";
-import { createBaseSchemaMembers } from "./engine/members/base-schema-members";
-import {
-  createContributionMembers,
-  createContributionOperationMembers,
-} from "./engine/members/contribution-members";
+import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
-import { createGraphTemplateMembers } from "./engine/members/graph-template-members";
-import { createIdentityMembers } from "./engine/members/identity-members";
-import { createIndexMaterializationMembers } from "./engine/members/index-materialization-members";
-import { createKindRemovalMembers } from "./engine/members/kind-removal-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
   buildCommonOperationOptions,
@@ -171,7 +170,6 @@ import {
 import {
   assertActiveSchemaVersion,
   assertAdoptedDialect,
-  commitSchemaVersionIfKindsEmpty,
   createCommonOperationBackend,
   type InternalOperationBackend,
   type OperationBackendRowMappers,
@@ -1059,11 +1057,13 @@ export function createSqliteBackend(
 /**
  * Builds the SQLite {@link SqlEngineProfile} `createSqlBackend` (from
  * `./engine`) assembles into a backend. Everything below is today's SQLite
- * backend construction, unchanged, reorganized into the profile's head
- * data, its dialect-owned late members (`transactions`, `fence`,
- * `schemaCommit`, `rawSql`, `maintenance`, `trustedImport`, `extensions`),
- * and the remaining adapter members not yet extracted into a shared
- * `members/*.ts` file (`inlineMembers`).
+ * backend construction, unchanged, reorganized into the profile's head data
+ * and its dialect-owned late members (`transactions`, `fence`, `rawSql`,
+ * `maintenance`, `trustedImport`, `extensions`) — every mirrored member
+ * group has been extracted into `members/*.ts` and is assembled by
+ * `createSqlBackend` itself from head-data runtime deps this profile
+ * supplies (`contributionRuntime`, `identityRuntime`, `graphTemplateRuntime`,
+ * `baseSchemaRuntime`, `indexMaterializationRuntime`, `kindRemovalRuntime`).
  */
 export function buildSqliteEngineProfile(
   db: AnySqliteDatabase,
@@ -1119,34 +1119,23 @@ export function buildSqliteEngineProfile(
   // (durable markers, a catalog probe, a strategy that declares teardown
   // DDL, a transactional schema fence), and a caller who declared a
   // rebuild this backend cannot perform would be advertising a lie.
-  // The rebuild-support predicate this profile hands
-  // `finalizeEngineCapabilities` as a dep (`./engine/capabilities`) rather
-  // than letting that shared tail import `contributionRebuildSupported`
-  // itself — see that module's doc comment for why.
-  const contributionRebuildSupportedForThisConnection = (
-    interactiveTransactions: boolean,
-  ): boolean =>
-    contributionRebuildSupported(
-      fulltextStrategy,
-      tables.fulltextTableName,
-      interactiveTransactions,
-    );
   // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
   // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target, the operation backend, and the
-  // contribution materializer this factory still builds inline.
-  // `createSqlBackend` calls it again with `profile.declaredCapabilities` to
-  // resolve `ctx.capabilities` — a profile variant built by overriding
-  // `declaredCapabilities` (as the refusal tests do) is re-derived correctly
-  // only because that function stays pure in its arguments rather than a
-  // cached value; the resulting duplicated derivation is a known,
-  // harmless-today identity gap between `ctx.capabilities` and the
-  // `capabilities` object already baked into `operations` below.
+  // below feeds the fence target and the operation backend this factory
+  // still builds inline. `createSqlBackend` calls it again with
+  // `profile.declaredCapabilities` to resolve `ctx.capabilities` — a profile
+  // variant built by overriding `declaredCapabilities` (as the refusal tests
+  // do) is re-derived correctly only because that function stays pure in its
+  // arguments rather than a cached value; the resulting duplicated
+  // derivation is a known, harmless-today identity gap between
+  // `ctx.capabilities` and the `capabilities` object already baked into
+  // `operations` below.
   const capabilities: BackendCapabilities = finalizeEngineCapabilities(
     declaredCapabilities,
     {
       execution: executionAdapter,
-      contributionRebuildSupported: contributionRebuildSupportedForThisConnection,
+      fulltextStrategy,
+      fulltextTableName: tables.fulltextTableName,
     },
   );
 
@@ -1224,23 +1213,27 @@ export function buildSqliteEngineProfile(
     await db.run(sql.raw(ddl));
   };
 
-  const {
-    contributionMaterializer,
-    contributionTableExists,
-    members: contributionMembers,
-  } = createContributionMembers({
+  // ONE fence target for the whole factory, shared by the contribution
+  // materializer's lock sites. Marked first-party because `capabilities`
+  // here is the object the factory assembled — a caller who blanked
+  // `pessimisticLocks` out of it must still resolve the dialect-derived
+  // plan, not `unfenced`.
+  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
     dialect: "sqlite",
-    fulltextStrategy,
+    capabilities,
+  });
+
+  // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
+  // beyond what `createSqlBackend` supplies itself: `dialect`/`fulltextStrategy`/
+  // `vectorStrategy` (the profile head), `fenceTarget` above, `ensureTable`/
+  // `execute`/`operationStrategy` (`provisioning`/`execution`/`strategy`), and
+  // `schemaWriteTransaction` (the fence's own late member, once it exists).
+  const contributionRuntime: ContributionRuntime = {
     fulltextTableName: tables.fulltextTableName,
-    vectorStrategy,
-    fenceTarget: markFirstPartyFactory({ dialect: "sqlite", capabilities }),
     contributionTableDdl: generateSqliteCreateTableSQL(matTable),
     reconciliationMarkersTableDdl: generateSqliteCreateTableSQL(
       tables.reconciliationMarkers,
     ),
-    ensureTable: runDdlStatement,
-    execute: executionAdapter.execute,
-    operationStrategy,
     timestamps: SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
     contributionMarkerColumns: matTable,
     contributionMarkerRows: {
@@ -1285,252 +1278,45 @@ export function buildSqliteEngineProfile(
           });
       },
     },
-    // Withheld rather than wired-and-throwing when transactions are
-    // disabled: the rebuild must refuse with its own typed error naming
-    // the absent fence, matching `capabilities.contributions.rebuild`.
-    // The graph id the materializer passes is unused — this backend's
-    // schema lock is per connection, not per graph.
-    ...(capabilities.execution.interactiveTransactions ?
-      {
-        schemaWriteTransaction: <T>(
-          _graphId: string,
-          fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
-        ) => runSchemaWriteTransaction((target) => fn(target)),
-      }
-    : {}),
-  });
+  };
 
-  const identityMembers = createIdentityMembers({
+  // Deps for `createIdentityMembers`, beyond `ensureTable` (`provisioning`)
+  // and `contributionTableExists` (from the contribution member group
+  // `createSqlBackend` builds first). No `primaryKeyConstraintNameFor`:
+  // SQLite does not name PRIMARY KEY constraints separately.
+  const identityRuntime: IdentityRuntime = {
     revisionOriginsTableDdl: generateSqliteCreateTableSQL(
       tables.revisionOrigins,
     ),
-    ensureTable: runDdlStatement,
-    contributionTableExists,
     contributionsForTableNames: (overrides) =>
       sqliteContributions(buildSqliteTables(overrides), fulltextStrategy),
-  });
-
-  const operations = createSqliteOperationBackend({
-    capabilities,
-    db,
-    executionAdapter,
-    ...(atomicSqlProgramExecutor === undefined ?
-      {}
-    : { atomicSqlProgramExecutor }),
-    operationStrategy,
-    tableNames,
-    fulltextStrategy,
-    vectorStrategy,
-    contributionMaterializer,
-    transactionScoped: false,
-    ...(serializedQueue === undefined ? {} : { serializedQueue }),
-  });
+  };
 
   /**
-   * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
-   * Durable Objects expose an async storage transaction runner —
-   * `ctx.storage.transaction(async () => ...)`, surfaced by Drizzle as
-   * `db.$client.transaction` — that rolls back SQL writes across
-   * `await`. There is no Drizzle tx handle on DO: the storage
-   * transaction is ambient on the object, so callers bind the *outer*
-   * `db` (as the "sql" path binds the outer connection). Drizzle's own
-   * `db.transaction()` here is `ctx.storage.transactionSync` and cannot
-   * span an await, so it is deliberately not used. Shared by
-   * `transaction()` (business writes) and `runSchemaWriteTransaction()`.
-   * Ordinary schema-version commits are data-only; administrative removal
-   * cleanup may execute transaction-scoped DDL.
+   * Builds this profile's top-level `InternalOperationBackend`, deferred
+   * until `createSqlBackend` has built the contribution materializer (its
+   * `buildCommonOperationOptions` assembly needs it for the projection-
+   * evidence callbacks) — everything else here is a plain closure capture,
+   * unchanged from when this call site built `operations` directly.
    */
-  function runDoSqliteStorageTransaction<T>(run: () => Promise<T>): Promise<T> {
-    const storage = getDurableObjectStorageClient(db);
-    if (storage === undefined) {
-      throwSqliteTransactionsDisabled(
-        "transactionMode 'do-sqlite' requires a Drizzle Durable Objects " +
-          "database (drizzle(ctx.storage)) whose `$client` exposes the SQL, " +
-          "transactionSync, and async transaction runners.",
-      );
-    }
-    return runWithSerializedQueue(serializedQueue, () =>
-      storage.transaction(run),
-    );
-  }
-
-  /**
-   * Executes a transaction-frame statement (BEGIN IMMEDIATE / COMMIT /
-   * ROLLBACK) through the prepared-statement cache when the driver has one.
-   * These are the hottest statements on the per-write path (every single
-   * write is its own transaction). Local libsql also uses "sql" transaction
-   * mode but is async (no compiled path) and keeps the drizzle fallback.
-   */
-  async function runFrameStatement(query: SQL): Promise<void> {
-    const compiledRun = executionAdapter.executeCompiledRun;
-    if (compiledRun === undefined) {
-      await db.run(query);
-      return;
-    }
-    await compiledRun(executionAdapter.compile(query));
-  }
-
-  /**
-   * Rolls the manually framed transaction back on the failure path WITHOUT ever
-   * throwing: the caller rethrows the original error immediately after.
-   *
-   * SQLite rolls a transaction back by itself on some errors (SQLITE_FULL,
-   * SQLITE_IOERR, SQLITE_NOMEM), so by the time this runs the frame can already
-   * be gone and the ROLLBACK fails with "cannot rollback - no transaction is
-   * active". A bare `await ROLLBACK; throw error` replaces the caller's
-   * actionable failure ("disk image is malformed") with that secondary one and
-   * never reaches its own rethrow — the masking that `closeAfterFailure` and the
-   * index-materialization claim release exist to prevent, applied here too.
-   *
-   * The two reasons a ROLLBACK can fail are NOT told apart here, deliberately.
-   * SQLite reports the already-closed frame only as a message ("cannot rollback
-   * - no transaction is active"), with no result code that distinguishes it, so
-   * a classifier would have to match text through whatever wrapper the driver
-   * applied — and it would buy nothing, because the handling is identical
-   * either way: never mask the caller's error, always report. The report
-   * therefore states both possibilities rather than asserting the benign one,
-   * so an operator reading the log is not told "nothing is leaked" about a
-   * failure that did leave the frame open. When it did, nothing here can close
-   * it (the statement that would is the one that just failed) and the next
-   * BEGIN on this connection fails loudly rather than silently joining it.
-   */
-  async function rollbackFrameQuietly(): Promise<void> {
-    try {
-      await runFrameStatement(sql`ROLLBACK`);
-    } catch (rollbackError) {
-      console.warn(
-        "typegraph: ROLLBACK failed while unwinding a failed SQLite " +
-          "transaction; the original failure is the one thrown. Either the " +
-          "frame was already closed (SQLite auto-rolls-back on SQLITE_FULL / " +
-          "SQLITE_IOERR / SQLITE_NOMEM) and nothing is leaked, or it is still " +
-          "open on this connection, in which case the next BEGIN here fails.",
-        rollbackError,
-      );
-    }
-  }
-
-  /**
-   * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
-   * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
-   * is serialized against concurrent writers — a deferred BEGIN would let
-   * two transactions race past the CAS read and one would later fail
-   * with SQLITE_BUSY instead of producing a clean StaleVersionError. The
-   * same BEGIN IMMEDIATE already owns SQLite's serialized writer slot for
-   * `commitSchemaVersionIfKindsEmpty`'s populated-kind counts and its final
-   * schema CAS, so that multi-statement read-then-write shares this one
-   * ordinary-write fence too, with no locking of its own to add.
-   *
-   * Refuses on `transactionMode: "none"`. The orphan-row crash window
-   * cannot be eliminated without atomicity.
-   */
-  function runSchemaWriteTransaction<T>(
-    fn: (tx: InternalOperationBackend) => Promise<T>,
-  ): Promise<T> {
-    if (transactionMode === "none") {
-      throwSqliteTransactionsDisabled(
-        "Schema writes and removal cleanup require atomic transactions, " +
-          "but this SQLite backend has transactions disabled. Configure a " +
-          "driver that supports transactions (better-sqlite3, libsql, " +
-          "bun:sqlite) to use schema commits.",
-      );
-    }
-
-    if (transactionMode === "sql") {
-      return runWithSerializedQueue(serializedQueue, async () => {
-        // Write-lock is held here, so the schema-write-capable
-        // InternalOperationBackend is used intentionally (see its type).
-        const txBackend = createTransactionBackend({
-          capabilities,
-          db,
-          executionAdapter,
-          operationStrategy,
-          profileHints: { isSync },
-          tableNames,
-          fulltextStrategy,
-          vectorStrategy,
-          contributionMaterializer,
-        });
-        await runFrameStatement(sql`BEGIN IMMEDIATE`);
-        try {
-          const result = await fn(txBackend);
-          await runFrameStatement(sql`COMMIT`);
-          return result;
-        } catch (error) {
-          await rollbackFrameQuietly();
-          throw error;
-        }
-      });
-    }
-
-    if (transactionMode === "do-sqlite") {
-      // No interactive lock-mode control on the DO storage runner; the
-      // serialized queue (always present — DO is sync) provides the
-      // single-writer ordering that "immediate" gives the other paths.
-      // Raw txBackend (no `gateFulltext`, unlike the business
-      // `transaction()` do-sqlite branch). Schema-version commits remain
-      // data-only; administrative removal cleanup may use the target's
-      // transaction-scoped DDL primitive.
-      return runDoSqliteStorageTransaction(async () => {
-        const txBackend = createTransactionBackend({
-          capabilities,
-          db,
-          operationStrategy,
-          profileHints: { isSync },
-          tableNames,
-          fulltextStrategy,
-          vectorStrategy,
-          contributionMaterializer,
-        });
-        return fn(txBackend);
-      });
-    }
-
-    // transactionMode === "drizzle". Drizzle's sqlite-core transaction
-    // accepts a `behavior` option that maps to BEGIN / BEGIN IMMEDIATE /
-    // BEGIN EXCLUSIVE; "immediate" is what we need to acquire a reserved
-    // write lock at the start of the transaction.
-    return runWithSerializedQueue(
-      serializedQueue,
-      async () =>
-        db.transaction(
-          async (tx) => {
-            const txBackend = createTransactionBackend({
-              capabilities,
-              db: tx,
-              operationStrategy,
-              profileHints: { isSync },
-              tableNames,
-              fulltextStrategy,
-              vectorStrategy,
-              contributionMaterializer,
-            });
-            return fn(txBackend);
-          },
-          { behavior: "immediate" },
-        ) as Promise<T>,
-    );
-  }
-
-  // Shared by the "drizzle" branch of `transaction()` (TypeGraph opens
-  // the tx) and `adoptTransaction()` (#134 — the caller already opened
-  // it): bind a tx-scoped backend to the *literal* `tx` client and gate
-  // fulltext on the durable marker (a cached SELECT, never DDL).
-  function bindTransactionBackend(tx: AnySqliteDatabase): TransactionBackend {
-    const txBackend = createTransactionBackend({
+  function buildOperations(
+    contributionMaterializer: ContributionMaterializer,
+  ): InternalOperationBackend {
+    return createSqliteOperationBackend({
       capabilities,
-      db: tx,
+      db,
+      executionAdapter,
+      ...(atomicSqlProgramExecutor === undefined ?
+        {}
+      : { atomicSqlProgramExecutor }),
       operationStrategy,
-      profileHints: { isSync },
       tableNames,
       fulltextStrategy,
       vectorStrategy,
       contributionMaterializer,
+      transactionScoped: false,
+      ...(serializedQueue === undefined ? {} : { serializedQueue }),
     });
-    return gateFulltext(
-      txBackend,
-      contributionMaterializer.assertInitialized,
-      contributionMaterializer.refuseUnavailableFulltext,
-    );
   }
 
   async function ensureEdgeMatchIdentityStorage(): Promise<void> {
@@ -1609,73 +1395,76 @@ export function buildSqliteEngineProfile(
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy),
   };
 
-  const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
-    createGraphTemplateMembers({
-      dialect: "sqlite",
-      graphTemplatesTableDdl: generateSqliteCreateTableSQL(
-        tables.graphTemplates,
+  // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
+  // head), `ensureTable` (`provisioning`), and `execute` (the operation
+  // layer's own `execute`, built once `createSqlBackend` has a contribution
+  // materializer to hand `buildOperations`).
+  const graphTemplateRuntime: GraphTemplateRuntime = {
+    graphTemplatesTableDdl: generateSqliteCreateTableSQL(
+      tables.graphTemplates,
+    ),
+    tableNames: {
+      schemaVersions: getTableName(tables.schemaVersions),
+      graphTemplates: getTableName(tables.graphTemplates),
+      contributionMaterializations: getTableName(
+        tables.contributionMaterializations,
       ),
-      ensureTable: runDdlStatement,
-      execute: operations.execute,
-      tableNames: {
-        schemaVersions: getTableName(tables.schemaVersions),
-        graphTemplates: getTableName(tables.graphTemplates),
-        contributionMaterializations: getTableName(
-          tables.contributionMaterializations,
-        ),
+    },
+    toSchemaVersionRow,
+    rowAccess: {
+      async insertIgnoringConflict(params) {
+        const t = tables.graphTemplates;
+        await db
+          .insert(t)
+          .values({
+            templateId: params.templateId,
+            schemaHash: params.schemaHash,
+            schemaDoc: JSON.stringify(params.schemaDoc),
+            createdAt: nowIso(),
+          })
+          .onConflictDoNothing();
       },
-      toSchemaVersionRow,
-      rowAccess: {
-        async insertIgnoringConflict(params) {
-          const t = tables.graphTemplates;
-          await db
-            .insert(t)
-            .values({
-              templateId: params.templateId,
-              schemaHash: params.schemaHash,
-              schemaDoc: JSON.stringify(params.schemaDoc),
-              createdAt: nowIso(),
-            })
-            .onConflictDoNothing();
-        },
-        async selectByTemplateId(templateId) {
-          const t = tables.graphTemplates;
-          const templateRows = await db
-            .select()
-            .from(t)
-            .where(eq(t.templateId, templateId));
-          const row = templateRows.at(0);
-          if (row === undefined) return;
-          return {
-            templateId: row.templateId,
-            schemaHash: row.schemaHash,
-            schemaDoc: row.schemaDoc,
-            createdAt: row.createdAt,
-          };
-        },
+      async selectByTemplateId(templateId) {
+        const t = tables.graphTemplates;
+        const templateRows = await db
+          .select()
+          .from(t)
+          .where(eq(t.templateId, templateId));
+        const row = templateRows.at(0);
+        if (row === undefined) return;
+        return {
+          templateId: row.templateId,
+          schemaHash: row.schemaHash,
+          schemaDoc: row.schemaDoc,
+          createdAt: row.createdAt,
+        };
       },
-      // SQLite cannot put a data-modifying CTE beside the schema INSERT, so
-      // the marker copy runs as a second DML statement after the schema row
-      // is confirmed (see `graph-template-sql.ts`).
-      async copyContributionMarkers(params) {
-        await operations.execute<Record<string, unknown>>(
-          copyGraphTemplateContributionMarkersStatement(params),
-        );
-      },
-    });
+    },
+    // SQLite cannot put a data-modifying CTE beside the schema INSERT, so
+    // the marker copy runs as a second DML statement after the schema row
+    // is confirmed (see `graph-template-sql.ts`). Takes `execute` as a
+    // parameter rather than closing over the operation layer directly: this
+    // closure is profile head data built before that layer exists, and
+    // `createGraphTemplateMembers` passes its own already-resolved `execute`
+    // when it actually invokes this callback.
+    async copyContributionMarkers(execute, params) {
+      await execute<Record<string, unknown>>(
+        copyGraphTemplateContributionMarkersStatement(params),
+      );
+    },
+  };
 
-  const baseSchemaMembers = createBaseSchemaMembers({
+  // Deps for `createBaseSchemaMembers`, beyond `ensureTable`/`executeDdl`/
+  // `generateDdl` (`provisioning`) and `ensureGraphTemplatesTable` (from the
+  // graph-template member group `createSqlBackend` builds first).
+  const baseSchemaRuntime: BaseSchemaRuntime = {
     baseSchemaVersionsTableDdl: generateSqliteCreateTableSQL(
       tables.baseSchemaVersions,
     ),
-    ensureTable: provisioning.ensureTable,
-    executeDdl: provisioning.executeDdl,
-    generateDdl: provisioning.generateDdl,
     readVersion: readBaseSchemaVersion,
     writeVersion: writeBaseSchemaVersion,
-    ensureGraphTemplatesTable,
     ensureEdgeMatchIdentityStorage,
-  });
+  };
 
   const limits = {
     maxBindParameters:
@@ -1691,11 +1480,12 @@ export function buildSqliteEngineProfile(
     toUniqueRow,
   };
 
-  const indexMaterializationMembers = createIndexMaterializationMembers({
+  // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`
+  // (`provisioning`) — SQLite has no additive-column migration to run.
+  const indexMaterializationRuntime: IndexMaterializationRuntime = {
     indexMaterializationsTableDdl: generateSqliteCreateTableSQL(
       tables.indexMaterializations,
     ),
-    ensureTable: runDdlStatement,
     tableName: getTableName(tables.indexMaterializations),
     timestamps: SQLITE_INDEX_MAT_TIMESTAMPS,
     rowAccess: {
@@ -1726,11 +1516,11 @@ export function buildSqliteEngineProfile(
           });
       },
     },
-  });
+  };
 
-  const kindRemovalMembers = createKindRemovalMembers({
+  // Deps for `createKindRemovalMembers`, beyond `ensureTable` (`provisioning`).
+  const kindRemovalRuntime: KindRemovalRuntime = {
     kindRemovalsTableDdl: generateSqliteCreateTableSQL(tables.kindRemovals),
-    ensureTable: runDdlStatement,
     timestamps: SQLITE_KIND_REMOVAL_TIMESTAMPS,
     rowAccess: {
       async selectPending(graphId) {
@@ -1760,11 +1550,220 @@ export function buildSqliteEngineProfile(
           });
       },
     },
-  });
+  };
 
   function lateMembers(
     ctx: EngineAssemblyContext<AnySqliteDatabase>,
   ): EngineLateMembers<AnySqliteDatabase> {
+    /**
+     * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
+     * Durable Objects expose an async storage transaction runner —
+     * `ctx.storage.transaction(async () => ...)`, surfaced by Drizzle as
+     * `db.$client.transaction` — that rolls back SQL writes across
+     * `await`. There is no Drizzle tx handle on DO: the storage
+     * transaction is ambient on the object, so callers bind the *outer*
+     * `db` (as the "sql" path binds the outer connection). Drizzle's own
+     * `db.transaction()` here is `ctx.storage.transactionSync` and cannot
+     * span an await, so it is deliberately not used. Shared by
+     * `transaction()` (business writes) and `runSchemaWriteTransaction()`.
+     * Ordinary schema-version commits are data-only; administrative removal
+     * cleanup may execute transaction-scoped DDL.
+     */
+    function runDoSqliteStorageTransaction<T>(
+      run: () => Promise<T>,
+    ): Promise<T> {
+      const storage = getDurableObjectStorageClient(db);
+      if (storage === undefined) {
+        throwSqliteTransactionsDisabled(
+          "transactionMode 'do-sqlite' requires a Drizzle Durable Objects " +
+            "database (drizzle(ctx.storage)) whose `$client` exposes the SQL, " +
+            "transactionSync, and async transaction runners.",
+        );
+      }
+      return runWithSerializedQueue(serializedQueue, () =>
+        storage.transaction(run),
+      );
+    }
+
+    /**
+     * Executes a transaction-frame statement (BEGIN IMMEDIATE / COMMIT /
+     * ROLLBACK) through the prepared-statement cache when the driver has one.
+     * These are the hottest statements on the per-write path (every single
+     * write is its own transaction). Local libsql also uses "sql" transaction
+     * mode but is async (no compiled path) and keeps the drizzle fallback.
+     */
+    async function runFrameStatement(query: SQL): Promise<void> {
+      const compiledRun = executionAdapter.executeCompiledRun;
+      if (compiledRun === undefined) {
+        await db.run(query);
+        return;
+      }
+      await compiledRun(executionAdapter.compile(query));
+    }
+
+    /**
+     * Rolls the manually framed transaction back on the failure path WITHOUT ever
+     * throwing: the caller rethrows the original error immediately after.
+     *
+     * SQLite rolls a transaction back by itself on some errors (SQLITE_FULL,
+     * SQLITE_IOERR, SQLITE_NOMEM), so by the time this runs the frame can already
+     * be gone and the ROLLBACK fails with "cannot rollback - no transaction is
+     * active". A bare `await ROLLBACK; throw error` replaces the caller's
+     * actionable failure ("disk image is malformed") with that secondary one and
+     * never reaches its own rethrow — the masking that `closeAfterFailure` and the
+     * index-materialization claim release exist to prevent, applied here too.
+     *
+     * The two reasons a ROLLBACK can fail are NOT told apart here, deliberately.
+     * SQLite reports the already-closed frame only as a message ("cannot rollback
+     * - no transaction is active"), with no result code that distinguishes it, so
+     * a classifier would have to match text through whatever wrapper the driver
+     * applied — and it would buy nothing, because the handling is identical
+     * either way: never mask the caller's error, always report. The report
+     * therefore states both possibilities rather than asserting the benign one,
+     * so an operator reading the log is not told "nothing is leaked" about a
+     * failure that did leave the frame open. When it did, nothing here can close
+     * it (the statement that would is the one that just failed) and the next
+     * BEGIN on this connection fails loudly rather than silently joining it.
+     */
+    async function rollbackFrameQuietly(): Promise<void> {
+      try {
+        await runFrameStatement(sql`ROLLBACK`);
+      } catch (rollbackError) {
+        console.warn(
+          "typegraph: ROLLBACK failed while unwinding a failed SQLite " +
+            "transaction; the original failure is the one thrown. Either the " +
+            "frame was already closed (SQLite auto-rolls-back on SQLITE_FULL / " +
+            "SQLITE_IOERR / SQLITE_NOMEM) and nothing is leaked, or it is still " +
+            "open on this connection, in which case the next BEGIN here fails.",
+          rollbackError,
+        );
+      }
+    }
+
+    /**
+     * Runs `fn` inside a SQLite write transaction (BEGIN IMMEDIATE) so that
+     * the read-then-write inside `commitSchemaVersion` / `setActiveVersion`
+     * is serialized against concurrent writers — a deferred BEGIN would let
+     * two transactions race past the CAS read and one would later fail
+     * with SQLITE_BUSY instead of producing a clean StaleVersionError. The
+     * same BEGIN IMMEDIATE already owns SQLite's serialized writer slot for
+     * `commitSchemaVersionIfKindsEmpty`'s populated-kind counts and its final
+     * schema CAS, so that multi-statement read-then-write shares this one
+     * ordinary-write fence too, with no locking of its own to add.
+     *
+     * Refuses on `transactionMode: "none"`. The orphan-row crash window
+     * cannot be eliminated without atomicity.
+     */
+    function runSchemaWriteTransaction<T>(
+      fn: (tx: InternalOperationBackend) => Promise<T>,
+    ): Promise<T> {
+      if (transactionMode === "none") {
+        throwSqliteTransactionsDisabled(
+          "Schema writes and removal cleanup require atomic transactions, " +
+            "but this SQLite backend has transactions disabled. Configure a " +
+            "driver that supports transactions (better-sqlite3, libsql, " +
+            "bun:sqlite) to use schema commits.",
+        );
+      }
+
+      if (transactionMode === "sql") {
+        return runWithSerializedQueue(serializedQueue, async () => {
+          // Write-lock is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const txBackend = createTransactionBackend({
+            capabilities,
+            db,
+            executionAdapter,
+            operationStrategy,
+            profileHints: { isSync },
+            tableNames,
+            fulltextStrategy,
+            vectorStrategy,
+            contributionMaterializer: ctx.contributionMaterializer,
+          });
+          await runFrameStatement(sql`BEGIN IMMEDIATE`);
+          try {
+            const result = await fn(txBackend);
+            await runFrameStatement(sql`COMMIT`);
+            return result;
+          } catch (error) {
+            await rollbackFrameQuietly();
+            throw error;
+          }
+        });
+      }
+
+      if (transactionMode === "do-sqlite") {
+        // No interactive lock-mode control on the DO storage runner; the
+        // serialized queue (always present — DO is sync) provides the
+        // single-writer ordering that "immediate" gives the other paths.
+        // Raw txBackend (no `gateFulltext`, unlike the business
+        // `transaction()` do-sqlite branch). Schema-version commits remain
+        // data-only; administrative removal cleanup may use the target's
+        // transaction-scoped DDL primitive.
+        return runDoSqliteStorageTransaction(async () => {
+          const txBackend = createTransactionBackend({
+            capabilities,
+            db,
+            operationStrategy,
+            profileHints: { isSync },
+            tableNames,
+            fulltextStrategy,
+            vectorStrategy,
+            contributionMaterializer: ctx.contributionMaterializer,
+          });
+          return fn(txBackend);
+        });
+      }
+
+      // transactionMode === "drizzle". Drizzle's sqlite-core transaction
+      // accepts a `behavior` option that maps to BEGIN / BEGIN IMMEDIATE /
+      // BEGIN EXCLUSIVE; "immediate" is what we need to acquire a reserved
+      // write lock at the start of the transaction.
+      return runWithSerializedQueue(
+        serializedQueue,
+        async () =>
+          db.transaction(
+            async (tx) => {
+              const txBackend = createTransactionBackend({
+                capabilities,
+                db: tx,
+                operationStrategy,
+                profileHints: { isSync },
+                tableNames,
+                fulltextStrategy,
+                vectorStrategy,
+                contributionMaterializer: ctx.contributionMaterializer,
+              });
+              return fn(txBackend);
+            },
+            { behavior: "immediate" },
+          ) as Promise<T>,
+      );
+    }
+
+    // Shared by the "drizzle" branch of `transaction()` (TypeGraph opens
+    // the tx) and `adoptTransaction()` (#134 — the caller already opened
+    // it): bind a tx-scoped backend to the *literal* `tx` client and gate
+    // fulltext on the durable marker (a cached SELECT, never DDL).
+    function bindTransactionBackend(tx: AnySqliteDatabase): TransactionBackend {
+      const txBackend = createTransactionBackend({
+        capabilities,
+        db: tx,
+        operationStrategy,
+        profileHints: { isSync },
+        tableNames,
+        fulltextStrategy,
+        vectorStrategy,
+        contributionMaterializer: ctx.contributionMaterializer,
+      });
+      return gateFulltext(
+        txBackend,
+        ctx.contributionMaterializer.assertInitialized,
+        ctx.contributionMaterializer.refuseUnavailableFulltext,
+      );
+    }
+
     return {
       transactions: {
         async transaction<T>(
@@ -1819,7 +1818,7 @@ export function buildSqliteEngineProfile(
                 tableNames,
                 fulltextStrategy,
                 vectorStrategy,
-                contributionMaterializer,
+                contributionMaterializer: ctx.contributionMaterializer,
               });
               // Read-only multi-statement operations need one snapshot but must not
               // reserve SQLite's single writer slot. Business transactions retain
@@ -1835,8 +1834,8 @@ export function buildSqliteEngineProfile(
                   markSchemaFencedInsertEligible(
                     gateFulltext(
                       txBackend,
-                      contributionMaterializer.assertInitialized,
-                      contributionMaterializer.refuseUnavailableFulltext,
+                      ctx.contributionMaterializer.assertInitialized,
+                      ctx.contributionMaterializer.refuseUnavailableFulltext,
                     ),
                   ),
                   db,
@@ -1916,22 +1915,18 @@ export function buildSqliteEngineProfile(
       },
 
       fence: {
-        lockSchemaVersionForWrite: requireDefined(
-          operations.lockSchemaVersionForWrite,
-        ),
+        // The graph id is unused — this backend's schema lock is per
+        // connection, not per graph — but the signature stays uniform with
+        // PostgreSQL's, which does lock the named graph's schema row.
         runSchemaWriteTransaction: (_graphId, fn) =>
           runSchemaWriteTransaction(fn),
       },
 
-      schemaCommit: {
-        commitSchemaVersionIfKindsEmpty,
-      },
-
       rawSql: {
-        execute: operations.execute,
-        ...(operations.executeRaw === undefined ?
+        execute: ctx.operations.execute,
+        ...(ctx.operations.executeRaw === undefined ?
           {}
-        : { executeRaw: operations.executeRaw }),
+        : { executeRaw: ctx.operations.executeRaw }),
       },
 
       maintenance: {
@@ -2028,40 +2023,6 @@ export function buildSqliteEngineProfile(
     };
   }
 
-  function inlineMembers(
-    _ctx: EngineAssemblyContext<AnySqliteDatabase>,
-  ): Partial<AdapterBackend<AnySqliteDatabase>> {
-    return {
-      ...baseSchemaMembers,
-
-      ...graphTemplateMembers,
-
-      ...identityMembers,
-
-      // Every fulltext-touching method asserts the durable marker instead
-      // of lazily emitting DDL. Steady state performs zero ensure; an
-      // uninitialized database throws `StoreNotInitializedError` rather
-      // than self-healing (#135). Shared verbatim with the tx-scoped gate
-      // via `gateFulltextMethods`.
-      ...gateFulltextMethods(
-        operations,
-        contributionMaterializer.assertInitialized,
-        contributionMaterializer.refuseUnavailableFulltext,
-      ),
-
-      ...indexMaterializationMembers,
-
-      ...contributionMembers,
-
-      ...kindRemovalMembers,
-
-      close(): Promise<void> {
-        serializedQueue?.dispose();
-        return Promise.resolve();
-      },
-    };
-  }
-
   return {
     dialect: "sqlite",
     tableNames,
@@ -2070,7 +2031,6 @@ export function buildSqliteEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
-    contributionRebuildSupported: contributionRebuildSupportedForThisConnection,
     limits,
     rowMappers,
     resourceAudit,
@@ -2078,10 +2038,19 @@ export function buildSqliteEngineProfile(
     nowIso,
     provisioning,
     fusion: { atomicProgramsAtTransactionScope: false },
+    fenceTarget,
+    contributionRuntime,
+    identityRuntime,
+    graphTemplateRuntime,
+    baseSchemaRuntime,
+    indexMaterializationRuntime,
+    kindRemovalRuntime,
+    buildOperations,
+    close(): Promise<void> {
+      serializedQueue?.dispose();
+      return Promise.resolve();
+    },
     lateMembers,
-    operations,
-    contributionMaterializer,
-    inlineMembers,
   };
 }
 

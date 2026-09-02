@@ -44,19 +44,10 @@ export type ArtifactFormat = "import" | "require";
 
 /**
  * An entrypoint's expected shape, derived from `package.json#exports` minus
- * `ADAPTER_ENTRYPOINTS`. `adapter-type-only` names an entrypoint whose
- * runtime value never imports a Drizzle package, but whose declared TYPES
- * are built from Drizzle-derived shapes (a dialect's execution adapter or
- * SQL-fragment strategy, say) — this walker extracts every import/export
- * declaration regardless of `type`-only-ness (a real compiler erases those
- * at emit time; this AST walk does not), so such an entrypoint measures
- * dirty at source grain in both modes and clean at dist grain in both
- * modes and formats, a tuple neither `adapter-static` (dirty at both
- * grains) nor `adapter-dynamic-only` (dirty only once its factory runs)
- * describes.
+ * `ADAPTER_ENTRYPOINTS`.
  */
 export type EntrypointClassification =
-  "portable" | "adapter-static" | "adapter-dynamic-only" | "adapter-type-only";
+  "portable" | "adapter-static" | "adapter-dynamic-only";
 
 /** Whether a walk reached a `drizzle-orm*` specifier. */
 export type ReachabilityVerdict = "clean" | "dirty";
@@ -114,41 +105,28 @@ export const DRIZZLE_SPECIFIER_PATTERN =
 /**
  * The published entrypoints that are EXPECTED to reach Drizzle, and how.
  *
- * The six true `./adapters/drizzle/*` entrypoints are `adapter-static`:
- * their factories are synchronous and take a caller-constructed Drizzle
- * handle, so their connection construction reaches Drizzle eagerly, at both
- * `load` and `deferred` mode. The two "batteries included" entrypoints
+ * The seven `./adapters/drizzle/*` entrypoints are `adapter-static`: each
+ * one's module tree imports a Drizzle package as a value, so it measures
+ * dirty at both grains, in every mode and format. Six take a
+ * caller-constructed Drizzle handle directly; `./adapters/drizzle/engine`'s
+ * one value export (`createSqlBackend`) takes a caller-assembled engine
+ * profile instead, but its module tree imports the shared member modules
+ * that construct Drizzle-backed row access (`contribution-materializations.ts`
+ * and its `drizzle-orm` import, reached through
+ * `engine/members/contribution-members.ts`), so it reaches Drizzle exactly
+ * the same way the other six do. The two "batteries included" entrypoints
  * (`./sqlite/local`, `./postgres/pglite`) are `adapter-dynamic-only`: their
  * factories moved their connection construction behind an `await
  * import(...)` of a sibling `*-store-impl.ts` module, so Node's module
  * loader never resolves `drizzle-orm` for them (`load` is clean) unless the
  * factory actually runs (`deferred` is dirty) — which is also what makes the
  * typed missing-peer refusal in `src/backend/missing-peer-ledger.ts`
- * reachable in the first place. `./adapters/drizzle/engine` is
- * `adapter-type-only`: its one value export (a backend factory taking a
- * caller-assembled engine profile, never a raw Drizzle handle) never
- * imports a Drizzle package itself, but the profile TYPES it also exports
- * are built from Drizzle-derived shapes, so it measures dirty at source
- * grain (this walker cannot erase a `type`-only edge the way a real
- * compiler does) and clean at dist grain (the compiled artifact genuinely
- * never touches Drizzle as a value). This is a reviewed diff in this
- * table, never a silent flip: every other published entrypoint not listed
- * here is `portable` by default and must go clean.
- *
- * `adapter-type-only` describes a measured fact about today's module tree,
- * not a permanent classification: it holds only while the entrypoint's
- * factory takes an assembled profile rather than a driver handle. If its
- * module tree later imports a Drizzle package as a value (for example, by
- * absorbing an adapter object literal that itself imports `drizzle-orm`),
- * the dist-grain measurement goes dirty and the entrypoint belongs in
- * `adapter-static` instead, with its ledger arm in
- * `src/backend/missing-peer-ledger.ts` changed to match.
+ * reachable in the first place. This is a reviewed diff in this table,
+ * never a silent flip: every other published entrypoint not listed here is
+ * `portable` by default and must go clean.
  */
 export const ADAPTER_ENTRYPOINTS: Readonly<
-  Record<
-    string,
-    "adapter-static" | "adapter-dynamic-only" | "adapter-type-only"
-  >
+  Record<string, "adapter-static" | "adapter-dynamic-only">
 > = {
   "./adapters/drizzle/sqlite": "adapter-static",
   "./adapters/drizzle/postgres": "adapter-static",
@@ -156,7 +134,7 @@ export const ADAPTER_ENTRYPOINTS: Readonly<
   "./adapters/drizzle/sqlite/local": "adapter-static",
   "./adapters/drizzle/sqlite/libsql": "adapter-static",
   "./adapters/drizzle/indexes": "adapter-static",
-  "./adapters/drizzle/engine": "adapter-type-only",
+  "./adapters/drizzle/engine": "adapter-static",
   "./sqlite/local": "adapter-dynamic-only",
   "./postgres/pglite": "adapter-dynamic-only",
 };

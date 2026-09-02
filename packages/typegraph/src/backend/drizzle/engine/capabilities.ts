@@ -3,8 +3,9 @@
  * through before {@link createSqlBackend} (`./create-sql-backend`) builds a
  * backend from them: derive `execution.atomicBatch` from whether the
  * profile's own execution adapter exposes a native atomic-batch primitive,
- * derive `contributions` from the profile's rebuild-support predicate, then
- * validate and freeze the result with `assertBundledCapabilityDeclarations`.
+ * derive `contributions` from `contributionRebuildSupported`
+ * (`../contribution-materializations`), then validate and freeze the result
+ * with `assertBundledCapabilityDeclarations`.
  *
  * Everything dialect-specific about capability derivation — HTTP-only
  * driver overrides, the PGlite bind-parameter cap, the pessimistic-lock
@@ -13,19 +14,18 @@
  * and feeds `declaredCapabilities`. This module owns only the tail both of
  * them run identically on top of that.
  *
- * `contributionRebuildSupported` arrives as a dep rather than a direct
- * import of the function of the same name in `contribution-materializations.ts`:
- * this module is imported by `create-sql-backend.ts`, a published
- * entrypoint root (`./adapters/drizzle/engine`) whose runtime must not reach
- * a real Drizzle package until the operation-layer extraction folds that
- * module in for good, and `contribution-materializations.ts` imports
- * `drizzle-orm` at module scope. Each dialect builder still calls the real
- * predicate itself — it already imports that module for its inline
- * contribution members — and hands the result through as a closure.
+ * `contributionRebuildSupported` is imported directly rather than threaded
+ * through as a profile dep: `create-sql-backend.ts` (this module's only
+ * caller alongside the two dialect factories) already imports
+ * `contribution-materializations.ts` for its contribution-marker and
+ * fulltext-gate member construction, so this import adds no new reach into
+ * a real Drizzle package that was not already there.
  */
+import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import { createAtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
 import { assertBundledCapabilityDeclarations } from "../../capabilities/declarations";
 import type { BackendCapabilities } from "../../types";
+import { contributionRebuildSupported } from "../contribution-materializations";
 import type { SqlExecutionAdapter } from "../execution/types";
 
 export type FinalizeEngineCapabilitiesDeps = Readonly<{
@@ -36,14 +36,10 @@ export type FinalizeEngineCapabilitiesDeps = Readonly<{
    * wrapper, `"none"` otherwise.
    */
   execution: SqlExecutionAdapter;
-  /**
-   * The profile's own answer to whether it can rebuild a durable
-   * contribution marker outright, given whether this connection supports
-   * interactive transactions — see the module doc comment for why this
-   * arrives as a closure rather than a direct import of
-   * `contributionRebuildSupported`.
-   */
-  contributionRebuildSupported: (interactiveTransactions: boolean) => boolean;
+  /** The profile's full-text strategy, one of the two inputs `contributionRebuildSupported` needs. */
+  fulltextStrategy: FulltextStrategy;
+  /** The profile's physical fulltext table name, the other input `contributionRebuildSupported` needs. */
+  fulltextTableName: string;
 }>;
 
 /**
@@ -77,7 +73,9 @@ export function finalizeEngineCapabilities(
     contributions: {
       supported: true,
       probe: true,
-      rebuild: deps.contributionRebuildSupported(
+      rebuild: contributionRebuildSupported(
+        deps.fulltextStrategy,
+        deps.fulltextTableName,
         declared.execution.interactiveTransactions,
       ),
     },

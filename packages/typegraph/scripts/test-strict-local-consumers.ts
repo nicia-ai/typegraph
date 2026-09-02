@@ -84,16 +84,6 @@ export const TYPED_REFUSAL_FACTORIES: Readonly<Record<string, string>> = {
 };
 
 /**
- * The published factory each `loads-without-peer` ledger row's entrypoint
- * exports. Looked up by entrypoint for the same reason as
- * {@link TYPED_REFUSAL_FACTORIES}: a ledger row with no matching factory
- * fails loudly instead of the walk silently skipping its assertion.
- */
-export const LOADS_WITHOUT_PEER_FACTORIES: Readonly<Record<string, string>> = {
-  "./adapters/drizzle/engine": "createSqlBackend",
-};
-
-/**
  * The two Node module-resolution error codes a missing CommonJS/ESM
  * specifier can raise (`isMissingDrizzlePeerError`'s own accepted set,
  * `src/backend/missing-peer-ledger.ts`). Not re-exported from there — that
@@ -123,7 +113,6 @@ export type FixtureExpectations = Readonly<{
   portableEntrypoints: readonly string[];
   ledger: readonly MissingPeerLedgerEntry[];
   typedRefusalFactories: Readonly<Record<string, string>>;
-  loadsWithoutPeerFactories: Readonly<Record<string, string>>;
   missingPeerPackage: string;
   missingPeerInstallCommand: string;
   refusalDetailsCode: typeof REFUSAL_DETAILS_CODE;
@@ -400,7 +389,6 @@ export function fixtureExpectations(): FixtureExpectations {
     portableEntrypoints: portableFixtureEntrypoints(),
     ledger: MISSING_PEER_LEDGER,
     typedRefusalFactories: TYPED_REFUSAL_FACTORIES,
-    loadsWithoutPeerFactories: LOADS_WITHOUT_PEER_FACTORIES,
     missingPeerPackage: MISSING_PEER_PACKAGE,
     missingPeerInstallCommand: MISSING_PEER_INSTALL_COMMAND,
     refusalDetailsCode: REFUSAL_DETAILS_CODE,
@@ -707,25 +695,6 @@ export function renderLedgerWalkModule(): string {
     "        caught.details && caught.details.code,",
     "        expectations.refusalDetailsCode,",
     "        `${row.entrypoint} (${format}): the documented-resolution-error arm must not carry ${expectations.refusalDetailsCode}`,",
-    "      );",
-    "      asserted.push(row.entrypoint);",
-    "      continue;",
-    "    }",
-    "",
-    '    if (row.arm === "loads-without-peer") {',
-    "      const moduleExports = await loadEntrypoint(specifier);",
-    "      const factoryName =",
-    "        expectations.loadsWithoutPeerFactories[row.entrypoint];",
-    "      if (factoryName === undefined) {",
-    "        throw new Error(",
-    "          `No LOADS_WITHOUT_PEER_FACTORIES entry for ${row.entrypoint}`,",
-    "        );",
-    "      }",
-    "      const factory = moduleExports[factoryName];",
-    "      assert.equal(",
-    "        typeof factory,",
-    '        "function",',
-    "        `${row.entrypoint} (${format}): ${factoryName} is not a function`,",
     "      );",
     "      asserted.push(row.entrypoint);",
     "      continue;",

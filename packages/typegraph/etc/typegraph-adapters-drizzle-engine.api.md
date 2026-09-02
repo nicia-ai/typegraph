@@ -4,6 +4,7 @@
 
 ```ts
 
+import { AnyColumn } from 'drizzle-orm';
 import { SQL } from 'drizzle-orm';
 
 // @public
@@ -348,6 +349,9 @@ type BackendValidityEndMutation = Readonly<{
     validTo?: never;
     clearValidTo: true;
 }>;
+
+// @public
+export type BaseSchemaRuntime = Omit<CreateBaseSchemaMembersDeps, "ensureTable" | "executeDdl" | "generateDdl" | "ensureGraphTemplatesTable">;
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -698,6 +702,21 @@ type ContributionDiagnostic = Readonly<{
 // @public
 type ContributionDiagnosticState = "orphaned-marker" | "missing-marker" | "failed-materialization" | "stale";
 
+// @public
+type ContributionMarkerColumns = Readonly<{
+    graphId: AnyColumn;
+    logicalName: AnyColumn;
+    owner: AnyColumn;
+    tableName: AnyColumn;
+}>;
+
+// @public
+type ContributionMarkerRowAccess = Readonly<{
+    selectWhere: (condition: SQL) => Promise<readonly RawContributionMaterializationRow[]>;
+    upsert: (params: RecordContributionMaterializationParams) => Promise<void>;
+    deleteWhere: (condition: SQL) => Promise<void>;
+}>;
+
 // @public (undocumented)
 type ContributionMaterializationBackend = Pick<GraphBackend, "ensureContributionMaterializationsTable" | "getContributionMaterialization" | "recordContributionMaterialization" | "assertRuntimeContributionsInitialized" | "ensureRuntimeContributions" | "ensureFulltextTable">;
 
@@ -811,12 +830,26 @@ type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
+export type ContributionRuntime = Omit<CreateContributionMembersDeps, "dialect" | "fulltextStrategy" | "vectorStrategy" | "fenceTarget" | "ensureTable" | "execute" | "operationStrategy" | "schemaWriteTransaction">;
+
+// @public
 type ConvergeEdgeCreateParams = Readonly<{
     params: InsertEdgeParams;
     match: EdgeConvergenceMatch;
     timestamp: string;
     schemaFence?: SchemaWriteFenceParams;
     schemaLockClause?: SQL;
+}>;
+
+// @public (undocumented)
+type CopyGraphTemplateContributionMarkersSqlParams = Readonly<{
+    graphId: string;
+    schemaHash: string;
+    schemaVersionsTableName: string;
+    templatesTableName: string;
+    contributionMaterializationsTableName: string;
+    templateId: string;
+    templateSchemaHash: string;
 }>;
 
 // @public
@@ -848,6 +881,83 @@ type CountNodesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
+}>;
+
+// @public (undocumented)
+type CreateBaseSchemaMembersDeps = Readonly<{
+    baseSchemaVersionsTableDdl: string;
+    ensureTable: (ddl: string) => Promise<void>;
+    executeDdl: (ddl: string) => Promise<void>;
+    generateDdl: () => readonly string[];
+    readVersion: () => Promise<number | undefined>;
+    writeVersion: (version: number) => Promise<number | undefined>;
+    ensureGraphTemplatesTable: () => Promise<void>;
+    ensureEdgeMatchIdentityStorage: () => Promise<void>;
+}>;
+
+// @public (undocumented)
+type CreateContributionMembersDeps = Readonly<{
+    dialect: SqlDialect;
+    fulltextStrategy: FulltextStrategy;
+    fulltextTableName: string;
+    vectorStrategy: VectorStrategy | undefined;
+    fenceTarget: WriteFenceTarget;
+    contributionTableDdl: string;
+    reconciliationMarkersTableDdl: string;
+    ensureTable: (ddl: string) => Promise<void>;
+    execute: <TRow>(query: ExecutableSql) => Promise<readonly TRow[]>;
+    operationStrategy: Pick<CommonOperationStrategy, "buildTableExists">;
+    timestamps: Readonly<{
+        decode: (value: unknown) => string | undefined;
+    }>;
+    contributionMarkerColumns: ContributionMarkerColumns;
+    contributionMarkerRows: ContributionMarkerRowAccess;
+    reconciliationMarkerColumns: ReconciliationMarkerColumns;
+    reconciliationMarkerRows: ReconciliationMarkerRowAccess;
+    schemaWriteTransaction?: <T>(graphId: string, fn: (tx: SchemaWriteTransactionBackend) => Promise<T>) => Promise<T>;
+}>;
+
+// @public (undocumented)
+type CreateGraphTemplateMembersDeps = Readonly<{
+    dialect: SqlDialect;
+    graphTemplatesTableDdl: string;
+    ensureTable: (ddl: string) => Promise<void>;
+    execute: GraphTemplateExecute;
+    tableNames: GraphTemplateTableNames;
+    toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
+    rowAccess: GraphTemplateRowAccess;
+    copyContributionMarkers?: (execute: GraphTemplateExecute, params: CopyGraphTemplateContributionMarkersSqlParams) => Promise<void>;
+}>;
+
+// @public (undocumented)
+type CreateIdentityMembersDeps = Readonly<{
+    revisionOriginsTableDdl: string;
+    ensureTable: (ddl: string) => Promise<void>;
+    contributionTableExists: (tableName: string) => Promise<boolean>;
+    contributionsForTableNames: (overrides: Readonly<Record<string, string>>) => readonly TableContribution[];
+    primaryKeyConstraintNameFor?: (tableName: string) => string;
+}>;
+
+// @public (undocumented)
+type CreateIndexMaterializationMembersDeps = Readonly<{
+    indexMaterializationsTableDdl: string;
+    ensureTable: (ddl: string) => Promise<void>;
+    ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
+    tableName: string;
+    timestamps: Readonly<{
+        decode: (value: unknown) => string | undefined;
+    }>;
+    rowAccess: IndexMaterializationRowAccess;
+}>;
+
+// @public (undocumented)
+type CreateKindRemovalMembersDeps = Readonly<{
+    kindRemovalsTableDdl: string;
+    ensureTable: (ddl: string) => Promise<void>;
+    timestamps: Readonly<{
+        decode: (value: unknown) => string | undefined;
+    }>;
+    rowAccess: KindRemovalRowAccess;
 }>;
 
 // @public
@@ -1099,11 +1209,7 @@ export type EngineAssemblyContext<TTx> = Readonly<{
 export type EngineLateMembers<TTx> = Readonly<{
     transactions: Pick<AdapterBackend<TTx>, "transaction" | "transactionWithNative" | "adoptTransaction" | "schemaWriteTransaction">;
     fence: Readonly<{
-        lockSchemaVersionForWrite: NonNullable<AdapterBackend<TTx>["lockSchemaVersionForWrite"]>;
         runSchemaWriteTransaction: <T>(graphId: string, fn: (target: InternalOperationBackend) => Promise<T>) => Promise<T>;
-    }>;
-    schemaCommit: Readonly<{
-        commitSchemaVersionIfKindsEmpty: (target: InternalOperationBackend, params: CommitSchemaVersionParams, probes: readonly SchemaKindEmptinessProbe[]) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
     }>;
     rawSql: Pick<TransactionBackend, "execute" | "executeRaw">;
     maintenance: Pick<AdapterBackend<TTx>, "refreshStatistics">;
@@ -1651,11 +1757,30 @@ type GraphIdentityConfig = Readonly<{
 type GraphLifecycleBackend = Pick<GraphBackend, "clearGraph" | "bootstrapTables">;
 
 // @public
+type GraphTemplateExecute = <TRow>(query: CompiledRowsSql) => Promise<readonly TRow[]>;
+
+// @public
 type GraphTemplateRow = Readonly<{
     template_id: string;
     schema_hash: string;
     schema_doc: string;
     created_at: string;
+}>;
+
+// @public
+type GraphTemplateRowAccess = Readonly<{
+    insertIgnoringConflict: (params: RegisterGraphTemplateParams) => Promise<void>;
+    selectByTemplateId: (templateId: string) => Promise<RawGraphTemplateRow | undefined>;
+}>;
+
+// @public
+export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "dialect" | "ensureTable" | "execute">;
+
+// @public
+type GraphTemplateTableNames = Readonly<{
+    schemaVersions: string;
+    graphTemplates: string;
+    contributionMaterializations: string;
 }>;
 
 // @public
@@ -1729,6 +1854,9 @@ type HybridSearchRow = Readonly<{
 }>;
 
 // @public
+export type IdentityRuntime = Omit<CreateIdentityMembersDeps, "ensureTable" | "contributionTableExists">;
+
+// @public
 type IdentityTableNames = Readonly<{
     identityAssertions: string;
     recordedIdentityAssertions: string;
@@ -1771,6 +1899,16 @@ type IndexMaterializationRow = Readonly<{
     lastAttemptedAt: string;
     lastError: string | undefined;
 }>;
+
+// @public
+type IndexMaterializationRowAccess = Readonly<{
+    selectByIndexName: (indexName: string) => Promise<readonly RawIndexMaterializationRow[]>;
+    selectByIndexNames: (indexNames: readonly string[]) => Promise<readonly RawIndexMaterializationRow[]>;
+    upsert: (params: RecordIndexMaterializationParams) => Promise<void>;
+}>;
+
+// @public
+export type IndexMaterializationRuntime = Omit<CreateIndexMaterializationMembersDeps, "ensureTable" | "ensureIndexMaterializationColumns">;
 
 // @public
 type IndexOrigin = "compile-time" | "runtime";
@@ -1947,6 +2085,16 @@ type KindRemovalRow = Readonly<{
     lastError: string | undefined;
 }>;
 
+// @public
+type KindRemovalRowAccess = Readonly<{
+    selectPending: (graphId: string) => Promise<readonly RawKindRemovalRow[]>;
+    selectAll: (graphId: string) => Promise<readonly RawKindRemovalRow[]>;
+    upsert: (params: RecordKindRemovalParams) => Promise<void>;
+}>;
+
+// @public
+export type KindRemovalRuntime = Omit<CreateKindRemovalMembersDeps, "ensureTable">;
+
 // @public (undocumented)
 type LockSchemaVersionForWriteParams = Readonly<{
     graphId: string;
@@ -2106,6 +2254,13 @@ type OperationBackendRowMappers = Readonly<{
 // @public
 export type OperationFusionHooks = Readonly<{
     atomicProgramsAtTransactionScope: boolean;
+    nodeProjectionInsertFusion?: true;
+    beforeNodeProjectionInsert?: (params: InsertNodeParams, plan: ManagedNodeCreatePlan) => Promise<void>;
+    refuseNodeProjectionError?: (params: InsertNodeParams, plan: ManagedNodeCreatePlan, error: unknown) => Promise<never>;
+    schemaGraphWriteLockNamespace?: string;
+    edgeCardinalityInsertFusion?: true;
+    nodeClaimInsertFusion?: true;
+    tableExistenceCache?: TableExistenceCacheOptions;
 }>;
 
 // @public
@@ -2150,6 +2305,50 @@ type PurgeEdgeClaimsParams = Readonly<{
 // @public (undocumented)
 type QueryExecutionBackend = Pick<GraphBackend, "execute">;
 
+// @public
+type RawContributionMaterializationRow = Readonly<{
+    graphId: string;
+    logicalName: string;
+    owner: string;
+    tableName: string;
+    signature: string;
+    materializedAt: unknown;
+    lastAttemptedAt: unknown;
+    lastError: string | null;
+}>;
+
+// @public
+type RawGraphTemplateRow = Readonly<{
+    templateId: string;
+    schemaHash: string;
+    schemaDoc: string;
+    createdAt: string;
+}>;
+
+// @public
+type RawIndexMaterializationRow = Readonly<{
+    indexName: string;
+    graphId: string;
+    entity: string;
+    kind: string;
+    signature: string;
+    schemaVersion: number;
+    materializedAt: unknown;
+    lastAttemptedAt: unknown;
+    lastError: string | null;
+}>;
+
+// @public
+type RawKindRemovalRow = Readonly<{
+    graphId: string;
+    kindName: string;
+    entity: string;
+    schemaVersion: number;
+    removedAt: unknown;
+    lastAttemptedAt: unknown;
+    lastError: string | null;
+}>;
+
 // @public (undocumented)
 type RawQueryExecutionBackend = Pick<GraphBackend, "executeRaw" | "compileSql">;
 
@@ -2162,6 +2361,19 @@ type ReadConstraintFenceViolationsParams = Readonly<{
     uniqueConstraintNames: readonly string[];
     disjointKindPairs: readonly (readonly [string, string])[];
     edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+}>;
+
+// @public
+type ReconciliationMarkerColumns = Readonly<{
+    graphId: AnyColumn;
+}>;
+
+// @public
+type ReconciliationMarkerRowAccess = Readonly<{
+    selectWhere: (condition: SQL) => Promise<readonly Readonly<{
+        reconciledToVersion: number;
+    }>[]>;
+    upsert: (graphId: string, version: number) => Promise<void>;
 }>;
 
 // @public
@@ -2220,8 +2432,15 @@ type RecursiveTraversalCapability = Readonly<{
     reason?: string;
 }>;
 
-// @public
+// @public (undocumented)
 type RefuseUnavailableFulltext = (graphId: string, error: unknown) => Promise<never>;
+
+// @public
+type RegisterGraphTemplateParams = Readonly<{
+    templateId: string;
+    schemaHash: string;
+    schemaDoc: SerializedSchema;
+}>;
 
 // @public
 type RelationalIndexDeclaration = NodeIndexDeclaration | EdgeIndexDeclaration;
@@ -2288,6 +2507,14 @@ type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWrite" | 
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
+
+// @internal
+type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+    tableExists: (this: void, tableName: string) => Promise<boolean>;
+    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
+    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
+}>;
 
 // @public
 type SerializedClosures = Readonly<{
@@ -2412,7 +2639,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
     fulltext: FulltextStrategy;
     vector: VectorStrategy | undefined;
     declaredCapabilities: BackendCapabilities;
-    contributionRebuildSupported: (interactiveTransactions: boolean) => boolean;
     limits: Readonly<{
         maxBindParameters: number;
         batchConfig: OperationBackendBatchConfig;
@@ -2425,10 +2651,16 @@ export type SqlEngineProfile<TTx> = Readonly<{
     nowIso?: () => string;
     provisioning: EngineProvisioning;
     fusion?: OperationFusionHooks;
+    fenceTarget: WriteFenceTarget;
+    contributionRuntime: ContributionRuntime;
+    identityRuntime: IdentityRuntime;
+    graphTemplateRuntime: GraphTemplateRuntime;
+    baseSchemaRuntime: BaseSchemaRuntime;
+    indexMaterializationRuntime: IndexMaterializationRuntime;
+    kindRemovalRuntime: KindRemovalRuntime;
+    buildOperations: (contributionMaterializer: ContributionMaterializer) => InternalOperationBackend;
+    close: () => Promise<void>;
     lateMembers: (ctx: EngineAssemblyContext<TTx>) => EngineLateMembers<TTx>;
-    operations: InternalOperationBackend;
-    contributionMaterializer: ContributionMaterializer;
-    inlineMembers: (ctx: EngineAssemblyContext<TTx>) => Partial<AdapterBackend<TTx>>;
 }>;
 
 // @public (undocumented)
@@ -2509,6 +2741,12 @@ type TableContribution = Readonly<{
     createDdl: readonly string[];
     dropDdl?: readonly string[];
     runtimeEnsure: boolean;
+}>;
+
+// @public
+type TableExistenceCacheOptions = Readonly<{
+    cacheExisting?: boolean | undefined;
+    cacheMissing?: boolean | undefined;
 }>;
 
 // @public
@@ -2770,6 +3008,12 @@ Readonly<{
 /** Neither. Every non-degradable fence refuses. */
 | Readonly<{
     kind: "unfenced";
+}>;
+
+// @public
+type WriteFenceTarget = Readonly<{
+    dialect: SqlDialect;
+    capabilities: BackendCapabilities;
 }>;
 
 // (No @packageDocumentation comment for this package)

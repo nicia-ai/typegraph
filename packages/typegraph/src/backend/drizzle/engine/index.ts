@@ -5,10 +5,16 @@
  */
 export { createSqlBackend } from "./create-sql-backend";
 export type {
+  BaseSchemaRuntime,
+  ContributionRuntime,
   EngineAssemblyContext,
   EngineLateMembers,
   EngineProvisioning,
   EngineTableNames,
+  GraphTemplateRuntime,
+  IdentityRuntime,
+  IndexMaterializationRuntime,
+  KindRemovalRuntime,
   OperationFusionHooks,
   SqlEngineProfile,
 } from "./profile";

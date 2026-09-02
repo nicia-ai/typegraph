@@ -7,27 +7,22 @@
  * transaction runner this group calls through `runSchemaWriteTransaction`
  * rather than reimplementing.
  *
- * Both deps come from `EngineLateMembers` (`../profile.ts`) —
- * `runSchemaWriteTransaction` from its `fence` group, and
- * `commitSchemaVersionIfKindsEmpty` from the sibling `schemaCommit` group
- * (it issues no lock itself, so it is not filed under `fence`) — which is
- * why this group is assembled inside `createSqlBackend` after a profile's
- * `lateMembers(ctx)` runs, rather than living in `EngineAssemblyContext`
- * itself or being folded into `lateMembers` directly: both depend on
- * values `lateMembers` produces, not ones it receives.
+ * `runSchemaWriteTransaction` comes from `EngineLateMembers.fence`
+ * (`../profile.ts`), which is why this group is assembled inside
+ * `createSqlBackend` after a profile's `lateMembers(ctx)` runs, rather than
+ * living in `EngineAssemblyContext` itself or being folded into
+ * `lateMembers` directly: it depends on a value `lateMembers` produces, not
+ * one it receives.
  *
- * `commitSchemaVersionIfKindsEmpty` (the populated-kind guard plus commit —
- * the dep, as opposed to the member of the same name this group exposes) is
- * the shared helper `operation-backend-core.ts` implements once and both
- * dialects call identically today. It arrives as a dep rather than a direct
- * import of that module: this file is wired into `createSqlBackend` itself,
- * a published entrypoint root whose runtime must not reach a real Drizzle
- * package until the operation-layer extraction folds that module in for
- * good; `operation-backend-core.ts` imports `drizzle-orm` at module scope,
- * so re-importing one of its functions here would leak that edge into the
- * entrypoint today. Only its TYPE (`InternalOperationBackend`) is imported
- * directly — type-only imports are erased at build time and so carry none
- * of that weight.
+ * The populated-kind guard plus commit (the member of the same name this
+ * group exposes delegates to it) is imported directly from
+ * `operation-backend-core.ts`, the module that implements it once for both
+ * dialects: this file is wired into `createSqlBackend` itself, a published
+ * entrypoint root, but that entrypoint's module tree already imports
+ * `drizzle-orm` as a value elsewhere (the contribution-marker member group
+ * it assembles, and the fulltext gate it applies, both come from modules
+ * that import it at module scope), so this import adds no new reach into a
+ * real Drizzle package that was not already there.
  */
 import type {
   CommitSchemaVersionIfKindsEmptyResult,
@@ -37,7 +32,10 @@ import type {
   SchemaWriteTransactionBackend,
   SetActiveVersionParams,
 } from "../../../types";
-import type { InternalOperationBackend } from "../../operation-backend-core";
+import {
+  commitSchemaVersionIfKindsEmpty,
+  type InternalOperationBackend,
+} from "../../operation-backend-core";
 
 export type CreateSchemaVersionMembersDeps = Readonly<{
   /**
@@ -54,16 +52,6 @@ export type CreateSchemaVersionMembersDeps = Readonly<{
     graphId: string,
     fn: (target: InternalOperationBackend) => Promise<T>,
   ) => Promise<T>;
-  /**
-   * The populated-kind guard plus commit, called identically by both
-   * dialects — see the module doc comment for why it arrives as a dep
-   * rather than a direct import.
-   */
-  commitSchemaVersionIfKindsEmpty: (
-    target: InternalOperationBackend,
-    params: CommitSchemaVersionParams,
-    probes: readonly SchemaKindEmptinessProbe[],
-  ) => Promise<CommitSchemaVersionIfKindsEmptyResult>;
 }>;
 
 export type SchemaVersionMembers = Readonly<{
@@ -92,7 +80,7 @@ export type SchemaVersionMembers = Readonly<{
 export function createSchemaVersionMembers(
   deps: CreateSchemaVersionMembersDeps,
 ): SchemaVersionMembers {
-  const { runSchemaWriteTransaction, commitSchemaVersionIfKindsEmpty } = deps;
+  const { runSchemaWriteTransaction } = deps;
 
   return {
     async commitSchemaVersion(
