@@ -668,7 +668,7 @@ type OperationBackendExecution = Readonly<{
   execRun: (query: ExecutableSql) => Promise<void>;
 }>;
 
-type OperationBackendBatchConfig = Readonly<{
+export type OperationBackendBatchConfig = Readonly<{
   checkUniqueBatchChunkSize: number;
   edgeInsertBatchSize: number;
   edgeSchemaFencedInsertBatchSize: number;
@@ -681,7 +681,7 @@ type OperationBackendBatchConfig = Readonly<{
   uniqueInsertBatchSize: number;
 }>;
 
-type OperationBackendRowMappers = Readonly<{
+export type OperationBackendRowMappers = Readonly<{
   toEdgeRow: (row: Record<string, unknown>) => EdgeRow;
   toNodeRow: (row: Record<string, unknown>) => NodeRow;
   toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
