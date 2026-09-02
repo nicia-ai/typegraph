@@ -102,7 +102,7 @@ function assertPairsCompatible(
         registry.isAssignableTo(implyingPair.to, impliedPair.to),
     );
     if (!compatible) {
-      const allowedStr = impliedPairs
+      const allowedString = impliedPairs
         .map((p) => `(${p.from} -> ${p.to})`)
         .join(", ");
       throw new ConfigurationError(
@@ -117,7 +117,7 @@ function assertPairsCompatible(
           allowedPairs: impliedPairs,
         },
         {
-          suggestion: `Ensure every endpoint pair of "${implyingEdgeKind}" is assignable to an allowed pair of "${impliedEdgeKind}" (allowed: [${allowedStr}]), or remove implies("${implyingEdgeKind}", "${impliedEdgeKind}").`,
+          suggestion: `Ensure every endpoint pair of "${implyingEdgeKind}" is assignable to an allowed pair of "${impliedEdgeKind}" (allowed: [${allowedString}]), or remove implies("${implyingEdgeKind}", "${impliedEdgeKind}").`,
         },
       );
     }

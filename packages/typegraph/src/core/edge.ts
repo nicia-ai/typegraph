@@ -4,11 +4,7 @@ import {
   assertSchemaKeysAreFree,
   RESERVED_EDGE_KEYS,
 } from "../store/reserved-keys";
-import {
-  isEdgeTargetMap,
-  normalizeTargetMap,
-  validateTargetMapEntries,
-} from "./edge-endpoints";
+import { normalizeTargetMap, validateTargetMapEntries } from "./edge-endpoints";
 import { assertJsonValue } from "./json-value";
 import {
   EDGE_TYPE_BRAND,
@@ -119,9 +115,7 @@ export function defineEdge<
   K extends string,
   S extends z.ZodObject<z.ZodRawShape>,
   From extends readonly NodeType[],
-  To extends {
-    readonly [P in From[number]["kind"]]: readonly [NodeType, ...NodeType[]];
-  },
+  To extends Record<From[number]["kind"], readonly [NodeType, ...NodeType[]]>,
 >(
   name: K,
   options: DefineEdgeOptions<S, From, To> & { from: From; to: To },
@@ -150,15 +144,9 @@ export function defineEdge<
   }
 
   let resolvedTo: To | undefined = options?.to;
-  if (options?.to !== undefined) {
-    if (
-      typeof options.to === "object" &&
-      options.to !== null &&
-      !Array.isArray(options.to)
-    ) {
-      validateTargetMapEntries(name, options.from, options.to);
-      resolvedTo = normalizeTargetMap(options.to) as To;
-    }
+  if (options?.to !== undefined && !Array.isArray(options.to)) {
+    validateTargetMapEntries(name, options.from, options.to);
+    resolvedTo = normalizeTargetMap(options.to) as To;
   }
 
   return Object.freeze({

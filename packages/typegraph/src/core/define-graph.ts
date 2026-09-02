@@ -11,12 +11,12 @@ import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
 import { assertClaimAxisSafe } from "../store/claims/axis";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
-import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   isEdgeTargetMap,
   normalizeTargetMap,
   validateTargetMapEntries,
 } from "./edge-endpoints";
+import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   assertGraphAnnotations,
   cloneAndFreezeGraphAnnotations,
@@ -115,11 +115,7 @@ function validateConstraintNarrowing(
     }
   }
 
-  if (
-    typeof registration.to === "object" &&
-    registration.to !== null &&
-    !Array.isArray(registration.to)
-  ) {
+  if (!Array.isArray(registration.to)) {
     validateTargetMapEntries(name, registration.from, registration.to);
   }
 
@@ -129,22 +125,30 @@ function validateConstraintNarrowing(
   for (const fromNode of registration.from) {
     const allowedTargets =
       builtInIsMap ?
-        new Set((edgeType.to[fromNode.kind] ?? []).map((node) => node.kind))
-      : new Set(edgeType.to.map((node) => node.kind));
+        new Set<string>(
+          (edgeType.to[fromNode.kind] ?? []).map(
+            (node: NodeType): string => node.kind,
+          ),
+        )
+      : new Set<string>(
+          (edgeType.to as readonly NodeType[]).map(
+            (node: NodeType): string => node.kind,
+          ),
+        );
 
-    const declaredTargets =
+    const declaredTargets: readonly NodeType[] =
       registrationIsMap ?
         (registration.to[fromNode.kind] ?? [])
-      : registration.to;
+      : (registration.to as readonly NodeType[]);
 
     for (const targetNode of declaredTargets) {
       if (!allowedTargets.has(targetNode.kind)) {
         const message =
-          !builtInIsMap ?
-            `Edge "${name}" registration has 'to' kind "${targetNode.kind}" not in edge's built-in range: [${[...allowedTargets].join(", ")}]`
-          : !registrationIsMap ?
-            `Edge "${name}" registration has 'to' kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in source-dependent targets: [${[...allowedTargets].join(", ")}]. An array-valued registration must not erase built-in endpoint correlation.`
-          : `Edge "${name}" registration has target kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in mapping: [${[...allowedTargets].join(", ")}]`;
+          builtInIsMap ?
+            registrationIsMap ?
+              `Edge "${name}" registration has target kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in mapping: [${[...allowedTargets].join(", ")}]`
+            : `Edge "${name}" registration has 'to' kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in source-dependent targets: [${[...allowedTargets].join(", ")}]. An array-valued registration must not erase built-in endpoint correlation.`
+          : `Edge "${name}" registration has 'to' kind "${targetNode.kind}" not in edge's built-in range: [${[...allowedTargets].join(", ")}]`;
 
         throw new ConfigurationError(
           message,
@@ -180,22 +184,22 @@ function normalizeEdgeEntry(
     return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
 
-  // Already EdgeRegistration — validate target mapping if map form
-  if (
-    typeof entry.to === "object" &&
-    entry.to !== null &&
-    !Array.isArray(entry.to)
-  ) {
+  let normalizedRegistration: AnyEdgeRegistration = entry;
+  if (!Array.isArray(entry.to)) {
     validateTargetMapEntries(name, entry.from, entry.to);
-    entry = { ...entry, to: normalizeTargetMap(entry.to) };
+    normalizedRegistration = { ...entry, to: normalizeTargetMap(entry.to) };
   }
 
   // Validate narrowing if edge has built-in constraints
-  if (isEdgeTypeWithEndpoints(entry.type)) {
-    validateConstraintNarrowing(name, entry.type, entry);
+  if (isEdgeTypeWithEndpoints(normalizedRegistration.type)) {
+    validateConstraintNarrowing(
+      name,
+      normalizedRegistration.type,
+      normalizedRegistration,
+    );
   }
 
-  return canonicalizeMatchIdentity(name, entry);
+  return canonicalizeMatchIdentity(name, normalizedRegistration);
 }
 
 /**

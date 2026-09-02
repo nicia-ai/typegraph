@@ -664,13 +664,15 @@ export class TraversalBuilder<
       const endpoints = edgeType?.[side];
       if (!endpoints) return;
       if (side === "to" && isEdgeTargetMap(endpoints)) {
-        for (const targets of Object.values(endpoints)) {
+        for (const targets of Object.values(
+          endpoints,
+        ) as (readonly NodeType[])[]) {
           for (const endpoint of targets) {
             expectedKinds.add(endpoint.kind);
           }
         }
       } else if (Array.isArray(endpoints)) {
-        for (const endpoint of endpoints) {
+        for (const endpoint of endpoints as readonly NodeType[]) {
           expectedKinds.add(endpoint.kind);
         }
       }

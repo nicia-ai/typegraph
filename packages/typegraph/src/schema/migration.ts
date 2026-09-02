@@ -577,18 +577,18 @@ function propertySchemasEqual(before: unknown, after: unknown): boolean {
  */
 function getSerializedEdgePairs(edge: SerializedEdgeDef): ReadonlySet<string> {
   const pairs = new Set<string>();
-  if (edge.targetKindsBySource !== undefined) {
+  if (edge.targetKindsBySource === undefined) {
+    for (const fromKind of edge.fromKinds) {
+      for (const toKind of edge.toKinds) {
+        pairs.add(`${fromKind}\0${toKind}`);
+      }
+    }
+  } else {
     for (const [sourceKind, targetKinds] of Object.entries(
       edge.targetKindsBySource,
     )) {
       for (const targetKind of targetKinds) {
         pairs.add(`${sourceKind}\0${targetKind}`);
-      }
-    }
-  } else {
-    for (const fromKind of edge.fromKinds) {
-      for (const toKind of edge.toKinds) {
-        pairs.add(`${fromKind}\0${toKind}`);
       }
     }
   }

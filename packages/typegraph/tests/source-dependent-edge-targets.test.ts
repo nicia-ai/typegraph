@@ -2,6 +2,7 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
+  asEdgeId,
   ConfigurationError,
   createStore,
   createStoreWithSchema,
@@ -23,6 +24,7 @@ import { buildKindRegistry } from "../src/registry";
 import { computeSchemaHash, serializeSchema } from "../src/schema";
 import { computeSchemaDiff } from "../src/schema/migration";
 import { type NodeRef, type TypedEdgeCollection } from "../src/store/types";
+import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
 describe("Source-dependent edge targets (Issue #603)", () => {
@@ -317,21 +319,19 @@ describe("Source-dependent edge targets (Issue #603)", () => {
         store.edges.dependsOn.create(task1, course1),
       ).rejects.toThrow(EndpointPairError);
 
-      try {
-        // @ts-expect-error undeclared endpoint pair
-        await store.edges.dependsOn.create(task1, course1);
-      } catch (err) {
-        expect(err).toBeInstanceOf(EndpointPairError);
-        const pairErr = err as EndpointPairError;
-        expect(pairErr.details.endpoint).toBe("pair");
-        expect(pairErr.details.edgeKind).toBe("dependsOn");
-        expect(pairErr.details.fromKind).toBe("Task");
-        expect(pairErr.details.toKind).toBe("Course");
-        expect(pairErr.details.allowedPairs).toEqual([
-          { from: "Course", to: "Course" },
-          { from: "Task", to: "Task" },
-        ]);
-      }
+      const thrownError = await store.edges.dependsOn
+        .create(task1, course1 as unknown as NodeRef<typeof Task>)
+        .catch((error: unknown) => error);
+      expect(thrownError).toBeInstanceOf(EndpointPairError);
+      const pairError = thrownError as EndpointPairError;
+      expect(pairError.details.endpoint).toBe("pair");
+      expect(pairError.details.edgeKind).toBe("dependsOn");
+      expect(pairError.details.fromKind).toBe("Task");
+      expect(pairError.details.toKind).toBe("Course");
+      expect(pairError.details.allowedPairs).toEqual([
+        { from: "Course", to: "Course" },
+        { from: "Task", to: "Task" },
+      ]);
 
       // Course -> Task is also undeclared
       await expect(
@@ -362,7 +362,7 @@ describe("Source-dependent edge targets (Issue #603)", () => {
           { kind: "Task", id: "t-nonexistent" },
           { kind: "Course", id: "c-nonexistent" },
           {},
-          { validateEndpoints: false } as any,
+          { validateEndpoints: false } as { validateEndpoints?: boolean },
         ),
       ).rejects.toThrow(EndpointPairError);
     });
@@ -407,26 +407,30 @@ describe("Source-dependent edge targets (Issue #603)", () => {
         priority: 2,
       });
 
+      const untypedEdge = store.edges.dependsOn as unknown as {
+        create: (from: unknown, to: unknown) => Promise<{ id: string }>;
+      };
+
       // SubTask -> Task
-      const e1 = await (store.edges.dependsOn.create as any)(
+      const edge1 = await untypedEdge.create(
         { kind: "SubTask", id: subtask1.id },
         { kind: "Task", id: task.id },
       );
-      expect(e1.id).toBeDefined();
+      expect(edge1.id).toBeDefined();
 
       // Task -> SubTask
-      const e2 = await (store.edges.dependsOn.create as any)(
+      const edge2 = await untypedEdge.create(
         { kind: "Task", id: task.id },
         { kind: "SubTask", id: subtask2.id },
       );
-      expect(e2.id).toBeDefined();
+      expect(edge2.id).toBeDefined();
 
       // SubTask -> SubTask
-      const e3 = await (store.edges.dependsOn.create as any)(
+      const edge3 = await untypedEdge.create(
         { kind: "SubTask", id: subtask1.id },
         { kind: "SubTask", id: subtask2.id },
       );
-      expect(e3.id).toBeDefined();
+      expect(edge3.id).toBeDefined();
     });
 
     it("rejects SubTask -> Course", async () => {
@@ -439,8 +443,12 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       });
       const course = await store.nodes.Course.create({ name: "Math" });
 
+      const untypedEdge = store.edges.dependsOn as unknown as {
+        create: (from: unknown, to: unknown) => Promise<{ id: string }>;
+      };
+
       await expect(
-        (store.edges.dependsOn.create as any)(
+        untypedEdge.create(
           { kind: "SubTask", id: subtask.id },
           { kind: "Course", id: course.id },
         ),
@@ -510,9 +518,9 @@ describe("Source-dependent edge targets (Issue #603)", () => {
 
       await expect(
         store.edges.dependsOn.bulkUpsertById([
-          { id: "e1" as any, from: t1, to: t2 },
+          { id: asEdgeId("e1"), from: t1, to: t2 },
           // @ts-expect-error undeclared pair
-          { id: "e2" as any, from: t1, to: c1 },
+          { id: asEdgeId("e2"), from: t1, to: c1 },
         ]),
       ).rejects.toThrow(EndpointPairError);
 
@@ -815,13 +823,21 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       const t2 = await evolved.nodes.Task.create({ title: "Ext T2" });
       const c1 = await evolved.nodes.Course.create({ name: "Ext C1" });
 
-      const edges = (evolved as any).edges;
+      const untypedEdges = (
+        evolved as unknown as {
+          edges: Record<
+            string,
+            { create: (from: unknown, to: unknown) => Promise<{ id: string }> }
+          >;
+        }
+      ).edges;
+      const extensionDependsOn = requireDefined(untypedEdges["dependsOn"]);
       // Valid write
-      const e1 = await edges.dependsOn.create(t1, t2);
-      expect(e1.id).toBeDefined();
+      const edge1 = await extensionDependsOn.create(t1, t2);
+      expect(edge1.id).toBeDefined();
 
       // Invalid pair write
-      await expect(edges.dependsOn.create(t1, c1)).rejects.toThrow(
+      await expect(extensionDependsOn.create(t1, c1)).rejects.toThrow(
         EndpointPairError,
       );
     });
@@ -933,10 +949,10 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       const after = await store.removeKinds(["NodeX"]);
 
       // Verify NodeA is pruned from rel, but rel SURVIVES with NodeB -> NodeY!
-      const relEdge = after.registry.getEdgeType("rel");
-      expect(relEdge).toBeDefined();
-      expect(relEdge?.from?.map((n) => n.kind)).toEqual(["NodeB"]);
-      expect(relEdge?.to).toEqual({
+      const relationshipEdge = after.registry.getEdgeType("rel");
+      expect(relationshipEdge).toBeDefined();
+      expect(relationshipEdge?.from?.map((n) => n.kind)).toEqual(["NodeB"]);
+      expect(relationshipEdge?.to).toEqual({
         NodeB: [expect.objectContaining({ kind: "NodeY" })],
       });
     });
@@ -946,6 +962,7 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       const worksAt = defineEdge("worksAt", {
         schema: z.object({ role: z.string() }),
       });
+      expect(worksAt.kind).toBe("worksAt");
 
       type TestRegistration = EdgeRegistration<
         typeof worksAt,
@@ -961,9 +978,13 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       >();
 
       // Valid create args
-      type CreateArgs = Parameters<TestCollection["create"]>;
-      expectTypeOf<CreateArgs[0]>().toEqualTypeOf<NodeRef<typeof Employee>>();
-      expectTypeOf<CreateArgs[1]>().toEqualTypeOf<NodeRef<typeof Department>>();
+      type CreateArguments = Parameters<TestCollection["create"]>;
+      expectTypeOf<CreateArguments[0]>().toEqualTypeOf<
+        NodeRef<typeof Employee>
+      >();
+      expectTypeOf<CreateArguments[1]>().toEqualTypeOf<
+        NodeRef<typeof Department>
+      >();
     });
 
     // Finding 5: Legal __proto__ source kind works safely
@@ -994,18 +1015,26 @@ describe("Source-dependent edge targets (Issue #603)", () => {
       const backend = createTestBackend();
       const store = createStore(protoGraph, backend);
 
-      const nodeCollections = store.nodes as Record<string, any>;
-      const p1 = await nodeCollections[PROTO_KEY].create({ val: "p1" });
-      const p2 = await nodeCollections[PROTO_KEY].create({ val: "p2" });
+      const protoStore = store as unknown as {
+        nodes: Record<
+          string,
+          { create: (props: { val: string }) => Promise<{ kind: string }> }
+        >;
+        edges: Record<
+          string,
+          { create: (from: unknown, to: unknown) => Promise<{ id: string }> }
+        >;
+      };
+      const p1 = await protoStore.nodes[PROTO_KEY]?.create({ val: "p1" });
+      const p2 = await protoStore.nodes[PROTO_KEY]?.create({ val: "p2" });
       const t1 = await store.nodes.Task.create({ title: "t1" });
 
-      const createdEdge = await store.edges.protoEdge.create(p1, p2);
-      expect(createdEdge.id).toBeDefined();
+      const createdEdge = await protoStore.edges["protoEdge"]?.create(p1, p2);
+      expect(createdEdge?.id).toBeDefined();
 
       // Unrelated source or target rejected
       await expect(
-        // @ts-expect-error invalid endpoint
-        store.edges.protoEdge.create(t1, p2),
+        protoStore.edges["protoEdge"]?.create(t1, p2),
       ).rejects.toThrow(EndpointError);
     });
 
@@ -1051,7 +1080,6 @@ describe("Source-dependent edge targets (Issue #603)", () => {
             dependsOn: {
               type: baseEdge,
               from: [Task],
-              // @ts-expect-error empty target array
               to: {
                 Task: [],
               },

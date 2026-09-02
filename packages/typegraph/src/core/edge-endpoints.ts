@@ -5,6 +5,7 @@
  * and source-dependent target declarations (map-valued `to`).
  */
 import { ConfigurationError } from "../errors";
+import { compareStrings } from "../utils/compare";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import {
   type EdgeTargetMap,
@@ -34,7 +35,8 @@ export function isEdgeTargetMap(value: unknown): value is EdgeTargetMap {
 export function projectTargetNodes(to: EdgeTargets): readonly NodeType[] {
   const seen = new Set<string>();
   const result: NodeType[] = [];
-  const lists = Array.isArray(to) ? [to] : Object.values(to);
+  const lists: readonly (readonly NodeType[])[] =
+    Array.isArray(to) ? [to] : Object.values(to);
   for (const targets of lists) {
     for (const node of targets) {
       if (!seen.has(node.kind)) {
@@ -72,31 +74,33 @@ export function getEdgeEndpointPairs(
   const seen = new Set<string>();
 
   if (Array.isArray(to)) {
-    for (const f of from) {
-      for (const t of to) {
-        const key = `${f.kind}\0${t.kind}`;
+    const toArray: readonly NodeType[] = to;
+    for (const fromNode of from) {
+      for (const toNode of toArray) {
+        const key = `${fromNode.kind}\0${toNode.kind}`;
         if (!seen.has(key)) {
           seen.add(key);
-          pairs.push({ from: f.kind, to: t.kind });
+          pairs.push({ from: fromNode.kind, to: toNode.kind });
         }
       }
     }
   } else {
-    for (const [sourceKind, targets] of Object.entries(to)) {
-      for (const t of targets) {
-        const key = `${sourceKind}\0${t.kind}`;
+    const toMap: EdgeTargetMap = to as EdgeTargetMap;
+    for (const [sourceKind, targets] of Object.entries(toMap)) {
+      for (const targetNode of targets) {
+        const key = `${sourceKind}\0${targetNode.kind}`;
         if (!seen.has(key)) {
           seen.add(key);
-          pairs.push({ from: sourceKind, to: t.kind });
+          pairs.push({ from: sourceKind, to: targetNode.kind });
         }
       }
     }
   }
 
   return pairs.toSorted((a, b) => {
-    const cmp = a.from.localeCompare(b.from);
+    const cmp = compareStrings(a.from, b.from);
     if (cmp !== 0) return cmp;
-    return a.to.localeCompare(b.to);
+    return compareStrings(a.to, b.to);
   });
 }
 
@@ -151,7 +155,9 @@ export function validateTargetMapEntries(
     );
   }
 
-  const declaredSourceKinds = new Set(from.map((node) => node.kind));
+  const declaredSourceKinds = new Set<string>(
+    from.map((node: NodeType): string => node.kind),
+  );
   const declaredSourceList = [...declaredSourceKinds];
   const mapKeys = Object.keys(to);
 

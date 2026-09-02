@@ -26,6 +26,7 @@ import { type ContributionRepairResult } from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
+import { type NodeType } from "../src/core/types";
 import {
   ConfigurationError,
   KindNotFoundError,
@@ -454,7 +455,9 @@ describe("Store.evolve — round-trip parity matrix", () => {
     expect(edgeType?.from?.map((node) => node.kind)).toEqual(["Tag"]);
     expect(
       Array.isArray(edgeType?.to) ?
-        edgeType.to.map((node) => node.kind)
+        (edgeType.to as readonly NodeType[]).map(
+          (node: NodeType): string => node.kind,
+        )
       : undefined,
     ).toEqual(["Person"]);
 

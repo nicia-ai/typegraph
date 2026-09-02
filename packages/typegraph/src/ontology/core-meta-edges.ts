@@ -1,4 +1,4 @@
-import { type AnyEdgeType, type EdgeType, type NodeType } from "../core/types";
+import { type AnyEdgeType, type NodeType } from "../core/types";
 import {
   META_EDGE_BROADER,
   META_EDGE_DIFFERENT_FROM,

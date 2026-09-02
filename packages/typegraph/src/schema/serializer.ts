@@ -495,11 +495,11 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
 
   let targetKindsBySource: Record<string, readonly string[]> | undefined;
   if (isMap) {
-    const map: Record<string, readonly string[]> = {};
+    const map = createDataKeyedBag<readonly string[]>();
     for (const [sourceKind, targets] of Object.entries(registration.to)) {
       map[sourceKind] = targets.map((t) => t.kind).toSorted();
     }
-    targetKindsBySource = map;
+    targetKindsBySource = { ...map };
   }
 
   return {

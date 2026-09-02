@@ -720,13 +720,13 @@ function validateTargetMapping(
       return undefined;
     }
   }
-  const result: Record<string, readonly string[]> = {};
-  for (const [key, val] of Object.entries(raw)) {
-    const targets = validateEndpointList(val, `${path}/${key}`, issues);
+  const result = createDataKeyedBag<readonly string[]>();
+  for (const [key, value] of Object.entries(raw)) {
+    const targets = validateEndpointList(value, `${path}/${key}`, issues);
     if (targets === undefined) return undefined;
     result[key] = targets;
   }
-  return result;
+  return { ...result };
 }
 
 // ============================================================

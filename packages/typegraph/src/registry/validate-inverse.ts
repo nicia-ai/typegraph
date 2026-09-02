@@ -91,7 +91,7 @@ function assertInversePairsCompatible(
         registry.isAssignableTo(reversed.to, inversePair.to),
     );
     if (!compatible) {
-      const allowedStr = inversePairs
+      const allowedString = inversePairs
         .map((p) => `(${p.from} -> ${p.to})`)
         .join(", ");
       throw new ConfigurationError(
@@ -107,7 +107,7 @@ function assertInversePairsCompatible(
           allowedPairs: inversePairs,
         },
         {
-          suggestion: `Ensure every reversed pair of "${sourceEdge}" matches an allowed pair of "${inverseEdge}" (allowed: [${allowedStr}]), or remove the inverseOf relation.`,
+          suggestion: `Ensure every reversed pair of "${sourceEdge}" matches an allowed pair of "${inverseEdge}" (allowed: [${allowedString}]), or remove the inverseOf relation.`,
         },
       );
     }

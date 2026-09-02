@@ -616,7 +616,9 @@ describe("edge compilation", () => {
     ]);
     expect(
       Array.isArray(edge.to) ?
-        edge.to.map((endpoint) => endpointKind(endpoint))
+        (edge.to as readonly (NodeType | string)[]).map(
+          (endpoint: NodeType | string): string => endpointKind(endpoint),
+        )
       : undefined,
     ).toEqual(["Author"]);
   });

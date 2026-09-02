@@ -457,14 +457,15 @@ export function isEdgeType(value: unknown): value is AnyEdgeType {
 export function isEdgeTypeWithEndpoints(
   value: unknown,
 ): value is EdgeTypeWithEndpoints {
-  return (
-    isEdgeType(value) &&
-    Array.isArray(value.from) &&
-    value.from.length > 0 &&
-    ((Array.isArray(value.to) && value.to.length > 0) ||
-      (typeof value.to === "object" &&
-        value.to !== null &&
-        !Array.isArray(value.to) &&
-        Object.keys(value.to).length > 0))
-  );
+  if (
+    !isEdgeType(value) ||
+    !Array.isArray(value.from) ||
+    value.from.length === 0 ||
+    value.to === undefined
+  ) {
+    return false;
+  }
+  return Array.isArray(value.to) ?
+      value.to.length > 0
+    : Object.keys(value.to).length > 0;
 }

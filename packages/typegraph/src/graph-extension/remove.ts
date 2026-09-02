@@ -151,7 +151,9 @@ export function planRemovals<G extends GraphDef>(
     const edgeTo = edgeDocument.to;
     let newTo: readonly string[] | Record<string, readonly string[]>;
     if (Array.isArray(edgeTo)) {
-      newTo = edgeTo.filter((kind) => !removedNodeKindsSet.has(kind));
+      newTo = (edgeTo as readonly string[]).filter(
+        (kind: string): boolean => !removedNodeKindsSet.has(kind),
+      );
       if (newFrom.length === 0 || newTo.length === 0) {
         cascadeEdges.add(edgeName);
         continue;
@@ -162,7 +164,7 @@ export function planRemovals<G extends GraphDef>(
       const survivingFrom: string[] = [];
       for (const sourceKind of newFrom) {
         const targets = (targetMap[sourceKind] ?? []).filter(
-          (kind) => !removedNodeKindsSet.has(kind),
+          (kind: string): boolean => !removedNodeKindsSet.has(kind),
         );
         if (targets.length > 0) {
           survivingFrom.push(sourceKind);
@@ -318,7 +320,7 @@ function buildCompileTimeReferentIndex<G extends GraphDef>(
       name: edgeName,
     };
     const seen = new Set<string>();
-    for (const endpoint of registration.from ?? []) {
+    for (const endpoint of registration.from) {
       if (seen.has(endpoint.kind)) continue;
       seen.add(endpoint.kind);
       append(endpoint.kind, referent);

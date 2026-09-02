@@ -5,7 +5,6 @@ import {
   type AnyEdgeType,
   type EdgeRegistration,
   type EdgeTargetMap,
-  type EdgeType,
   type KindEntity,
   type NodeRegistration,
   type NodeType,
@@ -202,16 +201,28 @@ export function mergeGraphExtension<G extends GraphDef>(
     // The compiler intentionally doesn't construct an EdgeType — its
     // view is graph-extension-only, so endpoint resolution against
     // compile-time host kinds isn't possible there.
-    const type = defineEdge(
-      edge.kindName,
-      compactUndefined({
-        schema: edge.schema,
-        description: edge.description,
-        annotations: edge.annotations,
-        from,
-        to,
-      }) as any,
-    ) as unknown as EdgeType;
+    const type =
+      Array.isArray(to) ?
+        defineEdge(
+          edge.kindName,
+          compactUndefined({
+            schema: edge.schema,
+            description: edge.description,
+            annotations: edge.annotations,
+            from,
+            to,
+          }),
+        )
+      : defineEdge(
+          edge.kindName,
+          compactUndefined({
+            schema: edge.schema,
+            description: edge.description,
+            annotations: edge.annotations,
+            from,
+            to: to as Record<string, readonly [NodeType, ...NodeType[]]>,
+          }),
+        );
     mergedEdges[edge.kindName] = { type, from, to };
   }
 
@@ -596,7 +607,7 @@ function resolveTargetMap(
   nodeKinds: ReadonlyMap<string, NodeType>,
   context: Readonly<{ graphId: string; edgeKind: string }>,
 ): EdgeTargetMap {
-  const result: Record<string, readonly NodeType[]> = {};
+  const result = createDataKeyedBag<readonly NodeType[]>();
   for (const [sourceKind, targets] of Object.entries(map)) {
     result[sourceKind] = resolveEndpoints(targets, nodeKinds, {
       graphId: context.graphId,
@@ -604,7 +615,7 @@ function resolveTargetMap(
       side: "to",
     });
   }
-  return result;
+  return { ...result };
 }
 
 function resolveOntologyEndpoints(

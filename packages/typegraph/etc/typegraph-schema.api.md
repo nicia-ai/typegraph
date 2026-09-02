@@ -12,7 +12,7 @@ import { ZodType } from 'zod';
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
 
 // @public
-type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, readonly NodeType[] | undefined>;
+type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
 export function applyDeprecatedKinds<G extends GraphDef>(graph: G, names: Iterable<string> | undefined): G;
@@ -586,10 +586,10 @@ type EdgeMatchIdentityStorage = Readonly<{
 }>;
 
 // @public
-type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType> = Readonly<{
+type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType, ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets : readonly ToTypes[]> = Readonly<{
     type: E;
     from: readonly FromTypes[];
-    to: readonly ToTypes[];
+    to: ToDef;
     cardinality?: Cardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
@@ -615,7 +615,13 @@ type EdgeRow = Readonly<{
 }>;
 
 // @public
-type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends readonly NodeType[] | undefined = undefined> = Readonly<{
+type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+// @public
+type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+// @public
+type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
     [EDGE_TYPE_BRAND]: true;
     kind: K;
     schema: S;
@@ -665,7 +671,7 @@ type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
-    to: readonly string[];
+    to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
 }>;
 
@@ -1855,8 +1861,8 @@ export type OntologyChange = Readonly<{
 // @public
 type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
-    from: NodeType | EdgeType | string;
-    to: NodeType | EdgeType | string;
+    from: NodeType | AnyEdgeType | string;
+    to: NodeType | AnyEdgeType | string;
 }>;
 
 // @public
@@ -2129,6 +2135,7 @@ export type SerializedEdgeDef = Readonly<{
     kind: string;
     fromKinds: readonly string[];
     toKinds: readonly string[];
+    targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
     endpointExistence: EndpointExistence;

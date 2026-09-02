@@ -1296,7 +1296,7 @@ type EdgeBulkCreateItem<
   Pairs extends EdgeEndpointPairTypes,
   Schema extends z.ZodObject<z.ZodRawShape>,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     Readonly<{
       from: NodeRef<Pairs["from"]>;
       to: NodeRef<Pairs["to"]>;
@@ -1311,7 +1311,7 @@ type EdgeBulkUpsertItem<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     Readonly<{
       id: EdgeId<E>;
       from: NodeRef<Pairs["from"]>;
@@ -1326,7 +1326,7 @@ type EdgeBulkInsertItem<
   Pairs extends EdgeEndpointPairTypes,
   Schema extends z.ZodObject<z.ZodRawShape>,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     Readonly<{
       from: NodeRef<Pairs["from"]>;
       to: NodeRef<Pairs["to"]>;
@@ -1341,7 +1341,7 @@ type EdgeBulkGetOrCreateItem<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     Readonly<{
       from: NodeRef<Pairs["from"]>;
       to: NodeRef<Pairs["to"]>;
@@ -1352,11 +1352,11 @@ type EdgeBulkGetOrCreateItem<
       ValidityEndMutation
   : never;
 
-type EdgeCreateArgs<
+type EdgeCreateArgumentsTuple<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     [
       from: NodeRef<Pairs["from"]>,
       to: NodeRef<Pairs["to"]>,
@@ -1364,11 +1364,11 @@ type EdgeCreateArgs<
     ]
   : never;
 
-type EdgeFindByEndpointsArgs<
+type EdgeFindByEndpointsArguments<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     [
       from: NodeRef<Pairs["from"]>,
       to: NodeRef<Pairs["to"]>,
@@ -1377,11 +1377,11 @@ type EdgeFindByEndpointsArgs<
     ]
   : never;
 
-type EdgeGetOrCreateByEndpointsArgs<
+type EdgeGetOrCreateByEndpointsArguments<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
 > =
-  Pairs extends any ?
+  Pairs extends EdgeEndpointPairTypes ?
     [
       from: NodeRef<Pairs["from"]>,
       to: NodeRef<Pairs["to"]>,
@@ -1412,7 +1412,9 @@ export type EdgeCollection<
    * @param to - Target node (must be one of the allowed 'to' types)
    * @param args - Edge properties (optional if schema is empty) and creation options
    */
-  create: (...args: EdgeCreateArgs<E, Pairs>) => Promise<Edge<E, From, To>>;
+  create: (
+    ...args: EdgeCreateArgumentsTuple<E, Pairs>
+  ) => Promise<Edge<E, From, To>>;
 
   /** Get an edge by ID */
   getById: (
@@ -1538,7 +1540,7 @@ export type EdgeCollection<
    * per call, like {@link EdgeCollection.batchFindFrom}.
    */
   batchFindByEndpoints: (
-    ...args: EdgeFindByEndpointsArgs<E, Pairs>
+    ...args: EdgeFindByEndpointsArguments<E, Pairs>
   ) => BatchableQuery<Edge<E, From, To>>;
 
   /** Delete an edge (soft delete - sets deletedAt timestamp) */
@@ -1683,7 +1685,7 @@ export type EdgeCollection<
    *   `temporalMode` / `asOf` to read the edge as of another coordinate.
    */
   findByEndpoints: (
-    ...args: EdgeFindByEndpointsArgs<E, Pairs>
+    ...args: EdgeFindByEndpointsArguments<E, Pairs>
   ) => Promise<Edge<E, From, To> | undefined>;
 
   /**
@@ -1714,7 +1716,7 @@ export type EdgeCollection<
    * @param options - Match criteria and conflict resolution
    */
   getOrCreateByEndpoints: (
-    ...args: EdgeGetOrCreateByEndpointsArgs<E, Pairs>
+    ...args: EdgeGetOrCreateByEndpointsArguments<E, Pairs>
   ) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>>;
 
   /**
@@ -1756,44 +1758,44 @@ export type ConstraintNames<R extends NodeRegistration> =
 type EdgeFromTypes<R extends EdgeRegistration> =
   R["from"] extends readonly (infer N)[] ? N : never;
 
+type ExtractTargets<T> =
+  T extends readonly (infer N extends NodeType)[] ? N
+  : T extends Record<string, readonly (infer N extends NodeType)[]> ? N
+  : never;
+
 /**
  * Extract the union of 'to' node types from an EdgeRegistration.
  */
-type EdgeToTypes<R extends EdgeRegistration> =
-  R["to"] extends any ?
-    R["to"] extends readonly (infer N)[] ? N
-    : R["to"] extends Record<string, readonly (infer N)[]> ? N
-    : never
-  : never;
+type EdgeToTypes<R extends EdgeRegistration> = ExtractTargets<R["to"]>;
+
+type ExtractAllowedPairs<From, To> =
+  To extends readonly (infer ToNode extends NodeType)[] ?
+    {
+      from: From extends readonly (infer FromNode extends NodeType)[] ? FromNode
+      : NodeType;
+      to: ToNode;
+    }
+  : To extends Record<string, readonly NodeType[]> ?
+    {
+      [K in keyof To & string]: {
+        from: Extract<
+          From extends readonly (infer FromNode extends NodeType)[] ? FromNode
+          : NodeType,
+          { kind: K }
+        >;
+        to: To[K] extends readonly (infer ToNode extends NodeType)[] ? ToNode
+        : NodeType;
+      };
+    }[keyof To & string]
+  : { from: NodeType; to: NodeType };
 
 /**
  * Extract the allowed endpoint pairs from an EdgeRegistration.
  */
-type EdgeAllowedPairs<R extends EdgeRegistration> =
-  R["to"] extends any ?
-    R["to"] extends readonly (infer ToNode extends NodeType)[] ?
-      {
-        from: R["from"] extends readonly (infer FromNode extends NodeType)[] ?
-          FromNode
-        : NodeType;
-        to: ToNode;
-      }
-    : R["to"] extends Record<string, readonly NodeType[]> ?
-      {
-        [K in keyof R["to"] & string]: {
-          from: Extract<
-            R["from"] extends readonly (infer FromNode extends NodeType)[] ?
-              FromNode
-            : NodeType,
-            { kind: K }
-          >;
-          to: R["to"][K] extends readonly (infer ToNode extends NodeType)[] ?
-            ToNode
-          : NodeType;
-        };
-      }[keyof R["to"] & string]
-    : { from: NodeType; to: NodeType }
-  : never;
+type EdgeAllowedPairs<R extends EdgeRegistration> = ExtractAllowedPairs<
+  R["from"],
+  R["to"]
+>;
 
 /**
  * Create a type-safe EdgeCollection from an EdgeRegistration.
@@ -1972,7 +1974,7 @@ export type StoreViewEdgeCollection<
 
   /** Find the edge between two endpoints at the view's pinned coordinate. */
   findByEndpoints: (
-    ...args: Pairs extends any ?
+    ...args: Pairs extends EdgeEndpointPairTypes ?
       [
         from: NodeRef<Pairs["from"]>,
         to: NodeRef<Pairs["to"]>,

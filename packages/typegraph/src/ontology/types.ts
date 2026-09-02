@@ -1,4 +1,4 @@
-import { type AnyEdgeType, type EdgeType, type NodeType } from "../core/types";
+import { type AnyEdgeType, type NodeType } from "../core/types";
 
 // ============================================================
 // Brand Key
