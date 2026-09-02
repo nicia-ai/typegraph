@@ -22,21 +22,12 @@ import type {
   AdapterBackend,
   BackendCapabilities,
   DatabaseExtensionName,
-  InsertNodeParams,
-  ManagedNodeCreatePlan,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
 import type { SqlExecutionAdapter } from "../execution/types";
-import type {
-  InternalOperationBackend,
-  OperationBackendBatchConfig,
-  OperationBackendRowMappers,
-} from "../operation-backend-core";
-import type {
-  CommonOperationStrategy,
-  TableExistenceCacheOptions,
-} from "../operations/strategy";
+import type { InternalOperationBackend } from "../operation-backend-core";
+import type { CommonOperationStrategy } from "../operations/strategy";
 import type { CreateBaseSchemaMembersDeps } from "./members/base-schema-members";
 import type { CreateContributionMembersDeps } from "./members/contribution-members";
 import type { CreateGraphTemplateMembersDeps } from "./members/graph-template-members";
@@ -84,49 +75,6 @@ export type EngineProvisioning = Readonly<{
 }>;
 
 /**
- * The operation-layer fusion knobs `buildCommonOperationOptions`
- * (`./operation-layer`) reads to assemble one `createCommonOperationBackend`
- * options object for either dialect. `atomicProgramsAtTransactionScope` is
- * the one fact both dialects report: whether the atomic SQL program executor
- * is threaded into a transaction-scoped operation backend at all (PostgreSQL
- * always does; SQLite's transaction-scoped backend excludes it — a real
- * capability gap, not drift). Every other member is PostgreSQL-only and
- * optional for that reason: SQLite's dialect factory builds a value with
- * only `atomicProgramsAtTransactionScope` set, and PostgreSQL's builds one
- * with every member present except the three transaction-scope-only keys
- * (`schemaGraphWriteLockNamespace`, `edgeCardinalityInsertFusion`,
- * `nodeClaimInsertFusion`), which its dialect factory itself omits outside a
- * transaction-scoped operation backend. `buildCommonOperationOptions` spreads
- * each optional member into the assembled options only when the dialect
- * supplied it, so the presence-or-absence decision stays where the
- * asymmetry actually lives — in what each dialect factory constructs — and
- * the shared assembly never branches on which dialect it was called for.
- */
-export type OperationFusionHooks = Readonly<{
-  atomicProgramsAtTransactionScope: boolean;
-  /** Always `true` when present; a bundled projection-aware backend fuses managed-node projections into its INSERT. */
-  nodeProjectionInsertFusion?: true;
-  /** Read-only prerequisite gate run before a fused projection statement. */
-  beforeNodeProjectionInsert?: (
-    params: InsertNodeParams,
-    plan: ManagedNodeCreatePlan,
-  ) => Promise<void>;
-  /** Error-path projection storage classifier; must rethrow or return never. */
-  refuseNodeProjectionError?: (
-    params: InsertNodeParams,
-    plan: ManagedNodeCreatePlan,
-    error: unknown,
-  ) => Promise<never>;
-  /** Present only for a transaction-scoped operation backend. */
-  schemaGraphWriteLockNamespace?: string;
-  /** Present only for a transaction-scoped operation backend. */
-  edgeCardinalityInsertFusion?: true;
-  /** Present only for a transaction-scoped operation backend; claim plans require a caller-owned transaction to roll back refusals. */
-  nodeClaimInsertFusion?: true;
-  tableExistenceCache?: TableExistenceCacheOptions;
-}>;
-
-/**
  * What a profile's late-bound members receive instead of the whole profile
  * or a partially built backend: the facts and collaborators
  * {@link createSqlBackend} has already assembled by the time it calls
@@ -140,9 +88,9 @@ export type EngineAssemblyContext<TTx> = Readonly<{
    * The backend's capabilities after `finalizeEngineCapabilities`
    * (`./capabilities`) runs the shared capability tail on
    * `declaredCapabilities`. Each dialect builder resolves this same value a
-   * second time, for the local `capabilities` its still-inline
-   * operation-backend construction needs — a deliberate, harmless-today
-   * duplication (see that module's doc comment).
+   * second time, for the local `capabilities` its own `buildOperations`
+   * closure needs; the function is pure, so both derivations agree (see
+   * that module's doc comment).
    */
   capabilities: BackendCapabilities;
   /** The write-fence decision, resolved once from the capabilities above. */
@@ -338,13 +286,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
   vector: VectorStrategy | undefined;
   /** The dialect's declared capabilities, before its capability tail runs. */
   declaredCapabilities: BackendCapabilities;
-  /** Bind-parameter and batch-sizing limits the operation-backend layer partitions its writes against. */
-  limits: Readonly<{
-    maxBindParameters: number;
-    batchConfig: OperationBackendBatchConfig;
-  }>;
-  /** Decodes a raw driver row into each operation-backend result shape — the one place a dialect's column typing is normalized. */
-  rowMappers: OperationBackendRowMappers;
   /**
    * The serialized-resource verdict {@link createSqlBackend} records once,
    * before the backend object escapes (see `../../transaction-resource.ts`).
@@ -358,10 +299,7 @@ export type SqlEngineProfile<TTx> = Readonly<{
    * durable.
    */
   autocommit: Readonly<{ singleStatementDurable: boolean }>;
-  /** Returns the current instant as an ISO string, for row mappers that stamp a value the driver does not supply. */
-  nowIso?: () => string;
   provisioning: EngineProvisioning;
-  fusion?: OperationFusionHooks;
   /**
    * ONE fence target for the whole backend and every transaction-scoped one
    * it builds, marked first-party by the profile itself, so every lock

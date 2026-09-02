@@ -16,10 +16,17 @@
  * execution/statement-queue.ts`) — a handle that escapes the callback then
  * rejects every later statement with `TransactionClosedError`. SQLite's
  * transaction-scoped operation backend excludes the atomic SQL program
- * executor entirely (`fusion.atomicProgramsAtTransactionScope: false`), so
- * it registers no mutation programs at all, and it has no comparable close
- * step — the transaction IS the connection's own framing, so a handle that
- * escapes the callback keeps working exactly as an ordinary read would.
+ * executor entirely — its `createTransactionBackend` call site never
+ * supplies one to `createSqliteOperationBackend` at all, so it registers no
+ * mutation programs — and it has no comparable close step: the transaction
+ * IS the connection's own framing, so a handle that escapes the callback
+ * keeps working exactly as an ordinary read would.
+ * `fusion.atomicProgramsAtTransactionScope` (`../src/backend/drizzle/
+ * engine/operation-layer.ts`) is the profile-level seam for a dialect that
+ * DOES supply a transaction-scoped executor and must still exclude it; it
+ * has no effect for SQLite, which never supplies one to begin with. That
+ * flag's own effect is covered directly in
+ * `tests/engine-common-operation-options.test.ts`, not here.
  */
 import { describe, expect, it } from "vitest";
 

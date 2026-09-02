@@ -15,6 +15,5 @@ export type {
   IdentityRuntime,
   IndexMaterializationRuntime,
   KindRemovalRuntime,
-  OperationFusionHooks,
   SqlEngineProfile,
 } from "./profile";

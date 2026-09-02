@@ -1,5 +1,24 @@
 /**
- * SQLite backend adapter for TypeGraph.
+ * SQLite engine profile for TypeGraph.
+ *
+ * `createSqliteBackend` builds a `SqlEngineProfile`
+ * (`buildSqliteEngineProfile`) and hands it to `createSqlBackend`
+ * (`./engine`), which assembles the mirrored member groups — fulltext,
+ * vector, contribution, identity, graph-template, base-schema,
+ * index-materialization, kind-removal, schema-version — that this file
+ * shares with `postgres.ts` through `./engine/members/*.ts`. What stays
+ * here is the SQLite-owned island `createSqlBackend` cannot share: the
+ * execution adapter and its per-driver transaction-mode detection, the
+ * per-connection write fence (SQLite has no per-graph lock to take),
+ * transaction framing across all four transaction modes
+ * (`EngineLateMembers.transactions` / `fence` / `rawSql` / `maintenance` /
+ * `trustedImport` / `extensions`), the DDL provisioning `EngineProvisioning`
+ * wires through, the dialect's own operation-backend construction (which
+ * `SqlEngineProfile.buildOperations` defers until the contribution
+ * materializer exists), `hybridSearch` (an embedding-adjacent member kept
+ * inline on both dialects rather than part of the shared assembly), and
+ * the per-backend serialized execution queue that orders top-level
+ * operations against SQLite's single-writer constraint.
  *
  * Works with any Drizzle SQLite database instance:
  * - better-sqlite3
@@ -172,7 +191,6 @@ import {
   assertAdoptedDialect,
   createCommonOperationBackend,
   type InternalOperationBackend,
-  type OperationBackendRowMappers,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
 import { createSqliteOperationStrategy } from "./operations/strategy";
@@ -588,15 +606,6 @@ function resolveSqliteGraphAnalyticsCapabilities(
 // Backend Factory
 // ============================================================
 
-/**
- * Creates a TypeGraph backend for SQLite databases.
- *
- * Works with any Drizzle SQLite instance regardless of the underlying driver.
- *
- * @param db - A Drizzle SQLite database instance
- * @param options - Backend configuration
- * @returns A GraphBackend implementation
- */
 type CreateSqliteOperationBackendOptions = Readonly<{
   capabilities: GraphBackend["capabilities"];
   db: AnySqliteDatabase;
@@ -1046,6 +1055,10 @@ export function isSerializedSqliteClient(client: unknown): boolean {
 /**
  * Creates a TypeGraph backend for SQLite databases (better-sqlite3, libsql,
  * Cloudflare D1, bun:sqlite, sql.js).
+ *
+ * @param db - A Drizzle SQLite database instance
+ * @param options - Backend configuration
+ * @returns A GraphBackend implementation
  */
 export function createSqliteBackend(
   db: AnySqliteDatabase,
@@ -1056,14 +1069,13 @@ export function createSqliteBackend(
 
 /**
  * Builds the SQLite {@link SqlEngineProfile} `createSqlBackend` (from
- * `./engine`) assembles into a backend. Everything below is today's SQLite
- * backend construction, unchanged, reorganized into the profile's head data
- * and its dialect-owned late members (`transactions`, `fence`, `rawSql`,
- * `maintenance`, `trustedImport`, `extensions`) — every mirrored member
- * group has been extracted into `members/*.ts` and is assembled by
- * `createSqlBackend` itself from head-data runtime deps this profile
- * supplies (`contributionRuntime`, `identityRuntime`, `graphTemplateRuntime`,
- * `baseSchemaRuntime`, `indexMaterializationRuntime`, `kindRemovalRuntime`).
+ * `./engine`) assembles into a backend: the head data and dialect-owned
+ * late members (`transactions`, `fence`, `rawSql`, `maintenance`,
+ * `trustedImport`, `extensions`) only SQLite supplies, plus the runtime deps
+ * (`contributionRuntime`, `identityRuntime`, `graphTemplateRuntime`,
+ * `baseSchemaRuntime`, `indexMaterializationRuntime`, `kindRemovalRuntime`)
+ * `createSqlBackend` uses to assemble the mirrored member groups from
+ * `members/*.ts`.
  */
 export function buildSqliteEngineProfile(
   db: AnySqliteDatabase,
@@ -1121,15 +1133,14 @@ export function buildSqliteEngineProfile(
   // rebuild this backend cannot perform would be advertising a lie.
   // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
   // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target and the operation backend this factory
-  // still builds inline. `createSqlBackend` calls it again with
-  // `profile.declaredCapabilities` to resolve `ctx.capabilities` — a profile
-  // variant built by overriding `declaredCapabilities` (as the refusal tests
-  // do) is re-derived correctly only because that function stays pure in its
-  // arguments rather than a cached value; the resulting duplicated
-  // derivation is a known, harmless-today identity gap between
+  // below feeds the fence target and the operation backend this dialect's
+  // own `buildOperations` closure builds. `createSqlBackend` calls it again
+  // with `profile.declaredCapabilities` to resolve `ctx.capabilities` — a
+  // profile variant built by overriding `declaredCapabilities` (as the
+  // refusal tests do) is re-derived correctly wherever it runs, because the
+  // function is pure in its arguments rather than a cached value, so
   // `ctx.capabilities` and the `capabilities` object already baked into
-  // `operations` below.
+  // `operations` below always agree.
   const capabilities: BackendCapabilities = finalizeEngineCapabilities(
     declaredCapabilities,
     {
@@ -1464,20 +1475,6 @@ export function buildSqliteEngineProfile(
     readVersion: readBaseSchemaVersion,
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
-  };
-
-  const limits = {
-    maxBindParameters:
-      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
-    batchConfig: computeSqliteBatchChunkSizes(
-      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
-    ),
-  };
-  const rowMappers: OperationBackendRowMappers = {
-    toEdgeRow,
-    toNodeRow,
-    toSchemaVersionRow,
-    toUniqueRow,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`
@@ -2031,13 +2028,9 @@ export function buildSqliteEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
-    limits,
-    rowMappers,
     resourceAudit,
     autocommit: { singleStatementDurable: true },
-    nowIso,
     provisioning,
-    fusion: { atomicProgramsAtTransactionScope: false },
     fenceTarget,
     contributionRuntime,
     identityRuntime,

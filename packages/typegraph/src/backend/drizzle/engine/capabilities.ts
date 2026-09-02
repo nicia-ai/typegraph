@@ -48,14 +48,14 @@ export type FinalizeEngineCapabilitiesDeps = Readonly<{
  * then validates and freezes the result.
  *
  * Both dialect builders call this twice with the same `declared` value: once
- * themselves, to resolve the local `capabilities` their still-inline
- * operation-backend construction needs, and once more inside
- * `createSqlBackend` to resolve `EngineAssemblyContext.capabilities`. That
- * duplication is deliberate (see `EngineAssemblyContext`'s doc comment) —
- * this function stays a pure function of its arguments, never a cached
- * value, so a profile variant built by overriding `declaredCapabilities`
- * (as `tests/engine-profile-refusals.test.ts` does) is re-derived correctly
- * wherever it is called from.
+ * themselves, to resolve the local `capabilities` their own `buildOperations`
+ * closure needs, and once more inside `createSqlBackend` to resolve
+ * `EngineAssemblyContext.capabilities` (see `EngineAssemblyContext`'s doc
+ * comment). This function stays a pure function of its arguments, never a
+ * cached value, so a profile variant built by overriding
+ * `declaredCapabilities` (as `tests/engine-profile-refusals.test.ts` does) is
+ * re-derived correctly wherever it is called from, and both derivations
+ * agree.
  */
 export function finalizeEngineCapabilities(
   declared: BackendCapabilities,

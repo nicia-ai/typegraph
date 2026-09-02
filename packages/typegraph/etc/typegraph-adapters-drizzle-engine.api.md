@@ -2229,40 +2229,6 @@ type NodeRow = Readonly<{
 // @public
 type NullCheckOp = "isNull" | "isNotNull";
 
-// @public (undocumented)
-type OperationBackendBatchConfig = Readonly<{
-    checkUniqueBatchChunkSize: number;
-    edgeInsertBatchSize: number;
-    edgeSchemaFencedInsertBatchSize: number;
-    findEdgesEndpointChunkSize: number;
-    getEdgesChunkSize: number;
-    getNodesChunkSize: number;
-    nodeInsertBatchSize: number;
-    nodeSchemaFencedInsertBatchSize: number;
-    uniqueDeleteChunkSize: number;
-    uniqueInsertBatchSize: number;
-}>;
-
-// @public (undocumented)
-type OperationBackendRowMappers = Readonly<{
-    toEdgeRow: (row: Record<string, unknown>) => EdgeRow;
-    toNodeRow: (row: Record<string, unknown>) => NodeRow;
-    toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
-    toUniqueRow: (row: Record<string, unknown>) => UniqueRow;
-}>;
-
-// @public
-export type OperationFusionHooks = Readonly<{
-    atomicProgramsAtTransactionScope: boolean;
-    nodeProjectionInsertFusion?: true;
-    beforeNodeProjectionInsert?: (params: InsertNodeParams, plan: ManagedNodeCreatePlan) => Promise<void>;
-    refuseNodeProjectionError?: (params: InsertNodeParams, plan: ManagedNodeCreatePlan, error: unknown) => Promise<never>;
-    schemaGraphWriteLockNamespace?: string;
-    edgeCardinalityInsertFusion?: true;
-    nodeClaimInsertFusion?: true;
-    tableExistenceCache?: TableExistenceCacheOptions;
-}>;
-
 // @public
 type PessimisticLockCapabilities = Readonly<{
     advisoryLocks: boolean;
@@ -2639,18 +2605,11 @@ export type SqlEngineProfile<TTx> = Readonly<{
     fulltext: FulltextStrategy;
     vector: VectorStrategy | undefined;
     declaredCapabilities: BackendCapabilities;
-    limits: Readonly<{
-        maxBindParameters: number;
-        batchConfig: OperationBackendBatchConfig;
-    }>;
-    rowMappers: OperationBackendRowMappers;
     resourceAudit: BackendResourceAudit;
     autocommit: Readonly<{
         singleStatementDurable: boolean;
     }>;
-    nowIso?: () => string;
     provisioning: EngineProvisioning;
-    fusion?: OperationFusionHooks;
     fenceTarget: WriteFenceTarget;
     contributionRuntime: ContributionRuntime;
     identityRuntime: IdentityRuntime;
@@ -2741,12 +2700,6 @@ type TableContribution = Readonly<{
     createDdl: readonly string[];
     dropDdl?: readonly string[];
     runtimeEnsure: boolean;
-}>;
-
-// @public
-type TableExistenceCacheOptions = Readonly<{
-    cacheExisting?: boolean | undefined;
-    cacheMissing?: boolean | undefined;
 }>;
 
 // @public

@@ -22,7 +22,12 @@ import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import type { SqlFragment } from "../../../query/sql-fragment";
 import type { AtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
-import type { BackendCapabilities, TransactionBackend } from "../../types";
+import type {
+  BackendCapabilities,
+  InsertNodeParams,
+  ManagedNodeCreatePlan,
+  TransactionBackend,
+} from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
 import type {
   CompiledSqlQuery,
@@ -33,10 +38,11 @@ import {
   type InternalOperationBackend,
 } from "../operation-backend-core";
 import { resolveAtomicNodeProjectionRequirements } from "../operations/node-projections";
+import type { TableExistenceCacheOptions } from "../operations/strategy";
 import type { ContributionOperationMembers } from "./members/contribution-members";
 import type { FulltextMembers } from "./members/fulltext-members";
 import type { VectorMembers } from "./members/vector-members";
-import type { EngineTableNames, OperationFusionHooks } from "./profile";
+import type { EngineTableNames } from "./profile";
 
 /**
  * The options `createCommonOperationBackend` accepts, recovered through its
@@ -45,6 +51,49 @@ import type { EngineTableNames, OperationFusionHooks } from "./profile";
  * by hand is exactly the kind of second copy that drifts.
  */
 type CommonOperationOptions = Parameters<typeof createCommonOperationBackend>[0];
+
+/**
+ * The operation-layer fusion knobs `buildCommonOperationOptions` reads to
+ * assemble one `createCommonOperationBackend` options object for either
+ * dialect. `atomicProgramsAtTransactionScope` is the one fact both dialects
+ * report: whether the atomic SQL program executor is threaded into a
+ * transaction-scoped operation backend at all (PostgreSQL always does;
+ * SQLite's transaction-scoped backend excludes it — a real capability gap,
+ * not drift). Every other member is PostgreSQL-only and optional for that
+ * reason: SQLite's dialect factory builds a value with only
+ * `atomicProgramsAtTransactionScope` set, and PostgreSQL's builds one with
+ * every member present except the three transaction-scope-only keys
+ * (`schemaGraphWriteLockNamespace`, `edgeCardinalityInsertFusion`,
+ * `nodeClaimInsertFusion`), which its dialect factory itself omits outside a
+ * transaction-scoped operation backend. `buildCommonOperationOptions` spreads
+ * each optional member into the assembled options only when the dialect
+ * supplied it, so the presence-or-absence decision stays where the
+ * asymmetry actually lives — in what each dialect factory constructs — and
+ * the shared assembly never branches on which dialect it was called for.
+ */
+type OperationFusionHooks = Readonly<{
+  atomicProgramsAtTransactionScope: boolean;
+  /** Always `true` when present; a bundled projection-aware backend fuses managed-node projections into its INSERT. */
+  nodeProjectionInsertFusion?: true;
+  /** Read-only prerequisite gate run before a fused projection statement. */
+  beforeNodeProjectionInsert?: (
+    params: InsertNodeParams,
+    plan: ManagedNodeCreatePlan,
+  ) => Promise<void>;
+  /** Error-path projection storage classifier; must rethrow or return never. */
+  refuseNodeProjectionError?: (
+    params: InsertNodeParams,
+    plan: ManagedNodeCreatePlan,
+    error: unknown,
+  ) => Promise<never>;
+  /** Present only for a transaction-scoped operation backend. */
+  schemaGraphWriteLockNamespace?: string;
+  /** Present only for a transaction-scoped operation backend. */
+  edgeCardinalityInsertFusion?: true;
+  /** Present only for a transaction-scoped operation backend; claim plans require a caller-owned transaction to roll back refusals. */
+  nodeClaimInsertFusion?: true;
+  tableExistenceCache?: TableExistenceCacheOptions;
+}>;
 
 /**
  * What a dialect factory supplies to build its `createCommonOperationBackend`
@@ -193,7 +242,7 @@ export function buildCommonOperationOptions(
  * spreads it onto this function's result afterward.
  */
 export type CreateEngineOperationBackendDeps = Readonly<{
-  /** `createCommonOperationBackend(buildCommonOperationOptions(...))` — still built by the dialect factory, which owns the execution primitives that options object closes over. */
+  /** `createCommonOperationBackend(buildCommonOperationOptions(...))` — built by the dialect factory's own `buildOperations` closure, which owns the execution primitives that options object closes over. */
   commonOperationMembers: ReturnType<typeof createCommonOperationBackend>;
   /** The transaction-scoped contribution stamp; see `./members/contribution-members`. */
   contributionOperationMembers: ContributionOperationMembers;

@@ -1,5 +1,22 @@
 /**
- * PostgreSQL backend adapter for TypeGraph.
+ * PostgreSQL engine profile for TypeGraph.
+ *
+ * `createPostgresBackend` builds a `SqlEngineProfile`
+ * (`buildPostgresEngineProfile`) and hands it to `createSqlBackend`
+ * (`./engine`), which assembles the mirrored member groups — fulltext,
+ * vector, contribution, identity, graph-template, base-schema,
+ * index-materialization, kind-removal, schema-version — that this file
+ * shares with `sqlite.ts` through `./engine/members/*.ts`. What stays here
+ * is the PostgreSQL-owned island `createSqlBackend` cannot share: the
+ * execution adapter and its driver-shape detection, the advisory-lock write
+ * fence, the GUC-wrapped vector search path, transaction framing
+ * (`EngineLateMembers.transactions` / `fence` / `rawSql` / `maintenance` /
+ * `trustedImport` / `extensions`), the DDL and extension provisioning
+ * `EngineProvisioning` wires through, the dialect's own operation-backend
+ * construction (which `SqlEngineProfile.buildOperations` defers until the
+ * contribution materializer exists), and `hybridSearch` (an
+ * embedding-adjacent member kept inline on both dialects rather than part
+ * of the shared assembly).
  *
  * Works with any Drizzle PostgreSQL database instance. Tested against:
  * - `drizzle-orm/node-postgres` (pg Pool / Client)
@@ -207,7 +224,6 @@ import {
   assertAdoptedDialect,
   createCommonOperationBackend,
   type InternalOperationBackend,
-  type OperationBackendRowMappers,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
 import {
@@ -678,15 +694,13 @@ export function createPostgresBackend(
 
 /**
  * Builds the PostgreSQL {@link SqlEngineProfile} `createSqlBackend` (from
- * `./engine`) assembles into a backend. Everything below is today's
- * PostgreSQL backend construction, unchanged, reorganized into the
- * profile's head data and its dialect-owned late members (`transactions`,
- * `fence`, `rawSql`, `maintenance`, `trustedImport`, `extensions`) — every
- * mirrored member group has been extracted into `members/*.ts` and is
- * assembled by `createSqlBackend` itself from head-data runtime deps this
- * profile supplies (`contributionRuntime`, `identityRuntime`,
- * `graphTemplateRuntime`, `baseSchemaRuntime`,
- * `indexMaterializationRuntime`, `kindRemovalRuntime`).
+ * `./engine`) assembles into a backend: the head data and dialect-owned
+ * late members (`transactions`, `fence`, `rawSql`, `maintenance`,
+ * `trustedImport`, `extensions`) only PostgreSQL supplies, plus the runtime
+ * deps (`contributionRuntime`, `identityRuntime`, `graphTemplateRuntime`,
+ * `baseSchemaRuntime`, `indexMaterializationRuntime`, `kindRemovalRuntime`)
+ * `createSqlBackend` uses to assemble the mirrored member groups from
+ * `members/*.ts`.
  */
 function buildPostgresEngineProfile(
   db: AnyPgDatabase,
@@ -804,15 +818,14 @@ function buildPostgresEngineProfile(
     createAtomicSqlProgramExecutor(executionAdapter);
   // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
   // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target and the operation backend this factory
-  // still builds inline. `createSqlBackend` calls it again with
-  // `profile.declaredCapabilities` to resolve `ctx.capabilities` — a profile
-  // variant built by overriding `declaredCapabilities` (as the refusal tests
-  // do) is re-derived correctly only because that function stays pure in its
-  // arguments rather than a cached value; the resulting duplicated
-  // derivation is a known, harmless-today identity gap between
+  // below feeds the fence target and the operation backend this dialect's
+  // own `buildOperations` closure builds. `createSqlBackend` calls it again
+  // with `profile.declaredCapabilities` to resolve `ctx.capabilities` — a
+  // profile variant built by overriding `declaredCapabilities` (as the
+  // refusal tests do) is re-derived correctly wherever it runs, because the
+  // function is pure in its arguments rather than a cached value, so
   // `ctx.capabilities` and the `capabilities` object already baked into
-  // `operations` below.
+  // `operations` below always agree.
   const capabilities: BackendCapabilities = finalizeEngineCapabilities(
     declaredCapabilities,
     {
@@ -1243,20 +1256,6 @@ function buildPostgresEngineProfile(
     readVersion: readBaseSchemaVersion,
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
-  };
-
-  const limits = {
-    maxBindParameters:
-      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
-    batchConfig: computePostgresBatchChunkSizes(
-      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
-    ),
-  };
-  const rowMappers: OperationBackendRowMappers = {
-    toEdgeRow,
-    toNodeRow,
-    toSchemaVersionRow,
-    toUniqueRow,
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -1798,13 +1797,9 @@ function buildPostgresEngineProfile(
     fulltext: fulltextStrategy,
     vector: vectorStrategy,
     declaredCapabilities,
-    limits,
-    rowMappers,
     resourceAudit,
     autocommit: { singleStatementDurable: true },
-    nowIso,
     provisioning,
-    fusion: { atomicProgramsAtTransactionScope: true },
     fenceTarget,
     contributionRuntime,
     identityRuntime,

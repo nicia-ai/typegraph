@@ -1,32 +1,33 @@
 /**
  * Characterization tests for the two bundled SQL backend factories
- * (`createSqliteBackend` / `createPostgresBackend`), written BEFORE the
- * engine-profile extraction (`docs/design/sql-engine-profile-plan.md`, S0).
- * These pin today's observable behavior so a later step that moves a member
- * body between the two factories and `createSqlBackend` fails loudly instead
- * of silently dropping one dialect's semantics.
+ * (`createSqliteBackend` / `createPostgresBackend`). These pin today's
+ * observable behavior — the exact member set, capabilities, trust marks,
+ * and emitted SQL each factory produces — so a change that moves a member
+ * body between the two factories and `createSqlBackend`, or shares logic
+ * that used to be dialect-owned, fails loudly instead of silently dropping
+ * or altering one dialect's semantics.
  *
  * Four parts, run against a PGlite root (Postgres dialect, pgvector enabled)
  * and a better-sqlite3 root (SQLite dialect, sqlite-vec enabled):
  *
  * 1. The backend's own member-key set and its resolved capabilities
  *    (sorted, so key order never causes a spurious diff), plus explicit
- *    assertions on the two capabilities the extraction's refusals key off
+ *    assertions on the two capabilities a shared-code refusal keys off
  *    (`pessimisticLocks`, `maxBindParameters`).
  * 2. The three trust marks a bundled root — and a `transaction()` handle
  *    opened on it — carry (`isFirstPartyFactory`,
  *    `isSchemaFencedInsertEligible`, `isBundledRootAutocommitEligible`).
  * 3. An ORDERED capture of every statement issued for one fixed script per
  *    dialect. This is the only part of the file that would catch a moved
- *    member whose BODY silently changed while its name did not (the
- *    critique's A1/A2/A5/A6 findings) — see the capture helpers below for
- *    why interception happens at the raw driver, not at `backend.execute`.
+ *    member whose BODY silently changed while its name did not — see the
+ *    capture helpers below for why interception happens at the raw driver,
+ *    not at `backend.execute`.
  * 4. A SQLite serialization probe: proof that `runWithSerializedQueue`
  *    still wraps `execute`, since nothing else in the suite fails if it is
  *    removed.
  *
- * Per the construction ratchet (AGENTS.md, D4 in the critique), nothing here
- * spreads a backend or a call whose name ends in "Backend".
+ * Per the construction ratchet (AGENTS.md), nothing here spreads a backend
+ * or a call whose name ends in "Backend".
  */
 import { createRequire } from "node:module";
 

@@ -235,6 +235,18 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * doc comments, now reached for real — plus `GraphTemplateExecute`, the named
  * function-type alias `graph-template-members.ts` introduces for its
  * `execute` member (300 → 324).
+ *
+ * `SqlEngineProfile` later drops its `limits` and `rowMappers` head fields
+ * once each dialect's own `buildOperations` closure re-derives them inline
+ * instead of reading them off the profile it also builds; that removes this
+ * entrypoint's only references to `OperationBackendBatchConfig` and
+ * `OperationBackendRowMappers`, so both leave the forgotten-export set
+ * (324 → 322). `OperationFusionHooks` then moves out of `profile.ts` to
+ * `operation-layer.ts`, where its only consumer already lived, and out of
+ * this entrypoint's export list — it was a direct export before, so this
+ * drops it from the rendered API report entirely rather than adding it to
+ * the forgotten set, and nothing else under the published surface still
+ * names it, so it leaves the forgotten set too (322 → 321).
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -242,8 +254,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "576b2d133f48d9c2fdd754ad72cc8b0d73741510de9950ce28b2392682e71c6b",
   },
   "./adapters/drizzle/engine": {
-    count: 324,
-    sha256: "810c84984aae97940d6332571f76f7b900041f8ecf3f5bb54fd10c9513c0efca",
+    count: 321,
+    sha256: "7f53031dbd9f668a9a68f43ccee61bc78e54c275b577de528c98af1f8f39f1ad",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
