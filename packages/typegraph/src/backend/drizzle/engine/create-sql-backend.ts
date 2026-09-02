@@ -9,38 +9,30 @@
  * profile owns only what genuinely differs between engines.
  */
 import { ConfigurationError } from "../../../errors";
-import { registerAtomicMutationPrograms } from "../../capabilities/atomic-mutation-program";
-import { registerAtomicSqlProgram } from "../../capabilities/atomic-sql-program";
-import { markBundledRootAutocommitEligible } from "../../capabilities/autocommit-single-statement";
-import { markSchemaFencedInsertEligible } from "../../capabilities/schema-fenced-insert";
 import {
-  markFirstPartyFactory,
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
-import { type AdapterBackend, supportsRootAtomicBatch } from "../../types";
+import type { AdapterBackend } from "../../types";
 import { finalizeEngineCapabilities } from "./capabilities";
+import { applyEngineMarks } from "./marks";
 import { createSchemaVersionMembers } from "./members/schema-version-members";
 import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 
 /**
  * Assembles one `AdapterBackend` from a {@link SqlEngineProfile}.
  *
- * The three refusals below are what makes marking sound for a profile this
- * factory did not write itself, not only for the two bundled ones:
- *
- * - a profile whose resolved capabilities omit `pessimisticLocks` is
- *   refused outright — every other mark and registration below assumes a
- *   resolvable write-fence decision, and `resolveWriteFencePlan`'s
- *   dialect-derivation fallback is sound only for the two bundled dialects;
- * - `markBundledRootAutocommitEligible` is gated on the profile's own
- *   `autocommit.singleStatementDurable` declaration, never on construction
- *   site alone — it is a durability claim, not a convenience;
- * - `markSchemaFencedInsertEligible` is gated on the resolved fence plan
- *   actually fencing something (`kind !== "unfenced"`), since the fused
- *   insert's lock clause is profile-supplied and an empty clause is only
- *   correct when the profile's own plan says writers are serialized.
+ * The pessimistic-locks refusal below is what makes the marking
+ * `applyEngineMarks` (`./marks`) performs sound for a profile this factory
+ * did not write itself, not only for the two bundled ones: a profile whose
+ * resolved capabilities omit `pessimisticLocks` is refused outright, because
+ * every mark and registration `applyEngineMarks` applies assumes a
+ * resolvable write-fence decision, and `resolveWriteFencePlan`'s
+ * dialect-derivation fallback is sound only for the two bundled dialects.
+ * `applyEngineMarks`'s own doc comment covers its two further gates —
+ * `markBundledRootAutocommitEligible` on the profile's `autocommit`
+ * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
  */
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
@@ -149,16 +141,12 @@ export function createSqlBackend<TTx>(
   // "independent" is a verdict the guards can tell apart from a backend
   // nobody looked at.
   auditBackendResource(backend, profile.resourceAudit);
-  markFirstPartyFactory(backend);
-  if (fencePlan.kind !== "unfenced") {
-    markSchemaFencedInsertEligible(backend);
-  }
-  if (profile.autocommit.singleStatementDurable) {
-    markBundledRootAutocommitEligible(backend);
-  }
-  if (supportsRootAtomicBatch(capabilities)) {
-    registerAtomicSqlProgram(backend, profile.execution);
-    registerAtomicMutationPrograms(backend, {
+  applyEngineMarks(backend, {
+    capabilities,
+    fencePlan,
+    autocommit: profile.autocommit,
+    execution: profile.execution,
+    atomicMutationPrograms: {
       createNodes: ctx.operations.executeAtomicNodeBatch,
       replaceNodes: ctx.operations.executeAtomicNodeReplacementBatch,
       createEdges: ctx.operations.executeAtomicEdgeBatch,
@@ -168,8 +156,8 @@ export function createSqlBackend<TTx>(
       updateEdges: ctx.operations.executeAtomicEdgeResolvedUpdateBatch,
       mutateNodes: ctx.operations.executeAtomicNodeResolvedMutationSet,
       mutateEdges: ctx.operations.executeAtomicEdgeMutationProgram,
-    });
-  }
+    },
+  });
 
   return backend;
 }
