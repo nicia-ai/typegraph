@@ -38,17 +38,26 @@ import type { CommonOperationStrategy } from "../operations/strategy";
 export type EngineTableNames = ResolvedSqlTableNames;
 
 /**
- * The DDL primitives a profile owns. Every statement any member group emits
- * goes through one of these rather than a bare `db.execute` / `db.run`, so
- * the one dialect-specific wrinkle in each — SQLite's DDL bypasses its
- * serialized queue on purpose; PostgreSQL's carries a concurrent-create
- * retry because two replicas can boot against the same database at once —
- * stays in exactly one place per dialect.
+ * The DDL primitives a profile owns. Every DDL statement any member group
+ * emits goes through one of these rather than a bare `db.execute` /
+ * `db.run`, so each dialect's wrinkle stays in one place: SQLite's DDL
+ * bypasses its serialized queue on purpose, and PostgreSQL's `ensureTable`
+ * carries a concurrent-create retry because two replicas can boot against
+ * the same database at once.
  */
 export type EngineProvisioning = Readonly<{
-  /** Runs one idempotent DDL statement (`CREATE ... IF NOT EXISTS` and similar). */
+  /**
+   * Runs ONE DDL statement with no concurrency handling — the semantics of
+   * the adapter's own `executeDdl` member. Never use it for a create that
+   * two booting processes can race; that is what `ensureTable` is for.
+   */
   executeDdl: (ddl: string) => Promise<void>;
-  /** Creates one already-rendered table DDL statement, idempotently. */
+  /**
+   * Runs one already-rendered `CREATE ...` statement idempotently, carrying
+   * the dialect's concurrent-create retry where the engine needs one
+   * (PostgreSQL). Every bootstrap and `ensure*` path that creates a relation
+   * must use this arm, not `executeDdl`.
+   */
   ensureTable: (ddl: string) => Promise<void>;
   /** The full set of base-schema DDL statements for a fresh bootstrap. */
   generateDdl: () => readonly string[];
