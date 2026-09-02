@@ -128,14 +128,6 @@ import {
   type ClaimIndexMaterializationParams,
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
-  type ContributionDiagnostic,
-  type ContributionMaterializationIdentity,
-  type ContributionMaterializationRow,
-  type ContributionProbeEntry,
-  type ContributionRebuildResult,
-  type ContributionRebuildScope,
-  type ContributionRepairResult,
-  type ContributionRepopulationStats,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type GraphTemplateRow,
@@ -152,7 +144,6 @@ import {
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
-  type RecordContributionMaterializationParams,
   type RecordedRelationDdl,
   type RecordedTableNames,
   type RecordIndexMaterializationParams,
@@ -173,10 +164,8 @@ import {
   buildContributionOnConflictSet,
   type ContributionMaterializer,
   contributionRebuildSupported,
-  createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
-  mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
@@ -195,6 +184,10 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import {
+  createContributionMembers,
+  createContributionOperationMembers,
+} from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
@@ -239,7 +232,6 @@ import { resolveAtomicNodeProjectionRequirements } from "./operations/node-proje
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
-  tableExistsFromRow,
 } from "./operations/strategy";
 import {
   createPostgresTables as buildPostgresTables,
@@ -1039,10 +1031,6 @@ function buildPostgresEngineProfile(
     });
   }
 
-  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
-    await ensureTableWithConcurrentCreateRetry(matTable);
-  }
-
   /**
    * The contribution descriptors for exactly the identity relations, under
    * caller-supplied physical names. Pure — nothing is executed here — and the
@@ -1086,96 +1074,6 @@ function buildPostgresEngineProfile(
     );
   }
 
-  async function getContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<ContributionMaterializationRow | undefined> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-    const row = rows[0];
-    if (row === undefined) return undefined;
-    return mapContributionMaterializationRow(
-      row,
-      POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-    );
-  }
-
-  async function getContributionMaterializationRows(
-    graphId: string,
-  ): Promise<readonly ContributionMaterializationRow[]> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(eq(matTable.graphId, graphId));
-    return rows.map((row) =>
-      mapContributionMaterializationRow(
-        row,
-        POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-      ),
-    );
-  }
-
-  async function recordContributionMaterializationRow(
-    params: RecordContributionMaterializationParams,
-  ): Promise<void> {
-    await db
-      .insert(matTable)
-      .values(
-        buildContributionInsertValues(
-          params,
-          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-        ),
-      )
-      .onConflictDoUpdate({
-        target: [
-          matTable.graphId,
-          matTable.logicalName,
-          matTable.owner,
-          matTable.tableName,
-        ],
-        set: buildContributionOnConflictSet(
-          matTable.materializedAt,
-          params.materializedAt,
-        ),
-      });
-  }
-
-  async function deleteContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<void> {
-    await db
-      .delete(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-  }
-
-  /**
-   * Uncached catalog probe backing `verifyContributions`. The shared
-   * `createCachedTableExistence` wrapper is deliberately NOT used: this
-   * diagnostic's whole job is to notice that a table confirmed present
-   * earlier has since been dropped.
-   */
-  async function contributionTableExists(tableName: string): Promise<boolean> {
-    const rows = await executionAdapter.execute<Record<string, unknown>>(
-      operationStrategy.buildTableExists(tableName),
-    );
-    return tableExistsFromRow(rows[0]);
-  }
-
   // ONE fence target for the whole factory, shared by the contribution
   // materializer's two lock sites and by the schema fence's two below, so
   // every lock this backend can take resolves the SAME plan. Marked
@@ -1187,25 +1085,67 @@ function buildPostgresEngineProfile(
     capabilities,
   });
 
-  const contributionMaterializer = createContributionMaterializer({
+  const {
+    contributionMaterializer,
+    contributionTableExists,
+    members: contributionMembers,
+  } = createContributionMembers({
     dialect: "postgres",
-    fenceTarget,
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
     vectorStrategy,
-    // Contribution DDL is `CREATE ... IF NOT EXISTS` reached from every
-    // booting replica, so it carries the same concurrent-create retry the
-    // other create sites use. Without it the loser's 23505 is recorded as
-    // `lastError` on the marker row and reported as a failed materialization,
-    // when the table it wanted is in fact present.
-    execDdl: async (statement) => {
-      await executeConcurrentCreateDdl(statement);
+    fenceTarget,
+    contributionTableDdl: generatePgCreateTableSQL(matTable),
+    reconciliationMarkersTableDdl: generatePgCreateTableSQL(
+      tables.reconciliationMarkers,
+    ),
+    ensureTable: executeConcurrentCreateDdl,
+    execute: executionAdapter.execute,
+    operationStrategy,
+    timestamps: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
+    contributionMarkerColumns: matTable,
+    contributionMarkerRows: {
+      selectWhere: (condition) => db.select().from(matTable).where(condition),
+      async upsert(params) {
+        await db
+          .insert(matTable)
+          .values(
+            buildContributionInsertValues(
+              params,
+              POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: [
+              matTable.graphId,
+              matTable.logicalName,
+              matTable.owner,
+              matTable.tableName,
+            ],
+            set: buildContributionOnConflictSet(
+              matTable.materializedAt,
+              params.materializedAt,
+            ),
+          });
+      },
+      async deleteWhere(condition) {
+        await db.delete(matTable).where(condition);
+      },
     },
-    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
-    getMarkers: getContributionMaterializationRows,
-    recordMarker: recordContributionMaterializationRow,
-    deleteMarker: deleteContributionMaterializationRow,
-    tableExists: contributionTableExists,
+    reconciliationMarkerColumns: tables.reconciliationMarkers,
+    reconciliationMarkerRows: {
+      selectWhere: (condition) =>
+        db.select().from(tables.reconciliationMarkers).where(condition),
+      async upsert(graphId, version) {
+        await db
+          .insert(tables.reconciliationMarkers)
+          .values({ graphId, reconciledToVersion: version })
+          .onConflictDoUpdate({
+            target: tables.reconciliationMarkers.graphId,
+            set: { reconciledToVersion: version },
+          });
+      },
+    },
     // Withheld rather than wired-and-throwing when the driver cannot hold
     // a session: the rebuild must refuse with its own typed error naming
     // the absent fence, matching `capabilities.contributions.rebuild`.
@@ -2072,27 +2012,7 @@ function buildPostgresEngineProfile(
           });
       },
 
-      async ensureContributionMaterializationsTable(): Promise<void> {
-        await ensureContributionMaterializationsTableImpl();
-      },
-
-      async getContributionMaterialization(
-        identity: ContributionMaterializationIdentity,
-      ): Promise<ContributionMaterializationRow | undefined> {
-        return getContributionMaterializationRow(identity);
-      },
-
-      async recordContributionMaterialization(
-        params: RecordContributionMaterializationParams,
-      ): Promise<void> {
-        await recordContributionMaterializationRow(params);
-      },
-
-      async assertRuntimeContributionsInitialized(
-        graphId: string,
-      ): Promise<void> {
-        await contributionMaterializer.assertInitialized(graphId);
-      },
+      ...contributionMembers,
 
       async ensureKindRemovalsTable(): Promise<void> {
         await ensureTableWithConcurrentCreateRetry(tables.kindRemovals);
@@ -2134,133 +2054,6 @@ function buildPostgresEngineProfile(
           .onConflictDoUpdate({
             target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
             set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
-      },
-
-      async ensureReconciliationMarkersTable(): Promise<void> {
-        await ensureTableWithConcurrentCreateRetry(
-          tables.reconciliationMarkers,
-        );
-      },
-
-      async ensureRuntimeContributions(graphId: string): Promise<void> {
-        await contributionMaterializer.ensureRuntimeContributions(graphId);
-      },
-
-      /**
-       * Superseded by `ensureRuntimeContributions(graphId)` (#129).
-       * Retained as a thin back-compat wrapper for callers predating
-       * #129; #135 routed it through the durable-marker writer.
-       */
-      async ensureFulltextTable(graphId: string): Promise<void> {
-        await contributionMaterializer.ensureRuntimeContributions(graphId);
-      },
-
-      async verifyContributions(
-        graphId: string,
-        vectorSlots: readonly VectorSlot[],
-      ): Promise<readonly ContributionDiagnostic[]> {
-        return contributionMaterializer.verifyContributions(
-          graphId,
-          vectorSlots,
-        );
-      },
-
-      async repairContributions(
-        graphId: string,
-        vectorSlots: readonly VectorSlot[],
-      ): Promise<ContributionRepairResult> {
-        return contributionMaterializer.repairContributions(
-          graphId,
-          vectorSlots,
-        );
-      },
-
-      async probeContributions(
-        graphId: string,
-        vectorSlots: readonly VectorSlot[],
-      ): Promise<readonly ContributionProbeEntry[]> {
-        return contributionMaterializer.probeContributions(
-          graphId,
-          vectorSlots,
-        );
-      },
-
-      async rebuildContribution(
-        graphId: string,
-        scope: ContributionRebuildScope,
-        repopulate: (
-          target: TransactionBackend,
-        ) => Promise<ContributionRepopulationStats>,
-      ): Promise<ContributionRebuildResult> {
-        return contributionMaterializer.rebuildContribution(
-          graphId,
-          scope,
-          repopulate,
-        );
-      },
-
-      // Vector counterparts of the runtime-contribution methods. Present
-      // only when a vector strategy is wired (omitted under `vector: false`,
-      // mirroring the embedding/search methods), so a no-vector backend
-      // doesn't advertise vector materialization it can't perform.
-      ...(vectorStrategy === undefined ?
-        {}
-      : {
-          async ensureVectorSlotContribution(
-            slot: VectorSlot,
-            options_?: Readonly<{
-              force?: boolean;
-              onDrift?: "throw" | "skip";
-            }>,
-          ): Promise<void> {
-            await contributionMaterializer.ensureVectorSlot(slot, options_);
-          },
-
-          async ensureVectorSlotContributions(
-            slots: readonly VectorSlot[],
-            options_?: Readonly<{
-              force?: boolean;
-              onDrift?: "throw" | "skip";
-            }>,
-          ): Promise<void> {
-            await contributionMaterializer.ensureVectorSlots(slots, options_);
-          },
-
-          async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
-            await contributionMaterializer.assertVectorSlot(slot);
-          },
-
-          async assertVectorSlotsInitialized(
-            slots: readonly VectorSlot[],
-          ): Promise<void> {
-            await contributionMaterializer.assertVectorSlots(slots);
-          },
-
-          async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
-            await contributionMaterializer.dropVectorSlot(slot);
-          },
-        }),
-
-      async getReconciliationMarker(
-        graphId: string,
-      ): Promise<number | undefined> {
-        const t = tables.reconciliationMarkers;
-        const rows = await db.select().from(t).where(eq(t.graphId, graphId));
-        return rows[0]?.reconciledToVersion;
-      },
-
-      async setReconciliationMarker(
-        graphId: string,
-        version: number,
-      ): Promise<void> {
-        const t = tables.reconciliationMarkers;
-        await db
-          .insert(t)
-          .values({ graphId, reconciledToVersion: version })
-          .onConflictDoUpdate({
-            target: t.graphId,
-            set: { reconciledToVersion: version },
           });
       },
 
@@ -2853,6 +2646,11 @@ function createPostgresOperationBackend(
     batchConfig,
   });
 
+  const contributionOperationMembers = createContributionOperationMembers({
+    execRun,
+    operationStrategy,
+  });
+
   /**
    * The third consumer of the schema fence's `FOR SHARE`, and the
    * writer-side half that managed entity inserts carry INSIDE their own
@@ -3215,24 +3013,7 @@ function createPostgresOperationBackend(
     ...executeRawMethod,
     ...vectorMembers,
     ...vectorEmbeddingMethods,
-    /**
-     * Transaction-scoped contribution marker stamp. Present so the
-     * destructive rebuild can commit its marker with the DDL that
-     * produced it; without it the stamp would land outside the
-     * transaction and could survive a rolled-back drop.
-     *
-     * States the row outright rather than reusing the top-level upsert,
-     * whose `materialized_at` COALESCE preserves an earlier success so a
-     * failed re-attempt cannot erase it. A completed rebuild replaced the
-     * storage, so the recorded timestamp must be the rebuild's.
-     */
-    async recordContributionMaterialization(
-      params: RecordContributionMaterializationParams,
-    ): Promise<void> {
-      await execRun(
-        operationStrategy.buildInsertContributionMaterialization(params),
-      );
-    },
+    ...contributionOperationMembers,
 
     capabilities,
     fulltextStrategy,

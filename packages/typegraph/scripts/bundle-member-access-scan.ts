@@ -213,23 +213,26 @@ export const NOT_AN_ACCESS_SITES: readonly Readonly<{
  * `src/backend/drizzle/**` used to be excluded wholesale (`/^backend\/drizzle\//`).
  * That directory-wide glob is broader than what Contract I2 actually ratified:
  * "backend implementations — outside the scanner's scope by construction (they
- * *are* the members)" names three specific files whose accesses are a backend
- * calling a member on an object it just built itself (`postgres.ts:1515`,
- * `sqlite.ts:2020` — `contributionMaterializer.rebuildContribution`; `contribution-
- * materializations.ts:1494,1694` — `executeStatement` on the always-present
- * `SchemaWriteTransactionBackend`). Those three are named below, individually.
+ * *are* the members)" names specific files whose accesses are a backend
+ * calling a member on an object it just built itself
+ * (`contribution-members.ts:447` — `contributionMaterializer.rebuildContribution`,
+ * called from inside the same `createContributionMembers` that constructs
+ * `contributionMaterializer`; `contribution-materializations.ts:1494,1694` —
+ * `executeStatement` on the always-present `SchemaWriteTransactionBackend`).
+ * Those are named below, individually.
  *
  * `backend/drizzle/trusted-import.ts` is NOT excluded by file pattern (B10):
  * its four accesses are classified `excluded` instead, via
  * {@link EXCLUDED_ACCESS_SITES} — a pinned, exactly-four inventory rather than
  * a glob hole, per the B9-checkpoint ruling ("Trusted-import gap: INVENTORIED
  * EXCLUSION, ruled"). Any OTHER file added under `backend/drizzle/**` is
- * in-scope by default — only these three are named here.
+ * in-scope by default — only these are named here.
  */
 const EXCLUDED_FILE_PATTERNS: readonly RegExp[] = [
   /^backend\/drizzle\/postgres\.ts$/,
   /^backend\/drizzle\/sqlite\.ts$/,
   /^backend\/drizzle\/contribution-materializations\.ts$/,
+  /^backend\/drizzle\/engine\/members\/contribution-members\.ts$/,
   /^backend\/types\.ts$/,
   /^backend\/graph-backend-keys\.ts$/,
   /^backend\/member-classes\.ts$/,

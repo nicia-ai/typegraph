@@ -385,6 +385,10 @@ export const DRIZZLE_ZONE = [
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },
   {
+    file: "src/backend/drizzle/engine/members/contribution-members.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
     file: "src/backend/drizzle/execution/postgres-execution.ts",
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },

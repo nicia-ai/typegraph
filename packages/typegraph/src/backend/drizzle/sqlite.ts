@@ -47,7 +47,6 @@ import {
   buildVectorCapabilities,
   resolveEfSearchOverride,
   vectorSearchFrontierTuning,
-  type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
 import {
@@ -81,14 +80,6 @@ import {
   type BundledBackendCapabilityOverrides,
   type CommitSchemaVersionIfKindsEmptyResult,
   type CommitSchemaVersionParams,
-  type ContributionDiagnostic,
-  type ContributionMaterializationIdentity,
-  type ContributionMaterializationRow,
-  type ContributionProbeEntry,
-  type ContributionRebuildResult,
-  type ContributionRebuildScope,
-  type ContributionRepairResult,
-  type ContributionRepopulationStats,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
   type GraphTemplateRow,
@@ -101,7 +92,6 @@ import {
   type KindRemovalRow,
   type LockSchemaVersionForWriteParams,
   normalizeGraphAnalyticsCapabilities,
-  type RecordContributionMaterializationParams,
   type RecordedRelationDdl,
   type RecordedTableNames,
   type RecordIndexMaterializationParams,
@@ -158,10 +148,8 @@ import {
   buildContributionOnConflictSet,
   type ContributionMaterializer,
   contributionRebuildSupported,
-  createContributionMaterializer,
   gateFulltext,
   gateFulltextMethods,
-  mapContributionMaterializationRow,
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
@@ -177,6 +165,10 @@ import {
   type EngineProvisioning,
   type SqlEngineProfile,
 } from "./engine";
+import {
+  createContributionMembers,
+  createContributionOperationMembers,
+} from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
 import {
@@ -201,10 +193,7 @@ import {
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
 import { resolveAtomicNodeProjectionRequirements } from "./operations/node-projections";
-import {
-  createSqliteOperationStrategy,
-  tableExistsFromRow,
-} from "./operations/strategy";
+import { createSqliteOperationStrategy } from "./operations/strategy";
 import {
   createSqliteTables as buildSqliteTables,
   type SqliteTables,
@@ -767,6 +756,11 @@ function createSqliteOperationBackend(
     batchConfig,
   });
 
+  const contributionOperationMembers = createContributionOperationMembers({
+    execRun,
+    operationStrategy,
+  });
+
   const commonOperationMembers = createCommonOperationBackend({
     batchConfig,
     commandSession: transactionScoped ? "transaction" : "root",
@@ -986,24 +980,7 @@ function createSqliteOperationBackend(
     ...executeRawMethod,
     ...vectorMembers,
     ...vectorEmbeddingMethods,
-    /**
-     * Transaction-scoped contribution marker stamp. Present so the
-     * destructive rebuild can commit its marker with the DDL that
-     * produced it; without it the stamp would land outside the
-     * transaction and could survive a rolled-back drop.
-     *
-     * States the row outright rather than reusing the top-level upsert,
-     * whose `materialized_at` COALESCE preserves an earlier success so a
-     * failed re-attempt cannot erase it. A completed rebuild replaced the
-     * storage, so the recorded timestamp must be the rebuild's.
-     */
-    async recordContributionMaterialization(
-      params: RecordContributionMaterializationParams,
-    ): Promise<void> {
-      await execRun(
-        operationStrategy.buildInsertContributionMaterialization(params),
-      );
-    },
+    ...contributionOperationMembers,
 
     capabilities,
     dialect: "sqlite",
@@ -1326,100 +1303,6 @@ export function buildSqliteEngineProfile(
   // ensure through it instead of issuing DDL on the hot path.
   const matTable = tables.contributionMaterializations;
 
-  async function ensureContributionMaterializationsTableImpl(): Promise<void> {
-    await db.run(sql.raw(generateSqliteCreateTableSQL(matTable)));
-  }
-
-  async function getContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<ContributionMaterializationRow | undefined> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-    const row = rows[0];
-    if (row === undefined) return undefined;
-    return mapContributionMaterializationRow(
-      row,
-      SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-    );
-  }
-
-  async function getContributionMaterializationRows(
-    graphId: string,
-  ): Promise<readonly ContributionMaterializationRow[]> {
-    const rows = await db
-      .select()
-      .from(matTable)
-      .where(eq(matTable.graphId, graphId));
-    return rows.map((row) =>
-      mapContributionMaterializationRow(
-        row,
-        SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-      ),
-    );
-  }
-
-  async function recordContributionMaterializationRow(
-    params: RecordContributionMaterializationParams,
-  ): Promise<void> {
-    await db
-      .insert(matTable)
-      .values(
-        buildContributionInsertValues(
-          params,
-          SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-        ),
-      )
-      .onConflictDoUpdate({
-        target: [
-          matTable.graphId,
-          matTable.logicalName,
-          matTable.owner,
-          matTable.tableName,
-        ],
-        set: buildContributionOnConflictSet(
-          matTable.materializedAt,
-          params.materializedAt,
-        ),
-      });
-  }
-
-  async function deleteContributionMaterializationRow(
-    identity: ContributionMaterializationIdentity,
-  ): Promise<void> {
-    await db
-      .delete(matTable)
-      .where(
-        and(
-          eq(matTable.graphId, identity.graphId),
-          eq(matTable.logicalName, identity.logicalName),
-          eq(matTable.owner, identity.owner),
-          eq(matTable.tableName, identity.tableName),
-        ),
-      );
-  }
-
-  /**
-   * Uncached catalog probe backing `verifyContributions`. The shared
-   * `createCachedTableExistence` wrapper is deliberately NOT used: this
-   * diagnostic's whole job is to notice that a table confirmed present
-   * earlier has since been dropped.
-   */
-  async function contributionTableExists(tableName: string): Promise<boolean> {
-    const rows = await executionAdapter.execute<Record<string, unknown>>(
-      operationStrategy.buildTableExists(tableName),
-    );
-    return tableExistsFromRow(rows[0]);
-  }
-
   /**
    * The contribution descriptors for exactly the identity relations, under
    * caller-supplied physical names. Pure — nothing is executed here — and the
@@ -1463,20 +1346,76 @@ export function buildSqliteEngineProfile(
     );
   }
 
-  const contributionMaterializer = createContributionMaterializer({
+  // Runs one idempotent DDL statement — `CREATE ... IF NOT EXISTS`. SQLite
+  // has no concurrent-create race to retry, so this needs no retry logic,
+  // unlike PostgreSQL's `executeConcurrentCreateDdl`; it backs both the
+  // contribution members' `ensureTable` dep and `provisioning.ensureTable`
+  // below.
+  const runDdlStatement = async (ddl: string): Promise<void> => {
+    await db.run(sql.raw(ddl));
+  };
+
+  const {
+    contributionMaterializer,
+    contributionTableExists,
+    members: contributionMembers,
+  } = createContributionMembers({
     dialect: "sqlite",
-    fenceTarget: markFirstPartyFactory({ dialect: "sqlite", capabilities }),
     fulltextStrategy,
     fulltextTableName: tables.fulltextTableName,
     vectorStrategy,
-    execDdl: async (statement) => {
-      await db.run(sql.raw(statement));
+    fenceTarget: markFirstPartyFactory({ dialect: "sqlite", capabilities }),
+    contributionTableDdl: generateSqliteCreateTableSQL(matTable),
+    reconciliationMarkersTableDdl: generateSqliteCreateTableSQL(
+      tables.reconciliationMarkers,
+    ),
+    ensureTable: runDdlStatement,
+    execute: executionAdapter.execute,
+    operationStrategy,
+    timestamps: SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
+    contributionMarkerColumns: matTable,
+    contributionMarkerRows: {
+      selectWhere: (condition) => db.select().from(matTable).where(condition),
+      async upsert(params) {
+        await db
+          .insert(matTable)
+          .values(
+            buildContributionInsertValues(
+              params,
+              SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+            ),
+          )
+          .onConflictDoUpdate({
+            target: [
+              matTable.graphId,
+              matTable.logicalName,
+              matTable.owner,
+              matTable.tableName,
+            ],
+            set: buildContributionOnConflictSet(
+              matTable.materializedAt,
+              params.materializedAt,
+            ),
+          });
+      },
+      async deleteWhere(condition) {
+        await db.delete(matTable).where(condition);
+      },
     },
-    ensureMarkerTable: ensureContributionMaterializationsTableImpl,
-    getMarkers: getContributionMaterializationRows,
-    recordMarker: recordContributionMaterializationRow,
-    deleteMarker: deleteContributionMaterializationRow,
-    tableExists: contributionTableExists,
+    reconciliationMarkerColumns: tables.reconciliationMarkers,
+    reconciliationMarkerRows: {
+      selectWhere: (condition) =>
+        db.select().from(tables.reconciliationMarkers).where(condition),
+      async upsert(graphId, version) {
+        await db
+          .insert(tables.reconciliationMarkers)
+          .values({ graphId, reconciledToVersion: version })
+          .onConflictDoUpdate({
+            target: tables.reconciliationMarkers.graphId,
+            set: { reconciledToVersion: version },
+          });
+      },
+    },
     // Withheld rather than wired-and-throwing when transactions are
     // disabled: the rebuild must refuse with its own typed error naming
     // the absent fence, matching `capabilities.contributions.rebuild`.
@@ -1826,9 +1765,7 @@ export function buildSqliteEngineProfile(
     executeDdl: async (ddl) => {
       await db.run(sql.raw(ddl));
     },
-    ensureTable: async (ddl) => {
-      await db.run(sql.raw(ddl));
-    },
+    ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy),
   };
 
@@ -2318,27 +2255,7 @@ export function buildSqliteEngineProfile(
           });
       },
 
-      async ensureContributionMaterializationsTable(): Promise<void> {
-        await ensureContributionMaterializationsTableImpl();
-      },
-
-      async getContributionMaterialization(
-        identity: ContributionMaterializationIdentity,
-      ): Promise<ContributionMaterializationRow | undefined> {
-        return getContributionMaterializationRow(identity);
-      },
-
-      async recordContributionMaterialization(
-        params: RecordContributionMaterializationParams,
-      ): Promise<void> {
-        await recordContributionMaterializationRow(params);
-      },
-
-      async assertRuntimeContributionsInitialized(
-        graphId: string,
-      ): Promise<void> {
-        await contributionMaterializer.assertInitialized(graphId);
-      },
+      ...contributionMembers,
 
       async ensureKindRemovalsTable(): Promise<void> {
         await db.run(
@@ -2382,133 +2299,6 @@ export function buildSqliteEngineProfile(
           .onConflictDoUpdate({
             target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
             set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
-      },
-
-      async ensureReconciliationMarkersTable(): Promise<void> {
-        await db.run(
-          sql.raw(generateSqliteCreateTableSQL(tables.reconciliationMarkers)),
-        );
-      },
-
-      async ensureRuntimeContributions(graphId: string): Promise<void> {
-        await contributionMaterializer.ensureRuntimeContributions(graphId);
-      },
-
-      /**
-       * Superseded by `ensureRuntimeContributions(graphId)` (#129).
-       * Retained as a thin back-compat wrapper for callers predating
-       * #129; #135 routed it through the durable-marker writer.
-       */
-      async ensureFulltextTable(graphId: string): Promise<void> {
-        await contributionMaterializer.ensureRuntimeContributions(graphId);
-      },
-
-      async verifyContributions(
-        graphId: string,
-        vectorSlots: readonly VectorSlot[],
-      ): Promise<readonly ContributionDiagnostic[]> {
-        return contributionMaterializer.verifyContributions(
-          graphId,
-          vectorSlots,
-        );
-      },
-
-      async repairContributions(
-        graphId: string,
-        vectorSlots: readonly VectorSlot[],
-      ): Promise<ContributionRepairResult> {
-        return contributionMaterializer.repairContributions(
-          graphId,
-          vectorSlots,
-        );
-      },
-
-      async probeContributions(
-        graphId: string,
-        vectorSlots: readonly VectorSlot[],
-      ): Promise<readonly ContributionProbeEntry[]> {
-        return contributionMaterializer.probeContributions(
-          graphId,
-          vectorSlots,
-        );
-      },
-
-      async rebuildContribution(
-        graphId: string,
-        scope: ContributionRebuildScope,
-        repopulate: (
-          target: TransactionBackend,
-        ) => Promise<ContributionRepopulationStats>,
-      ): Promise<ContributionRebuildResult> {
-        return contributionMaterializer.rebuildContribution(
-          graphId,
-          scope,
-          repopulate,
-        );
-      },
-
-      // Vector counterparts of the runtime-contribution methods. Present
-      // only when a vector strategy is wired (omitted on a plain SQLite
-      // connection with no vector extension), mirroring the embedding/
-      // search methods.
-      ...(vectorStrategy === undefined ?
-        {}
-      : {
-          async ensureVectorSlotContribution(
-            slot: VectorSlot,
-            options_?: Readonly<{
-              force?: boolean;
-              onDrift?: "throw" | "skip";
-            }>,
-          ): Promise<void> {
-            await contributionMaterializer.ensureVectorSlot(slot, options_);
-          },
-
-          async ensureVectorSlotContributions(
-            slots: readonly VectorSlot[],
-            options_?: Readonly<{
-              force?: boolean;
-              onDrift?: "throw" | "skip";
-            }>,
-          ): Promise<void> {
-            await contributionMaterializer.ensureVectorSlots(slots, options_);
-          },
-
-          async assertVectorSlotInitialized(slot: VectorSlot): Promise<void> {
-            await contributionMaterializer.assertVectorSlot(slot);
-          },
-
-          async assertVectorSlotsInitialized(
-            slots: readonly VectorSlot[],
-          ): Promise<void> {
-            await contributionMaterializer.assertVectorSlots(slots);
-          },
-
-          async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
-            await contributionMaterializer.dropVectorSlot(slot);
-          },
-        }),
-
-      async getReconciliationMarker(
-        graphId: string,
-      ): Promise<number | undefined> {
-        const t = tables.reconciliationMarkers;
-        const rows = await db.select().from(t).where(eq(t.graphId, graphId));
-        return rows[0]?.reconciledToVersion;
-      },
-
-      async setReconciliationMarker(
-        graphId: string,
-        version: number,
-      ): Promise<void> {
-        const t = tables.reconciliationMarkers;
-        await db
-          .insert(t)
-          .values({ graphId, reconciledToVersion: version })
-          .onConflictDoUpdate({
-            target: t.graphId,
-            set: { reconciledToVersion: version },
           });
       },
 
