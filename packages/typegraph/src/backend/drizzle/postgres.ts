@@ -73,7 +73,6 @@ import {
   annIndexScanTypes,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
-import { chunk as chunkArray } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
@@ -137,11 +136,8 @@ import {
   type ContributionRebuildScope,
   type ContributionRepairResult,
   type ContributionRepopulationStats,
-  type CreateVectorIndexParams,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
-  type DeleteEmbeddingParams,
-  type DropVectorIndexParams,
   type GraphTemplateRow,
   type HybridSearchParams,
   type HybridSearchRow,
@@ -169,10 +165,7 @@ import {
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
-  type UpsertEmbeddingBatchParams,
-  type UpsertEmbeddingParams,
   type VectorSearchParams,
-  type VectorSearchResult,
 } from "../types";
 import { createBaseSchemaLifecycle } from "./base-schema";
 import {
@@ -203,6 +196,7 @@ import {
   type SqlEngineProfile,
 } from "./engine";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
+import { createVectorMembers } from "./engine/members/vector-members";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -263,8 +257,6 @@ import {
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
-  vectorSlotFromCreateIndexParams,
-  vectorSlotFromDropIndexParams,
   vectorSlotFromParams,
 } from "./vector-runtime";
 
@@ -3031,160 +3023,69 @@ function createPostgresOperationBackend(
         },
       };
 
-  // Embedding write/search methods are present only when a vector strategy
-  // is wired. With `vector: false` (e.g. PGlite without pgvector) they are
-  // omitted, so `capabilities.vector` is absent and the store never routes
-  // embedding work here — mirroring a SQLite connection without sqlite-vec.
+  // Embedding write/search/index methods are present only when a vector
+  // strategy is wired. With `vector: false` (e.g. PGlite without pgvector)
+  // they are omitted, so `capabilities.vector` is absent and the store never
+  // routes embedding work here — mirroring a SQLite connection without
+  // sqlite-vec. Shared verbatim with the SQLite backend via
+  // `createVectorMembers`; the two genuine per-engine differences (the
+  // GUC-wrapped, ceiling-validated search override and the serial-fallback
+  // index build) are threaded through as `applySearchOverrides` and
+  // `runIndexBuild`.
+  const vectorMembers =
+    vectorStrategy === undefined ?
+      createVectorMembers({ vectorStrategy: undefined })
+    : createVectorMembers({
+        vectorStrategy,
+        execution: { execRun },
+        batchConfig,
+        tableNames,
+        contributionMaterializer,
+        operationStrategy,
+        async applySearchOverrides(query, params) {
+          // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
+          // before `runVectorSearch` applies it via `set_config`.
+          assertPgvectorEfSearch(params.efSearch);
+          const gucOverrides = await vectorSearchGucOverrides(params);
+          return runVectorSearch(gucOverrides, query);
+        },
+        async runIndexBuild({ slot, indexStatement }) {
+          // Honor the `concurrent` flag materializeIndexes passes on Postgres
+          // so the ANN build doesn't take a write-blocking lock on a live
+          // table. execRun is autocommit, which CONCURRENTLY requires.
+          // Built-in pgvector HNSW/IVFFlat builds stage the build graph in
+          // dynamic shared memory, and resource-constrained hosts reject the
+          // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
+          // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
+          // from dsm_impl_posix). Retry serially: drop the INVALID
+          // leftover the failed CONCURRENTLY build leaves behind (its
+          // IF NOT EXISTS would otherwise mask the retry), pin the
+          // strategy table to parallel_workers = 0 (maintenance builds
+          // take min(storage parameter, max_parallel_maintenance_workers)),
+          // rebuild in local memory, and restore the setting.
+          const strategyTableName = vectorStrategy.tableName(
+            slot.graphId,
+            slot.nodeKind,
+            slot.fieldPath,
+          );
+          await runPostgresVectorIndexBuild(
+            vectorStrategy,
+            execRun,
+            strategyTableName,
+            indexStatement,
+            vectorStrategy.buildDropIndex?.(slot),
+          );
+        },
+      });
+
+  // `hybridSearch` is the one embedding-adjacent member NOT shared with
+  // SQLite (it composes the vector leg with `operationStrategy`'s
+  // single-statement hybrid SQL, which is dialect-owned) — kept inline,
+  // gated the same way `vectorEmbeddingMethods` always has been.
   const vectorEmbeddingMethods =
     vectorStrategy === undefined ?
       {}
     : {
-        async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-          const slot = vectorSlotFromParams(params);
-          // Assert the slot's durable marker (SELECT, cached) — never DDL.
-          // The per-field table is provisioned by the privileged migrator
-          // (`createStoreWithSchema` → `materializeVectorContributions`), so
-          // a least-privilege runtime role writes embeddings without CREATE.
-          await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
-          try {
-            for (const statement of statements) {
-              await execRun(statement);
-            }
-          } catch (error) {
-            throw mapVectorWriteError(error, params);
-          }
-        },
-
-        async upsertEmbeddingBatch(
-          params: UpsertEmbeddingBatchParams,
-        ): Promise<void> {
-          if (params.rows.length === 0) return;
-          const slot = vectorSlotFromParams(params);
-          // Same SELECT-only marker assert as the single-row path — never DDL.
-          await contributionMaterializer.assertVectorSlot(slot);
-          // Last-write-wins dedupe: a multi-row upsert cannot affect one
-          // row twice.
-          const rowsById = new Map(
-            params.rows.map((row) => [row.nodeId, row] as const),
-          );
-          const rows = [...rowsById.values()];
-          const timestamp = nowIso();
-          try {
-            for (const chunk of chunkArray(
-              rows,
-              batchConfig.embeddingUpsertBatchSize,
-            )) {
-              const statements =
-                vectorStrategy.buildUpsertBatch === undefined ?
-                  chunk.flatMap((row) =>
-                    vectorStrategy.buildUpsert(
-                      slot,
-                      {
-                        graphId: params.graphId,
-                        nodeKind: params.nodeKind,
-                        nodeId: row.nodeId,
-                        fieldPath: params.fieldPath,
-                        embedding: row.embedding,
-                        dimensions: params.dimensions,
-                        metric: params.metric,
-                        indexType: params.indexType,
-                      },
-                      timestamp,
-                    ),
-                  )
-                : vectorStrategy.buildUpsertBatch(
-                    slot,
-                    { ...params, rows: chunk },
-                    timestamp,
-                  );
-              for (const statement of statements) {
-                await execRun(statement);
-              }
-            }
-          } catch (error) {
-            throw mapVectorWriteError(error, params);
-          }
-        },
-
-        async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          // Assert the slot's durable marker before deleting. A delete can
-          // run before any embedding was ever written for the field (e.g. a
-          // node hard-deleted having never carried one); the per-field table
-          // was provisioned at boot, so the DELETE targets an existing
-          // (possibly empty) table and is a clean no-op — never a DELETE
-          // against a missing relation, which would abort an enclosing
-          // Postgres transaction. SELECT-only assert, never DDL.
-          const slot = vectorSlotFromParams(params);
-          await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildDelete(slot, params);
-          for (const statement of statements) {
-            await execRun(statement);
-          }
-        },
-        async deleteEmbeddingBatch(
-          params: Omit<DeleteEmbeddingParams, "nodeId"> &
-            Readonly<{ nodeIds: readonly string[] }>,
-        ): Promise<void> {
-          if (params.nodeIds.length === 0) return;
-          const slot = vectorSlotFromParams(params);
-          await contributionMaterializer.assertVectorSlot(slot);
-          for (const nodeIds of chunkArray(
-            [...new Set(params.nodeIds)],
-            batchConfig.embeddingUpsertBatchSize,
-          )) {
-            const statements = vectorStrategy.buildDeleteBatch(slot, {
-              ...params,
-              nodeIds,
-            });
-            for (const statement of statements) await execRun(statement);
-          }
-        },
-
-        async vectorSearch(
-          params: VectorSearchParams,
-        ): Promise<readonly VectorSearchResult[]> {
-          assertVectorSearchLimit(params.limit);
-          // Validate `efSearch` against pgvector's `hnsw.ef_search` ceiling
-          // before `runVectorSearch` applies it via `set_config`.
-          assertPgvectorEfSearch(params.efSearch);
-          const slot = vectorSlotFromParams(params);
-          // Deliberately NOT marker-gated: search is read-only (no DDL
-          // hazard to gate), and its params carry the caller's runtime
-          // metric override, which legitimately diverges from the
-          // provisioned shape on strategies that bake the metric into the
-          // DDL (sqlite-vec; pgvector's table DDL is metric-free but the
-          // contract is kept identical across dialects). An unprovisioned
-          // slot surfaces the engine's missing-relation error — the same
-          // contract as a query-builder `similarTo()` predicate;
-          // `createVerifiedStore` catches both at attach.
-          const query = vectorStrategy.buildSearch(
-            slot,
-            params,
-            // Store-compiled candidates (predicates + subclass + currency)
-            // take precedence; the live-node default covers direct backend use.
-            params.candidates ??
-              buildLiveNodeCandidates(
-                tableNames.nodes,
-                params.graphId,
-                params.nodeKind,
-                nowIso(),
-              ),
-          );
-          const gucOverrides = await vectorSearchGucOverrides(params);
-          let rows: readonly { node_id: string; score: number }[];
-          try {
-            rows = await runVectorSearch(gucOverrides, query);
-          } catch (error) {
-            // A query vector whose dimension no longer matches the stored
-            // column surfaces the same typed error as the write path.
-            throw mapVectorWriteError(error, params);
-          }
-          return rows.map((row) => ({
-            nodeId: row.node_id,
-            score: row.score,
-          }));
-        },
         // Single-statement hybrid needs ROW_NUMBER(); a capability
         // profile that disables window functions keeps the store's
         // multi-statement fallback by simply not exposing the member.
@@ -3207,7 +3108,9 @@ function createPostgresOperationBackend(
                 metric: params.vector.metric,
                 indexType: params.vector.indexType,
               });
-              // Read-only, not marker-gated — see vectorSearch above.
+              // Read-only, not marker-gated — see
+              // `createVectorMembers`'s vectorSearch
+              // (engine/members/vector-members.ts) for why.
               const candidates =
                 params.candidates ??
                 buildLiveNodeCandidates(
@@ -3310,6 +3213,7 @@ function createPostgresOperationBackend(
   const operationBackend: InternalOperationBackend = {
     ...commonOperationMembers,
     ...executeRawMethod,
+    ...vectorMembers,
     ...vectorEmbeddingMethods,
     /**
      * Transaction-scoped contribution marker stamp. Present so the
@@ -3330,22 +3234,6 @@ function createPostgresOperationBackend(
       );
     },
 
-    async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      for (const contribution of vectorStrategy.ownedTables(slot)) {
-        await execRun(
-          operationStrategy.buildDeleteContributionMaterialization({
-            graphId: slot.graphId,
-            logicalName: contribution.logicalName,
-            owner: contribution.owner,
-            tableName: contribution.tableName,
-          }),
-        );
-      }
-      // Eviction is conservative if the surrounding transaction later rolls
-      // back: the next access re-reads the still-durable marker.
-      contributionMaterializer.evictVectorSlot(slot);
-    },
     capabilities,
     fulltextStrategy,
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
@@ -3408,65 +3296,8 @@ function createPostgresOperationBackend(
       });
     },
 
-    // === Vector Index Operations ===
-
-    async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      const slot = vectorSlotFromCreateIndexParams(params);
-      // Ensure the per-field table + its durable marker first (privileged,
-      // idempotent), then create its ANN index. pgvector's `ownedTables`
-      // builds the table only — the HNSW/IVFFlat index is created here (and
-      // only here) so it picks up the declared `m`/`ef_construction`/`lists`
-      // from `slot.indexParams` rather than defaults.
-      await contributionMaterializer.ensureVectorSlot(slot);
-      // Honor the `concurrent` flag materializeIndexes passes on Postgres so the
-      // ANN build doesn't take a write-blocking lock on a live table. execRun is
-      // autocommit, which CONCURRENTLY requires.
-      const indexStatement = vectorStrategy.buildCreateIndex?.(slot, {
-        concurrent: params.concurrent === true,
-      });
-      if (indexStatement !== undefined) {
-        const strategyTableName = vectorStrategy.tableName(
-          slot.graphId,
-          slot.nodeKind,
-          slot.fieldPath,
-        );
-        // Built-in pgvector HNSW/IVFFlat builds stage the build graph in dynamic
-        // shared memory, and resource-constrained hosts reject the
-        // allocation (SQLSTATE class 53 — e.g. containers with the 64MB
-        // /dev/shm default fail a 50k x 384-dim HNSW build with 53100
-        // from dsm_impl_posix). Retry serially: drop the INVALID
-        // leftover the failed CONCURRENTLY build leaves behind (its
-        // IF NOT EXISTS would otherwise mask the retry), pin the
-        // strategy table to parallel_workers = 0 (maintenance builds
-        // take min(storage parameter, max_parallel_maintenance_workers)),
-        // rebuild in local memory, and restore the setting.
-        await runPostgresVectorIndexBuild(
-          vectorStrategy,
-          execRun,
-          strategyTableName,
-          indexStatement,
-          vectorStrategy.buildDropIndex?.(slot),
-        );
-      }
-    },
-
     // === Fulltext Operations ===
     ...fulltextMembers,
-
-    async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      const slot = vectorSlotFromDropIndexParams(params);
-      const dropStatement = vectorStrategy.buildDropIndex?.(slot);
-      if (dropStatement === undefined) return;
-      try {
-        await execRun(dropStatement);
-      } catch (error) {
-        // The per-field table (and thus its index) may never have been
-        // materialized; treat a missing relation as already-dropped.
-        if (!isMissingTableError(error)) throw error;
-      }
-    },
 
     // === Query Execution ===
 

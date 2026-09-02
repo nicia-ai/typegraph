@@ -115,8 +115,9 @@ export type EngineAssemblyContext<TTx> = Readonly<{
  * {@link createSqlBackend} from `EngineAssemblyContext`. These stay
  * dialect-owned forever — none is a mirror waiting to be extracted into a
  * shared `members/*.ts` file, because each genuinely differs in body
- * between engines (self-referential transaction framing, GUC-wrapped vector
- * search, a lock clause resolved from the fence plan).
+ * between engines (self-referential transaction framing, the raw-SQL escape
+ * hatch's driver-level binding and decoding, a lock clause resolved from the
+ * fence plan).
  */
 export type EngineLateMembers<TTx> = Readonly<{
   /**

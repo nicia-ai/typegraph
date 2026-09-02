@@ -56,7 +56,6 @@ import {
   type SqlFragment,
 } from "../../query/sql-fragment";
 import { type CompiledRowsSql } from "../../query/sql-intent";
-import { chunk as chunkArray } from "../../utils/array";
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
@@ -90,9 +89,6 @@ import {
   type ContributionRebuildScope,
   type ContributionRepairResult,
   type ContributionRepopulationStats,
-  type CreateVectorIndexParams,
-  type DeleteEmbeddingParams,
-  type DropVectorIndexParams,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
   type GraphTemplateRow,
@@ -119,10 +115,7 @@ import {
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
-  type UpsertEmbeddingBatchParams,
-  type UpsertEmbeddingParams,
   type VectorSearchParams,
-  type VectorSearchResult,
 } from "../types";
 import {
   type AnySqliteDatabase,
@@ -144,8 +137,6 @@ import { isLocalLibsqlClient } from "./libsql-client";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
   mapVectorWriteError,
-  vectorSlotFromCreateIndexParams,
-  vectorSlotFromDropIndexParams,
   vectorSlotFromParams,
 } from "./vector-runtime";
 export type { SqliteTransactionMode } from "./execution/sqlite-execution";
@@ -187,6 +178,7 @@ import {
   type SqlEngineProfile,
 } from "./engine";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
+import { createVectorMembers } from "./engine/members/vector-members";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -856,119 +848,30 @@ function createSqliteOperationBackend(
         },
       };
 
-  const vectorEmbeddingMethods =
+  // Embedding write/search/index methods are present only when a vector
+  // strategy is wired — mirroring a fulltext-less backend. Shared verbatim
+  // with the PostgreSQL backend via `createVectorMembers`; the two genuine
+  // per-engine differences (the GUC-wrapped, ceiling-validated search
+  // override and the serial-fallback index build) are threaded through as
+  // `applySearchOverrides` and `runIndexBuild`.
+  const vectorMembers =
     vectorStrategy === undefined ?
-      {}
-    : {
-        async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-          const slot = vectorSlotFromParams(params);
-          // Assert the slot's durable marker (SELECT, cached) — never DDL.
-          // The per-field table is provisioned by the privileged migrator
-          // (`createStoreWithSchema` → `materializeVectorContributions`).
-          await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
-          try {
-            for (const statement of statements) {
-              await execRun(statement);
-            }
-          } catch (error) {
-            throw mapVectorWriteError(error, params);
-          }
-        },
-        async upsertEmbeddingBatch(
-          params: UpsertEmbeddingBatchParams,
-        ): Promise<void> {
-          if (params.rows.length === 0) return;
-          const slot = vectorSlotFromParams(params);
-          // Same SELECT-only marker assert as the single-row path — never DDL.
-          await contributionMaterializer.assertVectorSlot(slot);
-          // Last-write-wins dedupe: a multi-row upsert cannot affect one
-          // row twice.
-          const rowsById = new Map(
-            params.rows.map((row) => [row.nodeId, row] as const),
-          );
-          const rows = [...rowsById.values()];
-          const timestamp = nowIso();
-          try {
-            for (const chunk of chunkArray(
-              rows,
-              batchConfig.embeddingUpsertBatchSize,
-            )) {
-              const statements =
-                vectorStrategy.buildUpsertBatch === undefined ?
-                  chunk.flatMap((row) =>
-                    vectorStrategy.buildUpsert(
-                      slot,
-                      {
-                        graphId: params.graphId,
-                        nodeKind: params.nodeKind,
-                        nodeId: row.nodeId,
-                        fieldPath: params.fieldPath,
-                        embedding: row.embedding,
-                        dimensions: params.dimensions,
-                        metric: params.metric,
-                        indexType: params.indexType,
-                      },
-                      timestamp,
-                    ),
-                  )
-                : vectorStrategy.buildUpsertBatch(
-                    slot,
-                    { ...params, rows: chunk },
-                    timestamp,
-                  );
-              for (const statement of statements) {
-                await execRun(statement);
-              }
-            }
-          } catch (error) {
-            throw mapVectorWriteError(error, params);
-          }
-        },
-        async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          // Assert the slot's durable marker before deleting. A delete can
-          // run before any embedding was ever written for the field (e.g. a
-          // node hard-deleted having never carried one); the per-field table
-          // was provisioned at boot, so the DELETE is a clean no-op against
-          // an existing (possibly empty) table, matching the Postgres path
-          // (where a DELETE on a missing relation would abort an enclosing
-          // transaction). SELECT-only assert, never DDL.
-          const slot = vectorSlotFromParams(params);
-          await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildDelete(slot, params);
-          for (const statement of statements) {
-            await execRun(statement);
-          }
-        },
-        async deleteEmbeddingBatch(
-          params: Omit<DeleteEmbeddingParams, "nodeId"> &
-            Readonly<{ nodeIds: readonly string[] }>,
-        ): Promise<void> {
-          if (params.nodeIds.length === 0) return;
-          const slot = vectorSlotFromParams(params);
-          await contributionMaterializer.assertVectorSlot(slot);
-          for (const nodeIds of chunkArray(
-            [...new Set(params.nodeIds)],
-            batchConfig.embeddingUpsertBatchSize,
-          )) {
-            const statements = vectorStrategy.buildDeleteBatch(slot, {
-              ...params,
-              nodeIds,
-            });
-            for (const statement of statements) await execRun(statement);
-          }
-        },
-        async vectorSearch(
-          params: VectorSearchParams,
-        ): Promise<readonly VectorSearchResult[]> {
-          assertVectorSearchLimit(params.limit);
-          // Apply-or-refuse for the per-search ANN frontier. No SQLite engine
-          // TypeGraph bundles has one (sqlite-vec's vec0 takes only `k`;
-          // libSQL's `vector_top_k` takes only (index, query, k)), so the
-          // shared predicate refuses `efSearch` here with the engine's own
-          // reason instead of accepting it and searching as if it were never
-          // passed. `undefined` — the overwhelmingly common case — returns
-          // without touching anything.
+      createVectorMembers({ vectorStrategy: undefined })
+    : createVectorMembers({
+        vectorStrategy,
+        execution: { execRun },
+        batchConfig,
+        tableNames,
+        contributionMaterializer,
+        operationStrategy,
+        async applySearchOverrides(query, params) {
+          // Apply-or-refuse for the per-search ANN frontier. No SQLite
+          // engine TypeGraph bundles has one (sqlite-vec's vec0 takes only
+          // `k`; libSQL's `vector_top_k` takes only (index, query, k)), so
+          // the shared predicate refuses `efSearch` here with the engine's
+          // own reason instead of accepting it and searching as if it were
+          // never passed. `undefined` — the overwhelmingly common case —
+          // returns without touching anything.
           resolveEfSearchOverride({
             efSearch: params.efSearch,
             indexType: params.indexType,
@@ -978,41 +881,21 @@ function createSqliteOperationBackend(
             dialect: "SQLite",
             engine: vectorStrategy.name,
           });
-          // Deliberately NOT marker-gated: search is read-only (no DDL
-          // hazard to gate), and its params carry the caller's runtime
-          // metric override, which legitimately diverges from the
-          // provisioned shape on strategies that bake the metric into the
-          // DDL (sqlite-vec). An unprovisioned slot surfaces the engine's
-          // missing-relation error — the same contract as a query-builder
-          // `similarTo()` predicate; `createVerifiedStore` catches both at
-          // attach.
-          const slot = vectorSlotFromParams(params);
-          const query = vectorStrategy.buildSearch(
-            slot,
-            params,
-            // Store-compiled candidates (predicates + subclass + currency)
-            // take precedence; the live-node default covers direct backend use.
-            params.candidates ??
-              buildLiveNodeCandidates(
-                tableNames.nodes,
-                params.graphId,
-                params.nodeKind,
-                nowIso(),
-              ),
-          );
-          let rows: readonly { node_id: string; score: number }[];
-          try {
-            rows = await execAll<{ node_id: string; score: number }>(query);
-          } catch (error) {
-            // A query vector whose dimension no longer matches the stored
-            // column surfaces the same typed error as the write path.
-            throw mapVectorWriteError(error, params);
-          }
-          return rows.map((row) => ({
-            nodeId: row.node_id,
-            score: row.score,
-          }));
+          return execAll<{ node_id: string; score: number }>(query);
         },
+        async runIndexBuild({ indexStatement }) {
+          await execRun(indexStatement);
+        },
+      });
+
+  // `hybridSearch` is the one embedding-adjacent member NOT shared with
+  // PostgreSQL (it composes the vector leg with `operationStrategy`'s
+  // single-statement hybrid SQL, which is dialect-owned) — kept inline,
+  // gated the same way `vectorEmbeddingMethods` always has been.
+  const vectorEmbeddingMethods =
+    vectorStrategy === undefined ?
+      {}
+    : {
         // Single-statement hybrid needs ROW_NUMBER(); a capability profile
         // that disables window functions keeps the store's multi-statement
         // fallback by simply not exposing the member.
@@ -1049,7 +932,9 @@ function createSqliteOperationBackend(
                 metric: params.vector.metric,
                 indexType: params.vector.indexType,
               });
-              // Read-only, not marker-gated — see vectorSearch above.
+              // Read-only, not marker-gated — see
+              // `createVectorMembers`'s vectorSearch
+              // (engine/members/vector-members.ts) for why.
               const candidates =
                 params.candidates ??
                 buildLiveNodeCandidates(
@@ -1099,6 +984,7 @@ function createSqliteOperationBackend(
   const operationBackend: InternalOperationBackend = {
     ...commonOperationMembers,
     ...executeRawMethod,
+    ...vectorMembers,
     ...vectorEmbeddingMethods,
     /**
      * Transaction-scoped contribution marker stamp. Present so the
@@ -1119,20 +1005,6 @@ function createSqliteOperationBackend(
       );
     },
 
-    async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      for (const contribution of vectorStrategy.ownedTables(slot)) {
-        await execRun(
-          operationStrategy.buildDeleteContributionMaterialization({
-            graphId: slot.graphId,
-            logicalName: contribution.logicalName,
-            owner: contribution.owner,
-            tableName: contribution.tableName,
-          }),
-        );
-      }
-      contributionMaterializer.evictVectorSlot(slot);
-    },
     capabilities,
     dialect: "sqlite",
     tableNames,
@@ -1165,36 +1037,6 @@ function createSqliteOperationBackend(
         params.expectedVersion,
         active?.version ?? 0,
       );
-    },
-
-    async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      const slot = vectorSlotFromCreateIndexParams(params);
-      // Ensure the per-field table + its durable marker first (privileged,
-      // idempotent), then create its ANN index. `ownedTables` already folds
-      // the index DDL in, so the explicit `buildCreateIndex` step is
-      // belt-and-suspenders for slots whose index intent changed after the
-      // table was first materialized.
-      await contributionMaterializer.ensureVectorSlot(slot);
-      const indexStatement = vectorStrategy.buildCreateIndex?.(slot);
-      if (indexStatement !== undefined) {
-        await execRun(indexStatement);
-      }
-    },
-
-    async dropVectorIndex(params: DropVectorIndexParams): Promise<void> {
-      if (vectorStrategy === undefined) return;
-      const slot = vectorSlotFromDropIndexParams(params);
-      const dropStatement = vectorStrategy.buildDropIndex?.(slot);
-      if (dropStatement === undefined) return;
-      try {
-        await execRun(dropStatement);
-      } catch (error) {
-        // The per-field table (and thus its index) may never have been
-        // materialized; DROP INDEX IF EXISTS against a missing table errors
-        // on some drivers, so treat that as already-dropped.
-        if (!isMissingTableError(error)) throw error;
-      }
     },
 
     // === Fulltext Operations ===
