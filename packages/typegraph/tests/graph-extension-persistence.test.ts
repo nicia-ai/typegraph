@@ -13,6 +13,7 @@ import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
+import { type NodeType } from "../src/core/types";
 import { GraphExtensionUnresolvedEndpointError } from "../src/graph-extension";
 import { defineGraphExtension } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
@@ -124,7 +125,13 @@ describe("graph-extension persistence — loader rewire", () => {
     const edgeType = restored.registry.getEdgeType("appliesTo");
     expect(edgeType).toBeDefined();
     expect(edgeType?.from?.map((node) => node.kind)).toEqual(["Tag"]);
-    expect(edgeType?.to?.map((node) => node.kind)).toEqual(["Person"]);
+    expect(
+      Array.isArray(edgeType?.to) ?
+        (edgeType.to as readonly NodeType[]).map(
+          (node: NodeType): string => node.kind,
+        )
+      : undefined,
+    ).toEqual(["Person"]);
   });
 
   it("startup conflict: missing compile-time kind referenced by an edge endpoint fails store construction", async () => {

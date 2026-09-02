@@ -572,7 +572,7 @@ export type EndpointErrorDetails = Readonly<{
 }>;
 
 /**
- * Thrown when edge endpoint has wrong node type.
+ * Thrown when edge endpoint has wrong node type on "from" or "to".
  */
 export class EndpointError extends TypeGraphError {
   declare readonly details: EndpointErrorDetails;
@@ -590,6 +590,53 @@ export class EndpointError extends TypeGraphError {
       },
     );
     this.name = "EndpointError";
+  }
+}
+
+/**
+ * Details for EndpointPairError.
+ */
+export type EndpointPairErrorDetails = Readonly<{
+  edgeKind: string;
+  endpoint: "pair";
+  fromKind: string;
+  toKind: string;
+  allowedPairs: readonly Readonly<{ from: string; to: string }>[];
+}>;
+
+/**
+ * Thrown when an edge connects an invalid/undeclared endpoint pair.
+ */
+export class EndpointPairError extends TypeGraphError {
+  declare readonly details: EndpointPairErrorDetails;
+
+  constructor(
+    details: Readonly<{
+      edgeKind: string;
+      fromKind: string;
+      toKind: string;
+      allowedPairs: readonly Readonly<{ from: string; to: string }>[];
+    }>,
+    options?: { cause?: unknown },
+  ) {
+    const fullDetails: EndpointPairErrorDetails = {
+      ...details,
+      endpoint: "pair",
+    };
+    const allowed = fullDetails.allowedPairs
+      .map((pair) => `(${pair.from} -> ${pair.to})`)
+      .join(", ");
+    super(
+      `Invalid endpoint pair for edge "${fullDetails.edgeKind}": cannot connect source "${fullDetails.fromKind}" to target "${fullDetails.toKind}". Allowed pairs: [${allowed}]`,
+      "ENDPOINT_PAIR_ERROR",
+      {
+        details: fullDetails,
+        category: "constraint",
+        suggestion: `Connect endpoints matching one of the allowed pairs: [${allowed}].`,
+        cause: options?.cause,
+      },
+    );
+    this.name = "EndpointPairError";
   }
 }
 

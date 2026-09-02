@@ -4,9 +4,11 @@ import {
   assertSchemaKeysAreFree,
   RESERVED_EDGE_KEYS,
 } from "../store/reserved-keys";
+import { normalizeTargetMap, validateTargetMapEntries } from "./edge-endpoints";
 import { assertJsonValue } from "./json-value";
 import {
   EDGE_TYPE_BRAND,
+  type EdgeTargets,
   type EdgeType,
   type KindAnnotations,
   type NodeType,
@@ -22,7 +24,7 @@ import {
 export type DefineEdgeOptions<
   S extends z.ZodObject<z.ZodRawShape>,
   From extends readonly NodeType[] | undefined = undefined,
-  To extends readonly NodeType[] | undefined = undefined,
+  To extends EdgeTargets | undefined = undefined,
 > = Readonly<{
   /** Zod schema for edge properties (defaults to empty object) */
   schema?: S;
@@ -38,7 +40,7 @@ export type DefineEdgeOptions<
   annotations?: KindAnnotations;
   /** Node types that can be the source of this edge (domain constraint) */
   from?: From;
-  /** Node types that can be the target of this edge (range constraint) */
+  /** Node types or source-to-target mapping for this edge (range constraint) */
   to?: To;
 }>;
 
@@ -83,12 +85,21 @@ function validateSchemaKeys(
  *   from: [Person],
  *   to: [Company],
  * });
+ *
+ * // Edge with source-dependent target constraints
+ * const dependsOn = defineEdge("dependsOn", {
+ *   from: [Task, Course],
+ *   to: {
+ *     Task: [Task],
+ *     Course: [Course],
+ *   },
+ * });
  * ```
  */
 // Overload: no options - returns edge without domain/range
 export function defineEdge<K extends string>(name: K): EdgeType<K, EmptySchema>;
 
-// Overload: options with both from and to - returns edge with domain/range
+// Overload: options with Cartesian from/to arrays
 export function defineEdge<
   K extends string,
   S extends z.ZodObject<z.ZodRawShape>,
@@ -99,18 +110,29 @@ export function defineEdge<
   options: DefineEdgeOptions<S, From, To> & { from: From; to: To },
 ): EdgeType<K, S, From, To>;
 
+// Overload: options with source-dependent target mapping
+export function defineEdge<
+  K extends string,
+  S extends z.ZodObject<z.ZodRawShape>,
+  From extends readonly NodeType[],
+  To extends Record<From[number]["kind"], readonly [NodeType, ...NodeType[]]>,
+>(
+  name: K,
+  options: DefineEdgeOptions<S, From, To> & { from: From; to: To },
+): EdgeType<K, S, From, To>;
+
 // Overload: options without from/to - returns edge without domain/range
 export function defineEdge<
   K extends string,
   S extends z.ZodObject<z.ZodRawShape>,
->(name: K, options: DefineEdgeOptions<S>): EdgeType<K, S>;
+>(name: K, options: DefineEdgeOptions<S, undefined, undefined>): EdgeType<K, S>;
 
 // Implementation
 export function defineEdge<
   K extends string,
   S extends z.ZodObject<z.ZodRawShape>,
   From extends readonly NodeType[] | undefined,
-  To extends readonly NodeType[] | undefined,
+  To extends EdgeTargets | undefined,
 >(
   name: K,
   options?: DefineEdgeOptions<S, From, To>,
@@ -121,6 +143,12 @@ export function defineEdge<
     assertJsonValue(options.annotations, "annotations", `Edge "${name}"`);
   }
 
+  let resolvedTo: To | undefined = options?.to;
+  if (options?.to !== undefined && !Array.isArray(options.to)) {
+    validateTargetMapEntries(name, options.from, options.to);
+    resolvedTo = normalizeTargetMap(options.to) as To;
+  }
+
   return Object.freeze({
     [EDGE_TYPE_BRAND]: true as const,
     kind: name,
@@ -128,6 +156,6 @@ export function defineEdge<
     description: options?.description,
     annotations: options?.annotations,
     from: options?.from,
-    to: options?.to,
+    to: resolvedTo,
   }) as EdgeType<K, S, From, To> | EdgeType<K, EmptySchema>;
 }

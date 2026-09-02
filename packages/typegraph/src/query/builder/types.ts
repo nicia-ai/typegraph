@@ -115,7 +115,13 @@ export type ValidEdgeTargets<
 > =
   G["edges"][EK] extends EdgeRegistration ?
     Dir extends "out" ?
-      G["edges"][EK]["to"][number]["kind"]
+      G["edges"][EK]["to"] extends readonly (infer N extends NodeType)[] ?
+        N["kind"]
+      : G["edges"][EK]["to"] extends (
+        Record<string, readonly (infer N extends NodeType)[]>
+      ) ?
+        N["kind"]
+      : never
     : G["edges"][EK]["from"][number]["kind"]
   : never;
 

@@ -11,15 +11,22 @@ import { type IndexDeclaration } from "../indexes/types";
 import { type OntologyRelation } from "../ontology/types";
 import { assertClaimAxisSafe } from "../store/claims/axis";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
+import {
+  isEdgeTargetMap,
+  normalizeTargetMap,
+  validateTargetMapEntries,
+} from "./edge-endpoints";
 import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   assertGraphAnnotations,
   cloneAndFreezeGraphAnnotations,
 } from "./json-value";
 import {
+  type AnyEdgeRegistration,
   type AnyEdgeType,
   type DeleteBehavior,
   type EdgeRegistration,
+  type EdgeTargets,
   type EdgeTypeWithEndpoints,
   type GraphAnnotations,
   type GraphDefaults,
@@ -66,7 +73,13 @@ type NormalizedEdges<
       TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N
       : TNodes[keyof TNodes]["type"],
       TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N
-      : TNodes[keyof TNodes]["type"]
+      : TEdges[K]["to"] extends (
+        Record<string, readonly (infer N extends NodeType)[]>
+      ) ?
+        N
+      : TNodes[keyof TNodes]["type"],
+      TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"]
+      : readonly TNodes[keyof TNodes]["type"][]
     >
   : never;
 };
@@ -102,21 +115,54 @@ function validateConstraintNarrowing(
     }
   }
 
-  const builtInToNames = new Set(edgeType.to.map((node) => node.kind));
-  for (const toNode of registration.to) {
-    if (!builtInToNames.has(toNode.kind)) {
-      throw new ConfigurationError(
-        `Edge "${name}" registration has 'to' kind "${toNode.kind}" ` +
-          `not in edge's built-in range: [${[...builtInToNames].join(", ")}]`,
-        {
-          edgeName: name,
-          invalidTo: toNode.kind,
-          allowedTo: [...builtInToNames],
-        },
-        {
-          suggestion: `Edge registration can only narrow, not widen, the edge type's built-in constraints.`,
-        },
-      );
+  if (!Array.isArray(registration.to)) {
+    validateTargetMapEntries(name, registration.from, registration.to);
+  }
+
+  const builtInIsMap = isEdgeTargetMap(edgeType.to);
+  const registrationIsMap = isEdgeTargetMap(registration.to);
+
+  for (const fromNode of registration.from) {
+    const allowedTargets =
+      builtInIsMap ?
+        new Set<string>(
+          (edgeType.to[fromNode.kind] ?? []).map(
+            (node: NodeType): string => node.kind,
+          ),
+        )
+      : new Set<string>(
+          (edgeType.to as readonly NodeType[]).map(
+            (node: NodeType): string => node.kind,
+          ),
+        );
+
+    const declaredTargets: readonly NodeType[] =
+      registrationIsMap ?
+        (registration.to[fromNode.kind] ?? [])
+      : (registration.to as readonly NodeType[]);
+
+    for (const targetNode of declaredTargets) {
+      if (!allowedTargets.has(targetNode.kind)) {
+        const message =
+          builtInIsMap ?
+            registrationIsMap ?
+              `Edge "${name}" registration has target kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in mapping: [${[...allowedTargets].join(", ")}]`
+            : `Edge "${name}" registration has 'to' kind "${targetNode.kind}" for source "${fromNode.kind}" not in edge's built-in source-dependent targets: [${[...allowedTargets].join(", ")}]. An array-valued registration must not erase built-in endpoint correlation.`
+          : `Edge "${name}" registration has 'to' kind "${targetNode.kind}" not in edge's built-in range: [${[...allowedTargets].join(", ")}]`;
+
+        throw new ConfigurationError(
+          message,
+          {
+            edgeName: name,
+            sourceKind: fromNode.kind,
+            invalidTo: targetNode.kind,
+            allowedTo: [...allowedTargets],
+          },
+          {
+            suggestion: `Edge registration can only narrow, not widen, the edge type's built-in constraints.`,
+          },
+        );
+      }
     }
   }
 }
@@ -128,7 +174,7 @@ function normalizeEdgeEntry(
   name: string,
   entry: EdgeEntry,
   allNodeTypes: readonly NodeType[],
-): EdgeRegistration {
+): AnyEdgeRegistration {
   if (isEdgeType(entry)) {
     if (isEdgeTypeWithEndpoints(entry)) {
       // EdgeType with from/to — convert to EdgeRegistration
@@ -138,12 +184,22 @@ function normalizeEdgeEntry(
     return { type: entry, from: allNodeTypes, to: allNodeTypes };
   }
 
-  // Already EdgeRegistration — validate narrowing if edge has built-in constraints
-  if (isEdgeTypeWithEndpoints(entry.type)) {
-    validateConstraintNarrowing(name, entry.type, entry);
+  let normalizedRegistration: AnyEdgeRegistration = entry;
+  if (!Array.isArray(entry.to)) {
+    validateTargetMapEntries(name, entry.from, entry.to);
+    normalizedRegistration = { ...entry, to: normalizeTargetMap(entry.to) };
   }
 
-  return canonicalizeMatchIdentity(name, entry);
+  // Validate narrowing if edge has built-in constraints
+  if (isEdgeTypeWithEndpoints(normalizedRegistration.type)) {
+    validateConstraintNarrowing(
+      name,
+      normalizedRegistration.type,
+      normalizedRegistration,
+    );
+  }
+
+  return canonicalizeMatchIdentity(name, normalizedRegistration);
 }
 
 /**
@@ -288,8 +344,8 @@ function isPortableMatchIdentityFieldSchema(fieldSchema: unknown): boolean {
 function normalizeEdges(
   edges: Record<string, EdgeEntry>,
   allNodeTypes: readonly NodeType[],
-): Record<string, EdgeRegistration> {
-  const result = createDataKeyedBag<EdgeRegistration>();
+): Record<string, AnyEdgeRegistration> {
+  const result = createDataKeyedBag<AnyEdgeRegistration>();
   for (const [name, entry] of Object.entries(edges)) {
     result[name] = normalizeEdgeEntry(name, entry, allNodeTypes);
   }

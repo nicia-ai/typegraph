@@ -63,8 +63,21 @@ export {
   type NodeKinds,
 } from "./define-graph";
 
+// Edge endpoint utilities
+export {
+  type EndpointPair,
+  formatEndpointPairs,
+  getEdgeEndpointPairs,
+  isEdgeTargetMap,
+  normalizeTargetMap,
+  projectTargetKinds,
+  projectTargetNodes,
+  validateTargetMapEntries,
+} from "./edge-endpoints";
+
 // Core types
 export {
+  type AnyEdgeRegistration,
   type AnyEdgeType,
   asEdgeId,
   asNodeId,
@@ -75,6 +88,8 @@ export {
   type EdgeMatchIdentity,
   type EdgeProps,
   type EdgeRegistration,
+  type EdgeTargetMap,
+  type EdgeTargets,
   type EdgeType,
   type EdgeTypeWithEndpoints,
   type EndpointExistence,

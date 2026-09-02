@@ -440,12 +440,46 @@ try {
   await store.edges.worksAt.create(company, person, {}); // Wrong direction
 } catch (error) {
   if (error instanceof EndpointError) {
-    console.log(error.category); // "user"
+    console.log(error.category); // "constraint"
     console.log(error.suggestion);
     // "Check the edge definition to see which node types are allowed..."
   }
 }
 ```
+
+### `EndpointPairError`
+
+Thrown when a [source-dependent edge](/core-concepts#source-dependent-targets)
+receives a source/target combination that matches no declared pair. It extends
+`TypeGraphError` directly, so catching `EndpointError` alone does not catch it.
+An invalid source kind continues to produce `EndpointError`.
+
+```typescript
+import { EndpointPairError } from "@nicia-ai/typegraph";
+
+try {
+  // Dynamic callers are checked at runtime, too.
+  // assignedTo allows Employee -> Department and Student -> Course.
+  await store.getEdgeCollection("assignedTo").create(employee, course, {});
+} catch (error) {
+  if (error instanceof EndpointPairError) {
+    console.log(error.code); // "ENDPOINT_PAIR_ERROR"
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // {
+    //   edgeKind: "assignedTo", endpoint: "pair",
+    //   fromKind: "Employee", toKind: "Course",
+    //   allowedPairs: [
+    //     { from: "Employee", to: "Department" },
+    //     { from: "Student", to: "Course" },
+    //   ],
+    // }
+  }
+}
+```
+
+Malformed target maps and graph registrations that widen built-in constraints
+fail at configuration time with `ConfigurationError`.
 
 ### `CardinalityError`
 
@@ -1303,7 +1337,8 @@ try {
 | `IDENTITY_ENDPOINT_VALIDITY` | `IdentityEndpointValidityError` | constraint | An endpoint does not cover the explicit assertion window |
 | `GRAPH_MERGE_IDENTITY_CONFLICT` | `IdentityMergeConflictError` | system | Branches carry opposing identity truth |
 | `GRAPH_MERGE_CONSTRAINT_CONFLICT` | `MergeConstraintConflictError` | constraint | The resolved merge would violate a store constraint |
-| `ENDPOINT_ERROR` | `EndpointError` | user | Invalid edge endpoint types |
+| `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
+| `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |

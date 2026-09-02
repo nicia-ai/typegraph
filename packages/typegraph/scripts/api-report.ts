@@ -213,8 +213,8 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 367,
-    sha256: "576b2d133f48d9c2fdd754ad72cc8b0d73741510de9950ce28b2392682e71c6b",
+    count: 378,
+    sha256: "0cb94bcb6dfd5d167567f7e777f95e844ef837dd19891eb8694aa97e5f3f6662",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -253,36 +253,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "1678650d02e0d9d7cc767ffbacbf163724c82fd4590c219b97d3dff85a6bf2f6",
   },
   "./graph-merge": {
-    count: 690,
-    sha256: "22c4c42c13480468b98cb406733d60388188fecf5f0b73d1e8d15972a451fd7b",
+    count: 703,
+    sha256: "c064127f3073508f81c23fafe05a7b26910107b80904c05bfad0bd769f462df1",
   },
   "./indexes": {
-    count: 44,
-    sha256: "c4d11e1ce334cf416c99e3d77bfd7f8722fe141fe12685a0c3b83099cc08290a",
+    count: 46,
+    sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 676,
-    sha256: "ae315aab063ce17afe3397d1f782d4c27e9774e70432300346a7fc4ede6b9b99",
+    count: 689,
+    sha256: "e97787e4c8885fb5fb37d8da55a9f37d4c65e0e05ad73882dbed41b0d98eb287",
   },
   "./postgres/pglite": {
-    count: 680,
-    sha256: "9ffda28a91364c5738c14ed1a31060ec991c78371a5fb78fe7bc0158f0bc4ff9",
+    count: 693,
+    sha256: "05af42a38fdd2ae01bd1fb29940b7d5ac2e99dfcc2d6943d0f38ab04e857d803",
   },
   "./profiler": {
-    count: 678,
-    sha256: "10703f06a798431ec22aac3f0a8bafcd0cb79a8b31bd3c5ebec9f13e3868ebe0",
+    count: 691,
+    sha256: "04dbe9758a6958939e07b0ff229ab286745ed4e7170a0d57d5495dc8b169abe0",
   },
   "./provenance": {
-    count: 684,
-    sha256: "3647986b4142817d30f89e3ed7abb5337473abb1777018fe2323800e2b1b6a21",
+    count: 697,
+    sha256: "5f604329ce3285b31051a6222e051440f2a266f328ba3687fb3673ce59d5a47e",
   },
   "./schema": {
-    count: 261,
-    sha256: "e9e66309a54ef51107e9ab35a03bce99798d91244a3049db4041c7b7bdb664a2",
+    count: 263,
+    sha256: "eb7a0664ed8d89c35213508e4dd563ffeaf96bf2212f6e4a4916aaf9b3f971b5",
   },
   "./sqlite/local": {
-    count: 680,
-    sha256: "9ffda28a91364c5738c14ed1a31060ec991c78371a5fb78fe7bc0158f0bc4ff9",
+    count: 693,
+    sha256: "05af42a38fdd2ae01bd1fb29940b7d5ac2e99dfcc2d6943d0f38ab04e857d803",
   },
 };
 

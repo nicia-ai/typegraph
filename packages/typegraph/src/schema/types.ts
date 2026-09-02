@@ -294,7 +294,10 @@ const runtimeEdgeDocumentZod = z
     description: z.string().optional(),
     annotations: annotationsZod.optional(),
     from: z.array(z.string()),
-    to: z.array(z.string()),
+    to: z.union([
+      z.array(z.string()),
+      z.record(z.string(), z.array(z.string())),
+    ]),
     properties: z.record(z.string(), runtimePropertyZod).optional(),
   })
   .loose();
@@ -480,6 +483,7 @@ export type SerializedEdgeDef = Readonly<{
   kind: string;
   fromKinds: readonly string[];
   toKinds: readonly string[];
+  targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
   properties: JsonSchema;
   cardinality: Cardinality;
   endpointExistence: EndpointExistence;
@@ -570,6 +574,9 @@ export const serializedSchemaZod = z
             kind: z.string(),
             fromKinds: z.array(z.string()),
             toKinds: z.array(z.string()),
+            targetKindsBySource: z
+              .record(z.string(), z.array(z.string()))
+              .optional(),
             properties: z.record(z.string(), z.unknown()),
             cardinality: cardinalityZod,
             endpointExistence: endpointExistenceZod,

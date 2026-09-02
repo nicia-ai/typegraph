@@ -19,6 +19,7 @@ import {
   type AllNodeTypes,
   type GraphDef,
 } from "../core/define-graph";
+import { projectTargetKinds } from "../core/edge-endpoints";
 import { canonicalAnnotations } from "../core/json-value";
 import {
   type Cardinality,
@@ -148,7 +149,7 @@ export function introspectSchema<G extends GraphDef>(
       origin: runtimeEdgeNames.has(name) ? "runtime" : "compile-time",
       description: edgeType.description,
       from: reg.from.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
-      to: reg.to.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
+      to: projectTargetKinds(reg.to),
       cardinality: reg.cardinality ?? "many",
       endpointExistence: reg.endpointExistence ?? "notDeleted",
       properties: serializeSchemaProperties(edgeType.schema),

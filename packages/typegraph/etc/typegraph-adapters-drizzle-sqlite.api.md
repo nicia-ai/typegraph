@@ -4127,7 +4127,7 @@ type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
-    to: readonly string[];
+    to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
 }>;
 
@@ -6311,6 +6311,7 @@ type SerializedEdgeDef = Readonly<{
     kind: string;
     fromKinds: readonly string[];
     toKinds: readonly string[];
+    targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
     endpointExistence: EndpointExistence;

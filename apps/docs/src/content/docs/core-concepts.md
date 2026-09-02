@@ -273,7 +273,7 @@ const graph = defineGraph({
 });
 ```
 
-Attempting to widen beyond the edge's built-in constraints throws a `ValidationError`:
+Attempting to widen beyond the edge's built-in constraints throws a `ConfigurationError`:
 
 ```typescript
 const worksAt = defineEdge("worksAt", {
@@ -281,13 +281,83 @@ const worksAt = defineEdge("worksAt", {
   to: [Company],
 });
 
-// This throws ValidationError - OtherEntity is not in the edge's range
+// This throws ConfigurationError - OtherEntity is not in the edge's range
 defineGraph({
   edges: {
     worksAt: { type: worksAt, from: [Person], to: [OtherEntity] },
   },
 });
 ```
+
+#### Source-Dependent Targets
+
+An array-valued `to` allows every combination of the source and target types.
+When the valid target depends on the source, use a map instead:
+
+```typescript
+const Employee = defineNode("Employee", { schema: z.object({ name: z.string() }) });
+const Student = defineNode("Student", { schema: z.object({ name: z.string() }) });
+const Department = defineNode("Department", { schema: z.object({ name: z.string() }) });
+const Course = defineNode("Course", { schema: z.object({ name: z.string() }) });
+
+const assignedTo = defineEdge("assignedTo", {
+  from: [Employee, Student],
+  to: {
+    Employee: [Department],
+    Student: [Course],
+  },
+});
+
+const graph = defineGraph({
+  id: "assignments",
+  nodes: {
+    Employee: { type: Employee },
+    Student: { type: Student },
+    Department: { type: Department },
+    Course: { type: Course },
+  },
+  edges: { assignedTo },
+});
+```
+
+This permits `Employee → Department` and `Student → Course`. It rejects
+`Employee → Course` and `Student → Department`. Using
+`to: [Department, Course]` would permit all four combinations.
+
+Map keys are the literal node kind names (`Employee.kind`), not aliases used to
+register nodes in a graph. Every kind in `from` must have a map entry, no other
+keys are allowed, and each target array must be nonempty. You can also use
+computed keys such as `[Employee.kind]: [Department]`.
+
+The map syntax works in an explicit graph registration too:
+
+```typescript
+edges: {
+  assignedTo: {
+    type: assignedTo,
+    from: [Employee],
+    to: { Employee: [Department] },
+  },
+}
+```
+
+A registration may narrow the built-in allowed pairs, but it cannot introduce
+new pairs. Replacing a map with arrays is valid only when every resulting
+combination is already allowed by the edge definition.
+
+At runtime, both endpoints must match the **same** declared pair, including
+`subClassOf` assignability. A source matching several source entries can use the
+targets allowed by any of those entries. An undeclared pair fails with
+[`EndpointPairError`](/errors#endpointpairerror); an invalid source kind still
+fails with `EndpointError`. Malformed declarations fail with `ConfigurationError`.
+
+Typed collection writes preserve the source/target relationship; dynamic writes
+and imports enforce it at runtime. Bulk writes reject invalid pairs atomically.
+Import pair validation remains active even when reference validation is disabled;
+imports retain their own documented error-handling and partial-success behavior.
+See [collection types](/types#typededgecollectionr) for inference limits,
+[graph extensions](/graph-extensions#edges) for runtime declarations, and
+[schema management](/schema-management#endpoint-pair-changes) for schema changes.
 
 ### Edge Constraints
 

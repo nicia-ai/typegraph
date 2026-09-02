@@ -13,6 +13,7 @@ import type {
   EmbeddingDimensionChangedErrorDetails,
   EndpointErrorDetails,
   EndpointNotFoundErrorDetails,
+  EndpointPairErrorDetails,
   KindNotFoundErrorDetails,
   MigrationErrorDetails,
   MigrationFailureReason,
@@ -39,6 +40,7 @@ import {
   EmbeddingDimensionChangedError,
   EndpointError,
   EndpointNotFoundError,
+  EndpointPairError,
   getErrorSuggestion,
   isConstraintError,
   isSystemError,
@@ -746,6 +748,42 @@ describe("EndpointError", () => {
     expectTypeOf(error.details.expectedKinds).toEqualTypeOf<
       readonly string[]
     >();
+  });
+});
+
+describe("EndpointPairError", () => {
+  it("creates error with endpoint pair details", () => {
+    const error = new EndpointPairError({
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      toKind: "Course",
+      allowedPairs: [
+        { from: "Task", to: "Task" },
+        { from: "Course", to: "Course" },
+      ],
+    });
+    expect(error.message).toContain("dependsOn");
+    expect(error.message).toContain("Task");
+    expect(error.message).toContain("Course");
+    expect(error.code).toBe("ENDPOINT_PAIR_ERROR");
+    expect(error.name).toBe("EndpointPairError");
+    expect(error.category).toBe("constraint");
+    expect(error.details.endpoint).toBe("pair");
+    expect(error.details.fromKind).toBe("Task");
+    expect(error.details.toKind).toBe("Course");
+    expect(error.details.allowedPairs).toHaveLength(2);
+  });
+
+  it("exposes details typed as EndpointPairErrorDetails", () => {
+    const error = new EndpointPairError({
+      edgeKind: "dependsOn",
+      fromKind: "Task",
+      toKind: "Course",
+      allowedPairs: [{ from: "Task", to: "Task" }],
+    });
+    expectTypeOf(error.details).toEqualTypeOf<EndpointPairErrorDetails>();
+    expectTypeOf(error.details.fromKind).toBeString();
+    expectTypeOf(error.details.toKind).toBeString();
   });
 });
 

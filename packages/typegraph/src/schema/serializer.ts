@@ -12,6 +12,7 @@ import {
   getNodeKinds,
   type GraphDef,
 } from "../core/define-graph";
+import { isEdgeTargetMap, projectTargetKinds } from "../core/edge-endpoints";
 import { canonicalAnnotations } from "../core/json-value";
 import {
   type EdgeRegistration,
@@ -486,10 +487,26 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
   const edge = registration.type;
   const annotations = canonicalAnnotations(edge.annotations);
 
+  const isMap = isEdgeTargetMap(registration.to);
+  const toKinds =
+    isMap ?
+      projectTargetKinds(registration.to).toSorted()
+    : registration.to.map((node) => node.kind);
+
+  let targetKindsBySource: Record<string, readonly string[]> | undefined;
+  if (isMap) {
+    const map = createDataKeyedBag<readonly string[]>();
+    for (const [sourceKind, targets] of Object.entries(registration.to)) {
+      map[sourceKind] = targets.map((t) => t.kind).toSorted();
+    }
+    targetKindsBySource = { ...map };
+  }
+
   return {
     kind: edge.kind,
     fromKinds: registration.from.map((node) => node.kind),
-    toKinds: registration.to.map((node) => node.kind),
+    toKinds,
+    ...(targetKindsBySource === undefined ? {} : { targetKindsBySource }),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
     endpointExistence: registration.endpointExistence ?? "notDeleted",
