@@ -64,7 +64,7 @@ import {
   defineNode,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { asEdgeId, asNodeId } from "../../../src/core/types";
@@ -96,6 +96,7 @@ import { importGraph } from "../../../src/interchange";
 import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
 import { canonicalizeDatabaseTimestamp } from "../../../src/utils/date";
 import { requireDefined } from "../../../src/utils/presence";
+import { createPgliteFixturePool } from "../../graph-merge/pglite-fixture-pool";
 import { backendMatrix } from "../../graph-merge/test-utils";
 
 const Agent = defineNode("Agent", {
@@ -1279,10 +1280,13 @@ async function expectLawfulOutcome(args: {
   }
 }
 
-// Per-fixture backends (no shared PGlite engine): the shared engine renames
-// only the CORE table set, so an identity-enabled graph would provision its
-// assertion/closure tables under the default names once per engine — leaking
-// ledger rows across property iterations.
+// Each property iteration releases whole fixture schemas, including identity
+// ledgers. Live branches keep separate engines and independent transactions.
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
   type Fixture = Readonly<{
     forkPoint: Store<LawGraph>;
@@ -1371,7 +1375,10 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
         fc.asyncProperty(snapshotScenarioArb(lane.ops), async (scenario) => {
           const cleanups: (() => Promise<void>)[] = [];
           async function makeBackend(): Promise<GraphBackend> {
-            const fixture = await entry.make();
+            const fixture =
+              entry.name === "PGlite" ?
+                await pglitePool.makeFixture()
+              : await entry.make();
             cleanups.push(fixture.cleanup);
             return fixture.backend;
           }
@@ -1430,10 +1437,9 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
           numRuns: LAW_RUNS,
         },
       );
-      // Coverage-instrumented CI shards run each PGlite boot several times
-      // slower than a bare run; the default 60s test timeout is not sized
-      // for LAW_RUNS × per-iteration store fixtures (same allowance as
-      // merge-laws.test.ts).
+      // Coverage instrumentation and property shrinking can multiply the
+      // per-iteration workload even with pooled engines. Keep the extended
+      // law-suite timeout (same allowance as merge-laws.test.ts).
     }, 300_000);
   }
 
@@ -1443,7 +1449,10 @@ describe.each(backendMatrix())("identity merge laws [$name]", (entry) => {
       fc.asyncProperty(incrementalScenarioArb, async (scenario) => {
         const cleanups: (() => Promise<void>)[] = [];
         async function makeBackend(): Promise<GraphBackend> {
-          const fixture = await entry.make();
+          const fixture =
+            entry.name === "PGlite" ?
+              await pglitePool.makeFixture()
+            : await entry.make();
           cleanups.push(fixture.cleanup);
           return fixture.backend;
         }
