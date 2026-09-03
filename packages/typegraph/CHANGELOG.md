@@ -2,6 +2,21 @@
 
 ## 0.56.0
 
+### Highlights
+
+TypeGraph 0.56 adds a durable review workflow for candidate write sets. `planCandidateWriteSetReview()` captures immutable, digest-checked evidence for the candidate, original plan, policy context, normalized options, and target baseline. After an application records approval, `revalidateCandidateWriteSetReview()` compares that evidence with current graph state and returns a structured compatible, changed, or incompatible result together with a fresh revision-fenced plan when execution remains safe.
+
+Reviewed plan application can now share one protected transaction with application-owned checks and writes. Optional `beforeApply` and `afterApply` callbacks run after the target fence is validated, use transaction-bound typed collections, and roll back with the merge if any step fails. Transaction-conflict retries replay the complete operation, including both callbacks.
+
+Generic code can dispatch edge operations by kind through `DynamicEdgeCollection<E>` while preserving the selected edge's property and result types and validating endpoint pairs at runtime. Transactions gain `getEdgeCollection` and `getEdgeCollectionOrThrow`, valid-time views support pinned dynamic edge reads, and generic traversal factories now preserve declared target kinds across array targets, source-dependent maps, and unions.
+
+### Upgrade notes
+
+- Replace generic `tx.edges[kind]` access and uncorrelated edge collection casts with `tx.getEdgeCollectionOrThrow(kind)`. Concrete `.edges.<kind>` access retains compile-time endpoint-pair checking.
+- Known-kind dynamic edge lookups now enforce their property schema at compile time. Parse unvalidated records before passing them, and update hand-authored transaction or view mocks with the new lookup methods.
+- `beforeApply` and `afterApply` callbacks may run again after a transaction conflict, so callback behavior must be safe to retry. Callback failures roll back the combined transaction; optional provenance persistence remains a separate post-commit operation.
+- Candidate review evidence is application-authenticated and V1 uses a conservative whole-target baseline. Applications must version opaque policy and callback dependencies and decide whether a compatible revalidation still satisfies their approval policy.
+
 ### Minor Changes
 
 - [#615](https://github.com/nicia-ai/typegraph/pull/615) [`4574be7`](https://github.com/nicia-ai/typegraph/commit/4574be7f5b7fb91428639a9bf3056801f8f15bbf) Thanks [@pdlug](https://github.com/pdlug)! - Add durable candidate merge reviews with `planCandidateWriteSetReview()` and `revalidateCandidateWriteSetReview()`. Persist immutable review and approval evidence in the target graph, then compare the retained candidate against current state before applying a fresh revision-fenced plan. Structured compatibility results expose changes requiring review without weakening atomic apply-time concurrency or constraint checks.
@@ -15,6 +30,20 @@
 - [#614](https://github.com/nicia-ai/typegraph/pull/614) [`5232be5`](https://github.com/nicia-ai/typegraph/commit/5232be5dd1cc465dd7fc6569d391d9fd52e517eb) Thanks [@pdlug](https://github.com/pdlug)! - Compose reviewed merge-plan application with application-owned graph checks and writes using optional `beforeApply` and `afterApply` callbacks. Prechecks receive transaction-bound read-only collections after the target fence is validated; post-apply work uses typed graph operations before the same transaction commits. Failures roll back the combined operation, and transaction-conflict retries replay both callbacks.
 
 ## 0.55.0
+
+### Highlights
+
+TypeGraph 0.55 adds source-dependent edge targets to the existing `from`/`to` syntax. One edge kind can now permit Employee → Department and Student → Course without admitting the cross-pairs. TypeScript write inference preserves that relationship, runtime validation rejects invalid pairs with `EndpointPairError`, and restrictions survive schema serialization, imports, graph merges, and runtime graph extensions.
+
+Store node and edge creation and upsert inputs now accept `validFrom: null` to explicitly request an open-left validity window. Snapshot and incremental graph merges preserve those windows through canonicalization, edge repointing, and serialized merge plans instead of narrowing them to the merge commit time. Bulk-upsert coalescing also distinguishes a confirmed absent lower bound from a creation timestamp that has not yet been assigned.
+
+Startup identity repair now checks the schema version used to derive its registry before rebuilding closure. If a concurrent migration has committed newer semantics, the stale repair raises `StaleVersionError` and leaves the newer closure intact. This covers both existing-relation repair and creation plus population of missing derived relations.
+
+### Upgrade notes
+
+- Existing array-valued `to` declarations retain their Cartesian-product semantics. Removing allowed pairs from a source-dependent target map is classified as a breaking schema change.
+- Omitted `validFrom` retains its existing defaults. Explicit `null` requests no lower bound, while returned metadata still uses `undefined` for an absent bound. Live-row upserts retain their immutable-bound rules; `validTo` continues to use its existing set/clear protocol.
+- If startup identity repair raises `StaleVersionError` after a concurrent migration, reopen with the current graph definition before retrying.
 
 ### Minor Changes
 
@@ -166,6 +195,19 @@ This release also adds [`nodes.<Kind>.bulkReplaceById()`](https://typegraph.dev/
 
 ## 0.52.0
 
+### Highlights
+
+TypeGraph 0.52 introduces the authoritative command and atomic SQL-program foundations later expanded in 0.53. Eligible schema-managed creates can fold their fences, constraint decisions, projections, and row write into one authoritative statement, while eligible bulk node and edge creates execute as one bounded atomic submission on bundled Neon HTTP, Cloudflare D1, and libSQL roots. Unsupported dimensions continue through the complete interactive-transaction path or a typed refusal; the optimization does not silently omit requested behavior.
+
+Edges can now declare a durable graph-local `matchIdentity`. TypeGraph persists and arbitrates the canonical endpoint-and-property key, maintains it through ordinary and import writers, and uses it to converge eligible `getOrCreateByEndpoints()` calls without a read-then-insert race. This release also adds durable schema-only graph templates through `registerGraphTemplate()` and `instantiateGraphTemplate()`.
+
+### Upgrade notes
+
+- Custom `GraphBackend` implementations must provide the required `commands: { session, execute }` port and move managed node create, edge create, and edge convergence behavior out of the removed specialized hooks. A command that cannot honor a requested dimension must return its typed `unsupported` result before executing SQL.
+- `OptionalTransactionExecution.atomic` is replaced by the discriminated `execution.mode: "interactive-transaction" | "sequential"`. Custom `lockSchemaVersionAndGraphWrite` implementations must now return the effective `GraphCommandIsolation` observed by the same pinned session that acquired the lock.
+- Adding, removing, or changing an edge `matchIdentity` is a breaking schema change. The affected edge kind must be empty during activation; export and hard-delete its rows, migrate the schema, then import them so every row receives the durable key.
+- Inside `store.transaction()`, issue work through the callback-scoped Store. Calls through an enclosing root Store do not join the callback's transaction and may observe or create a different execution boundary.
+
 ### Minor Changes
 
 - [#558](https://github.com/nicia-ai/typegraph/pull/558) [`48532f8`](https://github.com/nicia-ai/typegraph/commit/48532f87de7ce5a769c5e090b5afddae325dbdc5) Thanks [@pdlug](https://github.com/pdlug)! - Eligible schema-managed generated-id node creates and `cardinality: "many"` edge creates on bundled root backends can now execute as one authoritative statement, including Neon HTTP and Cloudflare D1, where all required claims, projections, and side effects are either absent or fused into that statement. History/revision and Operational Identity work, plus other managed writes, continue to require the interactive transaction or an explicit typed refusal.
@@ -224,6 +266,19 @@ This release also adds [`nodes.<Kind>.bulkReplaceById()`](https://typegraph.dev/
 
 ## 0.51.0
 
+### Highlights
+
+TypeGraph 0.51 removes `drizzle-orm` from the dependency graph of its portable entrypoints. Applications using the root, backend, core, schema, indexes, graph-extension, interchange, profiler, graph-merge, or provenance entrypoints can now install and run TypeGraph without Drizzle; managed SQLite and PGlite Stores and explicit `/adapters/drizzle/...` entrypoints still use it.
+
+Custom backend behavior is now resolved through explicit capability declarations and shared bundles instead of scattered optional-member checks. The first bundle set covers claims, statement execution, recorded revision origins, batch point reads, unique-sidecar batching, and contribution health. Recursive traversal and write-fence support are also explicit: unsupported engines can refuse recursive operations with a stable reason, while stateful features require a fence plan backed by real locks or engine-serialized writers.
+
+### Upgrade notes
+
+- Applications using managed SQLite or PGlite Store entrypoints, or any explicit Drizzle adapter entrypoint, must keep `drizzle-orm` installed. Managed Store factories report `MISSING_PEER_DEPENDENCY` with the installation command when it is absent.
+- A custom backend hosting Operational Identity, `history: true`, or `revisionTracking: true` must declare truthful `capabilities.pessimisticLocks`. TypeGraph refuses an unfenced declaration rather than assuming safety from the dialect name.
+- A custom backend without recursive SQL or an equivalent graph-native operation should declare `capabilities.recursiveTraversal: { supported: false, reason }`. Omission retains the pre-0.51 assumption that recursive traversal is supported.
+- A custom backend that created the timestamp-only recorded-time preview schema must implement `recordedTableDdl(tableNames)` before running `migrateLegacyRecordedTime`; bundled SQLite and PostgreSQL backends already provide it.
+
 ### Minor Changes
 
 - [#521](https://github.com/nicia-ai/typegraph/pull/521) [`da251ef`](https://github.com/nicia-ai/typegraph/commit/da251ef021c8b2b61717f0c8fa7c07535a28599a) Thanks [@pdlug](https://github.com/pdlug)! - Custom backend capabilities now resolve through six shared bundles instead of scattered `undefined` checks. This makes each operation family consistently choose one of three outcomes: use the declared member, take its documented fallback, or refuse with a typed error.
@@ -267,6 +322,19 @@ This release also adds [`nodes.<Kind>.bulkReplaceById()`](https://typegraph.dev/
 - [#521](https://github.com/nicia-ai/typegraph/pull/521) [`da251ef`](https://github.com/nicia-ai/typegraph/commit/da251ef021c8b2b61717f0c8fa7c07535a28599a) Thanks [@pdlug](https://github.com/pdlug)! - **For contributors:** CI now compares the public `etc/*.api.md` snapshots with the last published tag through `test:api-surface`. The check fails when an external consumer would lose a member, see an optional member become required, or need to supply a newly required member through a contravariant API position. This adds no runtime or published API; it makes breaking surface changes visible before release. See the [release verification commands](https://github.com/nicia-ai/typegraph/blob/main/docs/RELEASE.md#pre-release-verification).
 
 ## 0.50.0
+
+### Highlights
+
+TypeGraph 0.50 completes database-arbitrated enforcement across the declared constraint families. Hierarchy-wide uniqueness, `disjointWith`, and edge `one`, `unique`, and `oneActive` cardinality now remain fenced under concurrent writers, including interchange import. Claim ownership is the concrete `(kind, id)` pair, so namesake nodes in different kinds cannot take over one another's reservations and lifecycle cleanup releases only the claims a node owns.
+
+`store.verifyConstraintFences()` audits uniqueness, disjointness, and cardinality violations that predate these fences without modifying data. Internally, every Store and interchange write now runs through one typed write-plan/session pipeline; this architectural consolidation does not intentionally change public statement order, lock scope, or error behavior beyond the constraint corrections described above.
+
+### Upgrade notes
+
+- Databases created before 0.50 need the new `typegraph_edge_claims` relation before their first constrained edge write. Run the normal idempotent bootstrap path or apply the SQL emitted by `generatePostgresMigrationSQL()` / `generateSqliteMigrationSQL()`; a missing relation is reported as `EDGE_CLAIM_RELATION_MISSING`.
+- The new fences prevent future conflicting writes but do not choose winners among violations already stored. Run `store.verifyConstraintFences()` after upgrading and resolve any reported owners or edge ids deliberately.
+- Custom backends that implement constraint claims should add the `edgeClaims` table name and the edge-cardinality claim members, then declare matching `capabilities.constraintClaims`. Omission remains a supported opt-out; a declaration/member mismatch is refused.
+- Custom `deleteUnique` implementations must scope release by `concreteKind` and `nodeId`, and apply the `nodeKind` predicate only when `params.nodeKind` is present. Keeping the old unconditional predicate can leak lifecycle claims permanently.
 
 ### Minor Changes
 
@@ -457,6 +525,18 @@ This release also adds [`nodes.<Kind>.bulkReplaceById()`](https://typegraph.dev/
 
 ## 0.48.0
 
+### Highlights
+
+TypeGraph 0.48 adds constraint-aware ingestion branches. Applications can stage overlapping records without prematurely enforcing node uniqueness, then resolve duplicates and validate the complete merge write set atomically against the target graph.
+
+Writes with an implicit start and a historical end now preserve an unknown lower validity bound, so an already-ended record remains readable before its end. The new `repairInvertedValidityWindows()` utility reports or repairs older rows whose stored start is later than their end. PostgreSQL connection detection also recognizes additional single-connection configurations, preventing streaming interchange from waiting indefinitely on a connection it already holds.
+
+### Upgrade notes
+
+- Existing inverted validity windows are not repaired automatically. Run `repairInvertedValidityWindows()` in report mode first; apply repairs with writers stopped, preferably across both live and recorded relations, then re-baseline outstanding merge branches.
+- Rows created with an implicit start and a historical `validTo` can now return `meta.validFrom: undefined`. Custom backends should use `resolveStampedValidityLowerBound` for insert and node-resurrection stamping.
+- String-valued PostgreSQL single-connection settings now trigger the same interchange guards as numeric `max: 1`. Working-copy clones on those connections use a materialized in-memory export; use the `serializedResource` declaration when connection topology cannot be inferred correctly.
+
 ### Minor Changes
 
 - [#476](https://github.com/nicia-ai/typegraph/pull/476) [`a58ba03`](https://github.com/nicia-ai/typegraph/commit/a58ba031b439f3befbcc073e016f896b178af00e) Thanks [@pdlug](https://github.com/pdlug)! - Store no validity lower bound for a write that would otherwise be born already
@@ -568,6 +648,19 @@ This release also adds [`nodes.<Kind>.bulkReplaceById()`](https://typegraph.dev/
 
 ## 0.47.0
 
+### Highlights
+
+TypeGraph 0.47 separates merge planning from execution with JSON-serializable `MergePlanArtifact` values. Applications can inspect the resolved write set and entity-resolution evidence, then apply the reviewed artifact against its target, schema, and revision fence without rerunning candidate generation or conflict callbacks. Existing one-call merge APIs retain their behavior.
+
+Operational Identity assertions gain explicit half-open validity windows, temporal contradiction checks, endpoint coverage validation, and window-aware interchange and merge behavior. Node and edge update/upsert APIs gain `clearValidTo: true` to reopen ended records, while dynamic collection results can participate directly in identity operations. Streaming exports also gain an optional consumer-idle timeout that releases their snapshot transaction and connection lease.
+
+### Upgrade notes
+
+- Custom similarity scorers must return finite numbers; `NaN` and infinity now raise `MatchEvidenceError`. Candidate-source failures use `CandidateSourceError`, and deterministic merge constraint failures use `MergeConstraintConflictError` with the original store error as their cause.
+- With `coalesceUnchangedUpserts` enabled, an unchanged endpoint edge get-or-create returns `"found"`, not `"updated"`. The coalescing path requires the endpoint convergence fence and refuses with `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` on backends that cannot provide it.
+- Compiled-query metadata timestamps now use canonical fixed-width UTC ISO 8601 across drivers. Consumers comparing serialized timestamps should expect the same rendering as collection reads.
+- Reopening a validity window rechecks applicable constraints, including `oneActive` cardinality. Custom backends that cannot honor `clearValidTo` refuse it explicitly.
+
 ### Minor Changes
 
 - [#475](https://github.com/nicia-ai/typegraph/pull/475) [`4abc7ba`](https://github.com/nicia-ai/typegraph/commit/4abc7ba34897f3cec1ed876321f0eaba0e2829c9) Thanks [@pdlug](https://github.com/pdlug)! - Add an opt-in `idleTimeoutMs` safety bound to `exportGraphStream`. The timeout
@@ -657,6 +750,23 @@ This release also adds [`nodes.<Kind>.bulkReplaceById()`](https://typegraph.dev/
   clarify that `MergeReport.validityEnds` only reports inherited-row claims.
 
 ## 0.46.0
+
+### Highlights
+
+TypeGraph 0.46 introduces Operational Identity: an opt-in profile for asserting that graph nodes represent the same or different entities. Typed Store, transaction, and temporal-view APIs expose identity membership, representatives, assertions, retractions, and history. Applications can choose same-ID folding across kinds or assertion-only identity, and use identity-expanded traversal without physically merging the underlying nodes.
+
+Identity truth travels through interchange and graph merge, with transactional contradiction checks and derived closure storage on SQLite and PostgreSQL. Merge handling also preserves inherited validity-window changes, retains parallel edges unless repointing causes a collision, and gives committed rows precedence when a collapse selects a survivor.
+
+This release completes the contribution maintenance sequence with read-only `probeContributions()`, non-destructive `repairContributions()`, and explicit `rebuildContribution()`. Validity-window validation is shared across write paths, and streaming exports support cancellation while holding a consistent snapshot.
+
+### Upgrade notes
+
+- Audit graph definitions and persisted extension schemas before upgrading. Duplicate ontology relations, hierarchical self-loops, disjointness contradictions, incompatible inverse endpoints, multiple inverse partners, and unresolved extension edge names now fail validation on both construction and reload.
+- Operational Identity requires a supported transactional backend. Use ordinary interchange import for identity-bearing data; trusted import refuses identity-enabled targets and identity-bearing streams. Exports now use format `2.0`, while imports still accept `1.0`.
+- Custom backend table-name resolutions and `SqlSchema` subclasses must provide the identity assertion, recorded identity assertion, and closure relations. Restore missing assertion ledgers from backup; a missing derived closure can be recreated and rebuilt before traffic resumes.
+- `StoreView` and `RecordedStoreView` retain construction and `instanceof` support but can no longer be subclassed. Exhaustive merge-report and import-error consumers must handle the new `"identity"` entity kind, and tooling that assumes `FORMAT_VERSION` is the literal `"1.0"` must be updated.
+- Writes now refuse inverted validity windows and live-row updates that state a different immutable `validFrom`. Trusted imports require canonical UTC validity timestamps. Node creation or upsert on a soft-deleted same-kind ID now resurrects the row instead of exposing a storage constraint error.
+- Changing `identity.sameIdAcrossKinds` requires an explicit schema migration, which rebuilds closure with the schema commit. The type-level `sameAs` and `differentFrom` factories are deprecated in favor of Operational Identity.
 
 ### Minor Changes
 
@@ -2931,6 +3041,22 @@ CONCURRENTLY` on PostgreSQL, riding the same status table, drift
 
 ## 0.35.0
 
+### Highlights
+
+TypeGraph 0.35 improves bulk ingestion, search, and traversal performance across SQLite and PostgreSQL. Bulk creation and import batch their validation and side effects, large autocommit loads refresh planner statistics, and built-in hybrid search combines retrieval, fusion, and hydration in one SQL statement. Search gains property filters, pagination, subclass scope, and explicit approximate vector retrieval; exact retrieval remains the default.
+
+Graph branches can now use durable revision origins and counters to validate their base without fingerprinting every live row. Streaming interchange supports larger graph copies, and `transactionWithReceipt()` exposes completed collection write intents and recorded commit coordinates. Index declarations gain GIN, trigram, and system-column keys.
+
+Correctness fixes keep repeated and prepared queries bound to a fresh read instant, preserve temporal metadata through branch copies, and enforce exact vector results even when an approximate index exists. Current temporal reads now use the application clock consistently with writes.
+
+### Upgrade notes
+
+- Audit persisted schemas as well as source definitions for endpoint-incompatible `implies()` relations. These are now rejected when constructing or loading a registry.
+- Backend rows expose `props` as `RowProps`, which may be JSON text or a parsed object. Direct backend consumers should use `rowPropsToObject()` or `rowPropsToJsonText()` instead of unconditionally calling `JSON.parse()`.
+- Custom vector strategies must declare the new filtered approximate-search capability, including whether they guarantee a full result page.
+- Existing databases retain their old edge traversal indexes until those indexes are explicitly rebuilt. The detailed entries below include the PostgreSQL and SQLite rebuild procedures; rerunning `CREATE INDEX IF NOT EXISTS` alone does not widen an existing index.
+- New records without an explicit `validFrom` now begin at their creation instant. Existing open-left records retain their stored bounds, and interchange preserves those bounds through branch copies. Approximate vector retrieval requires `{ approximate: true }`; applications that previously received approximate results on the default path may see a different cost for the corrected exact search.
+
 ### Minor Changes
 
 - [#231](https://github.com/nicia-ai/typegraph/pull/231) [`839f536`](https://github.com/nicia-ai/typegraph/commit/839f53621998d41704537e45408872d49452cf1c) Thanks [@pdlug](https://github.com/pdlug)! - Aggregate queries now support `.orderBy()`. Previously `ExecutableAggregateQuery`
@@ -3868,6 +3994,20 @@ true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 
 ## 0.34.0
 
+### Highlights
+
+TypeGraph 0.34 adds provenance-backed source retraction through `@nicia-ai/typegraph/provenance`. Applications map their graph kinds to sources, justifications, facts, premises, and derivations; retracting a source then makes unsupported reachable facts non-current while preserving their edges and recorded history. `unRetract` reverses the belief transition without treating it as a domain delete.
+
+The release also strengthens transaction and import behavior: operation hooks report durably committed writes, conflicting updates preserve uniqueness reservations, tombstones survive update-mode imports, and incremental merges refuse inherited-row changes that occurred after planning. SQLite transaction handling and deterministic keyset pagination receive correctness fixes.
+
+### Upgrade notes
+
+- Provenance retraction requires `history: true` and captures TypeGraph-managed writes. Out-of-band SQL remains outside recorded capture.
+- `onOperationEnd` now runs after the enclosing transaction commits. Consumers using hooks for metrics, cache invalidation, or audit events should account for the later notification boundary.
+- Incompatible property-schema changes, including narrowed enums and nested type changes, are now classified as breaking migrations.
+- `importGraph(..., { onConflict: "update" })` skips soft-deleted target rows. Use `onUnknownProperty: "allow"` for fidelity-preserving imports and `"strip"` when schema normalization is intended.
+- An incremental merge that detects a changed inherited target row returns a retryable `BaseVersionMismatchError`; recompute the merge against current state.
+
 ### Minor Changes
 
 - [#188](https://github.com/nicia-ai/typegraph/pull/188) [`0b0f4ea`](https://github.com/nicia-ai/typegraph/commit/0b0f4ea23ee2310cc2c160d24385eb94ebfdc5a8) Thanks [@pdlug](https://github.com/pdlug)! - Add the `@nicia-ai/typegraph/provenance` subpath for provenance-backed source
@@ -4014,6 +4154,20 @@ true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 
 ## 0.33.0
 
+### Highlights
+
+TypeGraph 0.33 adds recorded/system time alongside valid time. Enabling `history: true` captures TypeGraph-managed node and edge writes into historical relations at a monotonic per-graph commit instant, making it possible to reconstruct values that were later corrected or deleted.
+
+`store.asOfRecorded()` exposes read-only reconstruction through point reads, queries, subgraph extraction, and graph algorithms. Applications can pin recorded and valid time independently to distinguish when a fact was true from when TypeGraph knew it. External history producers can bind compatible recorded relations through `recordedRelation()` and `recordedRead`.
+
+### Upgrade notes
+
+- Capture is opt-in and does not backfill existing rows. Enable it on a fresh graph for complete history; existing entities are first captured on their next managed write. Capture requires a transactional backend with statement execution.
+- Use typed collection writes for captured transactions. Raw `tx.sql` is unavailable under `history: true`; adopt caller-owned transactions through `withRecordedTransaction(externalTx, callback)` so capture flushes before commit.
+- Use `recordedNow()` as a post-write reconstruction anchor after checking for `undefined`. Recorded instants can advance ahead of wall-clock time, and recorded coordinates must use canonical UTC ISO 8601.
+- Recorded views expose only reconstructible reads. Current full-text/vector indexes and unsupported broad collection reads are refused; `asOfRecorded(T)` pins both time axes to `T` unless composed with an explicit valid-time view.
+- Custom backend and SQL tooling must honor the new backend-role and row-versus-statement SQL intent brands. `recordedRead` descriptors must come from `recordedRelation()` and cannot be combined with `history: true`.
+
 ### Minor Changes
 
 - [#186](https://github.com/nicia-ai/typegraph/pull/186) [`655407a`](https://github.com/nicia-ai/typegraph/commit/655407a9c225e8eca0aff5f636ed17ca99f3e382) Thanks [@pdlug](https://github.com/pdlug)! - Add recorded / system-time capture — TypeGraph's second temporal axis. Where valid time (`validFrom` / `validTo`, queried via `asOf` / `includeEnded`) records _when a fact was true in the world_, recorded time records _when TypeGraph captured a managed node/edge write_. Together they answer "what did TypeGraph reconstruct as true, as of a captured commit instant?" — surfacing values that were later corrected (à la SQL:2011 system-versioned tables).
@@ -4062,6 +4216,18 @@ true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 
 ## 0.31.0
 
+### Highlights
+
+TypeGraph 0.31 introduces graph branching and semantic merge through `@nicia-ai/typegraph/graph-merge`. `branch()` creates an isolated working copy; `merge()` reconciles one or more branches using stable IDs, declared uniqueness constraints, blocking keys, and optional similarity scoring. Canonical survivors receive merged properties and repointed edges, with conflicts and source contributions recorded in the report.
+
+Snapshot merges check the branch's base token, while `mergeIncremental()` supports targets that have advanced since the fork. Applications can configure property and delete/modify conflict policies, use ontology-aware type reconciliation, and optionally persist provenance in a separate sidecar graph.
+
+### Upgrade notes
+
+- Merge requires a transaction-capable backend and refuses non-atomic execution. Vector and hybrid entity-resolution strategies require a configured embedder.
+- Choose snapshot or incremental merge according to whether the target may advance after the fork. A base mismatch requires a fresh branch or an appropriate incremental merge workflow.
+- Optional `persistProvenance` runs after the graph commit. A persistence failure is a report warning and does not roll back the merged graph.
+
 ### Minor Changes
 
 - [#178](https://github.com/nicia-ai/typegraph/pull/178) [`6b6e418`](https://github.com/nicia-ai/typegraph/commit/6b6e4186642c65d58c939250458b6521efbc40c7) Thanks [@pdlug](https://github.com/pdlug)! - Add `@nicia-ai/typegraph/graph-merge`, a TypeGraph-native branch and semantic merge subpath for deterministic entity-resolution merges across graph forks.
@@ -4079,6 +4245,19 @@ true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 - [#173](https://github.com/nicia-ai/typegraph/pull/173) [`bd96cfb`](https://github.com/nicia-ai/typegraph/commit/bd96cfbeadde11c6986fb667f9a86b0ba0b5b1bd) Thanks [@pdlug](https://github.com/pdlug)! - Add the `backend.capabilities.windowFunctions` capability and reject relevance-ranking queries before SQL generation when a custom backend profile disables SQL window functions.
 
 ## 0.29.0
+
+### Highlights
+
+TypeGraph 0.29 makes vector storage and hybrid search portable across pgvector, sqlite-vec, and libSQL/Turso through a pluggable `VectorStrategy`. Embeddings move into graph-scoped, fixed-dimension storage per field, with strategy-derived metric and index capabilities, legacy migration tooling, and field re-embedding after dimension changes.
+
+PGlite gains first-class backend support and a local factory for running PostgreSQL and pgvector in process. SQLite set operations now compile their operands through the full query compiler, preserving traversal, search, nested ordering, and pagination behavior across backends.
+
+### Upgrade notes
+
+- Existing vector deployments must run `migrateLegacyEmbeddings()` after upgrading. Search no longer reads the shared legacy `typegraph_node_embeddings` table. Use `reembedVectorField()` when an embedding field's dimensions change.
+- Install the optional PGlite peers when using the local PGlite backend. Configure `vector: false` when the engine has no vector extension.
+- Custom capability consumers must remove the descriptive-only `jsonb`, `ginIndexes`, `partialIndexes`, `cte`, and `returning` flags. Query semantics are provided by the shared compiler and configured strategies.
+- Interchange payloads with `source.type: "typegraph-cloud"` must be retagged as `"external"`; the removed source variant now fails validation.
 
 ### Minor Changes
 
@@ -4404,6 +4583,19 @@ true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 
 ## 0.26.0
 
+### Highlights
+
+TypeGraph 0.26 lets graph writes share a transaction with application-owned relational writes. `store.withTransaction(externalTx)` binds graph collections to the caller's connection, while `tx.sql` exposes the transaction handle when TypeGraph owns the boundary. Cloudflare Durable Objects SQLite gains asynchronous storage-transaction support, allowing graph and application writes to roll back together across awaited operations.
+
+Strategy-owned tables now follow one `TableContribution` contract. Full-text initialization becomes a durable, signature-checked materialization fact, allowing runtime operations to verify readiness without issuing DDL inside a business transaction.
+
+### Upgrade notes
+
+- Initialize the parent Store through `createStoreWithSchema()` before adopting business transactions. Full-text operations refuse missing, stale, or failed materialization markers with `StoreNotInitializedError`.
+- `withTransaction()` requires real rollback support and refuses transactionless backends such as D1 and Neon HTTP. On synchronous better-sqlite3 connections, use an explicit transaction boundary instead of an async Drizzle transaction callback; Durable Objects use the asynchronous storage transaction runner.
+- Inside a TypeGraph-owned transaction, use its `tx.sql` handle for relational writes so they share the same connection. Using the outer database object on pooled backends can escape the transaction.
+- Custom `FulltextStrategy` implementations must replace `generateDdl()` with `ownedTables()`, declaring each table and its supporting indexes. Custom backends should implement the contribution initialization and durable materialization contracts described below.
+
 ### Minor Changes
 
 - [#139](https://github.com/nicia-ai/typegraph/pull/139) [`f1ea17c`](https://github.com/nicia-ai/typegraph/commit/f1ea17cafab281d61741b1d2ad0b26a769efaa5a) Thanks [@pdlug](https://github.com/pdlug)! - Cross-store atomicity: share one transaction across the TypeGraph store and an
@@ -4703,14 +4895,12 @@ true`, so a fork's `validFrom`/`validTo` exactly match the base's — without
 
 ## 0.25.0
 
-### Minor Changes
+### Highlights
 
 0.25.0 is the runtime schema evolution release. It adds graph extensions,
 unified index declarations and materialization, dynamic queries over
 runtime-declared kinds, runtime access to compiled props schemas, and a safer
 transactional schema-version commit path.
-
-#### Highlights
 
 - Graph extensions let applications commit reviewed JSON schema proposals as
   durable TypeGraph schema versions without redeploying application code.
@@ -4724,6 +4914,46 @@ transactional schema-version commit path.
   their `OrThrow` variants.
 - Node and edge definitions now accept JSON-serializable `annotations` for
   consumer-owned metadata such as UI hints, audit policy, and provenance.
+
+### Upgrade notes
+
+- Existing deployments with manually managed schemas should add the one-active
+  schema-version partial unique index:
+  `typegraph_schema_versions_one_active_per_graph_idx` on `(graph_id)` where
+  `is_active` is true (`TRUE` on Postgres, `1` on SQLite).
+- Manually managed schemas should also sync the generated DDL for the new
+  TypeGraph status tables, including `typegraph_index_materializations`,
+  `typegraph_kind_removals`, and `typegraph_reconciliation_markers`.
+- Run schema migrations from a transactional backend. Edge or HTTP-only
+  non-transactional drivers can continue serving normal reads and writes after
+  the schema is established.
+- Tests that deep-compare the full `SchemaValidationResult` object may need to
+  switch to partial matching because `initialized` and `migrated` now include
+  `committedRow`.
+
+#### Custom backends and index consumers
+
+These changes affect custom `GraphBackend` implementations and advanced index
+consumers; ordinary `createStoreWithSchema`, query, and collection callers
+should not need code changes.
+
+- `insertSchema` and `setActiveSchema` were removed from `GraphBackend`.
+  Implement `commitSchemaVersion` and `setActiveVersion` instead.
+- `commitSchemaVersion` and `setActiveVersion` require transactional behavior.
+  Non-transactional drivers such as Cloudflare D1, Durable Objects,
+  `drizzle-orm/neon-http`, and SQLite backends configured with
+  `transactionMode: "none"` refuse these primitives for schema commits.
+- `createFulltextIndex` and `dropFulltextIndex` were removed from
+  `GraphBackend`; fulltext storage remains owned by the active backend fulltext
+  strategy.
+- The old `NodeIndex`, `EdgeIndex`, and `TypeGraphIndex` types were removed from
+  `@nicia-ai/typegraph/indexes`. Use `NodeIndexDeclaration`,
+  `EdgeIndexDeclaration`, or `IndexDeclaration`.
+- Custom backends should add the new optional materialization/removal primitives
+  when they want first-class support for index status loading, removal
+  reconciliation markers, and vector index materialization.
+
+### Minor Changes
 
 #### New APIs
 
@@ -4760,44 +4990,6 @@ transactional schema-version commit path.
 - Graph-extension merge/compile paths share caches and fast paths for idempotent
   or partially overlapping evolves.
 - Postgres vector-index drops now run per-metric DDL concurrently.
-
-#### Breaking changes for backend implementers
-
-These changes affect custom `GraphBackend` implementations and advanced index
-consumers; ordinary `createStoreWithSchema`, query, and collection callers
-should not need code changes.
-
-- `insertSchema` and `setActiveSchema` were removed from `GraphBackend`.
-  Implement `commitSchemaVersion` and `setActiveVersion` instead.
-- `commitSchemaVersion` and `setActiveVersion` require transactional behavior.
-  Non-transactional drivers such as Cloudflare D1, Durable Objects,
-  `drizzle-orm/neon-http`, and SQLite backends configured with
-  `transactionMode: "none"` refuse these primitives for schema commits.
-- `createFulltextIndex` and `dropFulltextIndex` were removed from
-  `GraphBackend`; fulltext storage remains owned by the active backend fulltext
-  strategy.
-- The old `NodeIndex`, `EdgeIndex`, and `TypeGraphIndex` types were removed from
-  `@nicia-ai/typegraph/indexes`. Use `NodeIndexDeclaration`,
-  `EdgeIndexDeclaration`, or `IndexDeclaration`.
-- Custom backends should add the new optional materialization/removal primitives
-  when they want first-class support for index status loading, removal
-  reconciliation markers, and vector index materialization.
-
-#### Upgrade notes
-
-- Existing deployments with manually managed schemas should add the one-active
-  schema-version partial unique index:
-  `typegraph_schema_versions_one_active_per_graph_idx` on `(graph_id)` where
-  `is_active` is true (`TRUE` on Postgres, `1` on SQLite).
-- Manually managed schemas should also sync the generated DDL for the new
-  TypeGraph status tables, including `typegraph_index_materializations`,
-  `typegraph_kind_removals`, and `typegraph_reconciliation_markers`.
-- Run schema migrations from a transactional backend. Edge or HTTP-only
-  non-transactional drivers can continue serving normal reads and writes after
-  the schema is established.
-- Tests that deep-compare the full `SchemaValidationResult` object may need to
-  switch to partial matching because `initialized` and `migrated` now include
-  `committedRow`.
 
 #### Pull requests
 
@@ -5008,6 +5200,19 @@ should not need code changes.
   `getEmbedding` and the hybrid-search facade (`store.search.hybrid(...)`) remain PostgreSQL-only — decoding the raw BLOB back to `number[]` via `vec_to_json` and exposing a hybrid-search backend method are tracked separately.
 
 ## 0.21.0
+
+### Highlights
+
+TypeGraph 0.21 adds full-text search and hybrid vector/text retrieval. Mark string fields with `searchable()` and TypeGraph maintains native PostgreSQL tsvector/GIN or SQLite FTS5 storage. The node-level `$fulltext.matches()` predicate composes with property filters, graph traversal, and vector similarity; `store.search` provides full-text and hybrid helpers with reciprocal-rank fusion and optional snippets.
+
+Full-text behavior is supplied by a pluggable `FulltextStrategy`, with query-mode, language, prefix, and highlighting capabilities checked against the active strategy. Existing graph data can be indexed through the paginated `rebuildFulltext()` maintenance API.
+
+### Upgrade notes
+
+- Node and edge property names beginning with `$` are now reserved for query accessors. Rename those fields before upgrading; graph definition rejects them with `ConfigurationError`.
+- Use `store.search.rebuildFulltext()` to index existing data after declaring searchable fields. It reports skipped invalid properties and is a maintenance operation rather than a transactionally frozen scan of the whole graph.
+- Query options must be supported by the configured strategy. SQLite FTS5 cannot honor per-query language overrides; unsupported modes, overrides, and snippet requests are refused.
+- `findNodesByKind` now breaks equal creation-time ties by ID. Callers should not rely on the previously unspecified order.
 
 ### Minor Changes
 

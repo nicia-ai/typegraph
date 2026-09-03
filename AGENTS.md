@@ -112,6 +112,40 @@ permanent history, not review chatter:
   inventories are not.
 - **End with a `Closes #NNN` line for every issue the PR resolves.**
 
+# Release Announcements
+
+Changesets opens the `Version Packages` release PR and generates the package
+version plus `packages/typegraph/CHANGELOG.md`. For a substantial release, edit
+the generated changelog entry on that release PR's branch before merging. Editing
+the PR description alone does not update the packaged changelog or the GitHub
+Release generated from it.
+
+- Add `### Highlights` before the generated change groups. Use a few cohesive,
+  user-facing paragraphs to explain the release's main capabilities and their
+  practical effect. Synthesize related changes instead of repeating every
+  changeset.
+- Add `### Upgrade notes` when the release changes public types or behavior,
+  requires a schema or data migration, introduces deployment ordering, changes
+  retry or concurrency semantics, or requires custom backend work. Make each
+  bullet an actionable instruction and name the affected API or runtime state.
+- Leave the generated `### Minor Changes` and `### Patch Changes` entries intact.
+  They remain the detailed source-attributed record beneath the editorial
+  summary.
+- Small additive releases and routine patch releases do not need editorial
+  sections. Add them when a concise overview or migration guidance materially
+  helps users.
+- Keep the release PR description aligned with the final changelog entry under
+  `# Releases` and `## @nicia-ai/typegraph@X.Y.Z`. Preserve the Changesets bot
+  preamble. The description becomes the squash commit message, while the
+  changelog content ships in the package and supplies the GitHub Release notes.
+- When Changesets refreshes an open release PR after more changes land, review
+  the Highlights and Upgrade notes again and restore them if regeneration
+  removed them.
+- After merging, verify that the GitHub Release matches the changelog. Correct
+  drift on the GitHub Release page without rewriting historical release PRs. If
+  the complete entry exceeds GitHub's body limit, keep Highlights and Upgrade
+  notes in the release body and attach the complete changelog entry.
+
 # Core Principles
 
 - **TypeScript strict mode** with readonly types by default
