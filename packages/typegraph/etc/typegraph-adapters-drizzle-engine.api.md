@@ -1197,11 +1197,8 @@ type EdgeRow = Readonly<{
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
-export type EngineAssemblyContext<TTx> = Readonly<{
-    capabilities: BackendCapabilities;
-    fencePlan: WriteFencePlan;
+export type EngineAssemblyContext<TTx> = EngineOperationsContext & Readonly<{
     operations: InternalOperationBackend;
-    contributionMaterializer: ContributionMaterializer;
     self: () => AdapterBackend<TTx>;
 }>;
 
@@ -1218,13 +1215,20 @@ export type EngineLateMembers<TTx> = Readonly<{
 }>;
 
 // @public
+export type EngineOperationsContext = Readonly<{
+    capabilities: BackendCapabilities;
+    fencePlan: WriteFencePlan;
+    fenceTarget: WriteFenceTarget;
+    contributionMaterializer: ContributionMaterializer;
+    isFirstParty: boolean;
+}>;
+
+// @public
 export type EngineProvisioning = Readonly<{
     executeDdl: (ddl: string) => Promise<void>;
     ensureTable: (ddl: string) => Promise<void>;
     generateDdl: () => readonly string[];
     ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
-    ensureExtension?: (name: DatabaseExtensionName) => Promise<void>;
-    ensureTrigramExtension?: () => Promise<void>;
 }>;
 
 // @public
@@ -1450,6 +1454,9 @@ type FindNodesByKindParams = Readonly<{
     orderBy?: "id" | "created_at";
     after?: string;
 }>;
+
+// @internal
+type FirstPartyProfileToken = Readonly<Record<never, never>>;
 
 // @public
 type FulltextBatchRow = Readonly<{
@@ -2600,6 +2607,7 @@ type SqlDialect = "sqlite" | "postgres";
 // @public
 export type SqlEngineProfile<TTx> = Readonly<{
     dialect: SqlDialect;
+    firstParty?: FirstPartyProfileToken;
     tableNames: EngineTableNames;
     execution: SqlExecutionAdapter;
     strategy: CommonOperationStrategy;
@@ -2611,14 +2619,13 @@ export type SqlEngineProfile<TTx> = Readonly<{
         singleStatementDurable: boolean;
     }>;
     provisioning: EngineProvisioning;
-    fenceTarget: WriteFenceTarget;
     contributionRuntime: ContributionRuntime;
     identityRuntime: IdentityRuntime;
     graphTemplateRuntime: GraphTemplateRuntime;
     baseSchemaRuntime: BaseSchemaRuntime;
     indexMaterializationRuntime: IndexMaterializationRuntime;
     kindRemovalRuntime: KindRemovalRuntime;
-    buildOperations: (contributionMaterializer: ContributionMaterializer) => InternalOperationBackend;
+    buildOperations: (ctx: EngineOperationsContext) => InternalOperationBackend;
     close: () => Promise<void>;
     lateMembers: (ctx: EngineAssemblyContext<TTx>) => EngineLateMembers<TTx>;
 }>;
