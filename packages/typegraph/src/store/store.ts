@@ -644,12 +644,18 @@ export interface RequiredNodeCollectionLookup {
   <const K extends string>(kind: K): DynamicNodeCollection<K>;
 }
 
-export type EdgeCollectionLookup = (
-  kind: string,
-) => DynamicEdgeCollection | undefined;
+export interface EdgeCollectionLookup<G extends GraphDef = GraphDef> {
+  <K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]> | undefined;
+  (kind: string): DynamicEdgeCollection | undefined;
+}
 
-export interface RequiredEdgeCollectionLookup {
+export interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
   <T extends RuntimeEdgeKind>(token: T): RuntimeEdgeCollection<T>;
+  <K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]>;
   (kind: string): DynamicEdgeCollection;
 }
 
@@ -677,8 +683,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
   ) => RuntimeEdgeKind<K, ExtensionObjectSchema<ExtensionEdgeProperties<D>>>;
   getNodeCollection: NodeCollectionLookup;
   getNodeCollectionOrThrow: RequiredNodeCollectionLookup;
-  getEdgeCollection: EdgeCollectionLookup;
-  getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup;
+  getEdgeCollection: EdgeCollectionLookup<G>;
+  getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
   getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
   getNodePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
   getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -1940,32 +1946,67 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * Use this for runtime string-keyed access when the kind is not known at
    * compile time. For post-evolve access, prefer `getEdgeCollectionOrThrow`.
    */
-  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined {
-    if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
-    return this.edges[
-      kind as keyof G["edges"] & string
-    ] as unknown as DynamicEdgeCollection;
+  getEdgeCollection<K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]> | undefined;
+  getEdgeCollection(kind: string): DynamicEdgeCollection | undefined;
+  getEdgeCollection(kind: string): unknown {
+    return this.#resolveDynamicEdgeCollection(this.edges, kind);
   }
 
-  /**
-   * Returns the edge collection for the given kind. Throws
-   * `KindNotFoundError` when the kind is not registered.
-   */
+  /** Returns a runtime-validated collection; throws when the kind is absent. */
   getEdgeCollectionOrThrow<T extends RuntimeEdgeKind>(
     token: T,
   ): RuntimeEdgeCollection<T>;
+  getEdgeCollectionOrThrow<K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicEdgeCollection<G["edges"][K]["type"]>;
   getEdgeCollectionOrThrow(kind: string): DynamicEdgeCollection;
-  getEdgeCollectionOrThrow(
+  getEdgeCollectionOrThrow(kindOrToken: string | RuntimeEdgeKind): unknown {
+    return this.#requireDynamicEdgeCollection(this.edges, kindOrToken);
+  }
+
+  #requireDynamicEdgeCollection(
+    collections: GraphEdgeCollections<G>,
     kindOrToken: string | RuntimeEdgeKind,
   ): DynamicEdgeCollection {
     const kind = this.#resolveRuntimeKind(kindOrToken, "edge");
-    const collection = this.getEdgeCollection(kind);
+    const collection = this.#resolveDynamicEdgeCollection(collections, kind);
     if (collection === undefined) {
-      throw new KindNotFoundError(kind, "edge", {
-        graphId: this.graphId,
-      });
+      throw new KindNotFoundError(kind, "edge", { graphId: this.graphId });
     }
     return collection;
+  }
+
+  #resolveDynamicEdgeCollection(
+    collections: GraphEdgeCollections<G>,
+    kind: string,
+  ): DynamicEdgeCollection | undefined {
+    if (!Object.hasOwn(this.#graph.edges, kind)) return undefined;
+    return collections[
+      kind as EdgeKinds<G>
+    ] as unknown as DynamicEdgeCollection;
+  }
+
+  /** Resolve through the supplied context's wrappers, preserving transaction and receipt ownership. */
+  #edgeCollectionAccess(collections: GraphEdgeCollections<G>): Readonly<{
+    getEdgeCollection: EdgeCollectionLookup<G>;
+    getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
+  }> {
+    const getEdgeCollection = (
+      kind: string,
+    ): DynamicEdgeCollection | undefined =>
+      this.#resolveDynamicEdgeCollection(collections, kind);
+    const getEdgeCollectionOrThrow = (
+      kindOrToken: string | RuntimeEdgeKind,
+    ): DynamicEdgeCollection =>
+      this.#requireDynamicEdgeCollection(collections, kindOrToken);
+    // Lookup erases endpoint evidence, not the selected edge's property schema.
+    return {
+      getEdgeCollection: getEdgeCollection as EdgeCollectionLookup<G>,
+      getEdgeCollectionOrThrow:
+        getEdgeCollectionOrThrow as RequiredEdgeCollectionLookup<G>,
+    };
   }
 
   // === Dynamic Props Schema Access ===
@@ -3597,7 +3638,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `context` never reaches the scope recorder. This makes overlapping/concurrent
    * measures safe by construction (each holds its own scope recorder) and lets
    * scopes nest: the scoped context is itself decorated, so `scoped.measure(...)`
-   * chains one more wrapper. The scoped context's `getNodeCollection` resolves
+   * chains one more wrapper. The scoped context's dynamic collection lookups resolve
    * against the scope-wrapped map too, so dynamic-kind writes are attributed like
    * `scoped.nodes.<Kind>`. The scope receipt's `recorded` is always undefined —
    * the recorded instant is a whole-transaction flush concern.
@@ -3630,6 +3671,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           nodes,
           edges,
           ...(identity === undefined ? {} : { identity }),
+          ...this.#edgeCollectionAccess(edges),
           getNodeCollection: <const K extends string>(kind: K) =>
             this.#resolveDynamicNodeCollection(nodes, kind),
         }),
@@ -3733,6 +3775,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: createTransactionReadBackend(txBackend),
       [TRANSACTION_RUNTIME]: { backend: txBackend, runNodeOperationHooks },
       getNodeCollection,
+      ...this.#edgeCollectionAccess(edges),
     };
 
     let withSql: AdapterTransactionContext<G, TNativeTransaction>;

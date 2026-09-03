@@ -292,7 +292,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        typescript-version: ["5.9.3", "6.0.3"]
+        typescript-version: ["5.9.3", "6.0.3", "7.0.2"]
     steps:
       - uses: actions/checkout@v6
 
@@ -307,7 +307,14 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run layered type tests
+        if: matrix.typescript-version != '7.0.2'
         run: pnpm --filter @nicia-ai/typegraph test:types
+        env:
+          TYPEGRAPH_TYPESCRIPT_VERSION: ${{ matrix.typescript-version }}
+
+      - name: Test packed consumers with TypeScript 7
+        if: matrix.typescript-version == '7.0.2'
+        run: pnpm --filter @nicia-ai/typegraph test:types:consumer
         env:
           TYPEGRAPH_TYPESCRIPT_VERSION: ${{ matrix.typescript-version }}
 

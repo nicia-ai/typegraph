@@ -656,6 +656,7 @@ export type {
   DynamicNode,
   DynamicNodeCollection,
   DynamicNodeReference,
+  DynamicStoreViewEdgeCollection,
   Edge,
   EdgeBulkFindEndpointOptions,
   EdgeBulkFindOptions,

@@ -1,1 +1,282 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "StoreViewImplementation",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollection",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "TransactionCollections",
+    "member": "getEdgeCollectionOrThrow",
+    "kind": "required-member-added",
+    "reason": "Intentional pre-1.0 minor API addition: generic edge dispatch uses context-owned dynamic lookup methods. Hand-authored transaction or view mocks must implement the lookup; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getById",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "DynamicStoreViewEdgeCollection",
+    "member": "getByIds",
+    "kind": "required-member-added",
+    "reason": "New return type of the required dynamic view lookup, reachable through hand-authored StoreView mocks. The pre-1.0 minor migration requires mocks to provide the lookup and its pinned read collection; see docs/TYPE_REGRESSION_055.md.",
+    "issue": "#604"
+  }
+]
