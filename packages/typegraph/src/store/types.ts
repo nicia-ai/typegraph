@@ -59,6 +59,10 @@ import type {
   NODE_WRITE_NAMES,
   RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
+import type {
+  EdgeCollectionLookup,
+  RequiredEdgeCollectionLookup,
+} from "./store";
 
 /**
  * An explicit validity-end mutation. Omission preserves the stored end,
@@ -1320,10 +1324,11 @@ type EdgeBulkCreateItem<
 type EdgeBulkUpsertItem<
   E extends AnyEdgeType,
   Pairs extends EdgeEndpointPairTypes,
+  Id extends string = EdgeId<E>,
 > =
   Pairs extends EdgeEndpointPairTypes ?
     Readonly<{
-      id: EdgeId<E>;
+      id: Id;
       from: NodeRef<Pairs["from"]>;
       to: NodeRef<Pairs["to"]>;
       props?: z.input<E["schema"]>;
@@ -1400,14 +1405,17 @@ type EdgeGetOrCreateByEndpointsArguments<
     ]
   : never;
 
+/**
+ * Typed edge operations. InputId controls accepted ID arguments only; returned
+ * edges retain their schema-derived ID brand. Prefer DynamicEdgeCollection<E>
+ * for runtime endpoint dispatch instead of spelling its parameters manually.
+ */
 export type EdgeCollection<
   E extends AnyEdgeType,
   From extends NodeType = NodeType,
   To extends NodeType = NodeType,
-  Pairs extends EdgeEndpointPairTypes = {
-    from: From;
-    to: To;
-  },
+  Pairs extends EdgeEndpointPairTypes = { from: From; to: To },
+  InputId extends string = EdgeId<E>,
 > = Readonly<{
   /**
    * Create a new edge.
@@ -1428,13 +1436,13 @@ export type EdgeCollection<
 
   /** Get an edge by ID */
   getById: (
-    id: EdgeId<E>,
+    id: InputId,
     options?: QueryOptions,
   ) => Promise<Edge<E, From, To> | undefined>;
 
   /** Get multiple edges by ID, preserving input order (undefined for missing) */
   getByIds: (
-    ids: readonly EdgeId<E>[],
+    ids: readonly InputId[],
     options?: QueryOptions,
   ) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
 
@@ -1443,7 +1451,7 @@ export type EdgeCollection<
    * Reopening a `oneActive` edge rechecks cardinality before the write.
    */
   update: (
-    id: EdgeId<E>,
+    id: InputId,
     props: Partial<z.input<E["schema"]>>,
     options?: ValidityEndMutation,
   ) => Promise<Edge<E, From, To>>;
@@ -1554,7 +1562,7 @@ export type EdgeCollection<
   ) => BatchableQuery<Edge<E, From, To>>;
 
   /** Delete an edge (soft delete - sets deletedAt timestamp) */
-  delete: (id: EdgeId<E>) => Promise<void>;
+  delete: (id: InputId) => Promise<void>;
 
   /**
    * Permanently delete an edge from the database.
@@ -1565,7 +1573,7 @@ export type EdgeCollection<
    * **Warning:** This operation is irreversible and should be used carefully.
    * Consider using soft delete (`delete()`) for most use cases.
    */
-  hardDelete: (id: EdgeId<E>) => Promise<void>;
+  hardDelete: (id: InputId) => Promise<void>;
 
   /** Find edges matching endpoint and pagination criteria */
   find: (
@@ -1644,7 +1652,7 @@ export type EdgeCollection<
    * (free the slot, then claim it) or to apply those items individually.
    */
   bulkUpsertById: (
-    items: readonly EdgeBulkUpsertItem<E, Pairs>[],
+    items: readonly EdgeBulkUpsertItem<E, Pairs, InputId>[],
   ) => Promise<Edge<E, From, To>[]>;
 
   /**
@@ -1676,7 +1684,7 @@ export type EdgeCollection<
    * because the whole batch is one transaction, that refusal rolls back
    * every delete already applied for an earlier id in the same batch.
    */
-  bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
+  bulkDelete: (ids: readonly InputId[]) => Promise<void>;
 
   /**
    * Find an edge by endpoints and optional property fields.
@@ -2157,6 +2165,10 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
   [TRANSACTION_RUNTIME]: TransactionRuntime;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
+  /** Runtime endpoint validation with the selected edge's property schema retained. */
+  getEdgeCollection: EdgeCollectionLookup<G>;
+  /** Like getEdgeCollection, throwing KindNotFoundError when absent. */
+  getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
   /** Read-only backend projection bound to the same graph transaction. */
   backend: TransactionReadBackend;
   /**
@@ -2322,9 +2334,35 @@ export type DynamicNodeCollection<K extends string = string> = WidenBrandedIds<
  * the dynamic path typically receives IDs from edge metadata, snapshots,
  * or external input where the brand is not available.
  */
-export type DynamicEdgeCollection = WidenBrandedIds<
-  EdgeCollection<AnyEdgeType, NodeType, NodeType>
->;
+export type DynamicEdgeCollection<E extends AnyEdgeType = AnyEdgeType> = Omit<
+  EdgeCollection<
+    E,
+    NodeType,
+    NodeType,
+    { from: NodeType; to: NodeType },
+    string
+  >,
+  "create"
+> &
+  Readonly<{
+    /** Create with runtime-validated endpoints and schema-typed properties. */
+    create: (
+      from: NodeRef,
+      to: NodeRef,
+      ...args: EdgeCreateArguments<E>
+    ) => Promise<Edge<E>>;
+  }>;
+
+/** Runtime endpoint reads at a view's pinned coordinate; no writes or temporal overrides. */
+export type DynamicStoreViewEdgeCollection<
+  E extends AnyEdgeType = AnyEdgeType,
+> = Omit<StoreViewEdgeCollection<E>, "getById" | "getByIds"> &
+  Readonly<{
+    getById: (id: string) => Promise<Edge<E> | undefined>;
+    getByIds: (
+      ids: readonly string[],
+    ) => Promise<readonly (Edge<E> | undefined)[]>;
+  }>;
 
 /** A node collection narrowed by Store-issued runtime-kind evidence. */
 export type RuntimeNodeCollection<T extends RuntimeNodeKind> = WidenBrandedIds<
@@ -2332,9 +2370,8 @@ export type RuntimeNodeCollection<T extends RuntimeNodeKind> = WidenBrandedIds<
 >;
 
 /** An edge collection narrowed by Store-issued runtime-kind evidence. */
-export type RuntimeEdgeCollection<T extends RuntimeEdgeKind> = WidenBrandedIds<
-  EdgeCollection<RuntimeEdgeTypeFor<T>, NodeType, NodeType>
->;
+export type RuntimeEdgeCollection<T extends RuntimeEdgeKind> =
+  DynamicEdgeCollection<RuntimeEdgeTypeFor<T>>;
 
 /** One kind-grouped source input for a token-validated heterogeneous read. */
 export type RuntimeBulkEdgeSourceGroup<T extends RuntimeNodeKind> =

@@ -2,6 +2,11 @@ import { validateEdgeEndpoints } from "../constraints";
 import { IdentityEndpointValidityError } from "../errors";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import {
+  assertMergeCallbackResult,
+  type MergePlanApplyOptions,
+  mergePlanReadContext,
+} from "./apply-callbacks";
 /**
  * `merge()` orchestrator (design §7.2, T11).
  *
@@ -2530,7 +2535,7 @@ function assertPublicPlanCapability<G extends GraphDef>(
   }
 }
 
-async function captureMergePlanTargetFence<G extends GraphDef>(
+export async function captureMergePlanTargetFence<G extends GraphDef>(
   target: Store<G>,
 ): Promise<MergePlanTargetFence> {
   assertPublicPlanCapability(target);
@@ -2551,7 +2556,7 @@ async function captureMergePlanTargetFence<G extends GraphDef>(
   };
 }
 
-function sameMergePlanTargetFence(
+export function sameMergePlanTargetFence(
   left: MergePlanTargetFence,
   right: MergePlanTargetFence,
 ): boolean {
@@ -2565,7 +2570,7 @@ function sameMergePlanTargetFence(
   );
 }
 
-async function assertPlanningFenceUnchanged<G extends GraphDef>(
+export async function assertPlanningFenceUnchanged<G extends GraphDef>(
   target: Store<G>,
   startingFence: MergePlanTargetFence,
 ): Promise<void> {
@@ -3620,6 +3625,7 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   target: Store<G>,
   txBackend: TransactionBackend,
   artifact: MergePlanArtifactV1,
+  requireFreshSnapshot: boolean,
 ): Promise<void> {
   await lockMergeTargetWrite(txBackend, {
     graphId: target.graphId,
@@ -3628,6 +3634,7 @@ async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
         artifact.target.schema.version
       : undefined,
     graphLock: "required",
+    requireFreshSnapshot,
     staleSchemaError: (cause) =>
       new MergePlanSchemaMismatchError(
         "The target's active schema no longer matches the merge plan.",
@@ -3834,6 +3841,7 @@ function reportFromArtifact<G extends GraphDef>(
 export async function applyMergePlan<G extends GraphDef>(
   target: Store<G>,
   input: MergePlanArtifact,
+  options: MergePlanApplyOptions<NoInfer<G>> = {},
 ): Promise<Result<MergeReport<G>, MergeError>> {
   let validation: Awaited<ReturnType<typeof validateMergePlanArtifact>>;
   try {
@@ -3863,6 +3871,12 @@ export async function applyMergePlan<G extends GraphDef>(
     );
   }
   try {
+    const { beforeApply, afterApply } = options;
+    const composed = beforeApply !== undefined || afterApply !== undefined;
+    const transactionOptions =
+      composed ?
+        ({ isolationLevel: "read_committed" } as const)
+      : mergeCommitTransactionOptions(target);
     assertPublicPlanCapability(target);
     const provenanceStore =
       artifact.provenance.persist ?
@@ -3878,7 +3892,14 @@ export async function applyMergePlan<G extends GraphDef>(
           target,
           txBackend,
           artifact,
+          composed,
         );
+        if (beforeApply !== undefined) {
+          assertMergeCallbackResult(
+            await beforeApply(mergePlanReadContext(tx, target.graph)),
+            "beforeApply",
+          );
+        }
         await preflightWireMergeWrites(
           target,
           tx.nodes as unknown as TxNodes,
@@ -3889,14 +3910,21 @@ export async function applyMergePlan<G extends GraphDef>(
           identityAssertions: artifact.writes.identityAssertions,
           identityRetractions: artifact.writes.identityRetractions,
         });
-        return applyWireMergeWrites(
+        const applied = await applyWireMergeWrites(
           target,
           tx.nodes as unknown as TxNodes,
           tx.edges as unknown as TxEdges,
           txBackend,
           artifact,
         );
-      }, mergeCommitTransactionOptions(target)),
+        if (afterApply !== undefined) {
+          assertMergeCallbackResult(
+            await afterApply(tx, { merged: structuredClone(applied) }),
+            "afterApply",
+          );
+        }
+        return applied;
+      }, transactionOptions),
     );
     const warnings = [...artifact.review.warnings];
     let provenancePersisted: MergeReport<G>["provenancePersisted"];

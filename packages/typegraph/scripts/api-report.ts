@@ -220,10 +220,16 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * surfaces as forgotten-export debt rather than a direct export, in family
  * with the other adapter entrypoints.
  */
+// Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
+// non-root Store-bearing entrypoints. Removing that single name reproduces each
+// previous fingerprint; the root exports the type directly and is unchanged.
+// Generic traversal inference adds only ArrayNodeKinds and EdgeTargetKinds to
+// the seven Store-bearing entrypoints. Removing those names reproduces each
+// preceding fingerprint; these helpers are not new package entrypoint exports.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 378,
-    sha256: "0cb94bcb6dfd5d167567f7e777f95e844ef837dd19891eb8694aa97e5f3f6662",
+    count: 380,
+    sha256: "fbd1da5eac1bd4d5b2516645e3e6568f3b787a6a9537e1504fd4ca64017634e5",
   },
   "./adapters/drizzle/engine": {
     count: 321,
@@ -265,37 +271,40 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 16,
     sha256: "1678650d02e0d9d7cc767ffbacbf163724c82fd4590c219b97d3dff85a6bf2f6",
   },
+  // MergePlanReadContext derives its read-only surface from the runtime method
+  // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
+  // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 703,
-    sha256: "c064127f3073508f81c23fafe05a7b26910107b80904c05bfad0bd769f462df1",
+    count: 709,
+    sha256: "b963d4c34acde32b568a6b2d46eccd7294d04da60f18d0d0c8673dffd596337e",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 689,
-    sha256: "e97787e4c8885fb5fb37d8da55a9f37d4c65e0e05ad73882dbed41b0d98eb287",
+    count: 692,
+    sha256: "f4760194562e7aae14b78a84d54aa4b47505cb7b2e68a08d45463b12d1870fa3",
   },
   "./postgres/pglite": {
-    count: 693,
-    sha256: "05af42a38fdd2ae01bd1fb29940b7d5ac2e99dfcc2d6943d0f38ab04e857d803",
+    count: 696,
+    sha256: "dc01a8fc90496da7732c9f5d0d99d0c755070d99ab65878d784e263278bc590f",
   },
   "./profiler": {
-    count: 691,
-    sha256: "04dbe9758a6958939e07b0ff229ab286745ed4e7170a0d57d5495dc8b169abe0",
+    count: 694,
+    sha256: "593c75cf197ad215ffd18dbab8a911b2bce9f3694f222243b533df4e8fff9bd2",
   },
   "./provenance": {
-    count: 697,
-    sha256: "5f604329ce3285b31051a6222e051440f2a266f328ba3687fb3673ce59d5a47e",
+    count: 700,
+    sha256: "74a5fa745fa37bdc4a760aee4b7f92877f93909784878c5282f07bf2f30335b6",
   },
   "./schema": {
     count: 263,
     sha256: "eb7a0664ed8d89c35213508e4dd563ffeaf96bf2212f6e4a4916aaf9b3f971b5",
   },
   "./sqlite/local": {
-    count: 693,
-    sha256: "05af42a38fdd2ae01bd1fb29940b7d5ac2e99dfcc2d6943d0f38ab04e857d803",
+    count: 696,
+    sha256: "dc01a8fc90496da7732c9f5d0d99d0c755070d99ab65878d784e263278bc590f",
   },
 };
 

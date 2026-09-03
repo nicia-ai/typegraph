@@ -19,7 +19,7 @@ import {
   disjointWith,
   subClassOf,
 } from "@nicia-ai/typegraph";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { branch } from "../../src/graph-merge/branch";
@@ -47,6 +47,7 @@ import { asCompiledStatementSql } from "../../src/query/sql-intent";
 import { getCommittedSchemaVersion, migrateSchema } from "../../src/schema";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix, identityAssertionDocument } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -166,6 +167,11 @@ const BRANCH_A = asBranchId("branch-a");
 const BRANCH_B = asBranchId("branch-b");
 const BRANCH_C = asBranchId("branch-c");
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
   let cleanups: (() => Promise<void>)[];
 
@@ -193,7 +199,10 @@ describe.each(backendMatrix())("identity universe guards [$name]", (entry) => {
   });
 
   async function makeBackend(): Promise<GraphBackend> {
-    const fixture = await entry.make();
+    const fixture =
+      entry.name === "PGlite" ?
+        await pglitePool.makeFixture()
+      : await entry.make();
     cleanups.push(fixture.cleanup);
     return fixture.backend;
   }

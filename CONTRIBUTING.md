@@ -7,8 +7,10 @@ community to help make this the best embedded knowledge graph for TypeScript.
 
 ### Prerequisites
 
-- **Node.js**: Version 22 or higher.
-- **pnpm**: We use pnpm for package management.
+- **Node.js**: Use Node 24, matching the release workflow. Changesets supports
+  Node `^22.11 || ^24 || >=26`.
+- **pnpm**: Use the version pinned in the root `packageManager` field. Changesets
+  requires pnpm 10 or higher.
 
 ### Installation
 

@@ -885,13 +885,15 @@ void dynamicEdge.bulkUpsertById([
   { id: plainId, from: { kind: "X", id: "1" }, to: { kind: "Y", id: "2" } },
 ]);
 
-// getNodeCollection / getEdgeCollection return the dynamic types
+// Known edge lookups preserve the schema; an arbitrary string uses the erased default.
 expectAssignable<DynamicNodeCollection | undefined>(
   store.getNodeCollection("Person"),
 );
-expectAssignable<DynamicEdgeCollection | undefined>(
+expectType<DynamicEdgeCollection<typeof worksAt> | undefined>(
   store.getEdgeCollection("worksAt"),
 );
+
+expectType<DynamicEdgeCollection | undefined>(store.getEdgeCollection(plainId));
 
 // ============================================================
 // Graph extension — public surface published in 0.25
