@@ -72,6 +72,14 @@ Location: `packages/typegraph/tests/backends/`
 
 Tests that exercise complete workflows with real database backends.
 
+The identity-universe, incremental-merge, and ingestion-branch suites reuse idle
+PGlite engines through `tests/graph-merge/pglite-fixture-pool.ts`. Every live
+fixture still owns a separate engine, so base and branch transactions remain
+independent. Each lease creates a fresh backend and schema; cleanup drops the
+whole schema (including strategy-owned indexes) and resets session settings
+before returning the engine to the pool. The file's `afterAll` closes the pool.
+Keep this lifecycle when adding cases to these suites.
+
 The **adapter test suite** (`adapter-test-suite.ts`) defines a shared contract that all backends must satisfy:
 
 ```typescript
@@ -268,6 +276,12 @@ coverage: {
 
 The test command will fail if coverage drops below these thresholds.
 
+Per-test timeouts live in `vitest.config.ts`: the main project has 15 seconds,
+while PGlite and graph-merge projects have 60 seconds. Coverage uses these same
+budgets. Do not pass a global `--testTimeout` in the coverage workflow: it
+overrides project settings and can shorten the budget for in-process Postgres
+tests.
+
 ### Interpreting Coverage
 
 High coverage doesn't guarantee good tests. A file can have 100% line coverage but still
@@ -461,7 +475,7 @@ only SQLite unit/property tests). The jobs are:
 | Job | What it runs |
 |-----|--------------|
 | **Lint & Type Check** | `typecheck`, `lint` (ESLint), `prettier`, `test:docs` (markdownlint), `test:unused` (knip) |
-| **Test (SQLite)** | Two `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
+| **Test (SQLite)** | Four `test:unit` shards on Node 22, `test:property` on Node 24, plus a SQLite perf sanity check and example smoke tests |
 | **Test (Coverage)** | Four V8 coverage shards on Node 24; a merge job combines their blob reports and enforces the coverage thresholds |
 | **Type Tests** | `test:types` against TypeScript 5.9.3 and 6.0.3; packed-consumer checks against 7.0.2 |
 | **Test (PostgreSQL)** | `test:postgres` against `pgvector/pgvector:pg18` (PostgreSQL + pgvector), plus a PostgreSQL perf sanity check |

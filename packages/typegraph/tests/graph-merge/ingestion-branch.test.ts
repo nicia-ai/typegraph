@@ -17,7 +17,14 @@ import {
   UniquenessError,
 } from "@nicia-ai/typegraph";
 import fc from "fast-check";
-import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+} from "vitest";
 import { z } from "zod";
 
 import type { TransactionBackend } from "../../src/backend/types";
@@ -54,6 +61,7 @@ import {
 } from "../../src/store/claims/axis";
 import { nodeClaimEntries } from "../../src/store/claims/node-claims";
 import { requireDefined } from "../../src/utils/presence";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -260,6 +268,11 @@ function incrementalOptions() {
   };
 }
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())(
   "constraint-aware ingestion branch [$name]",
   (entry) => {
@@ -271,7 +284,10 @@ describe.each(backendMatrix())(
     });
 
     async function makeBackend(): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        entry.name === "PGlite" ?
+          await pglitePool.makeFixture()
+        : await entry.make();
       cleanups.push(fixture.cleanup);
       return fixture.backend;
     }
