@@ -822,7 +822,7 @@ export type UnbundledOptionalMember =
  * (B9's scanner corrected two `reasoned` counts: `tableNames` 22→23,
  * `ensureIdentityTables` 3→4; #520 then added `recordedTableDdl` with one
  * access; resolving the write-fence spelling through the fence plan then
- * added `fenceSql` with zero), 15 + 80 = 95 members total.
+ * added `fenceSql` with two accesses), 15 + 80 = 95 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   adoptBaseSchema: {

@@ -1,10 +1,12 @@
 /**
- * The bundled PostgreSQL lock-statement spelling: the ONE module in `src/`
- * (outside `src/query/dialect/`) allowed to contain `pg_advisory_xact_lock`,
- * `hashtext(`, `LOCK TABLE`, or `current_setting('transaction_isolation')`.
- * Every write-fence lock site resolves a plan and consumes `fence.sql.*`
- * from it rather than spelling any of these itself; this is where the
- * PostgreSQL profile's declared spelling comes from.
+ * The bundled PostgreSQL lock-statement spelling every write-fence lock site
+ * consumes through its resolved plan (`fence.sql.*`) instead of spelling
+ * `pg_advisory_xact_lock`, `hashtext(`, `LOCK TABLE`, or
+ * `current_setting('transaction_isolation')` itself. The lock-fence inventory
+ * test ratchets those tokens out of the lock-site files; the PostgreSQL
+ * profile's extension-DDL lock, the trusted-import table lock, and the
+ * graph-template instantiation statement still spell their own and are
+ * outside that ratchet.
  *
  * Built from `SqlFragment` (`../../query/sql-fragment`), not `drizzle-orm`,
  * so this module stays outside the Drizzle zone and is safe to import from
@@ -42,9 +44,7 @@ const LOCK_TABLE_MODE_CLAUSE = {
  * spelling through here.
  */
 function advisoryLockKeyExpression(key: string | number): SqlFragment {
-  return typeof key === "number" ?
-      sql.raw(String(key))
-    : sql`hashtext(${key})`;
+  return typeof key === "number" ? sql.raw(String(key)) : sql`hashtext(${key})`;
 }
 
 /**

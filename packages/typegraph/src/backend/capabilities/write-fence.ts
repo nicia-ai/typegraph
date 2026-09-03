@@ -273,15 +273,15 @@ function planFromLockCapabilities(
  * 2. **Absent, first-party factory** — derive from `dialect`
  *    (`postgres` → `{advisoryLocks:true,tableLocks:true,serializedWriters:false}`,
  *    `sqlite` → `{advisoryLocks:false,tableLocks:false,serializedWriters:true}`),
- *    which is exactly what every lock site used to compute inline. After
- *    A1/A2 land, nothing in-tree reaches this arm — both bundled factories
- *    declare `pessimisticLocks` unconditionally — so it is reachable only
- *    from tests that build a backend object bypassing the factories'
- *    declared capabilities while still carrying the first-party mark.
+ *    which is exactly what every lock site used to compute inline. Both
+ *    bundled factories declare `pessimisticLocks` unconditionally, so nothing
+ *    in-tree reaches this arm; it is reachable only from tests that build a
+ *    backend object bypassing the factories' declared capabilities while
+ *    still carrying the first-party mark.
  * 3. **Absent, anything else** — `unfenced`. Conservative: an undeclared
  *    custom backend is by definition uncertified, and inferring lock support
  *    from `dialect` alone is the unsound inference this capability replaces
- *    (a Doltgres-shaped backend reporting `dialect: "postgres"` need not
+ *    (a PostgreSQL-wire backend reporting `dialect: "postgres"` need not
  *    honor `pg_advisory_xact_lock`).
  */
 export function resolveWriteFencePlan(
