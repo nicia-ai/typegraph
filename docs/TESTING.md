@@ -80,6 +80,14 @@ whole schema (including strategy-owned indexes) and resets session settings
 before returning the engine to the pool. The file's `afterAll` closes the pool.
 Keep this lifecycle when adding cases to these suites.
 
+The libSQL adapter and integration suite uses temporary database files. CI sets
+`TYPEGRAPH_LIBSQL_TMPDIR=/dev/shm` for unit and coverage jobs, placing these
+disposable files on the Linux runner's RAM-backed filesystem. This preserves
+file-client behavior, close/reopen persistence, and default journal/synchronous
+settings while avoiding variable disk flush latency. Locally the suite defaults
+to the OS temporary directory; the override must name an existing directory.
+It affects only this suite's database files, not other tools' temporary files.
+
 The **adapter test suite** (`adapter-test-suite.ts`) defines a shared contract that all backends must satisfy:
 
 ```typescript
