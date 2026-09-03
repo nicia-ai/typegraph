@@ -18,7 +18,7 @@ import {
 } from "../../capabilities/atomic-mutation-program";
 import { registerAtomicSqlProgram } from "../../capabilities/atomic-sql-program";
 import { markBundledRootAutocommitEligible } from "../../capabilities/autocommit-single-statement";
-import { markSchemaFencedInsertEligible } from "../../capabilities/schema-fenced-insert";
+import { markSchemaFencedInsertEligibleUnderFence } from "../../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
   type WriteFencePlan,
@@ -52,9 +52,7 @@ export function applyEngineMarks<TTx>(
   deps: ApplyEngineMarksDeps,
 ): void {
   markFirstPartyFactory(backend);
-  if (deps.fencePlan.kind !== "unfenced") {
-    markSchemaFencedInsertEligible(backend);
-  }
+  markSchemaFencedInsertEligibleUnderFence(backend, deps.fencePlan);
   if (deps.autocommit.singleStatementDurable) {
     markBundledRootAutocommitEligible(backend);
   }

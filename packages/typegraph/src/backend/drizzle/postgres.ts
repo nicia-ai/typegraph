@@ -109,7 +109,7 @@ import {
 } from "../capabilities/atomic-sql-program";
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
-import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
+import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
   requireWriteFence,
@@ -178,6 +178,7 @@ import {
   createSqlBackend,
   type EngineAssemblyContext,
   type EngineLateMembers,
+  type EngineOperationsContext,
   type EngineProvisioning,
   type GraphTemplateRuntime,
   type IdentityRuntime,
@@ -185,7 +186,6 @@ import {
   type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
-import { finalizeEngineCapabilities } from "./engine/capabilities";
 import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
@@ -816,24 +816,13 @@ function buildPostgresEngineProfile(
   const executionAdapter = createPostgresExecutionAdapter(db, adapterOptions);
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
-  // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
-  // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target and the operation backend this dialect's
-  // own `buildOperations` closure builds. `createSqlBackend` calls it again
-  // with `profile.declaredCapabilities` to resolve `ctx.capabilities` — a
-  // profile variant built by overriding `declaredCapabilities` (as the
-  // refusal tests do) is re-derived correctly wherever it runs, because the
-  // function is pure in its arguments rather than a cached value, so
-  // `ctx.capabilities` and the `capabilities` object already baked into
-  // `operations` below always agree.
-  const capabilities: BackendCapabilities = finalizeEngineCapabilities(
-    declaredCapabilities,
-    {
-      execution: executionAdapter,
-      fulltextStrategy,
-      fulltextTableName: tables.fulltextTableName,
-    },
-  );
+  // `declaredCapabilities` above is this profile's contribution; the
+  // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
+  // that derives `execution.atomicBatch` and `contributions` from it runs
+  // once, in `createSqlBackend`, which then hands the finalized result back
+  // through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // .capabilities` — `buildOperations` and `lateMembers` below read it off
+  // `ctx` rather than re-deriving a local copy.
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
     edges: getTableName(tables.edges),
@@ -951,7 +940,13 @@ function buildPostgresEngineProfile(
    * sound only when the failed unit of work is one this function owns
    * end-to-end.
    */
+  // Takes `capabilities` explicitly rather than closing over a head-level
+  // constant: this backend's finalized capabilities are `createSqlBackend`'s
+  // (`EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // .capabilities`), and this function's only caller — `lateMembers.extensions`
+  // — already has that value on `ctx`.
   async function ensureDatabaseExtension(
+    capabilities: BackendCapabilities,
     name: DatabaseExtensionName,
   ): Promise<void> {
     // The name reaches DDL by interpolation, so the allowlist — not the
@@ -983,22 +978,12 @@ function buildPostgresEngineProfile(
     });
   }
 
-  // ONE fence target for the whole factory, shared by the contribution
-  // materializer's two lock sites and by the schema fence's two below, so
-  // every lock this backend can take resolves the SAME plan. Marked
-  // first-party because both are, and because `capabilities` here is the
-  // object the factory assembled — a caller who blanked `pessimisticLocks`
-  // out of it must still resolve the dialect-derived plan, not `unfenced`.
-  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
-    dialect: "postgres",
-    capabilities,
-  });
-
   // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
   // beyond what `createSqlBackend` supplies itself: `dialect`/`fulltextStrategy`/
-  // `vectorStrategy` (the profile head), `fenceTarget` above, `ensureTable`/
-  // `execute`/`operationStrategy` (`provisioning`/`execution`/`strategy`), and
-  // `schemaWriteTransaction` (the fence's own late member, once it exists).
+  // `vectorStrategy` (the profile head), `fenceTarget` (built by `createSqlBackend`
+  // from its finalized capabilities), `ensureTable`/`execute`/`operationStrategy`
+  // (`provisioning`/`execution`/`strategy`), and `schemaWriteTransaction` (the
+  // fence's own late member, once it exists).
   const contributionRuntime: ContributionRuntime = {
     fulltextTableName: tables.fulltextTableName,
     contributionTableDdl: generatePgCreateTableSQL(matTable),
@@ -1063,13 +1048,15 @@ function buildPostgresEngineProfile(
 
   /**
    * Builds this profile's top-level `InternalOperationBackend`, deferred
-   * until `createSqlBackend` has built the contribution materializer (its
-   * `buildCommonOperationOptions` assembly needs it for the projection-
-   * evidence callbacks) — everything else here is a plain closure capture,
-   * unchanged from when this call site built `operations` directly.
+   * until `createSqlBackend` has resolved the assembled pipeline's
+   * capabilities, fence target, and contribution materializer (`ctx` — its
+   * `buildCommonOperationOptions` assembly needs the materializer for the
+   * projection-evidence callbacks) — everything else here is a plain
+   * closure capture, unchanged from when this call site built `operations`
+   * directly.
    */
   function buildOperations(
-    contributionMaterializer: ContributionMaterializer,
+    ctx: EngineOperationsContext,
   ): InternalOperationBackend {
     return createPostgresOperationBackend({
       db,
@@ -1080,13 +1067,13 @@ function buildPostgresEngineProfile(
       adapterOptions,
       operationStrategy,
       tableNames,
-      capabilities,
+      capabilities: ctx.capabilities,
       fulltextStrategy,
       vectorStrategy,
-      contributionMaterializer,
+      contributionMaterializer: ctx.contributionMaterializer,
       iterativeScanProbe,
       schemaVersionsTable: tables.schemaVersions,
-      fenceTarget,
+      fenceTarget: ctx.fenceTarget,
       transactionScoped: false,
     });
   }
@@ -1194,8 +1181,6 @@ function buildPostgresEngineProfile(
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy),
     ensureIndexMaterializationColumns,
-    ensureExtension: ensureDatabaseExtension,
-    ensureTrigramExtension: () => ensureDatabaseExtension("pg_trgm"),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
@@ -1333,6 +1318,13 @@ function buildPostgresEngineProfile(
   function lateMembers(
     ctx: EngineAssemblyContext<AnyPgTransaction>,
   ): EngineLateMembers<AnyPgTransaction> {
+    // The factory's finalized capabilities and ONE fence target/plan —
+    // resolved once by `createSqlBackend`, never re-derived here. Aliased
+    // to bare names so every existing capabilities/fence-gated call below
+    // reads exactly as it did when this dialect built its own (stale-prone)
+    // copies of both.
+    const { capabilities, fencePlan, fenceTarget } = ctx;
+
     /**
      * The per-graph schema-commit fence.
      *
@@ -1573,7 +1565,10 @@ function buildPostgresEngineProfile(
             const { backend: txBackend, drainAndClose } =
               bindTransactionBackend(tx);
             try {
-              return await fn(markSchemaFencedInsertEligible(txBackend), tx);
+              return await fn(
+                markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
+                tx,
+              );
             } finally {
               // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
               // instant the callback settles, and those control statements do not
@@ -1729,9 +1724,9 @@ function buildPostgresEngineProfile(
       : {}),
 
       extensions: {
-        ensureExtension: ensureDatabaseExtension,
+        ensureExtension: (name) => ensureDatabaseExtension(capabilities, name),
         ensureTrigramExtension(): Promise<void> {
-          return ensureDatabaseExtension("pg_trgm");
+          return ensureDatabaseExtension(capabilities, "pg_trgm");
         },
         async claimIndexMaterialization(
           params: ClaimIndexMaterializationParams,
@@ -1800,7 +1795,6 @@ function buildPostgresEngineProfile(
     resourceAudit,
     autocommit: { singleStatementDurable: true },
     provisioning,
-    fenceTarget,
     contributionRuntime,
     identityRuntime,
     graphTemplateRuntime,

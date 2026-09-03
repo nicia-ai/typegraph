@@ -20,6 +20,7 @@ import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema
 import {
   isFirstPartyFactory,
   pessimisticLockDeclarationLine,
+  resolveWriteFencePlan,
 } from "../src/backend/capabilities/write-fence";
 import { createSqlBackend } from "../src/backend/drizzle/engine";
 import type { SqlEngineProfile } from "../src/backend/drizzle/engine/profile";
@@ -106,5 +107,31 @@ describe("createSqlBackend refusals", () => {
     // still constructs, and the other two marks are unaffected by this gate.
     expect(isFirstPartyFactory(backend)).toBe(true);
     expect(isBundledRootAutocommitEligible(backend)).toBe(true);
+  });
+
+  it("resolves the same unfenced plan and schema-fenced-insert eligibility on the root and on a transaction() handle it opens", async () => {
+    const base = createRealSqliteProfile();
+    const profile = {
+      ...base,
+      declaredCapabilities: {
+        ...base.declaredCapabilities,
+        pessimisticLocks: {
+          advisoryLocks: false,
+          tableLocks: false,
+          serializedWriters: false,
+        },
+      },
+    };
+
+    const backend = createSqlBackend(profile);
+
+    expect(resolveWriteFencePlan(backend).kind).toBe("unfenced");
+    expect(isSchemaFencedInsertEligible(backend)).toBe(false);
+
+    await backend.transaction((tx) => {
+      expect(resolveWriteFencePlan(tx).kind).toBe("unfenced");
+      expect(isSchemaFencedInsertEligible(tx)).toBe(false);
+      return Promise.resolve();
+    });
   });
 });

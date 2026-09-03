@@ -11,15 +11,14 @@
  * driver overrides, the PGlite bind-parameter cap, the pessimistic-lock
  * override validation, SQLite's execution-profile hints and graph-analytics
  * resolution — stays in `buildPostgresEngineProfile` / `buildSqliteEngineProfile`
- * and feeds `declaredCapabilities`. This module owns only the tail both of
- * them run identically on top of that.
+ * and feeds `declaredCapabilities`. This module owns only the tail
+ * `createSqlBackend` runs once on top of that, for every dialect alike.
  *
  * `contributionRebuildSupported` is imported directly rather than threaded
  * through as a profile dep: `create-sql-backend.ts` (this module's only
- * caller alongside the two dialect factories) already imports
- * `contribution-materializations.ts` for its contribution-marker and
- * fulltext-gate member construction, so this import adds no new reach into
- * a real Drizzle package that was not already there.
+ * caller) already imports `contribution-materializations.ts` for its
+ * contribution-marker and fulltext-gate member construction, so this import
+ * adds no new reach into a real Drizzle package that was not already there.
  */
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import { createAtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
@@ -47,15 +46,13 @@ export type FinalizeEngineCapabilitiesDeps = Readonly<{
  * `execution.atomicBatch` and `contributions` from `declared` and `deps`,
  * then validates and freezes the result.
  *
- * Both dialect builders call this twice with the same `declared` value: once
- * themselves, to resolve the local `capabilities` their own `buildOperations`
- * closure needs, and once more inside `createSqlBackend` to resolve
- * `EngineAssemblyContext.capabilities` (see `EngineAssemblyContext`'s doc
- * comment). This function stays a pure function of its arguments, never a
- * cached value, so a profile variant built by overriding
- * `declaredCapabilities` (as `tests/engine-profile-refusals.test.ts` does) is
- * re-derived correctly wherever it is called from, and both derivations
- * agree.
+ * `createSqlBackend` is the ONE caller, on `profile.declaredCapabilities`;
+ * the resulting value reaches every member group, mark site, and dialect
+ * `buildOperations` closure through `EngineOperationsContext.capabilities` /
+ * `EngineAssemblyContext.capabilities` rather than a second derivation, so a
+ * profile variant built by overriding `declaredCapabilities` (as
+ * `tests/engine-profile-refusals.test.ts` does) is re-derived correctly the
+ * one place this runs, and nothing downstream can hold a stale copy.
  */
 export function finalizeEngineCapabilities(
   declared: BackendCapabilities,

@@ -82,11 +82,8 @@ import {
 } from "../capabilities/atomic-sql-program";
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
-import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
-import {
-  markFirstPartyFactory,
-  type WriteFenceTarget,
-} from "../capabilities/write-fence";
+import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
+import { markFirstPartyFactory } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
@@ -161,6 +158,7 @@ import {
   createSqlBackend,
   type EngineAssemblyContext,
   type EngineLateMembers,
+  type EngineOperationsContext,
   type EngineProvisioning,
   type GraphTemplateRuntime,
   type IdentityRuntime,
@@ -168,7 +166,6 @@ import {
   type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
-import { finalizeEngineCapabilities } from "./engine/capabilities";
 import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
@@ -1126,29 +1123,13 @@ export function buildSqliteEngineProfile(
       capabilityOverrides.graphAnalytics,
     ),
   });
-  // Derived last and not overridable: how far up the contribution health
-  // ladder this backend goes is a structural fact about the wiring below
-  // (durable markers, a catalog probe, a strategy that declares teardown
-  // DDL, a transactional schema fence), and a caller who declared a
-  // rebuild this backend cannot perform would be advertising a lie.
-  // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
-  // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target and the operation backend this dialect's
-  // own `buildOperations` closure builds. `createSqlBackend` calls it again
-  // with `profile.declaredCapabilities` to resolve `ctx.capabilities` — a
-  // profile variant built by overriding `declaredCapabilities` (as the
-  // refusal tests do) is re-derived correctly wherever it runs, because the
-  // function is pure in its arguments rather than a cached value, so
-  // `ctx.capabilities` and the `capabilities` object already baked into
-  // `operations` below always agree.
-  const capabilities: BackendCapabilities = finalizeEngineCapabilities(
-    declaredCapabilities,
-    {
-      execution: executionAdapter,
-      fulltextStrategy,
-      fulltextTableName: tables.fulltextTableName,
-    },
-  );
+  // `declaredCapabilities` above is this profile's contribution; the
+  // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
+  // that derives `execution.atomicBatch` and `contributions` from it runs
+  // once, in `createSqlBackend`, which then hands the finalized result back
+  // through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // .capabilities` — `buildOperations` and `lateMembers` below read it off
+  // `ctx` rather than re-deriving a local copy.
 
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -1224,21 +1205,12 @@ export function buildSqliteEngineProfile(
     await db.run(sql.raw(ddl));
   };
 
-  // ONE fence target for the whole factory, shared by the contribution
-  // materializer's lock sites. Marked first-party because `capabilities`
-  // here is the object the factory assembled — a caller who blanked
-  // `pessimisticLocks` out of it must still resolve the dialect-derived
-  // plan, not `unfenced`.
-  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
-    dialect: "sqlite",
-    capabilities,
-  });
-
   // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
   // beyond what `createSqlBackend` supplies itself: `dialect`/`fulltextStrategy`/
-  // `vectorStrategy` (the profile head), `fenceTarget` above, `ensureTable`/
-  // `execute`/`operationStrategy` (`provisioning`/`execution`/`strategy`), and
-  // `schemaWriteTransaction` (the fence's own late member, once it exists).
+  // `vectorStrategy` (the profile head), `fenceTarget` (built by `createSqlBackend`
+  // from its finalized capabilities), `ensureTable`/`execute`/`operationStrategy`
+  // (`provisioning`/`execution`/`strategy`), and `schemaWriteTransaction` (the
+  // fence's own late member, once it exists).
   const contributionRuntime: ContributionRuntime = {
     fulltextTableName: tables.fulltextTableName,
     contributionTableDdl: generateSqliteCreateTableSQL(matTable),
@@ -1305,16 +1277,18 @@ export function buildSqliteEngineProfile(
 
   /**
    * Builds this profile's top-level `InternalOperationBackend`, deferred
-   * until `createSqlBackend` has built the contribution materializer (its
-   * `buildCommonOperationOptions` assembly needs it for the projection-
-   * evidence callbacks) — everything else here is a plain closure capture,
-   * unchanged from when this call site built `operations` directly.
+   * until `createSqlBackend` has resolved the assembled pipeline's
+   * capabilities and contribution materializer (`ctx` — its
+   * `buildCommonOperationOptions` assembly needs the materializer for the
+   * projection-evidence callbacks) — everything else here is a plain
+   * closure capture, unchanged from when this call site built `operations`
+   * directly.
    */
   function buildOperations(
-    contributionMaterializer: ContributionMaterializer,
+    ctx: EngineOperationsContext,
   ): InternalOperationBackend {
     return createSqliteOperationBackend({
-      capabilities,
+      capabilities: ctx.capabilities,
       db,
       executionAdapter,
       ...(atomicSqlProgramExecutor === undefined ?
@@ -1324,7 +1298,7 @@ export function buildSqliteEngineProfile(
       tableNames,
       fulltextStrategy,
       vectorStrategy,
-      contributionMaterializer,
+      contributionMaterializer: ctx.contributionMaterializer,
       transactionScoped: false,
       ...(serializedQueue === undefined ? {} : { serializedQueue }),
     });
@@ -1552,6 +1526,12 @@ export function buildSqliteEngineProfile(
   function lateMembers(
     ctx: EngineAssemblyContext<AnySqliteDatabase>,
   ): EngineLateMembers<AnySqliteDatabase> {
+    // The factory's finalized capabilities and resolved fence plan —
+    // resolved once by `createSqlBackend`, never re-derived here. Aliased
+    // to bare names so every existing capabilities-gated call below reads
+    // exactly as it did when this dialect built its own (stale-prone) copy.
+    const { capabilities, fencePlan } = ctx;
+
     /**
      * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
      * Durable Objects expose an async storage transaction runner —
@@ -1828,12 +1808,13 @@ export function buildSqliteEngineProfile(
 
               try {
                 const result = await fn(
-                  markSchemaFencedInsertEligible(
+                  markSchemaFencedInsertEligibleUnderFence(
                     gateFulltext(
                       txBackend,
                       ctx.contributionMaterializer.assertInitialized,
                       ctx.contributionMaterializer.refuseUnavailableFulltext,
                     ),
+                    fencePlan,
                   ),
                   db,
                 );
@@ -1849,7 +1830,10 @@ export function buildSqliteEngineProfile(
           if (transactionMode === "do-sqlite") {
             return runDoSqliteStorageTransaction(async () =>
               fn(
-                markSchemaFencedInsertEligible(bindTransactionBackend(db)),
+                markSchemaFencedInsertEligibleUnderFence(
+                  bindTransactionBackend(db),
+                  fencePlan,
+                ),
                 db,
               ),
             );
@@ -1863,7 +1847,10 @@ export function buildSqliteEngineProfile(
               db.transaction(
                 async (tx) =>
                   fn(
-                    markSchemaFencedInsertEligible(bindTransactionBackend(tx)),
+                    markSchemaFencedInsertEligibleUnderFence(
+                      bindTransactionBackend(tx),
+                      fencePlan,
+                    ),
                     tx,
                   ),
                 {
@@ -2031,7 +2018,6 @@ export function buildSqliteEngineProfile(
     resourceAudit,
     autocommit: { singleStatementDurable: true },
     provisioning,
-    fenceTarget,
     contributionRuntime,
     identityRuntime,
     graphTemplateRuntime,

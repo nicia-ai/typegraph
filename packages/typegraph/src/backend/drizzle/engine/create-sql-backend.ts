@@ -2,19 +2,21 @@
  * The one factory every SQL engine profile is assembled through.
  *
  * `createSqlBackend` owns what is the same for every SQL engine: deriving
- * the final capabilities, resolving the write-fence decision once, refusing
- * a profile that cannot back the marks it is about to earn, building the
- * contribution-marker and operation-backend layers from the profile's own
- * deps, assembling every mirrored adapter member group, auditing the
- * backend's resource shape, and applying the trust marks and atomic-program
- * registrations. A profile owns only what genuinely differs between
- * engines.
+ * the final capabilities, building the ONE write-fence target and resolving
+ * its plan once, refusing a profile that cannot back the marks it is about
+ * to earn, building the contribution-marker and operation-backend layers
+ * from the profile's own deps, assembling every mirrored adapter member
+ * group, auditing the backend's resource shape, and applying the trust
+ * marks and atomic-program registrations. A profile owns only what
+ * genuinely differs between engines.
  */
 import { ConfigurationError } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
 import {
+  markFirstPartyFactory,
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
+  type WriteFenceTarget,
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
 import type { AdapterBackend, SchemaWriteTransactionBackend } from "../../types";
@@ -72,10 +74,18 @@ export function createSqlBackend<TTx>(
     );
   }
 
-  const fencePlan = resolveWriteFencePlan({
+  // ONE fence target for the whole backend and every transaction-scoped one
+  // it builds, marked first-party for the same reason the two bundled
+  // builders always marked their own: `capabilities` here is the object
+  // this factory just finalized, so a caller who blanked `pessimisticLocks`
+  // out of a profile's declaration still resolves the dialect-derived plan,
+  // not `unfenced`, for the two bundled dialects.
+  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
     dialect: profile.dialect,
     capabilities,
   });
+
+  const fencePlan = resolveWriteFencePlan(fenceTarget);
 
   // The contribution materializer's destructive rebuild runs under the SAME
   // per-graph fence a schema commit does — `late.fence.runSchemaWriteTransaction`
@@ -94,7 +104,7 @@ export function createSqlBackend<TTx>(
     dialect: profile.dialect,
     fulltextStrategy: profile.fulltext,
     vectorStrategy: profile.vector,
-    fenceTarget: profile.fenceTarget,
+    fenceTarget,
     ensureTable: profile.provisioning.ensureTable,
     execute: profile.execution.execute,
     operationStrategy: profile.strategy,
@@ -117,7 +127,12 @@ export function createSqlBackend<TTx>(
     contributionTableExists,
   });
 
-  const operations = profile.buildOperations(contributionMaterializer);
+  const operations = profile.buildOperations({
+    capabilities,
+    fencePlan,
+    fenceTarget,
+    contributionMaterializer,
+  });
 
   const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
     createGraphTemplateMembers({
@@ -154,6 +169,7 @@ export function createSqlBackend<TTx>(
   const ctx: EngineAssemblyContext<TTx> = {
     capabilities,
     fencePlan,
+    fenceTarget,
     operations,
     contributionMaterializer,
     self: () => backend,
@@ -184,6 +200,12 @@ export function createSqlBackend<TTx>(
 
   const backend = {
     ...operations,
+    // Set explicitly rather than left to whatever `...operations` carried:
+    // this is the ONE finalized value every mark and every late member
+    // above resolved its decision from, and it must be what the returned
+    // backend advertises even if a dialect's operation-backend layer closed
+    // over a capabilities object of its own.
+    capabilities,
     ...late.transactions,
     ...late.rawSql,
     lockSchemaVersionForWrite: requireDefined(

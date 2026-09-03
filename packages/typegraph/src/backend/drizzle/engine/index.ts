@@ -9,6 +9,7 @@ export type {
   ContributionRuntime,
   EngineAssemblyContext,
   EngineLateMembers,
+  EngineOperationsContext,
   EngineProvisioning,
   EngineTableNames,
   GraphTemplateRuntime,
