@@ -75,6 +75,7 @@ export function createSqlBackend<TTx>(
   const fencePlan = resolveWriteFencePlan({
     dialect: profile.dialect,
     capabilities,
+    fenceSql: profile.fenceTarget.fenceSql,
   });
 
   // The contribution materializer's destructive rebuild runs under the SAME

@@ -280,9 +280,15 @@ import { type RecursiveTraversalCapability } from "./capabilities/recursive-trav
 
 export type { RecursiveTraversalCapability } from "./capabilities/recursive-traversal";
 
-import { type PessimisticLockCapabilities } from "./capabilities/write-fence";
+import {
+  type FenceSql,
+  type PessimisticLockCapabilities,
+} from "./capabilities/write-fence";
 
-export type { PessimisticLockCapabilities } from "./capabilities/write-fence";
+export type {
+  FenceSql,
+  PessimisticLockCapabilities,
+} from "./capabilities/write-fence";
 
 /**
  * Backend capabilities that vary by dialect.
@@ -2157,6 +2163,14 @@ export type GraphBackend = Readonly<{
    * SQLite backend without sqlite-vec).
    */
   vectorStrategy?: VectorStrategy | undefined;
+  /**
+   * The lock-statement spelling this backend's `capabilities.pessimisticLocks`
+   * declaration requires when `advisoryLocks` is `true` — resolved through
+   * {@link resolveWriteFencePlan} rather than read directly by a lock site.
+   * Absent on a backend that serializes writers instead (SQLite's writer
+   * slot needs no lock statement at all) or that declares no usable fence.
+   */
+  fenceSql?: FenceSql | undefined;
 
   // === Node Operations ===
   insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
@@ -3431,6 +3445,7 @@ export type BackendIdentity = Pick<
   | "tableNames"
   | "fulltextStrategy"
   | "vectorStrategy"
+  | "fenceSql"
 >;
 
 export type NodeEntityReadBackend = Pick<

@@ -214,6 +214,8 @@ export function publicNodeRef<G extends GraphDef>(
   return ref as IdentityNodeReference<G>;
 }
 
+const IDENTITY_ADVISORY_LOCK_NAMESPACE = "typegraph:identity";
+
 /**
  * Serializes identity-affecting writers on one graph.
  *
@@ -253,12 +255,9 @@ export async function lockIdentityGraph(
   switch (fence.kind) {
     case "lock": {
       await target.execute(
-        asCompiledRowsSql(sql`
-          SELECT pg_advisory_xact_lock(
-            hashtext('typegraph:identity'),
-            hashtext(${graphId})
-          )
-        `),
+        asCompiledRowsSql(
+          fence.sql.advisoryLock(IDENTITY_ADVISORY_LOCK_NAMESPACE, graphId),
+        ),
       );
       return;
     }
@@ -279,6 +278,13 @@ export async function lockIdentityGraph(
  * Resolves a {@link resolveWriteFencePlan}; the `lock` arm takes the relation
  * lock (needs `tableLocks`), and the `engine-serialized` arm is the SQLite
  * writer-slot case, which has already drained every writer.
+ *
+ * `schema.tables.nodes` — the physical name, not `schema.nodesTable` — is
+ * deliberate: this fence always drains the LIVE node relation regardless of
+ * which relation `schema`'s other fields point a caller's query at (a
+ * recorded-time schema view remaps `nodesTable` to the recorded relation
+ * while leaving `tables.nodes` at the live one). A future caller passing a
+ * recorded-read `SqlSchema` here would still lock the live table, correctly.
  */
 export async function lockIdentityEnablementNodes(
   target: Backend,
@@ -294,7 +300,7 @@ export async function lockIdentityEnablementNodes(
     case "lock": {
       await executeIdentityStatement(
         target,
-        sql`LOCK TABLE ${schema.nodesTable} IN SHARE MODE`,
+        fence.sql.lockTables([schema.tables.nodes], "share"),
       );
       return;
     }

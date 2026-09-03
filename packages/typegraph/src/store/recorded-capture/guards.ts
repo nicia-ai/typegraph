@@ -2,6 +2,7 @@ import {
   recordedRevisionOriginsVerdict,
   statementExecutionVerdict,
 } from "../../backend/capabilities/resolve";
+import { refuseFenceSqlSessionFactUnavailable } from "../../backend/capabilities/write-fence";
 import { normalizeGraphCommandIsolation } from "../../backend/command-contract";
 import {
   type GraphBackend,
@@ -14,7 +15,7 @@ import {
 } from "../../errors";
 import { createSqlSchema, type SqlSchema } from "../../query/compiler/schema";
 import type { SqlDialect } from "../../query/dialect/types";
-import { sql, type SqlFragment } from "../../query/sql-fragment";
+import { type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -120,16 +121,25 @@ export function assertRequestedRecordedIsolation(
 }
 
 export async function assertRecordedCaptureTransactionIsolation(
-  target: Pick<TransactionBackend, "dialect" | "execute">,
+  target: Pick<TransactionBackend, "dialect" | "execute" | "fenceSql">,
   options?: TransactionOptions,
 ): Promise<void> {
   if (!RECORDED_ISOLATION_REQUIRES_POSTGRES_CHECK[target.dialect]) return;
   if (options?.accessMode === "read_only") return;
 
+  // This check is gated purely on `dialect`, not on a resolved write-fence
+  // plan (it runs whether or not history capture takes a lock at all), so it
+  // cannot resolve a `WriteFencePlan` to read the isolation fact through —
+  // it reads the target's OWN `fenceSql` directly instead. A PostgreSQL
+  // target that declares no `fenceSql` gets a typed refusal naming the
+  // session-fact read it cannot spell, rather than having the bundled
+  // spelling substituted under it or being told to fix a lock declaration
+  // this path never consults.
+  if (target.fenceSql === undefined) {
+    refuseFenceSqlSessionFactUnavailable(target.dialect);
+  }
   const rows = await target.execute<IsolationRow>(
-    asCompiledRowsSql(sql`
-      SELECT current_setting('transaction_isolation') AS transaction_isolation
-    `),
+    asCompiledRowsSql(target.fenceSql.isolationFact()),
   );
   const isolationLevel = normalizeGraphCommandIsolation(
     rows[0]?.transaction_isolation,

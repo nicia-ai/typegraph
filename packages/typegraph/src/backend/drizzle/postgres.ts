@@ -230,6 +230,7 @@ import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
 } from "./operations/strategy";
+import { postgresFenceSql } from "./postgres-fence-sql";
 import {
   createPostgresTables as buildPostgresTables,
   type PostgresTables,
@@ -1005,6 +1006,7 @@ function buildPostgresEngineProfile(
   const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
     dialect: "postgres",
     capabilities,
+    fenceSql: postgresFenceSql,
   });
 
   // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
@@ -2791,6 +2793,9 @@ function createPostgresOperationBackend(
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
     dialect: "postgres",
     tableNames,
+    ...(fenceTarget.fenceSql === undefined ?
+      {}
+    : { fenceSql: fenceTarget.fenceSql }),
   });
 
   // `hybridSearch` is not part of the shared assembly — see

@@ -123,6 +123,7 @@ export {
   uniqueSidecarBatchVerdict,
 } from "./resolve";
 export {
+  type FenceSql,
   type PessimisticLockCapabilities,
   requireWriteFence,
   resolveWriteFencePlan,

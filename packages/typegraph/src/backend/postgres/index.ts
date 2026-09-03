@@ -62,6 +62,7 @@ export {
   type PostgresTables,
   tables,
 } from "../drizzle/postgres";
+export { postgresFenceSql } from "../drizzle/postgres-fence-sql";
 export type { SerializedResourceDeclaration } from "../transaction-resource";
 export type {
   BundledBackendCapabilityOverrides,
