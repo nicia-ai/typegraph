@@ -529,8 +529,10 @@ When querying with temporal context, these fields are available:
 
 A row may have **no lower bound at all**, which means "valid since forever, as
 far as this store knows". `asOf` and `current` treat such a row as valid at
-every instant at or before its `validTo`. Two writes produce one:
+every instant strictly before its `validTo`, or every instant if it has no end.
+These writes produce one:
 
+- a Store create or resurrecting upsert stating `validFrom: null`;
 - an interchange record stating `validFrom: null` — a source row confirmed to
   have no lower bound, round-tripped rather than re-stamped;
 - a **born-already-ended** write: one that CREATES a row, or RESETS its window,

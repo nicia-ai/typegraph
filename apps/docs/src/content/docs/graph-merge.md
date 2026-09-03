@@ -990,8 +990,13 @@ Unsupported backends are refused rather than falling back to sequential checks.
 
 ## Valid-time windows
 
-**A new row's window travels with the merge.** A branch-authored node or edge
-window — including a deliberately ended one on a resurrection — is written
+**A new row's window travels with the merge.** An explicitly open-left row stays
+open-left through snapshot and incremental merges, including edge repointing.
+Reviewable plans serialize that lower bound as `validFrom: null`; an omitted
+plan field means the write states no lower-bound change. JSON export/import and
+plan application preserve the distinction.
+
+A branch-authored node or edge window — including a deliberately ended one on a resurrection — is written
 as-is by the commit rather than reset to merge time. When the incremental
 target itself also created the surviving row, the target's committed window
 wins.

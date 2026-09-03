@@ -246,7 +246,7 @@ export type EdgeOperations = Readonly<{
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
@@ -260,7 +260,7 @@ export type EdgeOperations = Readonly<{
       toKind: string;
       toId: string;
       props: Record<string, unknown>;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";

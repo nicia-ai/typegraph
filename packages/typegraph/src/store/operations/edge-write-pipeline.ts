@@ -81,7 +81,7 @@ export type EdgeUpdateWork = Readonly<{
   id: string;
   props: Record<string, unknown>;
   /** See {@link UpdateEdgeParams.validFrom}: stored on the resurrecting leg. */
-  validFrom?: string;
+  validFrom?: string | null;
   clearDeleted?: boolean;
   /**
    * The cardinality claim this update owes, present only when the write

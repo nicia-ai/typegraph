@@ -10,7 +10,12 @@ import { z } from "zod";
 
 import { rowPropsToObject } from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
-import { merge } from "../../src/graph-merge/merge";
+import {
+  applyMergePlan,
+  merge,
+  planMerge,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import {
   enumerateAllEdges,
@@ -313,6 +318,79 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(forkedLegacy).toBeDefined();
     expect(forkedLegacy?.meta.validFrom).toBeUndefined();
   });
+
+  it.each(["direct", "plan", "incremental"] as const)(
+    "preserves open-left staged nodes and edges when merging through %s",
+    async (mode) => {
+      const [baseStore] = await createStoreWithSchema(
+        graph,
+        await makeBackend(),
+        { revisionTracking: true },
+      );
+      const fork = unwrap(await branch<G>(baseStore, () => makeBackend()));
+      const backend = getStoreBackend(fork.store);
+      for (const id of ["open-a", "open-b"]) {
+        await backend.insertNode({
+          graphId: fork.store.graphId,
+          kind: "Person",
+          id,
+          props: { name: id },
+          validFrom: null,
+        });
+      }
+      await backend.insertEdge({
+        graphId: fork.store.graphId,
+        kind: "knows",
+        id: "open-edge",
+        fromKind: "Person",
+        fromId: "open-a",
+        toKind: "Person",
+        toId: "open-b",
+        props: { since: "unknown" },
+        validFrom: null,
+      });
+      if (mode === "direct") {
+        const result = await merge(baseStore, [fork], {});
+        if (isErr(result)) throw result.error;
+      } else {
+        const planned =
+          mode === "plan" ?
+            await planMerge(baseStore, [fork])
+          : await planMergeIncremental({
+              forkPoint: baseStore,
+              target: baseStore,
+              branches: [fork],
+            });
+        const artifact = unwrap(planned);
+        expect(
+          artifact.writes.nodeUpserts.map((node) => node.validFrom),
+        ).toEqual([null, null]);
+        expect(artifact.writes.edgeUpserts[0]?.validFrom).toBeNull();
+        const applied = await applyMergePlan(
+          baseStore,
+          JSON.parse(JSON.stringify(artifact)) as typeof artifact,
+        );
+        if (isErr(applied)) throw applied.error;
+      }
+      const nodes = await enumerateAllNodes(
+        getStoreBackend(baseStore),
+        baseStore.graphId,
+        "Person",
+      );
+      const edges = await enumerateAllEdges(
+        getStoreBackend(baseStore),
+        baseStore.graphId,
+        "knows",
+      );
+      expect(nodes).toHaveLength(2);
+      expect(edges).toHaveLength(1);
+      expect(nodes.map((node) => node.valid_from)).toEqual([
+        undefined,
+        undefined,
+      ]);
+      expect(edges[0]?.valid_from).toBeUndefined();
+    },
+  );
 
   it("honors an explicit branch id from options", async () => {
     const { baseStore } = await seedBase();

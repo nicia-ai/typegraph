@@ -208,7 +208,7 @@ export type AtomicEdgeConvergenceEligibilityInput =
       kind: string;
       matchOn: readonly string[];
       inputs: readonly Readonly<{
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
         clearValidTo?: true;
         onImmutableLowerBound?: "preserve" | "refuse";

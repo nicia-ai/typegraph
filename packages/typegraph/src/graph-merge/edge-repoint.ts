@@ -184,7 +184,7 @@ export type StagedEdge = Readonly<{
    * resolved across the folded set (see {@link repointEdges}), because an end is
    * a monotone claim that must not be lost to the survivor pick.
    */
-  validFrom?: string;
+  validFrom?: string | null;
 }> &
   ValidityEndMutation;
 
@@ -207,7 +207,7 @@ export type MergedEdge = Readonly<{
   props: Readonly<Record<string, JsonValue>>;
   mergedIds: readonly EdgeId[];
   /** The survivor's {@link StagedEdge} window, if it carried one. */
-  validFrom?: string;
+  validFrom?: string | null;
 }> &
   ValidityEndMutation;
 

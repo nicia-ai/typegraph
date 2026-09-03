@@ -92,10 +92,11 @@ export type ClusterMember = Readonly<{
   kind: string;
   branchId: BranchId;
   props: Readonly<Record<string, JsonValue>>;
-  // The row's valid-time window. A `validTo` on a staged member means the
+  // The row's valid-time window. null explicitly preserves an open-left start.
+  // A `validTo` on a staged member means the
   // branch authored the node as ALREADY ENDED — the commit must not resurrect
   // it as current.
-  validFrom?: string;
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -115,7 +116,7 @@ export type CanonicalEntity = Readonly<{
   // untouched). Carried to the commit upsert so a branch-authored window —
   // including a deliberately ENDED one on a resurrection — survives the
   // merge instead of being reset to merge time.
-  validFrom?: string;
+  validFrom?: string | null;
   validTo?: string;
   // The effective survivor window, including committed base survivors whose
   // window is intentionally not copied into the upsert fields above. Identity
@@ -477,9 +478,9 @@ export function canonicalizeCluster(
     ...(windowSource.validTo === undefined ?
       {}
     : { validTo: windowSource.validTo }),
-    ...(windowSource.validFrom === undefined ?
-      {}
-    : { endpointValidFrom: windowSource.validFrom }),
+    ...(typeof windowSource.validFrom === "string" ?
+      { endpointValidFrom: windowSource.validFrom }
+    : {}),
     ...(windowSource.validTo === undefined ?
       {}
     : { endpointValidTo: windowSource.validTo }),

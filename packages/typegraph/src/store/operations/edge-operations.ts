@@ -137,6 +137,7 @@ import {
   assertWritableValidityWindow,
   preservesImmutableLowerBound,
   validateOptionalCanonicalIsoDate,
+  validateStatedValidityLowerBound,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { hasOwnKey, readOwnProperty } from "../../utils/object";
@@ -346,7 +347,7 @@ function buildInsertEdgeParams(
   toKind: string,
   toId: string,
   props: Record<string, unknown>,
-  validFrom: string | undefined,
+  validFrom: string | null | undefined,
   validTo: string | undefined,
   matchIdentity?: Readonly<{ name: string; key: string }>,
 ): InsertEdgeParams {
@@ -359,7 +360,7 @@ function buildInsertEdgeParams(
     toKind: string;
     toId: string;
     props: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     matchIdentity?: Readonly<{ name: string; key: string }>;
   } = {
@@ -441,7 +442,7 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   );
 
   // Validate temporal fields
-  const validFrom = validateOptionalCanonicalIsoDate(
+  const validFrom = validateStatedValidityLowerBound(
     input.validFrom,
     "validFrom",
   );
@@ -1912,7 +1913,7 @@ async function performEdgeUpdate<G extends GraphDef>(
 
   const { validatedProps } = resolveEdgeUpdateProps(ctx, existing, input.props);
 
-  const statedValidFrom = validateOptionalCanonicalIsoDate(
+  const statedValidFrom = validateStatedValidityLowerBound(
     input.validFrom,
     "validFrom",
   );
@@ -3119,7 +3120,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   options?: Readonly<{
     matchOn?: readonly string[];
     ifExists?: IfExistsMode;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
@@ -3155,7 +3156,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   // pair here. A preserve-mode update defers ordering until its write leg has
   // resolved whether it will create/resurrect (and apply the stated start) or
   // update a live row (and retain the stored start).
-  const validFrom = validateOptionalCanonicalIsoDate(
+  const validFrom = validateStatedValidityLowerBound(
     options?.validFrom,
     "validFrom",
   );
@@ -3497,7 +3498,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     toKind: string;
     toId: string;
     props: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
@@ -3538,7 +3539,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     matchProps: Record<string, unknown>;
     compositeKey: string;
     endpointKey: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
@@ -3554,7 +3555,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       operation: "create",
     });
     const matchProps = normalizePersistedEdgeMatchProps(validatedProps);
-    const validFrom = validateOptionalCanonicalIsoDate(
+    const validFrom = validateStatedValidityLowerBound(
       item.validFrom,
       "validFrom",
     );
@@ -3865,7 +3866,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
      * forwarded on the live-update leg too, where the write guard refuses a
      * bound that differs from the one the row already holds.
      */
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";

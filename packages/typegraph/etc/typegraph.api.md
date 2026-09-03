@@ -1237,7 +1237,7 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
     toKind: string;
     toId: string;
     props: z.infer<E["schema"]>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
 }>;
 
@@ -1252,7 +1252,7 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
     kind: N["kind"];
     id?: string;
     props: z.infer<N["schema"]>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
 }>;
 
@@ -1778,7 +1778,7 @@ type EdgeBulkCreateItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.Zo
     to: NodeRef<Pairs["to"]>;
     props?: z.input<Schema>;
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
 }> : never;
 
@@ -1795,7 +1795,7 @@ type EdgeBulkGetOrCreateItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPa
     from: NodeRef<Pairs["from"]>;
     to: NodeRef<Pairs["to"]>;
     props: z.input<E["schema"]>;
-    validFrom?: string;
+    validFrom?: string | null;
     onImmutableLowerBound?: "preserve" | "refuse";
 }> & ValidityEndMutation : never;
 
@@ -1805,7 +1805,7 @@ type EdgeBulkInsertItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.Zo
     to: NodeRef<Pairs["to"]>;
     props?: z.input<Schema>;
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
 }> : never;
 
@@ -1815,7 +1815,7 @@ type EdgeBulkUpsertItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTyp
     from: NodeRef<Pairs["from"]>;
     to: NodeRef<Pairs["to"]>;
     props?: z.input<E["schema"]>;
-    validFrom?: string;
+    validFrom?: string | null;
 }> & ValidityEndMutation : never;
 
 // @public
@@ -1961,7 +1961,7 @@ export type EdgeCreateCommandResult = Readonly<{
 // @public
 type EdgeCreateOptions = Readonly<{
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
 }>;
 
@@ -2022,7 +2022,7 @@ options?: EdgeGetOrCreateByEndpointsOptions<E>
 export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> = Readonly<{
     matchOn?: readonly (keyof z.input<E["schema"]>)[];
     ifExists?: IfExistsMode;
-    validFrom?: string;
+    validFrom?: string | null;
     onImmutableLowerBound?: "preserve" | "refuse";
 }> & ValidityEndMutation;
 
@@ -4780,7 +4780,7 @@ type NodeChange = Readonly<{
 export type NodeCollection<N extends NodeType, CN extends string = string> = Readonly<{
     create: (props: z.input<N["schema"]>, options?: Readonly<{
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
     }>) => Promise<Node<N>>;
     getById: (id: NodeId<N>, options?: QueryOptions) => Promise<Node<N> | undefined>;
@@ -4814,27 +4814,27 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     count: (temporal?: QueryOptions) => Promise<number>;
     createFromRecord: (data: Record<string, unknown>, options?: Readonly<{
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
     }>) => Promise<Node<N>>;
     upsertById: (id: string, props: z.input<N["schema"]>, options?: Readonly<{
-        validFrom?: string;
+        validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation) => Promise<Node<N>>;
     upsertByIdFromRecord: (id: string, data: Record<string, unknown>, options?: Readonly<{
-        validFrom?: string;
+        validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation) => Promise<Node<N>>;
     bulkCreate: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
     }>[]) => Promise<Node<N>[]>;
     bulkUpsertById: (items: readonly (Readonly<{
         id: string;
         props: z.input<N["schema"]>;
-        validFrom?: string;
+        validFrom?: string | null;
         onImmutableLowerBound?: "preserve" | "refuse";
     }> & ValidityEndMutation)[]) => Promise<Node<N>[]>;
     bulkReplaceById: (items: readonly Readonly<{
@@ -4844,7 +4844,7 @@ export type NodeCollection<N extends NodeType, CN extends string = string> = Rea
     bulkInsert: (items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
     }>[]) => Promise<void>;
     bulkDelete: (ids: readonly NodeId<N>[]) => Promise<void>;

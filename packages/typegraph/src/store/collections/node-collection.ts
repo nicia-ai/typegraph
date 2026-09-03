@@ -87,7 +87,7 @@ function isNodeReplacementPartitionMovement(error: unknown): boolean {
 type OnImmutableLowerBound = "preserve" | "refuse";
 
 type NodeUpsertOptions = Readonly<{
-  validFrom?: string;
+  validFrom?: string | null;
   onImmutableLowerBound?: OnImmutableLowerBound;
 }> &
   ValidityEndMutation;
@@ -188,7 +188,7 @@ function evaluateNodePredicate<N extends NodeType>(
  */
 export type UpsertUpdateNodeInput = UpdateNodeInput &
   Readonly<{
-    validFrom?: string;
+    validFrom?: string | null;
     onImmutableLowerBound?: OnImmutableLowerBound;
   }>;
 
@@ -322,13 +322,17 @@ export type NodeCollectionConfig = Readonly<{
 function buildCreateInput(
   kind: string,
   props: Record<string, unknown>,
-  options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+  options?: Readonly<{
+    id?: string;
+    validFrom?: string | null;
+    validTo?: string;
+  }>,
 ): CreateNodeInput {
   const input: {
     kind: string;
     id?: string;
     props: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   } = { kind, props };
   if (options?.id !== undefined) input.id = options.id;
@@ -361,7 +365,7 @@ function buildUpsertUpdateInput(
   id: string,
   props: Record<string, unknown>,
   options?: Readonly<{
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: OnImmutableLowerBound;
@@ -371,7 +375,7 @@ function buildUpsertUpdateInput(
     kind: string;
     id: string;
     props: Partial<Record<string, unknown>>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: OnImmutableLowerBound;
@@ -390,7 +394,7 @@ function mapBulkNodeInputs(
   items: readonly Readonly<{
     props: Record<string, unknown>;
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }>[],
 ): CreateNodeInput[] {
@@ -437,14 +441,22 @@ export function createNodeCollection<
   return {
     async create(
       props: z.input<N["schema"]>,
-      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+      options?: Readonly<{
+        id?: string;
+        validFrom?: string | null;
+        validTo?: string;
+      }>,
     ): Promise<Node<N>> {
       return this.createFromRecord(props, options);
     },
 
     async createFromRecord(
       data: Record<string, unknown>,
-      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+      options?: Readonly<{
+        id?: string;
+        validFrom?: string | null;
+        validTo?: string;
+      }>,
     ): Promise<Node<N>> {
       const result = await executeNodeCreate(
         buildCreateInput(kind, data, options),
@@ -802,7 +814,7 @@ export function createNodeCollection<
       items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<Node<N>[]> {
@@ -902,7 +914,7 @@ export function createNodeCollection<
       items: readonly Readonly<{
         id: string;
         props: z.input<N["schema"]>;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
         clearValidTo?: true;
         onImmutableLowerBound?: OnImmutableLowerBound;
@@ -1194,7 +1206,7 @@ export function createNodeCollection<
       items: readonly Readonly<{
         props: z.input<N["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<void> {

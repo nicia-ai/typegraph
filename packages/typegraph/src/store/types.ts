@@ -157,7 +157,8 @@ export type CreateNodeInput<N extends NodeType = NodeType> = Readonly<{
   kind: N["kind"];
   id?: string; // Optional - will generate ULID if not provided
   props: z.infer<N["schema"]>;
-  validFrom?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -214,7 +215,8 @@ export type CreateEdgeInput<E extends AnyEdgeType = EdgeType> = Readonly<{
   toKind: string;
   toId: string;
   props: z.infer<E["schema"]>;
-  validFrom?: string;
+  /** Omit to use the creation default; null explicitly requests no lower bound. */
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -797,7 +799,7 @@ export type EdgeGetOrCreateByEndpointsOptions<E extends AnyEdgeType> =
      * (`ifExists: "return"`), which writes nothing at all — there the window
      * describes the edge to create if none is found.
      */
-    validFrom?: string;
+    validFrom?: string | null;
     /**
      * How an `ifExists: "update"` write treats a stated `validFrom` that differs
      * from the live edge's stored lower bound. Default: `"refuse"`.
@@ -842,7 +844,11 @@ export type NodeCollection<
    */
   create: (
     props: z.input<N["schema"]>,
-    options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+    options?: Readonly<{
+      id?: string;
+      validFrom?: string | null;
+      validTo?: string;
+    }>,
   ) => Promise<Node<N>>;
 
   /** Get a node by ID */
@@ -959,7 +965,11 @@ export type NodeCollection<
    */
   createFromRecord: (
     data: Record<string, unknown>,
-    options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+    options?: Readonly<{
+      id?: string;
+      validFrom?: string | null;
+      validTo?: string;
+    }>,
   ) => Promise<Node<N>>;
 
   /**
@@ -989,7 +999,7 @@ export type NodeCollection<
     id: string,
     props: z.input<N["schema"]>,
     options?: Readonly<{
-      validFrom?: string;
+      validFrom?: string | null;
       onImmutableLowerBound?: "preserve" | "refuse";
     }> &
       ValidityEndMutation,
@@ -1021,7 +1031,7 @@ export type NodeCollection<
     id: string,
     data: Record<string, unknown>,
     options?: Readonly<{
-      validFrom?: string;
+      validFrom?: string | null;
       onImmutableLowerBound?: "preserve" | "refuse";
     }> &
       ValidityEndMutation,
@@ -1043,7 +1053,7 @@ export type NodeCollection<
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
       id?: string;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
     }>[],
   ) => Promise<Node<N>[]>;
@@ -1092,7 +1102,7 @@ export type NodeCollection<
     items: readonly (Readonly<{
       id: string;
       props: z.input<N["schema"]>;
-      validFrom?: string;
+      validFrom?: string | null;
       onImmutableLowerBound?: "preserve" | "refuse";
     }> &
       ValidityEndMutation)[],
@@ -1132,7 +1142,7 @@ export type NodeCollection<
     items: readonly Readonly<{
       props: z.input<N["schema"]>;
       id?: string;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
     }>[],
   ) => Promise<void>;
@@ -1249,7 +1259,7 @@ export type NodeRef<N extends NodeType = NodeType> =
  */
 type EdgeCreateOptions = Readonly<{
   id?: string;
-  validFrom?: string;
+  validFrom?: string | null;
   validTo?: string;
 }>;
 
@@ -1302,7 +1312,7 @@ type EdgeBulkCreateItem<
       to: NodeRef<Pairs["to"]>;
       props?: z.input<Schema>;
       id?: string;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
     }>
   : never;
@@ -1317,7 +1327,7 @@ type EdgeBulkUpsertItem<
       from: NodeRef<Pairs["from"]>;
       to: NodeRef<Pairs["to"]>;
       props?: z.input<E["schema"]>;
-      validFrom?: string;
+      validFrom?: string | null;
     }> &
       ValidityEndMutation
   : never;
@@ -1332,7 +1342,7 @@ type EdgeBulkInsertItem<
       to: NodeRef<Pairs["to"]>;
       props?: z.input<Schema>;
       id?: string;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
     }>
   : never;
@@ -1346,7 +1356,7 @@ type EdgeBulkGetOrCreateItem<
       from: NodeRef<Pairs["from"]>;
       to: NodeRef<Pairs["to"]>;
       props: z.input<E["schema"]>;
-      validFrom?: string;
+      validFrom?: string | null;
       onImmutableLowerBound?: "preserve" | "refuse";
     }> &
       ValidityEndMutation

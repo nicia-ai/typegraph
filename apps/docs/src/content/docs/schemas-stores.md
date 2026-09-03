@@ -849,11 +849,35 @@ example with multiple graphs.
 
 The store provides typed node and edge collections via `store.nodes.*` and `store.edges.*`.
 
-Every write method below that accepts a `validFrom` option (`create`,
+On creation, every method that accepts `validFrom` (`create`,
 `createFromRecord`, `upsertById`, `upsertByIdFromRecord`, `bulkCreate`,
-`bulkInsert`, `bulkUpsertById`, and their edge equivalents) defaults it to
-that operation's own creation timestamp when omitted. `validTo` remains
-optional and open-ended until set.
+`bulkInsert`, `bulkUpsertById`, and their edge equivalents) distinguishes three
+inputs:
+
+| Input | Stored lower bound |
+| --- | --- |
+| Omitted | The operation's creation timestamp, except for the born-ended case below |
+| Canonical UTC timestamp | That timestamp |
+| `null` | No lower bound: an explicitly **open-left** window |
+
+```typescript
+const person = await store.nodes.Person.create(
+  { name: "Alice" },
+  { validFrom: null },
+);
+// person.meta.validFrom === undefined
+```
+
+An open-left row is visible at every valid-time coordinate before its `validTo`,
+or at every coordinate when there is no end. Returned metadata uses `undefined`
+for an absent bound; pass `validFrom: row.meta.validFrom ?? null` to preserve that
+state when creating a copy. Passing `undefined` requests the creation default.
+`validTo` remains optional and open-ended until set.
+
+On a live upsert, omission preserves the stored lower bound. An explicit `null`
+restates an already open-left row and is refused if the live row has a timestamp,
+just as a different timestamp is refused. `onImmutableLowerBound: "preserve"`
+continues to make the stated bound creation/resurrection-only input.
 
 The one exception is a row **born already ended**: a write that CREATES or
 RESETS a row's window while stating a `validTo` at or before its own instant and
@@ -914,7 +938,7 @@ Creates a new node.
 ```typescript
 store.nodes.Person.create(
   props: { name: string; email?: string },
-  options?: { id?: string; validFrom?: string; validTo?: string }
+  options?: { id?: string; validFrom?: string | null; validTo?: string }
 ): Promise<Node<Person>>;
 ```
 
@@ -1132,7 +1156,7 @@ at runtime, not compile time. The return type is fully typed — only the input 
 ```typescript
 store.nodes.Person.createFromRecord(
   data: Record<string, unknown>,
-  options?: { id?: string; validFrom?: string; validTo?: string }
+  options?: { id?: string; validFrom?: string | null; validTo?: string }
 ): Promise<Node<Person>>;
 ```
 
@@ -1152,7 +1176,7 @@ store.nodes.Person.upsertById(
   id: string,
   props: { name: string; email?: string },
   options?: {
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
@@ -1207,7 +1231,7 @@ store.nodes.Person.upsertByIdFromRecord(
   id: string,
   data: Record<string, unknown>,
   options?: {
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
@@ -1232,7 +1256,7 @@ store.nodes.Person.bulkCreate(
   items: readonly {
     props: { name: string; email?: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<Node<Person>[]>;
@@ -1254,7 +1278,7 @@ store.nodes.Person.bulkInsert(
   items: readonly {
     props: { name: string; email?: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<void>;
@@ -1269,7 +1293,7 @@ store.nodes.Person.bulkUpsertById(
   items: readonly {
     id: string;
     props: { name: string; email?: string };
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
@@ -1732,7 +1756,7 @@ store.edges.worksAt.bulkCreate(
     to: NodeRef<Company>;
     props?: { role: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<Edge<worksAt>[]>;
@@ -1756,7 +1780,7 @@ store.edges.worksAt.bulkInsert(
     to: NodeRef<Company>;
     props?: { role: string };
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }[]
 ): Promise<void>;
@@ -1788,7 +1812,7 @@ store.edges.worksAt.bulkUpsertById(
     from: NodeRef<Person>;
     to: NodeRef<Company>;
     props?: { role: string };
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
   }[]
@@ -1845,7 +1869,7 @@ store.edges.worksAt.getOrCreateByEndpoints(
   options?: {
     matchOn?: readonly ("role")[]; // Default: []
     ifExists?: "return" | "update"; // Default: "return"
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve"; // Default: "refuse"
@@ -1927,7 +1951,7 @@ store.edges.worksAt.bulkGetOrCreateByEndpoints(
     from: NodeRef<Person>;
     to: NodeRef<Company>;
     props: { role: string };
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
     onImmutableLowerBound?: "refuse" | "preserve";
