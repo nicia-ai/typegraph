@@ -342,7 +342,7 @@ export function validityWindowContainsInstant(
  * PRECONDITION: as {@link isEmptyValidityWindow}. This is called BELOW the
  * validation boundary, on a public `GraphBackend` surface, so canonicality is
  * established by whoever reached the backend: store paths through
- * {@link validateOptionalCanonicalIsoDate}, interchange import through its own
+ * {@link validateStatedValidityLowerBound}, interchange import through its own
  * window validator, trusted import through its per-chunk format check. A direct
  * `GraphBackend` caller establishes it itself — a pre-existing property of that
  * surface, written down here rather than left implicit.
@@ -361,7 +361,7 @@ export function resolveStampedValidityLowerBound(
 
 /**
  * The lower bound a write that PASSES THROUGH a stated one stores: `null` — the
- * interchange spelling of a confirmed open-left window — becomes "no bound", and
+ * write-protocol spelling of a confirmed open-left window — becomes "no bound", and
  * a string is stored verbatim.
  *
  * Separate from {@link resolveStampedValidityLowerBound} because it answers a

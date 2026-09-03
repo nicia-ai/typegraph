@@ -669,7 +669,7 @@ export function createNodeBatchValidationSeams(
       version: 1,
       // The simulated cached row only needs a NodeRow-shaped valid_from
       // (string | undefined, never null) for existence/uniqueness checks,
-      // which don't inspect its value — normalize import's explicit-NULL
+      // which don't inspect its value — normalize the write protocol's explicit-NULL
       // sentinel away rather than widen this cache's row shape.
       valid_from: params.validFrom ?? undefined,
       valid_to: params.validTo,
