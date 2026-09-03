@@ -192,6 +192,9 @@ async function runFulltextRebuild(
   const { registry } = ctx;
   const backend = driver.read;
 
+  // Member presence rather than `resolveBackendFulltext`: this is the type
+  // guard that narrows `backend.upsertFulltext` / `backend.deleteFulltext`
+  // for the calls the rebuild loop below makes.
   if (!backend.upsertFulltext || !backend.deleteFulltext) {
     throw new ConfigurationError(
       "Backend does not support fulltext; cannot rebuild index",

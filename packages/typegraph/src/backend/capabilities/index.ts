@@ -97,6 +97,7 @@ export {
   WS5B_SEED_BUNDLES,
   type Ws5bBundleId,
 } from "./bundle-registry";
+export { resolveBackendFulltext } from "./fulltext";
 export {
   batchPointReadVerdict,
   type BundleVerdictOf,

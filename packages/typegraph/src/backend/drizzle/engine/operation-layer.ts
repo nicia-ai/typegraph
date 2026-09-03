@@ -267,7 +267,8 @@ export type CreateEngineOperationBackendDeps = Readonly<{
   capabilities: BackendCapabilities;
   dialect: SqlDialect;
   tableNames: EngineTableNames;
-  fulltextStrategy: FulltextStrategy;
+  /** Absent when this backend has no fulltext support (`fulltext: false`). */
+  fulltextStrategy: FulltextStrategy | undefined;
   /** Absent when this connection has no vector extension loaded. */
   vectorStrategy?: VectorStrategy;
 }>;
@@ -305,7 +306,7 @@ export function createEngineOperationBackend(
     capabilities,
     dialect,
     tableNames,
-    fulltextStrategy,
+    ...(fulltextStrategy === undefined ? {} : { fulltextStrategy }),
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
 
     lockSchemaVersionForWrite,

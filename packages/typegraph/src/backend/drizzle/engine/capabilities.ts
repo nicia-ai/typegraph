@@ -36,8 +36,12 @@ export type FinalizeEngineCapabilitiesDeps = Readonly<{
    * wrapper, `"none"` otherwise.
    */
   execution: SqlExecutionAdapter;
-  /** The profile's full-text strategy, one of the two inputs `contributionRebuildSupported` needs. */
-  fulltextStrategy: FulltextStrategy;
+  /**
+   * The profile's full-text strategy, one of the two inputs
+   * `contributionRebuildSupported` needs, or `undefined` when this backend
+   * has no fulltext support (`fulltext: false`).
+   */
+  fulltextStrategy: FulltextStrategy | undefined;
   /** The profile's physical fulltext table name, the other input `contributionRebuildSupported` needs. */
   fulltextTableName: string;
 }>;

@@ -4,7 +4,7 @@ import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy"
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
 import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
-import { isPresent } from "../../../utils/presence";
+import { isPresent, requireDefined } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type {
   AtomicEdgeDeleteBatchInput,
@@ -705,7 +705,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
 function createCommonOperationStrategy(
   tables: Tables,
   dialect: SqlDialect,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy: VectorStrategy | undefined,
 ): CommonOperationStrategy {
   const tableOperations = bindTableOperationBuilders(
@@ -739,43 +739,47 @@ function createCommonOperationStrategy(
       params: UpsertFulltextParams,
       timestamp: string,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildUpsert(fulltextTable, params, timestamp)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (fulltextStrategy?.buildUpsert(fulltextTable, params, timestamp) ?? []).map(
+        (statement) => toDrizzleSql(statement, dialect),
+      ),
     buildDeleteFulltext: (params: DeleteFulltextParams): readonly SQL[] =>
-      fulltextStrategy
-        .buildDelete(fulltextTable, params)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (fulltextStrategy?.buildDelete(fulltextTable, params) ?? []).map(
+        (statement) => toDrizzleSql(statement, dialect),
+      ),
     buildDeleteFulltextByNode: (
       graphId: string,
       nodeKind: string,
       nodeId: string,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildDelete(fulltextTable, {
+      (
+        fulltextStrategy?.buildDelete(fulltextTable, {
           graphId,
           nodeKind,
           nodeId,
-        })
-        .map((statement) => toDrizzleSql(statement, dialect)),
+        }) ?? []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildUpsertFulltextBatch: (
       params: UpsertFulltextBatchParams,
       timestamp: string,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildBatchUpsert(fulltextTable, params, timestamp)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (
+        fulltextStrategy?.buildBatchUpsert(fulltextTable, params, timestamp) ??
+        []
+      ).map((statement) => toDrizzleSql(statement, dialect)),
     buildDeleteFulltextBatch: (
       params: DeleteFulltextBatchParams,
     ): readonly SQL[] =>
-      fulltextStrategy
-        .buildBatchDelete(fulltextTable, params)
-        .map((statement) => toDrizzleSql(statement, dialect)),
+      (fulltextStrategy?.buildBatchDelete(fulltextTable, params) ?? []).map(
+        (statement) => toDrizzleSql(statement, dialect),
+      ),
     buildFulltextSearch: (params: FulltextSearchParams): SQL =>
       buildFulltextSearch(
         fulltextTable,
         params,
-        fulltextStrategy,
+        requireDefined(
+          fulltextStrategy,
+          "buildFulltextSearch requires an active fulltext strategy",
+        ),
         dialect,
         // Store-compiled candidates (predicates + subclass + currency)
         // take precedence; the live-node default covers direct backend use.
@@ -820,7 +824,10 @@ function createCommonOperationStrategy(
             {}
           : { includeSnippets: params.fulltext.includeSnippets }),
         },
-        fulltextStrategy,
+        requireDefined(
+          fulltextStrategy,
+          "buildHybridSearch requires an active fulltext strategy",
+        ),
         dialect,
         // Reference, not copy: the statement evaluates the shared
         // tg_hybrid_cand CTE once for both legs.
@@ -910,8 +917,10 @@ function createCommonOperationStrategy(
   return {
     ...tableOperations,
     ...fulltextBuilders,
-    atomicNodeProjectionFamilies:
-      vectorStrategy === undefined ? ["fulltext"] : ["embedding", "fulltext"],
+    atomicNodeProjectionFamilies: [
+      ...(vectorStrategy === undefined ? [] : (["embedding"] as const)),
+      ...(fulltextStrategy === undefined ? [] : (["fulltext"] as const)),
+    ],
     buildConvergeEdgeCreate: (params) =>
       buildConvergeEdgeCreate(tables, params),
     buildAtomicConvergeEdges: (params) =>
@@ -1234,7 +1243,7 @@ function createCommonOperationStrategy(
       }
     },
     buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
-      return buildClearGraph(tables, graphId);
+      return buildClearGraph(tables, graphId, fulltextStrategy);
     },
   };
 }
@@ -1296,7 +1305,7 @@ export function createCachedTableExistence(
 
 export function createSqliteOperationStrategy(
   tables: SqliteTables,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy?: VectorStrategy,
 ): SqliteOperationStrategy {
   return createCommonOperationStrategy(
@@ -1310,7 +1319,7 @@ export function createSqliteOperationStrategy(
 function createPostgresNodeProjectionBuilders(
   tables: PostgresTables,
   dialect: SqlDialect,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy: VectorStrategy | undefined,
 ): Pick<CommonOperationStrategy, "buildInsertNodeWithProjections"> {
   const fulltextTable = tables.fulltextTableName;
@@ -1333,7 +1342,7 @@ function createPostgresNodeProjectionBuilders(
 
 export function createPostgresOperationStrategy(
   tables: PostgresTables,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy?: VectorStrategy,
 ): PostgresOperationStrategy {
   return {

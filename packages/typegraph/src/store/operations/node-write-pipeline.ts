@@ -695,6 +695,11 @@ export async function applyNodeSetUpdate(
     );
   }
   if (
+    // Narrower than "is fulltext available on this backend"
+    // (`resolveBackendFulltext`): a backend can have an active fulltext
+    // strategy yet still lack the batch primitives a set-based update needs,
+    // so this checks the four members the write plan below actually calls,
+    // mirroring the batched-uniqueness and batched-vector checks around it.
     getSearchableFields(schema).length > 0 &&
     (backend.upsertFulltext === undefined ||
       backend.deleteFulltext === undefined ||

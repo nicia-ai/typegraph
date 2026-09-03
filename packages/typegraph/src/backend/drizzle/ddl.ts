@@ -407,9 +407,10 @@ function isSqliteTable(
  * walking base tables.
  */
 export function runtimeStrategyContributions(
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | false,
   fulltextTableName: string,
 ): readonly StrategyTableContribution[] {
+  if (fulltextStrategy === false) return [];
   return fulltextStrategy
     .ownedTables(fulltextTableName)
     .filter((contribution) => contribution.runtimeEnsure);
@@ -423,7 +424,7 @@ export function runtimeStrategyContributions(
  */
 export function sqliteContributions(
   tables: SqliteTables = sqliteTables,
-  fulltextStrategy: FulltextStrategy = fts5Strategy,
+  fulltextStrategy: FulltextStrategy | false = fts5Strategy,
 ): readonly TableContribution[] {
   const contributions: TableContribution[] = [];
   for (const [key, table] of Object.entries(tables)) {
@@ -443,11 +444,14 @@ export function sqliteContributions(
     });
   }
   // Strategy declarations are already authoritative contributions;
-  // emitted last (after base tables).
-  for (const declared of fulltextStrategy.ownedTables(
-    tables.fulltextTableName,
-  )) {
-    contributions.push(declared);
+  // emitted last (after base tables). `false` (`fulltext: false`)
+  // contributes no fulltext table at all.
+  if (fulltextStrategy !== false) {
+    for (const declared of fulltextStrategy.ownedTables(
+      tables.fulltextTableName,
+    )) {
+      contributions.push(declared);
+    }
   }
   return contributions;
 }
@@ -464,7 +468,7 @@ export function sqliteContributions(
  */
 export function generateSqliteDDL(
   tables: SqliteTables = sqliteTables,
-  fulltextStrategy: FulltextStrategy = fts5Strategy,
+  fulltextStrategy: FulltextStrategy | false = fts5Strategy,
 ): string[] {
   return sqliteContributions(tables, fulltextStrategy).flatMap(
     (contribution) => [...contribution.createDdl],
@@ -477,7 +481,7 @@ export function generateSqliteDDL(
  */
 export function generateSqliteMigrationSQL(
   tables: SqliteTables = sqliteTables,
-  fulltextStrategy: FulltextStrategy = fts5Strategy,
+  fulltextStrategy: FulltextStrategy | false = fts5Strategy,
 ): string {
   const ddlSql = generateSqliteDDL(tables, fulltextStrategy).join("\n\n");
   const markerSql = generateBaseSchemaVersionMarkerSQL(
@@ -643,7 +647,7 @@ function isPgTable(
  */
 export function postgresContributions(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): readonly TableContribution[] {
   const contributions: TableContribution[] = [];
   for (const [key, table] of Object.entries(tables)) {
@@ -666,10 +670,13 @@ export function postgresContributions(
       runtimeEnsure: false,
     });
   }
-  for (const declared of fulltextStrategy.ownedTables(
-    tables.fulltextTableName,
-  )) {
-    contributions.push(declared);
+  // `false` (`fulltext: false`) contributes no fulltext table at all.
+  if (fulltextStrategy !== false) {
+    for (const declared of fulltextStrategy.ownedTables(
+      tables.fulltextTableName,
+    )) {
+      contributions.push(declared);
+    }
   }
   return contributions;
 }
@@ -686,7 +693,7 @@ export function postgresContributions(
  */
 export function generatePostgresDDL(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): string[] {
   return postgresContributions(tables, fulltextStrategy).flatMap(
     (contribution) => [...contribution.createDdl],
@@ -696,7 +703,7 @@ export function generatePostgresDDL(
 /** Builds complete PostgreSQL installation SQL for a bundled factory profile. */
 function generatePostgresInstallationSQL(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
   includeVectorExtension: boolean,
 ): string {
   // pgvector extension is required for the per-field embedding tables
@@ -724,7 +731,7 @@ function generatePostgresInstallationSQL(
  */
 export function generatePostgresMigrationSQL(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): string {
   return generatePostgresInstallationSQL(tables, fulltextStrategy, true);
 }
@@ -732,7 +739,7 @@ export function generatePostgresMigrationSQL(
 /** @internal Complete installation SQL for the vector-disabled PGlite factory. */
 export function generateVectorlessPostgresMigrationSQL(
   tables: PostgresTables = postgresTables,
-  fulltextStrategy: FulltextStrategy = tsvectorStrategy,
+  fulltextStrategy: FulltextStrategy | false = tsvectorStrategy,
 ): string {
   return generatePostgresInstallationSQL(tables, fulltextStrategy, false);
 }

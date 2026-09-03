@@ -22,6 +22,7 @@ import {
   getSearchableFields,
   type SearchableFieldInfo,
 } from "../core/searchable";
+import { UnsupportedBackendCapabilityError } from "../errors";
 import { readOwnProperty } from "../utils/object";
 
 export { getSearchableFields } from "../core/searchable";
@@ -34,6 +35,28 @@ export type FulltextSyncContext = Readonly<{
 }>;
 
 const FIELD_SEPARATOR = "\n";
+
+/**
+ * Refuses with a typed error, rather than silently dropping the write, when
+ * a node kind declares `searchable()` fields but the backend has no
+ * fulltext support (`fulltext: false`). The backend's fulltext methods are
+ * absent in that state (mirroring the vector methods on a vector-off
+ * backend), so `syncFulltext` / `syncFulltextBatchForKind` /
+ * `deleteNodeFulltext` would otherwise no-op forever instead of surfacing
+ * the mismatch at the first write.
+ */
+function refuseFulltextUnavailable(
+  backend: GraphBackend | TransactionBackend,
+  nodeKind: string,
+): never {
+  throw new UnsupportedBackendCapabilityError(
+    `Node kind "${nodeKind}" declares searchable() fields`,
+    "fulltext_unsupported",
+    { backend: backend.dialect, nodeKind },
+    "This backend was created with `fulltext: false`. Remove the " +
+      "searchable() declaration, or use a backend with fulltext support.",
+  );
+}
 
 /**
  * Picks a representative language when a node has searchable fields with
@@ -122,7 +145,14 @@ export async function syncFulltext(
 ): Promise<void> {
   const { backend } = ctx;
 
+  // Member presence rather than `resolveBackendFulltext`: this same check is
+  // what narrows `backend.upsertFulltext` / `backend.deleteFulltext` from
+  // optional to defined for the calls below, so it doubles as the type
+  // guard the rest of the function relies on.
   if (!backend.upsertFulltext || !backend.deleteFulltext) {
+    if (getSearchableFields(schema).length > 0) {
+      refuseFulltextUnavailable(backend, ctx.nodeKind);
+    }
     return;
   }
 
@@ -165,7 +195,14 @@ export async function syncFulltextBatchForKind(
   }>[],
 ): Promise<void> {
   const { graphId, nodeKind, backend } = args;
+  // Member presence rather than `resolveBackendFulltext`: this same check is
+  // what narrows `backend.upsertFulltext` / `backend.deleteFulltext` from
+  // optional to defined for the calls below, so it doubles as the type
+  // guard the rest of the function relies on.
   if (!backend.upsertFulltext || !backend.deleteFulltext) {
+    if (getSearchableFields(schema).length > 0) {
+      refuseFulltextUnavailable(backend, nodeKind);
+    }
     return;
   }
 
@@ -226,7 +263,12 @@ export async function deleteNodeFulltext(
 ): Promise<void> {
   const { backend } = ctx;
 
+  // Member presence rather than `resolveBackendFulltext`: this is the type
+  // guard that narrows `backend.deleteFulltext` for the call below.
   if (!backend.deleteFulltext) {
+    if (getSearchableFields(schema).length > 0) {
+      refuseFulltextUnavailable(backend, ctx.nodeKind);
+    }
     return;
   }
 

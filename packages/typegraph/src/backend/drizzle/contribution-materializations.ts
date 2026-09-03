@@ -588,7 +588,13 @@ export type ContributionMaterializerDeps = Readonly<{
    * lock decision itself.
    */
   fenceTarget: WriteFenceTarget;
-  fulltextStrategy: FulltextStrategy;
+  /**
+   * Active fulltext strategy, or `undefined` when fulltext support is
+   * disabled (`fulltext: false`). Mirrors `vectorStrategy` below: with no
+   * strategy there is no fulltext contribution to materialize, assert, or
+   * rebuild.
+   */
+  fulltextStrategy: FulltextStrategy | undefined;
   fulltextTableName: string;
   /**
    * Active vector strategy, or `undefined` when vector support is
@@ -794,15 +800,16 @@ export type ContributionMaterializer = Readonly<{
  * is worse than one that declines.
  */
 export function contributionRebuildSupported(
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   fulltextTableName: string,
   transactional: boolean,
 ): boolean {
   return (
     transactional &&
-    runtimeStrategyContributions(fulltextStrategy, fulltextTableName).every(
-      (contribution) => contribution.dropDdl !== undefined,
-    )
+    runtimeStrategyContributions(
+      fulltextStrategy ?? false,
+      fulltextTableName,
+    ).every((contribution) => contribution.dropDdl !== undefined)
   );
 }
 
@@ -921,7 +928,10 @@ export function createContributionMaterializer(
   }
 
   function runtimeContributions(): readonly StrategyTableContribution[] {
-    return runtimeStrategyContributions(fulltextStrategy, fulltextTableName);
+    return runtimeStrategyContributions(
+      fulltextStrategy ?? false,
+      fulltextTableName,
+    );
   }
 
   type ResolvedContribution = Readonly<{
@@ -1810,6 +1820,12 @@ export function createContributionMaterializer(
         "vector-source-unavailable",
         { graphId, contribution: scope },
       );
+    }
+    if (fulltextStrategy === undefined) {
+      throw new ContributionRebuildUnsupportedError("fulltext-unavailable", {
+        graphId,
+        contribution: scope,
+      });
     }
     const contributions = runtimeContributions();
     const withoutTeardown = contributions.find(

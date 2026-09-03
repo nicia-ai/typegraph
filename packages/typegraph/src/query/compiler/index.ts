@@ -154,11 +154,13 @@ export type CompileQueryOptions = Readonly<{
   /**
    * Fulltext strategy override. When set, overrides the dialect's
    * default fulltext strategy for `$fulltext.matches()` compilation.
-   * Callers typically read this from `backend.fulltextStrategy` so a
-   * backend-declared strategy (e.g. ParadeDB) wins over the dialect
-   * default (tsvector).
+   * Callers typically read this from `resolveBackendFulltext(backend)` so
+   * a backend-declared strategy (e.g. ParadeDB) wins over the dialect
+   * default (tsvector), and `false` (a backend built with
+   * `fulltext: false`) compiles a `matches()` predicate to a typed
+   * refusal instead of the dialect default.
    */
-  fulltextStrategy?: FulltextStrategy | undefined;
+  fulltextStrategy?: FulltextStrategy | false | undefined;
   /**
    * Vector strategy override. When set, `field.similarTo(...)`
    * predicates compile against the strategy's per-`(kind, field)`
@@ -417,12 +419,25 @@ export function compileSetOperation(
  * absent or identical to the dialect default — shipped backends always
  * set `fulltextStrategy`, so this short-circuit keeps the common path
  * from allocating a fresh adapter on every compile.
+ *
+ * `false` (a backend built with `fulltext: false`) is a third, distinct
+ * signal from `undefined`: it declares no fulltext support at all, so a
+ * `matches()` predicate hits the compiler's typed refusal instead of
+ * falling back to the dialect's own default strategy and compiling SQL
+ * against a table this backend never creates.
  */
 function resolveDialectAdapter(
   dialect: SqlDialect,
-  fulltextStrategy: FulltextStrategy | undefined,
+  fulltextStrategy: FulltextStrategy | false | undefined,
 ): DialectAdapter {
   const baseAdapter = getDialect(dialect);
+  if (fulltextStrategy === false) {
+    return {
+      ...baseAdapter,
+      capabilities: { ...baseAdapter.capabilities, supportsFulltext: false },
+      fulltext: undefined,
+    };
+  }
   if (
     fulltextStrategy === undefined ||
     fulltextStrategy === baseAdapter.fulltext

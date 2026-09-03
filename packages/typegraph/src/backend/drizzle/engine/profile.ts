@@ -280,8 +280,12 @@ export type SqlEngineProfile<TTx> = Readonly<{
    * its writes and reads against.
    */
   strategy: CommonOperationStrategy;
-  /** The dialect's full-text search strategy; feeds capability derivation and search compilation. */
-  fulltext: FulltextStrategy;
+  /**
+   * The dialect's full-text search strategy, or `undefined` when this
+   * backend has no fulltext support (`fulltext: false`). Feeds capability
+   * derivation and search compilation.
+   */
+  fulltext: FulltextStrategy | undefined;
   /** The dialect's vector-search strategy, or `undefined` when this connection has no vector extension loaded. */
   vector: VectorStrategy | undefined;
   /** The dialect's declared capabilities, before its capability tail runs. */
