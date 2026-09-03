@@ -120,6 +120,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run unit tests
+        env:
+          TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
         run: pnpm turbo run test:unit -- --shard=${{ matrix.shard }}
 
   test-sqlite-property:
@@ -223,6 +225,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run coverage shard
+        env:
+          TYPEGRAPH_LIBSQL_TMPDIR: /dev/shm
         run: >-
           pnpm --filter @nicia-ai/typegraph exec vitest run --coverage
           --shard=${{ matrix.shard }}
