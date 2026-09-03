@@ -42,12 +42,15 @@ const concurrencyGraph = defineGraph({
 // (In-memory databases also work — local clients frame transactions with raw
 // BEGIN/COMMIT instead of client.transaction(), which would abandon the
 // connection: tursodatabase/libsql-client-ts#229 — see the specific tests.)
+// CI uses a RAM-backed directory for these disposable files. Keep file-client
+// semantics and default SQLite pragmas without paying the runner's disk fsync
+// latency on every schema statement and autocommit write.
 
 const temporaryFiles: string[] = [];
 
 function createTemporaryDbPath(): string {
   const dbPath = path.join(
-    tmpdir(),
+    process.env["TYPEGRAPH_LIBSQL_TMPDIR"] ?? tmpdir(),
     `typegraph-libsql-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.db`,
   );
   temporaryFiles.push(dbPath);
@@ -117,6 +120,32 @@ createIntegrationTestSuite("libsql", async () => {
 // ============================================================
 
 describe("libsql Backend - Specific", () => {
+  it("preserves committed data when a fixture file is closed and reopened", async () => {
+    const dbPath = createTemporaryDbPath();
+    const client = createClient({ url: `file:${dbPath}` });
+    try {
+      await client.execute("CREATE TABLE fixture_probe (value TEXT)");
+      await client.execute("INSERT INTO fixture_probe VALUES ('committed')");
+    } finally {
+      client.close();
+    }
+
+    const reopened = createClient({ url: `file:${dbPath}` });
+    try {
+      expect(reopened.protocol).toBe("file");
+      const persisted = await reopened.execute(
+        "SELECT value FROM fixture_probe",
+      );
+      const synchronous = await reopened.execute("PRAGMA synchronous");
+      const journalMode = await reopened.execute("PRAGMA journal_mode");
+      expect(persisted.rows).toEqual([{ value: "committed" }]);
+      expect(synchronous.rows).toEqual([{ synchronous: 2 }]);
+      expect(journalMode.rows).toEqual([{ journal_mode: "delete" }]);
+    } finally {
+      reopened.close();
+    }
+  });
+
   it("exposes the Drizzle database instance", async () => {
     const client = createClient({ url: "file::memory:" });
     const { backend, db } = await createLibsqlBackend(client);

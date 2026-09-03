@@ -12,11 +12,13 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["TYPEGRAPH_LIBSQL_TMPDIR"]
     },
     "test:unit": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["TYPEGRAPH_LIBSQL_TMPDIR"]
     },
     "test:property": {
       "dependsOn": ["^build"],

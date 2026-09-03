@@ -87,6 +87,7 @@ echo "Running PostgreSQL tests ($MAX_WORKERS workers)..."
 vitest_args=(
   run
   --maxWorkers="$MAX_WORKERS"
+  --exclude=tests/backends/postgres/pglite-*.test.ts
 )
 
 # GitHub's non-TTY default reporter prints every successful test, and expected
@@ -129,4 +130,6 @@ vitest_args+=(
   tests/perf/identity-historical-traversal-scaling.test.ts
 )
 
-POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}"
+# PGlite-only files and local merge-matrix entries already run in the default
+# lanes. Keep mixed files loaded so their server-specific cases still execute.
+TYPEGRAPH_TEST_BACKEND=postgres POSTGRES_URL="$POSTGRES_URL" vitest "${vitest_args[@]}"
