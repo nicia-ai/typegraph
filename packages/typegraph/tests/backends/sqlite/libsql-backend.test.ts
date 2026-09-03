@@ -133,15 +133,14 @@ describe("libsql Backend - Specific", () => {
     const reopened = createClient({ url: `file:${dbPath}` });
     try {
       expect(reopened.protocol).toBe("file");
-      expect(
-        (await reopened.execute("SELECT value FROM fixture_probe")).rows,
-      ).toEqual([{ value: "committed" }]);
-      expect((await reopened.execute("PRAGMA synchronous")).rows).toEqual([
-        { synchronous: 2 },
-      ]);
-      expect((await reopened.execute("PRAGMA journal_mode")).rows).toEqual([
-        { journal_mode: "delete" },
-      ]);
+      const persisted = await reopened.execute(
+        "SELECT value FROM fixture_probe",
+      );
+      const synchronous = await reopened.execute("PRAGMA synchronous");
+      const journalMode = await reopened.execute("PRAGMA journal_mode");
+      expect(persisted.rows).toEqual([{ value: "committed" }]);
+      expect(synchronous.rows).toEqual([{ synchronous: 2 }]);
+      expect(journalMode.rows).toEqual([{ journal_mode: "delete" }]);
     } finally {
       reopened.close();
     }
