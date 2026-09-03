@@ -69,7 +69,7 @@ type AndPredicate = Readonly<{
 type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
-export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact): Promise<Result<MergeReport<G>, MergeError>>;
+export function applyMergePlan<G extends GraphDef>(target: Store<G>, input: MergePlanArtifact, options?: MergePlanApplyOptions<NoInfer<G>>): Promise<Result<MergeReport<G>, MergeError>>;
 
 // @public (undocumented)
 type ArrayFieldAccessor<U> = BaseFieldAccessor & Readonly<{
@@ -1361,6 +1361,9 @@ type Edge<E extends AnyEdgeType = EdgeType, From extends NodeType = NodeType, To
     toId: NodeId<To>;
     meta: EdgeMeta;
 }> & Readonly<z.infer<E["schema"]>>;
+
+// @public
+const EDGE_TEMPORAL_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findFrom", "findTo", "bulkFindFrom", "bulkFindTo", "findByEndpoints"];
 
 // @public
 const EDGE_TYPE_BRAND: "__edgeType";
@@ -2790,6 +2793,9 @@ type HybridVectorOptions = Readonly<{
 }>;
 
 // @public
+const IDENTITY_READ_NAMES: readonly ["representativeOf", "membersOf", "nodesOf", "areSame", "areDifferent", "assertionsOf"];
+
+// @public
 type IdentityAssertion<G extends GraphDef> = Readonly<{
     id: IdentityAssertionId;
     relation: IdentityRelation;
@@ -3725,6 +3731,17 @@ export type MergePlanAnchors = Readonly<{
 }>;
 
 // @public
+export type MergePlanApplied = Readonly<{
+    merged: MergedCounts;
+}>;
+
+// @public
+export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
+    beforeApply?: (reads: MergePlanReadContext<G>) => Promise<void>;
+    afterApply?: (tx: TransactionContext<G>, applied: MergePlanApplied) => Promise<void>;
+}>;
+
+// @public
 export type MergePlanArtifact = MergePlanArtifactV1;
 
 // @public (undocumented)
@@ -3943,6 +3960,18 @@ export type MergePlanProvenanceOptions = Readonly<{
     persist: boolean;
 }>;
 
+// @public
+export type MergePlanReadContext<G extends GraphDef> = Readonly<{
+    nodes: Readonly<{
+        [K in keyof TransactionContext<G>["nodes"]]: Pick<TransactionContext<G>["nodes"][K], (typeof NODE_READ_NAMES)[number]>;
+    }>;
+    edges: Readonly<{
+        [K in keyof TransactionContext<G>["edges"]]: Pick<TransactionContext<G>["edges"][K], (typeof EDGE_TEMPORAL_READ_NAMES)[number]>;
+    }>;
+}> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
+    identity: Pick<IdentityFacade<G>, (typeof IDENTITY_READ_NAMES)[number]>;
+}> : Readonly<Record<never, never>>);
+
 // @public (undocumented)
 export type MergePlanRetype = Readonly<{
     entity: MergePlanEntityRef;
@@ -4146,6 +4175,9 @@ type Node<N extends NodeType = NodeType> = Readonly<{
     id: NodeId<N>;
     meta: NodeMeta;
 }> & Readonly<z.infer<N["schema"]>>;
+
+// @public (undocumented)
+const NODE_READ_NAMES: readonly ["getById", "getByIds", "find", "count", "findByConstraint", "bulkFindByConstraint", "bulkFindByIndex"];
 
 // @public
 const NODE_TYPE_BRAND: "__nodeType";

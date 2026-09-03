@@ -28,6 +28,7 @@ export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
+export { registerGraphMergeCallbackIntegrationTests } from "./graph-merge-callbacks";
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
 export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerIdentityIntegrationTests } from "./identity";

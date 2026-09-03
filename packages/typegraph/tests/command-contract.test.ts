@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertGraphCommandExecutionContext,
   executeAuthoritativeGraphCommand,
+  graphCommandCoordinationIsolation,
   graphCommandExecutionContext,
   mintGraphCommandCoordination,
 } from "../src/backend/command-contract";
@@ -98,6 +99,39 @@ function edgeRow(matchIdentityKey: string): EdgeRow {
 }
 
 describe("authoritative graph command contract", () => {
+  it.each([
+    "read_committed",
+    "serializable",
+    "repeatable_read",
+    "unknown",
+  ] as const)(
+    "reads observed %s isolation only for the owning graph and session",
+    (isolation) => {
+      const port: GraphCommandPort = {
+        session: "transaction",
+        execute: () => Promise.resolve(RESULT),
+      };
+      const otherPort: GraphCommandPort = {
+        session: "transaction",
+        execute: () => Promise.resolve(RESULT),
+      };
+      const coordination = mintGraphCommandCoordination(
+        port,
+        "graph",
+        isolation,
+      );
+      expect(
+        graphCommandCoordinationIsolation(port, "graph", coordination),
+      ).toBe(isolation);
+      expect(
+        graphCommandCoordinationIsolation(port, "other", coordination),
+      ).toBe("unknown");
+      expect(
+        graphCommandCoordinationIsolation(otherPort, "graph", coordination),
+      ).toBe("unknown");
+    },
+  );
+
   it.each(["root", "transaction"] as const)(
     "binds %s commands to the matching session boundary",
     (session) => {

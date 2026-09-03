@@ -258,9 +258,12 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 16,
     sha256: "1678650d02e0d9d7cc767ffbacbf163724c82fd4590c219b97d3dff85a6bf2f6",
   },
+  // MergePlanReadContext derives its read-only surface from the runtime method
+  // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
+  // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 706,
-    sha256: "3494595c41f350eac3a5de03adc6589dabee3de481c4747a7d43ac138a7784f1",
+    count: 709,
+    sha256: "b963d4c34acde32b568a6b2d46eccd7294d04da60f18d0d0c8673dffd596337e",
   },
   "./indexes": {
     count: 46,
