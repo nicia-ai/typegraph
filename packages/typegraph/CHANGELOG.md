@@ -1,5 +1,19 @@
 # @nicia-ai/typegraph
 
+## 0.56.0
+
+### Minor Changes
+
+- [#615](https://github.com/nicia-ai/typegraph/pull/615) [`4574be7`](https://github.com/nicia-ai/typegraph/commit/4574be7f5b7fb91428639a9bf3056801f8f15bbf) Thanks [@pdlug](https://github.com/pdlug)! - Add durable candidate merge reviews with `planCandidateWriteSetReview()` and `revalidateCandidateWriteSetReview()`. Persist immutable review and approval evidence in the target graph, then compare the retained candidate against current state before applying a fresh revision-fenced plan. Structured compatibility results expose changes requiring review without weakening atomic apply-time concurrency or constraint checks.
+
+- [#611](https://github.com/nicia-ai/typegraph/pull/611) [`cf126e3`](https://github.com/nicia-ai/typegraph/commit/cf126e3542f585eeb18d8bc784e769b224de4ed5) Thanks [@pdlug](https://github.com/pdlug)! - Support generic edge dispatch through `DynamicEdgeCollection<E>` and graph-aware dynamic lookups. Edge property and result types are preserved while endpoint pairs are validated at runtime. Transactions now expose `getEdgeCollection` and `getEdgeCollectionOrThrow`, including scoped receipt accounting; valid-time views expose pinned dynamic edge reads.
+
+  Migration: replace generic `tx.edges[kind]` calls or uncorrelated collection casts with `tx.getEdgeCollectionOrThrow(kind)`. Concrete `.edges.<kind>` calls retain compile-time pair checking. Known-kind dynamic lookups now enforce their property schema at compile time; parse unvalidated records before passing them. Broad `EdgeRegistration` annotations continue to permit array or map targets; narrow the target shape when inspecting it. Hand-authored transaction and view mocks must provide the new lookup methods.
+
+  Fix outgoing traversal target inference in graph factories that accept generic node types. Preserve the declared target kinds for both array targets and source-dependent maps, including unions of edge kinds.
+
+- [#614](https://github.com/nicia-ai/typegraph/pull/614) [`5232be5`](https://github.com/nicia-ai/typegraph/commit/5232be5dd1cc465dd7fc6569d391d9fd52e517eb) Thanks [@pdlug](https://github.com/pdlug)! - Compose reviewed merge-plan application with application-owned graph checks and writes using optional `beforeApply` and `afterApply` callbacks. Prechecks receive transaction-bound read-only collections after the target fence is validated; post-apply work uses typed graph operations before the same transaction commits. Failures roll back the combined operation, and transaction-conflict retries replay both callbacks.
+
 ## 0.55.0
 
 ### Minor Changes
