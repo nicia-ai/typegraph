@@ -1220,6 +1220,7 @@ export type EngineOperationsContext = Readonly<{
     fencePlan: WriteFencePlan;
     fenceTarget: WriteFenceTarget;
     contributionMaterializer: ContributionMaterializer;
+    isFirstParty: boolean;
 }>;
 
 // @public
@@ -1453,6 +1454,9 @@ type FindNodesByKindParams = Readonly<{
     orderBy?: "id" | "created_at";
     after?: string;
 }>;
+
+// @internal
+type FirstPartyProfileToken = Readonly<Record<never, never>>;
 
 // @public
 type FulltextBatchRow = Readonly<{
@@ -2603,6 +2607,7 @@ type SqlDialect = "sqlite" | "postgres";
 // @public
 export type SqlEngineProfile<TTx> = Readonly<{
     dialect: SqlDialect;
+    firstParty?: FirstPartyProfileToken;
     tableNames: EngineTableNames;
     execution: SqlExecutionAdapter;
     strategy: CommonOperationStrategy;

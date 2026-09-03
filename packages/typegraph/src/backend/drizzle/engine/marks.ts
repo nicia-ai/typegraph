@@ -4,13 +4,16 @@
  * (`create-sql-backend.ts`, the only audit writer) has already run.
  *
  * Every gate here mirrors the profile-refusal reasoning in
- * `create-sql-backend.ts`'s own doc comment: `markBundledRootAutocommitEligible`
- * trusts the profile's own `autocommit.singleStatementDurable` declaration,
- * never construction site alone, because it is a durability claim; and
- * `markSchemaFencedInsertEligible` trusts the resolved fence plan actually
- * fencing something (`kind !== "unfenced"`), since the fused insert's lock
- * clause is profile-supplied and an empty clause is only correct when the
- * profile's own plan says writers are serialized.
+ * `create-sql-backend.ts`'s own doc comment: `markFirstPartyFactory` trusts
+ * only a profile carrying a token `mintFirstPartyProfileToken` actually
+ * minted, never a profile that merely resembles a bundled one;
+ * `markBundledRootAutocommitEligible` trusts the profile's own
+ * `autocommit.singleStatementDurable` declaration, never construction site
+ * alone, because it is a durability claim; and `markSchemaFencedInsertEligible`
+ * trusts the resolved fence plan actually fencing something
+ * (`kind !== "unfenced"`), since the fused insert's lock clause is
+ * profile-supplied and an empty clause is only correct when the profile's
+ * own plan says writers are serialized.
  */
 import {
   type AtomicMutationProgramRegistration,
@@ -31,6 +34,12 @@ import {
 import type { SqlExecutionAdapter } from "../execution/types";
 
 export type ApplyEngineMarksDeps = Readonly<{
+  /**
+   * Whether `profile.firstParty` was a token `mintFirstPartyProfileToken`
+   * actually minted (`isRecognizedFirstPartyProfileToken`, resolved once by
+   * `createSqlBackend`) — the sole gate on `markFirstPartyFactory`.
+   */
+  isFirstParty: boolean;
   /** The backend's capabilities after `finalizeEngineCapabilities` runs — what `supportsRootAtomicBatch` gates the atomic-program registrations on. */
   capabilities: BackendCapabilities;
   /** The write-fence decision resolved once in `createSqlBackend`, gating `markSchemaFencedInsertEligible`. */
@@ -51,7 +60,9 @@ export function applyEngineMarks<TTx>(
   backend: AdapterBackend<TTx>,
   deps: ApplyEngineMarksDeps,
 ): void {
-  markFirstPartyFactory(backend);
+  if (deps.isFirstParty) {
+    markFirstPartyFactory(backend);
+  }
   markSchemaFencedInsertEligibleUnderFence(backend, deps.fencePlan);
   if (deps.autocommit.singleStatementDurable) {
     markBundledRootAutocommitEligible(backend);

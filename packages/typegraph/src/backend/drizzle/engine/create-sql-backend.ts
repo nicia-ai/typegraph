@@ -13,6 +13,7 @@
 import { ConfigurationError } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
 import {
+  isRecognizedFirstPartyProfileToken,
   markFirstPartyFactory,
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
@@ -45,12 +46,20 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
  * `applyEngineMarks`'s own doc comment covers its two further gates —
  * `markBundledRootAutocommitEligible` on the profile's `autocommit`
  * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
+ * A fourth gate, resolved once as `isFirstParty` below and threaded to both
+ * `applyEngineMarks` and the fence target this factory builds, decides
+ * `markFirstPartyFactory` itself: only a profile carrying a token
+ * `mintFirstPartyProfileToken` actually minted (`../../capabilities/write-fence`)
+ * earns that mark, so the dialect-derivation fallback above and the lazy
+ * schema-fence lease it feeds stay closed to a profile that merely resembles
+ * a bundled one.
  */
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
 ): AdapterBackend<TTx> {
   const capabilities = finalizeEngineCapabilities(profile.declaredCapabilities, {
     execution: profile.execution,
+    vectorStrategy: profile.vector,
     fulltextStrategy: profile.fulltext,
     fulltextTableName: profile.tableNames.fulltext,
   });
@@ -74,16 +83,28 @@ export function createSqlBackend<TTx>(
     );
   }
 
+  // Resolved once and reused for both marks below: whether `profile.firstParty`
+  // is a token this factory's own `mintFirstPartyProfileToken` actually
+  // minted, not merely an object shaped like one. Only the two bundled
+  // builders can produce a recognized token, so this is `false` for any
+  // profile assembled elsewhere — including one built by copying a bundled
+  // profile's fields into a plain object literal without carrying the field
+  // forward.
+  const isFirstParty = isRecognizedFirstPartyProfileToken(profile.firstParty);
+
   // ONE fence target for the whole backend and every transaction-scoped one
-  // it builds, marked first-party for the same reason the two bundled
-  // builders always marked their own: `capabilities` here is the object
-  // this factory just finalized, so a caller who blanked `pessimisticLocks`
-  // out of a profile's declaration still resolves the dialect-derived plan,
-  // not `unfenced`, for the two bundled dialects.
-  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
+  // it builds, marked first-party only under the same gate as the backend
+  // itself: `capabilities` here is the object this factory just finalized,
+  // so a recognized-first-party caller who blanked `pessimisticLocks` out of
+  // a profile's declaration still resolves the dialect-derived plan, not
+  // `unfenced`, for the two bundled dialects — while a profile without a
+  // recognized token never reaches that fallback.
+  const fenceTargetBase: WriteFenceTarget = {
     dialect: profile.dialect,
     capabilities,
-  });
+  };
+  const fenceTarget: WriteFenceTarget =
+    isFirstParty ? markFirstPartyFactory(fenceTargetBase) : fenceTargetBase;
 
   const fencePlan = resolveWriteFencePlan(fenceTarget);
 
@@ -132,6 +153,7 @@ export function createSqlBackend<TTx>(
     fencePlan,
     fenceTarget,
     contributionMaterializer,
+    isFirstParty,
   });
 
   const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
@@ -172,6 +194,12 @@ export function createSqlBackend<TTx>(
     fenceTarget,
     operations,
     contributionMaterializer,
+    // The same resolved flag `applyEngineMarks` gates the root's own
+    // `markFirstPartyFactory` call on below — handed to `lateMembers` so a
+    // dialect's transaction-opening surface gates its OWN mark on a
+    // TypeGraph-opened handle the identical way, instead of marking every
+    // handle unconditionally regardless of whether this profile earned it.
+    isFirstParty,
     self: () => backend,
   };
 
@@ -242,6 +270,7 @@ export function createSqlBackend<TTx>(
   // nobody looked at.
   auditBackendResource(backend, profile.resourceAudit);
   applyEngineMarks(backend, {
+    isFirstParty,
     capabilities,
     fencePlan,
     autocommit: profile.autocommit,

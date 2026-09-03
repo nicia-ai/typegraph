@@ -218,7 +218,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * `*Runtime` head types, `WriteFenceTarget`, `InternalOperationBackend` —
  * that this entrypoint deliberately does not republish, so nearly all of it
  * surfaces as forgotten-export debt rather than a direct export, in family
- * with the other adapter entrypoints.
+ * with the other adapter entrypoints. `SqlEngineProfile` gaining an optional
+ * `firstParty` field adds one more such name, `FirstPartyProfileToken`
+ * (+1): the type only two bundled profile builders can produce a recognized
+ * instance of, present on the field's declared type but not itself exported.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -232,8 +235,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "fbd1da5eac1bd4d5b2516645e3e6568f3b787a6a9537e1504fd4ca64017634e5",
   },
   "./adapters/drizzle/engine": {
-    count: 321,
-    sha256: "7f53031dbd9f668a9a68f43ccee61bc78e54c275b577de528c98af1f8f39f1ad",
+    count: 322,
+    sha256: "4b47251ef7f2a11eb1e685e86f879fe1d46d85d1eb798880b3e85dda5ddbb6a7",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

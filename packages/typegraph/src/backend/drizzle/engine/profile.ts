@@ -16,7 +16,11 @@ import type { ResolvedSqlTableNames } from "../../../query/compiler/schema";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
-import type { WriteFencePlan, WriteFenceTarget } from "../../capabilities/write-fence";
+import type {
+  FirstPartyProfileToken,
+  WriteFencePlan,
+  WriteFenceTarget,
+} from "../../capabilities/write-fence";
 import type { BackendResourceAudit } from "../../transaction-resource";
 import type {
   AdapterBackend,
@@ -96,6 +100,19 @@ export type EngineOperationsContext = Readonly<{
   fenceTarget: WriteFenceTarget;
   /** The contribution materializer `createSqlBackend` built from `profile.contributionRuntime`. */
   contributionMaterializer: ContributionMaterializer;
+  /**
+   * Whether `profile.firstParty` was a token `mintFirstPartyProfileToken`
+   * actually minted — resolved once by `createSqlBackend` and reused for
+   * every transaction-scoped backend a dialect's `lateMembers` opens, so a
+   * handle it hands out carries the SAME standing as the root rather than
+   * re-deriving one from a copied token field it may or may not still
+   * carry. A dialect gates its own `markFirstPartyFactory` call on a
+   * TypeGraph-opened transaction handle on this flag exactly as
+   * `createSqlBackend` gates the root and fence-target marks on it;
+   * `adoptTransaction` — a caller-driven, unaudited transaction lifetime —
+   * passes `false` regardless of this flag, never this value.
+   */
+  isFirstParty: boolean;
 }>;
 
 /**
@@ -280,6 +297,21 @@ export type SqlEngineProfile<TTx> = Readonly<{
    * marker, and the profile-refusal error — never branches on it itself.
    */
   dialect: SqlDialect;
+  /**
+   * An unforgeable token only `buildSqliteEngineProfile` and
+   * `buildPostgresEngineProfile` can mint (`mintFirstPartyProfileToken`,
+   * `../../capabilities/write-fence`). Present and recognized, it tells
+   * `createSqlBackend` this profile came from a factory whose transaction
+   * lifetime, connection ownership, and DDL surface TypeGraph has audited,
+   * and grants exactly two things: `resolveWriteFencePlan`'s
+   * dialect-derivation fallback (sound only for the two bundled dialects)
+   * and the lazy schema-fence lease `store/operations/write-transaction.ts`
+   * takes out under `isFirstPartyFactory`. Absent on a profile assembled by
+   * hand, or by copying a bundled profile's fields into a plain object
+   * literal — minting a recognized token is not reachable from outside
+   * `write-fence.ts`, so a profile cannot claim this standing for itself.
+   */
+  firstParty?: FirstPartyProfileToken;
   tableNames: EngineTableNames;
   /**
    * Every statement any shared member group issues goes through this

@@ -64,18 +64,13 @@ import {
   StaleVersionError,
 } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
-import {
-  buildFulltextCapabilities,
-  type FulltextStrategy,
-  tsvectorStrategy,
-} from "../../query/dialect/fulltext-strategy";
+import { type FulltextStrategy, tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
 import {
   assertPgvectorEfSearch,
   pgvectorStrategy,
 } from "../../query/dialect/vector/pgvector-strategy";
 import {
   assertVectorSearchLimit,
-  buildVectorCapabilities,
   resolveEfSearchOverride,
   vectorSearchFrontierTuning,
   type VectorSlot,
@@ -112,6 +107,7 @@ import { scopeAtomicBatchToSession } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
+  mintFirstPartyProfileToken,
   requireWriteFence,
   resolveWriteFencePlan,
   type WriteFenceTarget,
@@ -659,19 +655,6 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
   POSTGRES_ROW_MAPPER_CONFIG,
 );
 
-function buildPostgresCapabilities(
-  fulltextStrategy: FulltextStrategy,
-  vectorStrategy: VectorStrategy | undefined,
-): BackendCapabilities {
-  return {
-    ...POSTGRES_CAPABILITIES,
-    ...(vectorStrategy === undefined ?
-      {}
-    : { vector: buildVectorCapabilities(vectorStrategy) }),
-    fulltext: buildFulltextCapabilities(fulltextStrategy),
-  };
-}
-
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -702,7 +685,7 @@ export function createPostgresBackend(
  * `createSqlBackend` uses to assemble the mirrored member groups from
  * `members/*.ts`.
  */
-function buildPostgresEngineProfile(
+export function buildPostgresEngineProfile(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): SqlEngineProfile<AnyPgTransaction> {
@@ -728,10 +711,12 @@ function buildPostgresEngineProfile(
   // backend so the pgvector version check runs — and its pre-0.8 warning
   // fires — at most once per backend, not once per `store.transaction()`.
   const iterativeScanProbe = createIterativeScanProbe();
-  const baseCapabilities = buildPostgresCapabilities(
-    fulltextStrategy,
-    vectorStrategy,
-  );
+  // `vector` and `fulltext` are deliberately absent from this base: both are
+  // derived once, from `profile.vector` / `profile.fulltext`, by
+  // `finalizeEngineCapabilities` (`./engine/capabilities`) — baking either
+  // here would give this profile's `declaredCapabilities` a copy that a
+  // caller overriding the strategy field could leave stale.
+  const baseCapabilities = POSTGRES_CAPABILITIES;
   // HTTP-only drivers (notably `drizzle-orm/neon-http`) can't hold a
   // session across statements, so multi-statement transactions are
   // unavailable regardless of what we declare. Auto-detect and downgrade
@@ -818,9 +803,10 @@ function buildPostgresEngineProfile(
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
   // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
-  // that derives `execution.atomicBatch` and `contributions` from it runs
-  // once, in `createSqlBackend`, which then hands the finalized result back
-  // through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // that derives `execution.atomicBatch`, `vector` (from `vectorStrategy`
+  // above), `fulltext` (from `fulltextStrategy`), and `contributions` from it
+  // runs once, in `createSqlBackend`, which then hands the finalized result
+  // back through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
   // .capabilities` — `buildOperations` and `lateMembers` below read it off
   // `ctx` rather than re-deriving a local copy.
   const tableNames: ResolvedSqlTableNames = {
@@ -1318,12 +1304,12 @@ function buildPostgresEngineProfile(
   function lateMembers(
     ctx: EngineAssemblyContext<AnyPgTransaction>,
   ): EngineLateMembers<AnyPgTransaction> {
-    // The factory's finalized capabilities and ONE fence target/plan —
-    // resolved once by `createSqlBackend`, never re-derived here. Aliased
-    // to bare names so every existing capabilities/fence-gated call below
-    // reads exactly as it did when this dialect built its own (stale-prone)
-    // copies of both.
-    const { capabilities, fencePlan, fenceTarget } = ctx;
+    // The factory's finalized capabilities, ONE fence target/plan, and
+    // first-party standing — resolved once by `createSqlBackend`, never
+    // re-derived here. Aliased to bare names so every existing
+    // capabilities/fence-gated call below reads exactly as it did when this
+    // dialect built its own (stale-prone) copies.
+    const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
 
     /**
      * The per-graph schema-commit fence.
@@ -1459,6 +1445,7 @@ function buildPostgresEngineProfile(
           iterativeScanProbe,
           schemaVersionsTable: tables.schemaVersions,
           fenceTarget,
+          isFirstParty,
         });
         try {
           return await fn(txBackend);
@@ -1471,8 +1458,15 @@ function buildPostgresEngineProfile(
     // Shared by `transaction()` (TypeGraph opens the tx) and
     // `adoptTransaction()` (#134 — the caller already opened it): bind a
     // tx-scoped backend to the *literal* `tx` client and gate fulltext on
-    // the durable marker (a cached SELECT, never DDL).
-    function bindTransactionBackend(tx: AnyPgTransaction): Readonly<{
+    // the durable marker (a cached SELECT, never DDL). `txIsFirstParty` is
+    // threaded explicitly rather than closing over the outer `isFirstParty`
+    // alias: `adoptTransaction` passes `false` regardless of this profile's
+    // own standing, since an adopted transaction's lifetime is the
+    // caller's, not one TypeGraph has audited.
+    function bindTransactionBackend(
+      tx: AnyPgTransaction,
+      txIsFirstParty: boolean,
+    ): Readonly<{
       backend: TransactionBackend;
       drainAndClose: () => Promise<void>;
     }> {
@@ -1488,6 +1482,7 @@ function buildPostgresEngineProfile(
         iterativeScanProbe,
         schemaVersionsTable: tables.schemaVersions,
         fenceTarget,
+        isFirstParty: txIsFirstParty,
       });
       const gatedBackend = carryAtomicMutationSessionRegistration(
         backend,
@@ -1562,8 +1557,10 @@ function buildPostgresEngineProfile(
             : undefined;
 
           return db.transaction(async (tx) => {
-            const { backend: txBackend, drainAndClose } =
-              bindTransactionBackend(tx);
+            const { backend: txBackend, drainAndClose } = bindTransactionBackend(
+              tx,
+              isFirstParty,
+            );
             try {
               return await fn(
                 markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
@@ -1615,7 +1612,11 @@ function buildPostgresEngineProfile(
           // Statements still serialize onto the pinned connection, but the queue
           // is never closed: only the caller knows when their transaction ends,
           // so it is on them to await every graph write before committing.
-          return bindTransactionBackend(externalTx).backend;
+          // `false` regardless of this profile's own first-party standing:
+          // the caller opened this transaction, its lifetime is not one
+          // TypeGraph has audited, and it must not qualify for the
+          // dialect-derivation fallback or the lazy schema-fence lease.
+          return bindTransactionBackend(externalTx, false).backend;
         },
 
         async schemaWriteTransaction<T>(
@@ -1786,6 +1787,11 @@ function buildPostgresEngineProfile(
 
   return {
     dialect: "postgres",
+    // Minted fresh for this profile instance — recognized only by this
+    // module's own `isRecognizedFirstPartyProfileToken`, so `createSqlBackend`
+    // marks this backend and its fence target first-party, exactly as it did
+    // before either was gated on the token.
+    firstParty: mintFirstPartyProfileToken(),
     tableNames,
     execution: executionAdapter,
     strategy: operationStrategy,
@@ -2116,6 +2122,14 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   schemaVersionsTable: PostgresTables["schemaVersions"];
   /** Shared write-fence target. See {@link CreatePostgresOperationBackendOptions}. */
   fenceTarget: WriteFenceTarget;
+  /**
+   * Whether the transaction handle this call builds should carry
+   * `markFirstPartyFactory` — the caller's own resolved standing, never
+   * re-derived here. `false` on the `adoptTransaction` path regardless of
+   * the profile's own standing: an adopted transaction's lifetime is the
+   * caller's, not one TypeGraph has audited.
+   */
+  isFirstParty: boolean;
 }>;
 
 function createPostgresOperationBackend(
@@ -2852,28 +2866,30 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  const backend = markFirstPartyFactory(
-    createPostgresOperationBackend({
-      db: options.db,
-      executionAdapter: txExecutionAdapter,
-      ...(sessionAtomicSqlProgramExecutor === undefined ?
-        {}
-      : { atomicSqlProgramExecutor: sessionAtomicSqlProgramExecutor }),
-      adapterOptions: options.adapterOptions,
-      operationStrategy: options.operationStrategy,
-      tableNames: options.tableNames,
-      capabilities: sessionCapabilities,
-      fulltextStrategy: options.fulltextStrategy,
-      vectorStrategy: options.vectorStrategy,
-      contributionMaterializer: options.contributionMaterializer,
-      // The probe is process-wide truth, so the outer instance's is reused
-      // rather than a fresh one per transaction.
-      iterativeScanProbe: options.iterativeScanProbe,
-      schemaVersionsTable: options.schemaVersionsTable,
-      fenceTarget: options.fenceTarget,
-      transactionScoped: true,
-    }),
-  );
+  const txOperationBackend = createPostgresOperationBackend({
+    db: options.db,
+    executionAdapter: txExecutionAdapter,
+    ...(sessionAtomicSqlProgramExecutor === undefined ?
+      {}
+    : { atomicSqlProgramExecutor: sessionAtomicSqlProgramExecutor }),
+    adapterOptions: options.adapterOptions,
+    operationStrategy: options.operationStrategy,
+    tableNames: options.tableNames,
+    capabilities: sessionCapabilities,
+    fulltextStrategy: options.fulltextStrategy,
+    vectorStrategy: options.vectorStrategy,
+    contributionMaterializer: options.contributionMaterializer,
+    // The probe is process-wide truth, so the outer instance's is reused
+    // rather than a fresh one per transaction.
+    iterativeScanProbe: options.iterativeScanProbe,
+    schemaVersionsTable: options.schemaVersionsTable,
+    fenceTarget: options.fenceTarget,
+    transactionScoped: true,
+  });
+  const backend =
+    options.isFirstParty ?
+      markFirstPartyFactory(txOperationBackend)
+    : txOperationBackend;
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);
