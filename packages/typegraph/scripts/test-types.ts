@@ -154,24 +154,12 @@ async function runInlineTypecheck(
   );
 }
 
-async function runDeclarationTypeTests(
-  packageDir: string,
-  typescriptVersion: string,
-): Promise<void> {
-  console.log(
-    `Running declaration (tsd) tests with TypeScript ${typescriptVersion}...`,
-  );
+async function runDeclarationTypeTests(packageDir: string): Promise<void> {
+  console.log("Running declaration tests with tsd's bundled TypeScript...");
 
   await runCommand(
     "pnpm",
-    [
-      "dlx",
-      `--package=typescript@${typescriptVersion}`,
-      "--package=tsd",
-      "tsd",
-      "--files",
-      "test-d/**/*.test-d.ts",
-    ],
+    ["dlx", "--package=tsd", "tsd", "--files", "test-d/**/*.test-d.ts"],
     packageDir,
   );
 }
@@ -201,6 +189,10 @@ async function runConsumerTypeSmokeTest(
     await copyFile(
       path.join(fixtureDir, "consumer.ts"),
       path.join(temporaryDir, "consumer.ts"),
+    );
+    await copyFile(
+      path.join(fixtureDir, "edge-endpoint-compat.ts"),
+      path.join(temporaryDir, "edge-endpoint-compat.ts"),
     );
     await copyFile(
       path.join(fixtureDir, "tsconfig.json"),
@@ -255,7 +247,7 @@ async function main(): Promise<void> {
   }
 
   if (mode === "all" || mode === "declarations") {
-    await runDeclarationTypeTests(packageDir, typescriptVersion);
+    await runDeclarationTypeTests(packageDir);
   }
 
   if (mode === "all" || mode === "consumer") {

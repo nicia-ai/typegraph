@@ -14,7 +14,15 @@
  * resolved tag has no snapshot for a given entrypoint, the checker refuses
  * (non-zero exit, remediation text) rather than silently comparing nothing.
  *
- * ## The one stated limitation
+ * ## Limitations
+ *
+ * This is a structural member comparison, not a TypeScript assignability or
+ * callable-signature checker. Changed rest tuples, conditional types, generic
+ * defaults, and input/output relationships can break consumers without changing
+ * a member's presence. Source and packed-consumer compiler fixtures cover those
+ * contracts; see docs/TYPE_REGRESSION_055.md.
+ *
+ * ### Effectively required optional members
  *
  * An optional-but-effectively-required member — `foo?: X` whose *absence*
  * throws a typed error at runtime — is invisible to this snapshot differ,

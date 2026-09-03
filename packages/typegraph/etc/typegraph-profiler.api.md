@@ -84,6 +84,9 @@ type ArrayFieldAccessor<U> = BaseFieldAccessor & Readonly<{
 }>;
 
 // @public
+type ArrayNodeKinds<T> = T[number & keyof T]["kind" & keyof T[number & keyof T]] & string;
+
+// @public
 type ArrayOp = "contains" | "containsAll" | "containsAny" | "isEmpty" | "isNotEmpty" | "lengthEq" | "lengthGt" | "lengthGte" | "lengthLt" | "lengthLte";
 
 // @public
@@ -950,7 +953,12 @@ type DynamicEdgeAccessor = Readonly<{
 }>;
 
 // @public
-type DynamicEdgeCollection = WidenBrandedIds<EdgeCollection<AnyEdgeType, NodeType, NodeType>>;
+type DynamicEdgeCollection<E extends AnyEdgeType = AnyEdgeType> = Omit<EdgeCollection<E, NodeType, NodeType, {
+    from: NodeType;
+    to: NodeType;
+}, string>, "create"> & Readonly<{
+    create: (from: NodeRef, to: NodeRef, ...args: EdgeCreateArguments<E>) => Promise<Edge<E>>;
+}>;
 
 // @public (undocumented)
 type DynamicEdgeType = AnyEdgeType & Readonly<{
@@ -1022,6 +1030,12 @@ type DynamicSelectableNode = Readonly<{
     kind: string;
     meta: SelectableNodeMeta;
 }> & Readonly<Record<string, unknown>>;
+
+// @public
+type DynamicStoreViewEdgeCollection<E extends AnyEdgeType = AnyEdgeType> = Omit<StoreViewEdgeCollection<E>, "getById" | "getByIds"> & Readonly<{
+    getById: (id: string) => Promise<Edge<E> | undefined>;
+    getByIds: (ids: readonly string[]) => Promise<readonly (Edge<E> | undefined)[]>;
+}>;
 
 // @public
 type Edge<E extends AnyEdgeType = EdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType> = Readonly<{
@@ -1096,8 +1110,8 @@ type EdgeBulkInsertItem<Pairs extends EdgeEndpointPairTypes, Schema extends z.Zo
 }> : never;
 
 // @public (undocumented)
-type EdgeBulkUpsertItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
-    id: EdgeId<E>;
+type EdgeBulkUpsertItem<E extends AnyEdgeType, Pairs extends EdgeEndpointPairTypes, Id extends string = EdgeId<E>> = Pairs extends EdgeEndpointPairTypes ? Readonly<{
+    id: Id;
     from: NodeRef<Pairs["from"]>;
     to: NodeRef<Pairs["to"]>;
     props?: z.input<E["schema"]>;
@@ -1128,15 +1142,15 @@ type EdgeClaimOutcome = Readonly<{
     holderEdgeId: string;
 }>;
 
-// @public (undocumented)
+// @public
 type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To extends NodeType = NodeType, Pairs extends EdgeEndpointPairTypes = {
     from: From;
     to: To;
-}> = Readonly<{
+}, InputId extends string = EdgeId<E>> = Readonly<{
     create: (...args: EdgeCreateArgumentsTuple<E, Pairs>) => Promise<Edge<E, From, To>>;
-    getById: (id: EdgeId<E>, options?: QueryOptions) => Promise<Edge<E, From, To> | undefined>;
-    getByIds: (ids: readonly EdgeId<E>[], options?: QueryOptions) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
-    update: (id: EdgeId<E>, props: Partial<z.input<E["schema"]>>, options?: ValidityEndMutation) => Promise<Edge<E, From, To>>;
+    getById: (id: InputId, options?: QueryOptions) => Promise<Edge<E, From, To> | undefined>;
+    getByIds: (ids: readonly InputId[], options?: QueryOptions) => Promise<readonly (Edge<E, From, To> | undefined)[]>;
+    update: (id: InputId, props: Partial<z.input<E["schema"]>>, options?: ValidityEndMutation) => Promise<Edge<E, From, To>>;
     findFrom: (from: NodeRef<From>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     findTo: (to: NodeRef<To>, options?: QueryOptions) => Promise<Edge<E, From, To>[]>;
     bulkFindFrom: (froms: readonly NodeRef<From>[], options?: EdgeBulkFindEndpointOptions) => Promise<readonly Edge<E, From, To>[][]>;
@@ -1144,8 +1158,8 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
     batchFindFrom: (from: NodeRef<From>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindTo: (to: NodeRef<To>, options?: QueryOptions) => BatchableQuery<Edge<E, From, To>>;
     batchFindByEndpoints: (...args: EdgeFindByEndpointsArguments<E, Pairs>) => BatchableQuery<Edge<E, From, To>>;
-    delete: (id: EdgeId<E>) => Promise<void>;
-    hardDelete: (id: EdgeId<E>) => Promise<void>;
+    delete: (id: InputId) => Promise<void>;
+    hardDelete: (id: InputId) => Promise<void>;
     find: (filter?: Readonly<{
         from?: NodeRef<From>;
         to?: NodeRef<To>;
@@ -1157,16 +1171,21 @@ type EdgeCollection<E extends AnyEdgeType, From extends NodeType = NodeType, To 
         to?: NodeRef<To>;
     }>, temporal?: QueryOptions) => Promise<number>;
     bulkCreate: (items: readonly EdgeBulkCreateItem<Pairs, E["schema"]>[]) => Promise<Edge<E, From, To>[]>;
-    bulkUpsertById: (items: readonly EdgeBulkUpsertItem<E, Pairs>[]) => Promise<Edge<E, From, To>[]>;
+    bulkUpsertById: (items: readonly EdgeBulkUpsertItem<E, Pairs, InputId>[]) => Promise<Edge<E, From, To>[]>;
     bulkInsert: (items: readonly EdgeBulkInsertItem<Pairs, E["schema"]>[]) => Promise<void>;
-    bulkDelete: (ids: readonly EdgeId<E>[]) => Promise<void>;
+    bulkDelete: (ids: readonly InputId[]) => Promise<void>;
     findByEndpoints: (...args: EdgeFindByEndpointsArguments<E, Pairs>) => Promise<Edge<E, From, To> | undefined>;
     getOrCreateByEndpoints: (...args: EdgeGetOrCreateByEndpointsArguments<E, Pairs>) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>>;
     bulkGetOrCreateByEndpoints: (items: readonly EdgeBulkGetOrCreateItem<E, Pairs>[], options?: Pick<EdgeGetOrCreateByEndpointsOptions<E>, "matchOn" | "ifExists">) => Promise<EdgeGetOrCreateByEndpointsResult<E, From, To>[]>;
 }>;
 
 // @public (undocumented)
-type EdgeCollectionLookup = (kind: string) => DynamicEdgeCollection | undefined;
+interface EdgeCollectionLookup<G extends GraphDef = GraphDef> {
+    // (undocumented)
+    <K extends EdgeKinds<G>>(kind: K): DynamicEdgeCollection<G["edges"][K]["type"]> | undefined;
+    // (undocumented)
+    (kind: string): DynamicEdgeCollection | undefined;
+}
 
 // @public
 type EdgeConvergeCreateCommand = Readonly<{
@@ -1398,6 +1417,9 @@ type EdgeRow = Readonly<{
     updated_at: string;
     deleted_at: string | undefined;
 }>;
+
+// @public
+type EdgeTargetKinds<T> = T extends unknown ? ArrayNodeKinds<T> | ArrayNodeKinds<T[keyof T]> : never;
 
 // @public
 type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
@@ -4124,9 +4146,11 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
 // @public (undocumented)
-interface RequiredEdgeCollectionLookup {
+interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
     // (undocumented)
     <T extends RuntimeEdgeKind>(token: T): RuntimeEdgeCollection<T>;
+    // (undocumented)
+    <K extends EdgeKinds<G>>(kind: K): DynamicEdgeCollection<G["edges"][K]["type"]>;
     // (undocumented)
     (kind: string): DynamicEdgeCollection;
 }
@@ -4181,7 +4205,7 @@ type RuntimeBulkEdgeSourceGroup<T extends RuntimeNodeKind> = T extends RuntimeNo
 }> : never;
 
 // @public
-type RuntimeEdgeCollection<T extends RuntimeEdgeKind> = WidenBrandedIds<EdgeCollection<RuntimeEdgeTypeFor<T>, NodeType, NodeType>>;
+type RuntimeEdgeCollection<T extends RuntimeEdgeKind> = DynamicEdgeCollection<RuntimeEdgeTypeFor<T>>;
 
 // @public
 type RuntimeEdgeFor<T extends RuntimeEdgeKind> = T extends RuntimeEdgeKind ? Edge<RuntimeEdgeTypeFor<T>, NodeType, NodeType> : never;
@@ -4648,8 +4672,8 @@ type StoreCore<G extends GraphDef> = Readonly<{
     runtimeEdgeKind: <const K extends string, const D extends ExtensionEdgeDef>(kind: K, definition: D) => RuntimeEdgeKind<K, ExtensionObjectSchema<ExtensionEdgeProperties<D>>>;
     getNodeCollection: NodeCollectionLookup;
     getNodeCollectionOrThrow: RequiredNodeCollectionLookup;
-    getEdgeCollection: EdgeCollectionLookup;
-    getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup;
+    getEdgeCollection: EdgeCollectionLookup<G>;
+    getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
     getNodePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
     getNodePropsSchemaOrThrow: (kind: string) => z.ZodObject<z.ZodRawShape>;
     getEdgePropsSchema: (kind: string) => z.ZodObject<z.ZodRawShape> | undefined;
@@ -5045,6 +5069,9 @@ class StoreViewImplementation<G extends GraphDef> extends CoordinatePinnedView<G
     asOfRecorded(recordedAsOf: RecordedInstant): RecordedStoreView<G>;
     bulkFindEdgesFrom<const K extends EdgeKinds<G>>(params: BulkFindEdgesFromParams<G, K>, options?: Omit<EdgeBulkFindEndpointOptions, "temporalMode" | "asOf">): Promise<readonly BulkFindEdgesFromResult<G, K>[]>;
     get edges(): StoreViewEdgeCollections<G>;
+    getEdgeCollection<K extends EdgeKinds<G>>(kind: K): DynamicStoreViewEdgeCollection<G["edges"][K]["type"]> | undefined;
+    // (undocumented)
+    getEdgeCollection(kind: string): DynamicStoreViewEdgeCollection | undefined;
     get nodes(): StoreViewNodeCollections<G>;
     get search(): StoreSearch<G>;
 }
@@ -5236,6 +5263,8 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
     [TRANSACTION_RUNTIME]: TransactionRuntime;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
+    getEdgeCollection: EdgeCollectionLookup<G>;
+    getEdgeCollectionOrThrow: RequiredEdgeCollectionLookup<G>;
     backend: TransactionReadBackend;
     getNodeCollection: <const K extends string>(kind: K) => DynamicNodeCollection<K> | undefined;
 }> & (G["identity"] extends GraphIdentityConfig ? Readonly<{
@@ -5661,7 +5690,7 @@ type ValidateStoreOptions = Readonly<{
 }>;
 
 // @public
-type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? G["edges"][EK]["to"] extends readonly (infer N extends NodeType)[] ? N["kind"] : G["edges"][EK]["to"] extends (Record<string, readonly (infer N extends NodeType)[]>) ? N["kind"] : never : G["edges"][EK]["from"][number]["kind"] : never;
+type ValidEdgeTargets<G extends GraphDef, EK extends keyof G["edges"] & string, Dir extends TraversalDirection> = G["edges"][EK] extends EdgeRegistration ? Dir extends "out" ? ArrayNodeKinds<G["edges"][EK]["to"]> | EdgeTargetKinds<G["edges"][EK]["to"]> : G["edges"][EK]["from"][number]["kind"] : never;
 
 // @public
 type ValidityEndMutation = BackendValidityEndMutation;
