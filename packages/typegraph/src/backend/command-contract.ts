@@ -15,15 +15,13 @@ import type {
   NodeCreateCommandResult,
 } from "./types";
 
-export type GraphCommandCoordinationBinding = Readonly<{
-  graphId: string;
-  isolation: GraphCommandIsolation;
-  sessionIdentity: object;
-}>;
-
 const graphCommandCoordinationBindings = new WeakMap<
   object,
-  GraphCommandCoordinationBinding
+  Readonly<{
+    graphId: string;
+    isolation: GraphCommandIsolation;
+    sessionIdentity: object;
+  }>
 >();
 const graphCommandPortSessionIdentities = new WeakMap<object, object>();
 
@@ -112,7 +110,7 @@ function boundGraphCommandCoordination(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
   graphId?: string,
-): GraphCommandCoordinationBinding | undefined {
+) {
   const binding = graphCommandCoordinationBindings.get(coordination);
   return (
       binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
