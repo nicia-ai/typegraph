@@ -1,5 +1,21 @@
 # @nicia-ai/typegraph
 
+## 0.55.0
+
+### Minor Changes
+
+- [#609](https://github.com/nicia-ai/typegraph/pull/609) [`39a65ef`](https://github.com/nicia-ai/typegraph/commit/39a65ef8eb544942f35f97fdbfbc2609d6284bba) Thanks [@pdlug](https://github.com/pdlug)! - Accept `validFrom: null` on Store node and edge creation and upsert inputs to explicitly request an open-left validity window. Omitted lower bounds keep their existing default behavior; live-row upserts still refuse changes to an immutable lower bound.
+
+  Preserve open-left staged node and edge windows through snapshot and incremental graph merges, edge repointing, and serialized merge plans instead of narrowing them to the merge commit time. Keep repeated bulk-upsert coalescing from confusing an unknown creation timestamp with a confirmed open-left bound.
+
+- [#605](https://github.com/nicia-ai/typegraph/pull/605) [`f7dcd17`](https://github.com/nicia-ai/typegraph/commit/f7dcd1708be8dd3ef67ce2b32a1c2ee22536d2f6) Thanks [@pdlug](https://github.com/pdlug)! - Define source-dependent edge targets with a `to` map, such as `from: [Employee, Student]` with `to: { Employee: [Department], Student: [Course] }`. This allows one edge kind to connect specific source/target pairs without admitting every combination. Array-valued `to` declarations retain their existing Cartesian-product behavior.
+
+  Allowed pairs are preserved in typed writes, runtime validation, schema serialization, imports, graph merges, and runtime graph extensions. Invalid pairs produce `EndpointPairError`, removing allowed pairs is a breaking schema change, and ontology compatibility checks account for the pair relationship. See [source-dependent targets](https://typegraph.dev/core-concepts#source-dependent-targets) for examples and lifecycle rules.
+
+### Patch Changes
+
+- [#608](https://github.com/nicia-ai/typegraph/pull/608) [`5b2dcc0`](https://github.com/nicia-ai/typegraph/commit/5b2dcc07bd84d3fe97959a3c86cab4e29449c5f5) Thanks [@pdlug](https://github.com/pdlug)! - Prevent startup identity repair from overwriting a newer schema migration with closure data derived from an older schema. Repair now checks the observed schema version inside its write transaction and raises `StaleVersionError` if a concurrent migration advanced it, preserving the newer closure.
+
 ## 0.54.0
 
 ### Highlights
