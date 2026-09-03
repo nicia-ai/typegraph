@@ -35,6 +35,7 @@ export const MERGE_ERROR_CODES = {
   candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE",
   evidence: "GRAPH_MERGE_EVIDENCE",
   candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET",
+  review: "GRAPH_MERGE_REVIEW",
 } as const;
 
 /**
@@ -95,6 +96,17 @@ export class InvalidMergeOptionsError extends MergeError {
   constructor(message: string, options: MergeErrorOptions = {}) {
     super(message, options);
     this.name = "InvalidMergeOptionsError";
+  }
+}
+
+/** Invalid, unsupported, or unavailable evidence for durable merge review. */
+export class MergeReviewError extends MergeError {
+  protected static override readonly errorCategory = "user";
+  override readonly code = MERGE_ERROR_CODES.review;
+
+  constructor(message: string, options: MergeErrorOptions = {}) {
+    super(message, options);
+    this.name = "MergeReviewError";
   }
 }
 

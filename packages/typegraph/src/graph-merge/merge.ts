@@ -2530,7 +2530,7 @@ function assertPublicPlanCapability<G extends GraphDef>(
   }
 }
 
-async function captureMergePlanTargetFence<G extends GraphDef>(
+export async function captureMergePlanTargetFence<G extends GraphDef>(
   target: Store<G>,
 ): Promise<MergePlanTargetFence> {
   assertPublicPlanCapability(target);
@@ -2551,7 +2551,7 @@ async function captureMergePlanTargetFence<G extends GraphDef>(
   };
 }
 
-function sameMergePlanTargetFence(
+export function sameMergePlanTargetFence(
   left: MergePlanTargetFence,
   right: MergePlanTargetFence,
 ): boolean {
@@ -2565,7 +2565,7 @@ function sameMergePlanTargetFence(
   );
 }
 
-async function assertPlanningFenceUnchanged<G extends GraphDef>(
+export async function assertPlanningFenceUnchanged<G extends GraphDef>(
   target: Store<G>,
   startingFence: MergePlanTargetFence,
 ): Promise<void> {

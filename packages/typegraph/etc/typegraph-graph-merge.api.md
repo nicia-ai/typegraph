@@ -3590,6 +3590,7 @@ export const MERGE_ERROR_CODES: {
     readonly candidateSource: "GRAPH_MERGE_CANDIDATE_SOURCE";
     readonly evidence: "GRAPH_MERGE_EVIDENCE";
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
+    readonly review: "GRAPH_MERGE_REVIEW";
 };
 
 // @public
@@ -3608,6 +3609,9 @@ export const MERGE_PLAN_DIGEST_ALGORITHM: "sha256";
 
 // @public (undocumented)
 export const MERGE_PLAN_FORMAT_VERSION: 1;
+
+// @public (undocumented)
+export const MERGE_REVIEW_FORMAT_VERSION: 1;
 
 // @public
 export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
@@ -4043,6 +4047,66 @@ export type MergeReport<G extends GraphDef = GraphDef> = Readonly<{
         graphId: string;
         count: number;
     }>;
+}>;
+
+// @public
+export type MergeReviewArtifact = Readonly<{
+    formatVersion: typeof MERGE_REVIEW_FORMAT_VERSION;
+    kind: "candidate-write-set";
+    digest: MergePlanDigest;
+    writeSet: CandidateWriteSet;
+    policy: MergeReviewPolicy;
+    options: JsonValue;
+    plan: MergePlanArtifact;
+    baseline: MergeReviewBaseline;
+}>;
+
+// @public
+export type MergeReviewBaseline = Readonly<{
+    rows: readonly MergeReviewRow[];
+    identityDigest: string;
+}>;
+
+// @public
+export type MergeReviewDifference = Readonly<{
+    category: "target" | "policy" | "baseline" | "plan";
+    path: string;
+    entity?: MergePlanEntityRef & Readonly<{
+        role: "node" | "edge";
+    }>;
+}>;
+
+// @public
+export class MergeReviewError extends MergeError {
+    constructor(message: string, options?: MergeErrorOptions);
+    // (undocumented)
+    readonly code: "GRAPH_MERGE_REVIEW";
+    // (undocumented)
+    protected static readonly errorCategory = "user";
+}
+
+// @public
+export type MergeReviewPolicy = Readonly<{
+    id: string;
+    context: JsonValue;
+}>;
+
+// @public
+export type MergeReviewRevalidation = Readonly<{
+    status: "compatible";
+    reviewDigest: MergePlanDigest;
+    plan: MergePlanArtifact;
+}> | Readonly<{
+    status: "changed" | "incompatible";
+    reviewDigest: MergePlanDigest;
+    differences: readonly MergeReviewDifference[];
+    plan?: MergePlanArtifact;
+}>;
+
+// @public
+export type MergeReviewRow = MergePlanEntityRef & Readonly<{
+    role: "node" | "edge";
+    digest?: string | undefined;
 }>;
 
 // @public
@@ -4589,6 +4653,14 @@ export type PlanCandidateWriteSetArgs<G extends GraphDef> = Readonly<{
     makeBackend: MakeBackend;
     writeSet: unknown;
     options?: Omit<MergeOptions<G>, "target">;
+}>;
+
+// @public
+export function planCandidateWriteSetReview<G extends GraphDef>(args: PlanCandidateWriteSetReviewArgs<G>): Promise<Result<MergeReviewArtifact, MergeError>>;
+
+// @public (undocumented)
+export type PlanCandidateWriteSetReviewArgs<G extends GraphDef> = PlanCandidateWriteSetArgs<G> & Readonly<{
+    policy: MergeReviewPolicy;
 }>;
 
 // @public
@@ -5239,6 +5311,14 @@ export type Result<T, E = Error> = Readonly<{
 }> | Readonly<{
     success: false;
     error: E;
+}>;
+
+// @public
+export function revalidateCandidateWriteSetReview<G extends GraphDef>(args: RevalidateCandidateWriteSetReviewArgs<G>): Promise<Result<MergeReviewRevalidation, MergeError>>;
+
+// @public (undocumented)
+export type RevalidateCandidateWriteSetReviewArgs<G extends GraphDef> = Omit<PlanCandidateWriteSetReviewArgs<G>, "writeSet"> & Readonly<{
+    review: unknown;
 }>;
 
 // @public

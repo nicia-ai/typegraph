@@ -29,6 +29,7 @@ export { integrationTestGraph } from "./fixtures";
 export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
 export { registerGraphMergePlanIntegrationTests } from "./graph-merge-plan";
+export { registerGraphMergeReviewIntegrationTests } from "./graph-merge-review";
 export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
