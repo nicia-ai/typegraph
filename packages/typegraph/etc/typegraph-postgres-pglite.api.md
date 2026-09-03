@@ -580,7 +580,7 @@ type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 type CompileQueryOptions = Readonly<{
     dialect?: SqlDialect | undefined;
     schema?: SqlSchema | undefined;
-    fulltextStrategy?: FulltextStrategy | undefined;
+    fulltextStrategy?: FulltextStrategy | false | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     windowFunctions?: boolean | undefined;
     vectorSlots?: VectorSlotMap | undefined;

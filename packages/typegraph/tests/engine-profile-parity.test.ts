@@ -112,6 +112,49 @@ function createSqliteRoot(): GraphBackend {
   return backend;
 }
 
+/**
+ * Same PGlite root as {@link createPgliteRoot}, but built with
+ * `fulltext: false` — pins the key-set and capabilities shape of a
+ * fulltext-off Postgres-dialect backend alongside the fulltext-on one
+ * above, without altering either existing snapshot.
+ */
+async function createPgliteFulltextOffRoot(): Promise<GraphBackend> {
+  const pgvectorModule = await import("@electric-sql/pglite-pgvector");
+  const vectorExtension = pgvectorModule.vector;
+  const client = await PGlite.create({
+    extensions: { vector: vectorExtension },
+  });
+  cleanups.push(() => client.close());
+  await client.exec("CREATE EXTENSION IF NOT EXISTS vector");
+  const backend = createPostgresBackend(drizzlePglite(client), {
+    fulltext: false,
+  });
+  return backend;
+}
+
+/**
+ * Same better-sqlite3 root as {@link createSqliteRoot}, but built with
+ * `fulltext: false` — pins the key-set and capabilities shape of a
+ * fulltext-off SQLite-dialect backend alongside the fulltext-on one above,
+ * without altering either existing snapshot.
+ */
+function createSqliteFulltextOffRoot(): GraphBackend {
+  const sqlite = new RealDatabase(":memory:");
+  cleanups.push(() => {
+    sqlite.close();
+    return Promise.resolve();
+  });
+  (nodeRequire("sqlite-vec") as { load: (db: Database.Database) => void }).load(
+    sqlite,
+  );
+  const backend = createSqliteBackend(drizzleSqlite(sqlite), {
+    executionProfile: { isSync: true },
+    vector: sqliteVecStrategy,
+    fulltext: false,
+  });
+  return backend;
+}
+
 // ============================================================
 // Snapshot normalization — deterministic key order and volatile-value
 // placeholders, so the golden files reflect real behavior changes only.
@@ -223,6 +266,44 @@ describe("engine-profile parity: member keys, capabilities, marks", () => {
       expect(isSchemaFencedInsertEligible(tx)).toBe(true);
       return Promise.resolve();
     });
+  });
+
+  it("PGlite root, fulltext off", async () => {
+    const backend = await createPgliteFulltextOffRoot();
+    expect(sortedKeys(backend)).toMatchSnapshot("pglite-fulltext-off-keys");
+    expect(deepSortKeys(backend.capabilities)).toMatchSnapshot(
+      "pglite-fulltext-off-capabilities",
+    );
+    expect(backend.capabilities.fulltext).toBeUndefined();
+    expect(backend.capabilities.vector?.supported).toBe(true);
+    expect(backend.upsertFulltext).toBeUndefined();
+    expect(backend.deleteFulltext).toBeUndefined();
+    expect(backend.upsertFulltextBatch).toBeUndefined();
+    expect(backend.deleteFulltextBatch).toBeUndefined();
+    expect(backend.fulltextSearch).toBeUndefined();
+
+    expect(isFirstPartyFactory(backend)).toBe(true);
+    expect(isSchemaFencedInsertEligible(backend)).toBe(true);
+    expect(isBundledRootAutocommitEligible(backend)).toBe(true);
+  });
+
+  it("better-sqlite3 root, fulltext off", () => {
+    const backend = createSqliteFulltextOffRoot();
+    expect(sortedKeys(backend)).toMatchSnapshot("sqlite-fulltext-off-keys");
+    expect(deepSortKeys(backend.capabilities)).toMatchSnapshot(
+      "sqlite-fulltext-off-capabilities",
+    );
+    expect(backend.capabilities.fulltext).toBeUndefined();
+    expect(backend.capabilities.vector?.supported).toBe(true);
+    expect(backend.upsertFulltext).toBeUndefined();
+    expect(backend.deleteFulltext).toBeUndefined();
+    expect(backend.upsertFulltextBatch).toBeUndefined();
+    expect(backend.deleteFulltextBatch).toBeUndefined();
+    expect(backend.fulltextSearch).toBeUndefined();
+
+    expect(isFirstPartyFactory(backend)).toBe(true);
+    expect(isSchemaFencedInsertEligible(backend)).toBe(true);
+    expect(isBundledRootAutocommitEligible(backend)).toBe(true);
   });
 });
 

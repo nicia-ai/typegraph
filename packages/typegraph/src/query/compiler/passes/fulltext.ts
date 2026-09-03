@@ -37,8 +37,8 @@ export function runFulltextPredicatePass(
   if (!dialect.capabilities.supportsFulltext) {
     throw new UnsupportedBackendCapabilityError(
       "$fulltext.matches()",
-      "fulltext_unsupported",
-      { dialect: dialect.name },
+      "fulltext",
+      { dialect: dialect.name, reason: "fulltext_unsupported" },
       "This backend was created with `fulltext: false`.",
     );
   }

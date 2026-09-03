@@ -4392,10 +4392,10 @@ type FulltextStrategy = Readonly<{
 }>;
 
 // @public
-export function generateSqliteDDL(tables?: SqliteTables, fulltextStrategy?: FulltextStrategy): string[];
+export function generateSqliteDDL(tables?: SqliteTables, fulltextStrategy?: FulltextStrategy | false): string[];
 
 // @public
-export function generateSqliteMigrationSQL(tables?: SqliteTables, fulltextStrategy?: FulltextStrategy): string;
+export function generateSqliteMigrationSQL(tables?: SqliteTables, fulltextStrategy?: FulltextStrategy | false): string;
 
 // @public (undocumented)
 const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
@@ -6438,7 +6438,7 @@ const SqlIntentBrand: unique symbol;
 export type SqliteBackendOptions = Readonly<{
     tables?: SqliteTables;
     executionProfile?: SqliteExecutionProfileHints;
-    fulltext?: FulltextStrategy;
+    fulltext?: FulltextStrategy | false;
     vector?: VectorStrategy;
     capabilities?: BundledBackendCapabilityOverrides;
     serializedResource?: SerializedResourceDeclaration;

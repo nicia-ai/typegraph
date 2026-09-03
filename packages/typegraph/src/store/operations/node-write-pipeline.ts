@@ -19,6 +19,7 @@ import { type z } from "zod";
 
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
+import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import {
   type BundleVerdictOf,
   type ClaimsVerdictThunk,
@@ -72,6 +73,7 @@ import {
 import {
   deleteNodeFulltext,
   getSearchableFields,
+  refuseFulltextUnavailable,
   syncFulltext,
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
@@ -694,22 +696,27 @@ export async function applyNodeSetUpdate(
       { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
     );
   }
-  if (
-    // Narrower than "is fulltext available on this backend"
-    // (`resolveBackendFulltext`): a backend can have an active fulltext
-    // strategy yet still lack the batch primitives a set-based update needs,
-    // so this checks the four members the write plan below actually calls,
-    // mirroring the batched-uniqueness and batched-vector checks around it.
-    getSearchableFields(schema).length > 0 &&
-    (backend.upsertFulltext === undefined ||
+  if (getSearchableFields(schema).length > 0) {
+    // A fulltext-off backend (`resolveBackendFulltext` returns `false`) gets
+    // the same typed capability refusal every other fulltext entry point
+    // raises, rather than the batch-primitive error below — that one is for
+    // a backend that DOES have fulltext but lacks the four members the write
+    // plan calls, mirroring the batched-uniqueness and batched-vector checks
+    // around it.
+    if (resolveBackendFulltext(backend) === false) {
+      refuseFulltextUnavailable(backend, kind);
+    }
+    if (
+      backend.upsertFulltext === undefined ||
       backend.deleteFulltext === undefined ||
       backend.upsertFulltextBatch === undefined ||
-      backend.deleteFulltextBatch === undefined)
-  ) {
-    throw new ConfigurationError(
-      "The transaction backend lacks batched fulltext operations",
-      { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
-    );
+      backend.deleteFulltextBatch === undefined
+    ) {
+      throw new ConfigurationError(
+        "The transaction backend lacks batched fulltext operations",
+        { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
+      );
+    }
   }
   if (
     getEmbeddingFields(schema).length > 0 &&

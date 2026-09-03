@@ -44,15 +44,21 @@ const FIELD_SEPARATOR = "\n";
  * backend), so `syncFulltext` / `syncFulltextBatchForKind` /
  * `deleteNodeFulltext` would otherwise no-op forever instead of surfacing
  * the mismatch at the first write.
+ *
+ * Exported for the set-based update paths (`executeNodeSetUpdate` /
+ * `applyNodeSetUpdate`), which probe for the batch fulltext members
+ * directly rather than through the single-row `upsertFulltext` /
+ * `deleteFulltext` presence check above, and so need the same refusal
+ * without duplicating its error shape.
  */
-function refuseFulltextUnavailable(
+export function refuseFulltextUnavailable(
   backend: GraphBackend | TransactionBackend,
   nodeKind: string,
 ): never {
   throw new UnsupportedBackendCapabilityError(
     `Node kind "${nodeKind}" declares searchable() fields`,
-    "fulltext_unsupported",
-    { backend: backend.dialect, nodeKind },
+    "fulltext",
+    { backend: backend.dialect, nodeKind, reason: "fulltext_unsupported" },
     "This backend was created with `fulltext: false`. Remove the " +
       "searchable() declaration, or use a backend with fulltext support.",
   );

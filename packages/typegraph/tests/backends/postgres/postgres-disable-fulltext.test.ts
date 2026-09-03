@@ -221,7 +221,7 @@ describe("fulltext: false — behavior on PGlite", () => {
       UnsupportedBackendCapabilityError,
     );
     await expect(attempt).rejects.toMatchObject({
-      details: { capability: "fulltext_unsupported" },
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
     });
   });
 
@@ -241,7 +241,7 @@ describe("fulltext: false — behavior on PGlite", () => {
       UnsupportedBackendCapabilityError,
     );
     await expect(attempt).rejects.toMatchObject({
-      details: { capability: "fulltext_unsupported" },
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
     });
   });
 
@@ -258,7 +258,31 @@ describe("fulltext: false — behavior on PGlite", () => {
       UnsupportedBackendCapabilityError,
     );
     await expect(attempt).rejects.toMatchObject({
-      details: { capability: "fulltext_unsupported" },
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
+    });
+  });
+
+  it("updateWhere() on a searchable kind refuses with UnsupportedBackendCapabilityError, not the batch-primitive ConfigurationError", async () => {
+    await setUp();
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+
+    // No row is written, and none needs to be: the capability check runs
+    // ahead of the candidate-row UPDATE, so an empty table already reaches
+    // it. `all: true` bypasses the separate "requires where/exists/all"
+    // guard without depending on any existing row.
+    const attempt = store.nodes.Document.updateWhere({
+      patch: { title: "hello" },
+      all: true,
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(
+      UnsupportedBackendCapabilityError,
+    );
+    await expect(attempt).rejects.toMatchObject({
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
     });
   });
 
@@ -304,7 +328,7 @@ describe("fulltext: false — behavior on PGlite", () => {
       UnsupportedBackendCapabilityError,
     );
     await expect(attempt).rejects.toMatchObject({
-      details: { capability: "fulltext_unsupported" },
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
     });
   });
 });

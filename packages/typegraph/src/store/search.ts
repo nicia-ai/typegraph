@@ -1167,8 +1167,8 @@ function refuseUnlessFulltextAvailable(
   if (resolveBackendFulltext(backend) !== false) return;
   throw new UnsupportedBackendCapabilityError(
     operation,
-    "fulltext_unsupported",
-    { backend: backend.dialect },
+    "fulltext",
+    { backend: backend.dialect, reason: "fulltext_unsupported" },
     "This backend was created with `fulltext: false`.",
   );
 }
