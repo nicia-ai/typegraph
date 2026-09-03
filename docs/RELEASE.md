@@ -29,6 +29,13 @@ changelog generation, npm publishing, and GitHub Releases.
 5. Merge the `Version Packages` PR.
 6. Workflow publishes to npm and creates GitHub Releases.
 7. Verify the GitHub Release against the changelog and correct any drift.
+8. After the new release tag is available, run the API compatibility check
+   (`pnpm --filter @nicia-ai/typegraph test:api-surface`) and remove only exceptions
+   reported as stale from
+   `packages/typegraph/etc/api-surface-exceptions.json` in a follow-up maintenance
+   PR. Exceptions cover changes against the latest published tag; once those
+   changes ship, they no longer need exceptions. Keep them until publication so
+   the release PR still passes against the previous tag.
 
 The [release announcement guidelines](../AGENTS.md#release-announcements) describe
 the editorial format and when it is useful. Editing only the PR description does
