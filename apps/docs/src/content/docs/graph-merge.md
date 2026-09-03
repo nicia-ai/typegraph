@@ -384,12 +384,102 @@ process stops after apply, the merge may already be committed without a receipt.
 Retain the original review and approval, and reconcile committed history and
 application operation identity before repairing the receipt. Do not treat a
 missing receipt as permission to replay the candidate; applying its old execution
-plan is stale, and replanning is not a duplicate-execution check. Applications
-requiring a receipt atomic with the merge need a separate transaction-composition
-design. This protocol adds no such guarantee.
+plan is stale, and replanning is not a duplicate-execution check. To commit the
+receipt atomically with the merge, create it in an `afterApply` callback as
+described in [Composing application checks and writes](#composing-application-checks-and-writes).
+Review revalidation alone does not add that guarantee.
 
 See the runnable [durable merge review example](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts)
 for the complete schema and lifecycle.
+
+## Composing application checks and writes
+
+Pass execution callbacks to `applyMergePlan()` when a reviewed candidate and
+related application records must commit together:
+
+```typescript
+const result = await applyMergePlan(target, reviewedPlan, {
+  beforeApply: async (reads) => {
+    const resource = await reads.nodes.Resource.getById(resourceId);
+    if (resource?.owner !== "unclaimed") {
+      throw new Error("Resource is already claimed");
+    }
+  },
+  afterApply: async (tx, applied) => {
+    await tx.nodes.Resource.update(resourceId, { owner: "accepted" });
+    const decision = await tx.nodes.Decision.create({
+      status: "accepted",
+      changedNodes: applied.merged.nodes,
+    });
+    await tx.edges.decides.create(decision.id, resourceId, {});
+  },
+});
+if (!isOk(result)) throw result.error;
+// The plan and application writes have now committed together.
+```
+
+`Resource`, `Decision`, and `decides` stand for types registered in your graph.
+Import `MergePlanApplyOptions`, `MergePlanReadContext`, and `MergePlanApplied`
+from `@nicia-ai/typegraph/graph-merge` to type reusable helpers. Callbacks are
+execution options: they are not stored in the artifact or covered by its digest.
+
+The transaction acquires the schema fence before the graph write lock, validates
+schema, revision origin, and revision, and then calls `beforeApply`. This context
+exposes node and edge collection reads and, for identity-enabled graphs, identity
+reads. Write methods, native SQL, and a root Store are absent. Application writes
+before plan application are deliberately unsupported: an uncommitted write can
+change the reviewed state without changing its durable revision yet.
+
+After the precheck, TypeGraph performs the existing plan preflight, identity
+checks, and writes. `afterApply` receives a `TransactionContext` whose reads see
+those writes. Its `applied.merged` contains only the plan's provisional counts;
+callback writes do not contribute to the final report's merge counts. Use the
+supplied contexts for every graph operation. Calling the original Store inside a
+callback does not enlist it in this transaction. Do not retain a context for later
+work, and await every operation before returning.
+
+Callbacks must resolve without a value. Throw or reject to abort; returning a
+value, including an `Err`, is refused with `InvalidMergeOptionsError`. A callback
+rejection, stale plan, merge failure, capture-flush failure, or commit failure
+rolls back the combined graph operation. Errors are converted to the outer
+`Result` after rollback; ordinary application errors are retained in the cause
+chain. Existing typed merge errors and constraint translation remain intact.
+Only the successful outer result confirms commit.
+
+Transaction conflicts (PostgreSQL serialization failures or deadlocks) retry the
+whole transaction up to **three attempts**, including both callbacks. Every
+attempt checks the fence again; an intervening committed write makes the plan
+stale rather than silently rebasing it. Keep callbacks safe to repeat. Do not send
+messages, call external services with side effects, or publish an outcome inside
+a callback. Perform those effects after successful completion, or write an
+application outbox record through `tx` for later delivery. Returned contexts and
+provisional outcomes are not durable notifications.
+
+Protection covers the target graph's transactional state and participating
+TypeGraph writers using its graph fence. It does not make an application policy a
+declarative constraint: every writer changing that policy's state must enforce
+it, for example through its own conditional operation. It does not cover other
+graphs, arbitrary SQL, or external systems. SQLite uses its writer transaction;
+Composed PostgreSQL applications use read-committed isolation and the graph
+write lock with or without history. The lock statement records the effective
+session isolation; incompatible or unknown isolation is refused before callbacks.
+Standalone revision-tracking-only applications retain serializable isolation. Unsupported
+transaction capabilities are refused before callbacks. Existing session-bound
+fence and recorded-capture isolation checks still apply.
+
+With history enabled, plan and application writes share the transaction's
+recorded capture and flush, producing one per-graph recorded revision. Without
+history, revision tracking likewise advances for the combined transaction.
+Failure leaves no live changes or recorded revision from the failed attempt.
+Existing valid-time bounds, including open bounds, retain their semantics.
+
+Optional persisted merge provenance remains separate from recorded history:
+provenance records are persisted only after successful graph commit, and a
+persistence failure remains a report warning. Callbacks do not receive a
+post-commit provenance result. Previously committed review records in the target
+still invalidate a plan's revision fence; this API does not relax plan staleness.
+For a durable candidate review, revalidate the stored review first, then pass
+the compatible result's fresh `plan` and these callbacks to `applyMergePlan()`.
 
 ## Scaling branches and interchange
 

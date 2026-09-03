@@ -5,8 +5,10 @@ import {
   type AdapterHistoryStore,
   type GraphBackend,
   defineGraph,
+  defineEdge,
   defineNode,
   type Store,
+  type TransactionContext,
 } from "..";
 import {
   applyMergePlan,
@@ -17,6 +19,9 @@ import {
   type MakeBackend,
   type MatchEvidence,
   type MergePlanArtifact,
+  type MergePlanApplyOptions,
+  type MergePlanApplied,
+  type MergePlanReadContext,
   type MergeOptions,
   MergeConstraintConflictError,
   type MergeConstraintConflictErrorDetails,
@@ -192,3 +197,77 @@ if (revalidation.status === "compatible") {
 declare const reviewError: MergeReviewError;
 expectAssignable<MergeError>(reviewError);
 expectType<"GRAPH_MERGE_REVIEW">(reviewError.code);
+// Merge callbacks remain graph-specific and cannot expose an unfenced writer.
+const applyOptions: MergePlanApplyOptions<typeof graph> = {
+  beforeApply: async (reads) => {
+    expectType<MergePlanReadContext<typeof graph>>(reads);
+    await reads.nodes.Person.count();
+    expectError(reads.nodes.Person.create({ birthDate: "2000", name: "Ada" }));
+    expectError(reads.nodes.Person.update);
+    expectError(reads.nodes.Person.delete);
+    expectError(reads.backend);
+    expectError(reads.transaction);
+    expectError(reads.getNodeCollection);
+    expectError(reads.identity);
+    expectError(reads.nodes.Unknown);
+  },
+  afterApply: async (tx, applied) => {
+    expectType<TransactionContext<typeof graph>>(tx);
+    expectType<MergePlanApplied>(applied);
+    expectType<number>(applied.merged.nodes);
+    await tx.nodes.Person.create({ birthDate: "2000", name: "Ada" });
+    expectError(tx.nodes.Person.create({ name: "Missing birth date" }));
+    expectError(tx.nodes.Unknown);
+    expectError(applied.provenance);
+    expectError((applied.merged.nodes = 2));
+  },
+};
+expectType<Promise<Result<MergeReport<typeof graph>, MergeError>>>(
+  applyMergePlan(store, mergePlan, applyOptions),
+);
+expectError(
+  applyMergePlan(store, mergePlan, {
+    beforeApply: async () => ({ success: false, error: new Error("refused") }),
+  }),
+);
+expectError(
+  applyMergePlan(store, mergePlan, {
+    afterApply: async () => ({ success: false, error: new Error("refused") }),
+  }),
+);
+expectError(applyMergePlan(store, mergePlan, { beforeApply: () => {} }));
+declare const transaction: TransactionContext<typeof graph>;
+expectError(applyMergePlan(transaction, mergePlan));
+
+const related = defineEdge("related", { schema: z.object({}) });
+const identityGraph = defineGraph({
+  id: "merge_callbacks_identity_typetest",
+  nodes: { Person: { type: Person } },
+  edges: { related: { type: related, from: [Person], to: [Person] } },
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+declare const identityStore: Store<typeof identityGraph>;
+applyMergePlan(identityStore, mergePlan, {
+  beforeApply: async (reads) => {
+    await reads.edges.related.count();
+    expectError(reads.edges.related.create);
+    expectError(reads.identity.assertSame);
+    expectError(reads.identity.retractAssertion);
+    const people = await reads.nodes.Person.find();
+    if (people[0] !== undefined) {
+      expectType<boolean>(await reads.identity.areSame(people[0], people[0]));
+    }
+  },
+  afterApply: async (tx) => {
+    const first = await tx.nodes.Person.create({
+      name: "First",
+      birthDate: "2000",
+    });
+    const second = await tx.nodes.Person.create({
+      name: "Second",
+      birthDate: "2001",
+    });
+    await tx.edges.related.create(first, second, {});
+    await tx.identity.assertSame(first, second);
+  },
+});

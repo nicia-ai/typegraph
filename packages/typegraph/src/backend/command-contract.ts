@@ -15,13 +15,15 @@ import type {
   NodeCreateCommandResult,
 } from "./types";
 
+export type GraphCommandCoordinationBinding = Readonly<{
+  graphId: string;
+  isolation: GraphCommandIsolation;
+  sessionIdentity: object;
+}>;
+
 const graphCommandCoordinationBindings = new WeakMap<
   object,
-  Readonly<{
-    graphId: string;
-    isolation: GraphCommandIsolation;
-    sessionIdentity: object;
-  }>
+  GraphCommandCoordinationBinding
 >();
 const graphCommandPortSessionIdentities = new WeakMap<object, object>();
 
@@ -106,6 +108,32 @@ export function normalizeGraphCommandIsolation(
   }
 }
 
+function boundGraphCommandCoordination(
+  port: GraphCommandPort,
+  coordination: GraphCommandCoordination,
+  graphId?: string,
+): GraphCommandCoordinationBinding | undefined {
+  const binding = graphCommandCoordinationBindings.get(coordination);
+  return (
+      binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
+        (graphId === undefined || binding.graphId === graphId)
+    ) ?
+      binding
+    : undefined;
+}
+
+/** Effective isolation of coordination earned by this graph and transaction. */
+export function graphCommandCoordinationIsolation(
+  port: GraphCommandPort,
+  graphId: string,
+  coordination: GraphCommandCoordination,
+): GraphCommandIsolation {
+  return (
+    boundGraphCommandCoordination(port, coordination, graphId)?.isolation ??
+    "unknown"
+  );
+}
+
 /**
  * A match-key convergence must observe the winner after waiting for its graph
  * lock. Repeatable-read snapshots cannot do that; serializable can instead
@@ -116,11 +144,8 @@ export function assertGraphCommandConvergenceIsolation(
   port: GraphCommandPort,
   coordination: GraphCommandCoordination,
 ): void {
-  const binding = graphCommandCoordinationBindings.get(coordination);
   const isolation =
-    binding?.sessionIdentity === graphCommandPortSessionIdentity(port) ?
-      binding.isolation
-    : "unknown";
+    boundGraphCommandCoordination(port, coordination)?.isolation ?? "unknown";
   if (isolation === "read_committed" || isolation === "serializable") return;
   throw new ConfigurationError(
     "Match-key convergence requires read-committed or serializable transaction isolation.",
@@ -141,10 +166,12 @@ export function assertGraphCommandCoordination(
   command: GraphCommand,
   coordination: GraphCommandCoordination,
 ): void {
-  const binding = graphCommandCoordinationBindings.get(coordination);
   if (
-    binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
-    binding.graphId === command.plan.params.graphId
+    boundGraphCommandCoordination(
+      port,
+      coordination,
+      command.plan.params.graphId,
+    ) !== undefined
   ) {
     return;
   }
