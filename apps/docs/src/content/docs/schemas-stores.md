@@ -2702,6 +2702,19 @@ The returned collections expose the full API (`create`, `getById`, `find`, `coun
 [`DynamicNodeCollection`](/types#dynamicnodecollection) and
 [`DynamicEdgeCollection`](/types#dynamicedgecollection).
 
+Both edge lookups are also available inside `transaction`, `withTransaction`,
+and receipt-enabled transaction contexts. They resolve the transaction's own
+collections; lookups inside `measure` contribute to that scope's receipt.
+`getEdgeCollectionOrThrow` throws `KindNotFoundError` for an unknown kind and also
+accepts a Store-issued runtime edge token, using the same token validation as the
+Store. Known graph keys retain their edge property schema while endpoints are
+validated at runtime.
+
+For generic graph/kind helpers, use these lookups instead of casting
+`tx.edges[kind]`; see [dynamic edge types and migration](/types#dynamicedgecollection).
+Valid-time views expose `view.getEdgeCollection(kind)` for dynamic reads at their
+pinned coordinate.
+
 ### Dynamic Props Schema Access
 
 Returns the live `z.ZodObject` the store uses internally to validate `.create()` /

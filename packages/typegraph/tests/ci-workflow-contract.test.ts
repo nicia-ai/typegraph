@@ -104,6 +104,14 @@ describe("CI workflow contract", () => {
     expect(workflow).toMatch(
       /test-coverage:[\s\S]*?timeout-minutes: 30[\s\S]*?strategy:/,
     );
+
+    // CLI timeouts override every project, including the 60s budgets for
+    // in-process Postgres suites. Keep per-test budgets in Vitest config.
+    const coverageJob = /\n {2}test-coverage:\n[\s\S]*?(?=\n {2}\S)/.exec(
+      workflow,
+    )?.[0];
+    expect(coverageJob).toBeDefined();
+    expect(coverageJob).not.toMatch(/--testTimeout(?:=|\s)/);
   });
 
   it("gives CI and release declaration builds enough worker heap", () => {
@@ -349,7 +357,7 @@ describe("CI workflow contract", () => {
     const jobBlockMatch =
       /\n {2}test-typescript-compat:\n[\s\S]*?(?=\n {2}\S)/.exec(workflow);
     expect(jobBlockMatch).not.toBeNull();
-    expect(jobBlockMatch?.[0]).toMatch(/- uses: actions\/checkout@v6\n\n/);
+    expect(jobBlockMatch?.[0]).toMatch(/- uses: actions\/checkout@\S+\n\n/);
     expect(packageManifest.scripts["test:api-surface"]).toBe(
       "node --import tsx scripts/api-surface-compat.ts",
     );

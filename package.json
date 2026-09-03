@@ -34,11 +34,11 @@
     "release": "turbo run build --filter='!@nicia-ai/typegraph-docs' && changeset publish"
   },
   "devDependencies": {
-    "@changesets/changelog-github": "^0.7.0",
-    "@changesets/cli": "^2.31.0",
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^3.0.1",
     "@typegraph/eslint-config": "workspace:*",
     "knip": "^6.24.0",
-    "markdownlint-cli2": "^0.23.0",
+    "markdownlint-cli2": "^0.23.2",
     "npm-run-all2": "^9.0.2",
     "prettier": "^3.9.4",
     "prettier-plugin-astro": "^0.14.1",

@@ -157,7 +157,7 @@ const planned = await planMerge(base, [sourceA, sourceB], {
 });
 if (!isOk(planned)) throw planned.error;
 
-// Safe to persist or send to a separate review process.
+// Persist outside the target graph, or send to a separate review process.
 const stored = JSON.stringify(planned.data);
 const reviewed = JSON.parse(stored);
 
@@ -208,6 +208,13 @@ review the new digest and proposal, then apply the new artifact; never edit an
 old plan or retry it as though it still represented the target. A successful
 plan is single-use: a second or concurrent application is stale.
 
+Persisting a plan or approval in the target graph also advances this revision.
+For exact-plan approval, use external storage or a separate graph ID; writes to
+that graph do not advance this target's revision. This does not provide atomic
+writes across graphs, and any intervening target write still requires a fresh
+plan. For candidate batches whose review records belong in the target itself,
+use the durable review protocol below.
+
 `merge()` and `mergeIncremental()` remain convenient compatibility wrappers.
 They invoke the same planner and applier contiguously and return the same
 `MergeReport` shape as before, now with match evidence on each resolution. Use
@@ -222,6 +229,257 @@ unrecorded changes. It is **not** a signature, proof of origin, authentication,
 or authorization. Authenticate untrusted storage and authorize the caller before
 passing a plan to `applyMergePlan()`.
 :::
+
+### Durable candidate review in the target graph
+
+`planCandidateWriteSetReview()` separates immutable review evidence from a
+revision-bound execution plan. Its `MergeReviewArtifact` retains the original
+candidate write set, reviewed plan, normalized merge options, explicit policy
+identity/context, and target baseline. You can persist this artifact and later
+approval records in the target before calling
+`revalidateCandidateWriteSetReview()` to compute a fresh execution plan.
+
+V1 supports candidate write sets only. It does not rebase arbitrary artifacts
+from `planMerge()` or `planMergeIncremental()`.
+
+The following continues the [candidate write set example](#constraint-aware-ingestion-branches).
+`Artifact`, `Decision`, and `evidence` are application-defined node/edge kinds;
+`proposal` is an existing node. The target enables `history` or `revisionTracking`.
+
+```typescript
+import {
+  applyMergePlan,
+  planCandidateWriteSetReview,
+  revalidateCandidateWriteSetReview,
+  unwrap,
+} from "@nicia-ai/typegraph/graph-merge";
+
+const policy = {
+  id: "acceptance-policy-v1",
+  context: { requiredApprovals: 1, resolverVersion: "2026-09-01" },
+};
+const review = unwrap(
+  await planCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    writeSet,
+    policy,
+  }),
+);
+const artifact = await store.nodes.Artifact.create(
+  { content: JSON.stringify(review) },
+  { id: review.digest.value },
+);
+await store.edges.evidence.create(proposal, artifact, { note: "review" });
+
+// After an authenticated reviewer approves under the application's policy:
+const decision = await store.nodes.Decision.create({
+  approved: true,
+  reviewDigest: review.digest.value,
+});
+await store.edges.evidence.create(decision, artifact, { note: "approval" });
+
+// Later: authenticate the stored artifact and decision, then check current
+// authorization, approval validity, and policy before reusing that approval.
+const persisted = await store.nodes.Artifact.getById(artifact.id);
+if (persisted === undefined) throw new Error("Missing review artifact");
+const checked = unwrap(
+  await revalidateCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    review: JSON.parse(persisted.content),
+    policy,
+  }),
+);
+if (checked.status !== "compatible") {
+  console.log(checked.differences);
+  throw new Error("Create a new review and obtain a new approval");
+}
+if (checked.reviewDigest.value !== decision.reviewDigest) {
+  throw new Error("Approval does not identify the validated review");
+}
+
+// Keep this fresh execution plan ephemeral: another target write makes it stale.
+const applied = unwrap(await applyMergePlan(store, checked.plan));
+
+// A separate commit AFTER successful apply; see the recovery boundary below.
+await store.nodes.Artifact.create({
+  content: JSON.stringify({
+    reviewDigest: checked.reviewDigest,
+    approvalId: decision.id,
+    executionPlanDigest: checked.plan.digest,
+    executionTarget: checked.plan.target,
+    report: applied,
+  }),
+});
+```
+
+All approval records and links must be committed before final revalidation.
+Do not persist each replacement execution plan in the target: that repeats the
+staleness cycle. Retain the original review, and use the returned `reviewDigest`
+plus the fresh plan's `digest` and `target` fence to relate approval to execution.
+
+Both review APIs return `Result<..., MergeError>`. Revalidation accepts the
+persisted artifact as `unknown` and replans its retained candidate input once
+target, policy, and baseline checks pass.
+Supply current merge `options` and `policy` again; callbacks are never restored
+from serialized data.
+
+| Revalidation status | Meaning and next step |
+| --- | --- |
+| `compatible` | Includes a fresh `plan` and the original `reviewDigest`. Application policy may reuse approval; authorize the action and apply promptly. Compatibility itself grants no permission. |
+| `changed` | `differences` identify changed policy/options, baseline entities/identity, or plan fields. Obtain a new review and approval. A `plan` is included only when fresh planning completed. |
+| `incompatible` | The graph ID, schema identity, or revision origin differs. Approval cannot be reused for this target; resolve the mismatch and create a new review. |
+
+Malformed/unsupported artifacts, mismatched digests, and missing required
+evidence return `MergeReviewError` (`GRAPH_MERGE_REVIEW`). Existing typed planning
+and constraint errors remain errors rather than compatibility statuses. A target
+change during evidence capture/planning returns `MergePlanningStaleError`.
+
+The V1 baseline is deliberately conservative:
+
+- Every original node and edge row, including tombstones and validity metadata,
+  must remain unchanged. Editing an old audit record requires a new review even
+  when the candidate's resolved writes would be identical.
+- Expected absences for candidate/write/guard references must remain absent.
+  Same-ID nodes of other kinds are also guarded, because they can change implicit
+  identity membership. Complete archival identity evidence must remain unchanged.
+- Newly added rows can coexist with approval only when fresh planning produces
+  identical resolved writes, guards, conflicts, evidence, provenance, and other
+  plan content. Candidate-derived anchors and the execution digest/fence are
+  regenerated. There is no exemption for an “audit” kind.
+
+Applicable store constraints still run during atomic application. Compatibility
+does not promise that apply will succeed: new rows may introduce constraint
+conflicts, and any write between revalidation and apply causes
+`StaleMergePlanError`. A failed application commits no partial candidate node,
+edge, or identity writes. Revalidate again after a stale refusal; require reapproval if
+the result changes.
+
+`policy.id` identifies your policy implementation; `policy.context` explicitly
+records every opaque dependency that can change its decision. Include callback
+and resolver versions, model/prompt versions, external configuration or data
+versions, and any application state used to authorize approval reuse. Use an
+empty context only when no such dependencies exist. TypeGraph captures callback
+presence and serializable options, but cannot discover callback code, closure
+state, external reads, or hidden application policy dependencies.
+
+The producer must supply complete evidence, and the application must authenticate
+the entire stored review and its approval. Content addressing and SHA-256 detect
+content changes; anyone able to replace evidence can recompute a digest. A valid
+digest is neither proof that the baseline was complete nor authorization to
+reuse approval. Enforce artifact immutability and access control in your storage
+or application. The review contains candidate data and an entire reviewed plan,
+so protect it with the same care as graph data.
+
+Review capture and revalidation read/fingerprint the complete target graph and
+archival identity ledger. The artifact stores one fingerprint per original row
+plus expected absences. Fresh candidate planning additionally clones the whole
+graph into its disposable working copy. Budget graph-sized reads, memory,
+artifact storage, and cloning for this workflow; it is intended for bounded
+review batches.
+
+The execution receipt above is a separate commit. If its write fails or the
+process stops after apply, the merge may already be committed without a receipt.
+Retain the original review and approval, and reconcile committed history and
+application operation identity before repairing the receipt. Do not treat a
+missing receipt as permission to replay the candidate; applying its old execution
+plan is stale, and replanning is not a duplicate-execution check. To commit the
+receipt atomically with the merge, create it in an `afterApply` callback as
+described in [Composing application checks and writes](#composing-application-checks-and-writes).
+Review revalidation alone does not add that guarantee.
+
+See the runnable [durable merge review example](https://github.com/nicia-ai/typegraph/blob/main/packages/typegraph/examples/27-durable-merge-review.ts)
+for the complete schema and lifecycle.
+
+## Composing application checks and writes
+
+Pass execution callbacks to `applyMergePlan()` when a reviewed candidate and
+related application records must commit together:
+
+```typescript
+const result = await applyMergePlan(target, reviewedPlan, {
+  beforeApply: async (reads) => {
+    const resource = await reads.nodes.Resource.getById(resourceId);
+    if (resource?.owner !== "unclaimed") {
+      throw new Error("Resource is already claimed");
+    }
+  },
+  afterApply: async (tx, applied) => {
+    await tx.nodes.Resource.update(resourceId, { owner: "accepted" });
+    const decision = await tx.nodes.Decision.create({
+      status: "accepted",
+      changedNodes: applied.merged.nodes,
+    });
+    await tx.edges.decides.create(decision.id, resourceId, {});
+  },
+});
+if (!isOk(result)) throw result.error;
+// The plan and application writes have now committed together.
+```
+
+`Resource`, `Decision`, and `decides` stand for types registered in your graph.
+Import `MergePlanApplyOptions`, `MergePlanReadContext`, and `MergePlanApplied`
+from `@nicia-ai/typegraph/graph-merge` to type reusable helpers. Callbacks are
+execution options: they are not stored in the artifact or covered by its digest.
+
+The transaction acquires the schema fence before the graph write lock, validates
+schema, revision origin, and revision, and then calls `beforeApply`. This context
+exposes node and edge collection reads and, for identity-enabled graphs, identity
+reads. Write methods, native SQL, and a root Store are absent. Application writes
+before plan application are deliberately unsupported: an uncommitted write can
+change the reviewed state without changing its durable revision yet.
+
+After the precheck, TypeGraph performs the existing plan preflight, identity
+checks, and writes. `afterApply` receives a `TransactionContext` whose reads see
+those writes. Its `applied.merged` contains only the plan's provisional counts;
+callback writes do not contribute to the final report's merge counts. Use the
+supplied contexts for every graph operation. Calling the original Store inside a
+callback does not enlist it in this transaction. Do not retain a context for later
+work, and await every operation before returning.
+
+Callbacks must resolve without a value. Throw or reject to abort; returning a
+value, including an `Err`, is refused with `InvalidMergeOptionsError`. A callback
+rejection, stale plan, merge failure, capture-flush failure, or commit failure
+rolls back the combined graph operation. Errors are converted to the outer
+`Result` after rollback; ordinary application errors are retained in the cause
+chain. Existing typed merge errors and constraint translation remain intact.
+Only the successful outer result confirms commit.
+
+Transaction conflicts (PostgreSQL serialization failures or deadlocks) retry the
+whole transaction up to **three attempts**, including both callbacks. Every
+attempt checks the fence again; an intervening committed write makes the plan
+stale rather than silently rebasing it. Keep callbacks safe to repeat. Do not send
+messages, call external services with side effects, or publish an outcome inside
+a callback. Perform those effects after successful completion, or write an
+application outbox record through `tx` for later delivery. Returned contexts and
+provisional outcomes are not durable notifications.
+
+Protection covers the target graph's transactional state and participating
+TypeGraph writers using its graph fence. It does not make an application policy a
+declarative constraint: every writer changing that policy's state must enforce
+it, for example through its own conditional operation. It does not cover other
+graphs, arbitrary SQL, or external systems. SQLite uses its writer transaction;
+Composed PostgreSQL applications use read-committed isolation and the graph
+write lock with or without history. The lock statement records the effective
+session isolation; incompatible or unknown isolation is refused before callbacks.
+Standalone revision-tracking-only applications retain serializable isolation. Unsupported
+transaction capabilities are refused before callbacks. Existing session-bound
+fence and recorded-capture isolation checks still apply.
+
+With history enabled, plan and application writes share the transaction's
+recorded capture and flush, producing one per-graph recorded revision. Without
+history, revision tracking likewise advances for the combined transaction.
+Failure leaves no live changes or recorded revision from the failed attempt.
+Existing valid-time bounds, including open bounds, retain their semantics.
+
+Optional persisted merge provenance remains separate from recorded history:
+provenance records are persisted only after successful graph commit, and a
+persistence failure remains a report warning. Callbacks do not receive a
+post-commit provenance result. Previously committed review records in the target
+still invalidate a plan's revision fence; this API does not relax plan staleness.
+For a durable candidate review, revalidate the stored review first, then pass
+the compatible result's fresh `plan` and these callbacks to `applyMergePlan()`.
 
 ## Scaling branches and interchange
 
@@ -1138,6 +1396,7 @@ subclass you can branch on:
 | `InvalidMergePlanError`      | The input is not a valid plan artifact. More specific subclasses distinguish unsupported versions, digest changes, and target/schema/origin mismatches.                                                                                                                       |
 | `CandidateSourceError`       | A built-in candidate source failed; details identify its source id, entity kind, and operation.                                                                                                                                                                               |
 | `CandidateWriteSetError`     | Code `GRAPH_MERGE_CANDIDATE_WRITE_SET`. Candidate JSON is malformed, targets another graph schema, cannot be staged, or violates the active graph contract. The accepted graph is unchanged.                                                                                  |
+| `MergeReviewError`           | Code `GRAPH_MERGE_REVIEW`. Durable review evidence is malformed, unsupported, incomplete, or inconsistent, or review options cannot be represented safely.                                                                                                                     |
 | `MatchEvidenceError`         | Evidence could not be constructed safely, including a custom scorer returning `NaN` or infinity.                                                                                                                                                                              |
 | `MergeError`                 | Any other merge failure (e.g. comparison-ceiling `"error"`, a non-transactional target). `MERGE_ERROR_CODES` enumerates the codes.                                                                                                                                            |
 
