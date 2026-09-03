@@ -17,7 +17,7 @@
  * `advisoryLockExpression` / `isolationFactExpression` are exported bare
  * sub-expressions, not members of the `FenceSql` bag: `./postgres-schema-
  * write-fence.ts` needs `drizzle-orm` to reach the schema table, so it
- * cannot live in this Drizzle-free module itself, but its fused statement
+ * cannot live in this module (which imports none), but its fused statement
  * still spells its lock and its isolation read by calling back into these
  * two functions rather than holding a second copy of the tokens.
  */
