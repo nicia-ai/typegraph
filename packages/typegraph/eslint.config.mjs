@@ -469,6 +469,10 @@ export const DRIZZLE_ZONE = [
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },
   {
+    file: "src/backend/drizzle/postgres-schema-write-fence.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
     file: "src/backend/drizzle/postgres.ts",
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },

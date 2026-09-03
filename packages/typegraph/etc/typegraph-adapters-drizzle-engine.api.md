@@ -330,7 +330,7 @@ type BackendCapabilities = Readonly<{
 }>;
 
 // @public (undocumented)
-type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
+type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
 // @public
 type BackendResourceAudit = Readonly<{
@@ -1374,6 +1374,14 @@ type ExtensionUniqueWhere = Readonly<{
 }>;
 
 // @public
+type FenceSql = Readonly<{
+    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
+    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    isolationFact: () => SqlFragment;
+}>;
+
+// @public
 type FilteredApproximateSearch = Readonly<{
     mode: FilteredApproximateSearchMode;
     guaranteesFullPage: boolean;
@@ -1535,6 +1543,7 @@ type GraphBackend = Readonly<{
     tableNames?: SqlTableNames | undefined;
     fulltextStrategy?: FulltextStrategy | undefined;
     vectorStrategy?: VectorStrategy | undefined;
+    fenceSql?: FenceSql | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
@@ -2949,11 +2958,16 @@ type VectorStrategy = Readonly<{
 
 // @public
 type WriteFencePlan =
-/** Take the keyed/table lock. */
+/**
+* Take the keyed/table lock, spelled by `sql` — the target's OWN declared
+* spelling: a lock site never hand-writes the statement, it resolves
+* a plan and consumes `sql.<builder>(…)`.
+*/
 Readonly<{
     kind: "lock";
     advisoryLocks: true;
     tableLocks: boolean;
+    sql: FenceSql;
 }>
 /** No lock needed: the engine serializes writers. */
 | Readonly<{
@@ -2968,6 +2982,7 @@ Readonly<{
 type WriteFenceTarget = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
+    fenceSql?: FenceSql | undefined;
 }>;
 
 // (No @packageDocumentation comment for this package)

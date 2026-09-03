@@ -1,7 +1,7 @@
 /**
  * T17 (I8) — the write-fence decision has exactly ONE owner.
  *
- * Two ratchets, both comment-stripped AST scans over `src/**` (modelled on
+ * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
  *  1. `resolveWriteFencePlan` has exactly **15** call sites — the 8 lock
@@ -38,12 +38,30 @@
  *     Postgres error-code classification and value selection) finds every row
  *     it returns NAMED — J10-J13 — so an exemption is a decision recorded
  *     here, not a silent survivor of the ratchet's own file scope.
+ *  3. The four PostgreSQL lock-statement tokens (`pg_advisory_xact_lock`,
+ *     `hashtext(`, `LOCK TABLE`, `current_setting('transaction_isolation')`)
+ *     appear nowhere in the nine sites' six files or in
+ *     `backend/drizzle/operations/schema.ts` — every one of those consumes a
+ *     resolved plan's `fence.sql.*` (or, for the one PostgreSQL-only builder
+ *     that lives outside the plan, calls back into the fence module's own
+ *     exported expressions) instead of spelling the statement itself — and
+ *     DOES appear in `backend/drizzle/postgres-fence-sql.ts`, the one module
+ *     that owns the spelling. This ratchet's file list is deliberately
+ *     narrower than "all of `src/`": `backend/drizzle/postgres.ts` (a
+ *     one-off DDL advisory lock, and a one-argument advisory lock keyed on a
+ *     deliberately different lock space than every namespaced two-argument
+ *     lock), `backend/drizzle/trusted-import.ts`, and
+ *     `backend/drizzle/graph-template-sql.ts` each still spell one of these
+ *     tokens inline and are none of the sites this model covers.
  *
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
  * "dialect literal reappeared" half catch this, from different angles).
  * *Mutation*: pin the `resolveWriteFencePlan` count at 10 (the number before
  * the Postgres schema fence's three consumers joined the model) → fails.
+ * *Mutation*: re-inline `pg_advisory_xact_lock(hashtext(...))` in a lock site
+ * or in `operations/schema.ts` → fails naming the file. *Mutation*: empty out
+ * `postgres-fence-sql.ts`'s builders → fails the module's own positive check.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -502,5 +520,146 @@ describe("T17 — no dialect literal remains at a lock site; every non-lock row 
     }
     expect(undeclaredReport).toEqual([]);
     expect(staleReport).toEqual([]);
+  });
+});
+
+/**
+ * The four literal PostgreSQL lock-statement tokens `postgres-fence-sql.ts`
+ * is the one module in `src/` (outside `src/query/dialect/`) allowed to
+ * spell — see that module's own docstring.
+ */
+const FENCE_TOKENS: readonly string[] = [
+  "pg_advisory_xact_lock",
+  "hashtext(",
+  "LOCK TABLE",
+  "current_setting('transaction_isolation')",
+];
+
+/** The module that owns every one of {@link FENCE_TOKENS}. */
+const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
+
+/**
+ * The nine sites' six files, `operations/schema.ts` (whose two builders lost
+ * the tokens when the PostgreSQL-only one relocated), and that relocated
+ * builder's own module — every one of these consumes `fence.sql.*` (or,
+ * for the fused schema+graph statement, calls back into
+ * `postgres-fence-sql.ts`'s exported bare expressions) rather than spelling
+ * a token itself. Deliberately narrower than "all of `src/`":
+ * `backend/drizzle/postgres.ts`, `backend/drizzle/trusted-import.ts`, and
+ * `backend/drizzle/graph-template-sql.ts` each still spell one of these
+ * tokens inline for reasons unrelated to this nine-site model (a one-off DDL
+ * lock, a lock space deliberately kept separate from every namespaced lock,
+ * an unrelated table lock, and a dialect-dispatch template respectively) and
+ * are none of the sites this ratchet covers.
+ */
+const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
+  "store/recorded-capture/clock.ts",
+  "store/recorded-capture/guards.ts",
+  "identity/service-read.ts",
+  "identity/schema-transition.ts",
+  "graph-merge/provenance-store.ts",
+  "backend/drizzle/contribution-materializations.ts",
+  "backend/drizzle/operations/schema.ts",
+  "backend/drizzle/postgres-schema-write-fence.ts",
+];
+
+/** String and template-literal AST tokens — comments and identifiers never match. */
+function isStringOrTemplatePart(
+  node: ts.Node,
+): node is ts.StringLiteral | ts.TemplateLiteralToken {
+  return (
+    ts.isStringLiteral(node) ||
+    ts.isNoSubstitutionTemplateLiteral(node) ||
+    ts.isTemplateHead(node) ||
+    ts.isTemplateMiddleOrTemplateTail(node)
+  );
+}
+
+/**
+ * Every physical line, within a string or template-literal AST node, that
+ * contains at least one of {@link FENCE_TOKENS} — an AST scan rather than a
+ * plain grep so a token named in a comment (this file's own docstrings
+ * above, `write-fence.ts`'s, etc.) is never mistaken for a real spelling.
+ * Deduplicated by line: two tokens on the same physical line (`postgres-
+ * fence-sql.ts`'s `pg_advisory_xact_lock(hashtext(` is both at once) report
+ * as one site, matching how `scanForDialectLiterals` above reports one site
+ * per line rather than one per match.
+ */
+function scanForFenceTokens(
+  file: string,
+  source: string,
+): readonly FoundSite[] {
+  const parsed = parseFile(file, source);
+  const lines = source.split("\n");
+  const sites: FoundSite[] = [];
+  const recordedLineNumbers = new Set<number>();
+
+  function recordAt(position: number): void {
+    const { line } = parsed.getLineAndCharacterOfPosition(position);
+    const lineNumber = line + 1;
+    if (recordedLineNumbers.has(lineNumber)) return;
+    recordedLineNumbers.add(lineNumber);
+    sites.push({ file, lineNumber, line: (lines[line] ?? "").trim() });
+  }
+
+  function visit(node: ts.Node): void {
+    if (isStringOrTemplatePart(node)) {
+      // Search the RAW source slice, not the decoded `.text`: a multi-line
+      // template head's `.text` and the source slice agree here (none of
+      // these files escape a backtick or `${` inside a fence statement), and
+      // slicing lets `start + index` map straight back to a source position
+      // without re-deriving an offset from decoded text.
+      const start = node.getStart(parsed);
+      const raw = source.slice(start, node.end);
+      for (const token of FENCE_TOKENS) {
+        let searchFrom = 0;
+        for (;;) {
+          const index = raw.indexOf(token, searchFrom);
+          if (index === -1) break;
+          recordAt(start + index);
+          searchFrom = index + token.length;
+        }
+      }
+    }
+    ts.forEachChild(node, (child) => {
+      visit(child);
+    });
+  }
+
+  visit(parsed);
+  return sites;
+}
+
+describe("T17 — the four PostgreSQL lock-statement tokens have exactly one owner", () => {
+  const scannedFound = scanFiles(FENCE_TOKEN_SCANNED_FILES, scanForFenceTokens);
+  const schemaFound = scanFiles(
+    ["backend/drizzle/operations/schema.ts"],
+    scanForFenceTokens,
+  );
+  const moduleFound = scanFiles([FENCE_MODULE_FILE], scanForFenceTokens);
+
+  it("has zero fence lock-statement tokens across the nine-site files and the relocated builder's home", () => {
+    const reported = scannedFound.map(
+      (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
+    );
+    if (reported.length > 0) {
+      throw new Error(
+        `A PostgreSQL lock-statement token remains outside ${FENCE_MODULE_FILE} — the lock spelling has re-acquired a second owner:\n\n${reported.join("\n")}`,
+      );
+    }
+    expect(reported).toEqual([]);
+  });
+
+  it("operations/schema.ts specifically contains none of the four tokens", () => {
+    expect(schemaFound).toEqual([]);
+  });
+
+  it(`${FENCE_MODULE_FILE} spells all four lock-statement tokens`, () => {
+    for (const token of FENCE_TOKENS) {
+      expect(
+        moduleFound.some((site) => site.line.includes(token)),
+        `expected ${FENCE_MODULE_FILE} to contain "${token}"`,
+      ).toBe(true);
+    }
   });
 });

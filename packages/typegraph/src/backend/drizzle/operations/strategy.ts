@@ -61,6 +61,7 @@ import type {
   UpsertFulltextParams,
 } from "../../types";
 import { toDrizzleSql } from "../execution/types";
+import { buildLockSchemaVersionAndGraphWrite } from "../postgres-schema-write-fence";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 import {
@@ -163,7 +164,6 @@ import {
   buildGetActiveSchema,
   buildGetSchemaVersion,
   buildInsertSchema,
-  buildLockSchemaVersionAndGraphWrite,
   buildSchemaFenceProbe,
   buildSetActiveSchema,
 } from "./schema";

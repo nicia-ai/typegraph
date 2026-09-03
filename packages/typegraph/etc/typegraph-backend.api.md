@@ -502,7 +502,7 @@ export type BackendCapabilities = Readonly<{
 export type BackendExecutionCapabilities = BackendCapabilities["execution"];
 
 // @public (undocumented)
-export type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
+export type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
 // @public (undocumented)
 export type BackendLifecycle = Pick<GraphBackend, "close">;
@@ -2206,6 +2206,14 @@ export type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
 }>;
 
 // @public
+export type FenceSql = Readonly<{
+    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
+    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    isolationFact: () => SqlFragment;
+}>;
+
+// @public
 export type FilteredApproximateSearch = Readonly<{
     mode: FilteredApproximateSearchMode;
     guaranteesFullPage: boolean;
@@ -2408,6 +2416,7 @@ export type GraphBackend = Readonly<{
     tableNames?: SqlTableNames | undefined;
     fulltextStrategy?: FulltextStrategy | undefined;
     vectorStrategy?: VectorStrategy | undefined;
+    fenceSql?: FenceSql | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;
@@ -3948,6 +3957,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
         readonly accesses: 23;
     };
+    readonly fenceSql: {
+        readonly kind: "reasoned";
+        readonly reason: "The write-fence lock spelling a backend's `pessimisticLocks.advisoryLocks: true` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.";
+        readonly accesses: 2;
+    };
     readonly commitSchemaVersionIfKindsEmpty: {
         readonly kind: "reasoned";
         readonly reason: "Schema-version write fence, a SchemaCommitBackend role member. Its absence is dispositioned by the schema manager's own gate, which is a write-pipeline decision, not a feature-family one.";
@@ -4725,11 +4739,16 @@ export type VectorStrategy = Readonly<{
 
 // @public
 export type WriteFencePlan =
-/** Take the keyed/table lock. */
+/**
+* Take the keyed/table lock, spelled by `sql` — the target's OWN declared
+* spelling: a lock site never hand-writes the statement, it resolves
+* a plan and consumes `sql.<builder>(…)`.
+*/
 Readonly<{
     kind: "lock";
     advisoryLocks: true;
     tableLocks: boolean;
+    sql: FenceSql;
 }>
 /** No lock needed: the engine serializes writers. */
 | Readonly<{
@@ -4744,6 +4763,7 @@ Readonly<{
 type WriteFenceTarget = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
+    fenceSql?: FenceSql | undefined;
 }>;
 
 // @public

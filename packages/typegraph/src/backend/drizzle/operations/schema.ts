@@ -103,44 +103,6 @@ export function buildSchemaFenceProbe(
 }
 
 /**
- * PostgreSQL's successful schema + graph write fence in one statement.
- *
- * Both CTEs are `MATERIALIZED`, and `graph_write_lock` reads exclusively from
- * `schema_fence`: PostgreSQL therefore must finish the expected active-row
- * `FOR SHARE` lock before it may acquire the advisory lock. A stale fence
- * yields no rows and cannot acquire the graph lock. The caller interprets that
- * zero-row result through the ordinary active-version diagnostic.
- */
-export function buildLockSchemaVersionAndGraphWrite(
-  tables: Tables,
-  params: SchemaWriteFenceParams,
-  advisoryLockNamespace: string,
-): SQL {
-  const { schemaVersions } = tables;
-  return sql`
-    WITH "schema_fence" AS MATERIALIZED (
-      SELECT ${schemaVersions.version}
-      FROM ${schemaVersions}
-      WHERE ${schemaVersions.graphId} = ${params.graphId}
-        AND ${schemaVersions.version} = ${params.expectedVersion}
-        AND ${schemaVersions.isActive} = TRUE
-      FOR SHARE
-    ),
-    "graph_write_lock" AS MATERIALIZED (
-      SELECT pg_advisory_xact_lock(
-        hashtext(${advisoryLockNamespace}),
-        hashtext(${params.graphId})
-      ) AS "lock_token"
-      FROM "schema_fence"
-    )
-    SELECT
-      TRUE AS "fence_acquired",
-      current_setting('transaction_isolation') AS "transaction_isolation"
-    FROM "graph_write_lock"
-  `;
-}
-
-/**
  * Builds a SELECT query to get a specific schema version.
  */
 export function buildGetSchemaVersion(

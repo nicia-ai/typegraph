@@ -11,6 +11,13 @@
  * portable code that only ever needs PostgreSQL's own SQL shape directly
  * (a raw-connection test fixture, or a session-fact read gated purely on
  * `dialect === "postgres"` rather than on a resolved lock plan).
+ *
+ * `advisoryLockExpression` / `isolationFactExpression` are exported bare
+ * sub-expressions, not members of the `FenceSql` bag: `./postgres-schema-
+ * write-fence.ts` needs `drizzle-orm` to reach the schema table, so it
+ * cannot live in this Drizzle-free module itself, but its fused statement
+ * still spells its lock and its isolation read by calling back into these
+ * two functions rather than holding a second copy of the tokens.
  */
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type FenceSql } from "../capabilities/write-fence";
@@ -40,8 +47,23 @@ function advisoryLockKeyExpression(key: string | number): SqlFragment {
     : sql`hashtext(${key})`;
 }
 
+/**
+ * The bare `pg_advisory_xact_lock(...)` call, with no `SELECT` around it —
+ * exported so `buildLockSchemaVersionAndGraphWrite` (a Drizzle-zone module,
+ * since it also reaches the schema table) can embed the SAME spelling inside
+ * its fused CTE rather than re-deriving it, converting this fragment to
+ * Drizzle's own `SQL` at the embedding boundary. `advisoryLock` below wraps
+ * this in the standalone-statement form every other lock site consumes.
+ */
+export function advisoryLockExpression(
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`pg_advisory_xact_lock(hashtext(${namespace}), ${advisoryLockKeyExpression(key)})`;
+}
+
 function advisoryLock(namespace: string, key: string | number): SqlFragment {
-  return sql`SELECT pg_advisory_xact_lock(hashtext(${namespace}), ${advisoryLockKeyExpression(key)})`;
+  return sql`SELECT ${advisoryLockExpression(namespace, key)}`;
 }
 
 function advisoryLockWithIsolation(
@@ -50,8 +72,8 @@ function advisoryLockWithIsolation(
 ): SqlFragment {
   return sql`
     SELECT
-      pg_advisory_xact_lock(hashtext(${namespace}), ${advisoryLockKeyExpression(key)}),
-      current_setting('transaction_isolation') AS transaction_isolation
+      ${advisoryLockExpression(namespace, key)},
+      ${isolationFactExpression()} AS transaction_isolation
   `;
 }
 
@@ -65,8 +87,18 @@ function lockTables(
   )} IN ${sql.raw(LOCK_TABLE_MODE_CLAUSE[mode])}`;
 }
 
+/**
+ * The bare `current_setting('transaction_isolation')` read, with no
+ * `SELECT`/alias around it — exported for the same reason as
+ * {@link advisoryLockExpression}: `buildLockSchemaVersionAndGraphWrite`
+ * embeds this exact spelling rather than re-deriving it.
+ */
+export function isolationFactExpression(): SqlFragment {
+  return sql`current_setting('transaction_isolation')`;
+}
+
 function isolationFact(): SqlFragment {
-  return sql`SELECT current_setting('transaction_isolation') AS transaction_isolation`;
+  return sql`SELECT ${isolationFactExpression()} AS transaction_isolation`;
 }
 
 /** The bundled PostgreSQL backend's {@link FenceSql} declaration. */

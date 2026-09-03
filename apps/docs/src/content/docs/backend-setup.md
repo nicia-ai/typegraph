@@ -1128,8 +1128,9 @@ can write. A third-party engine supplies its own profile builder and passes
 the result to `createSqlBackend`.
 
 A profile owns everything that genuinely differs between engines: dialect
-tokens, the execution adapter, transaction framing, fence SQL, provisioning
-DDL, strategies, and limits. `createSqlBackend` owns everything that is the
+tokens, the execution adapter, transaction framing, its `fenceSql` lock
+spelling (see [Write fence declaration](#write-fence-declaration-pessimisticlocks)),
+provisioning DDL, strategies, and limits. `createSqlBackend` owns everything that is the
 same for every SQL engine: deriving the final capabilities, resolving the
 write-fence decision once, assembling the mirrored member groups, auditing
 the backend's resource shape, and applying the trust marks. A backend minted
@@ -1432,6 +1433,16 @@ The two bundled backends declare exactly these lines — copy the one matching y
 
 - PostgreSQL: `pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false }`
 - SQLite: `pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: true }`
+
+A backend that declares `advisoryLocks: true` also supplies `fenceSql`, the statement spelling
+`resolveWriteFencePlan`'s `lock` arm hands to every lock site: `advisoryLock`, `advisoryLockWithIsolation`
+(the lock plus the session's isolation-level fact, read in the same statement it locks in),
+`lockTables`, and `isolationFact`. The bundled PostgreSQL spelling is exported as `postgresFenceSql`
+from `@nicia-ai/typegraph/adapters/drizzle/postgres` — pass it straight through as `fenceSql` when
+wrapping that backend, or supply a custom `FenceSql` matching a different engine's lock syntax. A
+backend that declares `advisoryLocks: true` with no `fenceSql` is refused at construction with
+details code `WRITE_FENCE_SQL_UNAVAILABLE`, naming the member to supply; `serializedWriters: true`
+needs no `fenceSql` since it takes no lock at all.
 
 Constructing Operational Identity, or `history: true` / `revisionTracking: true`, against an
 `unfenced` backend is refused immediately at `createStore` — never mid-flush — with
