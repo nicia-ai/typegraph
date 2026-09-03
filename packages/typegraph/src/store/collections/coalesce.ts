@@ -103,9 +103,12 @@ type CurrentWindow = Readonly<{
  *
  * Counting it as a change is also what lets the comparison canonicalize the
  * STORED side only ({@link statedBoundMatchesStored}): past this guard the
- * requested value is known canonical.
+ * requested value is known canonical, or explicitly open-left for `validFrom`.
+ * The upper bound retains its separate set/clear protocol: null must reach the
+ * write path for rejection even when the stored upper bound is absent.
  */
 function windowFieldChanges(
+  field: "validFrom" | "validTo",
   requested: string | null | undefined,
   stored: string | typeof UNKNOWN_VALIDITY_LOWER_BOUND | undefined,
 ): boolean {
@@ -114,7 +117,9 @@ function windowFieldChanges(
   }
   if (
     stored === UNKNOWN_VALIDITY_LOWER_BOUND ||
-    (requested !== null && !isCanonicalIsoDate(requested))
+    (requested === null ?
+      field !== "validFrom"
+    : !isCanonicalIsoDate(requested))
   ) {
     return true;
   }
@@ -128,7 +133,7 @@ function lowerBoundRequiresWrite(
 ): boolean {
   const requestedValidFrom = requested?.validFrom;
   if (!preservesImmutableLowerBound(requested?.onImmutableLowerBound)) {
-    return windowFieldChanges(requestedValidFrom, stored);
+    return windowFieldChanges("validFrom", requestedValidFrom, stored);
   }
   return (
     requestedValidFrom !== undefined &&
@@ -160,7 +165,7 @@ export function upsertWindowChanges(
       validityEndAfterMutation(requested, current.valid_to) !==
         current.valid_to) ||
     (requested?.clearValidTo === true && requested.validTo !== undefined) ||
-    windowFieldChanges(requested?.validTo, current.valid_to)
+    windowFieldChanges("validTo", requested?.validTo, current.valid_to)
   );
 }
 

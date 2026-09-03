@@ -220,6 +220,62 @@ export function registerValidityLowerBoundIntegrationTests(
     });
 
     for (const coalesceUnchangedUpserts of [false, true]) {
+      it.each(["node", "node bulk", "edge bulk"] as const)(
+        `rejects an unsupported null validTo on unchanged %s upserts with coalescing ${String(coalesceUnchangedUpserts)}`,
+        async (writePath) => {
+          const store = await context.createStore(integrationTestGraph, {
+            coalesceUnchangedUpserts,
+          });
+          const alice = await seedPerson(store, "invalid-end-a");
+          const bob = await seedPerson(store, "invalid-end-b");
+          const edge = await store.edges.knows.create(alice, bob, {});
+          const write = () => {
+            switch (writePath) {
+              case "node": {
+                return store.nodes.Person.upsertById(
+                  alice.id,
+                  { name: "Win", age: 1 },
+                  {
+                    // @ts-expect-error JavaScript callers can pass unsupported null upper bounds.
+                    validTo: null,
+                  },
+                );
+              }
+              case "node bulk": {
+                return store.nodes.Person.bulkUpsertById([
+                  {
+                    id: alice.id,
+                    props: { name: "Win", age: 1 },
+                    // @ts-expect-error JavaScript callers can pass unsupported null upper bounds.
+                    validTo: null,
+                  },
+                ]);
+              }
+              case "edge bulk": {
+                return store.edges.knows.bulkUpsertById([
+                  {
+                    id: edge.id,
+                    from: alice,
+                    to: bob,
+                    props: {},
+                    // @ts-expect-error JavaScript callers can pass unsupported null upper bounds.
+                    validTo: null,
+                  },
+                ]);
+              }
+            }
+          };
+          await expect(write()).rejects.toMatchObject({
+            name: "ValidationError",
+            message:
+              'Invalid canonical ISO 8601 datetime for "validTo": "null". Expected fixed-width UTC: YYYY-MM-DDTHH:mm:ss.sssZ',
+          });
+          const storedPerson = await store.nodes.Person.getById(alice.id);
+          const storedEdge = await store.edges.knows.getById(edge.id);
+          expect(storedPerson?.meta).toEqual(alice.meta);
+          expect(storedEdge?.meta).toEqual(edge.meta);
+        },
+      );
       it(`applies or refuses explicit open-left requests with coalescing ${String(coalesceUnchangedUpserts)}`, async () => {
         const store = await context.createStore(integrationTestGraph, {
           coalesceUnchangedUpserts,
