@@ -92,6 +92,12 @@ async function runOnTransactionIfSupported(
   await fn(backend);
 }
 
+/**
+ * Caller owns schema-version coherence: Store maintenance/startup repair fence
+ * the observed version, and schema preflights already hold the commit fence.
+ * This helper acquires only identity and never acquires an earlier lock after
+ * it. See docs/IDENTITY_LOCK_ORDER.md for the complete caller audit.
+ */
 export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   ctx: IdentityRebuildContext<G>,
 ): Promise<void> {

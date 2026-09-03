@@ -247,9 +247,10 @@ async function provisioningForCommit(
  *  - CREATE alone (no live `different` assertion) — empty IS the projection, so
  *    an ordinary idempotent provision is correct and needs no fence.
  *  - FILL alone (the relation exists, empty, and this graph owes rows) — the
- *    self-heal. The recompute opens its own transaction and takes the identity
- *    lock, and the relation is already published, so there is nothing a fence
- *    would add.
+ *    self-heal. The recompute opens its own transaction, validates the schema
+ *    version its registry came from, then takes the identity lock. No DDL fence
+ *    is needed for an already-published relation; the schema-version fence is
+ *    still required to prevent a stale opener overwriting a newer migration.
  */
 async function provisionDerivedRelations(
   backend: GraphBackend,
