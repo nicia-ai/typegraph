@@ -144,6 +144,7 @@ import {
   preservesImmutableLowerBound,
   resolveStampedValidityLowerBound,
   validateOptionalCanonicalIsoDate,
+  validateStatedValidityLowerBound,
 } from "../../utils/date";
 import { generateId } from "../../utils/id";
 import { createDataKeyedBag, hasOwnKey } from "../../utils/object";
@@ -490,7 +491,7 @@ function buildInsertNodeParams(
   kind: string,
   id: string,
   props: Record<string, unknown>,
-  validFrom: string | undefined,
+  validFrom: string | null | undefined,
   validTo: string | undefined,
 ): InsertNodeParams {
   const insertParams: {
@@ -498,7 +499,7 @@ function buildInsertNodeParams(
     kind: string;
     id: string;
     props: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   } = {
     graphId,
@@ -864,7 +865,7 @@ export type NodeCreateDraft = Readonly<{
   nodeKind: NodeType;
   uniqueConstraints: readonly UniqueConstraint[];
   validatedProps: Record<string, unknown>;
-  validFrom: string | undefined;
+  validFrom: string | null | undefined;
   validTo: string | undefined;
 }>;
 
@@ -891,7 +892,7 @@ function draftNodeCreate<G extends GraphDef>(
         operation: "create",
       });
 
-  const validFrom = validateOptionalCanonicalIsoDate(
+  const validFrom = validateStatedValidityLowerBound(
     input.validFrom,
     "validFrom",
   );
@@ -1252,7 +1253,7 @@ async function performNodeUpdate<G extends GraphDef>(
   const preservesLiveLowerBound =
     resurrectionInstant === undefined &&
     preservesImmutableLowerBound(input.onImmutableLowerBound);
-  const statedValidFrom = validateOptionalCanonicalIsoDate(
+  const statedValidFrom = validateStatedValidityLowerBound(
     input.validFrom,
     "validFrom",
   );

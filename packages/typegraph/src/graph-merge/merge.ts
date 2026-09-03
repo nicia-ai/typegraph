@@ -614,9 +614,7 @@ function clusterMembersFor(
         kind: staged.node.kind,
         branchId: staged.branchId,
         props: staged.node.props as Readonly<Record<string, JsonValue>>,
-        ...(staged.node.row.valid_from === undefined ?
-          {}
-        : { validFrom: staged.node.row.valid_from }),
+        validFrom: staged.node.row.valid_from ?? null,
         ...(staged.node.row.valid_to === undefined ?
           {}
         : { validTo: staged.node.row.valid_to }),
@@ -790,9 +788,7 @@ function toStagedEdge(branchId: BranchId, item: StagedNewEdge): StagedEdge {
     toKind: item.edge.toKind,
     props: item.edge.props as Readonly<Record<string, JsonValue>>,
     branchId,
-    ...(item.edge.row.valid_from === undefined ?
-      {}
-    : { validFrom: item.edge.row.valid_from }),
+    validFrom: item.edge.row.valid_from ?? null,
     ...(item.edge.row.valid_to === undefined ?
       {}
     : { validTo: item.edge.row.valid_to }),
@@ -1730,7 +1726,7 @@ type PlannedNodeWrite = Readonly<{
    * the committed window", which is what lets an otherwise-unchanged write
    * coalesce.
    */
-  validFrom?: string;
+  validFrom?: string | null;
 }> &
   ValidityEndMutation;
 
@@ -1862,7 +1858,7 @@ function nodeWriteProps(
   };
 }
 
-type NodeWriteWindowOptions = Readonly<{ validFrom?: string }> &
+type NodeWriteWindowOptions = Readonly<{ validFrom?: string | null }> &
   ValidityEndMutation;
 
 /** Converts the plan's explicit set/clear state into the collection option union. */
@@ -1884,7 +1880,7 @@ type MechanicalNodeWrite = Readonly<{
   kind: string;
   id: string;
   props: Readonly<Record<string, unknown>>;
-  validFrom?: string;
+  validFrom?: string | null;
 }> &
   ValidityEndMutation;
 
@@ -2346,7 +2342,7 @@ type NodeCollectionLike = Readonly<{
   upsertByIdFromRecord: (
     id: string,
     data: Record<string, unknown>,
-    options?: Readonly<{ validFrom?: string }> & ValidityEndMutation,
+    options?: Readonly<{ validFrom?: string | null }> & ValidityEndMutation,
   ) => Promise<unknown>;
   delete: (id: string) => Promise<void>;
 }>;
@@ -2363,7 +2359,7 @@ type EdgeCollectionLike = Readonly<{
       from: Readonly<{ kind: string; id: string }>;
       to: Readonly<{ kind: string; id: string }>;
       props?: Record<string, unknown>;
-      validFrom?: string;
+      validFrom?: string | null;
     }> &
       ValidityEndMutation)[],
   ) => Promise<unknown>;

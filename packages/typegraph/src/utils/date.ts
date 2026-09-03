@@ -199,6 +199,15 @@ export function validateOptionalCanonicalIsoDate(
   return validateCanonicalIsoDate(value, fieldName);
 }
 
+/** Validates the write protocol: omission uses the default; null states no lower bound. */
+export function validateStatedValidityLowerBound(
+  value: string | null | undefined,
+  fieldName: string,
+): string | null | undefined {
+  if (value === null) return value;
+  return validateOptionalCanonicalIsoDate(value, fieldName);
+}
+
 /**
  * Whether a CANONICAL stated bound names the same instant a row already stores.
  *
@@ -219,10 +228,10 @@ export function validateOptionalCanonicalIsoDate(
  * {@link validateCanonicalIsoDate} rather than silently treated as a mismatch.
  */
 export function statedBoundMatchesStored(
-  stated: string,
+  stated: string | null,
   stored: string | undefined,
 ): boolean {
-  return stated === canonicalizeDatabaseTimestamp(stored);
+  return (stated ?? undefined) === canonicalizeDatabaseTimestamp(stored);
 }
 
 /**
@@ -250,10 +259,11 @@ export function statedBoundMatchesStored(
  * output must round-trip.
  */
 export function isInvertedValidityWindow(
-  validFrom: string | undefined,
+  validFrom: string | null | undefined,
   validTo: string | undefined,
 ): boolean {
-  if (validFrom === undefined || validTo === undefined) return false;
+  if (validFrom === undefined || validFrom === null || validTo === undefined)
+    return false;
   return validFrom > validTo;
 }
 
@@ -420,7 +430,7 @@ function assertEffectiveValidityLowerBound(
  */
 export function assertOrderedValidityWindow(
   subject: string,
-  validFrom: string | undefined,
+  validFrom: string | null | undefined,
   validTo: string | undefined,
 ): void {
   if (!isInvertedValidityWindow(validFrom, validTo)) return;
@@ -613,7 +623,7 @@ export function preservesImmutableLowerBound(
  */
 function assertStatedLowerBoundIsApplicable(
   subject: string,
-  statedValidFrom: string,
+  statedValidFrom: string | null,
   storedValidFrom: string | undefined,
 ): void {
   if (statedBoundMatchesStored(statedValidFrom, storedValidFrom)) return;
@@ -635,7 +645,7 @@ function assertStatedLowerBoundIsApplicable(
     {
       suggestion:
         storedValidFrom === undefined ?
-          "Omit validFrom: this row has no lower bound to restate, and only a resurrection can give it one."
+          "Restate validFrom: null or omit validFrom; only a resurrection can give this row a lower bound."
         : `Restate the stored bound ("${storedValidFrom}") or omit validFrom.`,
     },
   );
@@ -682,7 +692,7 @@ function assertStatedLowerBoundIsApplicable(
  */
 export function assertWritableValidityWindow(
   subject: string,
-  validFrom: string | undefined,
+  validFrom: string | null | undefined,
   lowerBound: UpdateValidityLowerBound,
   validTo: string | undefined,
 ): ValidityWindowVerdict {
@@ -702,7 +712,9 @@ export function assertWritableValidityWindow(
 
   assertEffectiveValidityLowerBound(
     subject,
-    validFrom ?? lowerBound.effectiveValidFrom,
+    validFrom === undefined ?
+      lowerBound.effectiveValidFrom
+    : (validFrom ?? undefined),
     validTo,
   );
   // ...and the inversion check falls back to the row's bound only when the

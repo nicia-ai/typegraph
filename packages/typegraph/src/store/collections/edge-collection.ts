@@ -166,7 +166,7 @@ export type EdgeCollectionConfig = Readonly<{
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
@@ -180,7 +180,7 @@ export type EdgeCollectionConfig = Readonly<{
       toKind: string;
       toId: string;
       props: Record<string, unknown>;
-      validFrom?: string;
+      validFrom?: string | null;
       validTo?: string;
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
@@ -213,7 +213,11 @@ function buildCreateEdgeInput(
   from: NodeRef,
   to: NodeRef,
   props: Record<string, unknown>,
-  options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+  options?: Readonly<{
+    id?: string;
+    validFrom?: string | null;
+    validTo?: string;
+  }>,
 ): CreateEdgeInput {
   const input: {
     kind: string;
@@ -223,7 +227,7 @@ function buildCreateEdgeInput(
     toKind: string;
     toId: string;
     props: Record<string, unknown>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   } = {
     kind,
@@ -268,7 +272,7 @@ type EdgeUpdateInput = Readonly<{
  */
 export type UpsertUpdateEdgeInput = EdgeUpdateInput &
   Readonly<{
-    validFrom?: string;
+    validFrom?: string | null;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>;
 
@@ -304,7 +308,7 @@ function buildUpsertUpdateEdgeInput(
   to: NodeRef,
   props: Record<string, unknown>,
   options?: Readonly<{
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
   }>,
@@ -313,7 +317,7 @@ function buildUpsertUpdateEdgeInput(
     id: string;
     identity: EdgeIdentityExpectation;
     props: Partial<Record<string, unknown>>;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
   } = {
@@ -395,7 +399,7 @@ function mapBulkEdgeInputs(
     to: NodeRef;
     props?: Record<string, unknown>;
     id?: string;
-    validFrom?: string;
+    validFrom?: string | null;
     validTo?: string;
   }>[],
 ): CreateEdgeInput[] {
@@ -602,7 +606,11 @@ export function createEdgeCollection<
       from: NodeRef,
       to: NodeRef,
       props?: z.input<E["schema"]>,
-      options?: Readonly<{ id?: string; validFrom?: string; validTo?: string }>,
+      options?: Readonly<{
+        id?: string;
+        validFrom?: string | null;
+        validTo?: string;
+      }>,
     ): Promise<Edge<E>> {
       const result = await executeEdgeCreate(
         buildCreateEdgeInput(kind, from, to, props ?? {}, options),
@@ -796,7 +804,7 @@ export function createEdgeCollection<
         to: NodeRef;
         props?: z.input<E["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<Edge<E>[]> {
@@ -812,7 +820,7 @@ export function createEdgeCollection<
         from: NodeRef;
         to: NodeRef;
         props?: z.input<E["schema"]>;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
         clearValidTo?: true;
       }>[],
@@ -1133,7 +1141,7 @@ export function createEdgeCollection<
         to: NodeRef;
         props?: z.input<E["schema"]>;
         id?: string;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
       }>[],
     ): Promise<void> {
@@ -1210,7 +1218,7 @@ export function createEdgeCollection<
         from: NodeRef;
         to: NodeRef;
         props: z.input<E["schema"]>;
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
         clearValidTo?: true;
         onImmutableLowerBound?: "preserve" | "refuse";

@@ -53,7 +53,7 @@ export type MergePlanNodeUpsert = Readonly<{
   id: string;
   setProps: Readonly<Record<string, JsonValue>>;
   unsetProps: readonly string[];
-  validFrom?: string | undefined;
+  validFrom?: string | null | undefined;
   validTo?: string | undefined;
 }>;
 
@@ -66,7 +66,7 @@ export type MergePlanEdgeUpsert = Readonly<{
   to: MergePlanEntityRef;
   setProps: Readonly<Record<string, JsonValue>>;
   unsetProps: readonly string[];
-  validFrom?: string | undefined;
+  validFrom?: string | null | undefined;
   validTo?: string | undefined;
 }>;
 
@@ -321,7 +321,7 @@ const nodeUpsertSchema = z
     id: nonEmptyStringSchema,
     setProps: jsonObjectSchema,
     unsetProps: z.array(nonEmptyStringSchema),
-    validFrom: nonEmptyStringSchema.optional(),
+    validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
   })
   .strict();
@@ -334,7 +334,7 @@ const edgeUpsertSchema = z
     to: mergePlanEntityRefSchema,
     setProps: jsonObjectSchema,
     unsetProps: z.array(nonEmptyStringSchema),
-    validFrom: nonEmptyStringSchema.optional(),
+    validFrom: nonEmptyStringSchema.nullable().optional(),
     validTo: nonEmptyStringSchema.optional(),
   })
   .strict();

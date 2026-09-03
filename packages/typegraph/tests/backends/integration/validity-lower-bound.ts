@@ -123,6 +123,181 @@ export function registerValidityLowerBoundIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("a stated validFrom is applied or refused", () => {
+    /* eslint-disable unicorn/no-null -- Explicit null is the open-left write protocol under test. */
+    it("creates explicit open-left nodes and edges without changing omitted defaults", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      const alice = await store.nodes.Person.create(
+        { name: "Alice", age: 1 },
+        { validFrom: null },
+      );
+      const bob = await store.nodes.Person.upsertById(
+        "open-bob",
+        { name: "Bob", age: 2 },
+        { validFrom: null },
+      );
+      const stamped = await store.nodes.Person.create({
+        name: "Stamped",
+        age: 3,
+      });
+      const edge = await store.edges.knows.create(
+        alice,
+        bob,
+        {},
+        { validFrom: null },
+      );
+      expect(alice.meta.validFrom).toBeUndefined();
+      expect(bob.meta.validFrom).toBeUndefined();
+      expect(edge.meta.validFrom).toBeUndefined();
+      expect(stamped.meta.validFrom).toBeDefined();
+      const ancient = {
+        temporalMode: "asOf",
+        asOf: FOREIGN_VALID_FROM,
+      } as const;
+      expect(await store.nodes.Person.getById(alice.id, ancient)).toBeDefined();
+      expect(await store.edges.knows.getById(edge.id, ancient)).toBeDefined();
+      expect(
+        await store.nodes.Person.getById(stamped.id, ancient),
+      ).toBeUndefined();
+    });
+
+    it("preserves explicit open-left windows through bulk creation and resurrection", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      const people = await store.nodes.Person.bulkCreate([
+        { id: "open-bulk-a", props: { name: "A", age: 1 }, validFrom: null },
+        { id: "open-bulk-b", props: { name: "B", age: 2 }, validFrom: null },
+      ]);
+      const alice = requireDefined(people[0]);
+      const bob = requireDefined(people[1]);
+      const edges = await store.edges.knows.bulkCreate([
+        {
+          id: "open-bulk-edge",
+          from: alice,
+          to: bob,
+          props: {},
+          validFrom: null,
+        },
+      ]);
+      const edge = requireDefined(edges[0]);
+      expect(people.map((person) => person.meta.validFrom)).toEqual([
+        undefined,
+        undefined,
+      ]);
+      expect(edge.meta.validFrom).toBeUndefined();
+      await store.edges.knows.delete(edge.id);
+      const [revivedEdge] = await store.edges.knows.bulkUpsertById([
+        { id: edge.id, from: alice, to: bob, props: {}, validFrom: null },
+      ]);
+      expect(revivedEdge?.meta.validFrom).toBeUndefined();
+      await store.edges.knows.delete(edge.id);
+      await store.nodes.Person.delete(bob.id);
+      const revived = await store.nodes.Person.upsertById(
+        bob.id,
+        { name: "B", age: 2 },
+        { validFrom: null },
+      );
+      expect(revived.meta.validFrom).toBeUndefined();
+    });
+
+    it("replaces a tombstoned edge's timestamp with an explicit open-left historical window", async () => {
+      const store = await context.createStore(integrationTestGraph);
+      const alice = await seedPerson(store, "open-history-a");
+      const bob = await seedPerson(store, "open-history-b");
+      const edge = await store.edges.knows.create(alice, bob, {});
+      expect(edge.meta.validFrom).toBeDefined();
+      await store.edges.knows.delete(edge.id);
+      const [revived] = await store.edges.knows.bulkUpsertById([
+        {
+          id: edge.id,
+          from: alice,
+          to: bob,
+          props: {},
+          validFrom: null,
+          validTo: REVIVED_VALID_TO,
+        },
+      ]);
+      expect(revived?.meta.validFrom).toBeUndefined();
+      expect(revived?.meta.validTo).toBe(REVIVED_VALID_TO);
+    });
+
+    for (const coalesceUnchangedUpserts of [false, true]) {
+      it(`applies or refuses explicit open-left requests with coalescing ${String(coalesceUnchangedUpserts)}`, async () => {
+        const store = await context.createStore(integrationTestGraph, {
+          coalesceUnchangedUpserts,
+        });
+        const open = await store.nodes.Person.create(
+          { name: "Open", age: 1 },
+          { validFrom: null },
+        );
+        const replay = await store.nodes.Person.upsertById(
+          open.id,
+          { name: "Open", age: 1 },
+          { validFrom: null },
+        );
+        expect(replay.meta.validFrom).toBeUndefined();
+        expect(replay.meta.version).toBe(
+          open.meta.version + (coalesceUnchangedUpserts ? 0 : 1),
+        );
+        const stamped = await store.nodes.Person.create({
+          name: "Stamped",
+          age: 2,
+        });
+        await expectImmutableLowerBoundRefusal(
+          store.nodes.Person.upsertById(
+            stamped.id,
+            { name: "Stamped", age: 2 },
+            { validFrom: null },
+          ),
+        );
+        const edge = await store.edges.knows.create(open, stamped, {});
+        await expectImmutableLowerBoundRefusal(
+          store.edges.knows.bulkUpsertById([
+            {
+              id: edge.id,
+              from: open,
+              to: stamped,
+              props: {},
+              validFrom: null,
+            },
+          ]),
+        );
+        await expectImmutableLowerBoundRefusal(
+          store.nodes.Person.bulkUpsertById([
+            { id: "pending-stamp", props: { name: "Pending", age: 3 } },
+            {
+              id: "pending-stamp",
+              props: { name: "Pending", age: 3 },
+              validFrom: null,
+            },
+          ]),
+        );
+        expect(
+          await store.nodes.Person.getById(personId("pending-stamp")),
+        ).toBeUndefined();
+        await expectImmutableLowerBoundRefusal(
+          store.edges.knows.bulkUpsertById([
+            {
+              id: knowsId("pending-edge-stamp"),
+              from: open,
+              to: stamped,
+              props: {},
+            },
+            {
+              id: knowsId("pending-edge-stamp"),
+              from: open,
+              to: stamped,
+              props: {},
+              validFrom: null,
+            },
+          ]),
+        );
+        expect(
+          await store.edges.knows.getById(knowsId("pending-edge-stamp")),
+        ).toBeUndefined();
+      });
+    }
+
+    /* eslint-enable unicorn/no-null */
+
     /**
      * Registers the refusal cases against one `coalesceUnchangedUpserts` state.
      * Both are exercised, because the refusal is a property of the WRITE path:
