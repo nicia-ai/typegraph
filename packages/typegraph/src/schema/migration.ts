@@ -575,11 +575,46 @@ function propertySchemasEqual(before: unknown, after: unknown): boolean {
  * Endpoint kind lists are sets — the order edge endpoints are declared in
  * carries no meaning.
  */
+function getSerializedEdgePairs(edge: SerializedEdgeDef): ReadonlySet<string> {
+  const pairs = new Set<string>();
+  if (edge.targetKindsBySource === undefined) {
+    for (const fromKind of edge.fromKinds) {
+      for (const toKind of edge.toKinds) {
+        pairs.add(`${fromKind}\0${toKind}`);
+      }
+    }
+  } else {
+    for (const [sourceKind, targetKinds] of Object.entries(
+      edge.targetKindsBySource,
+    )) {
+      for (const targetKind of targetKinds) {
+        pairs.add(`${sourceKind}\0${targetKind}`);
+      }
+    }
+  }
+  return pairs;
+}
+
 function endpointKindsEqual(
   before: readonly string[] | undefined,
   after: readonly string[] | undefined,
 ): boolean {
   return canonicalEqual(before?.toSorted(), after?.toSorted());
+}
+
+function targetKindsBySourceEqual(
+  before: Readonly<Record<string, readonly string[]>> | undefined,
+  after: Readonly<Record<string, readonly string[]>> | undefined,
+): boolean {
+  if (before === undefined && after === undefined) return true;
+  if (before === undefined || after === undefined) return false;
+  const beforeKeys = Object.keys(before).toSorted();
+  const afterKeys = Object.keys(after).toSorted();
+  if (!canonicalEqual(beforeKeys, afterKeys)) return false;
+  for (const key of beforeKeys) {
+    if (!endpointKindsEqual(before[key], after[key])) return false;
+  }
+  return true;
 }
 
 /**
@@ -920,6 +955,39 @@ function diffEdgeDef(
       kind: name,
       severity: "warning",
       details: `toKinds changed for "${name}"`,
+      before,
+      after,
+    });
+  }
+
+  // Check targetKindsBySource
+  if (
+    !targetKindsBySourceEqual(
+      before.targetKindsBySource,
+      after.targetKindsBySource,
+    )
+  ) {
+    const beforePairs = getSerializedEdgePairs(before);
+    const afterPairs = getSerializedEdgePairs(after);
+    const removedPairs: string[] = [];
+    for (const pair of beforePairs) {
+      if (!afterPairs.has(pair)) {
+        const [from, to] = pair.split("\0");
+        removedPairs.push(`(${from} -> ${to})`);
+      }
+    }
+
+    const isBreaking = removedPairs.length > 0;
+    const details =
+      isBreaking ?
+        `targetKindsBySource narrowed for "${name}"; removed pairs: [${removedPairs.join(", ")}]`
+      : `targetKindsBySource changed for "${name}"`;
+
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: isBreaking ? "breaking" : "warning",
+      details,
       before,
       after,
     });

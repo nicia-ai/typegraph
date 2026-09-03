@@ -27,7 +27,52 @@ declare const store: Store<typeof graph>;
 const personId = asNodeId<typeof Person>("person");
 const edgeId = asEdgeId<typeof knows>("edge");
 
+/* eslint-disable unicorn/no-null -- Tests the explicit open-left protocol and unchanged upper-bound types. */
 function assertAcceptedStoreCalls(): void {
+  void store.nodes.Person.create({ name: "Alice" }, { validFrom: null });
+  void store.nodes.Person.createFromRecord(
+    { name: "Alice" },
+    { validFrom: null },
+  );
+  void store.nodes.Person.upsertById(
+    "person",
+    { name: "Alice" },
+    { validFrom: null },
+  );
+  void store.nodes.Person.bulkCreate([
+    { props: { name: "Alice" }, validFrom: null },
+  ]);
+  void store.nodes.Person.bulkInsert([
+    { props: { name: "Alice" }, validFrom: null },
+  ]);
+  void store.edges.knows.create(
+    { kind: "Person", id: "a" },
+    { kind: "Person", id: "b" },
+    {},
+    { validFrom: null },
+  );
+  void store.edges.knows.bulkUpsertById([
+    {
+      id: edgeId,
+      from: { kind: "Person", id: "a" },
+      to: { kind: "Person", id: "b" },
+      validFrom: null,
+    },
+  ]);
+  void store.nodes.Person.create(
+    { name: "Alice" },
+    {
+      // @ts-expect-error the explicit open-left sentinel does not make arbitrary values valid
+      validFrom: false,
+    },
+  );
+  void store.nodes.Person.create(
+    { name: "Alice" },
+    {
+      // @ts-expect-error validTo retains its existing set/clear protocol
+      validTo: null,
+    },
+  );
   void store.nodes.Person.update(personId, {}, { clearValidTo: true });
   void store.nodes.Person.upsertById(
     "person",
@@ -86,6 +131,8 @@ function assertAcceptedStoreCalls(): void {
     },
   );
 }
+
+/* eslint-enable unicorn/no-null */
 
 describe("validity-end write types", () => {
   it("models set and clear as mutually exclusive operations", () => {

@@ -143,7 +143,7 @@ type MergedEdgeShape = Readonly<{
   toId: string;
   props: Readonly<Record<string, JsonValue>>;
   mergedIds: readonly string[];
-  validFrom: string | undefined;
+  validFrom: string | null | undefined;
   validTo: string | undefined;
 }>;
 

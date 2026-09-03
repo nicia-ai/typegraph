@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../../../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  EndpointPairError,
+} from "../../../src";
 import {
   EDGE_IDENTITY_MISMATCH_CODE,
   ValidationError,
@@ -887,6 +892,46 @@ export function registerEdgeOperationIntegrationTests(
         requireDefined(aliceEdge).id,
       );
       expect(storedAliceEdge?.role).toBe("Engineer");
+    });
+  });
+
+  describe("source-dependent edge targets across backends", () => {
+    const TaskNode = defineNode("TaskNode", {
+      schema: z.object({ title: z.string() }),
+    });
+    const CourseNode = defineNode("CourseNode", {
+      schema: z.object({ name: z.string() }),
+    });
+    const dependsOn = defineEdge("dependsOn", {
+      from: [TaskNode, CourseNode],
+      to: {
+        TaskNode: [TaskNode],
+        CourseNode: [CourseNode],
+      },
+    });
+    const pairGraph = defineGraph({
+      id: "source_dependent_cross_backend",
+      nodes: {
+        TaskNode: { type: TaskNode },
+        CourseNode: { type: CourseNode },
+      },
+      edges: { dependsOn },
+    });
+
+    it("accepts valid correlated pairs and rejects cross-pairs across backends", async () => {
+      const store = await context.createStore(pairGraph);
+      const t1 = await store.nodes.TaskNode.create({ title: "T1" });
+      const t2 = await store.nodes.TaskNode.create({ title: "T2" });
+      const c1 = await store.nodes.CourseNode.create({ name: "C1" });
+
+      const edge = await store.edges.dependsOn.create(t1, t2);
+      expect(edge.fromId).toBe(t1.id);
+      expect(edge.toId).toBe(t2.id);
+
+      await expect(
+        // @ts-expect-error undeclared endpoint pair
+        store.edges.dependsOn.create(t1, c1),
+      ).rejects.toThrow(EndpointPairError);
     });
   });
 }

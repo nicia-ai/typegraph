@@ -1,4 +1,4 @@
-import { type EdgeType, type NodeType } from "../core/types";
+import { type AnyEdgeType, type NodeType } from "../core/types";
 import {
   META_EDGE_BROADER,
   META_EDGE_DIFFERENT_FROM,
@@ -338,7 +338,10 @@ const impliesMetaEdge = createMetaEdge(META_EDGE_IMPLIES, {
  * Creates an inverseOf ontology relation.
  * Edge A inverseOf edge B means traversing A is equivalent to traversing B backwards.
  */
-export function inverseOf(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation {
+export function inverseOf(
+  edgeA: AnyEdgeType,
+  edgeB: AnyEdgeType,
+): OntologyRelation {
   return {
     metaEdge: inverseOfMetaEdge,
     from: edgeA,
@@ -350,7 +353,10 @@ export function inverseOf(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation {
  * Creates an implies ontology relation.
  * Edge A implies edge B means if A exists between two nodes, B should also exist.
  */
-export function implies(edgeA: EdgeType, edgeB: EdgeType): OntologyRelation {
+export function implies(
+  edgeA: AnyEdgeType,
+  edgeB: AnyEdgeType,
+): OntologyRelation {
   return {
     metaEdge: impliesMetaEdge,
     from: edgeA,

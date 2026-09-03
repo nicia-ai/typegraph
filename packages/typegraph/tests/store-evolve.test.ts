@@ -26,6 +26,7 @@ import { type ContributionRepairResult } from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { embedding } from "../src/core/embedding";
 import { defineNode } from "../src/core/node";
+import { type NodeType } from "../src/core/types";
 import {
   ConfigurationError,
   KindNotFoundError,
@@ -452,7 +453,13 @@ describe("Store.evolve — round-trip parity matrix", () => {
 
     const edgeType = evolved.registry.getEdgeType("appliesTo");
     expect(edgeType?.from?.map((node) => node.kind)).toEqual(["Tag"]);
-    expect(edgeType?.to?.map((node) => node.kind)).toEqual(["Person"]);
+    expect(
+      Array.isArray(edgeType?.to) ?
+        (edgeType.to as readonly NodeType[]).map(
+          (node: NodeType): string => node.kind,
+        )
+      : undefined,
+    ).toEqual(["Person"]);
 
     // Compile-time `Person` is reachable through the merged registry
     // unchanged, and the runtime `Tag` shows up alongside it.

@@ -263,16 +263,26 @@ const company = await store.nodes.Company.getById(asNodeId<typeof Company>(rows[
 
 ### `TypedEdgeCollection<R>`
 
-A type-safe edge collection with From/To types extracted from the edge
-registration. This is what `store.edges.*` returns.
+A type-safe edge collection derived from the edge registration. This is what
+`store.edges.*` returns. With array-valued `to`, each source type can connect to
+each target type. With a [source-dependent target map](/core-concepts#source-dependent-targets),
+typed writes preserve the allowed pairs instead of accepting independent endpoint unions.
 
 ```typescript
-type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<
-  R["type"],
-  R["from"][number], // Union of allowed 'from' node types
-  R["to"][number]    // Union of allowed 'to' node types
->;
+// assignedTo allows Employee -> Department and Student -> Course.
+await store.edges.assignedTo.create(employee, department, {});
+await store.edges.assignedTo.create(student, course, {});
+
+// @ts-expect-error Employee cannot be assigned to Course.
+await store.edges.assignedTo.create(employee, course, {});
 ```
+
+Keep the inferred edge and graph types to retain this information. Widening a
+declaration to a generic endpoint union can lose compile-time correlation;
+runtime validation still enforces the graph's allowed pairs. The same runtime
+validation applies to dynamic collections whose kinds are only known at runtime.
+This write-side guarantee does not make query results a correlated union of
+source/target pairs; narrow result kinds explicitly when consuming them.
 
 ### `DynamicNodeCollection`
 

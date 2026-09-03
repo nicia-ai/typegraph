@@ -275,9 +275,34 @@ earlier graph-extension index name for a different declaration, is rejected.
 
 ### Edges
 
-Edges follow the same shape as nodes but add `from: [...]` and `to:
-[...]` listing the kind names they connect. Both endpoint kinds must
-already exist (compile-time or graph-extension) when `evolve()` runs.
+Edges follow the same shape as nodes and declare endpoints using kind names.
+An array-valued `to` permits every combination of `from` and `to` kinds.
+A map-valued `to` restricts targets by source kind:
+
+```ts
+const proposal = defineGraphExtension({
+  edges: {
+    assignedTo: {
+      from: ["Employee", "Student"],
+      to: {
+        Employee: ["Department"],
+        Student: ["Course"],
+      },
+      properties: {},
+    },
+  },
+});
+const evolved = await store.evolve(proposal);
+```
+
+All endpoint kinds must resolve in the merged graph when `evolve()` runs.
+Map keys must exactly cover `from`, and each target array must be nonempty.
+The map is persisted and restored on restart, preserving the same runtime pair
+validation as [compile-time declarations](/core-concepts#source-dependent-targets).
+
+Adding allowed pairs broadens an extension edge. Removing a pair tightens it,
+even if the overall source and target kind sets stay the same. Tightening
+currently requires the **entire edge kind** to be empty, not just the removed pair.
 
 ### Ontology
 
@@ -899,6 +924,12 @@ Removing an embedding field from a surviving kind orphans its
 per-`(graphId, kind, field)` `tg_vec_*` table; `materializeRemovals()`
 reclaims it and reports the count in
 `MaterializeRemovalsResult.reclaimedVectorFields`.
+
+For source-dependent edges, removing a node kind removes its source entry and
+any target references to it. A source entry whose targets are exhausted is also
+removed. The edge kind survives while another valid pair remains; it is cascaded
+only when no pairs remain. For example, removing `Course` from the `assignedTo`
+extension above preserves `Employee → Department`.
 
 Removal only applies to graph-extension-declared kinds. Removing a compile-time
 kind throws `RemoveCompileTimeKindError`; deploy new TypeScript code

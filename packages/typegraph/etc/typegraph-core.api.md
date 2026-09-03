@@ -26,7 +26,10 @@ export type AllNodeTypes<G extends GraphDef> = {
 }[NodeKinds<G>];
 
 // @public
-export type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, readonly NodeType[] | undefined>;
+export type AnyEdgeRegistration = EdgeRegistration<AnyEdgeType, NodeType, NodeType, EdgeTargets>;
+
+// @public
+export type AnyEdgeType = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[] | undefined, EdgeTargets | undefined>;
 
 // @public
 export function asEdgeId<E extends AnyEdgeType = AnyEdgeType>(value: string): EdgeId<E>;
@@ -62,10 +65,16 @@ export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape
 }): EdgeType<K, S, From, To>;
 
 // @public (undocumented)
-export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape>>(name: K, options: DefineEdgeOptions<S>): EdgeType<K, S>;
+export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[], To extends Record<From[number]["kind"], readonly [NodeType, ...NodeType[]]>>(name: K, options: DefineEdgeOptions<S, From, To> & {
+    from: From;
+    to: To;
+}): EdgeType<K, S, From, To>;
+
+// @public (undocumented)
+export function defineEdge<K extends string, S extends z.ZodObject<z.ZodRawShape>>(name: K, options: DefineEdgeOptions<S, undefined, undefined>): EdgeType<K, S>;
 
 // @public
-export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends readonly NodeType[] | undefined = undefined> = Readonly<{
+export type DefineEdgeOptions<S extends z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
     schema?: S;
     description?: string;
     annotations?: KindAnnotations;
@@ -123,17 +132,23 @@ export type EdgeMatchIdentity<E extends AnyEdgeType = AnyEdgeType> = Readonly<{
 export type EdgeProps<E extends AnyEdgeType> = z.infer<E["schema"]>;
 
 // @public
-export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType> = Readonly<{
+export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends NodeType = NodeType, ToTypes extends NodeType = NodeType, ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets : readonly ToTypes[]> = Readonly<{
     type: E;
     from: readonly FromTypes[];
-    to: readonly ToTypes[];
+    to: ToDef;
     cardinality?: Cardinality;
     endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
 }>;
 
 // @public
-export type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends readonly NodeType[] | undefined = undefined> = Readonly<{
+export type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+// @public
+export type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+// @public
+export type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>, From extends readonly NodeType[] | undefined = undefined, To extends EdgeTargets | undefined = undefined> = Readonly<{
     [EDGE_TYPE_BRAND]: true;
     kind: K;
     schema: S;
@@ -144,7 +159,7 @@ export type EdgeType<K extends string = string, S extends z.ZodObject<z.ZodRawSh
 }>;
 
 // @public
-export type EdgeTypeWithEndpoints = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[], readonly NodeType[]>;
+export type EdgeTypeWithEndpoints = EdgeType<string, z.ZodObject<z.ZodRawShape>, readonly NodeType[], EdgeTargets>;
 
 // @public
 export function embedding<D extends number>(dimensions: D, options?: EmbeddingIndexOptions): EmbeddingSchema<D>;
@@ -194,6 +209,12 @@ type EmptySchema = typeof EMPTY_SCHEMA;
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
+export type EndpointPair = Readonly<{
+    from: string;
+    to: string;
+}>;
+
+// @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
 
 // @public
@@ -212,7 +233,7 @@ type ExtensionEdgeDef = Readonly<{
     description?: string;
     annotations?: KindAnnotations;
     from: readonly string[];
-    to: readonly string[];
+    to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
 }>;
 
@@ -349,6 +370,12 @@ export type ExternalRefValue<T extends string = string> = Readonly<{
     table: T;
     id: string;
 }>;
+
+// @public
+export function formatEndpointPairs(pairs: readonly EndpointPair[]): string;
+
+// @public
+export function getEdgeEndpointPairs(from: readonly NodeType[], to: EdgeTargets): readonly EndpointPair[];
 
 // @public
 export function getEdgeKinds<G extends GraphDef>(graph: G): readonly (keyof G["edges"] & string)[];
@@ -518,6 +545,9 @@ type IndexWhereOperand = Readonly<{
 type InferenceType = "subsumption" | "hierarchy" | "substitution" | "constraint" | "composition" | "association" | "none";
 
 // @public
+export function isEdgeTargetMap(value: unknown): value is EdgeTargetMap;
+
+// @public
 export function isEdgeType(value: unknown): value is AnyEdgeType;
 
 // @public
@@ -632,8 +662,11 @@ export type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawSh
 
 // @public
 type NormalizedEdges<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>> = {
-    [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K] : TEdges[K] extends AnyEdgeType ? EdgeRegistration<TEdges[K], TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"]> : never;
+    [K in keyof TEdges]: TEdges[K] extends EdgeRegistration ? TEdges[K] : TEdges[K] extends AnyEdgeType ? EdgeRegistration<TEdges[K], TEdges[K]["from"] extends readonly (infer N extends NodeType)[] ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends readonly (infer N extends NodeType)[] ? N : TEdges[K]["to"] extends (Record<string, readonly (infer N extends NodeType)[]>) ? N : TNodes[keyof TNodes]["type"], TEdges[K]["to"] extends EdgeTargets ? TEdges[K]["to"] : readonly TNodes[keyof TNodes]["type"][]> : never;
 };
+
+// @public
+export function normalizeTargetMap(to: EdgeTargetMap): EdgeTargetMap;
 
 // @public
 export type NullCheckOp = "isNull" | "isNotNull";
@@ -641,9 +674,15 @@ export type NullCheckOp = "isNull" | "isNotNull";
 // @public
 type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
-    from: NodeType | EdgeType | string;
-    to: NodeType | EdgeType | string;
+    from: NodeType | AnyEdgeType | string;
+    to: NodeType | AnyEdgeType | string;
 }>;
+
+// @public
+export function projectTargetKinds(to: EdgeTargets): readonly string[];
+
+// @public
+export function projectTargetNodes(to: EdgeTargets): readonly NodeType[];
 
 // @public (undocumented)
 const RECORDED_INSTANT_BRAND: unique symbol;
@@ -733,6 +772,9 @@ type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> = Re
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";
+
+// @public
+export function validateTargetMapEntries(name: string, from: readonly NodeType[] | undefined, to: unknown): asserts to is EdgeTargetMap;
 
 // @public
 type ValueType = "string" | "number" | "boolean" | "date" | "array" | "object" | "embedding" | "unknown";

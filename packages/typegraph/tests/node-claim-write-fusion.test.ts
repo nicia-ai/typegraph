@@ -421,7 +421,29 @@ describe("node claim write fusion", () => {
     });
   });
 
-  it("falls back when a custom command port refuses a claim plan", async () => {
+  it("preserves an explicit open-left bound in a fused unique node create", async () => {
+    const fixture = await createRecordedPostgresStore(graph);
+
+    fixture.reset();
+    const created = await fixture.store.nodes.UniqueNode.create(
+      { email: "fused-open-left@example.com" },
+      // eslint-disable-next-line unicorn/no-null -- Explicit open-left write protocol under test.
+      { validFrom: null },
+    );
+
+    expectFusedClaimAndNode(nodeWrite(fixture.statements));
+    expect(created.meta.validFrom).toBeUndefined();
+    const stored = await fixture.store.nodes.UniqueNode.getById(created.id);
+    expect(stored).toBeDefined();
+    expect(stored?.meta.validFrom).toBeUndefined();
+    await expect(
+      fixture.store.nodes.UniqueNode.create({
+        email: "fused-open-left@example.com",
+      }),
+    ).rejects.toBeInstanceOf(UniquenessError);
+  });
+
+  it("preserves an explicit open-left bound when a custom command port refuses a claim plan", async () => {
     const fixture = await createRecordedPostgresStore(graph);
     const backend = deriveBackend(fixture.backend, {
       async transaction<T>(
@@ -449,9 +471,18 @@ describe("node claim write fusion", () => {
     });
     const store = createStore(graph, backend);
 
-    await store.nodes.UniqueNode.create({ email: "unsupported-consumer" });
+    const created = await store.nodes.UniqueNode.create(
+      { email: "unsupported-consumer" },
+      // eslint-disable-next-line unicorn/no-null -- Explicit open-left write protocol under test.
+      { validFrom: null },
+    );
+    expect(created.meta.validFrom).toBeUndefined();
     await expect(
-      store.nodes.UniqueNode.create({ email: "unsupported-consumer" }),
+      store.nodes.UniqueNode.create(
+        { email: "unsupported-consumer" },
+        // eslint-disable-next-line unicorn/no-null -- Explicit open-left write protocol under test.
+        { validFrom: null },
+      ),
     ).rejects.toBeInstanceOf(UniquenessError);
     expect(await store.nodes.UniqueNode.find()).toHaveLength(1);
   });

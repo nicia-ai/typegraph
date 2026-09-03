@@ -178,19 +178,30 @@ export type NodeProps<N extends NodeType> = z.infer<N["schema"]>;
 // ============================================================
 
 /**
+ * Target mapping from source kind name to allowed target node types.
+ */
+export type EdgeTargetMap = Readonly<Record<string, readonly NodeType[]>>;
+
+/**
+ * Valid edge target definitions: either a Cartesian array of target nodes,
+ * or a source-to-target map for source-dependent endpoints.
+ */
+export type EdgeTargets = readonly NodeType[] | EdgeTargetMap;
+
+/**
  * An edge type definition.
  *
  * Created via `defineEdge()`. Represents a type of edge in the graph
  * with an optional Zod schema for properties.
  *
- * Optionally includes `from` and `to` arrays that define the allowed
+ * Optionally includes `from` and `to` arrays or mappings that define the allowed
  * source and target node types (domain and range constraints).
  */
 export type EdgeType<
   K extends string = string,
   S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>,
   From extends readonly NodeType[] | undefined = undefined,
-  To extends readonly NodeType[] | undefined = undefined,
+  To extends EdgeTargets | undefined = undefined,
 > = Readonly<{
   [EDGE_TYPE_BRAND]: true;
   kind: K;
@@ -208,7 +219,7 @@ export type AnyEdgeType = EdgeType<
   string,
   z.ZodObject<z.ZodRawShape>,
   readonly NodeType[] | undefined,
-  readonly NodeType[] | undefined
+  EdgeTargets | undefined
 >;
 
 /**
@@ -219,7 +230,7 @@ export type EdgeTypeWithEndpoints = EdgeType<
   string,
   z.ZodObject<z.ZodRawShape>,
   readonly NodeType[],
-  readonly NodeType[]
+  EdgeTargets
 >;
 
 /**
@@ -378,14 +389,26 @@ export type EdgeRegistration<
   E extends AnyEdgeType = AnyEdgeType,
   FromTypes extends NodeType = NodeType,
   ToTypes extends NodeType = NodeType,
+  ToDef extends EdgeTargets = [NodeType] extends [ToTypes] ? EdgeTargets
+  : readonly ToTypes[],
 > = Readonly<{
   type: E;
   from: readonly FromTypes[];
-  to: readonly ToTypes[];
+  to: ToDef;
   cardinality?: Cardinality;
   endpointExistence?: EndpointExistence;
   matchIdentity?: EdgeMatchIdentity<E>;
 }>;
+
+/**
+ * Base edge registration type for use in constraints - accepts any endpoint configuration.
+ */
+export type AnyEdgeRegistration = EdgeRegistration<
+  AnyEdgeType,
+  NodeType,
+  NodeType,
+  EdgeTargets
+>;
 
 // ============================================================
 // Graph Defaults
@@ -434,11 +457,19 @@ export function isEdgeType(value: unknown): value is AnyEdgeType {
 export function isEdgeTypeWithEndpoints(
   value: unknown,
 ): value is EdgeTypeWithEndpoints {
-  return (
-    isEdgeType(value) &&
-    Array.isArray(value.from) &&
-    value.from.length > 0 &&
-    Array.isArray(value.to) &&
-    value.to.length > 0
-  );
+  if (!isEdgeType(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    !Array.isArray(candidate["from"]) ||
+    candidate["from"].length === 0 ||
+    typeof candidate["to"] !== "object" ||
+    candidate["to"] === null
+  ) {
+    return false;
+  }
+  return Array.isArray(candidate["to"]) ?
+      candidate["to"].length > 0
+    : Object.keys(candidate["to"]).length > 0;
 }

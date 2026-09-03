@@ -22,6 +22,7 @@
  *      removed kind are also cascading-removed.
  */
 import { type GraphDef } from "../core/define-graph";
+import { projectTargetKinds } from "../core/edge-endpoints";
 import { getTypeName } from "../ontology/types";
 import { createDataKeyedBag } from "../utils/object";
 import {
@@ -144,15 +145,38 @@ export function planRemovals<G extends GraphDef>(
       cascadeEdges.add(edgeName);
       continue;
     }
-    const newFrom = edgeDocument.from.filter(
+    let newFrom = edgeDocument.from.filter(
       (kind) => !removedNodeKindsSet.has(kind),
     );
-    const newTo = edgeDocument.to.filter(
-      (kind) => !removedNodeKindsSet.has(kind),
-    );
-    if (newFrom.length === 0 || newTo.length === 0) {
-      cascadeEdges.add(edgeName);
-      continue;
+    const edgeTo = edgeDocument.to;
+    let newTo: readonly string[] | Record<string, readonly string[]>;
+    if (Array.isArray(edgeTo)) {
+      newTo = (edgeTo as readonly string[]).filter(
+        (kind: string): boolean => !removedNodeKindsSet.has(kind),
+      );
+      if (newFrom.length === 0 || newTo.length === 0) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+    } else {
+      const updatedMap = createDataKeyedBag<readonly string[]>();
+      const targetMap = edgeTo as Readonly<Record<string, readonly string[]>>;
+      const survivingFrom: string[] = [];
+      for (const sourceKind of newFrom) {
+        const targets = (targetMap[sourceKind] ?? []).filter(
+          (kind: string): boolean => !removedNodeKindsSet.has(kind),
+        );
+        if (targets.length > 0) {
+          survivingFrom.push(sourceKind);
+          updatedMap[sourceKind] = targets;
+        }
+      }
+      if (survivingFrom.length === 0) {
+        cascadeEdges.add(edgeName);
+        continue;
+      }
+      newFrom = survivingFrom;
+      newTo = updatedMap;
     }
     updatedEdges[edgeName] = {
       ...edgeDocument,
@@ -291,24 +315,20 @@ function buildCompileTimeReferentIndex<G extends GraphDef>(
 
   for (const [edgeName, registration] of Object.entries(graph.edges)) {
     if (runtimeEdgeNames.has(edgeName)) continue;
-    const reg = registration as {
-      from?: readonly { kind: string }[];
-      to?: readonly { kind: string }[];
-    };
     const referent: KindReferent = {
       type: "compile-time-edge",
       name: edgeName,
     };
     const seen = new Set<string>();
-    for (const endpoint of reg.from ?? []) {
+    for (const endpoint of registration.from) {
       if (seen.has(endpoint.kind)) continue;
       seen.add(endpoint.kind);
       append(endpoint.kind, referent);
     }
-    for (const endpoint of reg.to ?? []) {
-      if (seen.has(endpoint.kind)) continue;
-      seen.add(endpoint.kind);
-      append(endpoint.kind, referent);
+    for (const toKind of projectTargetKinds(registration.to)) {
+      if (seen.has(toKind)) continue;
+      seen.add(toKind);
+      append(toKind, referent);
     }
   }
 

@@ -198,7 +198,11 @@ disjointness is rejected when it would make a persisted class contradictory.
 
 `rebuildIdentityClosure(store)` repairs the derived current closure from live
 nodes and current assertions. It validates integrity and never advances the
-content revision.
+content revision. Schema-managed rebuilds, including automatic startup repair
+of derived identity relations, pin the schema version used by the rebuild.
+If a concurrent migration advances that version first, repair refuses with
+`StaleVersionError` without overwriting the newer closure. Reopen using the
+current graph definition before retrying.
 
 ### The database-level backstop
 

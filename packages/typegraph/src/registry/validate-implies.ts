@@ -15,10 +15,11 @@ import { ConfigurationError } from "../errors/index";
 import { META_EDGE_IMPLIES } from "../ontology/constants";
 import { type KindRegistry } from "./kind-registry";
 
-/** An edge kind's declared domain (`from`) and range (`to`) kind names. */
+/** An edge kind's declared domain (`from`) and range (`to`) kind names and allowed pairs. */
 export type EdgeEndpointKinds = Readonly<{
   from: readonly string[];
   to: readonly string[];
+  pairs?: readonly Readonly<{ from: string; to: string }>[];
 }>;
 
 /**
@@ -37,9 +38,10 @@ export type EdgeEndpointKinds = Readonly<{
  * A relation is compatible when every kind the implying edge allows on a side
  * is assignable — via `registry.isAssignableToAny` (equal, or a `subClassOf`
  * descendant) — to at least one kind the implied edge allows on that same
- * side. An implying edge kind absent from `edgeEndpoints` is skipped: it is
- * unregistered on this graph, has no stored rows, and so can never fold
- * anything into a traversal.
+ * side, and every allowed endpoint pair of the implying edge is assignable to
+ * an allowed endpoint pair of the implied edge. An implying edge kind absent
+ * from `edgeEndpoints` is skipped: it is unregistered on this graph, has no
+ * stored rows, and so can never fold anything into a traversal.
  */
 export function validateImpliesEndpointCompatibility(
   edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>,
@@ -68,6 +70,55 @@ export function validateImpliesEndpointCompatibility(
         impliedEdgeKind,
         impliedEndpoints.to,
         registry,
+      );
+
+      if (
+        implyingEndpoints.pairs !== undefined &&
+        impliedEndpoints.pairs !== undefined
+      ) {
+        assertPairsCompatible(
+          implyingEdgeKind,
+          implyingEndpoints.pairs,
+          impliedEdgeKind,
+          impliedEndpoints.pairs,
+          registry,
+        );
+      }
+    }
+  }
+}
+
+function assertPairsCompatible(
+  implyingEdgeKind: string,
+  implyingPairs: readonly Readonly<{ from: string; to: string }>[],
+  impliedEdgeKind: string,
+  impliedPairs: readonly Readonly<{ from: string; to: string }>[],
+  registry: KindRegistry,
+): void {
+  for (const implyingPair of implyingPairs) {
+    const compatible = impliedPairs.some(
+      (impliedPair) =>
+        registry.isAssignableTo(implyingPair.from, impliedPair.from) &&
+        registry.isAssignableTo(implyingPair.to, impliedPair.to),
+    );
+    if (!compatible) {
+      const allowedString = impliedPairs
+        .map((p) => `(${p.from} -> ${p.to})`)
+        .join(", ");
+      throw new ConfigurationError(
+        `implies("${implyingEdgeKind}", "${impliedEdgeKind}") is endpoint-incompatible: ` +
+          `endpoint pair (${implyingPair.from} -> ${implyingPair.to}) declared on "${implyingEdgeKind}" ` +
+          `cannot be assigned to any allowed pair of "${impliedEdgeKind}".`,
+        {
+          metaEdge: META_EDGE_IMPLIES,
+          implyingEdge: implyingEdgeKind,
+          impliedEdge: impliedEdgeKind,
+          incompatiblePair: implyingPair,
+          allowedPairs: impliedPairs,
+        },
+        {
+          suggestion: `Ensure every endpoint pair of "${implyingEdgeKind}" is assignable to an allowed pair of "${impliedEdgeKind}" (allowed: [${allowedString}]), or remove implies("${implyingEdgeKind}", "${impliedEdgeKind}").`,
+        },
       );
     }
   }

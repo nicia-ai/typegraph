@@ -144,6 +144,7 @@ import {
   detachIdentityForNode,
   foldIdentityForCreatedNodes,
   type IdentityImportSummary,
+  type IdentityRebuildContext,
   type IdentityServiceContext,
   type IdentityTransferAssertion,
   importIdentityAssertionsIntoTarget,
@@ -299,6 +300,7 @@ import {
   runInWriteTransaction,
   withTransactionSchemaFenceLease,
   withWriteTransactionSession,
+  type WriteTransactionContext,
 } from "./operations/write-transaction";
 import {
   advanceRevisionClock,
@@ -1403,7 +1405,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** Rebuilds derived current identity closure without advancing revision. */
   async rebuildIdentityClosure(): Promise<void> {
     this.#requireIdentityEnabled();
-    await runInWriteTransaction(
+    await rebuildIdentityClosureWithSchemaFence(
+      this.#identityContext(this.#baseBackend),
       {
         graphId: this.graphId,
         schemaVersion: this.#schemaMetadata.schemaVersion,
@@ -1412,10 +1415,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         revisionSchema: this.#sqlSchema(),
         statementExecution: this.#statementExecution,
       },
-      this.#baseBackend,
-      async (target) =>
-        rebuildIdentityClosureForContext(this.#identityContext(target)),
-      { didWrite: () => false },
     );
   }
 
@@ -6475,6 +6474,20 @@ function identityMigrationRequiredError(
   );
 }
 
+/** One fenced, revision-neutral entry for public and startup identity repair. */
+function rebuildIdentityClosureWithSchemaFence<G extends GraphDef>(
+  identityContext: IdentityRebuildContext<G>,
+  writeContext: WriteTransactionContext,
+): Promise<void> {
+  return runInWriteTransaction(
+    writeContext,
+    identityContext.backend,
+    async (target) =>
+      rebuildIdentityClosureForContext({ ...identityContext, backend: target }),
+    { didWrite: () => false },
+  );
+}
+
 async function prepareStoreWithSchema<G extends GraphDef>(
   graph: G,
   backend: GraphBackend,
@@ -6583,14 +6596,27 @@ async function prepareStoreWithSchema<G extends GraphDef>(
       // graph whose semantics ARE committed heals it here.
       ...(identityGate === undefined ?
         {
+          // The registry was resolved before this transaction. Pin its schema
+          // version before taking the identity lock: a concurrent migration
+          // may already have rebuilt under different semantics, and a stale
+          // startup must not overwrite that closure even if boot later fails.
           recomputeDerivedRelations: (target) =>
-            rebuildIdentityClosureForContext({
-              backend: target,
-              graphId: merged.id,
-              registry: identityRegistry,
-              schema: resolvedIdentitySchema,
-              sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
-            }),
+            rebuildIdentityClosureWithSchemaFence(
+              {
+                backend: target,
+                graphId: merged.id,
+                registry: identityRegistry,
+                schema: resolvedIdentitySchema,
+                sameIdAcrossKinds: identityProfile.sameIdAcrossKinds,
+              },
+              {
+                graphId: merged.id,
+                schemaVersion: activeRow?.version,
+                historyEnabled: false,
+                revisionTrackingEnabled: false,
+                revisionSchema: resolvedIdentitySchema,
+              },
+            ),
         }
       : {}),
     });

@@ -62,20 +62,21 @@ export function findRepeatedUpsertIds(
  * A validity window as a row carries it, in the column names a backend returns —
  * so a prefetched row is comparable without being reshaped.
  *
- * `undefined` means BOTH "no bound" (an open window) and "a bound this layer
- * cannot know", and the two need no distinguishing: an absent bound never equals
- * a requested one, so an item naming a bound against either always writes. That
- * is what makes {@link windowAfterUpsertCreate} safe to leave `undefined` where
- * the backend will stamp the write instant.
+ * `undefined` is a known open-left bound. A private symbol is an UNKNOWN
+ * prediction for a queued create whose backend will choose the lower bound.
+ * Keeping those distinct prevents a later explicit open-left request from
+ * coalescing against an earlier, not-yet-stamped create.
  */
+const UNKNOWN_VALIDITY_LOWER_BOUND = Symbol("unknownValidityLowerBound");
+
 export type UpsertWindow = Readonly<{
-  valid_from: string | undefined;
+  valid_from: string | typeof UNKNOWN_VALIDITY_LOWER_BOUND | undefined;
   valid_to: string | undefined;
 }>;
 
 /** The window bounds an upsert item may request. */
 type RequestedWindow = Readonly<{
-  validFrom?: string;
+  validFrom?: string | null;
   validTo?: string;
   clearValidTo?: true;
   onImmutableLowerBound?: "preserve" | "refuse";
@@ -83,7 +84,7 @@ type RequestedWindow = Readonly<{
 
 /** A window to compare against — a row, or an {@link UpsertWindow}. */
 type CurrentWindow = Readonly<{
-  valid_from?: string | undefined;
+  valid_from?: string | typeof UNKNOWN_VALIDITY_LOWER_BOUND | undefined;
   valid_to?: string | undefined;
 }>;
 
@@ -102,16 +103,24 @@ type CurrentWindow = Readonly<{
  *
  * Counting it as a change is also what lets the comparison canonicalize the
  * STORED side only ({@link statedBoundMatchesStored}): past this guard the
- * requested value is known canonical.
+ * requested value is known canonical, or explicitly open-left for `validFrom`.
+ * The upper bound retains its separate set/clear protocol: null must reach the
+ * write path for rejection even when the stored upper bound is absent.
  */
 function windowFieldChanges(
-  requested: string | undefined,
-  stored: string | undefined,
+  field: "validFrom" | "validTo",
+  requested: string | null | undefined,
+  stored: string | typeof UNKNOWN_VALIDITY_LOWER_BOUND | undefined,
 ): boolean {
   if (requested === undefined) {
     return false;
   }
-  if (!isCanonicalIsoDate(requested)) {
+  if (
+    stored === UNKNOWN_VALIDITY_LOWER_BOUND ||
+    (requested === null ?
+      field !== "validFrom"
+    : !isCanonicalIsoDate(requested))
+  ) {
     return true;
   }
   return !statedBoundMatchesStored(requested, stored);
@@ -120,14 +129,16 @@ function windowFieldChanges(
 /** Whether the requested lower bound prevents an unchanged upsert from coalescing. */
 function lowerBoundRequiresWrite(
   requested: RequestedWindow | undefined,
-  stored: string | undefined,
+  stored: string | typeof UNKNOWN_VALIDITY_LOWER_BOUND | undefined,
 ): boolean {
   const requestedValidFrom = requested?.validFrom;
   if (!preservesImmutableLowerBound(requested?.onImmutableLowerBound)) {
-    return windowFieldChanges(requestedValidFrom, stored);
+    return windowFieldChanges("validFrom", requestedValidFrom, stored);
   }
   return (
-    requestedValidFrom !== undefined && !isCanonicalIsoDate(requestedValidFrom)
+    requestedValidFrom !== undefined &&
+    requestedValidFrom !== null &&
+    !isCanonicalIsoDate(requestedValidFrom)
   );
 }
 
@@ -154,7 +165,7 @@ export function upsertWindowChanges(
       validityEndAfterMutation(requested, current.valid_to) !==
         current.valid_to) ||
     (requested?.clearValidTo === true && requested.validTo !== undefined) ||
-    windowFieldChanges(requested?.validTo, current.valid_to)
+    windowFieldChanges("validTo", requested?.validTo, current.valid_to)
   );
 }
 
@@ -163,23 +174,19 @@ export function upsertWindowChanges(
  * COMPLETE window — leaves the row holding, for a later item with the same id in
  * the same batch to compare against.
  *
- * An omitted `validFrom` is left `undefined`, and that prediction is now EXACT in
- * one case and conservative in the other:
- *
- *  - BORN-ENDED (a stated `validTo` at or before the write instant): the backend
- *    stamps no lower bound at all, so `undefined` is precisely what the row will
- *    hold, and a later copy restating that shape coalesces correctly;
- *  - every other create: the backend stamps its own write instant, a value this
- *    layer cannot know, so `undefined` remains a deliberate under-approximation.
- *    A later copy naming a lower bound counts as a change and writes, rather than
- *    coalescing against a guess — the bulk path may spend a write the sequential
- *    path would skip, but it never skips one the sequential path makes.
+ * An explicit `null` predicts a known open-left row (`undefined`). Omission
+ * leaves the lower bound unknown: the backend can stamp its instant or
+ * choose no bound for a born-ended write. A later item stating any bound must
+ * therefore reach the write path, which compares against the actual row.
  */
 export function windowAfterUpsertCreate(
   requested: RequestedWindow,
 ): UpsertWindow {
   return {
-    valid_from: requested.validFrom,
+    valid_from:
+      requested.validFrom === null ?
+        undefined
+      : (requested.validFrom ?? UNKNOWN_VALIDITY_LOWER_BOUND),
     valid_to: validityEndAfterMutation(requested, undefined),
   };
 }
@@ -215,12 +222,12 @@ export function windowAfterUpsertUpdate(
 export function shouldCoalesceUpsert(
   existing: Readonly<{
     deleted_at: string | undefined;
-    valid_from?: string | undefined;
+    valid_from?: string | typeof UNKNOWN_VALIDITY_LOWER_BOUND | undefined;
     valid_to?: string | undefined;
   }>,
   options:
     | Readonly<{
-        validFrom?: string;
+        validFrom?: string | null;
         validTo?: string;
         clearValidTo?: true;
       }>
