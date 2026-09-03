@@ -35,18 +35,20 @@ export function getBackendProperty(
 /**
  * Backend test fixtures for the graph-merge suite.
  *
- * Two backends run fully in-process and ALWAYS run under plain `pnpm test`:
+ * Two backends run fully in-process under plain `pnpm test`:
  * SQLite via better-sqlite3 (`createLocalSqliteBackend`) and Postgres via
  * PGlite + pgvector (`createLocalPgliteBackend`) — no Docker, no
  * `POSTGRES_URL`, no 5432 dependency.
  *
- * When `POSTGRES_URL` IS set (the `pnpm test:postgres` lane), a third entry
- * runs every suite against the real server-Postgres backend (node-postgres
+ * When `POSTGRES_URL` IS set, a third entry runs every suite against the real
+ * server-Postgres backend (node-postgres
  * `Pool` + Drizzle) — the production driver and transaction wiring PGlite
  * cannot exercise. Each fixture gets its own throwaway schema on the shared
  * server (merge fixtures must be EMPTY and several live simultaneously per
  * test: a base plus its branches), created on `make()` and dropped by
  * `cleanup()`.
+ * The `test:postgres` script selects only that server entry; the normal unit,
+ * property and coverage lanes retain SQLite and PGlite.
  */
 
 /**
@@ -359,13 +361,28 @@ export type BackendMatrixEntry = Readonly<{
 }>;
 
 /**
- * Returns the backend matrix. The in-process SQLite and PGlite entries always
- * run; the server-Postgres entry (production `pg` driver over Docker/CI
- * Postgres) joins only when `POSTGRES_URL` is set — the `pnpm test:postgres`
- * lane. SQLite's synchronous factory is wrapped so every entry shares the
- * async `make()` signature.
+ * Returns the default local matrix, adding the server when POSTGRES_URL is
+ * set. TYPEGRAPH_TEST_BACKEND=postgres selects only the server for the dedicated
+ * lane and refuses to run without a URL. SQLite's synchronous factory is
+ * wrapped so every entry shares the async make() signature.
  */
 export function backendMatrix(): readonly BackendMatrixEntry[] {
+  const selectedBackend = process.env["TYPEGRAPH_TEST_BACKEND"];
+  if (selectedBackend !== undefined && selectedBackend !== "postgres") {
+    throw new Error(`Unsupported TYPEGRAPH_TEST_BACKEND: ${selectedBackend}`);
+  }
+  const postgresUrl = process.env["POSTGRES_URL"];
+  if (selectedBackend === "postgres") {
+    if (postgresUrl === undefined || postgresUrl === "") {
+      throw new Error("TYPEGRAPH_TEST_BACKEND=postgres requires POSTGRES_URL");
+    }
+    return [
+      {
+        name: "Postgres",
+        make: () => createServerPostgresMergeBackend(postgresUrl),
+      },
+    ];
+  }
   const entries: BackendMatrixEntry[] = [
     {
       name: "SQLite",
@@ -376,7 +393,6 @@ export function backendMatrix(): readonly BackendMatrixEntry[] {
       make: () => createPgliteMergeBackend(),
     },
   ];
-  const postgresUrl = process.env["POSTGRES_URL"];
   if (postgresUrl !== undefined && postgresUrl !== "") {
     entries.push({
       name: "Postgres",

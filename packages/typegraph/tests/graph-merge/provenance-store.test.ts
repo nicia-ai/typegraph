@@ -67,7 +67,7 @@ import {
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -97,6 +97,7 @@ import {
   asCompiledStatementSql,
 } from "../../src/query/sql-intent";
 import { requireDefined } from "../../src/utils/presence";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix, getBackendProperty } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -504,6 +505,11 @@ type Fixture = Readonly<{
   branches: readonly GraphBranch<CareGraph>[];
 }>;
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
   let cleanups: (() => Promise<void>)[] = [];
 
@@ -515,7 +521,10 @@ describe.each(backendMatrix())("provenance persistence [$name]", (entry) => {
   });
 
   async function makeBackend(): Promise<GraphBackend> {
-    const fixture = await entry.make();
+    const fixture =
+      entry.name === "PGlite" ?
+        await pglitePool.makeFixture()
+      : await entry.make();
     cleanups.push(fixture.cleanup);
     return fixture.backend;
   }

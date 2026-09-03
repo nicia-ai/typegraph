@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { requireDefined } from "../src/utils/presence";
+import { PGLITE_GLOBS } from "../vitest.pglite-project";
 
 const PACKAGE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -95,12 +96,42 @@ function isCoveredByLane(
   file: string,
   laneTargets: readonly string[],
 ): boolean {
-  return laneTargets.some((target) =>
-    target.endsWith("/") ? file.startsWith(target) : file === target,
+  const excluded = readLaneExclusions().some((pattern) =>
+    path.matchesGlob(file, pattern),
+  );
+  return (
+    !excluded &&
+    laneTargets.some((target) =>
+      target.endsWith("/") ? file.startsWith(target) : file === target,
+    )
+  );
+}
+
+function readLaneExclusions(): readonly string[] {
+  const script = readFileSync(
+    path.join(PACKAGE_ROOT, LANE_SCRIPT_RELATIVE_PATH),
+    "utf8",
+  );
+  return [...script.matchAll(/^\s*--exclude=(\S+)\s*$/gm)].map((match) =>
+    requireDefined(match[1]),
   );
 }
 
 describe("test:postgres lane coverage", () => {
+  it("excludes only files collected by the default PGlite project", () => {
+    const exclusions = readLaneExclusions();
+    expect(exclusions.length).toBeGreaterThan(0);
+    const excluded = listTestFiles().filter((file) =>
+      exclusions.some((pattern) => path.matchesGlob(file, pattern)),
+    );
+    expect(excluded.length).toBeGreaterThan(0);
+    expect(
+      excluded.filter(
+        (file) =>
+          !PGLITE_GLOBS.some((pattern) => path.matchesGlob(file, pattern)),
+      ),
+    ).toEqual([]);
+  });
   it("runs every suite that provisions a PostgreSQL database", () => {
     const laneTargets = readLaneTargets();
     const suites = suitesWithPostgresLeg();

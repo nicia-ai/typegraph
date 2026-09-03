@@ -6,7 +6,7 @@ import {
   disjointWith,
   subClassOf,
 } from "@nicia-ai/typegraph";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -46,6 +46,7 @@ import type { BranchId } from "../../src/graph-merge/types";
 import { asBranchId } from "../../src/graph-merge/types";
 import { storeRuntime } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -100,6 +101,11 @@ function narrowedAssertionWarning(assertionId: string): string {
   return `Identity assertion ${JSON.stringify(assertionId)} was narrowed from [2020-01-01T00:00:00.000Z, open) to [2022-01-01T00:00:00.000Z, open) to fit its remapped endpoint windows.`;
 }
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   let cleanups: (() => Promise<void>)[];
 
@@ -112,7 +118,10 @@ describe.each(backendMatrix())("identity merge [$name]", (entry) => {
   });
 
   async function makeBackend(): Promise<GraphBackend> {
-    const fixture = await entry.make();
+    const fixture =
+      entry.name === "PGlite" ?
+        await pglitePool.makeFixture()
+      : await entry.make();
     cleanups.push(fixture.cleanup);
     return fixture.backend;
   }
