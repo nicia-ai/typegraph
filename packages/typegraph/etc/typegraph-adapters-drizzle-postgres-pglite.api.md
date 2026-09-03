@@ -4405,6 +4405,7 @@ export type LocalPgliteBackendOptions = Readonly<{
     dataDir?: string;
     tables?: PostgresTables;
     vector?: false | Extension;
+    fulltext?: FulltextStrategy | false;
 }>;
 
 // @public

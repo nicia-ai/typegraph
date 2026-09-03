@@ -59,6 +59,7 @@ export async function createLocalSqliteStoreImpl<G extends GraphDef>(
     ...(options.capabilities === undefined ?
       {}
     : { capabilities: options.capabilities }),
+    ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),
     ...(tables === undefined ? {} : { tables }),
   });
   try {

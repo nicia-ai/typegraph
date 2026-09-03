@@ -14,12 +14,16 @@
  * never creates a fulltext table at all — proving a hard delete, a plain
  * write, and a plain query never touch it.
  */
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { PGlite } from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { Pool } from "pg";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -33,8 +37,12 @@ import {
 import { generatePostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
 import { tables as postgresTables } from "../../../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
+import { createLocalPgliteStore } from "../../../src/backend/postgres/pglite-store";
 import { embedding } from "../../../src/core/embedding";
 import { searchable } from "../../../src/core/searchable";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createAdapterStoreWithSchema } from "../../../src/store";
 
 // A pool is lazy — it opens no connection until the first query — and
@@ -97,6 +105,71 @@ describe("createPostgresBackend({ fulltext: false })", () => {
       off.capabilities.execution.interactiveTransactions,
     );
   });
+});
+
+describe("createLocalPgliteBackend({ fulltext: false })", () => {
+  it("forwards the option to both the installation DDL and the backend, so bootstrap creates no fulltext table", async () => {
+    const { backend } = await createLocalPgliteBackend({ fulltext: false });
+    try {
+      expect(backend.capabilities.fulltext).toBeUndefined();
+      expect(backend.upsertFulltext).toBeUndefined();
+
+      const rows = await backend.execute(
+        asCompiledRowsSql(
+          sql`SELECT to_regclass(${postgresTables.fulltextTableName}) AS relation`,
+        ),
+      );
+      expect(
+        (rows[0] as { relation: string | null } | undefined)?.relation,
+      ).toBeNull();
+    } finally {
+      await backend.close();
+    }
+  });
+});
+
+describe("createLocalPgliteStore({ fulltext: false })", () => {
+  it(
+    "forwards the option through the managed wrapper, so bootstrap creates no fulltext table",
+    { timeout: 60_000 },
+    async () => {
+      const dataDir = await mkdtemp(
+        path.join(tmpdir(), "typegraph-pglite-store-"),
+      );
+      try {
+        const WrapperPerson = defineNode("Person", {
+          schema: z.object({ name: z.string() }),
+        });
+        const wrapperGraph = defineGraph({
+          id: "pglite-store-fulltext-off",
+          nodes: { Person: { type: WrapperPerson } },
+          edges: {},
+        });
+        const store = await createLocalPgliteStore(wrapperGraph, {
+          dataDir,
+          fulltext: false,
+        });
+        await store.close();
+
+        // Reopen the data directory directly, bypassing every TypeGraph
+        // factory, so this proves what the wrapper's own bootstrap wrote to
+        // disk rather than what a second factory call would additionally
+        // provision.
+        const raw = await PGlite.create({ dataDir });
+        try {
+          const rows = await raw.query<{ to_regclass: string | null }>(
+            "SELECT to_regclass($1)",
+            [postgresTables.fulltextTableName],
+          );
+          expect(rows.rows[0]?.to_regclass).toBeNull();
+        } finally {
+          await raw.close();
+        }
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 const Person = defineNode("Person", {
@@ -162,6 +235,15 @@ describe("fulltext: false — behavior on PGlite", () => {
     // a missing-relation SQL error instead of succeeding.
     await store.nodes.Person.hardDelete(alice.id);
     await store.nodes.Person.hardDelete(bob.id);
+  });
+
+  it("bootstraps with no relation named like the fulltext table", async () => {
+    await setUp();
+    const rows = await client.query<{ to_regclass: string | null }>(
+      "SELECT to_regclass($1)",
+      [postgresTables.fulltextTableName],
+    );
+    expect(rows.rows[0]?.to_regclass).toBeNull();
   });
 
   it("refreshes statistics without touching the fulltext table", async () => {
@@ -253,6 +335,103 @@ describe("fulltext: false — behavior on PGlite", () => {
     );
 
     const attempt = store.nodes.Document.create({ title: "hello world" });
+
+    await expect(attempt).rejects.toBeInstanceOf(
+      UnsupportedBackendCapabilityError,
+    );
+    await expect(attempt).rejects.toMatchObject({
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
+    });
+  });
+
+  it("update() on a searchable kind refuses with UnsupportedBackendCapabilityError, not a SQL error", async () => {
+    await setUp();
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+    const seeded = await backend().insertNode({
+      graphId: searchableGraph.id,
+      kind: "Document",
+      id: "seeded-update",
+      props: { title: "hello world" },
+    });
+
+    const attempt = store.nodes.Document.update(seeded.id as never, {
+      title: "goodbye",
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(
+      UnsupportedBackendCapabilityError,
+    );
+    await expect(attempt).rejects.toMatchObject({
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
+    });
+  });
+
+  it("soft-deletes a searchable node that predates fulltext being disabled, without touching the fulltext table", async () => {
+    await setUp();
+    // `insertNode` bypasses `store.nodes.Document.create()` (which itself
+    // refuses on this backend), the way a row written before a database
+    // was reconfigured with `fulltext: false` would already exist. The
+    // point of this test is the delete path alone: `deleteNodeFulltext`
+    // must treat "no fulltext strategy" as "nothing to clean up", not as
+    // an availability refusal — and this backend's DDL never created a
+    // fulltext table, so any statement against one would surface as a
+    // missing-relation SQL error instead of succeeding.
+    const seeded = await backend().insertNode({
+      graphId: searchableGraph.id,
+      kind: "Document",
+      id: "seeded-soft-delete",
+      props: { title: "hello world" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+
+    const query = vi.spyOn(client, "query");
+
+    await store.nodes.Document.delete(seeded.id as never);
+
+    const statements = query.mock.calls.map((call) => call[0]);
+    expect(
+      statements.some((text) =>
+        text.includes(postgresTables.fulltextTableName),
+      ),
+    ).toBe(false);
+  });
+
+  it("hard-deletes a searchable node that predates fulltext being disabled, without touching the fulltext table", async () => {
+    await setUp();
+    const seeded = await backend().insertNode({
+      graphId: searchableGraph.id,
+      kind: "Document",
+      id: "seeded-hard-delete",
+      props: { title: "hello world" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+
+    const query = vi.spyOn(client, "query");
+
+    await store.nodes.Document.hardDelete(seeded.id as never);
+
+    const statements = query.mock.calls.map((call) => call[0]);
+    expect(
+      statements.some((text) =>
+        text.includes(postgresTables.fulltextTableName),
+      ),
+    ).toBe(false);
+  });
+
+  it("rebuildFulltext() refuses with UnsupportedBackendCapabilityError reason fulltext_unsupported", async () => {
+    await setUp();
+    const [store] = await createAdapterStoreWithSchema(plainGraph, backend());
+
+    const attempt = store.search.rebuildFulltext();
 
     await expect(attempt).rejects.toBeInstanceOf(
       UnsupportedBackendCapabilityError,

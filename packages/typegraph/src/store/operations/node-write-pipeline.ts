@@ -71,6 +71,7 @@ import {
   syncEmbeddingsBatchForKind,
 } from "../embedding-sync";
 import {
+  assertFulltextMember,
   deleteNodeFulltext,
   getSearchableFields,
   refuseFulltextUnavailable,
@@ -699,24 +700,28 @@ export async function applyNodeSetUpdate(
   if (getSearchableFields(schema).length > 0) {
     // A fulltext-off backend (`resolveBackendFulltext` returns `false`) gets
     // the same typed capability refusal every other fulltext entry point
-    // raises, rather than the batch-primitive error below — that one is for
-    // a backend that DOES have fulltext but lacks the four members the write
-    // plan calls, mirroring the batched-uniqueness and batched-vector checks
-    // around it.
+    // raises, rather than the member-presence assertions below — those are
+    // for a backend that DOES have fulltext but lacks one of the four
+    // members the write plan calls, mirroring the batched-uniqueness and
+    // batched-vector checks around it.
     if (resolveBackendFulltext(backend) === false) {
       refuseFulltextUnavailable(backend, kind);
     }
-    if (
-      backend.upsertFulltext === undefined ||
-      backend.deleteFulltext === undefined ||
-      backend.upsertFulltextBatch === undefined ||
-      backend.deleteFulltextBatch === undefined
-    ) {
-      throw new ConfigurationError(
-        "The transaction backend lacks batched fulltext operations",
-        { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
-      );
-    }
+    // Fulltext is available, so a missing batch member here is not an
+    // availability decision but a backend contract violation — the same
+    // invariant `syncFulltextBatchForKind` asserts on its own members.
+    assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+    assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
+    assertFulltextMember(
+      backend.upsertFulltextBatch,
+      "upsertFulltextBatch",
+      backend,
+    );
+    assertFulltextMember(
+      backend.deleteFulltextBatch,
+      "deleteFulltextBatch",
+      backend,
+    );
   }
   if (
     getEmbeddingFields(schema).length > 0 &&

@@ -38,3 +38,27 @@ the transactional-fence condition — with no fulltext contribution to fail
 the check, that condition is vacuously satisfied — and a `rebuildContribution`
 call naming the fulltext contribution on such a backend refuses with a typed
 `ContributionRebuildUnsupportedError` instead of running DDL against nothing.
+
+Soft-deleting or hard-deleting a `searchable()` node now succeeds on a
+fulltext-off backend instead of refusing: a delete removes data rather than
+accepting a write the backend cannot index, and this backend maintains no
+fulltext sidecar to issue that removal against, so there is nothing to do.
+Only create and update of a `searchable()` kind refuse.
+
+`createLocalSqliteBackend`, `createLocalPgliteBackend`, `createLocalSqliteStore`,
+and `createLocalPgliteStore` accept the same `fulltext?: FulltextStrategy | false`
+option and forward it to both their installation DDL and the underlying
+backend factory, so a batteries-included store can skip the fulltext table
+the same way a hand-wired one can.
+
+**Upgrade note:** `fulltext: false` stops creating and maintaining the
+fulltext table; it never drops one. On a database that already has fulltext
+rows, disabling fulltext leaves them in place and unmaintained — a hard
+delete performed while fulltext is off leaves an orphaned row behind in the
+fulltext table, because `hardDeleteNode`'s cascade has no active strategy to
+build a delete statement from. Re-enabling fulltext later therefore requires
+the destructive contribution rebuild, `store.rebuildContribution("fulltext")`
+(which drops and recreates the fulltext table), not
+`store.search.rebuildFulltext()`: that method pages live nodes to recompute
+their content, and a hard-deleted node has no row left for it to page, so it
+never revisits — and therefore never clears — the orphan.

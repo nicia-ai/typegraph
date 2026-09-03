@@ -188,6 +188,15 @@ Creates a SQLite backend with automatic database and schema setup.
 function createLocalSqliteBackend(options?: {
   path?: string; // Database path, defaults to ":memory:"
   tables?: SqliteTables;
+  /**
+   * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Pass `false` to disable fulltext support
+   * entirely — the backend then advertises no `capabilities.fulltext` and
+   * omits the fulltext CRUD/search methods, and the managed installation
+   * never creates the fulltext table. Forwarded to both the installation
+   * DDL and `createSqliteBackend`.
+   */
+  fulltext?: FulltextStrategy | false;
 }): { backend: GraphBackend; db: BetterSQLite3Database };
 ```
 
@@ -809,6 +818,13 @@ async function createLocalPgliteBackend(options?: {
    * support, or pass a PGlite Extension object to control the extension import.
    */
   vector?: false | Extension;
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table.
+   */
+  fulltext?: FulltextStrategy | false;
 }): Promise<{
   backend: GraphBackend;
   db: PgliteDatabase;
@@ -1050,6 +1066,9 @@ unused database drivers.
 PGlite vector support is enabled by default and loads the optional
 `@electric-sql/pglite-pgvector` package. Install that package when using vector
 fields, or pass `{ vector: false }` as above for a smaller non-vector setup.
+Both managed entrypoints also accept `fulltext: false`, which skips the
+fulltext table at bootstrap and returns a backend with no
+`capabilities.fulltext`.
 
 Both factories accept `store` and `schemaManagement` groups, so the managed
 path supports the same hooks, history/revision tracking, custom SQL schema,
@@ -2217,6 +2236,18 @@ backend built with `fulltext: false` has no fulltext contribution at all, so
 the first condition is vacuously satisfied and `rebuild` reduces to whether
 the backend has the transactional schema fence — the same value it would
 report if fulltext were still active on a driver with that fence.
+
+**`fulltext: false` stops creating and maintaining the fulltext table; it
+never drops one.** On a database that already carries fulltext rows,
+disabling fulltext leaves them in place and unmaintained: a hard delete
+performed while fulltext is off leaves an orphaned row behind in the
+fulltext table, because `hardDeleteNode`'s cascade has no active strategy to
+build a delete statement from. Re-enabling fulltext later therefore requires
+the destructive contribution rebuild — `store.rebuildContribution("fulltext")`,
+which drops and recreates the fulltext table — **not**
+`store.search.rebuildFulltext()`: that method pages live nodes to recompute
+their content, and a hard-deleted node has no row left in the node table for
+it to page, so it never revisits, and therefore never clears, the orphan.
 
 ### Recommended deployment shape
 
