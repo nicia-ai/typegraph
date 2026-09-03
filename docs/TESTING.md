@@ -81,6 +81,12 @@ whole schema (including strategy-owned indexes) and resets session settings
 before returning the engine to the pool. The file's `afterAll` closes the pool.
 Keep this lifecycle when adding cases to these suites.
 
+The PGlite integration suite also uses this pool for physically isolated merge
+branches and review targets. Its primary fixture still shares one engine and
+resets data before each test; serialized-backend tests intentionally use that
+primary engine. Isolated fixtures are released by the shared integration suite's
+cleanup hook, and the file closes both the primary engine and pool at completion.
+
 The libSQL adapter and integration suite uses temporary database files. CI sets
 `TYPEGRAPH_LIBSQL_TMPDIR=/dev/shm` for unit and coverage jobs, placing these
 disposable files on the Linux runner's RAM-backed filesystem. This preserves

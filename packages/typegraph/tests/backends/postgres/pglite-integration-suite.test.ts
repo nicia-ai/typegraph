@@ -13,15 +13,16 @@
  */
 import { afterAll, beforeAll, beforeEach } from "vitest";
 
-import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { createPgliteFixturePool } from "../../graph-merge/pglite-fixture-pool";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 import {
   setupSharedPgliteEngine,
   type SharedPgliteEngine,
 } from "./pglite-correctness-harness";
 
+const isolatedPool = createPgliteFixturePool();
 let engine: SharedPgliteEngine;
 
 beforeAll(async () => {
@@ -29,20 +30,23 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  const leakedWorkingTables = await engine.makeBackend().execute(
-    asCompiledRowsSql(sql`
-      SELECT relation.relname
-      FROM pg_catalog.pg_class relation
-      WHERE relation.relpersistence = 't'
-        AND relation.relname LIKE 'typegraph_iterative_%'
-    `),
-  );
-  if (leakedWorkingTables.length > 0) {
-    throw new Error(
-      `Iterative graph operations leaked temporary tables: ${JSON.stringify(leakedWorkingTables)}`,
+  try {
+    const leakedWorkingTables = await engine.makeBackend().execute(
+      asCompiledRowsSql(sql`
+        SELECT relation.relname
+        FROM pg_catalog.pg_class relation
+        WHERE relation.relpersistence = 't'
+          AND relation.relname LIKE 'typegraph_iterative_%'
+      `),
     );
+    if (leakedWorkingTables.length > 0) {
+      throw new Error(
+        `Iterative graph operations leaked temporary tables: ${JSON.stringify(leakedWorkingTables)}`,
+      );
+    }
+  } finally {
+    await Promise.all([engine.dispose(), isolatedPool.dispose()]);
   }
-  await engine.dispose();
 });
 
 // The integration suite builds the store in its own `beforeEach`, so the
@@ -71,9 +75,8 @@ createIntegrationTestSuite(
       }),
   }),
   {
-    createIsolatedBackend: async () => {
-      const { backend } = await createLocalPgliteBackend();
-      return { backend, cleanup: () => backend.close() };
-    },
+    // Branches and review targets need independent transactions. Reuse an
+    // engine only after its fixture schema has been dropped at test cleanup.
+    createIsolatedBackend: () => isolatedPool.makeFixture(),
   },
 );
