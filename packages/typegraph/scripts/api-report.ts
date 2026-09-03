@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -211,42 +212,13 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * measured API Extractor result after exporting the intended public contracts;
  * `./core` and the Drizzle indexes entrypoint are unchanged.
  *
- * `./adapters/drizzle/engine`: its two head types (`SqlEngineProfile`,
- * `EngineAssemblyContext`) name the internal backend vocabulary — command
- * ports, row shapes, capability records — that this entrypoint deliberately
- * does not republish, so nearly all of it surfaces as forgotten-export debt
- * rather than a direct export, in family with the other adapter entrypoints.
- *
- * `EngineLateMembers.fence.runSchemaWriteTransaction`'s callback now
- * receives `InternalOperationBackend` instead of the narrower, `@internal`
- * `SchemaWriteTransactionBackend`, and the new sibling `schemaCommit` group
- * carries `commitSchemaVersionIfKindsEmpty` (typed over
- * `InternalOperationBackend`, `CommitSchemaVersionParams`, and
- * `SchemaKindEmptinessProbe` — all three already forgotten-referenced
- * elsewhere in this entrypoint). `SchemaWriteTransactionBackend` was this
- * entrypoint's only reference to that type, so it drops out of the
- * forgotten-export set entirely rather than adding to it (301 → 300).
- *
- * `createSqlBackend` now assembles the adapter literal itself, from the six
- * new `*Runtime` head types (`ContributionRuntime`, `IdentityRuntime`,
- * `GraphTemplateRuntime`, `BaseSchemaRuntime`, `IndexMaterializationRuntime`,
- * `KindRemovalRuntime`) plus `WriteFenceTarget` — each one a `Create*MembersDeps`
- * shape this entrypoint already forgotten-referenced through `profile.ts`'s
- * doc comments, now reached for real — plus `GraphTemplateExecute`, the named
- * function-type alias `graph-template-members.ts` introduces for its
- * `execute` member (300 → 324).
- *
- * `SqlEngineProfile` later drops its `limits` and `rowMappers` head fields
- * once each dialect's own `buildOperations` closure re-derives them inline
- * instead of reading them off the profile it also builds; that removes this
- * entrypoint's only references to `OperationBackendBatchConfig` and
- * `OperationBackendRowMappers`, so both leave the forgotten-export set
- * (324 → 322). `OperationFusionHooks` then moves out of `profile.ts` to
- * `operation-layer.ts`, where its only consumer already lived, and out of
- * this entrypoint's export list — it was a direct export before, so this
- * drops it from the rendered API report entirely rather than adding it to
- * the forgotten set, and nothing else under the published surface still
- * names it, so it leaves the forgotten set too (322 → 321).
+ * `./adapters/drizzle/engine`: `SqlEngineProfile` and `EngineAssemblyContext`
+ * name the internal backend vocabulary — command ports, row shapes,
+ * capability records, the `Create*MembersDeps` shapes behind the six
+ * `*Runtime` head types, `WriteFenceTarget`, `InternalOperationBackend` —
+ * that this entrypoint deliberately does not republish, so nearly all of it
+ * surfaces as forgotten-export debt rather than a direct export, in family
+ * with the other adapter entrypoints.
  */
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
@@ -394,7 +366,54 @@ async function verifyReport(reportFileName: string): Promise<boolean> {
     readFile(path.join(REPORT_FOLDER, reportFileName), "utf8"),
     readFile(path.join(VERIFY_REPORT_FOLDER, reportFileName), "utf8"),
   ]);
-  return stableApiReport(expected) === stableApiReport(actual);
+  const stableExpected = stableApiReport(expected);
+  const stableActual = stableApiReport(actual);
+  if (stableExpected === stableActual) return true;
+  await printReportDifference(reportFileName, stableExpected, stableActual);
+  return false;
+}
+
+const REPORT_DIFF_LINE_CAP = 400;
+
+/**
+ * Prints the normalized unified diff between the checked-in report and the
+ * freshly generated one, so a CI failure names the contract change instead
+ * of only the file. Capped, since a report is thousands of lines.
+ */
+async function printReportDifference(
+  reportFileName: string,
+  expected: string,
+  actual: string,
+): Promise<void> {
+  const expectedPath = path.join(
+    VERIFY_REPORT_FOLDER,
+    `${reportFileName}.checked-in.normalized`,
+  );
+  const actualPath = path.join(
+    VERIFY_REPORT_FOLDER,
+    `${reportFileName}.generated.normalized`,
+  );
+  await Promise.all([
+    writeFile(expectedPath, expected),
+    writeFile(actualPath, actual),
+  ]);
+  const diff = spawnSync(
+    "git",
+    [
+      "diff",
+      "--no-index",
+      "--no-color",
+      "--unified=3",
+      expectedPath,
+      actualPath,
+    ],
+    { encoding: "utf8" },
+  );
+  const lines = diff.stdout.split("\n");
+  const shown = lines.slice(0, REPORT_DIFF_LINE_CAP).join("\n");
+  const omitted = Math.max(0, lines.length - REPORT_DIFF_LINE_CAP);
+  console.error(shown);
+  if (omitted > 0) console.error(`... ${omitted} more diff lines omitted.`);
 }
 
 async function run(): Promise<void> {
