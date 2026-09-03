@@ -14,6 +14,14 @@ export type { IngestionImportTarget } from "../interchange/ingestion-import-targ
 export { computeBaseVersion } from "./base-version";
 export { branch } from "./branch";
 export type {
+  PlanCandidateWriteSetReviewArgs,
+  RevalidateCandidateWriteSetReviewArgs,
+} from "./candidate-review";
+export {
+  planCandidateWriteSetReview,
+  revalidateCandidateWriteSetReview,
+} from "./candidate-review";
+export type {
   CandidateWriteSet,
   CandidateWriteSetTarget,
   PlanCandidateWriteSetArgs,
@@ -45,6 +53,7 @@ export {
   MergePlanOriginMismatchError,
   MergePlanSchemaMismatchError,
   MergePlanTargetMismatchError,
+  MergeReviewError,
   SimilarityUnavailableError,
   StaleMergePlanError,
   UnsupportedMergePlanVersionError,
@@ -115,6 +124,15 @@ export {
 } from "./provenance-store";
 export type { Result } from "./result";
 export { isErr, isOk, unwrap } from "./result";
+export type {
+  MergeReviewArtifact,
+  MergeReviewBaseline,
+  MergeReviewDifference,
+  MergeReviewPolicy,
+  MergeReviewRevalidation,
+  MergeReviewRow,
+} from "./review-schema";
+export { MERGE_REVIEW_FORMAT_VERSION } from "./review-schema";
 export type {
   BaseNodeLookup,
   CandidateSource,

@@ -58,6 +58,7 @@ import {
   registerFulltextIntegrationTests,
   registerGraphAnnotationsIntegrationTests,
   registerGraphMergePlanIntegrationTests,
+  registerGraphMergeReviewIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
@@ -310,6 +311,7 @@ export function createIntegrationTestSuite<
     registerWeightedShortestPathExtractionIntegrationTests(context);
     registerFulltextIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
+    registerGraphMergeReviewIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);

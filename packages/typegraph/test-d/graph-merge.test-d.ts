@@ -22,6 +22,9 @@ import {
   type MergeConstraintConflictErrorDetails,
   MergeError,
   type MergeReport,
+  type MergeReviewArtifact,
+  type MergeReviewRevalidation,
+  MergeReviewError,
   type ReconcileTypesMode,
   type Result,
   type WorkingCopyStrategy,
@@ -34,6 +37,8 @@ import {
   openProvenanceStore,
   planMerge,
   planMergeIncremental,
+  planCandidateWriteSetReview,
+  revalidateCandidateWriteSetReview,
   type ProvenanceGraph,
   unwrap,
 } from "../dist/graph-merge";
@@ -152,3 +157,38 @@ expectType<"GRAPH_MERGE_CONSTRAINT_CONFLICT">(constraintConflict.code);
 expectType<"constraint">(constraintConflict.category);
 expectType<MergeConstraintConflictErrorDetails>(constraintConflict.details);
 expectType<string>(constraintConflict.details.constraintCode);
+
+const reviewPolicy = { id: "review-v1", context: {} } as const;
+expectType<Promise<Result<MergeReviewArtifact, MergeError>>>(
+  planCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    writeSet: {} as unknown,
+    policy: reviewPolicy,
+  }),
+);
+expectType<Promise<Result<MergeReviewRevalidation, MergeError>>>(
+  revalidateCandidateWriteSetReview({
+    target: store,
+    makeBackend,
+    review: {} as unknown,
+    policy: reviewPolicy,
+  }),
+);
+expectError(
+  planCandidateWriteSetReview({ target: store, makeBackend, writeSet: {} }),
+);
+declare const reviewed: MergeReviewArtifact;
+expectError((reviewed.digest = mergePlan.digest));
+expectError(
+  reviewed.baseline.rows.push({ role: "node", kind: "Person", id: "x" }),
+);
+declare const revalidation: MergeReviewRevalidation;
+if (revalidation.status === "compatible") {
+  expectType<MergePlanArtifact>(revalidation.plan);
+} else {
+  expectType<MergePlanArtifact | undefined>(revalidation.plan);
+}
+declare const reviewError: MergeReviewError;
+expectAssignable<MergeError>(reviewError);
+expectType<"GRAPH_MERGE_REVIEW">(reviewError.code);
