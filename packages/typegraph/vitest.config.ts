@@ -118,6 +118,9 @@ export default defineConfig({
         extends: true,
         test: {
           name: "main",
+          // Keep the coverage lane's 15s allowance on this project. A CLI
+          // override also shortens the PGlite and graph-merge budgets below.
+          testTimeout: 15_000,
           include: ["tests/**/*.test.ts"],
           // Graph-merge runs under its own (serialized) project below.
           exclude: [

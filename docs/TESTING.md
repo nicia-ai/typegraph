@@ -268,6 +268,12 @@ coverage: {
 
 The test command will fail if coverage drops below these thresholds.
 
+Per-test timeouts live in `vitest.config.ts`: the main project has 15 seconds,
+while PGlite and graph-merge projects have 60 seconds. Coverage uses these same
+budgets. Do not pass a global `--testTimeout` in the coverage workflow: it
+overrides project settings and can shorten the budget for in-process Postgres
+tests.
+
 ### Interpreting Coverage
 
 High coverage doesn't guarantee good tests. A file can have 100% line coverage but still
