@@ -86,6 +86,7 @@ import {
 import {
   type BulkFindEdgesFromParams,
   type BulkFindEdgesFromResult,
+  type DynamicStoreViewEdgeCollection,
   type EdgeBulkFindEndpointOptions,
   type EdgeCollection,
   type NodeCollection,
@@ -1043,6 +1044,16 @@ class StoreViewImplementation<
         )
       ),
     );
+  }
+
+  /** Dynamic endpoint reads remain bound to this view's coordinate. */
+  getEdgeCollection<K extends EdgeKinds<G>>(
+    kind: K,
+  ): DynamicStoreViewEdgeCollection<G["edges"][K]["type"]> | undefined;
+  getEdgeCollection(kind: string): DynamicStoreViewEdgeCollection | undefined;
+  getEdgeCollection(kind: string): unknown {
+    if (this.store.getEdgeCollection(kind) === undefined) return undefined;
+    return this.edges[kind as EdgeKinds<G>];
   }
 
   /** Adds a recorded-time pin, returning the narrow reconstructing view. */

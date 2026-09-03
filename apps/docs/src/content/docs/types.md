@@ -326,21 +326,64 @@ contain both after runtime evolution.
 
 ### `DynamicEdgeCollection`
 
-An edge collection with widened generics for runtime string-keyed access via
-[`store.getEdgeCollection(kind)`](/schemas-stores#storegetedgecollectionkind).
-Exposes the full `EdgeCollection` API (`create`, `getById`, `find`, `count`,
-`findFrom`, `findTo`, etc.) with widened endpoint types.
+`DynamicEdgeCollection<E>` is an edge collection for runtime endpoint dispatch. Obtain it from
+[`store.getEdgeCollection(kind)`](/schemas-stores#storegetedgecollectionkind),
+`store.getEdgeCollectionOrThrow(kind)`, or either method on a transaction context.
+When `kind` belongs to the graph's TypeScript definition, `E` retains that edge's
+property schema and result type. An arbitrary `string` uses the default
+`AnyEdgeType`, so properties are checked at runtime.
 
-ID parameters (`getById`, `getByIds`, `update`, `delete`, `hardDelete`,
-`bulkDelete`, `bulkUpsertById`) accept plain `string` instead of branded
-`EdgeId<E>`, since the dynamic path typically receives IDs from edge metadata,
-snapshots, or external input where the brand is not available.
+Endpoints accept `{ kind: string; id: string }`. Writes validate endpoint domains
+and source-dependent pairs against the graph's schema. ID parameters accept
+plain `string`; returned edges retain their typed IDs. This surface exposes the
+full collection API, including bulk operations.
+
+Use it for helpers generic over a graph and edge kind:
 
 ```typescript
-import type { DynamicEdgeCollection } from "@nicia-ai/typegraph";
+import type { EdgeKinds, GraphDef, NodeRef, TransactionContext } from "@nicia-ai/typegraph";
+import type { z } from "zod";
 
-// Derived from EdgeCollection<AnyEdgeType, NodeType, NodeType> with branded ID parameters widened to string
+async function connect<G extends GraphDef, K extends EdgeKinds<G>>(
+  tx: TransactionContext<G>,
+  kind: K,
+  from: NodeRef,
+  to: NodeRef,
+  props: z.input<G["edges"][K]["type"]["schema"]>,
+) {
+  return tx.getEdgeCollectionOrThrow(kind).getOrCreateByEndpoints(
+    from, to, props, { ifExists: "update" },
+  );
+}
 ```
+
+For a reusable collection parameter, use `DynamicEdgeCollection<E>`. No collection
+cast or dependency on generated declaration filenames is needed.
+
+**Upgrading from 0.54/0.55:** source-dependent targets in 0.55 made endpoint
+arguments a union of valid pairs. TypeScript cannot resolve that union inside
+some generic `G`/`K` helpers, even for array-valued targets. Migrate dynamic calls
+from `tx.edges[kind]` to `tx.getEdgeCollectionOrThrow(kind)` (or check the optional
+lookup result). Generic `EdgeCollection<E, From, To>` and
+`TypedEdgeCollection<EdgeRegistration<E, From, To>>` annotations can encounter the
+same deferred-type limitation; use `DynamicEdgeCollection<E>` when endpoints are
+runtime data. Keep `store.edges.specificKind` for compile-time endpoint checking.
+
+`EdgeRegistration` now permits array or map targets in broad annotations. Code
+inspecting `.to` must narrow with `isEdgeTargetMap`; an explicitly Cartesian
+registration can specify `readonly To[]` as its fourth type argument.
+
+Known-kind dynamic lookups now check properties at compile time. Callers passing
+an unvalidated record should parse it with the selected schema first. An `unknown`
+property value was not accepted by the typed 0.54 API either.
+
+### `DynamicStoreViewEdgeCollection<E>`
+
+`view.getEdgeCollection(kind)` returns an optional dynamic collection bound to the
+view's valid-time coordinate. It retains known edge property types and accepts
+runtime endpoint references and string IDs. It exposes only the view's reads:
+there are no writes, deferred batch reads, or per-call temporal overrides.
+Recorded-time views retain their narrower reconstructing-read API.
 
 ## Subgraph Types
 

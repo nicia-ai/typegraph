@@ -45,6 +45,13 @@
       ]
     }
   },
-  "include": ["src", "tests", "examples", "scripts", "tsup.config.ts"],
+  "include": [
+    "src",
+    "tests",
+    "examples",
+    "scripts",
+    "tsup.config.ts",
+    "type-smoke/edge-endpoint-compat.ts"
+  ],
   "exclude": ["tests/do-sqlite"]
 }

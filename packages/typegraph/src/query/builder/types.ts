@@ -53,6 +53,7 @@ import {
   type IsDynamicEdgeType,
   type IsDynamicNodeType,
 } from "./dynamic";
+import type { ArrayNodeKinds, EdgeTargetKinds } from "./edge-target-kinds";
 
 export type { TraversalExpansion } from "../ast";
 
@@ -98,15 +99,9 @@ export type BatchResults<Queries extends readonly BatchableQuery<unknown>[]> = {
 // ============================================================
 
 /**
- * Extracts the names of valid target node kinds for an edge traversal.
- *
- * For "out" direction: returns the names of node kinds in the edge's "to" array.
- * For "in" direction: returns the names of node kinds in the edge's "from" array.
- *
- * @example
- * // Given: worksAt: { from: [Person], to: [Company, Organization] }
- * // ValidEdgeTargets<G, "worksAt", "out"> = "Company" | "Organization"
- * // ValidEdgeTargets<G, "worksAt", "in"> = "Person"
+ * Extracts the declared target kinds for an edge traversal.
+ * Outgoing traversals use the full range of an array or source-dependent map;
+ * incoming traversals use the source array.
  */
 export type ValidEdgeTargets<
   G extends GraphDef,
@@ -114,14 +109,11 @@ export type ValidEdgeTargets<
   Dir extends TraversalDirection,
 > =
   G["edges"][EK] extends EdgeRegistration ?
+    // Keep the direct array projection: a generic node schema must not wait
+    // for the distributive helper to resolve before its known kind is usable.
     Dir extends "out" ?
-      G["edges"][EK]["to"] extends readonly (infer N extends NodeType)[] ?
-        N["kind"]
-      : G["edges"][EK]["to"] extends (
-        Record<string, readonly (infer N extends NodeType)[]>
-      ) ?
-        N["kind"]
-      : never
+      | ArrayNodeKinds<G["edges"][EK]["to"]>
+      | EdgeTargetKinds<G["edges"][EK]["to"]>
     : G["edges"][EK]["from"][number]["kind"]
   : never;
 

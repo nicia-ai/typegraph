@@ -23,6 +23,7 @@ export {
   type DynamicNode,
   type DynamicNodeCollection,
   type DynamicNodeReference,
+  type DynamicStoreViewEdgeCollection,
   type Edge,
   type EdgeBatchReads,
   type EdgeCollection,

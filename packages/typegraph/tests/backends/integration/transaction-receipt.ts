@@ -7,6 +7,8 @@ import {
   defineGraph,
   defineNode,
   type EdgeId,
+  EndpointPairError,
+  KindNotFoundError,
   type NodeId,
   type RecordedInstant,
   recordedInstantRevision,
@@ -71,6 +73,24 @@ const receiptSurfaceGraph = defineGraph({
       from: [ReceiptEntity],
       to: [ReceiptEntity],
       cardinality: "many",
+    },
+  },
+});
+
+const OtherEntity = defineNode("OtherEntity", {
+  schema: z.object({ name: z.string() }),
+});
+const dynamicPairGraph = defineGraph({
+  id: "dynamic_pairs",
+  nodes: {
+    ReceiptEntity: { type: ReceiptEntity },
+    OtherEntity: { type: OtherEntity },
+  },
+  edges: {
+    receiptLinks: {
+      type: receiptLinks,
+      from: [ReceiptEntity, OtherEntity],
+      to: { ReceiptEntity: [ReceiptEntity], OtherEntity: [OtherEntity] },
     },
   },
 });
@@ -348,6 +368,87 @@ export function registerTransactionReceiptIntegrationTests(
       await expect(store.edges.receiptLinks.findFrom(source)).resolves.toEqual(
         [],
       );
+    });
+
+    for (const history of [false, true]) {
+      it(`binds dynamic edge lookups to transaction and scope receipts (history=${String(history)})`, async () => {
+        const store =
+          history ?
+            await context.createHistoryStore(dynamicPairGraph)
+          : await context.createStore(dynamicPairGraph);
+        const outcome = await store.transactionWithReceipt(async (tx) => {
+          const source = await tx.nodes.ReceiptEntity.create({
+            name: "source",
+            slot: "s",
+          });
+          const target = await tx.nodes.ReceiptEntity.create({
+            name: "target",
+            slot: "t",
+          });
+          const other = await tx.nodes.OtherEntity.create({ name: "other" });
+          expect(tx.getEdgeCollection("receiptLinks")).toBe(
+            tx.edges.receiptLinks,
+          );
+          expect(tx.getEdgeCollection("toString")).toBeUndefined();
+          expect(() => tx.getEdgeCollectionOrThrow("missing")).toThrow(
+            KindNotFoundError,
+          );
+          const measured = await tx.measure(async (scoped) => {
+            expect(scoped.getEdgeCollection("receiptLinks")).toBe(
+              scoped.edges.receiptLinks,
+            );
+            await scoped
+              .getEdgeCollectionOrThrow("receiptLinks")
+              .getOrCreateByEndpoints(source, target, { label: "measured" });
+            await expect(
+              scoped.getEdgeCollectionOrThrow("receiptLinks").bulkCreate([
+                {
+                  from: target,
+                  to: source,
+                  props: { label: "must roll back" },
+                },
+                { from: source, to: other, props: { label: "invalid pair" } },
+              ]),
+            ).rejects.toBeInstanceOf(EndpointPairError);
+            expect(await scoped.edges.receiptLinks.count()).toBe(1);
+          });
+          expect(measured.receipt.writes.edges).toEqual({ receiptLinks: 1 });
+          return { source, target };
+        });
+        expect(outcome.receipt.writes.edges).toEqual({ receiptLinks: 1 });
+        expect(await store.edges.receiptLinks.count()).toBe(1);
+        const pinned = store.asOf("2000-01-01T00:00:00.000Z");
+        expect(
+          await pinned
+            .getEdgeCollection("receiptLinks")
+            ?.findByEndpoints(outcome.result.source, outcome.result.target),
+        ).toBeUndefined();
+        expect(pinned.getEdgeCollection("missing")).toBeUndefined();
+        expect(pinned.getEdgeCollection("receiptLinks")).toBe(
+          pinned.edges.receiptLinks,
+        );
+      });
+    }
+
+    it("rolls back dynamic edge writes with their transaction", async () => {
+      const store = await context.createStore(dynamicPairGraph);
+      const source = await store.nodes.ReceiptEntity.create({
+        name: "source",
+        slot: "s",
+      });
+      const target = await store.nodes.ReceiptEntity.create({
+        name: "target",
+        slot: "t",
+      });
+      await expect(
+        store.transaction(async (tx) => {
+          await tx
+            .getEdgeCollectionOrThrow("receiptLinks")
+            .create(source, target, { label: "abort" });
+          throw new Error("abort transaction");
+        }),
+      ).rejects.toThrow("abort transaction");
+      expect(await store.edges.receiptLinks.count()).toBe(0);
     });
 
     it("counts writes made through tx.getNodeCollection", async () => {
