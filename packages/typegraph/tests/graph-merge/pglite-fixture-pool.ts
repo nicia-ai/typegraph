@@ -6,10 +6,14 @@ import {
 
 import { generatePostgresMigrationSQL } from "../../src/backend/drizzle/ddl";
 import { tables as defaultTables } from "../../src/backend/drizzle/postgres";
-import type { MergeBackendFixture } from "./test-utils";
 
 export type PgliteFixturePool = Readonly<{
-  makeFixture: () => Promise<MergeBackendFixture>;
+  makeFixture: () => Promise<
+    Readonly<{
+      backend: ReturnType<typeof createPostgresBackend>;
+      cleanup: () => Promise<void>;
+    }>
+  >;
   dispose: () => Promise<void>;
 }>;
 

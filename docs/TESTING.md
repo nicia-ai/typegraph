@@ -72,13 +72,28 @@ Location: `packages/typegraph/tests/backends/`
 
 Tests that exercise complete workflows with real database backends.
 
-The identity-universe, incremental-merge, and ingestion-branch suites reuse idle
+The identity-universe, incremental-merge, ingestion-branch, identity-merge,
+provenance-store, and identity-law property suites reuse idle
 PGlite engines through `tests/graph-merge/pglite-fixture-pool.ts`. Every live
 fixture still owns a separate engine, so base and branch transactions remain
 independent. Each lease creates a fresh backend and schema; cleanup drops the
 whole schema (including strategy-owned indexes) and resets session settings
 before returning the engine to the pool. The file's `afterAll` closes the pool.
 Keep this lifecycle when adding cases to these suites.
+
+The PGlite integration suite also uses this pool for physically isolated merge
+branches and review targets. Its primary fixture still shares one engine and
+resets data before each test; serialized-backend tests intentionally use that
+primary engine. Isolated fixtures are released by the shared integration suite's
+cleanup hook, and the file closes both the primary engine and pool at completion.
+
+The libSQL adapter and integration suite uses temporary database files. CI sets
+`TYPEGRAPH_LIBSQL_TMPDIR=/dev/shm` for unit and coverage jobs, placing these
+disposable files on the Linux runner's RAM-backed filesystem. This preserves
+file-client behavior, close/reopen persistence, and default journal/synchronous
+settings while avoiding variable disk flush latency. Locally the suite defaults
+to the OS temporary directory; the override must name an existing directory.
+It affects only this suite's database files, not other tools' temporary files.
 
 The **adapter test suite** (`adapter-test-suite.ts`) defines a shared contract that all backends must satisfy:
 
@@ -172,6 +187,17 @@ PostgreSQL example runner intentionally uses `POSTGRES_URL` so it can exercise
 the same caller-supplied connection configuration shown to users.
 
 ### Per-suite PostgreSQL databases
+
+`pnpm test:postgres` selects the server-only graph-merge matrix with
+`TYPEGRAPH_TEST_BACKEND=postgres` and excludes the dedicated `pglite-*.test.ts`
+files. SQLite and PGlite still run in the normal unit/property/coverage lanes.
+Mixed-backend files remain loaded so their server-specific cases are retained.
+The lane coverage guard checks exclusions as well as file inclusion, and allows
+excluded files only when the default PGlite project collects them.
+
+Direct Vitest runs with `POSTGRES_URL` still include all three merge backends
+unless the selector is set. Selecting `postgres` without a URL, or supplying an
+unknown selector, fails immediately instead of silently dropping test coverage.
 
 Every server-PostgreSQL suite owns the graph tables it operates on: `beforeEach`
 hooks `TRUNCATE` them, `beforeAll` hooks re-run the migration SQL, and a few

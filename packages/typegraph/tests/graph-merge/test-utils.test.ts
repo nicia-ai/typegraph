@@ -8,7 +8,7 @@ import {
   TypeGraphError,
   UniquenessError,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -45,6 +45,48 @@ const graph = defineGraph({
   id: "merge-test-utils",
   nodes: { Person: { type: Person } },
   edges: {},
+});
+
+describe("backend matrix selection", () => {
+  beforeEach(() => {
+    vi.stubEnv("POSTGRES_URL", undefined);
+    vi.stubEnv("TYPEGRAPH_TEST_BACKEND", undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps both local backends in the default lane", () => {
+    expect(backendMatrix().map((entry) => entry.name)).toEqual([
+      "SQLite",
+      "PGlite",
+    ]);
+  });
+  it("adds the server when a URL is supplied without a selector", () => {
+    vi.stubEnv("POSTGRES_URL", "postgresql://localhost/test");
+    expect(backendMatrix().map((entry) => entry.name)).toEqual([
+      "SQLite",
+      "PGlite",
+      "Postgres",
+    ]);
+  });
+  it("selects only the server for the dedicated lane", () => {
+    vi.stubEnv("POSTGRES_URL", "postgresql://localhost/test");
+    vi.stubEnv("TYPEGRAPH_TEST_BACKEND", "postgres");
+    expect(backendMatrix().map((entry) => entry.name)).toEqual(["Postgres"]);
+  });
+  it.each([undefined, ""])(
+    "refuses server selection without a URL (%s)",
+    (url) => {
+      vi.stubEnv("POSTGRES_URL", url);
+      vi.stubEnv("TYPEGRAPH_TEST_BACKEND", "postgres");
+      expect(() => backendMatrix()).toThrow("requires POSTGRES_URL");
+    },
+  );
+  it("refuses an unknown selector", () => {
+    vi.stubEnv("TYPEGRAPH_TEST_BACKEND", "typo");
+    expect(() => backendMatrix()).toThrow("Unsupported TYPEGRAPH_TEST_BACKEND");
+  });
 });
 
 describe("graph-merge Result module", () => {
