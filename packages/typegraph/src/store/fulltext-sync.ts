@@ -59,7 +59,7 @@ export function refuseFulltextUnavailable(
     `Node kind "${nodeKind}" declares searchable() fields`,
     "fulltext",
     { backend: backend.dialect, nodeKind, reason: "fulltext_unsupported" },
-    "This backend was created with `fulltext: false`. Remove the " +
+    "This backend declares no fulltext capability. Remove the " +
       "searchable() declaration, or use a backend with fulltext support.",
   );
 }

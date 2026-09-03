@@ -1169,7 +1169,7 @@ function refuseUnlessFulltextAvailable(
     operation,
     "fulltext",
     { backend: backend.dialect, reason: "fulltext_unsupported" },
-    "This backend was created with `fulltext: false`.",
+    "This backend declares no fulltext capability: it was created with `fulltext: false`, or it omits `capabilities.fulltext`.",
   );
 }
 
