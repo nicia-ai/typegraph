@@ -22,7 +22,7 @@ import {
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { deriveBackend } from "../../src/backend/derive-backend";
@@ -47,6 +47,7 @@ import type {
 import { asBranchId } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
 import { normalizeGraph } from "../property/graph-merge/normalize";
+import { createPgliteFixturePool } from "./pglite-fixture-pool";
 import { backendMatrix, getStoreBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -143,6 +144,11 @@ function options(
   };
 }
 
+const pglitePool = createPgliteFixturePool();
+afterAll(async () => {
+  await pglitePool.dispose();
+});
+
 describe.each(backendMatrix())(
   "mergeIncremental new-vs-live-target [$name]",
   (entry) => {
@@ -156,7 +162,10 @@ describe.each(backendMatrix())(
     });
 
     async function makeBackend(): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        entry.name === "PGlite" ?
+          await pglitePool.makeFixture()
+        : await entry.make();
       cleanups.push(fixture.cleanup);
       return fixture.backend;
     }
@@ -1396,7 +1405,10 @@ describe.each(backendMatrix())(
     });
 
     async function makeBackend(): Promise<GraphBackend> {
-      const fixture = await entry.make();
+      const fixture =
+        entry.name === "PGlite" ?
+          await pglitePool.makeFixture()
+        : await entry.make();
       cleanups.push(fixture.cleanup);
       return fixture.backend;
     }
