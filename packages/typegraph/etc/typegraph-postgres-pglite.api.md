@@ -3028,6 +3028,7 @@ type LiveStoreOptions = BaseStoreOptions & Readonly<{
 export type LocalPgliteStoreOptions<TStoreOptions extends StoreOptions = StoreOptions> = Readonly<{
     dataDir?: string;
     vector?: boolean;
+    fulltext?: FulltextStrategy | false;
     store?: TStoreOptions;
     schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;

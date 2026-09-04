@@ -193,10 +193,10 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/engine/create-sql-backend.ts",
-    line: "const fencePlan = resolveWriteFencePlan({",
+    line: "const fencePlan = resolveWriteFencePlan(fenceTarget);",
     site: "J17",
     reason:
-      "createSqlBackend resolves the plan once, after a profile's capability tail runs and before any member group is assembled, and gates markSchemaFencedInsertEligible on the result — every dialect profile this factory assembles shares this one resolution.",
+      "createSqlBackend builds the ONE fence target from a profile's finalized capabilities and resolves the plan once, before any member group is assembled, and gates markSchemaFencedInsertEligible on the result — every dialect profile this factory assembles shares this one resolution.",
   },
 ];
 

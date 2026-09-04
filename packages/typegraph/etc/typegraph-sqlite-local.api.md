@@ -3052,6 +3052,7 @@ export type LocalSqliteStoreOptions<TStoreOptions extends StoreOptions = StoreOp
     path?: string;
     pragmas?: LocalSqlitePragmaOptions | false;
     capabilities?: BundledBackendCapabilityOverrides;
+    fulltext?: FulltextStrategy | false;
     store?: TStoreOptions;
     schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;

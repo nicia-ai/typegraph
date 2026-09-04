@@ -13,9 +13,13 @@
  * whose DDL never creates a fulltext table at all — proving a hard delete,
  * a plain write, and a plain query never touch it.
  */
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -32,8 +36,13 @@ import {
   createSqliteBackend,
   tables,
 } from "../../../src/backend/drizzle/sqlite";
+import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
+import { createLocalSqliteStore } from "../../../src/backend/sqlite/local-store";
 import { searchable } from "../../../src/core/searchable";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createAdapterStoreWithSchema } from "../../../src/store";
+import { requireDefined } from "../../../src/utils/presence";
 
 describe("createSqliteBackend({ fulltext: false })", () => {
   let sqlite: Database.Database | undefined;
@@ -94,6 +103,64 @@ describe("createSqliteBackend({ fulltext: false })", () => {
     expect(off.capabilities.contributions?.rebuild).toBe(
       off.capabilities.execution.interactiveTransactions,
     );
+  });
+});
+
+describe("createLocalSqliteBackend({ fulltext: false })", () => {
+  it("forwards the option to both the installation DDL and the backend, so bootstrap creates no fulltext table", async () => {
+    const { backend } = createLocalSqliteBackend({ fulltext: false });
+    try {
+      expect(backend.capabilities.fulltext).toBeUndefined();
+      expect(backend.upsertFulltext).toBeUndefined();
+
+      const rows = await backend.execute(
+        asCompiledRowsSql(
+          sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${tables.fulltextTableName}`,
+        ),
+      );
+      expect(rows).toEqual([]);
+    } finally {
+      await backend.close();
+    }
+  });
+});
+
+describe("createLocalSqliteStore({ fulltext: false })", () => {
+  it("forwards the option through the managed wrapper, so bootstrap creates no fulltext table", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "typegraph-sqlite-"));
+    const dbPath = path.join(dataDir, "store.db");
+    try {
+      const WrapperPerson = defineNode("Person", {
+        schema: z.object({ name: z.string() }),
+      });
+      const wrapperGraph = defineGraph({
+        id: "sqlite-store-fulltext-off",
+        nodes: { Person: { type: WrapperPerson } },
+        edges: {},
+      });
+      const store = await createLocalSqliteStore(wrapperGraph, {
+        path: dbPath,
+        fulltext: false,
+      });
+      await store.close();
+
+      // Reopen the file directly, bypassing every TypeGraph factory, so
+      // this proves what the wrapper's own bootstrap wrote to disk rather
+      // than what a second factory call would additionally provision.
+      const raw = new Database(dbPath, { readonly: true });
+      try {
+        const row = raw
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+          )
+          .get(tables.fulltextTableName);
+        expect(row).toBeUndefined();
+      } finally {
+        raw.close();
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -161,6 +228,15 @@ describe("fulltext: false — behavior on a graph without searchable fields", ()
     await store.edges.knows.hardDelete(edge.id);
     await store.nodes.Person.hardDelete(alice.id);
     await store.nodes.Person.hardDelete(bob.id);
+  });
+
+  it("bootstraps with no relation named like the fulltext table", () => {
+    const rows = sqlite
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      )
+      .all(tables.fulltextTableName);
+    expect(rows).toEqual([]);
   });
 
   it("refreshes statistics without touching the fulltext table", async () => {
@@ -235,6 +311,104 @@ describe("fulltext: false — behavior on a graph without searchable fields", ()
     );
 
     const attempt = store.nodes.Document.create({ title: "hello world" });
+
+    await expect(attempt).rejects.toBeInstanceOf(
+      UnsupportedBackendCapabilityError,
+    );
+    await expect(attempt).rejects.toMatchObject({
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
+    });
+  });
+
+  it("update() on a searchable kind refuses with UnsupportedBackendCapabilityError, not a SQL error", async () => {
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+    const seededBackend = backend();
+    const seeded = await seededBackend.insertNode({
+      graphId: searchableGraph.id,
+      kind: "Document",
+      id: "seeded-update",
+      props: { title: "hello world" },
+    });
+
+    const attempt = store.nodes.Document.update(seeded.id as never, {
+      title: "goodbye",
+    });
+
+    await expect(attempt).rejects.toBeInstanceOf(
+      UnsupportedBackendCapabilityError,
+    );
+    await expect(attempt).rejects.toMatchObject({
+      details: { capability: "fulltext", reason: "fulltext_unsupported" },
+    });
+  });
+
+  it("soft-deletes a searchable node that predates fulltext being disabled, without touching the fulltext table", async () => {
+    // `insertNode` bypasses `store.nodes.Document.create()` (which itself
+    // refuses on this backend), the way a row written before a database
+    // was reconfigured with `fulltext: false` would already exist. The
+    // point of this test is the delete path alone: `deleteNodeFulltext`
+    // must treat "no fulltext strategy" as "nothing to clean up", not as
+    // an availability refusal.
+    const seedingBackend = backend();
+    const seeded = await seedingBackend.insertNode({
+      graphId: searchableGraph.id,
+      kind: "Document",
+      id: "seeded-soft-delete",
+      props: { title: "hello world" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+
+    const statements: string[] = [];
+    const originalPrepare = sqlite.prepare.bind(sqlite);
+    vi.spyOn(sqlite, "prepare").mockImplementation((sqlText: string) => {
+      statements.push(sqlText);
+      return originalPrepare(sqlText);
+    });
+
+    await store.nodes.Document.delete(seeded.id as never);
+
+    expect(
+      statements.some((text) => text.includes(tables.fulltextTableName)),
+    ).toBe(false);
+  });
+
+  it("hard-deletes a searchable node that predates fulltext being disabled, without touching the fulltext table", async () => {
+    const seedingBackend = backend();
+    const seeded = await seedingBackend.insertNode({
+      graphId: searchableGraph.id,
+      kind: "Document",
+      id: "seeded-hard-delete",
+      props: { title: "hello world" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      searchableGraph,
+      backend(),
+    );
+
+    const statements: string[] = [];
+    const originalPrepare = sqlite.prepare.bind(sqlite);
+    vi.spyOn(sqlite, "prepare").mockImplementation((sqlText: string) => {
+      statements.push(sqlText);
+      return originalPrepare(sqlText);
+    });
+
+    await store.nodes.Document.hardDelete(seeded.id as never);
+
+    expect(
+      statements.some((text) => text.includes(tables.fulltextTableName)),
+    ).toBe(false);
+  });
+
+  it("rebuildFulltext() refuses with UnsupportedBackendCapabilityError reason fulltext_unsupported", async () => {
+    const [store] = await createAdapterStoreWithSchema(plainGraph, backend());
+
+    const attempt = store.search.rebuildFulltext();
 
     await expect(attempt).rejects.toBeInstanceOf(
       UnsupportedBackendCapabilityError,
@@ -342,6 +516,86 @@ describe("fulltext: false — hybrid search refuses on the fulltext leg", () => 
       await expect(attempt).rejects.toMatchObject({
         details: { capability: "fulltext", reason: "fulltext_unsupported" },
       });
+    } finally {
+      sqlite.close();
+    }
+  });
+});
+
+describe("fulltext: false — an orphaned sidecar row left by a hard delete while off", () => {
+  it("store.search.rebuildFulltext() cannot clear the orphan; the contribution rebuild can", async () => {
+    const sqlite = new Database(":memory:");
+    try {
+      // Fulltext ON (the dialect default): write and index a searchable
+      // node.
+      for (const statement of generateSqliteDDL(tables)) {
+        sqlite.exec(statement);
+      }
+      const [storeOn] = await createStoreWithSchema(
+        searchableGraph,
+        createSqliteBackend(drizzle(sqlite), {
+          executionProfile: { isSync: true },
+          tables,
+        }),
+      );
+      const created = await storeOn.nodes.Document.create({
+        title: "an orphaned unobtainium treasure",
+      });
+
+      // Reopen the SAME database — same connection, same tables — with
+      // fulltext disabled, and hard-delete the node. `hardDeleteNode`'s
+      // cascade has no active fulltext strategy to build a delete
+      // statement from, so the row it already wrote to the fulltext
+      // table is never touched: it survives as an orphan.
+      const [storeOff] = await createStoreWithSchema(
+        searchableGraph,
+        createSqliteBackend(drizzle(sqlite), {
+          executionProfile: { isSync: true },
+          tables,
+          fulltext: false,
+        }),
+      );
+      await storeOff.nodes.Document.hardDelete(created.id);
+
+      // Reopen with fulltext back on. `rebuildFulltext()` pages live
+      // nodes to recompute their content; the hard-deleted node has no
+      // row left in the node table for it to page, so it never revisits
+      // the orphan.
+      const backendBackOn = createSqliteBackend(drizzle(sqlite), {
+        executionProfile: { isSync: true },
+        tables,
+      });
+      const [storeBackOn] = await createStoreWithSchema(
+        searchableGraph,
+        backendBackOn,
+      );
+      await storeBackOn.search.rebuildFulltext();
+
+      // `store.search.fulltext` restricts to nodes still in the node
+      // table by default — a hard-deleted node fails that join whether or
+      // not its sidecar row survives, so it cannot show the orphan.
+      // Searching directly against the deleted node's exact id as the
+      // sole candidate proves whether the FULLTEXT TABLE still has a
+      // matching row for it, independent of that join.
+      const orphanCandidate = sql`SELECT ${created.id}`;
+      const searchOrphan = () =>
+        requireDefined(backendBackOn.fulltextSearch)({
+          graphId: searchableGraph.id,
+          nodeKind: "Document",
+          query: "unobtainium",
+          limit: 10,
+          candidates: orphanCandidate,
+        });
+
+      const orphanMatchesAfterRebuildFulltext = await searchOrphan();
+      expect(orphanMatchesAfterRebuildFulltext.length).toBeGreaterThan(0);
+
+      // The destructive contribution rebuild drops and recreates the
+      // fulltext table, then refills it from current live nodes only —
+      // the orphan cannot survive a table that no longer exists.
+      await storeBackOn.rebuildContribution("fulltext");
+
+      expect(await searchOrphan()).toEqual([]);
     } finally {
       sqlite.close();
     }

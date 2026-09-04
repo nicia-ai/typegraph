@@ -1067,7 +1067,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "fulltextOperations",
-    ceiling: 11,
+    ceiling: 12,
   },
   deleteFulltextBatch: {
     kind: "deferred",
@@ -1289,7 +1289,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "fulltextOperations",
-    ceiling: 9,
+    ceiling: 10,
   },
   upsertFulltextBatch: {
     kind: "deferred",

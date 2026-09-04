@@ -16,12 +16,16 @@ import type { ResolvedSqlTableNames } from "../../../query/compiler/schema";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
-import type { WriteFencePlan, WriteFenceTarget } from "../../capabilities/write-fence";
+import type {
+  FenceSql,
+  FirstPartyProfileToken,
+  WriteFencePlan,
+  WriteFenceTarget,
+} from "../../capabilities/write-fence";
 import type { BackendResourceAudit } from "../../transaction-resource";
 import type {
   AdapterBackend,
   BackendCapabilities,
-  DatabaseExtensionName,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
@@ -68,40 +72,66 @@ export type EngineProvisioning = Readonly<{
    * dialects with no such migration to run.
    */
   ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
-  /** Installs a named database extension. PostgreSQL-only. */
-  ensureExtension?: (name: DatabaseExtensionName) => Promise<void>;
-  /** Installs the trigram extension specifically. PostgreSQL-only. */
-  ensureTrigramExtension?: () => Promise<void>;
+}>;
+
+/**
+ * What `SqlEngineProfile.buildOperations` receives instead of only the
+ * contribution materializer: the capabilities, fence plan, and fence target
+ * {@link createSqlBackend} has already resolved from the profile's own
+ * `declaredCapabilities`, before any member group — including the operation-
+ * backend layer this builds — is assembled.
+ *
+ * `createSqlBackend` is the ONE place that runs `finalizeEngineCapabilities`
+ * (`./capabilities`) and builds the fence target; a dialect's `buildOperations`
+ * closure reads `capabilities` / `fenceTarget` off this context rather than
+ * deriving its own copy, so the `InternalOperationBackend` it builds always
+ * agrees with every late member and every mark site about what this backend
+ * declares and which fence it resolves.
+ */
+export type EngineOperationsContext = Readonly<{
+  /** The backend's capabilities after `finalizeEngineCapabilities` runs on `declaredCapabilities`. */
+  capabilities: BackendCapabilities;
+  /** The write-fence decision, resolved once from `fenceTarget`. */
+  fencePlan: WriteFencePlan;
+  /**
+   * ONE fence target for the whole backend and every transaction-scoped one
+   * it builds, built by `createSqlBackend` from the capabilities above and
+   * marked first-party the same way the two bundled builders always did.
+   */
+  fenceTarget: WriteFenceTarget;
+  /** The contribution materializer `createSqlBackend` built from `profile.contributionRuntime`. */
+  contributionMaterializer: ContributionMaterializer;
+  /**
+   * Whether `profile.firstParty` was a token `mintFirstPartyProfileToken`
+   * actually minted — resolved once by `createSqlBackend` and reused for
+   * every transaction-scoped backend a dialect's `lateMembers` opens, so a
+   * handle it hands out carries the SAME standing as the root rather than
+   * re-deriving one from a copied token field it may or may not still
+   * carry. A dialect gates its own `markFirstPartyFactory` call on a
+   * TypeGraph-opened transaction handle on this flag exactly as
+   * `createSqlBackend` gates the root and fence-target marks on it;
+   * `adoptTransaction` — a caller-driven, unaudited transaction lifetime —
+   * passes `false` regardless of this flag, never this value.
+   */
+  isFirstParty: boolean;
 }>;
 
 /**
  * What a profile's late-bound members receive instead of the whole profile
- * or a partially built backend: the facts and collaborators
- * {@link createSqlBackend} has already assembled by the time it calls
- * `lateMembers`, plus `self()` — a thunk resolving to the exact backend
- * object being built, safe to call only once that object has been returned
- * to a caller who could invoke it (i.e., never during the profile's own
+ * or a partially built backend: everything {@link EngineOperationsContext}
+ * carries, plus the assembled operation-backend layer and `self()` — a
+ * thunk resolving to the exact backend object {@link createSqlBackend} is
+ * building, safe to call only once that object has been returned to a
+ * caller who could invoke it (i.e., never during the profile's own
  * construction).
  */
-export type EngineAssemblyContext<TTx> = Readonly<{
-  /**
-   * The backend's capabilities after `finalizeEngineCapabilities`
-   * (`./capabilities`) runs the shared capability tail on
-   * `declaredCapabilities`. Each dialect builder resolves this same value a
-   * second time, for the local `capabilities` its own `buildOperations`
-   * closure needs; the function is pure, so both derivations agree (see
-   * that module's doc comment).
-   */
-  capabilities: BackendCapabilities;
-  /** The write-fence decision, resolved once from the capabilities above. */
-  fencePlan: WriteFencePlan;
-  /** The operation-backend layer `createSqlBackend` built from `profile.buildOperations`. */
-  operations: InternalOperationBackend;
-  /** The contribution materializer `createSqlBackend` built from `profile.contributionRuntime`. */
-  contributionMaterializer: ContributionMaterializer;
-  /** Resolves to the backend `createSqlBackend` is building. */
-  self: () => AdapterBackend<TTx>;
-}>;
+export type EngineAssemblyContext<TTx> = EngineOperationsContext &
+  Readonly<{
+    /** The operation-backend layer `createSqlBackend` built from `profile.buildOperations`. */
+    operations: InternalOperationBackend;
+    /** Resolves to the backend `createSqlBackend` is building. */
+    self: () => AdapterBackend<TTx>;
+  }>;
 
 /**
  * The late-bound member groups a profile supplies, assembled by
@@ -183,9 +213,10 @@ export type EngineLateMembers<TTx> = Readonly<{
 /**
  * What a profile supplies `createSqlBackend` to build the contribution
  * member group, beyond what the profile's own head already carries
- * (`dialect`, `fulltext`, `vector`, `fenceTarget`) and what `createSqlBackend`
- * derives itself (`ensureTable`/`execute`/`operationStrategy` from
- * `provisioning`/`execution`/`strategy`, and `schemaWriteTransaction` from
+ * (`dialect`, `fulltext`, `vector`) and what `createSqlBackend` derives
+ * itself (`fenceTarget` from the finalized capabilities;
+ * `ensureTable`/`execute`/`operationStrategy` from
+ * `provisioning`/`execution`/`strategy`; and `schemaWriteTransaction` from
  * the fence's own late member, once it exists). See
  * `members/contribution-members.ts` for what each field does.
  */
@@ -251,7 +282,10 @@ export type IndexMaterializationRuntime = Omit<
  * member group, beyond `ensureTable` (from `provisioning`). See
  * `members/kind-removal-members.ts`.
  */
-export type KindRemovalRuntime = Omit<CreateKindRemovalMembersDeps, "ensureTable">;
+export type KindRemovalRuntime = Omit<
+  CreateKindRemovalMembersDeps,
+  "ensureTable"
+>;
 
 /**
  * Everything one SQL engine contributes to `createSqlBackend`: a HEAD of
@@ -267,6 +301,21 @@ export type SqlEngineProfile<TTx> = Readonly<{
    * marker, and the profile-refusal error — never branches on it itself.
    */
   dialect: SqlDialect;
+  /**
+   * An unforgeable token only `buildSqliteEngineProfile` and
+   * `buildPostgresEngineProfile` can mint (`mintFirstPartyProfileToken`,
+   * `../../capabilities/write-fence`). Present and recognized, it tells
+   * `createSqlBackend` this profile came from a factory whose transaction
+   * lifetime, connection ownership, and DDL surface TypeGraph has audited,
+   * and grants exactly two things: `resolveWriteFencePlan`'s
+   * dialect-derivation fallback (sound only for the two bundled dialects)
+   * and the lazy schema-fence lease `store/operations/write-transaction.ts`
+   * takes out under `isFirstPartyFactory`. Absent on a profile assembled by
+   * hand, or by copying a bundled profile's fields into a plain object
+   * literal — minting a recognized token is not reachable from outside
+   * `write-fence.ts`, so a profile cannot claim this standing for itself.
+   */
+  firstParty?: FirstPartyProfileToken;
   tableNames: EngineTableNames;
   /**
    * Every statement any shared member group issues goes through this
@@ -305,13 +354,12 @@ export type SqlEngineProfile<TTx> = Readonly<{
   autocommit: Readonly<{ singleStatementDurable: boolean }>;
   provisioning: EngineProvisioning;
   /**
-   * ONE fence target for the whole backend and every transaction-scoped one
-   * it builds, marked first-party by the profile itself, so every lock
-   * `createSqlBackend`'s contribution-member construction and this
-   * profile's own dialect-owned fence sites can take resolves the SAME
-   * `resolveWriteFencePlan` decision.
+   * The lock-statement spelling this engine's fence plan carries when it
+   * resolves to `lock`: `createSqlBackend` folds it into the one fence
+   * target it builds, and the backend advertises it as `fenceSql`. Absent
+   * on an engine whose fence is `engine-serialized`.
    */
-  fenceTarget: WriteFenceTarget;
+  fenceSql?: FenceSql;
   /** Deps for the contribution-marker member group; see {@link ContributionRuntime}. */
   contributionRuntime: ContributionRuntime;
   /** Deps for the identity/recorded-relation member group; see {@link IdentityRuntime}. */
@@ -325,16 +373,15 @@ export type SqlEngineProfile<TTx> = Readonly<{
   /** Deps for the kind-removals member group; see {@link KindRemovalRuntime}. */
   kindRemovalRuntime: KindRemovalRuntime;
   /**
-   * Builds this dialect's `InternalOperationBackend` once the contribution
-   * materializer exists — deferred rather than head data because the
-   * operation layer's own assembly (`buildCommonOperationOptions`) needs
-   * the materializer to build its projection-evidence callbacks, and that
-   * materializer is now built by `createSqlBackend` itself, from
-   * `contributionRuntime`, rather than by the profile ahead of time.
+   * Builds this dialect's `InternalOperationBackend` once the assembled
+   * pipeline exists — deferred rather than head data because the operation
+   * layer's own assembly (`buildCommonOperationOptions`) needs the
+   * contribution materializer to build its projection-evidence callbacks,
+   * and because the capabilities and fence target it builds against are
+   * `createSqlBackend`'s own resolved values (`EngineOperationsContext`),
+   * not a copy this profile derives itself.
    */
-  buildOperations: (
-    contributionMaterializer: ContributionMaterializer,
-  ) => InternalOperationBackend;
+  buildOperations: (ctx: EngineOperationsContext) => InternalOperationBackend;
   /** The `GraphBackend` member of the same name. */
   close: () => Promise<void>;
   // ---- late: everything that needs the assembled pipeline ----

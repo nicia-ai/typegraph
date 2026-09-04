@@ -2,22 +2,28 @@
  * The one factory every SQL engine profile is assembled through.
  *
  * `createSqlBackend` owns what is the same for every SQL engine: deriving
- * the final capabilities, resolving the write-fence decision once, refusing
- * a profile that cannot back the marks it is about to earn, building the
- * contribution-marker and operation-backend layers from the profile's own
- * deps, assembling every mirrored adapter member group, auditing the
- * backend's resource shape, and applying the trust marks and atomic-program
- * registrations. A profile owns only what genuinely differs between
- * engines.
+ * the final capabilities, building the ONE write-fence target and resolving
+ * its plan once, refusing a profile that cannot back the marks it is about
+ * to earn, building the contribution-marker and operation-backend layers
+ * from the profile's own deps, assembling every mirrored adapter member
+ * group, auditing the backend's resource shape, and applying the trust
+ * marks and atomic-program registrations. A profile owns only what
+ * genuinely differs between engines.
  */
 import { ConfigurationError } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
 import {
+  isRecognizedFirstPartyProfileToken,
+  markFirstPartyFactory,
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
+  type WriteFenceTarget,
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
-import type { AdapterBackend, SchemaWriteTransactionBackend } from "../../types";
+import type {
+  AdapterBackend,
+  SchemaWriteTransactionBackend,
+} from "../../types";
 import { gateFulltextMethods } from "../contribution-materializations";
 import { finalizeEngineCapabilities } from "./capabilities";
 import { applyEngineMarks } from "./marks";
@@ -43,15 +49,26 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
  * `applyEngineMarks`'s own doc comment covers its two further gates —
  * `markBundledRootAutocommitEligible` on the profile's `autocommit`
  * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
+ * A fourth gate, resolved once as `isFirstParty` below and threaded to both
+ * `applyEngineMarks` and the fence target this factory builds, decides
+ * `markFirstPartyFactory` itself: only a profile carrying a token
+ * `mintFirstPartyProfileToken` actually minted (`../../capabilities/write-fence`)
+ * earns that mark, so the dialect-derivation fallback above and the lazy
+ * schema-fence lease it feeds stay closed to a profile that merely resembles
+ * a bundled one.
  */
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
 ): AdapterBackend<TTx> {
-  const capabilities = finalizeEngineCapabilities(profile.declaredCapabilities, {
-    execution: profile.execution,
-    fulltextStrategy: profile.fulltext,
-    fulltextTableName: profile.tableNames.fulltext,
-  });
+  const capabilities = finalizeEngineCapabilities(
+    profile.declaredCapabilities,
+    {
+      execution: profile.execution,
+      vectorStrategy: profile.vector,
+      fulltextStrategy: profile.fulltext,
+      fulltextTableName: profile.tableNames.fulltext,
+    },
+  );
 
   if (capabilities.pessimisticLocks === undefined) {
     throw new ConfigurationError(
@@ -72,11 +89,31 @@ export function createSqlBackend<TTx>(
     );
   }
 
-  const fencePlan = resolveWriteFencePlan({
+  // Resolved once and reused for both marks below: whether `profile.firstParty`
+  // is a token this factory's own `mintFirstPartyProfileToken` actually
+  // minted, not merely an object shaped like one. Only the two bundled
+  // builders can produce a recognized token, so this is `false` for any
+  // profile assembled elsewhere — including one built by copying a bundled
+  // profile's fields into a plain object literal without carrying the field
+  // forward.
+  const isFirstParty = isRecognizedFirstPartyProfileToken(profile.firstParty);
+
+  // ONE fence target for the whole backend and every transaction-scoped one
+  // it builds, marked first-party only under the same gate as the backend
+  // itself: `capabilities` here is the object this factory just finalized,
+  // so a recognized-first-party caller who blanked `pessimisticLocks` out of
+  // a profile's declaration still resolves the dialect-derived plan, not
+  // `unfenced`, for the two bundled dialects — while a profile without a
+  // recognized token never reaches that fallback.
+  const fenceTargetBase: WriteFenceTarget = {
     dialect: profile.dialect,
     capabilities,
-    fenceSql: profile.fenceTarget.fenceSql,
-  });
+    ...(profile.fenceSql === undefined ? {} : { fenceSql: profile.fenceSql }),
+  };
+  const fenceTarget: WriteFenceTarget =
+    isFirstParty ? markFirstPartyFactory(fenceTargetBase) : fenceTargetBase;
+
+  const fencePlan = resolveWriteFencePlan(fenceTarget);
 
   // The contribution materializer's destructive rebuild runs under the SAME
   // per-graph fence a schema commit does — `late.fence.runSchemaWriteTransaction`
@@ -95,7 +132,7 @@ export function createSqlBackend<TTx>(
     dialect: profile.dialect,
     fulltextStrategy: profile.fulltext,
     vectorStrategy: profile.vector,
-    fenceTarget: profile.fenceTarget,
+    fenceTarget,
     ensureTable: profile.provisioning.ensureTable,
     execute: profile.execution.execute,
     operationStrategy: profile.strategy,
@@ -107,7 +144,8 @@ export function createSqlBackend<TTx>(
         schemaWriteTransaction: <T>(
           graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
-        ) => late.fence.runSchemaWriteTransaction(graphId, (target) => fn(target)),
+        ) =>
+          late.fence.runSchemaWriteTransaction(graphId, (target) => fn(target)),
       }
     : {}),
   });
@@ -118,7 +156,13 @@ export function createSqlBackend<TTx>(
     contributionTableExists,
   });
 
-  const operations = profile.buildOperations(contributionMaterializer);
+  const operations = profile.buildOperations({
+    capabilities,
+    fencePlan,
+    fenceTarget,
+    contributionMaterializer,
+    isFirstParty,
+  });
 
   const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
     createGraphTemplateMembers({
@@ -155,8 +199,15 @@ export function createSqlBackend<TTx>(
   const ctx: EngineAssemblyContext<TTx> = {
     capabilities,
     fencePlan,
+    fenceTarget,
     operations,
     contributionMaterializer,
+    // The same resolved flag `applyEngineMarks` gates the root's own
+    // `markFirstPartyFactory` call on below — handed to `lateMembers` so a
+    // dialect's transaction-opening surface gates its OWN mark on a
+    // TypeGraph-opened handle the identical way, instead of marking every
+    // handle unconditionally regardless of whether this profile earned it.
+    isFirstParty,
     self: () => backend,
   };
 
@@ -185,6 +236,12 @@ export function createSqlBackend<TTx>(
 
   const backend = {
     ...operations,
+    // Set explicitly rather than left to whatever `...operations` carried:
+    // this is the ONE finalized value every mark and every late member
+    // above resolved its decision from, and it must be what the returned
+    // backend advertises even if a dialect's operation-backend layer closed
+    // over a capabilities object of its own.
+    capabilities,
     ...late.transactions,
     ...late.rawSql,
     lockSchemaVersionForWrite: requireDefined(
@@ -221,6 +278,7 @@ export function createSqlBackend<TTx>(
   // nobody looked at.
   auditBackendResource(backend, profile.resourceAudit);
   applyEngineMarks(backend, {
+    isFirstParty,
     capabilities,
     fencePlan,
     autocommit: profile.autocommit,

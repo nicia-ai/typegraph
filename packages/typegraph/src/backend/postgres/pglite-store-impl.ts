@@ -56,6 +56,7 @@ export async function createLocalPgliteStoreImpl<G extends GraphDef>(
   const { backend } = await createLocalPgliteBackend({
     ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
     ...(options.vector === false ? { vector: false as const } : {}),
+    ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),
     ...(tables === undefined ? {} : { tables }),
   });
   try {

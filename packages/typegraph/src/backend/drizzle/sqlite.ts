@@ -57,13 +57,11 @@ import {
 } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
-  buildFulltextCapabilities,
   fts5Strategy,
   type FulltextStrategy,
 } from "../../query/dialect/fulltext-strategy";
 import {
   assertVectorSearchLimit,
-  buildVectorCapabilities,
   resolveEfSearchOverride,
   vectorSearchFrontierTuning,
   type VectorStrategy,
@@ -82,10 +80,10 @@ import {
 } from "../capabilities/atomic-sql-program";
 import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
-import { markSchemaFencedInsertEligible } from "../capabilities/schema-fenced-insert";
+import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
-  type WriteFenceTarget,
+  mintFirstPartyProfileToken,
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -161,6 +159,7 @@ import {
   createSqlBackend,
   type EngineAssemblyContext,
   type EngineLateMembers,
+  type EngineOperationsContext,
   type EngineProvisioning,
   type GraphTemplateRuntime,
   type IdentityRuntime,
@@ -168,7 +167,6 @@ import {
   type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
-import { finalizeEngineCapabilities } from "./engine/capabilities";
 import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
@@ -548,10 +546,13 @@ function throwSqliteTransactionsDisabled(message: string): never {
   });
 }
 
+// `fulltext` and `vector` are deliberately absent from the returned shape:
+// both are derived once, from `profile.fulltext` / `profile.vector`, by
+// `finalizeEngineCapabilities` (`./engine/capabilities`) — baking either
+// here would give this profile's `declaredCapabilities` a copy that a
+// caller overriding the strategy field could leave stale.
 function buildSqliteCapabilities(
   options: Readonly<{
-    fulltextStrategy: FulltextStrategy | undefined;
-    vectorStrategy: VectorStrategy | undefined;
     transactionMode: SqliteExecutionAdapter["profile"]["transactionMode"];
     maxBindParameters: number;
   }>,
@@ -575,12 +576,6 @@ function buildSqliteCapabilities(
   return {
     ...base,
     maxBindParameters: options.maxBindParameters,
-    ...(options.fulltextStrategy === undefined ?
-      {}
-    : { fulltext: buildFulltextCapabilities(options.fulltextStrategy) }),
-    ...(options.vectorStrategy === undefined ?
-      {}
-    : { vector: buildVectorCapabilities(options.vectorStrategy) }),
   };
 }
 
@@ -658,6 +653,14 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   vectorStrategy?: VectorStrategy | undefined;
   /** Shared durable-marker materializer. See {@link CreateSqliteOperationBackendOptions}. */
   contributionMaterializer: ContributionMaterializer;
+  /**
+   * Whether the transaction handle this call builds should carry
+   * `markFirstPartyFactory` — the caller's own resolved standing, never
+   * re-derived here. `false` on the `adoptTransaction` path regardless of
+   * the profile's own standing: an adopted transaction's lifetime is the
+   * caller's, not one TypeGraph has audited.
+   */
+  isFirstParty: boolean;
 }>;
 
 function createSqliteOperationBackend(
@@ -943,9 +946,7 @@ function createSqliteOperationBackend(
         },
       );
     }
-    const active = await commonOperationMembers.getActiveSchema(
-      params.graphId,
-    );
+    const active = await commonOperationMembers.getActiveSchema(params.graphId);
     assertActiveSchemaVersion(
       params.graphId,
       params.expectedVersion,
@@ -1129,8 +1130,6 @@ export function buildSqliteEngineProfile(
   const vectorStrategy = options.vector;
   const capabilityOverrides = options.capabilities ?? {};
   const baseCapabilities = buildSqliteCapabilities({
-    fulltextStrategy,
-    vectorStrategy,
     transactionMode,
     maxBindParameters: executionAdapter.profile.maxBindParameters,
   });
@@ -1150,29 +1149,14 @@ export function buildSqliteEngineProfile(
       capabilityOverrides.graphAnalytics,
     ),
   });
-  // Derived last and not overridable: how far up the contribution health
-  // ladder this backend goes is a structural fact about the wiring below
-  // (durable markers, a catalog probe, a strategy that declares teardown
-  // DDL, a transactional schema fence), and a caller who declared a
-  // rebuild this backend cannot perform would be advertising a lie.
-  // The capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
-  // runs here as well as inside `createSqlBackend`, since `capabilities`
-  // below feeds the fence target and the operation backend this dialect's
-  // own `buildOperations` closure builds. `createSqlBackend` calls it again
-  // with `profile.declaredCapabilities` to resolve `ctx.capabilities` — a
-  // profile variant built by overriding `declaredCapabilities` (as the
-  // refusal tests do) is re-derived correctly wherever it runs, because the
-  // function is pure in its arguments rather than a cached value, so
-  // `ctx.capabilities` and the `capabilities` object already baked into
-  // `operations` below always agree.
-  const capabilities: BackendCapabilities = finalizeEngineCapabilities(
-    declaredCapabilities,
-    {
-      execution: executionAdapter,
-      fulltextStrategy,
-      fulltextTableName: tables.fulltextTableName,
-    },
-  );
+  // `declaredCapabilities` above is this profile's contribution; the
+  // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
+  // that derives `execution.atomicBatch`, `vector` (from `vectorStrategy`
+  // below), `fulltext` (from `fulltextStrategy`), and `contributions` from it
+  // runs once, in `createSqlBackend`, which then hands the finalized result
+  // back through `EngineOperationsContext.capabilities` / `EngineAssemblyContext
+  // .capabilities` — `buildOperations` and `lateMembers` below read it off
+  // `ctx` rather than re-deriving a local copy.
 
   const tableNames: ResolvedSqlTableNames = {
     nodes: getTableName(tables.nodes),
@@ -1248,21 +1232,12 @@ export function buildSqliteEngineProfile(
     await db.run(sql.raw(ddl));
   };
 
-  // ONE fence target for the whole factory, shared by the contribution
-  // materializer's lock sites. Marked first-party because `capabilities`
-  // here is the object the factory assembled — a caller who blanked
-  // `pessimisticLocks` out of it must still resolve the dialect-derived
-  // plan, not `unfenced`.
-  const fenceTarget: WriteFenceTarget = markFirstPartyFactory({
-    dialect: "sqlite",
-    capabilities,
-  });
-
   // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
   // beyond what `createSqlBackend` supplies itself: `dialect`/`fulltextStrategy`/
-  // `vectorStrategy` (the profile head), `fenceTarget` above, `ensureTable`/
-  // `execute`/`operationStrategy` (`provisioning`/`execution`/`strategy`), and
-  // `schemaWriteTransaction` (the fence's own late member, once it exists).
+  // `vectorStrategy` (the profile head), `fenceTarget` (built by `createSqlBackend`
+  // from its finalized capabilities), `ensureTable`/`execute`/`operationStrategy`
+  // (`provisioning`/`execution`/`strategy`), and `schemaWriteTransaction` (the
+  // fence's own late member, once it exists).
   const contributionRuntime: ContributionRuntime = {
     fulltextTableName: tables.fulltextTableName,
     contributionTableDdl: generateSqliteCreateTableSQL(matTable),
@@ -1324,21 +1299,26 @@ export function buildSqliteEngineProfile(
       tables.revisionOrigins,
     ),
     contributionsForTableNames: (overrides) =>
-      sqliteContributions(buildSqliteTables(overrides), fulltextStrategy ?? false),
+      sqliteContributions(
+        buildSqliteTables(overrides),
+        fulltextStrategy ?? false,
+      ),
   };
 
   /**
    * Builds this profile's top-level `InternalOperationBackend`, deferred
-   * until `createSqlBackend` has built the contribution materializer (its
-   * `buildCommonOperationOptions` assembly needs it for the projection-
-   * evidence callbacks) — everything else here is a plain closure capture,
-   * unchanged from when this call site built `operations` directly.
+   * until `createSqlBackend` has resolved the assembled pipeline's
+   * capabilities and contribution materializer (`ctx` — its
+   * `buildCommonOperationOptions` assembly needs the materializer for the
+   * projection-evidence callbacks) — everything else here is a plain
+   * closure capture, unchanged from when this call site built `operations`
+   * directly.
    */
   function buildOperations(
-    contributionMaterializer: ContributionMaterializer,
+    ctx: EngineOperationsContext,
   ): InternalOperationBackend {
     return createSqliteOperationBackend({
-      capabilities,
+      capabilities: ctx.capabilities,
       db,
       executionAdapter,
       ...(atomicSqlProgramExecutor === undefined ?
@@ -1348,7 +1328,7 @@ export function buildSqliteEngineProfile(
       tableNames,
       fulltextStrategy,
       vectorStrategy,
-      contributionMaterializer,
+      contributionMaterializer: ctx.contributionMaterializer,
       transactionScoped: false,
       ...(serializedQueue === undefined ? {} : { serializedQueue }),
     });
@@ -1435,9 +1415,7 @@ export function buildSqliteEngineProfile(
   // layer's own `execute`, built once `createSqlBackend` has a contribution
   // materializer to hand `buildOperations`).
   const graphTemplateRuntime: GraphTemplateRuntime = {
-    graphTemplatesTableDdl: generateSqliteCreateTableSQL(
-      tables.graphTemplates,
-    ),
+    graphTemplatesTableDdl: generateSqliteCreateTableSQL(tables.graphTemplates),
     tableNames: {
       schemaVersions: getTableName(tables.schemaVersions),
       graphTemplates: getTableName(tables.graphTemplates),
@@ -1576,6 +1554,13 @@ export function buildSqliteEngineProfile(
   function lateMembers(
     ctx: EngineAssemblyContext<AnySqliteDatabase>,
   ): EngineLateMembers<AnySqliteDatabase> {
+    // The factory's finalized capabilities, resolved fence plan, and
+    // first-party standing — resolved once by `createSqlBackend`, never
+    // re-derived here. Aliased to bare names so every existing
+    // capabilities-gated call below reads exactly as it did when this
+    // dialect built its own (stale-prone) copy.
+    const { capabilities, fencePlan, isFirstParty } = ctx;
+
     /**
      * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
      * Durable Objects expose an async storage transaction runner —
@@ -1701,6 +1686,7 @@ export function buildSqliteEngineProfile(
             fulltextStrategy,
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
+            isFirstParty,
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
           try {
@@ -1732,6 +1718,7 @@ export function buildSqliteEngineProfile(
             fulltextStrategy,
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
+            isFirstParty,
           });
           return fn(txBackend);
         });
@@ -1755,6 +1742,7 @@ export function buildSqliteEngineProfile(
                 fulltextStrategy,
                 vectorStrategy,
                 contributionMaterializer: ctx.contributionMaterializer,
+                isFirstParty,
               });
               return fn(txBackend);
             },
@@ -1763,11 +1751,19 @@ export function buildSqliteEngineProfile(
       );
     }
 
-    // Shared by the "drizzle" branch of `transaction()` (TypeGraph opens
-    // the tx) and `adoptTransaction()` (#134 — the caller already opened
-    // it): bind a tx-scoped backend to the *literal* `tx` client and gate
-    // fulltext on the durable marker (a cached SELECT, never DDL).
-    function bindTransactionBackend(tx: AnySqliteDatabase): TransactionBackend {
+    // Shared by the "drizzle"/"do-sqlite" branches of `transaction()`
+    // (TypeGraph opens the tx) and `adoptTransaction()` (#134 — the caller
+    // already opened it): bind a tx-scoped backend to the *literal* `tx`
+    // client and gate fulltext on the durable marker (a cached SELECT,
+    // never DDL). `txIsFirstParty` is threaded explicitly rather than
+    // closing over the outer `isFirstParty` alias: `adoptTransaction`
+    // passes `false` regardless of this profile's own standing, since an
+    // adopted transaction's lifetime is the caller's, not one TypeGraph has
+    // audited.
+    function bindTransactionBackend(
+      tx: AnySqliteDatabase,
+      txIsFirstParty: boolean,
+    ): TransactionBackend {
       const txBackend = createTransactionBackend({
         capabilities,
         db: tx,
@@ -1777,6 +1773,7 @@ export function buildSqliteEngineProfile(
         fulltextStrategy,
         vectorStrategy,
         contributionMaterializer: ctx.contributionMaterializer,
+        isFirstParty: txIsFirstParty,
       });
       return gateFulltext(
         txBackend,
@@ -1840,6 +1837,7 @@ export function buildSqliteEngineProfile(
                 fulltextStrategy,
                 vectorStrategy,
                 contributionMaterializer: ctx.contributionMaterializer,
+                isFirstParty,
               });
               // Read-only multi-statement operations need one snapshot but must not
               // reserve SQLite's single writer slot. Business transactions retain
@@ -1852,12 +1850,13 @@ export function buildSqliteEngineProfile(
 
               try {
                 const result = await fn(
-                  markSchemaFencedInsertEligible(
+                  markSchemaFencedInsertEligibleUnderFence(
                     gateFulltext(
                       txBackend,
                       ctx.contributionMaterializer.assertInitialized,
                       ctx.contributionMaterializer.refuseUnavailableFulltext,
                     ),
+                    fencePlan,
                   ),
                   db,
                 );
@@ -1873,7 +1872,10 @@ export function buildSqliteEngineProfile(
           if (transactionMode === "do-sqlite") {
             return runDoSqliteStorageTransaction(async () =>
               fn(
-                markSchemaFencedInsertEligible(bindTransactionBackend(db)),
+                markSchemaFencedInsertEligibleUnderFence(
+                  bindTransactionBackend(db, isFirstParty),
+                  fencePlan,
+                ),
                 db,
               ),
             );
@@ -1887,7 +1889,10 @@ export function buildSqliteEngineProfile(
               db.transaction(
                 async (tx) =>
                   fn(
-                    markSchemaFencedInsertEligible(bindTransactionBackend(tx)),
+                    markSchemaFencedInsertEligibleUnderFence(
+                      bindTransactionBackend(tx, isFirstParty),
+                      fencePlan,
+                    ),
                     tx,
                   ),
                 {
@@ -1924,7 +1929,11 @@ export function buildSqliteEngineProfile(
           // sync better-sqlite3 driver runs the adopted statements on the
           // caller's stack, so wrapping a caller-driven tx in our queue
           // could deadlock against the caller's outer `db.transaction(...)`.
-          return bindTransactionBackend(externalTx);
+          // `false` regardless of this profile's own first-party standing:
+          // the caller opened this transaction, its lifetime is not one
+          // TypeGraph has audited, and it must not qualify for the
+          // dialect-derivation fallback or the lazy schema-fence lease.
+          return bindTransactionBackend(externalTx, false);
         },
 
         async schemaWriteTransaction<T>(
@@ -2046,6 +2055,11 @@ export function buildSqliteEngineProfile(
 
   return {
     dialect: "sqlite",
+    // Minted fresh for this profile instance — recognized only by this
+    // module's own `isRecognizedFirstPartyProfileToken`, so `createSqlBackend`
+    // marks this backend and its fence target first-party, exactly as it did
+    // before either was gated on the token.
+    firstParty: mintFirstPartyProfileToken(),
     tableNames,
     execution: executionAdapter,
     strategy: operationStrategy,
@@ -2055,7 +2069,6 @@ export function buildSqliteEngineProfile(
     resourceAudit,
     autocommit: { singleStatementDurable: true },
     provisioning,
-    fenceTarget,
     contributionRuntime,
     identityRuntime,
     graphTemplateRuntime,
@@ -2086,19 +2099,18 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  return markFirstPartyFactory(
-    createSqliteOperationBackend({
-      capabilities: downgradeAtomicBatch(options.capabilities),
-      db: options.db,
-      executionAdapter: txExecutionAdapter,
-      operationStrategy: options.operationStrategy,
-      tableNames: options.tableNames,
-      fulltextStrategy: options.fulltextStrategy,
-      vectorStrategy: options.vectorStrategy,
-      contributionMaterializer: options.contributionMaterializer,
-      transactionScoped: true,
-    }),
-  );
+  const txBackend = createSqliteOperationBackend({
+    capabilities: downgradeAtomicBatch(options.capabilities),
+    db: options.db,
+    executionAdapter: txExecutionAdapter,
+    operationStrategy: options.operationStrategy,
+    tableNames: options.tableNames,
+    fulltextStrategy: options.fulltextStrategy,
+    vectorStrategy: options.vectorStrategy,
+    contributionMaterializer: options.contributionMaterializer,
+    transactionScoped: true,
+  });
+  return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
 }
 
 // Re-export schema utilities

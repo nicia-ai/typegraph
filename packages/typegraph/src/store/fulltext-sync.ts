@@ -11,6 +11,7 @@
  */
 import { type z } from "zod";
 
+import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import {
   type GraphBackend,
   type NodeFulltextSync,
@@ -22,7 +23,10 @@ import {
   getSearchableFields,
   type SearchableFieldInfo,
 } from "../core/searchable";
-import { UnsupportedBackendCapabilityError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../errors";
 import { readOwnProperty } from "../utils/object";
 
 export { getSearchableFields } from "../core/searchable";
@@ -38,17 +42,16 @@ const FIELD_SEPARATOR = "\n";
 
 /**
  * Refuses with a typed error, rather than silently dropping the write, when
- * a node kind declares `searchable()` fields but the backend has no
- * fulltext support (`fulltext: false`). The backend's fulltext methods are
- * absent in that state (mirroring the vector methods on a vector-off
- * backend), so `syncFulltext` / `syncFulltextBatchForKind` /
- * `deleteNodeFulltext` would otherwise no-op forever instead of surfacing
- * the mismatch at the first write.
+ * a node kind declares `searchable()` fields but `resolveBackendFulltext`
+ * reports the backend has no fulltext support at all (`fulltext: false`).
+ * Used by `syncFulltext` / `syncFulltextBatchForKind` on the create/update
+ * paths, where an unavailable backend cannot honor the write. Deletes are
+ * exempt: a fulltext-off backend maintains no sidecar to remove a row
+ * from, so `deleteNodeFulltext` succeeds instead of refusing.
  *
  * Exported for the set-based update paths (`executeNodeSetUpdate` /
- * `applyNodeSetUpdate`), which probe for the batch fulltext members
- * directly rather than through the single-row `upsertFulltext` /
- * `deleteFulltext` presence check above, and so need the same refusal
+ * `applyNodeSetUpdate`), which reach the same "unavailable" branch ahead of
+ * their own batch-member presence checks, and so need the same refusal
  * without duplicating its error shape.
  */
 export function refuseFulltextUnavailable(
@@ -61,6 +64,32 @@ export function refuseFulltextUnavailable(
     { backend: backend.dialect, nodeKind, reason: "fulltext_unsupported" },
     "This backend declares no fulltext capability. Remove the " +
       "searchable() declaration, or use a backend with fulltext support.",
+  );
+}
+
+/**
+ * Narrows an optional fulltext member to defined. Called only after
+ * `resolveBackendFulltext` has already confirmed the backend declares
+ * fulltext support, so a member missing at this point is not an
+ * availability decision but a backend contract violation — a bundled
+ * backend never reaches this, and a third-party one that declares the
+ * capability without the member gets a `ConfigurationError` naming exactly
+ * which member is missing, not `refuseFulltextUnavailable`'s
+ * capability-absent error.
+ */
+export function assertFulltextMember<T>(
+  member: T | undefined,
+  memberName: string,
+  backend: GraphBackend | TransactionBackend,
+): asserts member is T {
+  if (member !== undefined) return;
+  throw new ConfigurationError(
+    `Backend declares a fulltext capability but is missing the "${memberName}" member`,
+    {
+      backend: backend.dialect,
+      capability: "fulltext",
+      missingMember: memberName,
+    },
   );
 }
 
@@ -151,16 +180,16 @@ export async function syncFulltext(
 ): Promise<void> {
   const { backend } = ctx;
 
-  // Member presence rather than `resolveBackendFulltext`: this same check is
-  // what narrows `backend.upsertFulltext` / `backend.deleteFulltext` from
-  // optional to defined for the calls below, so it doubles as the type
-  // guard the rest of the function relies on.
-  if (!backend.upsertFulltext || !backend.deleteFulltext) {
-    if (getSearchableFields(schema).length > 0) {
-      refuseFulltextUnavailable(backend, ctx.nodeKind);
-    }
-    return;
+  if (getSearchableFields(schema).length === 0) return;
+
+  // `resolveBackendFulltext` is the one decision for "is fulltext
+  // available on this backend"; a missing member past that point is a
+  // contract violation asserted separately below, never re-derived here.
+  if (resolveBackendFulltext(backend) === false) {
+    refuseFulltextUnavailable(backend, ctx.nodeKind);
   }
+  assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+  assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
 
   const sync = resolveNodeFulltextSync(schema, props, ctx);
   if (sync?.action === "upsert") {
@@ -201,30 +230,32 @@ export async function syncFulltextBatchForKind(
   }>[],
 ): Promise<void> {
   const { graphId, nodeKind, backend } = args;
-  // Member presence rather than `resolveBackendFulltext`: this same check is
-  // what narrows `backend.upsertFulltext` / `backend.deleteFulltext` from
-  // optional to defined for the calls below, so it doubles as the type
-  // guard the rest of the function relies on.
-  if (!backend.upsertFulltext || !backend.deleteFulltext) {
-    if (getSearchableFields(schema).length > 0) {
-      refuseFulltextUnavailable(backend, nodeKind);
-    }
-    return;
-  }
+  if (getSearchableFields(schema).length === 0) return;
 
+  // `resolveBackendFulltext` is the one decision for "is fulltext
+  // available on this backend"; a missing member past that point is a
+  // contract violation asserted separately below, never re-derived here.
+  if (resolveBackendFulltext(backend) === false) {
+    refuseFulltextUnavailable(backend, nodeKind);
+  }
+  assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+  assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
+
+  // The bail-out above guarantees the schema has searchable fields for
+  // every remaining line, so an item with no computed content always
+  // means "clear its row" rather than "not applicable".
   const rows: { nodeId: string; content: string; language: string }[] = [];
   const emptyContentIds: string[] = [];
-  const hasSearchableFields = getSearchableFields(schema).length > 0;
   for (const item of items) {
     const computed = computeFulltextContent(schema, item.props);
-    if (computed !== undefined) {
+    if (computed === undefined) {
+      emptyContentIds.push(item.nodeId);
+    } else {
       rows.push({
         nodeId: item.nodeId,
         content: computed.content,
         language: computed.language,
       });
-    } else if (hasSearchableFields) {
-      emptyContentIds.push(item.nodeId);
     }
   }
 
@@ -269,18 +300,17 @@ export async function deleteNodeFulltext(
 ): Promise<void> {
   const { backend } = ctx;
 
-  // Member presence rather than `resolveBackendFulltext`: this is the type
-  // guard that narrows `backend.deleteFulltext` for the call below.
-  if (!backend.deleteFulltext) {
-    if (getSearchableFields(schema).length > 0) {
-      refuseFulltextUnavailable(backend, ctx.nodeKind);
-    }
-    return;
-  }
+  if (getSearchableFields(schema).length === 0) return;
 
-  if (getSearchableFields(schema).length === 0) {
-    return;
-  }
+  // Unlike `syncFulltext`, an unavailable backend does not refuse here: a
+  // delete removes data rather than accepting a write the backend cannot
+  // index, and this backend maintains no fulltext sidecar to issue that
+  // removal against, so the delete is a no-op rather than a refusal. If
+  // fulltext was active before this backend was reconfigured with
+  // `fulltext: false`, an existing row is left in place, unmaintained.
+  if (resolveBackendFulltext(backend) === false) return;
+
+  assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
 
   await backend.deleteFulltext({
     graphId: ctx.graphId,

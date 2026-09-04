@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("30 reasoned entries sum to 90 accesses; 50 deferred entries sum to 215", () => {
+  it("30 reasoned entries sum to 90 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -130,6 +130,6 @@ describe("capability bundle totality (T9)", () => {
     // gated isolation check that has no resolved plan to read a spelling
     // through (see the registry's own entry) — 88 -> 90.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(90);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(215);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });

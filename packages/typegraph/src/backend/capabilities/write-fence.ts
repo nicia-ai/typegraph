@@ -161,6 +161,68 @@ export function carryFirstPartyFactoryMark(
   }
 }
 
+/**
+ * The token `SqlEngineProfile.firstParty` carries. Structurally this type
+ * grants nothing — like {@link WriteFenceTarget}, a plain object literal of
+ * this shape (`{}`) type-checks fine. What makes it unforgeable is the same
+ * technique as the mark itself: a `WeakSet` recording exactly the objects
+ * {@link mintFirstPartyProfileToken} produced, so a hand-built lookalike a
+ * profile author assembles by reading this type is never recognized.
+ *
+ * @internal
+ */
+export type FirstPartyProfileToken = Readonly<Record<never, never>>;
+
+/**
+ * The tokens {@link mintFirstPartyProfileToken} has actually minted.
+ * Module-private for the same reason `FIRST_PARTY_FACTORY_BACKENDS` is: the
+ * unforgeability this buys `isRecognizedFirstPartyProfileToken` depends on
+ * nothing outside this file ever adding to it.
+ */
+const RECOGNIZED_FIRST_PARTY_PROFILE_TOKENS = new WeakSet<object>();
+
+/**
+ * Mints a fresh {@link FirstPartyProfileToken}. Called once each by
+ * `buildSqliteEngineProfile` and `buildPostgresEngineProfile` and stored on
+ * the profile's `firstParty` field. Not exported from `src/backend/index.ts`
+ * or the `adapters/drizzle/engine` entrypoint, so nothing outside this module
+ * can mint a token {@link isRecognizedFirstPartyProfileToken} accepts — a
+ * profile assembled anywhere else, including one built by spreading a
+ * bundled profile's fields into a plain object literal, cannot manufacture
+ * first-party standing for itself.
+ *
+ * @internal
+ */
+export function mintFirstPartyProfileToken(): FirstPartyProfileToken {
+  const token: FirstPartyProfileToken = {};
+  RECOGNIZED_FIRST_PARTY_PROFILE_TOKENS.add(token);
+  return token;
+}
+
+/**
+ * Whether `token` is one this module actually minted; `undefined` (a
+ * profile that never set `firstParty`) and a hand-built object of the same
+ * shape both answer `false`.
+ *
+ * `createSqlBackend` calls this once per assembly and uses the result to
+ * gate every `markFirstPartyFactory` call it makes — on the backend it
+ * returns and on the one fence target it builds. An absent or unrecognized
+ * token leaves both unmarked, which in turn keeps two things closed to a
+ * profile this factory did not mint a token for: `resolveWriteFencePlan`'s
+ * dialect-derivation fallback (sound only for the two bundled dialects) and
+ * the lazy schema-fence lease `src/store/operations/write-transaction.ts`
+ * takes out under `isFirstPartyFactory`.
+ *
+ * @internal
+ */
+export function isRecognizedFirstPartyProfileToken(
+  token: FirstPartyProfileToken | undefined,
+): boolean {
+  return (
+    token !== undefined && RECOGNIZED_FIRST_PARTY_PROFILE_TOKENS.has(token)
+  );
+}
+
 function deriveFromDialect(dialect: SqlDialect): PessimisticLockCapabilities {
   switch (dialect) {
     case "postgres": {

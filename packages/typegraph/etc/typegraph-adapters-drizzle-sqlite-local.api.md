@@ -4534,6 +4534,7 @@ export type LocalSqliteBackendOptions = Readonly<{
     path?: string;
     pragmas?: LocalSqlitePragmaOptions | false;
     tables?: SqliteTables;
+    fulltext?: FulltextStrategy | false;
     capabilities?: BundledBackendCapabilityOverrides;
 }>;
 

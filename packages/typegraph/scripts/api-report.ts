@@ -241,8 +241,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "6f8d263c3fc9822abe5352c7ed921b09d2af0e490f49650f795b28ba1fcbebb6",
   },
   "./adapters/drizzle/engine": {
-    count: 322,
-    sha256: "a6a849e4bf039fd06a54cfd17b6a3fc38d2196eb325a7d9e2107c3dbd3bba1ec",
+    count: 323,
+    sha256: "4e84ecfc3e39591f4d005a8f5330bcf58d6fedd10642e453beda62539ab0d1e9",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
