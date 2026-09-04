@@ -16,7 +16,10 @@ import { z } from "zod";
 
 import { KindNotFoundError } from "../src";
 import { type BackendCatalogProbes } from "../src/backend/capabilities/catalog";
-import { projectBackendWithout } from "../src/backend/derive-backend";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
 import { tables as defaultSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { defineGraph } from "../src/core/define-graph";
@@ -388,5 +391,62 @@ describe("dropInvalidIndexLeftover", () => {
     );
 
     expect(drop).not.toHaveBeenCalled();
+  });
+});
+
+describe("materializeIndexes / materializeSystemIndexes — catalog refusal ordering", () => {
+  it("runs the status-table ensure step before the CATALOG_UNAVAILABLE refusal, but skips it for a kind filter with no candidates", async () => {
+    const rawBackend = createTestBackend();
+    const ensureIndexMaterializationsTable = vi.fn(
+      requireDefined(rawBackend.ensureIndexMaterializationsTable),
+    );
+    // `deriveBackend` decorates the catalog-less projection with a spy, per
+    // the construction ratchet (AGENTS.md) — never a spread of a *Backend
+    // identifier.
+    const backendWithoutCatalog = deriveBackend(
+      projectBackendWithout(rawBackend, ["catalog"]),
+      { ensureIndexMaterializationsTable },
+    );
+    const graph = buildGraph();
+    // `systemIndexes: "skip"` keeps boot from touching the catalog-less
+    // backend's status table itself, so the spy's call count below starts
+    // at zero and reflects only the calls this test makes.
+    const [store] = await createStoreWithSchema(graph, backendWithoutCatalog, {
+      systemIndexes: "skip",
+    });
+
+    // No declared index matches an empty kind filter, so `materializeIndexes`
+    // returns via its empty-candidate short circuit before ever reaching the
+    // status-table ensure step.
+    await expect(store.materializeIndexes({ kinds: [] })).resolves.toEqual({
+      results: [],
+    });
+    expect(ensureIndexMaterializationsTable).not.toHaveBeenCalled();
+
+    let materializeIndexesError: unknown;
+    try {
+      await store.materializeIndexes();
+    } catch (error) {
+      materializeIndexesError = error;
+    }
+    expect(materializeIndexesError).toBeInstanceOf(ConfigurationError);
+    expect(
+      (materializeIndexesError as ConfigurationError).details["code"],
+    ).toBe("CATALOG_UNAVAILABLE");
+    expect(ensureIndexMaterializationsTable).toHaveBeenCalledTimes(1);
+
+    let materializeSystemIndexesError: unknown;
+    try {
+      await store.materializeSystemIndexes();
+    } catch (error) {
+      materializeSystemIndexesError = error;
+    }
+    expect(materializeSystemIndexesError).toBeInstanceOf(ConfigurationError);
+    expect(
+      (materializeSystemIndexesError as ConfigurationError).details["code"],
+    ).toBe("CATALOG_UNAVAILABLE");
+    // `materializeSystemIndexes` has no candidate short circuit, so this is
+    // its own ensure-step call, on top of `materializeIndexes`'s above.
+    expect(ensureIndexMaterializationsTable).toHaveBeenCalledTimes(2);
   });
 });

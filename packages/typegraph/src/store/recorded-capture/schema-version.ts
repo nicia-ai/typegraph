@@ -146,7 +146,16 @@ export async function assertCurrentRecordedSchema(
     ) {
       return [];
     }
-    return [{ ...requirement, actual: column?.declaredType ?? "missing" }];
+    // An empty declared type (SQLite accepts a column with none at all,
+    // e.g. `CREATE TABLE t (a, ...)`) reports the same "missing" diagnostic
+    // as an absent column — the catalog probe reports it as declaredType
+    // "", not as an absent CatalogColumn, so an absent column alone is not
+    // enough to catch it here.
+    const actual =
+      column === undefined || column.declaredType === "" ?
+        "missing"
+      : column.declaredType;
+    return [{ ...requirement, actual }];
   });
   if (incompatible.length === 0) return;
 

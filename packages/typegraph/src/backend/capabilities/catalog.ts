@@ -122,11 +122,11 @@ export type CatalogIndexBehavior = Readonly<{
  *
  * Optional: a custom backend that omits it loses the store paths that
  * consult it directly — index materialization (`store.materializeIndexes()`
- * refuses only once its empty-candidate short circuit and the index-
- * materialization status table's `CREATE TABLE` have already run;
- * `store.materializeSystemIndexes()`, which has no candidate short circuit,
- * refuses only once that same status-table `CREATE TABLE` has run), the
- * recorded-time schema check, and the recorded-time migration's column read.
+ * refuses only once its empty-candidate short circuit and the status-table
+ * ensure step have already run; `store.materializeSystemIndexes()`, which
+ * has no candidate short circuit, refuses only once that same status-table
+ * ensure step has run), the recorded-time schema check, and the
+ * recorded-time migration's column read.
  */
 export type BackendCatalogProbes = Readonly<{
   /**
@@ -169,11 +169,14 @@ export type BackendCatalogProbes = Readonly<{
    * an engine whose `indexBehavior.hasInvalidIndexState` is `false`, and
    * a no-op for a valid or absent index on every engine.
    *
-   * A ROOT-BACKEND operation: PostgreSQL refuses `DROP INDEX CONCURRENTLY`
-   * inside a transaction block, so the `catalog` a `transaction()` handle
-   * exposes throws a typed `ConfigurationError` from this member instead of
-   * attempting the DDL — every other member here stays a plain read on
-   * that same transaction-scoped bag.
+   * A ROOT-BACKEND operation on an engine with an invalid-index state:
+   * PostgreSQL refuses `DROP INDEX CONCURRENTLY` inside a transaction
+   * block, so there the `catalog` a `transaction()` handle exposes throws a
+   * typed `ConfigurationError` from this member instead of attempting the
+   * DDL. An engine whose `indexBehavior.hasInvalidIndexState` is `false`
+   * (SQLite) has no invalid leftover to ever drop and stays a no-op in
+   * both scopes — every other member here stays a plain read on that same
+   * transaction-scoped bag regardless of engine.
    */
   dropInvalidIndex: (this: void, name: string) => Promise<void>;
   /** Every column's name and normalized type family for one physical table. */

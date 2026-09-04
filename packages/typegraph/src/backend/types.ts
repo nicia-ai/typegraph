@@ -2917,11 +2917,11 @@ export type GraphBackend = Readonly<{
    * both bundled Drizzle backends; a custom backend that omits it loses the
    * store paths that consult it directly: index materialization
    * (`store.materializeIndexes()` refuses only once its empty-candidate
-   * short circuit and the index-materialization status table's
-   * `CREATE TABLE` have already run; `store.materializeSystemIndexes()`,
-   * which has no candidate short circuit, refuses only once that same
-   * status-table `CREATE TABLE` has run), the recorded-time schema check,
-   * and the recorded-time migration's column read.
+   * short circuit and the status-table ensure step have already run;
+   * `store.materializeSystemIndexes()`, which has no candidate short
+   * circuit, refuses only once that same status-table ensure step has
+   * run), the recorded-time schema check, and the recorded-time
+   * migration's column read.
    */
   catalog?: BackendCatalogProbes | undefined;
 

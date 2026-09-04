@@ -286,3 +286,46 @@ describe.each([
     );
   });
 });
+
+describe("recorded-schema incompatibility diagnostic — SQLite typeless column", () => {
+  it("reports 'missing', not the empty string, for a column declared with no type at all", async () => {
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const scratchTable = "zz_recorded_schema_probe_clock_typeless";
+      // SQLite alone accepts a column with no declared type
+      // (`CREATE TABLE t (revision, ...)`); its catalog then reports that
+      // column with declaredType "" rather than omitting it, so the
+      // diagnostic must still classify it as "missing" for a human reading
+      // the incompatibility rather than surfacing the empty string.
+      await requireDefined(backend.executeDdl)(
+        `CREATE TABLE ${scratchTable} (revision, recorded_at TEXT NOT NULL)`,
+      );
+      const schema = createSqlSchema({
+        ...backend.tableNames,
+        recordedClock: scratchTable,
+      });
+
+      const error = await captureConfigurationError(
+        assertCurrentRecordedSchema(backend, schema),
+      );
+
+      expect(error.details["code"]).toBe("RECORDED_SCHEMA_INCOMPATIBLE");
+      const incompatible = error.details["incompatible"] as readonly Readonly<{
+        table: string;
+        column: string;
+        actual: unknown;
+      }>[];
+      const revisionEntry = incompatible.find(
+        (entry) => entry.table === scratchTable && entry.column === "revision",
+      );
+      // Pinned: removing `schema-version.ts`'s empty-declared-type
+      // conditional makes this report "" instead of "missing" — verified
+      // load-bearing by temporarily reverting to
+      // `column?.declaredType ?? "missing"`, watching this fail, and
+      // restoring the conditional.
+      expect(requireDefined(revisionEntry).actual).toBe("missing");
+    } finally {
+      await backend.close();
+    }
+  });
+});

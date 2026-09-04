@@ -1169,21 +1169,20 @@ cannot back that decision soundly. `buildPostgresEngineProfile` and
 new one; neither is a symbol you can import.
 
 A profile's `provisioning.catalog` supplies the backend's optional `catalog`
-member: physical-schema introspection (table and index existence, a
-normalized column-type family, and this engine's index-build facts) for the
-handful of store paths that need to read the engine catalog directly instead
-of compiling a portable query — index materialization
-(`store.materializeIndexes()` and `store.materializeSystemIndexes()`), the
+member: physical-schema introspection — table and index existence, each
+column's normalized type family and raw declared type (a `CatalogColumn` is
+`{ name, kind, declaredType }`; `declaredType` is required, and every custom
+`columnTypes` implementation must populate it), and this engine's
+index-build facts — for the handful of store paths that need to read the
+engine catalog directly instead of compiling a portable query: index
+materialization (`store.materializeIndexes()` refuses only once its
+empty-candidate short circuit and the status-table ensure step have already
+run; `store.materializeSystemIndexes()`, which has no candidate short
+circuit, refuses only once that same status-table ensure step has run), the
 recorded-time schema check, and the recorded-time migration's column read. A
-profile that leaves `catalog` unset builds a backend with no `catalog` member
-at all; those paths then refuse with a `ConfigurationError` naming `catalog`
-rather than guessing at engine-specific SQL. For `store.materializeIndexes()`
-that refusal is not the first thing a catalog-less backend sees: the call
-already short-circuits on an empty candidate set before touching the backend,
-and past that point it first ensures the index-materialization status table
-exists (issuing its own `CREATE TABLE`) before checking for `catalog` — so a
-catalog-less backend can execute that DDL, and even return an empty
-`{ results: [] }` for a no-candidate call, without ever reaching the refusal.
+profile that leaves `catalog` unset builds a backend with no `catalog`
+member at all; those paths then refuse with a `ConfigurationError` naming
+`catalog` rather than guessing at engine-specific SQL.
 
 A dialect also declares `subgraphMembershipStrategy`, naming a decision the
 dialect adapter makes, not one a profile supplies directly — the dialect
