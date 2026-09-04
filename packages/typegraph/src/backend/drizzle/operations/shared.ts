@@ -1,7 +1,10 @@
 import { getTableName, type SQL, sql, type SQLWrapper } from "drizzle-orm";
 
+import { getDialect } from "../../../query/dialect";
+import type { SqlFragment } from "../../../query/sql-fragment";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type { SqlDialect } from "../../types";
+import { toDrizzleSql } from "../execution/types";
 import type { PostgresTables } from "../schema/postgres";
 import type { SqliteTables } from "../schema/sqlite";
 
@@ -135,13 +138,33 @@ export function quotedTableName(tableName: string): SQL {
   return sql.raw(`"${tableName.replaceAll('"', '""')}"`);
 }
 
-const CODE_POINT_ORDER_BUILDERS = {
-  postgres: (value: SQL) => sql`${value} COLLATE "C"`,
-  sqlite: (value: SQL) => value,
-} satisfies Record<SqlDialect, (value: SQL) => SQL>;
+const EXISTING_COLUMN_QUALIFIERS = {
+  postgres: (tableName: string, columnName: string) =>
+    sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`,
+  sqlite: (_tableName: string, columnName: string) =>
+    quotedColumn({ name: columnName }),
+} satisfies Record<SqlDialect, (tableName: string, columnName: string) => SQL>;
 
 /**
- * `column` rendered so that ORDER BY sorts it by code point on both engines.
+ * The EXISTING row's column inside an `ON CONFLICT ... DO UPDATE`, as
+ * opposed to `excluded.<column>` (the row that was proposed for insertion).
+ * PostgreSQL requires this reference qualified with the table name to
+ * disambiguate it from `excluded`; SQLite takes the bare column. One owner
+ * for the three upsert builders that read the conflicting row instead of
+ * `excluded`.
+ */
+export function existingColumn(
+  dialect: SqlDialect,
+  tableName: string,
+  columnName: string,
+): SQL {
+  return EXISTING_COLUMN_QUALIFIERS[dialect](tableName, columnName);
+}
+
+/**
+ * `column` (an identifier or raw fragment, e.g. `sql.identifier("node_id")`
+ * or `sql.raw("node_id")`) rendered so that ORDER BY sorts it by code point
+ * on both engines.
  *
  * Relevance-ranking SQL breaks score ties on `node_id`. Left bare, Postgres
  * sorts it under the column's collation — a linguistic collation such as
@@ -151,11 +174,15 @@ const CODE_POINT_ORDER_BUILDERS = {
  * as is the store's `compareCodePoints`, which ranks the same rows whenever a
  * search falls back to fusing in JavaScript.
  *
+ * `DialectAdapter.binaryText` is the repo's one owner of this decision
+ * (`COLLATE "C"` on Postgres, identity on SQLite — the same seam
+ * `src/store/algorithms/**` and `identity/interchange-read.ts` already
+ * consume), so this reaches it instead of re-spelling the collation choice.
  * Forcing the `C` collation on Postgres makes all three agree. The ranking is
  * sorted anyway (no index supplies the order), so this costs nothing.
  */
-export function codePointOrderKey(column: SQL, dialect: SqlDialect): SQL {
-  return CODE_POINT_ORDER_BUILDERS[dialect](column);
+export function codePointOrderKey(column: SqlFragment, dialect: SqlDialect): SQL {
+  return toDrizzleSql(getDialect(dialect).binaryText(column), dialect);
 }
 
 /**

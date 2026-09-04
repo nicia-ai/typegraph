@@ -1846,6 +1846,7 @@ export type DialectCapabilities = Readonly<{
     vectorPredicateStrategy: DialectVectorPredicateStrategy;
     vectorMetrics: readonly VectorMetric[];
     supportsFulltext: boolean;
+    subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
 }>;
 
 // @public
@@ -1853,6 +1854,9 @@ export type DialectRecursiveQueryStrategy = "recursive_cte";
 
 // @public
 export type DialectStandardQueryStrategy = "cte_project";
+
+// @public
+export type DialectSubgraphMembershipStrategy = "materialized-ids" | "inline-cte";
 
 // @public
 export type DialectVectorPredicateStrategy = "native" | "unsupported";

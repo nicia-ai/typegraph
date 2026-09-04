@@ -703,6 +703,13 @@ type CreateCommonOperationBackendOptions = Readonly<{
   schemaGraphWriteLockNamespace?: string | undefined;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   edgeCardinalityInsertFusion?: boolean | undefined;
+  /**
+   * Whether a convergent edge create's dynamic (non-durable) match may
+   * inspect JSON match fields. Present only for a bundled PostgreSQL
+   * backend; absent (falsy) leaves dynamic convergence unsupported so the
+   * caller falls back to the portable check-then-write path.
+   */
+  dynamicEdgeConvergence?: boolean | undefined;
   /** Present only for bundled projection-aware operation backends. */
   nodeProjectionInsertFusion?: boolean | undefined;
   /** Claim plans require a caller-owned transaction to roll back refusals. */
@@ -4353,7 +4360,7 @@ export function createCommonOperationBackend(
     if (
       plan.cardinalityClaim !== undefined ||
       operationStrategy.buildConvergeEdgeCreate === undefined ||
-      (!durable && !operationStrategy.dynamicEdgeConvergence) ||
+      (!durable && !options.dynamicEdgeConvergence) ||
       (!durable && context.coordination === "none") ||
       (plan.schemaFence !== undefined &&
         options.schemaFenceLockClause === undefined)

@@ -17,8 +17,8 @@ import type {
 } from "../../types";
 import {
   castBoundValueForColumn,
+  existingColumn as existingColumnFor,
   quotedColumn,
-  quotedTableName,
   type Tables,
 } from "./shared";
 
@@ -69,25 +69,15 @@ function ownerColumnNames(uniques: Tables["uniques"]): ClaimOwnerColumnNames {
 
 /**
  * PostgreSQL qualifies the conflicting row in an upsert; SQLite requires the
- * bare column. This is the only dialect decision in the claim renderer.
+ * bare column. This is the only dialect decision in the claim renderer,
+ * resolved through `operations/shared.ts`'s one owner for that qualification.
  */
 function existingColumn(
   tables: Tables,
   dialect: SqlDialect,
   columnName: string,
 ): SQL {
-  const tableName = getTableName(tables.uniques);
-  switch (dialect) {
-    case "postgres": {
-      return sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
-    }
-    case "sqlite": {
-      return quotedColumn({ name: columnName });
-    }
-    default: {
-      return dialect satisfies never;
-    }
-  }
+  return existingColumnFor(dialect, getTableName(tables.uniques), columnName);
 }
 
 function excludedColumn(columnName: string): SQL {

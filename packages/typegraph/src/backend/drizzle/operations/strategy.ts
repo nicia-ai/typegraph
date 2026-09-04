@@ -407,8 +407,6 @@ export type CommonOperationStrategy = Readonly<{
   buildAtomicConvergeEdgesTombstoneRefusal?: (
     params: Omit<AtomicConvergeEdgesParams, "timestamp">,
   ) => SQL;
-  /** Whether the builder may inspect dynamic JSON match fields. */
-  dynamicEdgeConvergence: boolean;
   /** PostgreSQL transaction-only claim + endpoint + edge write. */
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (
     params: InsertEdgeParams,
@@ -929,7 +927,6 @@ function createCommonOperationStrategy(
       buildAtomicConvergeEdgesTombstoneRefusal(tables, params),
     buildInsertEdgesDurableBatchReturning: (params, timestamp) =>
       buildInsertEdgesDurableBatchReturning(tables, params, timestamp),
-    dynamicEdgeConvergence: dialect === "postgres",
     atomicEdgeRefusalConstraints: {
       cardinality: {
         table: getTableName(tables.edgeClaims),

@@ -556,7 +556,6 @@ type CommonOperationStrategy = Readonly<{
     buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
     buildAtomicConvergeEdges?: (params: AtomicConvergeEdgesParams) => SQL;
     buildAtomicConvergeEdgesTombstoneRefusal?: (params: Omit<AtomicConvergeEdgesParams, "timestamp">) => SQL;
-    dynamicEdgeConvergence: boolean;
     buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
     buildDeleteStaleAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildAcquireAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;

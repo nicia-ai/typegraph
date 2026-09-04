@@ -37,6 +37,7 @@ export const PGLITE_TEST_FILES = [
   "tests/schema-fused-insert.test.ts",
   "tests/schema-graph-write-fence.test.ts",
   "tests/schema-kind-emptiness.test.ts",
+  "tests/subgraph-membership-postgres.test.ts",
   "tests/write-plan-fence-threading.test.ts",
   "tests/write-plan-statement-order.test.ts",
 ] as const;

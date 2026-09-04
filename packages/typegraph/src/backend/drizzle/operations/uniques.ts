@@ -12,7 +12,11 @@ import type {
   InsertUniqueParams,
   SqlDialect,
 } from "../../types";
-import { quotedColumn, quotedTableName, type Tables } from "./shared";
+import {
+  existingColumn as existingColumnFor,
+  quotedColumn,
+  type Tables,
+} from "./shared";
 
 type InsertUniqueDialectBuilder = (
   tables: Tables,
@@ -152,7 +156,7 @@ function buildInsertUniquePostgres(
 
   const tableName = getTableName(uniques);
   const existingColumnByName = (columnName: string): SQL =>
-    sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
+    existingColumnFor("postgres", tableName, columnName);
   const existingColumn = (column: Readonly<{ name: string }>) =>
     existingColumnByName(column.name);
 
@@ -239,25 +243,9 @@ export function buildInsertUniqueBatch(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
 
-  // Mirror the single-row builders' dialect split for references to the
-  // EXISTING row inside DO UPDATE: Postgres qualifies with the table name,
-  // SQLite uses the bare quoted column. This is the batch builder's own
-  // switch — claimOwnerMatchesSql only composes whatever renderer it is
-  // handed.
   const tableName = getTableName(uniques);
-  const existingColumnByName = (columnName: string): SQL => {
-    switch (dialect) {
-      case "postgres": {
-        return sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
-      }
-      case "sqlite": {
-        return quotedColumn({ name: columnName });
-      }
-      default: {
-        return dialect satisfies never;
-      }
-    }
-  };
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor(dialect, tableName, columnName);
 
   const existingColumn = (column: Readonly<{ name: string }>) =>
     existingColumnByName(column.name);
@@ -331,19 +319,8 @@ export function buildInsertUniqueFromSource(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
   const tableName = getTableName(uniques);
-  const existingColumnByName = (columnName: string): SQL => {
-    switch (dialect) {
-      case "postgres": {
-        return sql`${quotedTableName(tableName)}.${quotedColumn({ name: columnName })}`;
-      }
-      case "sqlite": {
-        return quotedColumn({ name: columnName });
-      }
-      default: {
-        return dialect satisfies never;
-      }
-    }
-  };
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor(dialect, tableName, columnName);
   const ownerMatches = claimOwnerMatchesSql(
     drizzleSqlTag,
     (columnName) => existingColumnByName(columnName),

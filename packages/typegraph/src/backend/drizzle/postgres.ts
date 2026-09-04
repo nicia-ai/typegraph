@@ -2446,6 +2446,7 @@ function createPostgresOperationBackend(
       fusion: {
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
+        dynamicEdgeConvergence: true,
         async beforeNodeProjectionInsert(params, plan): Promise<void> {
           const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
             params,

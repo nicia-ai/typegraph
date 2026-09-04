@@ -301,13 +301,6 @@ export const DIALECT_SEAM_RESTRICTIONS = [
  */
 export const DIALECT_LITERAL_EXEMPTIONS = [
   {
-    file: "src/store/subgraph.ts",
-    reason:
-      "Subgraph membership picks between a materialized-closure round trip and an inlined recursive CTE, a control-flow and prepared-plan choice a later commit turns into a declared per-profile capability.",
-    permanent: false,
-    sites: 1,
-  },
-  {
     file: "src/backend/drizzle/graph-template-sql.ts",
     reason:
       "Selects between PostgreSQL's single data-modifying-CTE statement and SQLite's insert-plus-marker-copy pair; a later commit deletes this dialect parameter and reaches each shape through a profile-owned statement builder.",
@@ -315,25 +308,11 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
     sites: 1,
   },
   {
-    file: "src/backend/drizzle/operations/uniques.ts",
-    reason:
-      "Builds the ON CONFLICT DO UPDATE existing-column qualification inline at two call sites; a later commit collapses both onto one exported dialect-keyed builder.",
-    permanent: false,
-    sites: 2,
-  },
-  {
-    file: "src/backend/drizzle/operations/atomic-node-claims.ts",
-    reason:
-      "Builds the same existing-column qualification uniques.ts builds inline; a later commit routes it through that same collapsed builder.",
-    permanent: false,
-    sites: 1,
-  },
-  {
     file: "src/backend/drizzle/operations/strategy.ts",
     reason:
-      "Sets the dynamicEdgeConvergence operation option by dialect and probes table existence with dialect-specific catalog SQL — two independent decisions, at two sites; a later commit makes the option a plain per-profile value and resolves the probe through the backend's catalog member.",
+      "Probes table existence with dialect-specific catalog SQL; a later commit resolves it through the backend's catalog member.",
     permanent: false,
-    sites: 2,
+    sites: 1,
   },
   {
     file: "src/store/materialize-indexes.ts",

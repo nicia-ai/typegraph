@@ -561,9 +561,10 @@ export async function executeSubgraph<
   // pressure), and per-count SQL texts would churn the prepared-statement
   // cache.
   let membership: SubgraphMembership;
-  const dialect = ctx.dialect.name;
-  switch (dialect) {
-    case "postgres": {
+  const membershipStrategy =
+    ctx.dialect.capabilities.subgraphMembershipStrategy;
+  switch (membershipStrategy) {
+    case "materialized-ids": {
       const includedIds = await fetchIncludedIds(
         ctx,
         reachableCte,
@@ -578,19 +579,22 @@ export async function executeSubgraph<
       };
       break;
     }
-    case "sqlite": {
+    case "inline-cte": {
       membership = {
         prefix: sql`${reachableCte}${includedIdsCte} `,
-        // SQLite: `column IN (subquery)` evaluates via a transient index —
-        // optimal as-is. (Postgres takes the parameterized text[] form above.)
+        // `column IN (subquery)` evaluates via a transient index — optimal
+        // as-is. (The materialized-ids strategy takes the parameterized
+        // array form above instead.)
         idFilter: (column) => sql`${column} IN (SELECT id FROM included_ids)`,
         parameterDependentPlan: false,
       };
       break;
     }
     default: {
-      dialect satisfies never;
-      throw new Error(`Unsupported SQL dialect: ${String(dialect)}`);
+      membershipStrategy satisfies never;
+      throw new Error(
+        `Unsupported subgraph membership strategy: ${String(membershipStrategy)}`,
+      );
     }
   }
 
