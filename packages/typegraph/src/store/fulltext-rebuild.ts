@@ -11,6 +11,7 @@
  */
 import { type z } from "zod";
 
+import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import {
   type GraphBackend,
   type NodeRow,
@@ -18,9 +19,17 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../backend/types";
-import { ConfigurationError, ValidationError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+  ValidationError,
+} from "../errors";
 import { type KindRegistry } from "../registry";
-import { computeFulltextContent, getSearchableFields } from "./fulltext-sync";
+import {
+  assertFulltextMember,
+  computeFulltextContent,
+  getSearchableFields,
+} from "./fulltext-sync";
 
 /**
  * Default page size. Fits under SQLite's ~32766 placeholder limit with
@@ -192,12 +201,21 @@ async function runFulltextRebuild(
   const { registry } = ctx;
   const backend = driver.read;
 
-  if (!backend.upsertFulltext || !backend.deleteFulltext) {
-    throw new ConfigurationError(
-      "Backend does not support fulltext; cannot rebuild index",
-      { backend: backend.dialect, capability: "fulltext" },
+  // `resolveBackendFulltext` is the one decision for "is fulltext
+  // available on this backend" — the same one the write path consults.
+  // A member missing past that point is a contract violation, asserted
+  // separately below rather than folded into this availability check.
+  if (resolveBackendFulltext(backend) === false) {
+    throw new UnsupportedBackendCapabilityError(
+      "rebuildFulltext()",
+      "fulltext",
+      { backend: backend.dialect, reason: "fulltext_unsupported" },
+      "This backend declares no fulltext capability, so there is no " +
+        "fulltext index to rebuild. Use a backend with fulltext support.",
     );
   }
+  assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+  assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
 
   const pageSize = validatePageSize(options.pageSize);
   const maxSkippedIds = validateMaxSkippedIds(options.maxSkippedIds);
@@ -263,6 +281,12 @@ async function runFulltextRebuild(
                 language: item.language,
               });
             }
+          } else {
+            assertFulltextMember(
+              target.upsertFulltext,
+              "upsertFulltext",
+              target,
+            );
           }
         }
         if (pageResult.toDelete.length > 0) {
@@ -280,6 +304,12 @@ async function runFulltextRebuild(
                 nodeId,
               });
             }
+          } else {
+            assertFulltextMember(
+              target.deleteFulltext,
+              "deleteFulltext",
+              target,
+            );
           }
         }
       };

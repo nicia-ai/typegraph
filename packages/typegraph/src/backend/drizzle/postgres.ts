@@ -64,7 +64,10 @@ import {
   StaleVersionError,
 } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
-import { type FulltextStrategy, tsvectorStrategy } from "../../query/dialect/fulltext-strategy";
+import {
+  type FulltextStrategy,
+  tsvectorStrategy,
+} from "../../query/dialect/fulltext-strategy";
 import {
   assertPgvectorEfSearch,
   pgvectorStrategy,
@@ -265,8 +268,15 @@ export type PostgresBackendOptions = Readonly<{
    * expression, and snippet generation — for alternate Postgres
    * backends like ParadeDB (`pg_search`), pg_trgm similarity, or
    * pgroonga without forking TypeGraph.
+   *
+   * Pass `false` to disable fulltext support entirely. The backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/
+   * search methods, mirroring `vector: false`. A fulltext predicate, a
+   * `searchable()` field, `store.search.fulltext`, and hybrid search all
+   * refuse with a typed error instead of running SQL against a table
+   * this backend never creates.
    */
-  fulltext?: FulltextStrategy;
+  fulltext?: FulltextStrategy | false;
   /**
    * Vector strategy override. Defaults to `pgvectorStrategy` (pgvector's
    * `vector(N)` columns + HNSW/IVFFlat). The strategy owns per-`(kind,
@@ -699,7 +709,13 @@ export function buildPostgresEngineProfile(
     options.serializedResource,
   );
   const tables = options.tables ?? defaultTables;
-  const fulltextStrategy = options.fulltext ?? tsvectorStrategy;
+  // `fulltext: false` disables fulltext entirely — mirroring `vector`
+  // below, required for an engine or role with no fulltext implementation
+  // of its own to build a TypeGraph backend without a stub strategy.
+  const fulltextStrategy =
+    options.fulltext === false ?
+      undefined
+    : (options.fulltext ?? tsvectorStrategy);
   // pgvector is compiled into a standalone Postgres server, so it is wired
   // unconditionally by default (overridable for alternate Postgres vector
   // stacks). `vector: false` disables it — required for an in-process
@@ -846,7 +862,7 @@ export function buildPostgresEngineProfile(
     tableNames.nodes,
     tableNames.edges,
     getTableName(tables.uniques),
-    tableNames.fulltext,
+    ...(fulltextStrategy === undefined ? [] : [tableNames.fulltext]),
   ].map((name) =>
     toDrizzleSql(
       portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(name)}`,
@@ -1028,7 +1044,10 @@ export function buildPostgresEngineProfile(
   const identityRuntime: IdentityRuntime = {
     revisionOriginsTableDdl: generatePgCreateTableSQL(tables.revisionOrigins),
     contributionsForTableNames: (overrides) =>
-      postgresContributions(buildPostgresTables(overrides), fulltextStrategy),
+      postgresContributions(
+        buildPostgresTables(overrides),
+        fulltextStrategy ?? false,
+      ),
     primaryKeyConstraintNameFor: (tableName) => `${tableName}_pkey`,
   };
 
@@ -1165,7 +1184,7 @@ export function buildPostgresEngineProfile(
       await db.execute(sql.raw(ddl));
     },
     ensureTable: executeConcurrentCreateDdl,
-    generateDdl: () => generatePostgresDDL(tables, fulltextStrategy),
+    generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
   };
 
@@ -1557,10 +1576,8 @@ export function buildPostgresEngineProfile(
             : undefined;
 
           return db.transaction(async (tx) => {
-            const { backend: txBackend, drainAndClose } = bindTransactionBackend(
-              tx,
-              isFirstParty,
-            );
+            const { backend: txBackend, drainAndClose } =
+              bindTransactionBackend(tx, isFirstParty);
             try {
               return await fn(
                 markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
@@ -2074,7 +2091,11 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
   capabilities: BackendCapabilities;
-  fulltextStrategy: FulltextStrategy;
+  /**
+   * Active fulltext strategy (`tsvectorStrategy` unless overridden), or
+   * `undefined` when fulltext support is disabled (`fulltext: false`).
+   */
+  fulltextStrategy: FulltextStrategy | undefined;
   /**
    * Active vector strategy (`pgvectorStrategy` unless overridden), or
    * `undefined` when vector support is disabled (`vector: false`).
@@ -2112,7 +2133,8 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
   capabilities: BackendCapabilities;
-  fulltextStrategy: FulltextStrategy;
+  /** Active fulltext strategy. See {@link CreatePostgresOperationBackendOptions}. */
+  fulltextStrategy: FulltextStrategy | undefined;
   /** Active vector strategy. See {@link CreatePostgresOperationBackendOptions}. */
   vectorStrategy: VectorStrategy | undefined;
   /** Shared durable-marker materializer. See {@link CreatePostgresOperationBackendOptions}. */
@@ -2341,11 +2363,15 @@ function createPostgresOperationBackend(
     capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
   );
 
-  const fulltextMembers = createFulltextMembers({
-    strategy: operationStrategy,
-    execution: { execAll, execRun },
-    batchConfig,
-  });
+  const fulltextMembers =
+    fulltextStrategy === undefined ?
+      createFulltextMembers({ fulltextStrategy: undefined })
+    : createFulltextMembers({
+        fulltextStrategy,
+        strategy: operationStrategy,
+        execution: { execAll, execRun },
+        batchConfig,
+      });
 
   const contributionOperationMembers = createContributionOperationMembers({
     execRun,
@@ -2547,9 +2573,13 @@ function createPostgresOperationBackend(
   // `hybridSearch` is the one embedding-adjacent member NOT shared with
   // SQLite (it composes the vector leg with `operationStrategy`'s
   // single-statement hybrid SQL, which is dialect-owned) — kept inline,
-  // gated the same way `vectorEmbeddingMethods` always has been.
+  // gated the same way `vectorEmbeddingMethods` always has been. It also
+  // needs an active fulltext strategy for its fulltext leg, so it is
+  // additionally gated on `fulltextStrategy` — a fulltext-off backend
+  // falls back to the store's multi-statement RRF path just like a
+  // vector-off one already does.
   const vectorEmbeddingMethods =
-    vectorStrategy === undefined ?
+    vectorStrategy === undefined || fulltextStrategy === undefined ?
       {}
     : {
         // Single-statement hybrid needs ROW_NUMBER(); a capability
@@ -2757,9 +2787,7 @@ function createPostgresOperationBackend(
           const overrides: SearchGucOverride[] = [];
           for (const indexType of annTypes) {
             if (indexType !== "hnsw" && indexType !== "ivfflat") continue;
-            overrides.push(
-              ...(await vectorSearchGucOverrides({ indexType })),
-            );
+            overrides.push(...(await vectorSearchGucOverrides({ indexType })));
           }
           return runVectorSearch<T>(overrides, query);
         }

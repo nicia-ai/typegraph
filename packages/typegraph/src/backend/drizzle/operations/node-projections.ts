@@ -128,7 +128,7 @@ export function buildAtomicNodeProjectionStatements(
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy: VectorStrategy | undefined,
   chunkSize: number,
 ): readonly SQL[] | undefined {
@@ -164,6 +164,7 @@ export function buildAtomicNodeProjectionStatements(
   for (const entry of entries) {
     for (const projection of entry.projections) {
       if (projection.kind === "fulltext") {
+        if (fulltextStrategy === undefined) return;
         const key = encodeTupleKey([entry.graphId, entry.kind]);
         const group = fulltextGroups.get(key) ?? {
           graphId: entry.graphId,
@@ -221,24 +222,24 @@ export function buildAtomicNodeProjectionStatements(
   for (const group of fulltextGroups.values()) {
     for (const rows of chunkArray(group.upserts, chunkSize)) {
       statements.push(
-        ...fulltextStrategy
-          .buildBatchUpsert(
+        ...(
+          fulltextStrategy?.buildBatchUpsert(
             fulltextTableName,
             { graphId: group.graphId, nodeKind: group.nodeKind, rows },
             timestamp,
-          )
-          .map((statement) => toDrizzleSql(statement, dialect)),
+          ) ?? []
+        ).map((statement) => toDrizzleSql(statement, dialect)),
       );
     }
     for (const nodeIds of chunkArray(group.deletes, chunkSize)) {
       statements.push(
-        ...fulltextStrategy
-          .buildBatchDelete(fulltextTableName, {
+        ...(
+          fulltextStrategy?.buildBatchDelete(fulltextTableName, {
             graphId: group.graphId,
             nodeKind: group.nodeKind,
             nodeIds,
-          })
-          .map((statement) => toDrizzleSql(statement, dialect)),
+          }) ?? []
+        ).map((statement) => toDrizzleSql(statement, dialect)),
       );
     }
   }
@@ -547,7 +548,7 @@ function buildNodeClaimsAndProjections(
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy: VectorStrategy | undefined,
 ): SQL | undefined {
   const claims = plan.claims;
@@ -827,11 +828,11 @@ function buildProjectionSql(
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy: VectorStrategy | undefined,
 ): readonly SQL[] | undefined {
   const projectionSql: SQL[] = [];
-  const fulltextBuilder = fulltextStrategy.buildSyncFromInsertedNode;
+  const fulltextBuilder = fulltextStrategy?.buildSyncFromInsertedNode;
   const vectorBuilder = vectorStrategy?.buildUpsertFromInsertedNode;
 
   for (const projection of plan.projections) {
@@ -893,7 +894,7 @@ export function buildInsertNodeWithProjections(
   timestamp: string,
   dialect: SqlDialect,
   fulltextTableName: string,
-  fulltextStrategy: FulltextStrategy,
+  fulltextStrategy: FulltextStrategy | undefined,
   vectorStrategy: VectorStrategy | undefined,
   schemaLockClause?: SQL,
 ): SQL | undefined {

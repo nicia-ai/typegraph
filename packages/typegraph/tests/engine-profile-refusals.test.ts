@@ -289,11 +289,10 @@ describe("createSqlBackend refusals", () => {
 });
 
 describe("finalizeEngineCapabilities", () => {
-  it("omits capabilities.fulltext and reports contributions.rebuild: false when the profile supplies no fulltext strategy", () => {
-    // Every bundled profile supplies a fulltext strategy today, so this arm
-    // is unreachable through either dialect builder — it exists so a future
-    // profile that turns fulltext off has somewhere correct to land, and
-    // this test is the only thing exercising it.
+  it("omits capabilities.fulltext and reduces contributions.rebuild to the fence condition when the profile supplies no fulltext strategy", () => {
+    // A profile built with `fulltext: false` reaches this arm: with no
+    // fulltext contribution to tear down, the rebuild answer is the
+    // transactional-fence condition alone.
     const base = createRealSqliteProfile();
 
     const capabilities = finalizeEngineCapabilities(base.declaredCapabilities, {
@@ -305,6 +304,8 @@ describe("finalizeEngineCapabilities", () => {
 
     expect(capabilities.fulltext).toBeUndefined();
     expect(capabilities.vector).toBeUndefined();
-    expect(capabilities.contributions?.rebuild).toBe(false);
+    expect(capabilities.contributions?.rebuild).toBe(
+      base.declaredCapabilities.execution.interactiveTransactions,
+    );
   });
 });

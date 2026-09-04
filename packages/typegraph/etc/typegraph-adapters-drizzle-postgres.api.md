@@ -4374,10 +4374,10 @@ type FulltextStrategy = Readonly<{
 }>;
 
 // @public
-export function generatePostgresDDL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy): string[];
+export function generatePostgresDDL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy | false): string[];
 
 // @public
-export function generatePostgresMigrationSQL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy): string;
+export function generatePostgresMigrationSQL(tables?: PostgresTables, fulltextStrategy?: FulltextStrategy | false): string;
 
 // @public (undocumented)
 const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
@@ -5239,7 +5239,7 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 // @public
 export type PostgresBackendOptions = Readonly<{
     tables?: PostgresTables;
-    fulltext?: FulltextStrategy;
+    fulltext?: FulltextStrategy | false;
     vector?: VectorStrategy | false;
     capabilities?: BundledBackendCapabilityOverrides;
     prepareStatements?: boolean;

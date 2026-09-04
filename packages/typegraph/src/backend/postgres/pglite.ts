@@ -41,6 +41,7 @@ import { type Extension, PGlite } from "@electric-sql/pglite";
 import { drizzle, type PgliteDatabase } from "drizzle-orm/pglite";
 
 import { ConfigurationError } from "../../errors";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { markBundledRootAutocommitEligible } from "../capabilities/autocommit-single-statement";
 import { wrapWithManagedClose } from "../derive-backend";
 export type { GraphIdentityConfig } from "../../core/define-graph";
@@ -98,6 +99,15 @@ export type LocalPgliteBackendOptions = Readonly<{
    *   package version.
    */
   vector?: false | Extension;
+
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table,
+   * mirroring `vector: false`.
+   */
+  fulltext?: FulltextStrategy | false;
 }>;
 
 /**
@@ -198,14 +208,15 @@ export async function createLocalPgliteBackend(
     // EXTENSION` when enabled) in one round trip.
     const migrationSql =
       vectorEnabled ?
-        generatePostgresMigrationSQL(tables)
-      : generateVectorlessPostgresMigrationSQL(tables);
+        generatePostgresMigrationSQL(tables, options.fulltext)
+      : generateVectorlessPostgresMigrationSQL(tables, options.fulltext);
     await client.exec(migrationSql);
 
     const db = drizzle(client);
     const backend = createPostgresBackend(db, {
       tables,
       ...(vectorEnabled ? {} : { vector: false }),
+      ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),
     });
     const managedBackend = wrapWithManagedClose(backend, async () => {
       await client.close();

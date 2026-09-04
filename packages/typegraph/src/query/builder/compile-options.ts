@@ -3,6 +3,7 @@
  * aggregate query, and unionable query builders. Keeps one source of
  * truth for which config fields are propagated to the compiler.
  */
+import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import { resolveRecursiveTraversal } from "../../backend/capabilities/recursive-traversal";
 import { resolveEmbeddingFields } from "../../core/embedding";
 import { resolveDeclaredFulltextLanguage } from "../../core/searchable";
@@ -22,7 +23,10 @@ import { type QueryBuilderConfig } from "./types";
 export function buildCompileOptions(
   config: QueryBuilderConfig,
 ): CompileQueryOptions {
-  const fulltextStrategy = config.backend?.fulltextStrategy;
+  const fulltextStrategy =
+    config.backend === undefined ?
+      undefined
+    : resolveBackendFulltext(config.backend);
   const vectorStrategy = config.backend?.vectorStrategy;
   const { recordedReadBinding } = getQueryBuilderInternalContext(config);
   return {
@@ -38,7 +42,9 @@ export function buildCompileOptions(
       {}
     : {
         fulltextStrategy,
-        fulltextLanguages: buildFulltextLanguages(config.registry),
+        ...(fulltextStrategy === false ?
+          {}
+        : { fulltextLanguages: buildFulltextLanguages(config.registry) }),
       }),
     ...(vectorStrategy === undefined ?
       {}

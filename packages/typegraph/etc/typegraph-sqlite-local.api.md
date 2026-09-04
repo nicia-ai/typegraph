@@ -590,7 +590,7 @@ type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 type CompileQueryOptions = Readonly<{
     dialect?: SqlDialect | undefined;
     schema?: SqlSchema | undefined;
-    fulltextStrategy?: FulltextStrategy | undefined;
+    fulltextStrategy?: FulltextStrategy | false | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     windowFunctions?: boolean | undefined;
     vectorSlots?: VectorSlotMap | undefined;
@@ -3043,6 +3043,7 @@ export type LocalSqliteStoreOptions<TStoreOptions extends StoreOptions = StoreOp
     path?: string;
     pragmas?: LocalSqlitePragmaOptions | false;
     capabilities?: BundledBackendCapabilityOverrides;
+    fulltext?: FulltextStrategy | false;
     store?: TStoreOptions;
     schemaManagement?: Omit<SchemaManagerOptions, "schema">;
 }>;

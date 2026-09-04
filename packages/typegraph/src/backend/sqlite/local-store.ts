@@ -21,6 +21,7 @@ import {
 import { loadDrizzleBackedModule } from "../missing-peer-ledger";
 import { type BundledBackendCapabilityOverrides } from "../types";
 export type { BundledBackendCapabilityOverrides } from "../types";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { type LocalSqlitePragmaOptions } from "./local-options";
 
 export type { GraphIdentityConfig } from "../../core/define-graph";
@@ -58,6 +59,15 @@ export type LocalSqliteStoreOptions<
   pragmas?: LocalSqlitePragmaOptions | false;
   /** Optional backend capability overrides, primarily for controlled hosts. */
   capabilities?: BundledBackendCapabilityOverrides;
+  /**
+   * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Pass `false` to disable fulltext support
+   * entirely — the backend then advertises no `capabilities.fulltext` and
+   * omits the fulltext CRUD/search methods, and the managed installation
+   * never creates the fulltext table. Forwarded to both the installation
+   * DDL and `createSqliteBackend`.
+   */
+  fulltext?: FulltextStrategy | false;
   /** Store behavior, including hooks, history, and custom table names. */
   store?: TStoreOptions;
   /**

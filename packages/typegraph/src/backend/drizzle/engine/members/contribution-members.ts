@@ -100,7 +100,8 @@ type EnsureVectorSlotOptions = Readonly<{
 
 export type CreateContributionMembersDeps = Readonly<{
   dialect: SqlDialect;
-  fulltextStrategy: FulltextStrategy;
+  /** Absent when this backend has no fulltext support (`fulltext: false`). */
+  fulltextStrategy: FulltextStrategy | undefined;
   fulltextTableName: string;
   vectorStrategy: VectorStrategy | undefined;
   /** ONE fence target the materializer's two lock sites resolve, shared with every other lock this backend can take. */

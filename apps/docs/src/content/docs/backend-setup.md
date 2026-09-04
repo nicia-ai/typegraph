@@ -188,6 +188,15 @@ Creates a SQLite backend with automatic database and schema setup.
 function createLocalSqliteBackend(options?: {
   path?: string; // Database path, defaults to ":memory:"
   tables?: SqliteTables;
+  /**
+   * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Pass `false` to disable fulltext support
+   * entirely — the backend then advertises no `capabilities.fulltext` and
+   * omits the fulltext CRUD/search methods, and the managed installation
+   * never creates the fulltext table. Forwarded to both the installation
+   * DDL and `createSqliteBackend`.
+   */
+  fulltext?: FulltextStrategy | false;
 }): { backend: GraphBackend; db: BetterSQLite3Database };
 ```
 
@@ -201,10 +210,27 @@ function createSqliteBackend(
   db: BetterSQLite3Database,
   options?: {
     tables?: SqliteTables;
+    /**
+     * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+     * built-in FTS5 virtual table). Pass `false` to disable fulltext
+     * support entirely — the backend then advertises no
+     * `capabilities.fulltext` and omits the fulltext CRUD/search methods,
+     * mirroring `vector` left unset. Required for a SQLite build without
+     * FTS5 compiled in.
+     */
+    fulltext?: FulltextStrategy | false;
     vector?: VectorStrategy;
     capabilities?: BundledBackendCapabilityOverrides;
   },
 ): GraphBackend;
+```
+
+Pass `{ fulltext: false }` on a SQLite build without FTS5 compiled in, or
+whenever the graph has no `searchable()` fields and you would rather skip
+the virtual table than carry it unused:
+
+```typescript
+const backend = createSqliteBackend(db, { fulltext: false });
 ```
 
 #### `generateSqliteMigrationSQL()`
@@ -213,7 +239,10 @@ Returns complete fresh-installation SQL for creating TypeGraph tables and
 stamping the current deployment-wide base-schema marker in SQLite.
 
 ```typescript
-function generateSqliteMigrationSQL(): string;
+function generateSqliteMigrationSQL(
+  tables?: SqliteTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string;
 ```
 
 `generateSqliteDDL()` is the lower-level table/index statement array used by
@@ -722,7 +751,14 @@ function createPostgresBackend(
   db: AnyPgDatabase,
   options?: {
     tables?: PostgresTables;
-    fulltext?: FulltextStrategy;
+    /**
+     * Override the fulltext strategy. Defaults to `tsvectorStrategy`.
+     * Pass a custom `FulltextStrategy` to swap the fulltext stack, or
+     * `false` to disable fulltext support entirely — the backend then
+     * advertises no `capabilities.fulltext` and omits the fulltext
+     * CRUD/search methods, mirroring `vector: false`.
+     */
+    fulltext?: FulltextStrategy | false;
     /**
      * Override the vector search strategy. Defaults to
      * `pgvectorStrategy`. Pass a custom `VectorStrategy` to change the
@@ -755,6 +791,14 @@ function createPostgresBackend(
 ): GraphBackend;
 ```
 
+Pass `{ fulltext: false }` when the graph has no `searchable()` fields and
+you would rather skip the fulltext table (`typegraph_node_fulltext`) and its
+GIN index than carry them unused:
+
+```typescript
+const backend = createPostgresBackend(db, { fulltext: false });
+```
+
 #### `createLocalPgliteBackend(options?)`
 
 Creates an in-process PGlite backend with automatic engine construction,
@@ -774,6 +818,13 @@ async function createLocalPgliteBackend(options?: {
    * support, or pass a PGlite Extension object to control the extension import.
    */
   vector?: false | Extension;
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table.
+   */
+  fulltext?: FulltextStrategy | false;
 }): Promise<{
   backend: GraphBackend;
   db: PgliteDatabase;
@@ -791,7 +842,7 @@ the same installation builder internally while omitting only that extension.
 ```typescript
 function generatePostgresMigrationSQL(
   tables?: PostgresTables,
-  fulltextStrategy?: FulltextStrategy,
+  fulltextStrategy?: FulltextStrategy | false,
 ): string;
 ```
 
@@ -805,7 +856,10 @@ marker row, so joining it does not produce a complete installation. Use
 `createVerifiedStore()` or the DML-only graph-template APIs.
 
 ```typescript
-function generatePostgresDDL(tables?: PostgresTables): string[];
+function generatePostgresDDL(
+  tables?: PostgresTables,
+  fulltextStrategy?: FulltextStrategy | false,
+): string[];
 ```
 
 ### Upgrading deployment-wide base storage
@@ -1012,6 +1066,9 @@ unused database drivers.
 PGlite vector support is enabled by default and loads the optional
 `@electric-sql/pglite-pgvector` package. Install that package when using vector
 fields, or pass `{ vector: false }` as above for a smaller non-vector setup.
+Both managed entrypoints also accept `fulltext: false`, which skips the
+fulltext table at bootstrap and returns a backend with no
+`capabilities.fulltext`.
 
 Both factories accept `store` and `schemaManagement` groups, so the managed
 path supports the same hooks, history/revision tracking, custom SQL schema,
@@ -2163,6 +2220,7 @@ error rather than returning something that looks like success.
 | PostgreSQL (`pg`, `postgres-js`, PGlite, `neon-serverless`) | ✅ | ✅ | ✅ |
 | PostgreSQL over `neon-http` | ✅ | ✅ | ❌ no schema fence |
 | Custom fulltext strategy without `dropDdl` | ✅ | ✅ | ❌ no teardown DDL |
+| Fulltext disabled (`fulltext: false`) | ✅ | ✅ | ✅ with a schema fence |
 
 `rebuild` requires two things at once: a fulltext strategy that declares
 `dropDdl` on its contribution, and a transactional schema fence
@@ -2173,7 +2231,23 @@ no fence — the same reason they already report
 `dropDdl` keeps working for every other operation and is reported as not
 rebuildable rather than being dropped through a synthesized statement
 TypeGraph guessed at. Vector contributions are never rebuildable on any
-backend; that is a property of what TypeGraph stores, not of the engine.
+backend; that is a property of what TypeGraph stores, not of the engine. A
+backend built with `fulltext: false` has no fulltext contribution at all, so
+the first condition is vacuously satisfied and `rebuild` reduces to whether
+the backend has the transactional schema fence — the same value it would
+report if fulltext were still active on a driver with that fence.
+
+**`fulltext: false` stops creating and maintaining the fulltext table; it
+never drops one.** On a database that already carries fulltext rows,
+disabling fulltext leaves them in place and unmaintained: a hard delete
+performed while fulltext is off leaves an orphaned row behind in the
+fulltext table, because `hardDeleteNode`'s cascade has no active strategy to
+build a delete statement from. Re-enabling fulltext later therefore requires
+the destructive contribution rebuild — `store.rebuildContribution("fulltext")`,
+which drops and recreates the fulltext table — **not**
+`store.search.rebuildFulltext()`: that method pages live nodes to recompute
+their content, and a hard-deleted node has no row left in the node table for
+it to page, so it never revisits, and therefore never clears, the orphan.
 
 ### Recommended deployment shape
 

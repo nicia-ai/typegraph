@@ -31,6 +31,7 @@ import {
 } from "drizzle-orm/better-sqlite3";
 
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { sqliteVecStrategy } from "../../query/dialect/vector/sqlite-vec-strategy";
 import {
   isSqliteDuplicateEdgeMatchIdentityColumnError,
@@ -82,6 +83,7 @@ const nodeRequire = createRequire(import.meta.url);
 function installLocalSqliteBaseSchema(
   sqlite: Database.Database,
   tables: SqliteTables,
+  fulltextStrategy: FulltextStrategy | false | undefined,
 ): void {
   if (CURRENT_BASE_SCHEMA_VERSION !== 1) {
     throw new CompilerInvariantError(
@@ -89,7 +91,7 @@ function installLocalSqliteBaseSchema(
       { currentVersion: CURRENT_BASE_SCHEMA_VERSION },
     );
   }
-  const installationSql = generateSqliteMigrationSQL(tables);
+  const installationSql = generateSqliteMigrationSQL(tables, fulltextStrategy);
   try {
     sqlite.exec(installationSql);
   } catch (error) {
@@ -328,6 +330,16 @@ export type LocalSqliteBackendOptions = Readonly<{
   tables?: SqliteTables;
 
   /**
+   * Override the fulltext strategy. Defaults to `fts5Strategy` (SQLite's
+   * built-in FTS5 virtual table). Pass `false` to disable fulltext support
+   * entirely — the backend then advertises no `capabilities.fulltext` and
+   * omits the fulltext CRUD/search methods, and the managed installation
+   * never creates the fulltext table. Forwarded to both the installation
+   * DDL and `createSqliteBackend`.
+   */
+  fulltext?: FulltextStrategy | false;
+
+  /**
    * Override specific backend capabilities — e.g. to simulate an engine-level
    * gap like missing SQL window functions in tests. Forwarded to
    * createSqliteBackend.
@@ -402,7 +414,7 @@ export function createLocalSqliteBackend(
     // The managed factory owns a complete fresh installation, including the
     // deployment-wide base-schema marker consumed by verified/runtime-only
     // entrypoints. Raw generateSqliteDDL intentionally omits that marker.
-    installLocalSqliteBaseSchema(sqlite, tables);
+    installLocalSqliteBaseSchema(sqlite, tables, options.fulltext);
 
     const backend = createSqliteBackend(db, {
       executionProfile: {
@@ -410,6 +422,7 @@ export function createLocalSqliteBackend(
       },
       tables,
       ...(hasSqliteVec ? { vector: sqliteVecStrategy } : {}),
+      ...(options.fulltext === undefined ? {} : { fulltext: options.fulltext }),
       capabilities: {
         ...options.capabilities,
         graphAnalytics: {

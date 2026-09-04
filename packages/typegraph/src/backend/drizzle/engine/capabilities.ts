@@ -61,9 +61,8 @@ export type FinalizeEngineCapabilitiesDeps = Readonly<{
    * The profile's full-text strategy — `SqlEngineProfile.fulltext` verbatim.
    * Derives `capabilities.fulltext`, omitted when this is `undefined`, and
    * feeds `contributionRebuildSupported` alongside `fulltextTableName`.
-   * Every bundled profile supplies one today, so the omit arm is exercised
-   * only by a unit test calling this function directly — it exists so a
-   * future profile that turns fulltext off has somewhere correct to land.
+   * A profile built with `fulltext: false` supplies `undefined`, which is
+   * how the omit arm is reached.
    */
   fulltextStrategy: FulltextStrategy | undefined;
   /** The profile's physical fulltext table name, the other input `contributionRebuildSupported` needs. */
@@ -102,8 +101,7 @@ export function finalizeEngineCapabilities(
     execution: {
       ...declared.execution,
       atomicBatch:
-        createAtomicSqlProgramExecutor(deps.execution) === undefined ?
-          "none"
+        createAtomicSqlProgramExecutor(deps.execution) === undefined ? "none"
         : "root",
     },
     // Absent strategy: omit outright, regardless of what `declared` carried
@@ -117,7 +115,9 @@ export function finalizeEngineCapabilities(
     // derive it fresh from the strategy.
     ...(deps.vectorStrategy === undefined ?
       {}
-    : { vector: declaredVector ?? buildVectorCapabilities(deps.vectorStrategy) }),
+    : {
+        vector: declaredVector ?? buildVectorCapabilities(deps.vectorStrategy),
+      }),
     ...(deps.fulltextStrategy === undefined ?
       {}
     : {
@@ -127,14 +127,14 @@ export function finalizeEngineCapabilities(
     contributions: {
       supported: true,
       probe: true,
-      rebuild:
-        deps.fulltextStrategy === undefined ? false : (
-          contributionRebuildSupported(
-            deps.fulltextStrategy,
-            deps.fulltextTableName,
-            declared.execution.interactiveTransactions,
-          )
-        ),
+      // One owner for the rebuild answer, absent strategy included: with no
+      // fulltext contribution there is nothing to tear down, so the answer
+      // reduces to the transactional-fence condition inside that function.
+      rebuild: contributionRebuildSupported(
+        deps.fulltextStrategy,
+        deps.fulltextTableName,
+        declared.execution.interactiveTransactions,
+      ),
     },
   });
 }

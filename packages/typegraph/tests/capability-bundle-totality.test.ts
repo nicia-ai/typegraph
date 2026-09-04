@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("29 reasoned entries sum to 88 accesses; 50 deferred entries sum to 215", () => {
+  it("29 reasoned entries sum to 88 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -125,6 +125,6 @@ describe("capability bundle totality (T9)", () => {
     // set-based edge-delete fallback adds one batch write access, and atomic
     // node-delete refusal diagnosis adds one heterogeneous endpoint-set read.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(88);
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(215);
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });

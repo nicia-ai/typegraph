@@ -1,11 +1,14 @@
 /**
  * Fulltext CRUD and search: five members shared verbatim by every SQL
- * engine profile. Each statement is built by the dialect's
- * `CommonOperationStrategy` and run through the execution primitives the
- * dialect already exposes — this group never touches `executionAdapter`
- * or `db.execute` / `db.run` directly, so it carries none of a dialect's
- * own serialization or transaction-framing story.
+ * engine profile with an active fulltext strategy, and omitted entirely
+ * (never stubbed) from one built with `fulltext: false`. Each statement is
+ * built by the dialect's `CommonOperationStrategy` and run through the
+ * execution primitives the dialect already exposes — this group never
+ * touches `executionAdapter` or `db.execute` / `db.run` directly, so it
+ * carries none of a dialect's own serialization or transaction-framing
+ * story.
  */
+import type { FulltextStrategy } from "../../../../query/dialect/fulltext-strategy";
 import { chunk as chunkArray } from "../../../../utils/array";
 import { coerceNumericScore, nowIso } from "../../../row-mappers";
 import type {
@@ -44,38 +47,49 @@ type FulltextBatchChunkSizes = Readonly<{
   fulltextDeleteChunkSize: number;
 }>;
 
-export type CreateFulltextMembersDeps = Readonly<{
-  /** The dialect's fulltext SQL builders, already closed over its table names and fulltext strategy. */
-  strategy: Pick<
-    CommonOperationStrategy,
-    | "buildUpsertFulltext"
-    | "buildDeleteFulltext"
-    | "buildUpsertFulltextBatch"
-    | "buildDeleteFulltextBatch"
-    | "buildFulltextSearch"
-  >;
-  execution: FulltextMembersExecution;
-  batchConfig: FulltextBatchChunkSizes;
-}>;
+/**
+ * Deps needed only when a fulltext strategy is active. `undefined` collapses
+ * every field: with no strategy there is no fulltext table to write to,
+ * delete from, or search, so every member below is omitted entirely —
+ * mirroring `CreateVectorMembersDeps`.
+ */
+export type CreateFulltextMembersDeps =
+  | Readonly<{ fulltextStrategy: undefined }>
+  | Readonly<{
+      fulltextStrategy: FulltextStrategy;
+      /** The dialect's fulltext SQL builders, already closed over its table names and fulltext strategy. */
+      strategy: Pick<
+        CommonOperationStrategy,
+        | "buildUpsertFulltext"
+        | "buildDeleteFulltext"
+        | "buildUpsertFulltextBatch"
+        | "buildDeleteFulltextBatch"
+        | "buildFulltextSearch"
+      >;
+      execution: FulltextMembersExecution;
+      batchConfig: FulltextBatchChunkSizes;
+    }>;
 
 export type FulltextMembers = Readonly<{
-  upsertFulltext: (params: UpsertFulltextParams) => Promise<void>;
-  deleteFulltext: (params: DeleteFulltextParams) => Promise<void>;
-  upsertFulltextBatch: (params: UpsertFulltextBatchParams) => Promise<void>;
-  deleteFulltextBatch: (params: DeleteFulltextBatchParams) => Promise<void>;
-  fulltextSearch: (
+  upsertFulltext?: (params: UpsertFulltextParams) => Promise<void>;
+  deleteFulltext?: (params: DeleteFulltextParams) => Promise<void>;
+  upsertFulltextBatch?: (params: UpsertFulltextBatchParams) => Promise<void>;
+  deleteFulltextBatch?: (params: DeleteFulltextBatchParams) => Promise<void>;
+  fulltextSearch?: (
     params: FulltextSearchParams,
   ) => Promise<readonly FulltextSearchResult[]>;
 }>;
 
 /**
- * Builds the fulltext member group. Moved out of the two dialect files
+ * Builds the fulltext member group, or omits it entirely when the backend
+ * was built with `fulltext: false`. Moved out of the two dialect files
  * unchanged: same statements, same batch chunking, same numeric-score
  * coercion.
  */
 export function createFulltextMembers(
   deps: CreateFulltextMembersDeps,
 ): FulltextMembers {
+  if (deps.fulltextStrategy === undefined) return {};
   const { strategy, execution, batchConfig } = deps;
   const { execAll, execRun } = execution;
 

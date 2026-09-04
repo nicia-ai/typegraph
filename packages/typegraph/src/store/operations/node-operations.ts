@@ -63,6 +63,7 @@ import {
   type STATEMENT_EXECUTION,
   UNIQUE_SIDECAR_BATCH,
 } from "../../backend/capabilities/bundle-registry";
+import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import {
   rephaseAtomicNodeClaimPlan,
   supportsNodeCreatePlan,
@@ -181,7 +182,9 @@ import {
   resolveNodeEmbeddingProjectionTransitions,
 } from "../embedding-sync";
 import {
+  assertFulltextMember,
   getSearchableFields,
+  refuseFulltextUnavailable,
   resolveNodeFulltextProjection,
 } from "../fulltext-sync";
 import { getNodeRowsByIds } from "../node-fetch";
@@ -3279,16 +3282,30 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
       { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
     );
   }
-  if (
-    getSearchableFields(schema).length > 0 &&
-    (backend.upsertFulltext === undefined ||
-      backend.deleteFulltext === undefined ||
-      backend.upsertFulltextBatch === undefined ||
-      backend.deleteFulltextBatch === undefined)
-  ) {
-    throw new ConfigurationError(
-      "updateWhere() requires batched fulltext sidecar operations for searchable nodes",
-      { code: "SET_UPDATE_FULLTEXT_UNSUPPORTED", kind },
+  if (getSearchableFields(schema).length > 0) {
+    // A fulltext-off backend (`resolveBackendFulltext` returns `false`) gets
+    // the same typed capability refusal every other fulltext entry point
+    // raises, rather than the member-presence assertions below — those are
+    // for a backend that DOES have fulltext but lacks one of the four
+    // members the write plan calls, mirroring the batched-uniqueness and
+    // batched-vector checks around it.
+    if (resolveBackendFulltext(backend) === false) {
+      refuseFulltextUnavailable(backend, kind);
+    }
+    // Fulltext is available, so a missing batch member here is not an
+    // availability decision but a backend contract violation — the same
+    // invariant `syncFulltextBatchForKind` asserts on its own members.
+    assertFulltextMember(backend.upsertFulltext, "upsertFulltext", backend);
+    assertFulltextMember(backend.deleteFulltext, "deleteFulltext", backend);
+    assertFulltextMember(
+      backend.upsertFulltextBatch,
+      "upsertFulltextBatch",
+      backend,
+    );
+    assertFulltextMember(
+      backend.deleteFulltextBatch,
+      "deleteFulltextBatch",
+      backend,
     );
   }
   if (

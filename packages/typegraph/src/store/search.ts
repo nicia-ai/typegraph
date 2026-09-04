@@ -9,6 +9,7 @@
  */
 import { bindExtraIfReachable } from "../backend/capabilities/bind";
 import { BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   type FulltextCapabilities,
@@ -20,7 +21,10 @@ import {
 import { type GraphDef } from "../core/define-graph";
 import { resolveDeclaredFulltextLanguage } from "../core/searchable";
 import { type NodeType } from "../core/types";
-import { ConfigurationError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../errors";
 import {
   DEFAULT_RRF_K,
   DEFAULT_RRF_WEIGHT,
@@ -439,6 +443,7 @@ export async function executeFulltextSearch<N = Node>(
   options: FulltextSearchOptions,
 ): Promise<readonly FulltextSearchHit<N>[]> {
   const { backend, graphId } = ctx;
+  refuseUnlessFulltextAvailable(backend, "fulltextSearch");
   if (!backend.fulltextSearch) {
     throw new ConfigurationError("Backend does not support fulltext search", {
       backend: backend.dialect,
@@ -725,6 +730,9 @@ export async function executeHybridSearch<N = Node>(
   options: HybridSearchOptions,
 ): Promise<readonly HybridSearchHit<N>[]> {
   const { backend, graphId } = ctx;
+  // Checked ahead of the vector gate so a fulltext-off backend refuses on
+  // the fulltext leg regardless of what the vector leg supports.
+  refuseUnlessFulltextAvailable(backend, "hybridSearch");
   if (!backend.vectorSearch) {
     throw new ConfigurationError("Backend does not support vector search", {
       backend: backend.dialect,
@@ -1143,6 +1151,26 @@ function assertVectorQueryCompatible(
       `${label}: queryEmbedding has ${options.queryEmbedding.length} dimensions, but "${slot.dimensions}" are declared for this field.`,
     );
   }
+}
+
+/**
+ * The one gate every fulltext-touching store entry point consumes:
+ * `resolveBackendFulltext` is the sole owner of "is fulltext available on
+ * this backend", so `executeFulltextSearch` and `executeHybridSearch` both
+ * refuse through it instead of re-deriving the decision from method
+ * presence.
+ */
+function refuseUnlessFulltextAvailable(
+  backend: GraphBackend,
+  operation: string,
+): void {
+  if (resolveBackendFulltext(backend) !== false) return;
+  throw new UnsupportedBackendCapabilityError(
+    operation,
+    "fulltext",
+    { backend: backend.dialect, reason: "fulltext_unsupported" },
+    "This backend declares no fulltext capability: it was created with `fulltext: false`, or it omits `capabilities.fulltext`.",
+  );
 }
 
 type FulltextCallOptions = Readonly<{

@@ -1430,12 +1430,15 @@ export class ConfigurationError extends TypeGraphError {
  *   put it back. A rebuild that dropped anyway would leave every other
  *   graph's search silently empty; one that re-stamped this graph's marker
  *   without the drop would bless a physical shape nothing verified.
+ * - `fulltext-unavailable` — the backend declares no fulltext capability (`fulltext: false`, or no `capabilities.fulltext`),
+ *   so there is no fulltext contribution to rebuild at all.
  */
 export type ContributionRebuildRefusal =
   | "vector-source-unavailable"
   | "no-drop-ddl"
   | "no-schema-fence"
-  | "shared-storage-in-use";
+  | "shared-storage-in-use"
+  | "fulltext-unavailable";
 
 const CONTRIBUTION_REBUILD_REFUSAL_MESSAGE: Readonly<
   Record<ContributionRebuildRefusal, string>
@@ -1455,6 +1458,9 @@ const CONTRIBUTION_REBUILD_REFUSAL_MESSAGE: Readonly<
     "the current declaration, and the only repair — recreating it — would " +
     "destroy fulltext content belonging to other graphs that share the same " +
     "table and can only be rebuilt from their own processes.",
+  "fulltext-unavailable":
+    "This backend declares no fulltext capability, so there is no " +
+    "fulltext contribution to rebuild.",
 };
 
 const CONTRIBUTION_REBUILD_REFUSAL_SUGGESTION: Readonly<
@@ -1478,6 +1484,9 @@ const CONTRIBUTION_REBUILD_REFUSAL_SUGGESTION: Readonly<
     'store.rebuildContribution("fulltext") once per graph on this database. ' +
     "Each run recreates the table from the current DDL and refills that " +
     "graph's rows from its own nodes.",
+  "fulltext-unavailable":
+    "Recreate this backend without `fulltext: false` if fulltext search is " +
+    "needed for this graph.",
 };
 
 /**

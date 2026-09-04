@@ -56,7 +56,10 @@ import {
   ConfigurationError,
 } from "../../errors";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
-import { fts5Strategy, type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
+import {
+  fts5Strategy,
+  type FulltextStrategy,
+} from "../../query/dialect/fulltext-strategy";
 import {
   assertVectorSearchLimit,
   resolveEfSearchOverride,
@@ -226,8 +229,16 @@ export type SqliteBackendOptions = Readonly<{
   /**
    * Fulltext strategy override. Defaults to `fts5Strategy` (SQLite's
    * built-in FTS5 virtual table). Most users should leave this alone.
+   *
+   * Pass `false` to disable fulltext support entirely. The backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/
+   * search methods, mirroring `vector` left unset. A fulltext predicate, a
+   * `searchable()` field, `store.search.fulltext`, and hybrid search all
+   * refuse with a typed error instead of running SQL against a table
+   * this backend never creates. Required for a SQLite build without
+   * FTS5 compiled in.
    */
-  fulltext?: FulltextStrategy;
+  fulltext?: FulltextStrategy | false;
   /**
    * Vector strategy override. When present, the backend owns per-`(kind,
    * field)` typed storage through this strategy (DDL, upsert, delete,
@@ -608,7 +619,8 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   serializedQueue?: SerializedExecutionQueue;
   tableNames: ResolvedSqlTableNames;
-  fulltextStrategy: FulltextStrategy;
+  /** Absent when this backend has no fulltext support (`fulltext: false`). */
+  fulltextStrategy: FulltextStrategy | undefined;
   /**
    * Active vector strategy, or `undefined` when the connection has no
    * vector extension. When present, the backend exposes upsertEmbedding /
@@ -635,7 +647,8 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>;
   profileHints: SqliteExecutionProfileHints;
   tableNames: ResolvedSqlTableNames;
-  fulltextStrategy: FulltextStrategy;
+  /** Absent when this backend has no fulltext support (`fulltext: false`). */
+  fulltextStrategy: FulltextStrategy | undefined;
   /** Active vector strategy. See {@link CreateSqliteOperationBackendOptions}. */
   vectorStrategy?: VectorStrategy | undefined;
   /** Shared durable-marker materializer. See {@link CreateSqliteOperationBackendOptions}. */
@@ -718,11 +731,15 @@ function createSqliteOperationBackend(
     capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
   );
 
-  const fulltextMembers = createFulltextMembers({
-    strategy: operationStrategy,
-    execution: { execAll, execRun },
-    batchConfig,
-  });
+  const fulltextMembers =
+    fulltextStrategy === undefined ?
+      createFulltextMembers({ fulltextStrategy: undefined })
+    : createFulltextMembers({
+        fulltextStrategy,
+        strategy: operationStrategy,
+        execution: { execAll, execRun },
+        batchConfig,
+      });
 
   const contributionOperationMembers = createContributionOperationMembers({
     execRun,
@@ -814,9 +831,13 @@ function createSqliteOperationBackend(
   // `hybridSearch` is the one embedding-adjacent member NOT shared with
   // PostgreSQL (it composes the vector leg with `operationStrategy`'s
   // single-statement hybrid SQL, which is dialect-owned) — kept inline,
-  // gated the same way `vectorEmbeddingMethods` always has been.
+  // gated the same way `vectorEmbeddingMethods` always has been. It also
+  // needs an active fulltext strategy for its fulltext leg, so it is
+  // additionally gated on `fulltextStrategy` — a fulltext-off backend
+  // falls back to the store's multi-statement RRF path just like a
+  // vector-off one already does.
   const vectorEmbeddingMethods =
-    vectorStrategy === undefined ?
+    vectorStrategy === undefined || fulltextStrategy === undefined ?
       {}
     : {
         // Single-statement hybrid needs ROW_NUMBER(); a capability profile
@@ -925,9 +946,7 @@ function createSqliteOperationBackend(
         },
       );
     }
-    const active = await commonOperationMembers.getActiveSchema(
-      params.graphId,
-    );
+    const active = await commonOperationMembers.getActiveSchema(params.graphId);
     assertActiveSchemaVersion(
       params.graphId,
       params.expectedVersion,
@@ -1093,7 +1112,11 @@ export function buildSqliteEngineProfile(
     options.serializedResource,
   );
   const tables = options.tables ?? defaultTables;
-  const fulltextStrategy = options.fulltext ?? fts5Strategy;
+  // `fulltext: false` disables fulltext entirely — mirroring `vector`
+  // left unset, required for a SQLite build with no FTS5 support to build
+  // a TypeGraph backend without a stub strategy.
+  const fulltextStrategy =
+    options.fulltext === false ? undefined : (options.fulltext ?? fts5Strategy);
   const profileHints = options.executionProfile ?? {};
   const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
   const atomicSqlProgramExecutor =
@@ -1160,7 +1183,7 @@ export function buildSqliteEngineProfile(
     tableNames.nodes,
     tableNames.edges,
     tableNames.uniques,
-    tableNames.fulltext,
+    ...(fulltextStrategy === undefined ? [] : [tableNames.fulltext]),
   ];
   const guardedAnalyzeTables = [
     tableNames.recordedNodes,
@@ -1276,7 +1299,10 @@ export function buildSqliteEngineProfile(
       tables.revisionOrigins,
     ),
     contributionsForTableNames: (overrides) =>
-      sqliteContributions(buildSqliteTables(overrides), fulltextStrategy),
+      sqliteContributions(
+        buildSqliteTables(overrides),
+        fulltextStrategy ?? false,
+      ),
   };
 
   /**
@@ -1381,7 +1407,7 @@ export function buildSqliteEngineProfile(
       await db.run(sql.raw(ddl));
     },
     ensureTable: runDdlStatement,
-    generateDdl: () => generateSqliteDDL(tables, fulltextStrategy),
+    generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
@@ -1389,9 +1415,7 @@ export function buildSqliteEngineProfile(
   // layer's own `execute`, built once `createSqlBackend` has a contribution
   // materializer to hand `buildOperations`).
   const graphTemplateRuntime: GraphTemplateRuntime = {
-    graphTemplatesTableDdl: generateSqliteCreateTableSQL(
-      tables.graphTemplates,
-    ),
+    graphTemplatesTableDdl: generateSqliteCreateTableSQL(tables.graphTemplates),
     tableNames: {
       schemaVersions: getTableName(tables.schemaVersions),
       graphTemplates: getTableName(tables.graphTemplates),

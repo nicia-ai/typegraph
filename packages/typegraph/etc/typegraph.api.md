@@ -744,7 +744,7 @@ type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 type CompileQueryOptions = Readonly<{
     dialect?: SqlDialect | undefined;
     schema?: SqlSchema | undefined;
-    fulltextStrategy?: FulltextStrategy | undefined;
+    fulltextStrategy?: FulltextStrategy | false | undefined;
     vectorStrategy?: VectorStrategy | undefined;
     windowFunctions?: boolean | undefined;
     vectorSlots?: VectorSlotMap | undefined;
@@ -895,7 +895,7 @@ export type ContributionProbeResult = Readonly<{
 export type ContributionProbeState = "ready" | "degraded" | "building";
 
 // @public
-export type ContributionRebuildRefusal = "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence" | "shared-storage-in-use";
+export type ContributionRebuildRefusal = "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence" | "shared-storage-in-use" | "fulltext-unavailable";
 
 // @public
 export type ContributionRebuildResult = Readonly<{

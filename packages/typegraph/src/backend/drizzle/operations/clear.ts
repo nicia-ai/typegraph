@@ -1,6 +1,9 @@
 import { getTableName, sql } from "drizzle-orm";
 
-import { buildFulltextGraphDelete } from "../../../query/dialect/fulltext-strategy";
+import {
+  buildFulltextGraphDelete,
+  type FulltextStrategy,
+} from "../../../query/dialect/fulltext-strategy";
 import { type ExecutableSql } from "../execution/types";
 import { type Tables } from "./shared";
 
@@ -15,6 +18,9 @@ export type ClearGraphStatement = Readonly<{
  * graph_id. Delete order respects implicit FK-like dependencies:
  * fulltext → recorded identity/edges/nodes → identity closure/assertions →
  * recorded_clock → uniques → edge_claims → edges → nodes → schema_versions.
+ * The fulltext delete is omitted entirely when `fulltextStrategy` is
+ * `undefined` — the table does not exist on a backend with no fulltext
+ * strategy.
  *
  * Embeddings are NOT cleared here: they live in per-`(nodeKind, fieldPath)`
  * strategy-owned tables that this graph-agnostic builder cannot enumerate.
@@ -31,12 +37,17 @@ export type ClearGraphStatement = Readonly<{
 export function buildClearGraph(
   tables: Tables,
   graphId: string,
+  fulltextStrategy: FulltextStrategy | undefined,
 ): readonly ClearGraphStatement[] {
   return [
     // The fulltext table is shared by every graph in the database, so its
     // graph-scoped delete is owned by one builder the destructive
-    // contribution rebuild calls too — see `buildFulltextGraphDelete`.
-    { query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) },
+    // contribution rebuild calls too — see `buildFulltextGraphDelete`. Omitted
+    // entirely when no fulltext strategy is active: the table was never
+    // created, so there is nothing to delete from.
+    ...(fulltextStrategy === undefined
+      ? []
+      : [{ query: buildFulltextGraphDelete(tables.fulltextTableName, graphId) }]),
     {
       query: sql`DELETE FROM ${tables.recordedIdentityAssertions} WHERE ${tables.recordedIdentityAssertions.graphId} = ${graphId}`,
       ignoreMissingTable: true,

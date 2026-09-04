@@ -898,7 +898,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
 // @public (undocumented)
 type CreateContributionMembersDeps = Readonly<{
     dialect: SqlDialect;
-    fulltextStrategy: FulltextStrategy;
+    fulltextStrategy: FulltextStrategy | undefined;
     fulltextTableName: string;
     vectorStrategy: VectorStrategy | undefined;
     fenceTarget: WriteFenceTarget;
@@ -2611,7 +2611,7 @@ export type SqlEngineProfile<TTx> = Readonly<{
     tableNames: EngineTableNames;
     execution: SqlExecutionAdapter;
     strategy: CommonOperationStrategy;
-    fulltext: FulltextStrategy;
+    fulltext: FulltextStrategy | undefined;
     vector: VectorStrategy | undefined;
     declaredCapabilities: BackendCapabilities;
     resourceAudit: BackendResourceAudit;

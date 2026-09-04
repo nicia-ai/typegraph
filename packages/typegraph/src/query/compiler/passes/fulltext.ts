@@ -1,4 +1,7 @@
-import { UnsupportedPredicateError } from "../../../errors";
+import {
+  UnsupportedBackendCapabilityError,
+  UnsupportedPredicateError,
+} from "../../../errors";
 import type { FulltextMatchPredicate, QueryAst } from "../../ast";
 import type { DialectAdapter } from "../../dialect";
 import { extractFulltextMatchPredicates } from "../predicates";
@@ -32,8 +35,11 @@ export function runFulltextPredicatePass(
   }
 
   if (!dialect.capabilities.supportsFulltext) {
-    throw new UnsupportedPredicateError(
-      `Fulltext match predicates are not supported for dialect "${dialect.name}"`,
+    throw new UnsupportedBackendCapabilityError(
+      "$fulltext.matches()",
+      "fulltext",
+      { dialect: dialect.name, reason: "fulltext_unsupported" },
+      "This backend declares no fulltext capability: it was created with `fulltext: false`, or it omits `capabilities.fulltext`.",
     );
   }
 

@@ -9,6 +9,7 @@
  * deferrable. Candidates run sequentially because they share one graph lock.
  */
 import { type RawBackend } from "../backend/branded";
+import { resolveBackendFulltext } from "../backend/capabilities/fulltext";
 import {
   type GraphBackend,
   type KindRemovalRow,
@@ -148,7 +149,9 @@ type MaterializeOneContext = Readonly<{
   graphId: string;
   nodesTable: string;
   edgesTable: string;
-  fulltextTable: string;
+  // Undefined when the backend has no active fulltext strategy — the table
+  // was never created, so the removed-kind cleanup below skips it.
+  fulltextTable: string | undefined;
   uniquesTable: string;
   edgeClaimsTable: string;
   captureRecordedRemovals: boolean;
@@ -265,7 +268,10 @@ export async function materializeRemovals(
   const tableNames = backend.tableNames;
   const nodesTable = tableNames?.nodes ?? "typegraph_nodes";
   const edgesTable = tableNames?.edges ?? "typegraph_edges";
-  const fulltextTable = tableNames?.fulltext ?? "typegraph_node_fulltext";
+  const fulltextTable =
+    resolveBackendFulltext(backend) === false ? undefined : (
+      (tableNames?.fulltext ?? "typegraph_node_fulltext")
+    );
   const uniquesTable = tableNames?.uniques ?? "typegraph_node_uniques";
   const edgeClaimsTable = tableNames?.edgeClaims ?? "typegraph_edge_claims";
 
@@ -634,9 +640,15 @@ function buildRemovedKindLiveDeleteStatements(
       sql.raw(
         `DELETE FROM ${quote(ctx.edgesTable)} WHERE graph_id = ${graphLit} AND (from_kind = ${kindLit} OR to_kind = ${kindLit})`,
       ),
-      sql.raw(
-        `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
-      ),
+      // Omitted when the backend has no active fulltext strategy — the
+      // table was never created, so there is nothing to reap.
+      ...(ctx.fulltextTable === undefined ?
+        []
+      : [
+          sql.raw(
+            `DELETE FROM ${quote(ctx.fulltextTable)} WHERE graph_id = ${graphLit} AND node_kind = ${kindLit}`,
+          ),
+        ]),
       buildHardDeleteUniquesByConcreteKind(ctx.uniquesTable, {
         graphId: ctx.graphId,
         concreteKind: row.kindName,

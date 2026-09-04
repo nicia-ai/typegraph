@@ -5,6 +5,7 @@
  * TypeGraph Store surface rather than the adapter-native Drizzle handle.
  */
 import { type GraphDef } from "../../core/define-graph";
+import { type FulltextStrategy } from "../../query/dialect/fulltext-strategy";
 import { type SchemaManagerOptions } from "../../schema/manager";
 import {
   type HistoryStore,
@@ -47,6 +48,13 @@ export type LocalPgliteStoreOptions<
   dataDir?: string;
   /** Whether to load pgvector. Defaults to true. */
   vector?: boolean;
+  /**
+   * Override the fulltext strategy. Defaults to `tsvectorStrategy`. Pass
+   * `false` to disable fulltext support entirely — the backend then
+   * advertises no `capabilities.fulltext` and omits the fulltext CRUD/search
+   * methods, and the installation DDL never creates the fulltext table.
+   */
+  fulltext?: FulltextStrategy | false;
   /** Store behavior, including hooks, history, and custom table names. */
   store?: TStoreOptions;
   /**
