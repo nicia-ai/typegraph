@@ -42,7 +42,25 @@ export declare const DRIZZLE_SPECIFIER_PATTERN_SOURCE: string;
 export declare const DRIZZLE_ZONE_MESSAGE: string;
 export declare const DRIZZLE_ZONE_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
 
+/** The dialect-literal ban's own selector pair, resolved as a ban column in its own right. */
+export declare const DIALECT_SEAM_RESTRICTIONS: readonly RestrictedSyntaxEntry[];
+
 /** One `DRIZZLE_ZONE` entry: a real file that genuinely imports Drizzle, and why it may. */
 export type DrizzleZoneEntry = Readonly<{ file: string; reason: string }>;
 
 export declare const DRIZZLE_ZONE: readonly DrizzleZoneEntry[];
+
+/**
+ * One `DIALECT_LITERAL_EXEMPTIONS` entry: a real file that still contains an
+ * AST-level dialect-literal comparison, the reason it may, whether that
+ * reason is permanent or a later commit removes it, and the number of such
+ * sites in the file the reason accounts for.
+ */
+export type DialectLiteralExemptionEntry = Readonly<{
+  file: string;
+  reason: string;
+  permanent: boolean;
+  sites: number;
+}>;
+
+export declare const DIALECT_LITERAL_EXEMPTIONS: readonly DialectLiteralExemptionEntry[];

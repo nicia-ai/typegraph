@@ -37,7 +37,11 @@
  *     DDL/column-type selection, `store/algorithms/iterative-graph-operation.ts`
  *     Postgres error-code classification and value selection) finds every row
  *     it returns NAMED — J10-J13 — so an exemption is a decision recorded
- *     here, not a silent survivor of the ratchet's own file scope.
+ *     here, not a silent survivor of the ratchet's own file scope. The scan
+ *     itself (`scanForDialectLiterals`) lives in `./dialect-literal-scan` —
+ *     `tests/dialect-literal-inventory.test.ts` runs the SAME scan over the
+ *     whole of `src/**` for the ESLint ban's exemption list, so the two
+ *     ratchets cannot disagree about what a dialect literal is.
  *  3. The four PostgreSQL lock-statement tokens (`pg_advisory_xact_lock`,
  *     `hashtext(`, `LOCK TABLE`, `current_setting('transaction_isolation')`)
  *     appear nowhere in the nine sites' six files or in
@@ -70,19 +74,16 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import {
+  type FoundSite,
+  parseFile,
+  scanForDialectLiterals,
+} from "./dialect-literal-scan";
+
 const SOURCE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../src",
 );
-
-/** A site found by scanning source text. */
-type FoundSite = Readonly<{
-  /** Path relative to `packages/typegraph/src`. */
-  file: string;
-  lineNumber: number;
-  /** The site's own source line, trimmed. */
-  line: string;
-}>;
 
 type InventoryEntry = Readonly<{
   file: string;
@@ -276,16 +277,6 @@ function collectTypeScriptFiles(directory: string): readonly string[] {
   return found;
 }
 
-function parseFile(file: string, source: string): ts.SourceFile {
-  return ts.createSourceFile(
-    file,
-    source,
-    ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
-    ts.ScriptKind.TS,
-  );
-}
-
 /** Every bare `resolveWriteFencePlan(...)` call in `source`. */
 function scanForResolveCalls(
   file: string,
@@ -312,83 +303,6 @@ function scanForResolveCalls(
         lineNumber: line + 1,
         line: (lines[line] ?? "").trim(),
       });
-    }
-    ts.forEachChild(node, (child) => {
-      visit(child);
-    });
-  }
-
-  visit(parsed);
-  return sites;
-}
-
-const DIALECT_LITERALS = new Set(["postgres", "sqlite"]);
-
-function isDialectExpression(node: ts.Expression): boolean {
-  if (ts.isIdentifier(node) && node.text === "dialect") return true;
-  return ts.isPropertyAccessExpression(node) && node.name.text === "dialect";
-}
-
-function dialectLiteralComparison(node: ts.Node): boolean {
-  if (
-    ts.isBinaryExpression(node) &&
-    (node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
-      node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
-  ) {
-    const [dialectSide, literalSide] =
-      isDialectExpression(node.left) ? [node.left, node.right]
-      : isDialectExpression(node.right) ? [node.right, node.left]
-      : [undefined, undefined];
-    if (
-      dialectSide !== undefined &&
-      ts.isStringLiteralLike(literalSide) &&
-      DIALECT_LITERALS.has(literalSide.text)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Every `dialect (!==|===) "postgres"/"sqlite"` comparison, and every
- * `switch (dialect)`/`switch (x.dialect)` statement with a `"postgres"`/
- * `"sqlite"` case — the two shapes I8's baseline measured (a `switch` is
- * what `clock.ts`'s pre-fix `lockRecordedClock` used, which the
- * `(!==|===)` grep shape does not match at all).
- */
-function scanForDialectLiterals(
-  file: string,
-  source: string,
-): readonly FoundSite[] {
-  const parsed = parseFile(file, source);
-  const lines = source.split("\n");
-  const sites: FoundSite[] = [];
-
-  function recordAt(start: number): void {
-    const { line } = parsed.getLineAndCharacterOfPosition(start);
-    sites.push({
-      file,
-      lineNumber: line + 1,
-      line: (lines[line] ?? "").trim(),
-    });
-  }
-
-  function visit(node: ts.Node): void {
-    if (dialectLiteralComparison(node)) {
-      recordAt(node.getStart(parsed));
-    }
-    if (
-      ts.isSwitchStatement(node) &&
-      isDialectExpression(node.expression) &&
-      node.caseBlock.clauses.some(
-        (clause) =>
-          ts.isCaseClause(clause) &&
-          ts.isStringLiteralLike(clause.expression) &&
-          DIALECT_LITERALS.has(clause.expression.text),
-      )
-    ) {
-      recordAt(node.getStart(parsed));
     }
     ts.forEachChild(node, (child) => {
       visit(child);
