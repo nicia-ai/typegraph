@@ -27,6 +27,14 @@ export type CopyGraphTemplateContributionMarkersSqlParams = Readonly<{
 }>;
 
 /**
+ * SQLite's `is_active` TRUE literal, hoisted so the file has one spelling of
+ * this decision instead of the marker-copy statement re-deriving it as a
+ * bare `1` beside {@link sqliteInstantiateGraphTemplateStatement}'s own call
+ * to `getDialect("sqlite").booleanLiteral(true)`.
+ */
+const SQLITE_ACTIVE_LITERAL = getDialect("sqlite").booleanLiteral(true);
+
+/**
  * SQLite cannot put a data-modifying CTE beside the schema INSERT. The
  * marker copy therefore runs as a second DML statement after the schema row
  * has returned. It still carries only identifiers and hashes over the wire;
@@ -58,7 +66,7 @@ export function copyGraphTemplateContributionMarkersStatement(
         WHERE graph_id = ${params.graphId}
           AND version = 1
           AND schema_hash = ${params.schemaHash}
-          AND is_active = 1
+          AND is_active = ${SQLITE_ACTIVE_LITERAL}
       )
     ON CONFLICT(graph_id, logical_name, owner, table_name) DO UPDATE SET
       signature = excluded.signature,
@@ -91,7 +99,7 @@ export function sqliteInstantiateGraphTemplateStatement(
 ): SqlFragment {
   const schemaVersions = sql.identifier(params.schemaVersionsTableName);
   const templates = sql.identifier(params.templatesTableName);
-  const active = getDialect("sqlite").booleanLiteral(true);
+  const active = SQLITE_ACTIVE_LITERAL;
   return sql`
     INSERT INTO ${schemaVersions} (graph_id, version, schema_hash, schema_doc, created_at, is_active)
     SELECT ${params.graphId}, 1, ${params.schemaHash},

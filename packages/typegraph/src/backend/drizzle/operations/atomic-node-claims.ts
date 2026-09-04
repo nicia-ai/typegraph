@@ -67,11 +67,7 @@ function ownerColumnNames(uniques: Tables["uniques"]): ClaimOwnerColumnNames {
   };
 }
 
-/**
- * PostgreSQL qualifies the conflicting row in an upsert; SQLite requires the
- * bare column. This is the only dialect decision in the claim renderer,
- * resolved through `operations/shared.ts`'s one owner for that qualification.
- */
+/** Binds the uniques table name into `operations/shared.ts`'s `existingColumn`, this file's one caller of that owner. */
 function existingColumn(
   tables: Tables,
   dialect: SqlDialect,

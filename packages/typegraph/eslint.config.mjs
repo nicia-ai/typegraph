@@ -317,7 +317,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/store/recorded-capture/schema-version.ts",
     reason:
-      "Classifies a declared column's type compatibility by dialect at two call sites; a later commit returns a normalized kind from the catalog probe instead of branching here.",
+      "Probes catalog column types with dialect-specific introspection SQL (readColumnTypes) and classifies a declared column's type compatibility by dialect (isCompatibleColumnType); a later commit resolves both through a normalized column kind returned from the catalog probe.",
     permanent: false,
     sites: 2,
   },
@@ -338,7 +338,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/backend/migrate-recorded-time.ts",
     reason:
-      "Selects a dialect-specific introspection query and, at two further sites, the DDL column types the recorded-time migration writes; provisioning code, not query compilation.",
+      "Selects a dialect-specific introspection query, at two further sites the DDL column types the recorded-time migration writes, and at a fourth site the legacy mapping column the backfill joins on; provisioning code, not query compilation.",
     permanent: true,
     sites: 4,
   },
@@ -1004,23 +1004,17 @@ const LINT_BLOCKS = [
   // Backend parity guardrail. The query compiler is a single shared path; the
   // only sanctioned place for a dialect difference is a DialectAdapter member.
   // Inline `=== "sqlite"` / `case "postgres"` branching reintroduces the
-  // parallel-path failure mode that hid the set-operation gap, so ban it here.
-  // (Spreads DETERMINISM_RESTRICTIONS back in: this block REPLACES the src/**
-  // no-restricted-syntax entry for query-compiler files.)
+  // parallel-path failure mode that hid the set-operation gap. The ban itself
+  // (DIALECT_SEAM_RESTRICTIONS) is already installed on every `src/**/*.ts`
+  // block; this block only re-spreads it, because flat config's rule entries
+  // REPLACE rather than merge and this block's `files` list overrides the
+  // general one for query-compiler files. (Spreads DETERMINISM_RESTRICTIONS
+  // back in for the same reason.)
   //
   // `src/identity/historical-sql.ts` is query-compiler SQL construction that
-  // lives outside src/query, so it is in scope here too. `service-read.ts`
-  // (`lockIdentityGraph` / `lockIdentityEnablementNodes`),
-  // `schema-transition.ts` (`lockIdentityDdl`) and
-  // `graph-merge/provenance-store.ts` (`drainUnfencedRowWriters`) ALSO ban
-  // the dialect literal, but through the `dialect-seam` `WRITE_PIPELINE_PROFILES`
-  // entry below (`DIALECT_SEAM_LOCK_FILES`), not this block: the
-  // pessimistic-lock decision those three files used to spell inline now has
-  // exactly one owner, `resolveWriteFencePlan`
-  // (`src/backend/capabilities/write-fence.ts`, §5.3), so they are in scope
-  // for the same reason this block is — a second inline spelling of a
-  // decision that already has an owner is the defect this ban exists to
-  // catch, not a backend-provisioning exemption from it.
+  // lives outside src/query, so it is in scope here too. See
+  // DIALECT_LITERAL_EXEMPTIONS below for the full file-by-file accounting of
+  // where this ban does and doesn't reach across the rest of `src/**`.
   {
     files: ["src/query/**/*.ts", "src/identity/historical-sql.ts"],
     rules: {

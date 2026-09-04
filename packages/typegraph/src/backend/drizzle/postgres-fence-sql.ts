@@ -4,9 +4,8 @@
  * `pg_advisory_xact_lock`, `hashtext(`, `LOCK TABLE`, or
  * `current_setting('transaction_isolation')` itself. The lock-fence inventory
  * test ratchets those tokens out of the lock-site files; the PostgreSQL
- * profile's extension-DDL lock, the trusted-import table lock, and the
- * graph-template instantiation statement still spell their own and are
- * outside that ratchet.
+ * profile's extension-DDL lock and the trusted-import table lock still spell
+ * their own and are outside that ratchet.
  *
  * Built from `SqlFragment` (`../../query/sql-fragment`), not `drizzle-orm`,
  * so this module stays outside the Drizzle zone and is safe to import from

@@ -94,9 +94,15 @@ function buildInsertUniqueSqlite(
     `"${uniques.graphId.name}", "${uniques.nodeKind.name}", "${uniques.constraintName.name}", "${uniques.key.name}"`,
   );
 
+  const tableName = getTableName(uniques);
+  const existingColumnByName = (columnName: string): SQL =>
+    existingColumnFor("sqlite", tableName, columnName);
+  const existingColumn = (column: Readonly<{ name: string }>) =>
+    existingColumnByName(column.name);
+
   const ownerMatches = claimOwnerMatchesSql(
     drizzleSqlTag,
-    (columnName) => quotedColumn({ name: columnName }),
+    (columnName) => existingColumnByName(columnName),
     boundOwnerColumn(uniques, params),
     ownerColumnNames(uniques),
   );
@@ -111,18 +117,18 @@ function buildInsertUniqueSqlite(
     DO UPDATE SET
       ${quotedColumn(uniques.nodeId)} = CASE
         WHEN ${ownerMatches} THEN ${params.nodeId}
-        WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
-        ELSE ${quotedColumn(uniques.nodeId)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.nodeId}
+        ELSE ${existingColumn(uniques.nodeId)}
       END,
       ${quotedColumn(uniques.concreteKind)} = CASE
         WHEN ${ownerMatches} THEN ${params.concreteKind}
-        WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
-        ELSE ${quotedColumn(uniques.concreteKind)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN ${params.concreteKind}
+        ELSE ${existingColumn(uniques.concreteKind)}
       END,
       ${quotedColumn(uniques.deletedAt)} = CASE
         WHEN ${ownerMatches} THEN NULL
-        WHEN ${quotedColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
-        ELSE ${quotedColumn(uniques.deletedAt)}
+        WHEN ${existingColumn(uniques.deletedAt)} IS NOT NULL THEN NULL
+        ELSE ${existingColumn(uniques.deletedAt)}
       END
     RETURNING
       ${quotedColumn(uniques.nodeId)} as node_id,

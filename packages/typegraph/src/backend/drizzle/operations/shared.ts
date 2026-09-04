@@ -149,9 +149,12 @@ const EXISTING_COLUMN_QUALIFIERS = {
  * The EXISTING row's column inside an `ON CONFLICT ... DO UPDATE`, as
  * opposed to `excluded.<column>` (the row that was proposed for insertion).
  * PostgreSQL requires this reference qualified with the table name to
- * disambiguate it from `excluded`; SQLite takes the bare column. One owner
- * for the three upsert builders that read the conflicting row instead of
- * `excluded`.
+ * disambiguate it from `excluded`; SQLite takes the bare column. Every
+ * upsert builder that reads the conflicting row routes through this one
+ * owner instead of re-spelling the qualification: `buildInsertUnique`,
+ * `buildInsertUniqueBatch`, and `buildInsertUniqueFromSource` (all in
+ * `operations/uniques.ts`), plus the atomic node claim upsert in
+ * `operations/atomic-node-claims.ts` — four call sites.
  */
 export function existingColumn(
   dialect: SqlDialect,

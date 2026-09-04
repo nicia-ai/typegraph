@@ -63,10 +63,14 @@ describe("subgraph fetches route through PostgreSQL's materialized-ids membershi
       expect(result.root?.id).toBe(alice.id);
 
       expect(executed).toHaveLength(3);
-      const forcedCustomPlanCount = executed.filter((query) =>
-        shouldForceCustomPlan(query),
-      ).length;
-      expect(forcedCustomPlanCount).toBe(2);
+      const [closureFetch, ...membershipFetches] = executed;
+      if (closureFetch === undefined) {
+        throw new Error("expected a closure fetch");
+      }
+      expect(shouldForceCustomPlan(closureFetch)).toBe(false);
+      for (const membershipFetch of membershipFetches) {
+        expect(shouldForceCustomPlan(membershipFetch)).toBe(true);
+      }
     } finally {
       await raw.close();
     }

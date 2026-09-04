@@ -54,9 +54,8 @@
  *     narrower than "all of `src/`": `backend/drizzle/postgres.ts` (a
  *     one-off DDL advisory lock, and a one-argument advisory lock keyed on a
  *     deliberately different lock space than every namespaced two-argument
- *     lock), `backend/drizzle/trusted-import.ts`, and
- *     `backend/drizzle/graph-template-sql.ts` each still spell one of these
- *     tokens inline and are none of the sites this model covers.
+ *     lock) and `backend/drizzle/trusted-import.ts` each still spell one of
+ *     these tokens inline and are neither of the sites this model covers.
  *
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
@@ -454,17 +453,18 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
 
 /**
  * The nine sites' six files, `operations/schema.ts` (whose two builders lost
- * the tokens when the PostgreSQL-only one relocated), and that relocated
- * builder's own module — every one of these consumes `fence.sql.*` (or,
- * for the fused schema+graph statement, calls back into
+ * the tokens when the PostgreSQL-only one relocated), that relocated
+ * builder's own module, and `graph-template-sql.ts` (whose `is_active`
+ * literal was the only thing it ever spelled outside a resolved plan, and
+ * that was never one of these four tokens) — every one of these consumes
+ * `fence.sql.*` (or, for the fused schema+graph statement, calls back into
  * `postgres-fence-sql.ts`'s exported bare expressions) rather than spelling
  * a token itself. Deliberately narrower than "all of `src/`":
- * `backend/drizzle/postgres.ts`, `backend/drizzle/trusted-import.ts`, and
- * `backend/drizzle/graph-template-sql.ts` each still spell one of these
- * tokens inline for reasons unrelated to this nine-site model (a one-off DDL
- * lock, a lock space deliberately kept separate from every namespaced lock,
- * an unrelated table lock, and a dialect-dispatch template respectively) and
- * are none of the sites this ratchet covers.
+ * `backend/drizzle/postgres.ts` (a one-off DDL lock, and a lock space
+ * deliberately kept separate from every namespaced lock) and
+ * `backend/drizzle/trusted-import.ts` (an unrelated table lock) each still
+ * spell one of these tokens inline for reasons unrelated to this nine-site
+ * model and are neither of the sites this ratchet covers.
  */
 const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
   "store/recorded-capture/clock.ts",
@@ -475,6 +475,7 @@ const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
   "backend/drizzle/contribution-materializations.ts",
   "backend/drizzle/operations/schema.ts",
   "backend/drizzle/postgres-schema-write-fence.ts",
+  "backend/drizzle/graph-template-sql.ts",
 ];
 
 /** String and template-literal AST tokens — comments and identifiers never match. */
