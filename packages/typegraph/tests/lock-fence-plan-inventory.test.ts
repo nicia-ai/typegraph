@@ -4,15 +4,24 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **15** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **16** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
  *     commit-side, J15 writer-side, J16 the writer-side clause folded into
- *     the fused managed-insert programs), and the shared SQL engine
- *     factory's own resolution (J17, `createSqlBackend`) — enumerated in
- *     both directions, keyed on `(file, trimmed line)` so line drift cannot
- *     rot the pin.
+ *     the fused managed-insert programs), the shared SQL engine
+ *     factory's own resolution (J17, `createSqlBackend`), and the
+ *     trusted-import table lock (J18) — enumerated in both directions,
+ *     keyed on `(file, trimmed line)` so line drift cannot rot the pin.
+ *
+ *     J18 is not one of J1-J8: those eight sites are the ones that used to
+ *     spell `dialect === "postgres"` inline before this ratchet, while
+ *     trusted import's PostgreSQL/SQLite split was always made by calling a
+ *     different exported function per engine, never by a dialect literal.
+ *     It joins the model here because its table lock now resolves the SAME
+ *     plan the other lock sites do, and is the plan's one table-lock-alone
+ *     consumer — see `write-fence.ts`'s note next to
+ *     `planFromLockCapabilities`.
  *
  *     J17 resolves the plan once, immediately after a profile's capability
  *     tail runs and before any member group is assembled, and gates
@@ -29,37 +38,49 @@
  *     site, because its predicate lives INSIDE the insert statement: one
  *     statement cannot race itself, so an empty clause is correct at any
  *     isolation level — which is the posture SQLite has always run in.
- *  2. Zero dialect-literal comparisons (`dialect (!==|===) "postgres"/
- *     "sqlite"`, in a `BinaryExpression` or a `SwitchStatement` discriminant)
- *     remain in the eight lock sites' five files. The same scan run over the
+ *  2. Zero dialect-literal comparisons (any `===`/`!==`/`==`/`!=` comparison
+ *     with a `"postgres"`/`"sqlite"` string literal as either operand, or a
+ *     `case` clause testing one — an EXACT mirror of the ESLint selectors,
+ *     with no requirement that either side of the comparison, or the
+ *     enclosing switch's discriminant, be named `dialect`) remain in the
+ *     eight lock sites' five files. The same scan run over the
  *     two files that legitimately still branch on dialect for reasons that
  *     are NOT the pessimistic-lock decision (`backend/migrate-recorded-time.ts`
  *     DDL/column-type selection, `store/algorithms/iterative-graph-operation.ts`
  *     Postgres error-code classification and value selection) finds every row
  *     it returns NAMED — J10-J13 — so an exemption is a decision recorded
- *     here, not a silent survivor of the ratchet's own file scope.
+ *     here, not a silent survivor of the ratchet's own file scope. The scan
+ *     itself (`scanForDialectLiterals`) lives in `./dialect-literal-scan` —
+ *     `tests/dialect-literal-inventory.test.ts` runs the SAME scan over the
+ *     whole of `src/**` for the ESLint ban's exemption list, so the two
+ *     ratchets cannot disagree about what a dialect literal is.
  *  3. The four PostgreSQL lock-statement tokens (`pg_advisory_xact_lock`,
  *     `hashtext(`, `LOCK TABLE`, `current_setting('transaction_isolation')`)
- *     appear nowhere in the nine sites' six files or in
- *     `backend/drizzle/operations/schema.ts` — every one of those consumes a
- *     resolved plan's `fence.sql.*` (or, for the one PostgreSQL-only builder
- *     that lives outside the plan, calls back into the fence module's own
- *     exported expressions) instead of spelling the statement itself — and
- *     DOES appear in `backend/drizzle/postgres-fence-sql.ts`, the one module
- *     that owns the spelling. This ratchet's file list is deliberately
- *     narrower than "all of `src/`": `backend/drizzle/postgres.ts` (a
- *     one-off DDL advisory lock, and a one-argument advisory lock keyed on a
- *     deliberately different lock space than every namespaced two-argument
- *     lock), `backend/drizzle/trusted-import.ts`, and
- *     `backend/drizzle/graph-template-sql.ts` each still spell one of these
- *     tokens inline and are none of the sites this model covers.
+ *     appear nowhere in the ten files this ratchet scans
+ *     ({@link FENCE_TOKEN_SCANNED_FILES}), including
+ *     `backend/drizzle/trusted-import.ts` (J18, which now resolves the fence
+ *     plan and calls `fence.sql.lockTables(...)` instead of spelling
+ *     `LOCK TABLE` itself) and `backend/drizzle/operations/schema.ts` —
+ *     every one of those consumes a resolved plan's `fence.sql.*` (or, for
+ *     the one PostgreSQL-only builder that lives outside the plan, calls
+ *     back into the fence module's own exported expressions) instead of
+ *     spelling the statement itself — and DOES appear in
+ *     `backend/drizzle/postgres-fence-sql.ts`, the one module that owns the
+ *     spelling. This ratchet's file list is deliberately narrower than "all
+ *     of `src/`": `backend/drizzle/postgres.ts` (the one-off extension-DDL
+ *     advisory lock documented as the remaining leftover in #622, and a
+ *     one-argument advisory lock keyed on a deliberately different lock
+ *     space than every namespaced two-argument lock) still spells one of
+ *     these tokens inline and is not one of the sites this model covers.
  *
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
  * "dialect literal reappeared" half catch this, from different angles).
  * *Mutation*: pin the `resolveWriteFencePlan` count at 10 (the number before
  * the Postgres schema fence's three consumers joined the model) → fails.
- * *Mutation*: re-inline `pg_advisory_xact_lock(hashtext(...))` in a lock site
+ * *Mutation*: pin it at 15 (the number before trusted import's table lock
+ * joined the model) → fails. *Mutation*: re-inline
+ * `pg_advisory_xact_lock(hashtext(...))` in a lock site
  * or in `operations/schema.ts` → fails naming the file. *Mutation*: empty out
  * `postgres-fence-sql.ts`'s builders → fails the module's own positive check.
  */
@@ -70,19 +91,16 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import {
+  type FoundSite,
+  parseFile,
+  scanForDialectLiterals,
+} from "./dialect-literal-scan";
+
 const SOURCE_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../src",
 );
-
-/** A site found by scanning source text. */
-type FoundSite = Readonly<{
-  /** Path relative to `packages/typegraph/src`. */
-  file: string;
-  lineNumber: number;
-  /** The site's own source line, trimmed. */
-  line: string;
-}>;
 
 type InventoryEntry = Readonly<{
   file: string;
@@ -151,14 +169,14 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/store.ts",
-    line: 'resolveWriteFencePlan(backend).kind === "unfenced"',
+    line: "const identityFencePlan = resolveWriteFencePlan(backend);",
     site: "J9b",
     reason:
       "The Operational Identity construction gate refuses an unfenced backend before any statement runs.",
   },
   {
     file: "store/store.ts",
-    line: 'if (resolveWriteFencePlan(backend).kind === "unfenced") {',
+    line: "const clockFencePlan = resolveWriteFencePlan(backend);",
     site: "J9a",
     reason:
       "The recorded-clock-allocation construction gate refuses an unfenced backend before any statement runs.",
@@ -198,6 +216,13 @@ const CALL_SITES: readonly InventoryEntry[] = [
     reason:
       "createSqlBackend builds the ONE fence target from a profile's finalized capabilities and resolves the plan once, before any member group is assembled, and gates markSchemaFencedInsertEligible on the result — every dialect profile this factory assembles shares this one resolution.",
   },
+  {
+    file: "backend/drizzle/trusted-import.ts",
+    line: "const plan = resolveWriteFencePlan(backend);",
+    site: "J18",
+    reason:
+      "lockPostgresTrustedImportTables resolves the plan for the trusted-import table lock. The one site that takes a table lock with no advisory lock preceding it — the import owns the whole node and edge relations for its duration and runs inside its own transaction.",
+  },
 ];
 
 /** The 5 files every lock site (J1-J8) lives in — zero dialect literals here. */
@@ -218,13 +243,6 @@ const LOCK_SITE_FILES: readonly string[] = [
  * dialect comparisons from `migrate-recorded-time.ts`.
  */
 const NON_LOCK_EXEMPTIONS: readonly InventoryEntry[] = [
-  {
-    file: "backend/migrate-recorded-time.ts",
-    line: 'target.dialect === "sqlite" ?',
-    site: "J12-a",
-    reason:
-      "columnNames selects which introspection query to run (PRAGMA table_info vs information_schema) — not a lock.",
-  },
   {
     file: "backend/migrate-recorded-time.ts",
     line: 'const revisionType = dialect === "postgres" ? "BIGINT" : "INTEGER";',
@@ -276,16 +294,6 @@ function collectTypeScriptFiles(directory: string): readonly string[] {
   return found;
 }
 
-function parseFile(file: string, source: string): ts.SourceFile {
-  return ts.createSourceFile(
-    file,
-    source,
-    ts.ScriptTarget.Latest,
-    /* setParentNodes */ false,
-    ts.ScriptKind.TS,
-  );
-}
-
 /** Every bare `resolveWriteFencePlan(...)` call in `source`. */
 function scanForResolveCalls(
   file: string,
@@ -312,83 +320,6 @@ function scanForResolveCalls(
         lineNumber: line + 1,
         line: (lines[line] ?? "").trim(),
       });
-    }
-    ts.forEachChild(node, (child) => {
-      visit(child);
-    });
-  }
-
-  visit(parsed);
-  return sites;
-}
-
-const DIALECT_LITERALS = new Set(["postgres", "sqlite"]);
-
-function isDialectExpression(node: ts.Expression): boolean {
-  if (ts.isIdentifier(node) && node.text === "dialect") return true;
-  return ts.isPropertyAccessExpression(node) && node.name.text === "dialect";
-}
-
-function dialectLiteralComparison(node: ts.Node): boolean {
-  if (
-    ts.isBinaryExpression(node) &&
-    (node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
-      node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
-  ) {
-    const [dialectSide, literalSide] =
-      isDialectExpression(node.left) ? [node.left, node.right]
-      : isDialectExpression(node.right) ? [node.right, node.left]
-      : [undefined, undefined];
-    if (
-      dialectSide !== undefined &&
-      ts.isStringLiteralLike(literalSide) &&
-      DIALECT_LITERALS.has(literalSide.text)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Every `dialect (!==|===) "postgres"/"sqlite"` comparison, and every
- * `switch (dialect)`/`switch (x.dialect)` statement with a `"postgres"`/
- * `"sqlite"` case — the two shapes I8's baseline measured (a `switch` is
- * what `clock.ts`'s pre-fix `lockRecordedClock` used, which the
- * `(!==|===)` grep shape does not match at all).
- */
-function scanForDialectLiterals(
-  file: string,
-  source: string,
-): readonly FoundSite[] {
-  const parsed = parseFile(file, source);
-  const lines = source.split("\n");
-  const sites: FoundSite[] = [];
-
-  function recordAt(start: number): void {
-    const { line } = parsed.getLineAndCharacterOfPosition(start);
-    sites.push({
-      file,
-      lineNumber: line + 1,
-      line: (lines[line] ?? "").trim(),
-    });
-  }
-
-  function visit(node: ts.Node): void {
-    if (dialectLiteralComparison(node)) {
-      recordAt(node.getStart(parsed));
-    }
-    if (
-      ts.isSwitchStatement(node) &&
-      isDialectExpression(node.expression) &&
-      node.caseBlock.clauses.some(
-        (clause) =>
-          ts.isCaseClause(clause) &&
-          ts.isStringLiteralLike(clause.expression) &&
-          DIALECT_LITERALS.has(clause.expression.text),
-      )
-    ) {
-      recordAt(node.getStart(parsed));
     }
     ts.forEachChild(node, (child) => {
       visit(child);
@@ -453,13 +384,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 15 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 16 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 15 declared call sites, both directions", () => {
-    expect(found).toHaveLength(15);
-    expect(CALL_SITES).toHaveLength(15);
+  it("has exactly the 16 declared call sites, both directions", () => {
+    expect(found).toHaveLength(16);
+    expect(CALL_SITES).toHaveLength(16);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );
@@ -540,17 +471,20 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
 
 /**
  * The nine sites' six files, `operations/schema.ts` (whose two builders lost
- * the tokens when the PostgreSQL-only one relocated), and that relocated
- * builder's own module — every one of these consumes `fence.sql.*` (or,
- * for the fused schema+graph statement, calls back into
- * `postgres-fence-sql.ts`'s exported bare expressions) rather than spelling
- * a token itself. Deliberately narrower than "all of `src/`":
- * `backend/drizzle/postgres.ts`, `backend/drizzle/trusted-import.ts`, and
- * `backend/drizzle/graph-template-sql.ts` each still spell one of these
- * tokens inline for reasons unrelated to this nine-site model (a one-off DDL
- * lock, a lock space deliberately kept separate from every namespaced lock,
- * an unrelated table lock, and a dialect-dispatch template respectively) and
- * are none of the sites this ratchet covers.
+ * the tokens when the PostgreSQL-only one relocated), that relocated
+ * builder's own module, `graph-template-sql.ts` (whose `is_active`
+ * literal was the only thing it ever spelled outside a resolved plan, and
+ * that was never one of these four tokens), and `backend/drizzle/trusted-
+ * import.ts` (J18: its table lock now resolves the same plan and calls
+ * `fence.sql.lockTables(...)` instead of spelling `LOCK TABLE` itself) —
+ * ten files in all — every one of these consumes `fence.sql.*` (or, for the fused schema+graph
+ * statement, calls back into `postgres-fence-sql.ts`'s exported bare
+ * expressions) rather than spelling a token itself. Deliberately narrower
+ * than "all of `src/`": `backend/drizzle/postgres.ts` (the one-off
+ * extension-DDL advisory lock documented as the remaining leftover in #622,
+ * and a lock space deliberately kept separate from every namespaced lock)
+ * still spells one of these tokens inline and is not one of the sites this
+ * ratchet covers.
  */
 const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
   "store/recorded-capture/clock.ts",
@@ -561,6 +495,8 @@ const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
   "backend/drizzle/contribution-materializations.ts",
   "backend/drizzle/operations/schema.ts",
   "backend/drizzle/postgres-schema-write-fence.ts",
+  "backend/drizzle/graph-template-sql.ts",
+  "backend/drizzle/trusted-import.ts",
 ];
 
 /** String and template-literal AST tokens — comments and identifiers never match. */
@@ -582,8 +518,11 @@ function isStringOrTemplatePart(
  * above, `write-fence.ts`'s, etc.) is never mistaken for a real spelling.
  * Deduplicated by line: two tokens on the same physical line (`postgres-
  * fence-sql.ts`'s `pg_advisory_xact_lock(hashtext(` is both at once) report
- * as one site, matching how `scanForDialectLiterals` above reports one site
- * per line rather than one per match.
+ * as one site — a dedup this scan needs because it matches literal
+ * SUBSTRINGS within one string/template node, not whole AST nodes the way
+ * `scanForDialectLiterals` above does; that scan needs no such dedup, since
+ * each `BinaryExpression` or `case` clause it counts is already its own
+ * node.
  */
 function scanForFenceTokens(
   file: string,
@@ -638,7 +577,7 @@ describe("T17 — the four PostgreSQL lock-statement tokens have exactly one own
   );
   const moduleFound = scanFiles([FENCE_MODULE_FILE], scanForFenceTokens);
 
-  it("has zero fence lock-statement tokens across the nine-site files and the relocated builder's home", () => {
+  it("has zero fence lock-statement tokens across the scanned files", () => {
     const reported = scannedFound.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

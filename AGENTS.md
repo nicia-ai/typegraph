@@ -415,12 +415,15 @@ get there by construction, not by hoping:
    interface — a *token-level* seam (quote an identifier, pick a JSON function,
    emit a boolean literal). Because it is an `interface`, every dialect is forced
    by the type checker to provide an implementation, so a backend can never be
-   silently skipped. An ESLint rule bans inline `=== "sqlite"` / `case
-   "postgres"` branching under `src/query` to keep this true. Never reintroduce a
-   per-dialect *strategy function* that re-implements compilation for one backend
-   — that parallel-path pattern is exactly what hid the set-operation gap.
-   (Backend provisioning under `src/backend` — DDL, migrations, extension setup —
-   legitimately branches on dialect and is out of scope.)
+   silently skipped. An ESLint rule bans an inline `dialect === "sqlite"` / `case
+   "postgres"` comparison across the whole library source (`src/**`), not only
+   the query compiler; a file that genuinely cannot honor that — one-shot
+   provisioning or migration, the pessimistic-lock fence's one owner, a
+   resource-audit driver fact, dialect-specific error classification — is named
+   file by file in `DIALECT_LITERAL_EXEMPTIONS` (`eslint.config.mjs`) with the
+   reason, rather than exempted by directory. Never reintroduce a per-dialect
+   *strategy function* that re-implements compilation for one backend — that
+   parallel-path pattern is exactly what hid the set-operation gap.
 
 2. **Query-feature tests live in the shared cross-backend suite**
    (`tests/backends/integration/*.ts`, registered via `createIntegrationTestSuite`

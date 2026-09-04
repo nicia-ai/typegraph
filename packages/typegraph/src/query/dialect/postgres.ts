@@ -107,6 +107,7 @@ export const postgresDialect: DialectAdapter = {
     vectorPredicateStrategy: "native",
     vectorMetrics: ["cosine", "l2", "inner_product"] as const,
     supportsFulltext: true,
+    subgraphMembershipStrategy: "materialized-ids",
   },
 
   binaryText(expression) {

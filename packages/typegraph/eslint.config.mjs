@@ -9,12 +9,15 @@ import {
 } from "./eslint/write-pipeline-inventory.mjs";
 
 const DIALECT_SEAM_MESSAGE =
-  "Do not branch on dialect identity in the query compiler. Express the " +
-  "difference as a method/capability on DialectAdapter (a token-level seam) so " +
-  "TypeScript forces every backend to provide an implementation and the " +
-  "divergence stays visible and cross-backend testable. Backend provisioning " +
-  "(src/backend) may branch on dialect for DDL/migration; the query compiler " +
-  "must not.";
+  "Do not branch on dialect identity with an inline literal comparison or " +
+  "switch. Express the difference as a method/capability on DialectAdapter " +
+  "(a token-level seam) or a declared backend capability — anywhere under " +
+  "src — so TypeScript forces every backend to provide an implementation and " +
+  "the divergence stays visible and cross-backend testable. A file that " +
+  "genuinely cannot (one-shot provisioning/migration, the pessimistic-lock " +
+  "fence's one owner, a resource-audit driver fact, dialect-specific error " +
+  "classification) is named file by file in DIALECT_LITERAL_EXEMPTIONS, " +
+  "below, with the reason.";
 
 const LOCALE_API_MESSAGE =
   "Locale-dependent APIs (localeCompare / toLocale* / Intl) vary with the " +
@@ -257,12 +260,17 @@ export const SOURCE_WIDE_RESTRICTIONS = [
   ...INTEROP_PROBE_RESTRICTIONS,
 ];
 
-// The query compiler's dialect ban, named once so the write-pipeline block
-// that also covers `src/identity/historical-sql.ts` can respell its profile
-// without dropping it. Flat-config rule entries REPLACE, so a later block that
-// forgot this list would silently switch the parity guardrail off for that
-// file.
-const DIALECT_SEAM_RESTRICTIONS = [
+// The dialect ban, named once so every block that also needs it can respell
+// its profile without dropping it. Flat-config rule entries REPLACE, so a
+// later block that forgot this list would silently switch the parity
+// guardrail off for that file. Originally the query compiler's own ban, now
+// spread into every `no-restricted-syntax` block that covers `src/**/*.ts`
+// — see DIALECT_LITERAL_EXEMPTIONS immediately below for the per-file release
+// valve that lifts it where an AST-level literal still exists. Exported, like
+// DRIZZLE_ZONE_RESTRICTIONS, so `tests/backend-construction-lint.test.ts` can
+// resolve THIS list out of the real config as its own ban column, rather than
+// only checking the exemption list against the tree.
+export const DIALECT_SEAM_RESTRICTIONS = [
   {
     selector:
       "BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]",
@@ -271,6 +279,75 @@ const DIALECT_SEAM_RESTRICTIONS = [
   {
     selector: "SwitchCase > Literal[value=/^(sqlite|postgres)$/]",
     message: DIALECT_SEAM_MESSAGE,
+  },
+];
+
+/**
+ * The dialect-literal ban's exemption ratchet: exactly the `src/**` files
+ * that contain an AST-level `dialect === "postgres"` / `"sqlite"` comparison
+ * or `switch (dialect)` today (the same two shapes DIALECT_SEAM_RESTRICTIONS
+ * matches), each with the reason it may, whether that reason is permanent or
+ * a later commit removes it, and the number of such sites the reason covers.
+ * `tests/dialect-literal-inventory.test.ts` asserts this list's file set
+ * equals the set of real dialect-literal sites, BOTH directions — a stale
+ * entry (a file whose literal has been removed) fails as loudly as a new,
+ * unlisted one — and separately asserts each entry's `sites` count against
+ * the same file, so a reason that names N decisions stays honest as sites are
+ * removed one at a time: the count drops before the last one does, forcing
+ * the reason to narrow rather than surviving on a stale justification.
+ *
+ * @typedef {Readonly<{ file: string, reason: string, permanent: boolean, sites: number }>} DialectLiteralExemptionEntry
+ * @type {readonly DialectLiteralExemptionEntry[]}
+ */
+export const DIALECT_LITERAL_EXEMPTIONS = [
+  {
+    file: "src/store/store.ts",
+    reason:
+      "Passes ownsWriteLock=true only for SQLite's BEGIN IMMEDIATE transactions, which already hold the write lock recorded-clock allocation would otherwise re-acquire — the one boolean flag this preflight path threads through.",
+    permanent: true,
+    sites: 1,
+  },
+  {
+    file: "src/backend/migrate-vectors.ts",
+    reason:
+      "Decodes the legacy engine-native embedding column with engine-specific SQL; a one-shot migration over a format each engine wrote differently, not query compilation.",
+    permanent: true,
+    sites: 2,
+  },
+  {
+    file: "src/backend/migrate-recorded-time.ts",
+    reason:
+      "At two sites the DDL column types the recorded-time migration writes, and at a third site the legacy mapping column the backfill joins on; provisioning code, not query compilation.",
+    permanent: true,
+    sites: 3,
+  },
+  {
+    file: "src/backend/repair-validity-windows.ts",
+    reason:
+      "One site drops the SQLite-only canonical-instant GLOB predicates when scoping the repair on the other dialect; the other skips the non-canonical-window count on PostgreSQL, always reporting zero there. A one-shot provisioning tool, not query compilation.",
+    permanent: true,
+    sites: 2,
+  },
+  {
+    file: "src/backend/capabilities/write-fence.ts",
+    reason:
+      "The dialect-keyed default lock capabilities the fence planner starts from (deriveFromDialect), plus the refusal and declaration-guidance messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable, pessimisticLockDeclarationLine, unfencedRefusalMessage).",
+    permanent: true,
+    sites: 9,
+  },
+  {
+    file: "src/store/algorithms/iterative-graph-operation.ts",
+    reason:
+      "Gated to PostgreSQL only: classifies the SQL state of a refused read-write transaction open (a replica refusing the round's BEGIN before it starts) and, separately, of a failed working-table CREATE, so both can raise the same typed temporary-table-capability error; SQLite has no equivalent SQL state to classify. Error handling, not query compilation.",
+    permanent: true,
+    sites: 2,
+  },
+  {
+    file: "src/backend/transaction-resource.ts",
+    reason:
+      "The SQLite-only same-object and identity-lease arms of the serialized-resource audit are a driver fact, not a decision this ban's seam could generalize.",
+    permanent: true,
+    sites: 2,
   },
 ];
 
@@ -582,6 +659,71 @@ export function drizzleZoneExemptionBlocks(blocks, zone) {
 }
 
 /**
+ * Generates one exemption block per {@link DIALECT_LITERAL_EXEMPTIONS} entry:
+ * the LAST block in `blocks` that sets `no-restricted-syntax` and covers
+ * `file`, minus the dialect-literal ban's own selectors. Mirrors
+ * {@link drizzleZoneExemptionBlocks}'s "find the last covering block, drop
+ * only this ban's selectors" shape — the same composition rule applied to a
+ * second, independent ban — so a file keeps every OTHER guardrail its
+ * covering block installed and loses only the dialect-literal ban.
+ *
+ * @param {readonly Readonly<{
+ *   name?: string,
+ *   files?: readonly string[],
+ *   ignores?: readonly string[],
+ *   rules?: Readonly<Record<string, unknown>>,
+ * }>[]} blocks
+ * @param {readonly DialectLiteralExemptionEntry[]} exemptions
+ */
+export function dialectLiteralExemptionBlocks(blocks, exemptions) {
+  const banSelectors = new Set(
+    DIALECT_SEAM_RESTRICTIONS.map((restriction) => restriction.selector),
+  );
+
+  function isRestrictedSyntaxOption(option) {
+    return (
+      typeof option === "object" &&
+      option !== null &&
+      "selector" in option &&
+      typeof option.selector === "string"
+    );
+  }
+
+  return exemptions.map((entry) => {
+    const coveringBlocks = blocks.filter(
+      (block) =>
+        block.files !== undefined &&
+        Array.isArray(block.rules?.["no-restricted-syntax"]) &&
+        profileCovers(entry.file, {
+          files: block.files,
+          ignores: block.ignores,
+        }),
+    );
+    const coveringBlock = coveringBlocks.at(-1);
+    if (coveringBlock === undefined) {
+      throw new Error(
+        `dialectLiteralExemptionBlocks: no lint block sets no-restricted-syntax and covers ${entry.file}.`,
+      );
+    }
+
+    const inheritedOption = coveringBlock.rules?.["no-restricted-syntax"];
+    const inherited = (
+      Array.isArray(inheritedOption) ? inheritedOption : []).filter(
+      (option) =>
+        !isRestrictedSyntaxOption(option) || !banSelectors.has(option.selector),
+    );
+
+    return {
+      name: `typegraph/dialect-seam/exempt/${entry.file}`,
+      files: [entry.file],
+      rules: {
+        "no-restricted-syntax": inherited,
+      },
+    };
+  });
+}
+
+/**
  * The audited overlay files: they legitimately drop the backend-overlay ban
  * (they ARE the audited decorators), so they are their own restriction profile
  * rather than an `ignores` hole in the store profile.
@@ -635,6 +777,7 @@ const WRITE_PIPELINE_PROFILES = [
       ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...BACKEND_DERIVATION_RESTRICTIONS,
+      ...DIALECT_SEAM_RESTRICTIONS,
     ],
   },
   {
@@ -652,6 +795,7 @@ const WRITE_PIPELINE_PROFILES = [
       GLOBAL_SYMBOL_RESTRICTION,
       ...RUNTIME_PORT_RESTRICTIONS,
       ...BACKEND_DERIVATION_RESTRICTIONS,
+      ...DIALECT_SEAM_RESTRICTIONS,
     ],
   },
   {
@@ -662,6 +806,7 @@ const WRITE_PIPELINE_PROFILES = [
       ...DRIZZLE_ZONE_RESTRICTIONS,
       GLOBAL_SYMBOL_RESTRICTION,
       ...BACKEND_AUDIT_TRAIL_RESTRICTIONS,
+      ...DIALECT_SEAM_RESTRICTIONS,
     ],
   },
   {
@@ -775,7 +920,9 @@ const LINT_BLOCKS = [
   },
 
   // Determinism guardrail: no locale-dependent APIs anywhere in the library
-  // source.
+  // source. Also carries the dialect-literal ban, extended here to the whole
+  // library (previously the query compiler's alone); DIALECT_LITERAL_EXEMPTIONS
+  // lifts it, file by file, where an AST-level literal still exists.
   {
     files: ["src/**/*.ts"],
     rules: {
@@ -788,6 +935,7 @@ const LINT_BLOCKS = [
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -809,6 +957,7 @@ const LINT_BLOCKS = [
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -818,6 +967,7 @@ const LINT_BLOCKS = [
   // TypeScript this parameter, not a void-valued data field.
   {
     files: [
+      "src/backend/capabilities/catalog.ts",
       "src/backend/types.ts",
       "src/query/dialect/fulltext-strategy.ts",
       "src/query/dialect/types.ts",
@@ -834,23 +984,17 @@ const LINT_BLOCKS = [
   // Backend parity guardrail. The query compiler is a single shared path; the
   // only sanctioned place for a dialect difference is a DialectAdapter member.
   // Inline `=== "sqlite"` / `case "postgres"` branching reintroduces the
-  // parallel-path failure mode that hid the set-operation gap, so ban it here.
-  // (Spreads DETERMINISM_RESTRICTIONS back in: this block REPLACES the src/**
-  // no-restricted-syntax entry for query-compiler files.)
+  // parallel-path failure mode that hid the set-operation gap. The ban itself
+  // (DIALECT_SEAM_RESTRICTIONS) is already installed on every `src/**/*.ts`
+  // block; this block only re-spreads it, because flat config's rule entries
+  // REPLACE rather than merge and this block's `files` list overrides the
+  // general one for query-compiler files. (Spreads DETERMINISM_RESTRICTIONS
+  // back in for the same reason.)
   //
   // `src/identity/historical-sql.ts` is query-compiler SQL construction that
-  // lives outside src/query, so it is in scope here too. `service-read.ts`
-  // (`lockIdentityGraph` / `lockIdentityEnablementNodes`),
-  // `schema-transition.ts` (`lockIdentityDdl`) and
-  // `graph-merge/provenance-store.ts` (`drainUnfencedRowWriters`) ALSO ban
-  // the dialect literal, but through the `dialect-seam` `WRITE_PIPELINE_PROFILES`
-  // entry below (`DIALECT_SEAM_LOCK_FILES`), not this block: the
-  // pessimistic-lock decision those three files used to spell inline now has
-  // exactly one owner, `resolveWriteFencePlan`
-  // (`src/backend/capabilities/write-fence.ts`, §5.3), so they are in scope
-  // for the same reason this block is — a second inline spelling of a
-  // decision that already has an owner is the defect this ban exists to
-  // catch, not a backend-provisioning exemption from it.
+  // lives outside src/query, so it is in scope here too. See
+  // DIALECT_LITERAL_EXEMPTIONS below for the full file-by-file accounting of
+  // where this ban does and doesn't reach across the rest of `src/**`.
   {
     files: ["src/query/**/*.ts", "src/identity/historical-sql.ts"],
     rules: {
@@ -880,6 +1024,7 @@ const LINT_BLOCKS = [
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -902,6 +1047,7 @@ const LINT_BLOCKS = [
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -922,6 +1068,7 @@ const LINT_BLOCKS = [
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -946,6 +1093,7 @@ const LINT_BLOCKS = [
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -964,6 +1112,7 @@ const LINT_BLOCKS = [
         ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
+        ...DIALECT_SEAM_RESTRICTIONS,
       ],
     },
   },
@@ -1020,7 +1169,21 @@ const LINT_BLOCKS = [
 // guardrail their covering block installed stays in force. Appended last so
 // flat config's "last block wins" makes them authoritative for exactly
 // their one file each.
-export default [
+const CONFIG_WITHOUT_DIALECT_LITERAL_EXEMPTIONS = [
   ...LINT_BLOCKS,
   ...drizzleZoneExemptionBlocks(LINT_BLOCKS, DRIZZLE_ZONE),
+];
+
+// The dialect-literal ban's exemptions, resolved against the config above so
+// a file that is ALSO a Drizzle-zone import (e.g. `operations/strategy.ts`)
+// keeps that exemption too — this generator finds the true last-matching
+// block, drizzle-zone exemption included, before subtracting only the
+// dialect-literal selectors. Appended last for the same "last block wins"
+// reason as the zone exemptions above.
+export default [
+  ...CONFIG_WITHOUT_DIALECT_LITERAL_EXEMPTIONS,
+  ...dialectLiteralExemptionBlocks(
+    CONFIG_WITHOUT_DIALECT_LITERAL_EXEMPTIONS,
+    DIALECT_LITERAL_EXEMPTIONS,
+  ),
 ];

@@ -290,6 +290,17 @@ export type {
   PessimisticLockCapabilities,
 } from "./capabilities/write-fence";
 
+import { type BackendCatalogProbes } from "./capabilities/catalog";
+
+export type {
+  BackendCatalogProbes,
+  CatalogColumn,
+  CatalogIndexBehavior,
+  IndexState,
+  NormalizedColumnKind,
+  TableState,
+} from "./capabilities/catalog";
+
 /**
  * Backend capabilities that vary by dialect.
  */
@@ -2900,6 +2911,20 @@ export type GraphBackend = Readonly<{
     params: ReleaseIndexMaterializationClaimParams,
   ) => Promise<void>;
 
+  /**
+   * Physical-schema introspection: table/index presence, PostgreSQL's
+   * invalid-index leftover state, and normalized column types. Present on
+   * both bundled Drizzle backends; a custom backend that omits it loses the
+   * store paths that consult it directly: index materialization
+   * (`store.materializeIndexes()` refuses only once its empty-candidate
+   * short circuit and the status-table ensure step have already run;
+   * `store.materializeSystemIndexes()`, which has no candidate short
+   * circuit, refuses only once that same status-table ensure step has
+   * run), the recorded-time schema check, and the recorded-time
+   * migration's column read.
+   */
+  catalog?: BackendCatalogProbes | undefined;
+
   // === Contribution Materialization (#135 — durable strategy-owned
   // storage marker, sibling of the index status table) ===
 
@@ -3558,6 +3583,9 @@ export type IndexMaterializationBackend = Pick<
   | "recordIndexMaterialization"
 >;
 
+/** The optional catalog-introspection surface. See {@link BackendCatalogProbes}. */
+export type CatalogBackend = Pick<GraphBackend, "catalog">;
+
 export type ContributionMaterializationBackend = Pick<
   GraphBackend,
   | "ensureContributionMaterializationsTable"
@@ -3654,6 +3682,7 @@ export type TransactionBackend = Readonly<
     VectorOperationBackend &
     FulltextOperationBackend &
     IndexMaterializationBackend &
+    CatalogBackend &
     ContributionMaterializationBackend &
     RemovalMaterializationBackend &
     GraphLifecycleBackend &

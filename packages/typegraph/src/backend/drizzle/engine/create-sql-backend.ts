@@ -167,7 +167,6 @@ export function createSqlBackend<TTx>(
   const { ensureGraphTemplatesTable, members: graphTemplateMembers } =
     createGraphTemplateMembers({
       ...profile.graphTemplateRuntime,
-      dialect: profile.dialect,
       ensureTable: profile.provisioning.ensureTable,
       execute: operations.execute,
     });
@@ -269,6 +268,9 @@ export function createSqlBackend<TTx>(
     ...indexMaterializationMembers,
     ...contributionMembers,
     ...kindRemovalMembers,
+    ...(profile.provisioning.catalog === undefined ?
+      {}
+    : { catalog: profile.provisioning.catalog }),
     close: profile.close,
   } satisfies AdapterBackend<TTx>;
 

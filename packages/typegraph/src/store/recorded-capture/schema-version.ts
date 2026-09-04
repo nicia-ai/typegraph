@@ -1,10 +1,13 @@
+import {
+  type CatalogColumn,
+  type NormalizedColumnKind,
+  requireCatalog,
+  REVISION_COLUMN_KINDS,
+  WALL_TIME_COLUMN_KINDS,
+} from "../../backend/capabilities/catalog";
 import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
-import { sql } from "../../query/sql-fragment";
-import { asCompiledRowsSql } from "../../query/sql-intent";
-
-type ColumnRow = Readonly<{ name: unknown; type: unknown }>;
 
 type RecordedColumnKind = "revision" | "wall-time";
 
@@ -14,59 +17,30 @@ type RequiredRecordedColumn = Readonly<{
   table: string;
 }>;
 
-function normalizedColumnType(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const normalized = value.trim().toLowerCase();
-  return normalized.length === 0 ? undefined : normalized;
-}
-
 async function readColumnTypes(
-  backend: Pick<GraphBackend, "dialect" | "execute">,
+  backend: Pick<GraphBackend, "catalog">,
   table: string,
-): Promise<ReadonlyMap<string, string>> {
-  const rows =
-    backend.dialect === "sqlite" ?
-      await backend.execute<ColumnRow>(
-        asCompiledRowsSql(sql`PRAGMA table_info(${sql.identifier(table)})`),
-      )
-    : await backend.execute<ColumnRow>(
-        asCompiledRowsSql(sql`
-          SELECT column_name AS name, data_type AS type
-          FROM information_schema.columns
-          WHERE table_schema = current_schema()
-            AND table_name = ${table}
-        `),
-      );
-  return new Map(
-    rows.flatMap((row) => {
-      if (typeof row.name !== "string") return [];
-      const type = normalizedColumnType(row.type);
-      return type === undefined ? [] : [[row.name, type] as const];
-    }),
-  );
+): Promise<ReadonlyMap<string, CatalogColumn>> {
+  const catalog = requireCatalog(backend, "assertCurrentRecordedSchema");
+  const columns = await catalog.columnTypes(table);
+  return new Map(columns.map((column) => [column.name, column]));
 }
 
-function hasSqliteAffinity(
-  declaredType: string,
+/**
+ * Whether a column normalized to `actual` is compatible with the recorded
+ * time role `kind` expects, checked against the owned kind set for that
+ * role ({@link REVISION_COLUMN_KINDS} / {@link WALL_TIME_COLUMN_KINDS})
+ * rather than a dialect branch — the two dialects agree on the revision
+ * kind but not on the wall-time one, which is exactly what those two sets
+ * already encode.
+ */
+function isCompatibleColumnKind(
   kind: RecordedColumnKind,
+  actual: NormalizedColumnKind,
 ): boolean {
-  if (kind === "revision") return declaredType.includes("int");
-  return (
-    declaredType.includes("char") ||
-    declaredType.includes("clob") ||
-    declaredType.includes("text")
-  );
-}
-
-function isCompatibleColumnType(
-  dialect: GraphBackend["dialect"],
-  declaredType: string,
-  kind: RecordedColumnKind,
-): boolean {
-  if (dialect === "sqlite") return hasSqliteAffinity(declaredType, kind);
-  return kind === "revision" ?
-      declaredType === "bigint"
-    : declaredType === "timestamp with time zone";
+  const allowed =
+    kind === "revision" ? REVISION_COLUMN_KINDS : WALL_TIME_COLUMN_KINDS;
+  return allowed.includes(actual);
 }
 
 function requiredRecordedColumns(
@@ -132,7 +106,7 @@ function requiredRecordedColumns(
  * only exists for graphs that enable the TypeGraph Identity Profile.
  */
 export async function assertCurrentRecordedSchema(
-  backend: Pick<GraphBackend, "dialect" | "execute">,
+  backend: Pick<GraphBackend, "catalog" | "dialect">,
   schema: SqlSchema,
   includeIdentity = false,
 ): Promise<void> {
@@ -165,14 +139,23 @@ export async function assertCurrentRecordedSchema(
     );
   }
   const incompatible = requirements.flatMap((requirement) => {
-    const actual = columnTypes.get(requirement.table)?.get(requirement.column);
+    const column = columnTypes.get(requirement.table)?.get(requirement.column);
     if (
-      actual !== undefined &&
-      isCompatibleColumnType(backend.dialect, actual, requirement.kind)
+      column !== undefined &&
+      isCompatibleColumnKind(requirement.kind, column.kind)
     ) {
       return [];
     }
-    return [{ ...requirement, actual: actual ?? "missing" }];
+    // An empty declared type (SQLite accepts a column with none at all,
+    // e.g. `CREATE TABLE t (a, ...)`) reports the same "missing" diagnostic
+    // as an absent column — the catalog probe reports it as declaredType
+    // "", not as an absent CatalogColumn, so an absent column alone is not
+    // enough to catch it here.
+    const actual =
+      column === undefined || column.declaredType === "" ?
+        "missing"
+      : column.declaredType;
+    return [{ ...requirement, actual }];
   });
   if (incompatible.length === 0) return;
 

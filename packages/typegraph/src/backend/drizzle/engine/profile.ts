@@ -26,6 +26,7 @@ import type { BackendResourceAudit } from "../../transaction-resource";
 import type {
   AdapterBackend,
   BackendCapabilities,
+  BackendCatalogProbes,
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
@@ -72,6 +73,13 @@ export type EngineProvisioning = Readonly<{
    * dialects with no such migration to run.
    */
   ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
+  /**
+   * The physical-schema introspection surface `createSqlBackend` forwards
+   * onto the assembled backend's `catalog` member unchanged. Optional: a
+   * profile that omits it produces a backend with no `catalog`, exactly
+   * like any other optional `GraphBackend` member.
+   */
+  catalog?: BackendCatalogProbes;
 }>;
 
 /**
@@ -245,13 +253,13 @@ export type IdentityRuntime = Omit<
 
 /**
  * What a profile supplies `createSqlBackend` to build the graph-template
- * member group, beyond `dialect` (the profile head), `ensureTable` (from
- * `provisioning`), and `execute` (the operation layer's own `execute`, once
- * `createSqlBackend` has built it). See `members/graph-template-members.ts`.
+ * member group, beyond `ensureTable` (from `provisioning`) and `execute`
+ * (the operation layer's own `execute`, once `createSqlBackend` has built
+ * it). See `members/graph-template-members.ts`.
  */
 export type GraphTemplateRuntime = Omit<
   CreateGraphTemplateMembersDeps,
-  "dialect" | "ensureTable" | "execute"
+  "ensureTable" | "execute"
 >;
 
 /**

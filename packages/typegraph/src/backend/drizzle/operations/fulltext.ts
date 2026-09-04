@@ -14,7 +14,11 @@
 import { type SQL, sql } from "drizzle-orm";
 
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
-import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
+import {
+  isSqlFragment,
+  sql as fragmentSql,
+  type SqlFragment,
+} from "../../../query/sql-fragment";
 import type {
   FulltextQueryMode,
   FulltextSearchParams,
@@ -94,7 +98,7 @@ export function buildFulltextSearch(
       ${snippetExpr} AS snippet
     FROM ${table}
     WHERE ${sql.join(conditions, sql` AND `)}
-    ORDER BY ${rankExpression} DESC, ${codePointOrderKey(sql.raw('"node_id"'), dialect)} ASC
+    ORDER BY ${rankExpression} DESC, ${codePointOrderKey(fragmentSql.identifier("node_id"), dialect)} ASC
     ${pageClause}
   `;
 }

@@ -19,6 +19,7 @@ export type {
   DialectCapabilities,
   DialectRecursiveQueryStrategy,
   DialectStandardQueryStrategy,
+  DialectSubgraphMembershipStrategy,
   DialectVectorPredicateStrategy,
   InListParameterOptions,
   SqlDialect,

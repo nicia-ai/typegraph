@@ -93,6 +93,8 @@ type OperationFusionHooks = Readonly<{
   edgeCardinalityInsertFusion?: true;
   /** Present only for a transaction-scoped operation backend; claim plans require a caller-owned transaction to roll back refusals. */
   nodeClaimInsertFusion?: true;
+  /** Whether a convergent edge create's dynamic (non-durable) match may inspect JSON match fields. */
+  dynamicEdgeConvergence?: true;
   tableExistenceCache?: TableExistenceCacheOptions;
 }>;
 
@@ -220,6 +222,9 @@ export function buildCommonOperationOptions(
     ...(fusion.nodeClaimInsertFusion === undefined ?
       {}
     : { nodeClaimInsertFusion: fusion.nodeClaimInsertFusion }),
+    ...(fusion.dynamicEdgeConvergence === undefined ?
+      {}
+    : { dynamicEdgeConvergence: fusion.dynamicEdgeConvergence }),
     ...(fusion.tableExistenceCache === undefined ?
       {}
     : { tableExistenceCache: fusion.tableExistenceCache }),

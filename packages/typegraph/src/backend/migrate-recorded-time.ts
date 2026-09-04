@@ -23,6 +23,7 @@ import { shortHash } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import { canonicalizeDatabaseTimestamp } from "../utils/date";
+import { requireCatalog } from "./capabilities/catalog";
 import { resolvedTableNames } from "./table-names";
 import {
   type GraphBackend,
@@ -92,7 +93,6 @@ type MappingRow = Readonly<{
 type RemapRow = Readonly<{ recorded_at: unknown; revision: unknown }>;
 type MappingCountRow = Readonly<{ anchors: unknown; graphs: unknown }>;
 type MissingMappingRow = Readonly<{ missing: unknown }>;
-type ColumnRow = Readonly<{ name: unknown }>;
 
 export type MigrateLegacyRecordedTimeOptions = Readonly<{
   backend: GraphBackend;
@@ -212,25 +212,12 @@ function safeRevision(value: unknown): number {
 }
 
 async function columnNames(
-  target: TransactionBackend,
+  target: Pick<TransactionBackend, "catalog">,
   tableName: string,
 ): Promise<ReadonlySet<string>> {
-  const rows =
-    target.dialect === "sqlite" ?
-      await target.execute<ColumnRow>(
-        asCompiledRowsSql(sql`PRAGMA table_info(${sql.identifier(tableName)})`),
-      )
-    : await target.execute<ColumnRow>(
-        asCompiledRowsSql(sql`
-          SELECT column_name AS name
-          FROM information_schema.columns
-          WHERE table_schema = current_schema()
-            AND table_name = ${tableName}
-        `),
-      );
-  return new Set(
-    rows.flatMap((row) => (typeof row.name === "string" ? [row.name] : [])),
-  );
+  const catalog = requireCatalog(target, "migrateLegacyRecordedTime");
+  const columns = await catalog.columnTypes(tableName);
+  return new Set(columns.map((column) => column.name));
 }
 
 async function readLegacyInstants(

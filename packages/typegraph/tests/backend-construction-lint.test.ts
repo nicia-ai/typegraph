@@ -33,6 +33,8 @@ import {
   BACKEND_MUTATION_MESSAGE,
   BACKEND_SEAM_IMPORT_RESTRICTIONS,
   BACKEND_SEAM_MESSAGE,
+  DIALECT_LITERAL_EXEMPTIONS,
+  DIALECT_SEAM_RESTRICTIONS,
   DRIZZLE_ZONE,
   DRIZZLE_ZONE_RESTRICTIONS,
   GLOBAL_SYMBOL_RESTRICTION,
@@ -165,6 +167,21 @@ function banColumns(modules: readonly string[]): readonly BanColumn[] {
       name: "DRIZZLE_ZONE_RESTRICTIONS",
       restrictions: DRIZZLE_ZONE_RESTRICTIONS,
       exempt: DRIZZLE_ZONE.map((entry) => entry.file).toSorted(),
+    },
+    {
+      // The dialect-literal ban (`eslint.config.mjs`'s
+      // DIALECT_LITERAL_EXEMPTIONS). Without this column, a per-file block
+      // that dropped its `...DIALECT_SEAM_RESTRICTIONS` spread would resolve
+      // to no ban for that module and neither `pnpm exec eslint src` nor
+      // `tests/dialect-literal-inventory.test.ts` would notice — that ratchet
+      // only compares the exemption list to which files still contain a
+      // literal, never whether the ban is actually installed. This column
+      // closes that gap the same way every other column here does: by
+      // resolving ESLint's real config for every module and asserting the
+      // exempt set matches exactly.
+      name: "DIALECT_SEAM_RESTRICTIONS",
+      restrictions: DIALECT_SEAM_RESTRICTIONS,
+      exempt: DIALECT_LITERAL_EXEMPTIONS.map((entry) => entry.file).toSorted(),
     },
   ];
 }

@@ -3,10 +3,11 @@
  * consumes through its resolved plan (`fence.sql.*`) instead of spelling
  * `pg_advisory_xact_lock`, `hashtext(`, `LOCK TABLE`, or
  * `current_setting('transaction_isolation')` itself. The lock-fence inventory
- * test ratchets those tokens out of the lock-site files; the PostgreSQL
- * profile's extension-DDL lock, the trusted-import table lock, and the
- * graph-template instantiation statement still spell their own and are
- * outside that ratchet.
+ * test ratchets those tokens out of the lock-site files, including trusted
+ * import's table lock, which now resolves the same plan every other lock
+ * site does and consumes `fence.sql.lockTables(...)` instead of spelling
+ * `LOCK TABLE` itself; only the PostgreSQL profile's extension-DDL lock
+ * still spells its own and is outside that ratchet.
  *
  * Built from `SqlFragment` (`../../query/sql-fragment`), not `drizzle-orm`,
  * so this module stays outside the Drizzle zone and is safe to import from
@@ -20,6 +21,14 @@
  * cannot live in this module (which imports none), but its fused statement
  * still spells its lock and its isolation read by calling back into these
  * two functions rather than holding a second copy of the tokens.
+ *
+ * `advisoryLockSingleExpression` is the same kind of bare export for the
+ * ONE-argument `pg_advisory_xact_lock(bigint)` form, which occupies a lock
+ * space distinct from every namespaced two-argument lock this module builds.
+ * The schema-commit fence and the graph-template instantiation statement
+ * both take it on `hashtext(graphId)`, so they mutually exclude — calling
+ * back into this one function is what keeps that guarantee from drifting
+ * into two independently spelled lock calls.
  */
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type FenceSql } from "../capabilities/write-fence";
@@ -60,6 +69,22 @@ export function advisoryLockExpression(
   key: string | number,
 ): SqlFragment {
   return sql`pg_advisory_xact_lock(hashtext(${namespace}), ${advisoryLockKeyExpression(key)})`;
+}
+
+/**
+ * The bare ONE-argument `pg_advisory_xact_lock(hashtext($key))` call —
+ * never route a namespaced lock through this instead of
+ * {@link advisoryLockExpression}. PostgreSQL stores the one- and
+ * two-argument forms with different `locktag` field4 values, so a bigint
+ * key taken here can never collide with any (int4, int4) key the
+ * two-argument form produces, however the hashes land. Exported bare, like
+ * {@link advisoryLockExpression}, so a caller that must keep this lock
+ * co-atomic with a surrounding statement (a data-modifying CTE, for one)
+ * can embed it directly instead of wrapping it in this module's own
+ * standalone `SELECT`.
+ */
+export function advisoryLockSingleExpression(key: string): SqlFragment {
+  return sql`pg_advisory_xact_lock(hashtext(${key}))`;
 }
 
 function advisoryLock(namespace: string, key: string | number): SqlFragment {

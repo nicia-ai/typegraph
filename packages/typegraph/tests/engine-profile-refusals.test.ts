@@ -21,9 +21,10 @@ import { PGlite } from "@electric-sql/pglite";
 import RealDatabase from "better-sqlite3";
 import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePg } from "drizzle-orm/pglite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
+import { requireCatalog } from "../src/backend/capabilities/catalog";
 import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
 import {
   isFirstPartyFactory,
@@ -35,12 +36,14 @@ import { finalizeEngineCapabilities } from "../src/backend/drizzle/engine/capabi
 import type { SqlEngineProfile } from "../src/backend/drizzle/engine/profile";
 import type { AnyPgTransaction } from "../src/backend/drizzle/execution/postgres-execution";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
+import type { InternalOperationBackend } from "../src/backend/drizzle/operation-backend-core";
 import { buildPostgresEngineProfile } from "../src/backend/drizzle/postgres";
 import { buildSqliteEngineProfile } from "../src/backend/drizzle/sqlite";
 import { ConfigurationError } from "../src/errors";
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { buildVectorCapabilities } from "../src/query/dialect/vector-strategy";
 import { assertRecordedCaptureTransactionIsolation } from "../src/store/recorded-capture/guards";
+import { requireDefined } from "../src/utils/presence";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -402,5 +405,102 @@ describe("assertRecordedCaptureTransactionIsolation refusals", () => {
     expect(configurationError.message).not.toContain("advisoryLocks: true");
     expect(configurationError.message).toContain("fenceSql");
     expect(configurationError.suggestion).toContain("postgresFenceSql");
+  });
+});
+
+describe("requireCatalog refusals", () => {
+  it("refuses a backend with no catalog member, naming both catalog and the caller's operation", () => {
+    const backendWithNoCatalog = { catalog: undefined };
+
+    let thrown: unknown;
+    try {
+      requireCatalog(backendWithNoCatalog, "index materialization");
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe("CATALOG_UNAVAILABLE");
+    expect(configurationError.message).toContain("catalog");
+    expect(configurationError.message).toContain("index materialization");
+  });
+
+  it("returns the backend's own catalog probes, on the root and on a transaction() handle it opens, when present", async () => {
+    const sqliteBackend = createSqlBackend(createRealSqliteProfile());
+    expect(requireCatalog(sqliteBackend, "test")).toBe(sqliteBackend.catalog);
+    await sqliteBackend.transaction((tx) => {
+      expect(requireCatalog(tx, "test")).toBe(tx.catalog);
+      return Promise.resolve();
+    });
+
+    const postgresBackend = createSqlBackend(await createRealPostgresProfile());
+    expect(requireCatalog(postgresBackend, "test")).toBe(
+      postgresBackend.catalog,
+    );
+    await postgresBackend.transaction((tx) => {
+      expect(requireCatalog(tx, "test")).toBe(tx.catalog);
+      return Promise.resolve();
+    });
+  });
+
+  it("root backend.catalog is the SAME object EngineProvisioning.catalog built — buildOperations does not build a second one", async () => {
+    // Asserting on the ASSEMBLED backend's `catalog` alone would not catch a
+    // regression here: `createSqlBackend` always sets the root's exposed
+    // `catalog` from `profile.provisioning.catalog` regardless of what
+    // `buildOperations` returns, so a `buildOperations` that built its OWN,
+    // different bag would still leave `backend.catalog` looking correct.
+    // Spying on `buildOperations` itself catches exactly that — the bag it
+    // actually returned, before `createSqlBackend` overwrites `catalog` on
+    // the final object.
+    const sqliteProfile = createRealSqliteProfile();
+    const sqliteBuildOperations = vi.spyOn(sqliteProfile, "buildOperations");
+    createSqlBackend(sqliteProfile);
+    const sqliteOperations = requireDefined(
+      sqliteBuildOperations.mock.results[0],
+    ).value as InternalOperationBackend;
+    expect(sqliteOperations.catalog).toBe(sqliteProfile.provisioning.catalog);
+
+    const postgresProfile = await createRealPostgresProfile();
+    const postgresBuildOperations = vi.spyOn(
+      postgresProfile,
+      "buildOperations",
+    );
+    createSqlBackend(postgresProfile);
+    const postgresOperations = requireDefined(
+      postgresBuildOperations.mock.results[0],
+    ).value as InternalOperationBackend;
+    expect(postgresOperations.catalog).toBe(
+      postgresProfile.provisioning.catalog,
+    );
+  });
+
+  it("refuses dropInvalidIndex on a transaction-scoped PostgreSQL catalog: PostgreSQL cannot run DROP INDEX CONCURRENTLY inside a transaction block", async () => {
+    const postgresBackend = createSqlBackend(await createRealPostgresProfile());
+
+    let thrown: unknown;
+    await postgresBackend.transaction(async (tx) => {
+      try {
+        await requireDefined(tx.catalog).dropInvalidIndex(
+          "zz_catalog_probe_tx_drop_invalid_index",
+        );
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "CATALOG_DROP_INVALID_INDEX_REQUIRES_ROOT_BACKEND",
+    );
+
+    // The root backend's own catalog carries no such refusal — the same
+    // call succeeds there (a no-op: the index does not exist).
+    await expect(
+      requireDefined(postgresBackend.catalog).dropInvalidIndex(
+        "zz_catalog_probe_tx_drop_invalid_index",
+      ),
+    ).resolves.toBeUndefined();
   });
 });

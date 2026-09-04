@@ -329,6 +329,16 @@ type BackendCapabilities = Readonly<{
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
+// @public
+type BackendCatalogProbes = Readonly<{
+    tableExists: (this: void, name: string) => Promise<boolean>;
+    tablesExist: (this: void, names: readonly string[]) => Promise<readonly TableState[]>;
+    indexStates: (this: void, names: readonly string[]) => Promise<readonly IndexState[]>;
+    dropInvalidIndex: (this: void, name: string) => Promise<void>;
+    columnTypes: (this: void, table: string) => Promise<readonly CatalogColumn[]>;
+    indexBehavior: CatalogIndexBehavior;
+}>;
+
 // @public (undocumented)
 type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
@@ -355,6 +365,23 @@ export type BaseSchemaRuntime = Omit<CreateBaseSchemaMembersDeps, "ensureTable" 
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
+type CatalogBackend = Pick<GraphBackend, "catalog">;
+
+// @public
+type CatalogColumn = Readonly<{
+    name: string;
+    kind: NormalizedColumnKind;
+    declaredType: string;
+}>;
+
+// @public
+type CatalogIndexBehavior = Readonly<{
+    concurrentBuilds: boolean;
+    hasInvalidIndexState: boolean;
+    supportsGinFamily: boolean;
+}>;
 
 // @public
 type CheckUniqueBatchParams = Readonly<{
@@ -556,7 +583,6 @@ type CommonOperationStrategy = Readonly<{
     buildConvergeEdgeCreate?: (params: ConvergeEdgeCreateParams) => SQL;
     buildAtomicConvergeEdges?: (params: AtomicConvergeEdgesParams) => SQL;
     buildAtomicConvergeEdgesTombstoneRefusal?: (params: Omit<AtomicConvergeEdgesParams, "timestamp">) => SQL;
-    dynamicEdgeConvergence: boolean;
     buildInsertEdgeIfEndpointsLiveWithCardinalityClaim?: (params: InsertEdgeParams, claim: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
     buildDeleteStaleAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildAcquireAtomicEdgeClaims: (entries: readonly ClaimEdgeCardinalityParams[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
@@ -919,11 +945,11 @@ type CreateContributionMembersDeps = Readonly<{
 
 // @public (undocumented)
 type CreateGraphTemplateMembersDeps = Readonly<{
-    dialect: SqlDialect;
     graphTemplatesTableDdl: string;
     ensureTable: (ddl: string) => Promise<void>;
     execute: GraphTemplateExecute;
     tableNames: GraphTemplateTableNames;
+    instantiateStatement: (params: InstantiateGraphTemplateSqlParams) => SqlFragment;
     toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
     rowAccess: GraphTemplateRowAccess;
     copyContributionMarkers?: (execute: GraphTemplateExecute, params: CopyGraphTemplateContributionMarkersSqlParams) => Promise<void>;
@@ -1229,6 +1255,7 @@ export type EngineProvisioning = Readonly<{
     ensureTable: (ddl: string) => Promise<void>;
     generateDdl: () => readonly string[];
     ensureIndexMaterializationColumns?: (tableName: string) => Promise<void>;
+    catalog?: BackendCatalogProbes;
 }>;
 
 // @public
@@ -1660,6 +1687,7 @@ type GraphBackend = Readonly<{
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
+    catalog?: BackendCatalogProbes | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -1790,7 +1818,7 @@ type GraphTemplateRowAccess = Readonly<{
 }>;
 
 // @public
-export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "dialect" | "ensureTable" | "execute">;
+export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "ensureTable" | "execute">;
 
 // @public
 type GraphTemplateTableNames = Readonly<{
@@ -1947,6 +1975,13 @@ type IndexScope =
 */
 | "none";
 
+// @public
+type IndexState = Readonly<{
+    name: string;
+    exists: boolean;
+    invalid: boolean;
+}>;
+
 // @public (undocumented)
 type IndexWhereExpression = Readonly<{
     __type: "index_where_and";
@@ -2034,6 +2069,17 @@ type InsertUniqueParams = Readonly<{
     key: string;
     nodeId: string;
     concreteKind: string;
+}>;
+
+// @public (undocumented)
+type InstantiateGraphTemplateSqlParams = Readonly<{
+    graphId: string;
+    schemaHash: string;
+    schemaVersionsTableName: string;
+    templatesTableName: string;
+    contributionMaterializationsTableName: string;
+    templateId: string;
+    templateSchemaHash: string;
 }>;
 
 // @public (undocumented)
@@ -2241,6 +2287,9 @@ type NodeRow = Readonly<{
     updated_at: string;
     deleted_at: string | undefined;
 }>;
+
+// @public
+type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
 type NullCheckOp = "isNull" | "isNotNull";
@@ -2721,10 +2770,16 @@ type TableContribution = Readonly<{
 }>;
 
 // @public
+type TableState = Readonly<{
+    name: string;
+    exists: boolean;
+}>;
+
+// @public
 type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionOptions = Readonly<{
@@ -2737,6 +2792,9 @@ type TrustedImportSession = Readonly<{
     insertNodes: (params: readonly InsertNodeParams[]) => Promise<void>;
     insertEdges: (params: readonly InsertEdgeParams[]) => Promise<void>;
 }>;
+
+// @public
+type UnfencedReason = "undeclared" | "declared-none" | "table-locks-only";
 
 // @public (undocumented)
 type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
@@ -2981,9 +3039,10 @@ Readonly<{
 | Readonly<{
     kind: "engine-serialized";
 }>
-/** Neither. Every non-degradable fence refuses. */
+/** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
 | Readonly<{
     kind: "unfenced";
+    reason: UnfencedReason;
 }>;
 
 // @public

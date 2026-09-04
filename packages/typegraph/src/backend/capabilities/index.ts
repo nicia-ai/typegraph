@@ -97,6 +97,17 @@ export {
   WS5B_SEED_BUNDLES,
   type Ws5bBundleId,
 } from "./bundle-registry";
+export {
+  type BackendCatalogProbes,
+  type CatalogColumn,
+  type CatalogIndexBehavior,
+  type IndexState,
+  type NormalizedColumnKind,
+  requireCatalog,
+  REVISION_COLUMN_KINDS,
+  type TableState,
+  WALL_TIME_COLUMN_KINDS,
+} from "./catalog";
 export { resolveBackendFulltext } from "./fulltext";
 export {
   batchPointReadVerdict,

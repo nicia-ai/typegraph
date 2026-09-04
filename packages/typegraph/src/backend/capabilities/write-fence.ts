@@ -62,6 +62,28 @@ export type PessimisticLockCapabilities = Readonly<{
 }>;
 
 /**
+ * Why {@link resolveWriteFencePlan} could not resolve a usable fence — the
+ * three states `planFromLockCapabilities`/`resolveWriteFencePlan` can reach
+ * an `unfenced` plan from:
+ *
+ * - `"undeclared"` — `capabilities.pessimisticLocks` is absent on a target
+ *   that is not one of TypeGraph's bundled factories (M-5's defect
+ *   population: an undeclared custom backend is by definition uncertified).
+ * - `"declared-none"` — `pessimisticLocks` is present but declares all three
+ *   of `advisoryLocks`, `tableLocks`, and `serializedWriters` false.
+ * - `"table-locks-only"` — `pessimisticLocks` declares `{advisoryLocks:
+ *   false, tableLocks: true, serializedWriters: false}`. The plan model has
+ *   no table-lock-alone arm (see the note next to `planFromLockCapabilities`
+ *   below), so this declaration resolves `unfenced` exactly like an absent
+ *   or all-false one, even though it is neither.
+ *
+ * Every refusal that reaches an `unfenced` plan states the actual reason
+ * instead of a message broad enough to cover all three.
+ */
+export type UnfencedReason =
+  "undeclared" | "declared-none" | "table-locks-only";
+
+/**
  * The decision every lock site consumes, rather than a flag a caller would
  * have to re-derive.
  */
@@ -79,8 +101,8 @@ export type WriteFencePlan =
     }>
   /** No lock needed: the engine serializes writers. */
   | Readonly<{ kind: "engine-serialized" }>
-  /** Neither. Every non-degradable fence refuses. */
-  | Readonly<{ kind: "unfenced" }>;
+  /** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
+  | Readonly<{ kind: "unfenced"; reason: UnfencedReason }>;
 
 /**
  * What `resolveWriteFencePlan` needs: the dialect (for the first-party
@@ -315,12 +337,25 @@ function planFromLockCapabilities(
       sql: target.fenceSql,
     };
   }
-  // A declared table-locks-only engine (no advisoryLocks, no
-  // serializedWriters) resolves `unfenced`: every TypeGraph fence needs
-  // either the advisory key or the writer slot, and no lock site here takes
-  // a table lock without first having taken the advisory one.
   if (declared.serializedWriters) return { kind: "engine-serialized" };
-  return { kind: "unfenced" };
+  // A declared table-locks-only engine (no advisoryLocks, no
+  // serializedWriters) resolves `unfenced` with reason `"table-locks-only"`:
+  // every TypeGraph fence needs either the advisory key or the writer slot,
+  // and the plan model has no table-lock-only arm, so `{advisoryLocks:
+  // false, tableLocks: true, serializedWriters: false}` refuses with
+  // WRITE_FENCE_UNAVAILABLE exactly as it does at every other table-lock
+  // site — including trusted import's, even though that site takes a table
+  // lock with no advisory lock above it. Trusted import owns the whole node
+  // and edge relations for the duration of its own transaction, so there is
+  // no shared resource left for a second writer to race it on, and no wider
+  // fence for an advisory key to nest inside — but that exemption from
+  // needing an advisory lock is not an exemption from this declaration
+  // requirement. An all-false declaration reaches the same arm with reason
+  // `"declared-none"`.
+  return {
+    kind: "unfenced",
+    reason: declared.tableLocks ? "table-locks-only" : "declared-none",
+  };
 }
 
 /**
@@ -354,7 +389,7 @@ export function resolveWriteFencePlan(
   if (FIRST_PARTY_FACTORY_BACKENDS.has(target)) {
     return planFromLockCapabilities(target, deriveFromDialect(target.dialect));
   }
-  return { kind: "unfenced" };
+  return { kind: "unfenced", reason: "undeclared" };
 }
 
 /**
@@ -377,12 +412,44 @@ export function pessimisticLockDeclarationLine(dialect: SqlDialect): string {
 }
 
 /**
- * The shared body of both unfenced-construction refusals below: names both
- * ways `unfenced` is reached (absent, or a present-but-all-false
- * declaration) rather than claiming absence it cannot know, then prints the
- * one line that fixes it, keyed to the dialect the backend reports.
+ * THE one owner of the "why `unfenced`" phrase — consumed by both
+ * `unfencedRefusalMessage` (the two construction gates, which also print a
+ * dialect-keyed fix) and `requireWriteFence`'s `unfenced` arm below, which
+ * has no dialect to key a fix to (a bare `WriteFencePlan` carries `reason`
+ * but not the target's dialect).
  */
-function unfencedRefusalMessage(dialect: SqlDialect, resource: string): string {
+function unfencedDeclarationStateDescription(reason: UnfencedReason): string {
+  switch (reason) {
+    case "undeclared": {
+      return "`capabilities.pessimisticLocks` is absent";
+    }
+    case "declared-none": {
+      return "`capabilities.pessimisticLocks` declares neither advisory/table locks nor serialized writers";
+    }
+    case "table-locks-only": {
+      return (
+        "`capabilities.pessimisticLocks` reports table locks without " +
+        "advisory locks or serialized writers — TypeGraph has no " +
+        "table-lock-only fence, so this posture is unsupported"
+      );
+    }
+    default: {
+      return reason satisfies never;
+    }
+  }
+}
+
+/**
+ * The shared body of both unfenced-construction refusals below: states the
+ * ACTUAL reason `unfenced` was reached — see {@link UnfencedReason} — rather
+ * than a message broad enough to cover all three, then prints the fix,
+ * keyed to the dialect the backend reports.
+ */
+function unfencedRefusalMessage(
+  dialect: SqlDialect,
+  reason: UnfencedReason,
+  resource: string,
+): string {
   const declaredLine = pessimisticLockDeclarationLine(dialect);
   const otherDialect: SqlDialect =
     dialect === "postgres" ? "sqlite" : "postgres";
@@ -395,9 +462,22 @@ function unfencedRefusalMessage(dialect: SqlDialect, resource: string): string {
     otherDialect === "postgres" ?
       "an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"
     : "an engine with a single writer slot";
+  const declarationState = unfencedDeclarationStateDescription(reason);
+
+  if (reason === "table-locks-only") {
+    return (
+      `This backend's ${declarationState}, and ${resource} cannot run ` +
+      "unfenced. Declare `pessimisticLocks.advisoryLocks: true` for an " +
+      "engine that honors advisory locks:\n\n" +
+      `  ${declaredLine}\n\n` +
+      "or `pessimisticLocks.serializedWriters: true` for a single-writer " +
+      "engine:\n\n" +
+      `  ${otherLine}\n`
+    );
+  }
+
   return (
-    "This backend declares no usable write fence: `capabilities.pessimisticLocks` " +
-    "is absent, or declares neither advisory/table locks nor serialized writers, " +
+    `This backend declares no usable write fence: ${declarationState}, ` +
     `so TypeGraph cannot know whether it fences concurrent writers, and ${resource} ` +
     "cannot run unfenced. Add ONE line to the capabilities you pass:\n\n" +
     `  ${declaredLine}\n\n` +
@@ -413,10 +493,13 @@ function unfencedRefusalMessage(dialect: SqlDialect, resource: string): string {
  *
  * @throws {ConfigurationError} always.
  */
-export function refuseUnfencedOperationalIdentity(dialect: SqlDialect): never {
+export function refuseUnfencedOperationalIdentity(
+  dialect: SqlDialect,
+  reason: UnfencedReason,
+): never {
   throw new ConfigurationError(
-    unfencedRefusalMessage(dialect, "Operational Identity"),
-    { code: "IDENTITY_REQUIRES_WRITE_FENCE", dialect },
+    unfencedRefusalMessage(dialect, reason, "Operational Identity"),
+    { code: "IDENTITY_REQUIRES_WRITE_FENCE", dialect, reason },
     {
       suggestion:
         "Declare `capabilities.pessimisticLocks` on this backend, or construct the store without `identity`.",
@@ -431,13 +514,17 @@ export function refuseUnfencedOperationalIdentity(dialect: SqlDialect): never {
  *
  * @throws {ConfigurationError} always.
  */
-export function refuseUnfencedClockAllocation(dialect: SqlDialect): never {
+export function refuseUnfencedClockAllocation(
+  dialect: SqlDialect,
+  reason: UnfencedReason,
+): never {
   throw new ConfigurationError(
     unfencedRefusalMessage(
       dialect,
+      reason,
       "TypeGraph's recorded-time clock allocation",
     ),
-    { code: "RECORDED_CLOCK_REQUIRES_WRITE_FENCE", dialect },
+    { code: "RECORDED_CLOCK_REQUIRES_WRITE_FENCE", dialect, reason },
     {
       suggestion:
         "Declare `capabilities.pessimisticLocks` on this backend, or construct the store without `history`/`revisionTracking`.",
@@ -488,12 +575,18 @@ export function requireWriteFence(
     case "unfenced": {
       throw new ConfigurationError(
         `${operation} requires a write fence, but this backend declares no ` +
-          "usable write fence (`capabilities.pessimisticLocks` is absent, or " +
-          "declares neither advisory/table locks nor serialized writers).",
-        { code: "WRITE_FENCE_UNAVAILABLE", operation, requires },
+          `usable write fence (${unfencedDeclarationStateDescription(plan.reason)}).`,
+        {
+          code: "WRITE_FENCE_UNAVAILABLE",
+          operation,
+          requires,
+          reason: plan.reason,
+        },
         {
           suggestion:
-            "Declare `capabilities.pessimisticLocks` on this backend, matching the engine's real locking support.",
+            plan.reason === "table-locks-only" ?
+              "Declare `pessimisticLocks.advisoryLocks: true` on this backend for an engine that honors advisory locks, or `pessimisticLocks.serializedWriters: true` for a single-writer engine."
+            : "Declare `capabilities.pessimisticLocks` on this backend, matching the engine's real locking support.",
         },
       );
     }

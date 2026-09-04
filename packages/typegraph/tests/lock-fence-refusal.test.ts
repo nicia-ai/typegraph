@@ -36,6 +36,7 @@ import {
   createLoggedPostgresBackend,
   createLoggedSqliteBackend,
   overlayCapabilities,
+  TABLE_LOCKS_ONLY_CAPABILITIES,
   UNFENCED_CAPABILITIES,
 } from "./lock-fence-test-utils";
 
@@ -194,6 +195,52 @@ describe("T16 — (e) the refusal message carries the literal declaration line",
     // a pointer like "declare pessimisticLocks on this backend" would still
     // contain the bare word without carrying the migration guide's line.
     expect(message).not.toBe("pessimisticLocks");
+  });
+});
+
+describe("T16 — (g) a table-locks-only declaration refuses, naming that posture specifically", () => {
+  it("refuseUnfencedClockAllocation names the table-locks-only posture, not the generic absent/all-false message", () => {
+    const logged = createLoggedSqliteBackend({
+      pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
+    });
+    logged.reset();
+    let caught: unknown;
+    try {
+      createStore(plainGraph, logged.backend, { history: true });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(
+      writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"),
+    );
+    expect((caught as Error).message).toContain(
+      "table locks without advisory locks or serialized writers",
+    );
+    expect((caught as Error).message).not.toContain(
+      "declares neither advisory/table locks nor serialized writers",
+    );
+    expect(logged.statements).toHaveLength(0);
+  });
+
+  it("refuseUnfencedOperationalIdentity names the table-locks-only posture, not the generic absent/all-false message", () => {
+    const logged = createLoggedSqliteBackend({
+      pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
+    });
+    logged.reset();
+    let caught: unknown;
+    try {
+      createStore(identityGraph, logged.backend);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"));
+    expect((caught as Error).message).toContain(
+      "table locks without advisory locks or serialized writers",
+    );
+    expect((caught as Error).message).not.toContain(
+      "declares neither advisory/table locks nor serialized writers",
+    );
+    expect(logged.statements).toHaveLength(0);
   });
 });
 

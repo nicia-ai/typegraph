@@ -13,24 +13,27 @@
  * `rowAccess` dep the same way `kind-removal-members.ts` and
  * `index-materialization-members.ts` do it.
  *
- * `instantiateGraphTemplate` runs one dialect-parameterized statement built
- * by `instantiateGraphTemplateSql` (`graph-template-sql.ts`) for both
- * engines. The one genuine difference: PostgreSQL's statement copies the
- * template's contribution markers inside its own CTE, but SQLite cannot put
- * a data-modifying CTE beside the schema INSERT, so its profile runs a
- * second DML statement — `copyGraphTemplateContributionMarkersStatement` —
- * after the schema row is confirmed. That asymmetry is threaded through as
- * the optional `copyContributionMarkers` dep, present only on the SQLite
- * profile.
+ * `instantiateGraphTemplate` runs one statement, built by the profile's own
+ * `instantiateStatement` dep (`graph-template-sql.ts` exports one builder
+ * per dialect; each profile hands this group its own). The one genuine
+ * difference: PostgreSQL's statement copies the template's contribution
+ * markers inside its own CTE, but SQLite cannot put a data-modifying CTE
+ * beside the schema INSERT, so its profile runs a second DML statement —
+ * `copyGraphTemplateContributionMarkersStatement` — after the schema row is
+ * confirmed. That asymmetry is threaded through as the optional
+ * `copyContributionMarkers` dep, present only on the SQLite profile.
  */
 import { ConfigurationError } from "../../../../errors";
-import type { SqlDialect } from "../../../../query/dialect/types";
-import type { CompiledRowsSql } from "../../../../query/sql-intent";
+import type { SqlFragment } from "../../../../query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../../../../query/sql-intent";
 import type { SerializedSchema } from "../../../../schema/types";
 import type { GraphTemplateRow, SchemaVersionRow } from "../../../types";
 import {
   type CopyGraphTemplateContributionMarkersSqlParams,
-  instantiateGraphTemplateSql,
+  type InstantiateGraphTemplateSqlParams,
 } from "../../graph-template-sql";
 
 /**
@@ -91,7 +94,7 @@ type GraphTemplateRowAccess = Readonly<{
   ) => Promise<RawGraphTemplateRow | undefined>;
 }>;
 
-/** The table names `instantiateGraphTemplateSql` compiles its statement against. */
+/** The table names `instantiateStatement` compiles its statement against. */
 type GraphTemplateTableNames = Readonly<{
   schemaVersions: string;
   graphTemplates: string;
@@ -104,25 +107,33 @@ type GraphTemplateExecute = <TRow>(
 ) => Promise<readonly TRow[]>;
 
 export type CreateGraphTemplateMembersDeps = Readonly<{
-  /** The dialect `instantiateGraphTemplateSql` compiles its statement for. */
-  dialect: SqlDialect;
   /** Idempotent `CREATE TABLE ...` for the graph-templates table, rendered once by the caller from its own dialect's table-DDL generator. */
   graphTemplatesTableDdl: string;
   /** Runs one idempotent CREATE-shaped DDL statement — the same closure the profile's own `EngineProvisioning.ensureTable` uses. */
   ensureTable: (ddl: string) => Promise<void>;
   execute: GraphTemplateExecute;
   tableNames: GraphTemplateTableNames;
+  /**
+   * Builds this profile's schema-row instantiation statement
+   * (`graph-template-sql.ts` exports one such builder per dialect — the
+   * PostgreSQL profile hands over the one that also copies contribution
+   * markers inside its own CTE, the SQLite profile the bare
+   * `INSERT ... SELECT ... RETURNING`).
+   */
+  instantiateStatement: (
+    params: InstantiateGraphTemplateSqlParams,
+  ) => SqlFragment;
   /** Decodes a raw driver row into a `SchemaVersionRow` — the same mapper `OperationBackendRowMappers.toSchemaVersionRow` is. */
   toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
   rowAccess: GraphTemplateRowAccess;
   /**
    * SQLite's second DML statement copying contribution markers after the
    * schema row is confirmed (see the module doc comment). Absent on a
-   * dialect whose `instantiateGraphTemplateSql` already folds the marker
-   * copy into its own statement (PostgreSQL). Receives this same group's
-   * own `execute` dep as its first argument rather than closing over one:
-   * the profile head builds this closure before the operation layer
-   * exists, so it cannot capture `execute` directly, and by the time
+   * dialect whose `instantiateStatement` already folds the marker copy into
+   * its own statement (PostgreSQL). Receives this same group's own
+   * `execute` dep as its first argument rather than closing over one: the
+   * profile head builds this closure before the operation layer exists, so
+   * it cannot capture `execute` directly, and by the time
    * `instantiateGraphTemplate` actually invokes it below, this function's
    * own `execute` parameter is already the resolved one.
    */
@@ -162,11 +173,11 @@ export function createGraphTemplateMembers(
   deps: CreateGraphTemplateMembersDeps,
 ): GraphTemplateMembersResult {
   const {
-    dialect,
     graphTemplatesTableDdl,
     ensureTable,
     execute,
     tableNames,
+    instantiateStatement,
     toSchemaVersionRow,
     rowAccess,
     copyContributionMarkers,
@@ -214,7 +225,7 @@ export function createGraphTemplateMembers(
           templateSchemaHash: params.templateSchemaHash,
         };
         const rows = await execute<Record<string, unknown>>(
-          instantiateGraphTemplateSql({ dialect, ...sqlParams }),
+          asCompiledRowsSql(instantiateStatement(sqlParams)),
         );
         const row = rows[0];
         if (row === undefined) return { status: "refused" } as const;

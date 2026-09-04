@@ -63,6 +63,7 @@ import {
   ConfigurationError,
   StaleVersionError,
 } from "../../errors";
+import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   type FulltextStrategy,
@@ -133,23 +134,28 @@ import {
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type BackendCatalogProbes,
   type BundledBackendCapabilityOverrides,
+  type CatalogColumn,
   type ClaimIndexMaterializationParams,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IndexState,
   type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type LockSchemaVersionForWriteParams,
   type ManagedNodeCreatePlan,
+  type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
   type SchemaWriteTransactionBackend,
+  type TableState,
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
@@ -208,6 +214,7 @@ import {
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
+import { postgresInstantiateGraphTemplateStatement } from "./graph-template-sql";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -228,8 +235,12 @@ import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
+  tableExistsFromRow,
 } from "./operations/strategy";
-import { postgresFenceSql } from "./postgres-fence-sql";
+import {
+  advisoryLockSingleExpression,
+  postgresFenceSql,
+} from "./postgres-fence-sql";
 import {
   createPostgresTables as buildPostgresTables,
   type PostgresTables,
@@ -496,6 +507,149 @@ async function withConcurrentCreateRetry<T>(run: () => Promise<T>): Promise<T> {
  */
 function extensionDdlLockKey(extension: DatabaseExtensionName): string {
   return `typegraph:extension-ddl:${extension}`;
+}
+
+/**
+ * Normalizes one PostgreSQL declared column type to the family
+ * `catalog.columnTypes` reports. PostgreSQL's own type system already
+ * distinguishes these exactly, unlike SQLite's affinity rules, so this is
+ * an exact match rather than a substring test.
+ */
+function normalizePostgresColumnKind(
+  declaredType: string,
+): NormalizedColumnKind {
+  if (declaredType === "bigint") return "integer";
+  if (declaredType === "timestamp with time zone") {
+    return "timestamp-with-time-zone";
+  }
+  return "other";
+}
+
+/** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
+async function executeRawDdl(db: AnyPgDatabase, ddl: string): Promise<void> {
+  await db.execute(sql.raw(ddl));
+}
+
+/**
+ * Builds this dialect's `catalog` probes bound to one execution session —
+ * the profile's own connection for the root backend, or a transaction's
+ * pinned client for a transaction-scoped backend, via `db` and
+ * `executionAdapter` supplied by the caller. Bound this way rather than
+ * closed over the profile's own connection, so a probe issued through a
+ * transaction-scoped backend's `catalog` runs on that transaction's own
+ * session — reading its own uncommitted state, not the outer connection's.
+ *
+ * `transactionScoped` governs `dropInvalidIndex` only: PostgreSQL refuses
+ * `DROP INDEX CONCURRENTLY` inside a transaction block (every other probe
+ * here is a plain read, unaffected), so a transaction-scoped bag refuses
+ * that one member instead of issuing DDL its own session cannot run.
+ */
+function createPostgresCatalogProbes(
+  db: AnyPgDatabase,
+  executionAdapter: PostgresExecutionAdapter,
+  operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
+  transactionScoped: boolean,
+): BackendCatalogProbes {
+  async function indexStates(
+    names: readonly string[],
+  ): Promise<readonly IndexState[]> {
+    if (names.length === 0) return [];
+    // Scoped to `search_path`, matching the unqualified CREATE/DROP INDEX
+    // DDL a caller issues against these names.
+    const rows = await executionAdapter.execute<{
+      name: string;
+      valid: boolean;
+    }>(
+      portableSql`
+          SELECT c.relname AS name, i.indisvalid AS valid
+          FROM pg_class c
+          JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relname IN (${sqlValueList(names)})
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        `,
+    );
+    const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
+    return names.map((name) => {
+      const valid = byName.get(name);
+      return { name, exists: valid !== undefined, invalid: valid === false };
+    });
+  }
+
+  return {
+    async tableExists(tableName: string): Promise<boolean> {
+      const rows = await executionAdapter.execute<Record<string, unknown>>(
+        operationStrategy.buildTableExists(tableName),
+      );
+      return tableExistsFromRow(rows[0]);
+    },
+    async tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+      if (names.length === 0) return [];
+      const rows = await executionAdapter.execute<{ name: string }>(
+        portableSql`
+          SELECT c.relname AS name
+          FROM pg_class c
+          WHERE c.relname IN (${sqlValueList(names)})
+            AND c.relkind IN ('r', 'p')
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        `,
+      );
+      const existing = new Set(rows.map((row) => row.name));
+      return names.map((name) => ({ name, exists: existing.has(name) }));
+    },
+    indexStates,
+    async dropInvalidIndex(name: string): Promise<void> {
+      if (transactionScoped) {
+        throw new ConfigurationError(
+          "dropInvalidIndex requires a root PostgreSQL backend: PostgreSQL refuses DROP INDEX CONCURRENTLY inside a transaction block, so a transaction()-scoped catalog cannot issue it.",
+          {
+            code: "CATALOG_DROP_INVALID_INDEX_REQUIRES_ROOT_BACKEND",
+            operation: "dropInvalidIndex",
+          },
+          {
+            suggestion:
+              "Call dropInvalidIndex through the root backend (the object createPostgresBackend returned), not a transaction() handle.",
+          },
+        );
+      }
+      // A no-op for a valid or absent index on every engine: only an
+      // interrupted `CREATE INDEX CONCURRENTLY` leftover is ever dropped.
+      const [state] = await indexStates([name]);
+      if (!state?.invalid) return;
+      const quoted = `"${name.replaceAll('"', '""')}"`;
+      await executeRawDdl(db, `DROP INDEX CONCURRENTLY IF EXISTS ${quoted};`);
+    },
+    async columnTypes(table: string): Promise<readonly CatalogColumn[]> {
+      const rows = await executionAdapter.execute<{
+        name: unknown;
+        type: unknown;
+      }>(
+        portableSql`
+          SELECT column_name AS name, data_type AS type
+          FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = ${table}
+        `,
+      );
+      return rows.flatMap((row) => {
+        if (typeof row.name !== "string" || typeof row.type !== "string") {
+          return [];
+        }
+        const declaredType = row.type.trim().toLowerCase();
+        return [
+          {
+            name: row.name,
+            kind: normalizePostgresColumnKind(declaredType),
+            declaredType,
+          },
+        ];
+      });
+    },
+    indexBehavior: {
+      concurrentBuilds: true,
+      hasInvalidIndexState: true,
+      supportsGinFamily: true,
+    },
+  };
 }
 
 type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
@@ -1081,6 +1235,10 @@ export function buildPostgresEngineProfile(
       schemaVersionsTable: tables.schemaVersions,
       fenceTarget: ctx.fenceTarget,
       transactionScoped: false,
+      // The SAME object exposed as `backend.catalog` (via
+      // `provisioning.catalog`), not a second one built from this call's own
+      // `db`/`executionAdapter` — see `CreatePostgresOperationBackendOptions.catalog`.
+      catalog: provisioning.catalog,
     });
   }
 
@@ -1181,18 +1339,22 @@ export function buildPostgresEngineProfile(
   }
 
   const provisioning: EngineProvisioning = {
-    async executeDdl(ddl: string): Promise<void> {
-      await db.execute(sql.raw(ddl));
-    },
+    executeDdl: (ddl) => executeRawDdl(db, ddl),
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
+    catalog: createPostgresCatalogProbes(
+      db,
+      executionAdapter,
+      operationStrategy,
+      false,
+    ),
   };
 
-  // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
-  // head), `ensureTable` (`provisioning`), and `execute` (the operation
-  // layer's own `execute`, built once `createSqlBackend` has a contribution
-  // materializer to hand `buildOperations`).
+  // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
+  // (`provisioning`) and `execute` (the operation layer's own `execute`,
+  // built once `createSqlBackend` has a contribution materializer to hand
+  // `buildOperations`).
   const graphTemplateRuntime: GraphTemplateRuntime = {
     graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
     tableNames: {
@@ -1202,6 +1364,7 @@ export function buildPostgresEngineProfile(
         tables.contributionMaterializations,
       ),
     },
+    instantiateStatement: postgresInstantiateGraphTemplateStatement,
     toSchemaVersionRow,
     rowAccess: {
       async insertIgnoringConflict(params) {
@@ -1384,9 +1547,15 @@ export function buildPostgresEngineProfile(
           // hashes land — the schema fence is therefore independent of every
           // lock taken INSIDE it. Normalizing this to the two-argument form
           // would merge the spaces and put that independence at the mercy of
-          // `hashtext` collisions.
+          // `hashtext` collisions. `advisoryLockSingleExpression` is the one
+          // owner of this spelling; the graph-template instantiation
+          // statement takes the identical lock on the identical key so the
+          // two mutually exclude.
           await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
+            toDrizzleSql(
+              portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
+              "postgres",
+            ),
           );
           // Managed entity writers lock this row FOR SHARE. Locking it FOR
           // UPDATE before any emptiness probe makes a writer-first commit
@@ -2127,6 +2296,14 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   fenceTarget: WriteFenceTarget;
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
+  /**
+   * The root backend's own `catalog` bag, threaded through so this call
+   * exposes the SAME object rather than building a second one from `db` /
+   * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
+   * transaction-scoped call, which has no root bag to share and instead
+   * builds its own probes bound to the transaction's own session.
+   */
+  catalog?: BackendCatalogProbes | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -2174,6 +2351,7 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     fenceTarget,
     transactionScoped,
+    catalog,
   } = options;
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
@@ -2446,6 +2624,7 @@ function createPostgresOperationBackend(
       fusion: {
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
+        dynamicEdgeConvergence: true,
         async beforeNodeProjectionInsert(params, plan): Promise<void> {
           const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
             params,
@@ -2809,8 +2988,26 @@ function createPostgresOperationBackend(
   });
 
   // `hybridSearch` is not part of the shared assembly — see
-  // `vectorEmbeddingMethods`'s own comment above.
-  return { ...operations, ...vectorEmbeddingMethods };
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is the root's
+  // own bag when the caller supplied one (`options.catalog`, threaded
+  // through from `EngineProvisioning.catalog` — the SAME object exposed as
+  // `backend.catalog`, built once); when absent — the transaction-scoped
+  // call, which shares no bag of its own — this builds a fresh one bound to
+  // THIS call's own `db`/`executionAdapter` (the pinned transaction client),
+  // so every catalog probe on a transaction-scoped backend runs on the
+  // transaction's own session.
+  return {
+    ...operations,
+    ...vectorEmbeddingMethods,
+    catalog:
+      catalog ??
+      createPostgresCatalogProbes(
+        db,
+        executionAdapter,
+        operationStrategy,
+        transactionScoped,
+      ),
+  };
 }
 
 /**

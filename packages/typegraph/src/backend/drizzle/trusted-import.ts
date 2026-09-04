@@ -2,6 +2,7 @@ import { TrustedImportError } from "../../errors";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import { resolveStampedValidityLowerBound } from "../../utils/date";
+import { requireWriteFence, resolveWriteFencePlan } from "../capabilities/write-fence";
 import type {
   InsertEdgeParams,
   InsertNodeParams,
@@ -89,18 +90,57 @@ export async function assertTrustedImportDatabaseEmpty(
   );
 }
 
+/**
+ * Excludes every other writer from the imported relations for the whole
+ * import: trusted import owns the entire node and edge tables for its
+ * duration (the emptiness precondition `assertTrustedImportDatabaseEmpty`
+ * checks right after this lock is the point), and runs inside its own
+ * transaction (`transactionWithNative` in the PostgreSQL profile builder), so
+ * there is no wider fence above it for an advisory key to nest inside. This
+ * is the one write-fence site that takes a table lock with no advisory lock
+ * preceding it — see the note in `write-fence.ts` next to
+ * `planFromLockCapabilities`.
+ *
+ * Resolves the write-fence plan through {@link resolveWriteFencePlan}; the
+ * `lock` arm takes the relation lock below, spelled by the target's own
+ * `fenceSql`.
+ */
 export async function lockPostgresTrustedImportTables(
   backend: TransactionBackend,
   tableNames: TrustedImportTableNames,
 ): Promise<void> {
   const executeStatement = requireStatementExecution(backend);
-  await executeStatement(
-    asCompiledStatementSql(
-      sql.raw(
-        `LOCK TABLE ${quoteSqlIdentifier(tableNames.nodes)}, ${quoteSqlIdentifier(tableNames.edges)} IN ACCESS EXCLUSIVE MODE`,
-      ),
-    ),
-  );
+  const plan = resolveWriteFencePlan(backend);
+  const fence = requireWriteFence(plan, "trusted import", "table-lock");
+  switch (fence.kind) {
+    case "lock": {
+      await executeStatement(
+        asCompiledStatementSql(
+          fence.sql.lockTables(
+            [tableNames.nodes, tableNames.edges],
+            "access-exclusive",
+          ),
+        ),
+      );
+      return;
+    }
+    case "engine-serialized": {
+      // Two things read this arm as "take no relation lock". The bundled
+      // SQLite import session takes that reading its own way, without ever
+      // calling this function: it is built by
+      // `createSqliteTrustedImportSession`, which inserts under the writer
+      // slot `BEGIN IMMEDIATE` already holds. Any target — SQLite dialect
+      // or not — that declares `serializedWriters: true` instead of locks
+      // reaches this arm directly through `resolveWriteFencePlan`, and
+      // taking no relation lock is the deliberate reading of that
+      // declaration: the engine already excludes concurrent writers by
+      // construction, so this function's own table lock would add nothing.
+      return;
+    }
+    default: {
+      fence satisfies never;
+    }
+  }
 }
 
 export async function suspendSqliteSecondaryIndexes(

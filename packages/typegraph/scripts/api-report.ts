@@ -228,6 +228,32 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * `./interchange`, `./profiler`, `./schema`, `./graph-merge`, `./provenance`,
  * `./sqlite/local`, `./postgres/pglite`, and the five `./adapters/drizzle/*`
  * entrypoints. `./backend` is unaffected: it exports `FenceSql` directly.
+ *
+ * Graph-template statement builder split: `CreateGraphTemplateMembersDeps`
+ * drops its `dialect` field and gains `instantiateStatement`, a profile-owned
+ * builder keyed on the params shape the two statement builders in
+ * `graph-template-sql.ts` already took. That params type,
+ * `InstantiateGraphTemplateSqlParams`, is newly reachable through
+ * `./adapters/drizzle/engine`'s already-unexported `Create*MembersDeps`
+ * family — the one entrypoint that renders this internal vocabulary at all
+ * — for +1.
+ *
+ * Catalog probe bag: `GraphBackend` gaining an optional `catalog:
+ * BackendCatalogProbes` member makes six names newly reachable —
+ * `BackendCatalogProbes` itself, `CatalogBackend` (the facet `TransactionBackend`
+ * composes it through), `CatalogColumn`, `CatalogIndexBehavior`, `IndexState`,
+ * and `NormalizedColumnKind` — at every entrypoint whose public type graph
+ * renders `GraphBackend`/`TransactionBackend` without directly exporting them:
+ * `.`, `./interchange`, `./profiler`, `./schema`, `./graph-merge`,
+ * `./provenance`, `./sqlite/local`, `./postgres/pglite`,
+ * `./adapters/drizzle/engine`, and the four remaining `./adapters/drizzle/*`
+ * entrypoints (+6 each). `./backend` directly exports all six names alongside
+ * the rest of the backend-authoring vocabulary, so its debt is unchanged.
+ *
+ * The catalog bag's bulk table-existence member, `tablesExist`, adds a
+ * seventh name — `TableState` — newly reachable at the same fourteen
+ * entrypoints (+1 each, on top of the six above). `./backend` again exports
+ * it directly, so its debt stays unchanged.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -237,40 +263,40 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // preceding fingerprint; these helpers are not new package entrypoint exports.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 381,
-    sha256: "6f8d263c3fc9822abe5352c7ed921b09d2af0e490f49650f795b28ba1fcbebb6",
+    count: 388,
+    sha256: "11f038ecdf42bbad583047a01c5b5106f226a42291f67f19d588448764a6cbeb",
   },
   "./adapters/drizzle/engine": {
-    count: 323,
-    sha256: "4e84ecfc3e39591f4d005a8f5330bcf58d6fedd10642e453beda62539ab0d1e9",
+    count: 332,
+    sha256: "897ea05b4706a8f424132359f2b9bb97143289bf4545d5ddbb1d95f1f867f652",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 239,
-    sha256: "bd48fce8e23c03d658d1c243f1767de443e9bcfe876e2e4f1a9eb9f39ea5b1e9",
+    count: 246,
+    sha256: "8c006f6a1e41393662c563d728e9a1ea8e37088c8b99d36141a4576a749baf5e",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 243,
-    sha256: "e1b61463f2a34d55b681fff3b3f7ec215cd704a079e7f4aa2a250bbd8543ed4f",
+    count: 250,
+    sha256: "202efb4305f220d6ff4cb3e0a9d8f1d7d99dbbc5b3233015745dd9d928a31924",
   },
   "./adapters/drizzle/sqlite": {
-    count: 240,
-    sha256: "fbc253c2c6e75984a3b84792a3f0bd99d38d296fc1b6bc056f3f715065a0f7a4",
+    count: 247,
+    sha256: "22ef6d9483a40553b274996237ac3121560d8d88966c6e32003c1f97311f5872",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 243,
-    sha256: "3d5da501e2fe67c390ef04bc026b11ac0a538a147c0d71ff7cfaff248900746a",
+    count: 250,
+    sha256: "17154fcd67efb82e904e7ed3fa57cc984114bdd75b7acaebb6ed5782d7f8c3cf",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 243,
-    sha256: "3d5da501e2fe67c390ef04bc026b11ac0a538a147c0d71ff7cfaff248900746a",
+    count: 250,
+    sha256: "17154fcd67efb82e904e7ed3fa57cc984114bdd75b7acaebb6ed5782d7f8c3cf",
   },
   "./backend": {
-    count: 15,
-    sha256: "13cf39b72b5f873ccd97dbabeac3c01b619eefe6c851bbab8375727c62566ee7",
+    count: 16,
+    sha256: "8fe4a8c3a1c1b997735418d441a12fe07c37d647267af642776f6d58e255f6f7",
   },
   "./core": {
     count: 72,
@@ -284,36 +310,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 710,
-    sha256: "d801b983034fdb978bbb23c17bb9ef7de8ca36ca83a93141c1b09a5c7bc11bc3",
+    count: 717,
+    sha256: "ff5aad943413e62e5ed119351118e83297595d6bf470f20d5e2fb37dbca1ccd3",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 693,
-    sha256: "1b71aa5a8780bf64fa90408769c3c2c6ca582b5de6c677d7f1f7b3a6a29cf5cc",
+    count: 700,
+    sha256: "4bebeef9090fbb993590a09cbae43e0d5ab4ad0d2141dc1e9f6a0a7017e78c9d",
   },
   "./postgres/pglite": {
-    count: 697,
-    sha256: "15ee45c9b271244ae19a198818646f3fdb8656d2451926ff20a3f054f1e0e54d",
+    count: 704,
+    sha256: "a4dd2833423a44b8691c6de2a4c8566a23416dd10eb08d752b60548a5d7ab297",
   },
   "./profiler": {
-    count: 695,
-    sha256: "578be70ae4759ed9341915dbd062ab00670c93e638483b28e4f5a0f4ace88252",
+    count: 702,
+    sha256: "451e9efb72c1d85a6e4c08a437932dc3ff0f95682a2eb7fba55ebca8d02e3da5",
   },
   "./provenance": {
-    count: 701,
-    sha256: "4d9dcdbd6ae7da6ffa2aeec83afbc0ed041e16581ea1eea39c59e8ee29f088bf",
+    count: 708,
+    sha256: "f0cb0c67e3eeaed506c279f2941c72d14d24df4b08ac0fda6f596db9315e6189",
   },
   "./schema": {
-    count: 264,
-    sha256: "f0e349dfbf4ed6884b82cfdba51b206c8a6749a456c4a24f1017d538e6f0b93c",
+    count: 271,
+    sha256: "98937d4bdad02494cdd60bf29a4287e543d9471a673d5846cb6796207d0f7448",
   },
   "./sqlite/local": {
-    count: 697,
-    sha256: "15ee45c9b271244ae19a198818646f3fdb8656d2451926ff20a3f054f1e0e54d",
+    count: 704,
+    sha256: "a4dd2833423a44b8691c6de2a4c8566a23416dd10eb08d752b60548a5d7ab297",
   },
 };
 

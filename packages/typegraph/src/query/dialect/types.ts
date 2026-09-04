@@ -33,6 +33,18 @@ export type DialectRecursiveQueryStrategy = "recursive_cte";
 export type DialectVectorPredicateStrategy = "native" | "unsupported";
 
 /**
+ * Strategy for computing subgraph reachable-node membership.
+ *
+ * `"materialized-ids"` fetches the traversal closure's ids in one extra
+ * round trip and filters the node/edge fetches against that materialized
+ * array. `"inline-cte"` embeds the recursive traversal CTE directly in each
+ * fetch statement instead. This is a control-flow and prepared-plan choice,
+ * not SQL text a token could express identically on both engines.
+ */
+export type DialectSubgraphMembershipStrategy =
+  "materialized-ids" | "inline-cte";
+
+/**
  * Capability and strategy profile for a SQL dialect.
  */
 export type DialectCapabilities = Readonly<{
@@ -96,6 +108,12 @@ export type DialectCapabilities = Readonly<{
    * Whether the dialect supports fulltext MATCH predicates.
    */
   supportsFulltext: boolean;
+
+  /**
+   * Subgraph reachable-node membership strategy — see
+   * {@link DialectSubgraphMembershipStrategy}.
+   */
+  subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
 }>;
 
 /**

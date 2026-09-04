@@ -20,6 +20,7 @@ export const PGLITE_TEST_FILES = [
   "tests/durable-edge-match-identity.test.ts",
   "tests/edge-convergence-command.test.ts",
   "tests/edge-match-identity-ddl.test.ts",
+  "tests/engine-catalog-probes.test.ts",
   "tests/engine-operation-layer-transaction-scope.test.ts",
   "tests/engine-profile-parity.test.ts",
   "tests/engine-profile-refusals.test.ts",
@@ -37,6 +38,7 @@ export const PGLITE_TEST_FILES = [
   "tests/schema-fused-insert.test.ts",
   "tests/schema-graph-write-fence.test.ts",
   "tests/schema-kind-emptiness.test.ts",
+  "tests/subgraph-membership-postgres.test.ts",
   "tests/write-plan-fence-threading.test.ts",
   "tests/write-plan-statement-order.test.ts",
 ] as const;

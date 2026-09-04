@@ -55,6 +55,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
 } from "../../errors";
+import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   fts5Strategy,
@@ -90,19 +91,24 @@ import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type BackendCatalogProbes,
   type BundledBackendCapabilityOverrides,
+  type CatalogColumn,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IndexState,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type LockSchemaVersionForWriteParams,
+  type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
   type RecordKindRemovalParams,
   type SchemaWriteTransactionBackend,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
+  type TableState,
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
@@ -120,7 +126,10 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
-import { copyGraphTemplateContributionMarkersStatement } from "./graph-template-sql";
+import {
+  copyGraphTemplateContributionMarkersStatement,
+  sqliteInstantiateGraphTemplateStatement,
+} from "./graph-template-sql";
 import { isLocalLibsqlClient } from "./libsql-client";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
@@ -191,7 +200,10 @@ import {
   type InternalOperationBackend,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
-import { createSqliteOperationStrategy } from "./operations/strategy";
+import {
+  createSqliteOperationStrategy,
+  tableExistsFromRow,
+} from "./operations/strategy";
 import {
   createSqliteTables as buildSqliteTables,
   type SqliteTables,
@@ -607,6 +619,125 @@ function resolveSqliteGraphAnalyticsCapabilities(
   return { ...requested, supported: false };
 }
 
+/**
+ * Normalizes one SQLite declared column type to the family
+ * `catalog.columnTypes` reports, by type AFFINITY — the same substring
+ * rule SQLite itself applies when deciding how to store a value, since a
+ * declared type is otherwise free text SQLite does not enforce.
+ */
+function normalizeSqliteColumnKind(declaredType: string): NormalizedColumnKind {
+  if (declaredType.includes("int")) return "integer";
+  if (
+    declaredType.includes("char") ||
+    declaredType.includes("clob") ||
+    declaredType.includes("text")
+  ) {
+    return "text";
+  }
+  return "other";
+}
+
+/**
+ * SQLite has no invalid-build leftover state
+ * (`indexBehavior.hasInvalidIndexState` is `false`): every index either
+ * exists and is usable, or does not exist. Nothing to drop.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+async function dropSqliteInvalidIndex(_name: string): Promise<void> {}
+
+/**
+ * Builds this dialect's `catalog` probes bound to one execution session —
+ * the profile's own connection for the root backend, or a transaction's
+ * own adapter for a transaction-scoped backend, via `executionAdapter`
+ * supplied by the caller. Bound this way rather than closed over the
+ * profile's own connection, so a probe issued through a transaction-scoped
+ * backend's `catalog` runs on that transaction's own session — reading its
+ * own uncommitted state, not the outer connection's.
+ *
+ * Every probe runs through the SAME `serializedQueue` every other root
+ * operation does (`undefined` on a transaction-scoped backend, which
+ * carries no queue of its own — see `CreateSqliteTransactionBackendOptions`)
+ * — a catalog read has no special exemption from the ordering guarantee
+ * the queue gives every other backend call issued against this connection.
+ */
+function createSqliteCatalogProbes(
+  executionAdapter: SqliteExecutionAdapter,
+  operationStrategy: ReturnType<typeof createSqliteOperationStrategy>,
+  serializedQueue: SerializedExecutionQueue | undefined,
+): BackendCatalogProbes {
+  return {
+    tableExists(tableName: string): Promise<boolean> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        const rows = await executionAdapter.execute<Record<string, unknown>>(
+          operationStrategy.buildTableExists(tableName),
+        );
+        return tableExistsFromRow(rows[0]);
+      });
+    },
+    tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        if (names.length === 0) return [];
+        const rows = await executionAdapter.execute<{ name: string }>(
+          portableSql`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (${sqlValueList(names)})
+        `,
+        );
+        const existing = new Set(rows.map((row) => row.name));
+        return names.map((name) => ({ name, exists: existing.has(name) }));
+      });
+    },
+    indexStates(names: readonly string[]): Promise<readonly IndexState[]> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        if (names.length === 0) return [];
+        const rows = await executionAdapter.execute<{ name: string }>(
+          portableSql`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (${sqlValueList(names)})
+        `,
+        );
+        const existing = new Set(rows.map((row) => row.name));
+        return names.map((name) => ({
+          name,
+          exists: existing.has(name),
+          invalid: false,
+        }));
+      });
+    },
+    dropInvalidIndex: dropSqliteInvalidIndex,
+    columnTypes(table: string): Promise<readonly CatalogColumn[]> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        const rows = await executionAdapter.execute<{
+          name: unknown;
+          type: unknown;
+        }>(portableSql`PRAGMA table_info(${portableSql.identifier(table)})`);
+        return rows.flatMap((row) => {
+          if (typeof row.name !== "string" || typeof row.type !== "string") {
+            return [];
+          }
+          const declaredType = row.type.trim().toLowerCase();
+          return [
+            {
+              name: row.name,
+              kind: normalizeSqliteColumnKind(declaredType),
+              declaredType,
+            },
+          ];
+        });
+      });
+    },
+    indexBehavior: {
+      concurrentBuilds: false,
+      hasInvalidIndexState: false,
+      supportsGinFamily: false,
+    },
+  };
+}
+
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -638,6 +769,14 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   contributionMaterializer: ContributionMaterializer;
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
+  /**
+   * The root backend's own `catalog` bag, threaded through so this call
+   * exposes the SAME object rather than building a second one from `db` /
+   * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
+   * transaction-scoped call, which has no root bag to share and instead
+   * builds its own probes bound to the transaction's own session.
+   */
+  catalog?: BackendCatalogProbes | undefined;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -678,6 +817,7 @@ function createSqliteOperationBackend(
     vectorStrategy,
     contributionMaterializer,
     transactionScoped,
+    catalog,
   } = options;
 
   // CRUD statements route through the execution adapter's compiled path on
@@ -977,8 +1117,21 @@ function createSqliteOperationBackend(
   });
 
   // `hybridSearch` is not part of the shared assembly — see
-  // `vectorEmbeddingMethods`'s own comment above.
-  return { ...operations, ...vectorEmbeddingMethods };
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is the root's
+  // own bag when the caller supplied one (`options.catalog`, threaded
+  // through from `EngineProvisioning.catalog` — the SAME object exposed as
+  // `backend.catalog`, built once); when absent — the transaction-scoped
+  // call, which shares no bag of its own — this builds a fresh one bound to
+  // THIS call's own `executionAdapter` (the transaction's own adapter), so
+  // every catalog probe on a transaction-scoped backend runs on the
+  // transaction's own session.
+  return {
+    ...operations,
+    ...vectorEmbeddingMethods,
+    catalog:
+      catalog ??
+      createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
+  };
 }
 
 /**
@@ -1331,6 +1484,10 @@ export function buildSqliteEngineProfile(
       contributionMaterializer: ctx.contributionMaterializer,
       transactionScoped: false,
       ...(serializedQueue === undefined ? {} : { serializedQueue }),
+      // The SAME object exposed as `backend.catalog` (via
+      // `provisioning.catalog`), not a second one built from this call's own
+      // `executionAdapter` — see `CreateSqliteOperationBackendOptions.catalog`.
+      catalog: provisioning.catalog,
     });
   }
 
@@ -1408,12 +1565,13 @@ export function buildSqliteEngineProfile(
     },
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
+    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
   };
 
-  // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
-  // head), `ensureTable` (`provisioning`), and `execute` (the operation
-  // layer's own `execute`, built once `createSqlBackend` has a contribution
-  // materializer to hand `buildOperations`).
+  // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
+  // (`provisioning`) and `execute` (the operation layer's own `execute`,
+  // built once `createSqlBackend` has a contribution materializer to hand
+  // `buildOperations`).
   const graphTemplateRuntime: GraphTemplateRuntime = {
     graphTemplatesTableDdl: generateSqliteCreateTableSQL(tables.graphTemplates),
     tableNames: {
@@ -1423,6 +1581,7 @@ export function buildSqliteEngineProfile(
         tables.contributionMaterializations,
       ),
     },
+    instantiateStatement: sqliteInstantiateGraphTemplateStatement,
     toSchemaVersionRow,
     rowAccess: {
       async insertIgnoringConflict(params) {
