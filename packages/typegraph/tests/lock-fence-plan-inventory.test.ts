@@ -38,9 +38,12 @@
  *     site, because its predicate lives INSIDE the insert statement: one
  *     statement cannot race itself, so an empty clause is correct at any
  *     isolation level — which is the posture SQLite has always run in.
- *  2. Zero dialect-literal comparisons (`dialect (!==|===) "postgres"/
- *     "sqlite"`, in a `BinaryExpression` or a `SwitchStatement` discriminant)
- *     remain in the eight lock sites' five files. The same scan run over the
+ *  2. Zero dialect-literal comparisons (any `===`/`!==`/`==`/`!=` comparison
+ *     with a `"postgres"`/`"sqlite"` string literal as either operand, or a
+ *     `case` clause testing one — an EXACT mirror of the ESLint selectors,
+ *     with no requirement that either side of the comparison, or the
+ *     enclosing switch's discriminant, be named `dialect`) remain in the
+ *     eight lock sites' five files. The same scan run over the
  *     two files that legitimately still branch on dialect for reasons that
  *     are NOT the pessimistic-lock decision (`backend/migrate-recorded-time.ts`
  *     DDL/column-type selection, `store/algorithms/iterative-graph-operation.ts`
@@ -166,14 +169,14 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "store/store.ts",
-    line: 'resolveWriteFencePlan(backend).kind === "unfenced"',
+    line: "const identityFencePlan = resolveWriteFencePlan(backend);",
     site: "J9b",
     reason:
       "The Operational Identity construction gate refuses an unfenced backend before any statement runs.",
   },
   {
     file: "store/store.ts",
-    line: 'if (resolveWriteFencePlan(backend).kind === "unfenced") {',
+    line: "const clockFencePlan = resolveWriteFencePlan(backend);",
     site: "J9a",
     reason:
       "The recorded-clock-allocation construction gate refuses an unfenced backend before any statement runs.",
@@ -515,8 +518,11 @@ function isStringOrTemplatePart(
  * above, `write-fence.ts`'s, etc.) is never mistaken for a real spelling.
  * Deduplicated by line: two tokens on the same physical line (`postgres-
  * fence-sql.ts`'s `pg_advisory_xact_lock(hashtext(` is both at once) report
- * as one site, matching how `scanForDialectLiterals` above reports one site
- * per line rather than one per match.
+ * as one site — a dedup this scan needs because it matches literal
+ * SUBSTRINGS within one string/template node, not whole AST nodes the way
+ * `scanForDialectLiterals` above does; that scan needs no such dedup, since
+ * each `BinaryExpression` or `case` clause it counts is already its own
+ * node.
  */
 function scanForFenceTokens(
   file: string,

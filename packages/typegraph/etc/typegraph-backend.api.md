@@ -4426,6 +4426,9 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
 export type UnbundledOptionalMember = ReasonedUnbundledMember | DeferredUnbundledMember;
 
 // @public
+type UnfencedReason = "undeclared" | "declared-none" | "table-locks-only";
+
+// @public
 export const UNIQUE_SIDECAR_BATCH: {
     readonly id: "uniqueSidecarBatch";
     readonly kind: "graduated";
@@ -4807,9 +4810,10 @@ Readonly<{
 | Readonly<{
     kind: "engine-serialized";
 }>
-/** Neither. Every non-degradable fence refuses. */
+/** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
 | Readonly<{
     kind: "unfenced";
+    reason: UnfencedReason;
 }>;
 
 // @public

@@ -13,21 +13,31 @@
  *
  * A second implementation of this scan in either test could disagree with the
  * other about what counts as a dialect-literal comparison — the same
- * `dialect (!==|===) "postgres"/"sqlite"` decision would then have two
- * spellings, which is the defect class this scanner exists to prevent.
+ * decision would then have two spellings, which is the defect class this
+ * scanner exists to prevent.
  *
- * This scan is deliberately NARROWER than the ESLint selectors it models: it
- * only matches a comparison where one side is literally the identifier
- * `dialect` or a `.dialect` property access, and only the `===`/`!==`
- * operators, whereas the ESLint selectors match `==`/`!=` too and do not
- * require either side of the comparison to be named `dialect` at all — nor
- * does the `SwitchCase` selector require the switch's own discriminant to be
- * `dialect`. That is deliberate: this scan exists to answer "does this file
- * make the `dialect`-keyed decision," which is what an exemption reason
- * explains, not "will ESLint flag this file." Whether the ban is actually
- * installed for a given module is a question only ESLint's resolved config
- * can answer — see `pnpm exec eslint src` and the `DIALECT_SEAM_RESTRICTIONS`
- * column in `tests/backend-construction-lint.test.ts`.
+ * This scan is an EXACT mirror of `DIALECT_SEAM_RESTRICTIONS`'s two ESLint
+ * selectors (`eslint.config.mjs`), site for site:
+ *
+ *  - `BinaryExpression[operator=/^(===|!==|==|!=)$/] > Literal[value=/^(sqlite|postgres)$/]`
+ *    — any `===`/`!==`/`==`/`!=` comparison with a `"postgres"`/`"sqlite"`
+ *    string literal as EITHER operand, regardless of what the other operand
+ *    is (an identifier named `dialect`, a `.dialect` property access, another
+ *    literal, anything). One site is recorded per matching `BinaryExpression`
+ *    even when both operands are such a literal — a shape no real dialect
+ *    comparison in this codebase produces.
+ *  - `SwitchCase > Literal[value=/^(sqlite|postgres)$/]` — any `case` clause
+ *    whose own test expression is such a literal, regardless of the
+ *    enclosing switch's discriminant. One site per matching case clause, not
+ *    one per `switch` statement: a switch with two matching case labels is
+ *    two sites here, exactly as it is two `SwitchCase` matches for ESLint.
+ *
+ * Neither shape requires the OTHER side of a comparison, or the switch's own
+ * discriminant, to be named `dialect` — matching the ESLint selectors, which
+ * make no such requirement either. Whether the ban is actually installed for
+ * a given module is a question only ESLint's resolved config can answer —
+ * see `pnpm exec eslint src` and the `DIALECT_SEAM_RESTRICTIONS` column in
+ * `tests/backend-construction-lint.test.ts`.
  */
 import ts from "typescript";
 
@@ -52,38 +62,33 @@ export function parseFile(file: string, source: string): ts.SourceFile {
 
 const DIALECT_LITERALS = new Set(["postgres", "sqlite"]);
 
-function isDialectExpression(node: ts.Expression): boolean {
-  if (ts.isIdentifier(node) && node.text === "dialect") return true;
-  return ts.isPropertyAccessExpression(node) && node.name.text === "dialect";
+const EQUALITY_OPERATOR_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.EqualsEqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsEqualsToken,
+  ts.SyntaxKind.EqualsEqualsToken,
+  ts.SyntaxKind.ExclamationEqualsToken,
+]);
+
+function isDialectStringLiteral(node: ts.Expression): node is ts.StringLiteral {
+  // A plain string literal only: ESLint's `Literal` selector never matches a
+  // template literal, so neither does this mirror.
+  return ts.isStringLiteral(node) && DIALECT_LITERALS.has(node.text);
 }
 
 function dialectLiteralComparison(node: ts.Node): boolean {
-  if (
+  return (
     ts.isBinaryExpression(node) &&
-    (node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
-      node.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
-  ) {
-    const [dialectSide, literalSide] =
-      isDialectExpression(node.left) ? [node.left, node.right]
-      : isDialectExpression(node.right) ? [node.right, node.left]
-      : [undefined, undefined];
-    if (
-      dialectSide !== undefined &&
-      ts.isStringLiteralLike(literalSide) &&
-      DIALECT_LITERALS.has(literalSide.text)
-    ) {
-      return true;
-    }
-  }
-  return false;
+    EQUALITY_OPERATOR_KINDS.has(node.operatorToken.kind) &&
+    (isDialectStringLiteral(node.left) || isDialectStringLiteral(node.right))
+  );
 }
 
 /**
- * Every `dialect (!==|===) "postgres"/"sqlite"` comparison, and every
- * `switch (dialect)`/`switch (x.dialect)` statement with a `"postgres"`/
- * `"sqlite"` case — the two shapes a comment-stripped AST walk must cover (a
- * plain-text grep would also flag a token named in a comment or a docstring,
- * which neither ratchet wants).
+ * Every `(===|!==|==|!=)` comparison with a `"postgres"`/`"sqlite"` string
+ * literal as either operand, and every `case` clause testing such a literal
+ * — the two shapes {@link EQUALITY_OPERATOR_KINDS} and the module docblock
+ * describe, walked over a comment-stripped AST so a token named in a comment
+ * or a docstring is never mistaken for a real comparison.
  */
 export function scanForDialectLiterals(
   file: string,
@@ -106,16 +111,7 @@ export function scanForDialectLiterals(
     if (dialectLiteralComparison(node)) {
       recordAt(node.getStart(parsed));
     }
-    if (
-      ts.isSwitchStatement(node) &&
-      isDialectExpression(node.expression) &&
-      node.caseBlock.clauses.some(
-        (clause) =>
-          ts.isCaseClause(clause) &&
-          ts.isStringLiteralLike(clause.expression) &&
-          DIALECT_LITERALS.has(clause.expression.text),
-      )
-    ) {
+    if (ts.isCaseClause(node) && isDialectStringLiteral(node.expression)) {
       recordAt(node.getStart(parsed));
     }
     ts.forEachChild(node, (child) => {

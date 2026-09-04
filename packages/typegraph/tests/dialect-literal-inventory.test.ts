@@ -19,9 +19,10 @@
  * against the same scan of that one file, so a reason naming several
  * decisions cannot survive after one of them is removed.
  *
- * `scanForDialectLiterals` is narrower than the ESLint selectors it echoes —
- * see its own docblock — so it is not itself the proof that the ban is wired
- * up everywhere; that is `tests/backend-construction-lint.test.ts`'s
+ * `scanForDialectLiterals` is an EXACT mirror of the two ESLint selectors it
+ * echoes — see its own docblock. It proves what a dialect-literal comparison
+ * IS; it is not itself the proof that the ban is actually wired up for every
+ * module under `src` — that is `tests/backend-construction-lint.test.ts`'s
  * DIALECT_SEAM_RESTRICTIONS column, which resolves ESLint's real config for
  * every module. This test only keeps the exemption list honest against the
  * tree.
@@ -147,5 +148,37 @@ describe("the dialect-literal ban's exemption list matches the tree, both direct
       );
     }
     expect(mismatched).toEqual([]);
+  });
+});
+
+describe("scanForDialectLiterals is an exact mirror of the two ESLint selectors", () => {
+  const source = [
+    '// A comment naming dialect === "postgres" must never count as a site.',
+    'const notAComparison = "this string mentions postgres but is not a comparison";',
+    "function example(mode: string, other: string): string {",
+    '  if (mode === "postgres") return "left-operand literal, named dialect";',
+    '  if ("sqlite" !== other) return "right-operand literal, unrelated identifier";',
+    "  switch (mode) {",
+    '    case "postgres": {',
+    '      return "first case clause";',
+    "    }",
+    '    case "sqlite": {',
+    '      return "second case clause";',
+    "    }",
+    "    default: {",
+    '      return "default clause, no literal test";',
+    "    }",
+    "  }",
+    "}",
+  ].join("\n");
+
+  it("counts a literal on either operand and one site per matching case clause, and never a comment or an unrelated string", () => {
+    const sites = scanForDialectLiterals("example.ts", source);
+    expect(sites.map((site) => site.line)).toEqual([
+      'if (mode === "postgres") return "left-operand literal, named dialect";',
+      'if ("sqlite" !== other) return "right-operand literal, unrelated identifier";',
+      'case "postgres": {',
+      'case "sqlite": {',
+    ]);
   });
 });

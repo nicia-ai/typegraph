@@ -1199,6 +1199,23 @@ bind budget). This is a control-flow and prepared-plan decision, not SQL text a
 shared token could express identically on both shapes, so it lives on
 `DialectCapabilities` rather than in the query compiler.
 
+A profile's `graphTemplateRuntime.instantiateStatement` is a required builder cloning a durable
+schema template into a fresh graph. Given the template and target graph's ids and schema hashes
+(`InstantiateGraphTemplateSqlParams`: `templateId`, `templateSchemaHash`, `graphId`, `schemaHash`,
+and the three physical table names it reads), it must return the statement that inserts the target
+graph's `schema_versions` row from the template's stored document and copies the template's
+contribution-marker rows into the target graph — taking the target graph's write lock, the same key
+the schema-commit fence takes, co-atomically with the insert on an engine that fences with locks. An
+engine whose dialect can compose a data-modifying CTE beside the schema INSERT (PostgreSQL) folds
+the marker copy and the lock into that one statement; an engine that cannot (SQLite) instead
+supplies the optional `copyContributionMarkers` dep, which runs the marker copy as a second
+statement once the schema row is confirmed. The bundled
+`postgresInstantiateGraphTemplateStatement` and `sqliteInstantiateGraphTemplateStatement` builders
+(`graph-template-sql.ts`) are what `createPostgresBackend` and `createSqliteBackend` supply to
+their own profiles — like the reference profiles and the bundled fence expressions below, neither
+is a symbol you can import; a custom profile reaches the same shape only by copying a bundled
+profile and adapting its statement.
+
 The bundled PostgreSQL fence spelling exposes two lock forms as bare
 `SqlFragment` EXPRESSIONS rather than only as standalone statements:
 `advisoryLockExpression` (the two-argument, namespaced form every ordinary

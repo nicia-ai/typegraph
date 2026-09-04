@@ -1202,7 +1202,7 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
     expect(statements).toHaveLength(0);
   });
 
-  it("declared-table-locks-only: refuses before any statement (no table-lock-alone arm)", async () => {
+  it("declared-table-locks-only: refuses before any statement (no table-lock-alone arm), naming the posture", async () => {
     const statements: { query: string; params: readonly unknown[] }[] = [];
     const backend = mockTrustedImportBackend(
       {
@@ -1212,14 +1212,29 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
       },
       statements,
     );
-    await expect(
-      lockPostgresTrustedImportTables(backend, TRUSTED_IMPORT_TABLE_NAMES),
-    ).rejects.toThrow(
+    let caught: unknown;
+    try {
+      await lockPostgresTrustedImportTables(
+        backend,
+        TRUSTED_IMPORT_TABLE_NAMES,
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(
       expect.objectContaining({
         details: expect.objectContaining({
           code: "WRITE_FENCE_UNAVAILABLE",
+          reason: "table-locks-only",
         }) as unknown,
       }),
+    );
+    // requireWriteFence names the ACTUAL posture — table locks with no
+    // advisory lock or serialized-writer slot above them — rather than the
+    // generic "is absent, or declares neither..." message every other
+    // unfenced reason used to share with this one.
+    expect((caught as Error).message).toContain(
+      "table locks without advisory locks or serialized writers",
     );
     expect(statements).toHaveLength(0);
   });

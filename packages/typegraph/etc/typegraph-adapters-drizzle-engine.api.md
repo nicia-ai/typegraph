@@ -2793,6 +2793,9 @@ type TrustedImportSession = Readonly<{
     insertEdges: (params: readonly InsertEdgeParams[]) => Promise<void>;
 }>;
 
+// @public
+type UnfencedReason = "undeclared" | "declared-none" | "table-locks-only";
+
 // @public (undocumented)
 type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
@@ -3036,9 +3039,10 @@ Readonly<{
 | Readonly<{
     kind: "engine-serialized";
 }>
-/** Neither. Every non-degradable fence refuses. */
+/** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
 | Readonly<{
     kind: "unfenced";
+    reason: UnfencedReason;
 }>;
 
 // @public

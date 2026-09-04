@@ -1083,11 +1083,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // A separate throw, not a widened condition on the gate above, so the
     // message can be the migration guide (OQ-B) rather than a generic
     // "atomic backend" refusal.
-    if (
-      graph.identity !== undefined &&
-      resolveWriteFencePlan(backend).kind === "unfenced"
-    ) {
-      refuseUnfencedOperationalIdentity(backend.dialect);
+    if (graph.identity !== undefined) {
+      const identityFencePlan = resolveWriteFencePlan(backend);
+      if (identityFencePlan.kind === "unfenced") {
+        refuseUnfencedOperationalIdentity(
+          backend.dialect,
+          identityFencePlan.reason,
+        );
+      }
     }
     this.#baseBackend = asRawBackend(backend);
     this.#adapterBackend = adapterBackend;
@@ -1105,8 +1108,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         // a separately-named gate below handles the fence (R-2).
         refuseEngineNativeRecordedTimeNotYetImplemented();
       }
-      if (resolveWriteFencePlan(backend).kind === "unfenced") {
-        refuseUnfencedClockAllocation(backend.dialect);
+      const clockFencePlan = resolveWriteFencePlan(backend);
+      if (clockFencePlan.kind === "unfenced") {
+        refuseUnfencedClockAllocation(backend.dialect, clockFencePlan.reason);
       }
       assertRevisionTrackableBackend(backend);
     }

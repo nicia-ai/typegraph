@@ -312,7 +312,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
     reason:
       "Decodes the legacy engine-native embedding column with engine-specific SQL; a one-shot migration over a format each engine wrote differently, not query compilation.",
     permanent: true,
-    sites: 1,
+    sites: 2,
   },
   {
     file: "src/backend/migrate-recorded-time.ts",
@@ -333,7 +333,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
     reason:
       "The dialect-keyed default lock capabilities the fence planner starts from (deriveFromDialect), plus the refusal and declaration-guidance messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable, pessimisticLockDeclarationLine, unfencedRefusalMessage).",
     permanent: true,
-    sites: 6,
+    sites: 9,
   },
   {
     file: "src/store/algorithms/iterative-graph-operation.ts",
