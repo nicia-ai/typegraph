@@ -145,13 +145,10 @@ function banColumns(modules: readonly string[]): readonly BanColumn[] {
       exempt: ["src/backend/derive-backend.ts"],
     },
     {
-      /** I2: the only `src` modules that may import `auditBackendResource`. */
+      /** I2: the only `src` module that may import `auditBackendResource`. */
       name: "BACKEND_AUDIT_RESTRICTIONS",
       restrictions: BACKEND_AUDIT_RESTRICTIONS,
-      exempt: [
-        "src/backend/drizzle/postgres.ts",
-        "src/backend/drizzle/sqlite.ts",
-      ],
+      exempt: ["src/backend/drizzle/engine/create-sql-backend.ts"],
     },
     {
       /**

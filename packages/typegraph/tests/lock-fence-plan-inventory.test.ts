@@ -4,13 +4,23 @@
  * Two ratchets, both comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **14** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **15** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
- *     (J9c), and the 3 consumers of the PostgreSQL schema fence (J14
+ *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
  *     commit-side, J15 writer-side, J16 the writer-side clause folded into
- *     the fused managed-insert programs) — enumerated in both directions,
- *     keyed on `(file, trimmed line)` so line drift cannot rot the pin.
+ *     the fused managed-insert programs), and the shared SQL engine
+ *     factory's own resolution (J17, `createSqlBackend`) — enumerated in
+ *     both directions, keyed on `(file, trimmed line)` so line drift cannot
+ *     rot the pin.
+ *
+ *     J17 resolves the plan once, immediately after a profile's capability
+ *     tail runs and before any member group is assembled, and gates
+ *     `markSchemaFencedInsertEligible` on the result: a profile whose plan
+ *     resolves `unfenced` earns every other mark this factory can hand out,
+ *     but not that one, since the fused insert's lock clause is
+ *     profile-supplied and an empty one is only correct when writers are
+ *     actually serialized.
  *
  *     J14 and J15 REFUSE like J1-J8: both fence a read-then-write sequence
  *     that spans statements, so the lock is what makes the check binding
@@ -162,6 +172,13 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J16",
     reason:
       "schemaFenceInsertLockClause resolves the plan for the FOR SHARE the fused managed-insert programs carry INSIDE their own statement. The ONLY degrading site: an in-statement predicate cannot race itself, so an empty clause stays correct.",
+  },
+  {
+    file: "backend/drizzle/engine/create-sql-backend.ts",
+    line: "const fencePlan = resolveWriteFencePlan(fenceTarget);",
+    site: "J17",
+    reason:
+      "createSqlBackend builds the ONE fence target from a profile's finalized capabilities and resolves the plan once, before any member group is assembled, and gates markSchemaFencedInsertEligible on the result — every dialect profile this factory assembles shares this one resolution.",
   },
 ];
 
@@ -418,13 +435,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 14 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 15 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 14 declared call sites, both directions", () => {
-    expect(found).toHaveLength(14);
-    expect(CALL_SITES).toHaveLength(14);
+  it("has exactly the 15 declared call sites, both directions", () => {
+    expect(found).toHaveLength(15);
+    expect(CALL_SITES).toHaveLength(15);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

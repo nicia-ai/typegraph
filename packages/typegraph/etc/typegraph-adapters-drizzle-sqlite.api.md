@@ -310,7 +310,7 @@ type CountNodesByKindParams = Readonly<{
     asOf?: string;
 }>;
 
-// @public (undocumented)
+// @public
 export function createSqliteBackend(db: AnySqliteDatabase, options?: SqliteBackendOptions): AdapterBackend<AnySqliteDatabase>;
 
 // @public

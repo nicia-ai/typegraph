@@ -218,7 +218,7 @@ describe("missing-peer-ledger", () => {
   });
 
   describe("MISSING_PEER_LEDGER", () => {
-    it("the ledger's typed-refusal arm equals the adapter-dynamic-only classification", () => {
+    it("each ledger arm equals its matching classification, both directions", () => {
       const classification = classifyEntrypoints();
 
       const typedRefusalEntrypoints = new Set(

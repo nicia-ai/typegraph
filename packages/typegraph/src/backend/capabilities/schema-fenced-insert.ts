@@ -8,12 +8,39 @@
  * neither is eligible by inference. Factory-owned root backends and the
  * transaction handles those factories open carry this out-of-band evidence.
  */
+import type { WriteFencePlan } from "./write-fence";
 
 const ELIGIBLE_SCHEMA_FENCED_INSERT_BACKENDS = new WeakSet<object>();
 
-/** @internal Called only by bundled factories for their root/owned-tx handles. */
-export function markSchemaFencedInsertEligible<T extends object>(target: T): T {
+/**
+ * Every caller that could mark a backend or transaction handle eligible goes
+ * through {@link markSchemaFencedInsertEligibleUnderFence} instead of this
+ * primitive directly, so eligibility can never be granted without a resolved
+ * fence plan backing it.
+ */
+function markSchemaFencedInsertEligible<T extends object>(target: T): T {
   ELIGIBLE_SCHEMA_FENCED_INSERT_BACKENDS.add(target);
+  return target;
+}
+
+/**
+ * Marks `target` schema-fenced-insert eligible only when `fencePlan` actually
+ * fences concurrent writers — the same `kind !== "unfenced"` gate
+ * `createSqlBackend`'s root mark applies (`../drizzle/engine/marks`). The
+ * bundled factories' root backend and every TypeGraph-opened transaction
+ * handle earn this mark through this function, so the root and every
+ * transaction handle it opens can never disagree about eligibility for the
+ * same resolved plan.
+ *
+ * @internal Called only by bundled factories for their root/owned-tx handles.
+ */
+export function markSchemaFencedInsertEligibleUnderFence<T extends object>(
+  target: T,
+  fencePlan: WriteFencePlan,
+): T {
+  if (fencePlan.kind !== "unfenced") {
+    markSchemaFencedInsertEligible(target);
+  }
   return target;
 }
 

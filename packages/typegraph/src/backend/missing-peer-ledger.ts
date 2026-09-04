@@ -7,11 +7,13 @@
  * they are the only entrypoints a consumer can reach WITHOUT themselves
  * importing `drizzle-orm` first, and therefore the only ones that can turn
  * "drizzle-orm is not installed" into a typed, actionable error instead of a
- * bare module-resolution stack. The six explicit `./adapters/drizzle/*`
+ * bare module-resolution stack. The seven explicit `./adapters/drizzle/*`
  * entrypoints expose Drizzle-native backends, connections, or schema builders
- * and load `drizzle-orm` when their module is evaluated. Their raw resolution
- * failure is an accepted, documented exemption (ruling r3-OQ2), not a
- * mechanism this module builds.
+ * — `./adapters/drizzle/engine`'s `createSqlBackend` included, whose module
+ * tree reaches `drizzle-orm` through the shared member modules it assembles
+ * a backend from — and load `drizzle-orm` when their module is evaluated.
+ * Their raw resolution failure is an accepted, documented exemption (ruling
+ * r3-OQ2), not a mechanism this module builds.
  *
  * {@link isMissingDrizzlePeerError} is the single narrow both factories call
  * (through {@link loadDrizzleBackedModule}), so the decision is spelled
@@ -63,10 +65,13 @@ const ASYNC_DRIZZLE_NATIVE_ADAPTER_REASON =
 const DRIZZLE_INDEX_BUILDERS_REASON =
   "Drizzle-native schema-builder entrypoint with no factory boundary at which to translate a missing drizzle-orm import";
 
+const ASSEMBLED_PROFILE_MODULE_TREE_REASON =
+  "the factory takes a caller-assembled engine profile, never a raw Drizzle handle or connection, but its module tree statically imports the shared member modules that construct Drizzle-backed row access, so a missing drizzle-orm fails at module evaluation with the raw resolution error";
+
 /**
  * Repo-root-relative, POSIX paths (matching `scripts/drizzle-claim-inventory.ts`'s
  * path grain) naming every file that states the peer's optionality and the
- * install command for the six documented-resolution-error rows.
+ * install command for the seven documented-resolution-error rows.
  */
 const SYNCHRONOUS_ADAPTER_DOCUMENTED_IN: readonly string[] = [
   "README.md",
@@ -77,9 +82,9 @@ const SYNCHRONOUS_ADAPTER_DOCUMENTED_IN: readonly string[] = [
 /**
  * Every non-portable published entrypoint, in exactly one arm. The two
  * "batteries included" entrypoints get the typed refusal because their
- * factory owns the connection; the six `./adapters/drizzle/*` entrypoints
+ * factory owns the connection; the seven `./adapters/drizzle/*` entrypoints
  * are the documented, accepted exemption. `tests/missing-peer-refusal.test.ts`
- * asserts this set equals `Object.keys(classifyEntrypoints())` minus the ten
+ * asserts this set equals `Object.keys(classifyEntrypoints())` minus the
  * portable entrypoints, both directions — so the covered set and the
  * asserted set are one object.
  */
@@ -134,6 +139,13 @@ export const MISSING_PEER_LEDGER = [
     arm: "documented-resolution-error",
     formats: ["import", "require"],
     reason: DRIZZLE_INDEX_BUILDERS_REASON,
+    documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
+  },
+  {
+    entrypoint: "./adapters/drizzle/engine",
+    arm: "documented-resolution-error",
+    formats: ["import", "require"],
+    reason: ASSEMBLED_PROFILE_MODULE_TREE_REASON,
     documentedIn: SYNCHRONOUS_ADAPTER_DOCUMENTED_IN,
   },
 ] as const satisfies readonly MissingPeerLedgerEntry[];

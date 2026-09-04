@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -210,6 +211,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * entrypoints. The entrypoint-specific counts and fingerprints below are the
  * measured API Extractor result after exporting the intended public contracts;
  * `./core` and the Drizzle indexes entrypoint are unchanged.
+ *
+ * `./adapters/drizzle/engine`: `SqlEngineProfile` and `EngineAssemblyContext`
+ * name the internal backend vocabulary — command ports, row shapes,
+ * capability records, the `Create*MembersDeps` shapes behind the six
+ * `*Runtime` head types, `WriteFenceTarget`, `InternalOperationBackend` —
+ * that this entrypoint deliberately does not republish, so nearly all of it
+ * surfaces as forgotten-export debt rather than a direct export, in family
+ * with the other adapter entrypoints. `SqlEngineProfile` gaining an optional
+ * `firstParty` field adds one more such name, `FirstPartyProfileToken`
+ * (+1): the type only two bundled profile builders can produce a recognized
+ * instance of, present on the field's declared type but not itself exported.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -221,6 +233,10 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 380,
     sha256: "fbd1da5eac1bd4d5b2516645e3e6568f3b787a6a9537e1504fd4ca64017634e5",
+  },
+  "./adapters/drizzle/engine": {
+    count: 322,
+    sha256: "4b47251ef7f2a11eb1e685e86f879fe1d46d85d1eb798880b3e85dda5ddbb6a7",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -362,7 +378,54 @@ async function verifyReport(reportFileName: string): Promise<boolean> {
     readFile(path.join(REPORT_FOLDER, reportFileName), "utf8"),
     readFile(path.join(VERIFY_REPORT_FOLDER, reportFileName), "utf8"),
   ]);
-  return stableApiReport(expected) === stableApiReport(actual);
+  const stableExpected = stableApiReport(expected);
+  const stableActual = stableApiReport(actual);
+  if (stableExpected === stableActual) return true;
+  await printReportDifference(reportFileName, stableExpected, stableActual);
+  return false;
+}
+
+const REPORT_DIFF_LINE_CAP = 400;
+
+/**
+ * Prints the normalized unified diff between the checked-in report and the
+ * freshly generated one, so a CI failure names the contract change instead
+ * of only the file. Capped, since a report is thousands of lines.
+ */
+async function printReportDifference(
+  reportFileName: string,
+  expected: string,
+  actual: string,
+): Promise<void> {
+  const expectedPath = path.join(
+    VERIFY_REPORT_FOLDER,
+    `${reportFileName}.checked-in.normalized`,
+  );
+  const actualPath = path.join(
+    VERIFY_REPORT_FOLDER,
+    `${reportFileName}.generated.normalized`,
+  );
+  await Promise.all([
+    writeFile(expectedPath, expected),
+    writeFile(actualPath, actual),
+  ]);
+  const diff = spawnSync(
+    "git",
+    [
+      "diff",
+      "--no-index",
+      "--no-color",
+      "--unified=3",
+      expectedPath,
+      actualPath,
+    ],
+    { encoding: "utf8" },
+  );
+  const lines = diff.stdout.split("\n");
+  const shown = lines.slice(0, REPORT_DIFF_LINE_CAP).join("\n");
+  const omitted = Math.max(0, lines.length - REPORT_DIFF_LINE_CAP);
+  console.error(shown);
+  if (omitted > 0) console.error(`... ${omitted} more diff lines omitted.`);
 }
 
 async function run(): Promise<void> {

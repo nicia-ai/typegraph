@@ -36,8 +36,8 @@ const STATICALLY_REQUIRED_COUNT = 2;
 const REASONED_FLOOR = 88;
 const DEFERRED_LIVE_TOTAL = 212;
 const DEFERRED_DECLARED_TOTAL = 215;
-const EXCLUDED_COUNT = 4;
-const TOTAL_ROW_COUNT = 313;
+const EXCLUDED_COUNT = 5;
+const TOTAL_ROW_COUNT = 314;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:160#executeStatement",
   "backend/migrate-recorded-time.ts:167#executeStatement",
@@ -184,7 +184,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 313)", () => {
+  it("the class partition covers every scanned row (total 314)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.
@@ -229,8 +229,8 @@ describe("live bundle member access scan (I6, T21)", () => {
     ).toEqual([]);
   });
 
-  it("the trusted-import exclusion is exactly four sites, both directions", () => {
-    expect(EXCLUDED_ACCESS_SITES).toHaveLength(4);
+  it("the excluded-access inventory is exactly five sites, both directions", () => {
+    expect(EXCLUDED_ACCESS_SITES).toHaveLength(5);
     expect(scan.byClass.excluded).toBe(EXCLUDED_COUNT);
 
     const excludedRows = scan.rows.filter((row) => row.class === "excluded");
@@ -246,9 +246,14 @@ describe("live bundle member access scan (I6, T21)", () => {
       ).toBe(true);
     }
 
-    // (ii) per-(file, member) counts match: two rows each for executeRaw and
-    // executeStatement, both classified `excluded`.
-    for (const member of ["executeRaw", "executeStatement"] as const) {
+    // (ii) per-(file, member) counts match: two rows each for the
+    // trusted-import executeRaw/executeStatement carve-out, one for the
+    // create-sql-backend.ts self-reference, all classified `excluded`.
+    for (const member of [
+      "executeRaw",
+      "executeStatement",
+      "lockSchemaVersionForWrite",
+    ] as const) {
       const declaredCount = EXCLUDED_ACCESS_SITES.filter(
         (site) => site.member === member,
       ).length;
@@ -256,17 +261,20 @@ describe("live bundle member access scan (I6, T21)", () => {
         (row) => row.member === member,
       ).length;
       expect(liveCount).toBe(declaredCount);
-      expect(liveCount).toBe(2);
+      expect(liveCount).toBe(member === "lockSchemaVersionForWrite" ? 1 : 2);
     }
 
-    // (iii) every excluded row is in trusted-import.ts, and neither the
-    // reasoned floor nor the deferred ceiling absorbed these rows (the
-    // ruling's requirement that this be a SEVENTH bucket, not folded into
-    // an existing one): `perMember` — which the reasoned/deferred assertions
-    // above read — sums to the total row count MINUS the four excluded rows.
+    // (iii) every excluded row is in one of the two carved-out files, and
+    // neither the reasoned floor nor the deferred ceiling absorbed these
+    // rows (the ruling's requirement that this be a SEVENTH bucket, not
+    // folded into an existing one): `perMember` — which the
+    // reasoned/deferred assertions above read — sums to the total row count
+    // MINUS the five excluded rows.
     expect(
       excludedRows.every(
-        (row) => row.file === "backend/drizzle/trusted-import.ts",
+        (row) =>
+          row.file === "backend/drizzle/trusted-import.ts" ||
+          row.file === "backend/drizzle/engine/create-sql-backend.ts",
       ),
     ).toBe(true);
     const perMemberTotal = Object.values(scan.perMember).reduce(

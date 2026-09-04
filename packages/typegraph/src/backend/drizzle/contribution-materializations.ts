@@ -101,7 +101,7 @@ export const POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS: ContributionMaterializationTi
  * dialect-shared field set so `mapContributionMaterializationRow` can
  * decode it.
  */
-type RawContributionMaterializationRow = Readonly<{
+export type RawContributionMaterializationRow = Readonly<{
   graphId: string;
   logicalName: string;
   owner: string;

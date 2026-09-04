@@ -2,23 +2,17 @@
  * I2/I3 baseline ratchet — records today's measured Drizzle-reachability
  * numbers (source grain and dist grain) as executable data. Every
  * `RECORDED_*` constant below is a fact about the tree at the point it was
- * last measured, with the command that produced it named beside it, per
- * `design-ws8-port-isolation.md` §2.1. B3 severs R-migrate
- * (`src/backend/migrate-recorded-time.ts` / `migrate-vectors.ts`), which was
- * the last real route reaching Drizzle from `.` and `./backend` — both flip
- * clean at both grains and both formats. B4 restructures the dist table into
- * a per-mode verdict tuple and re-measures it against a fresh build (0 of 10
- * portable dirty at either mode, in both formats). This batch (B4b) moves
- * the two "batteries included" entrypoints' connection construction behind
- * `await import("./*-store-impl")` and re-classifies them
- * `adapter-dynamic-only`: `load` (static edges only) is now clean for both,
- * because Node's module loader never resolves `drizzle-orm` unless the
- * factory actually runs; `deferred` (every edge, including the dynamic
- * import) stays dirty, because the factory's impl module still reaches
- * Drizzle when it runs. `RECORDED_SOURCE_VERDICTS` and `RECORDED_DIST_VERDICTS`
- * are both restructured to the same per-mode tuple shape so every recorded
- * table in this file answers "clean or dirty at THIS mode" rather than a
- * single collapsed verdict.
+ * last measured, with the command that produced it named beside it.
+ * `RECORDED_SOURCE_VERDICTS` and `RECORDED_DIST_VERDICTS` share a per-mode
+ * verdict tuple shape so every recorded table in this file answers "clean or
+ * dirty at THIS mode" rather than a single collapsed verdict.
+ *
+ * `./adapters/drizzle/engine`'s `createSqlBackend` takes a caller-assembled
+ * engine profile rather than a raw Drizzle handle, but its module tree
+ * statically imports the shared member modules that construct Drizzle-backed
+ * row access, so it reaches `drizzle-orm` exactly like the other six
+ * `./adapters/drizzle/*` entrypoints and is classified `adapter-static`
+ * alongside them.
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -48,11 +42,11 @@ import {
 const REPOSITORY_SCAN_TIMEOUT_MS = 30_000;
 
 /**
- * Recorded at `29d63ec` by `node --import tsx
+ * Recorded at HEAD by `node --import tsx
  * scripts/drizzle-reachability-scan.ts --grain=source` — every published
- * entrypoint, classified. Ten portable, eight adapter (the six true
- * `./adapters/drizzle/*` entrypoints plus the two "batteries included"
- * entrypoints that still construct their connection eagerly today).
+ * entrypoint, classified. Ten portable, seven eagerly-dirty `adapter-static`
+ * entrypoints, and two "batteries included" `adapter-dynamic-only`
+ * entrypoints.
  */
 const RECORDED_CLASSIFICATIONS: Readonly<
   Record<string, EntrypointClassification>
@@ -75,11 +69,16 @@ const RECORDED_CLASSIFICATIONS: Readonly<
   "./adapters/drizzle/sqlite/local": "adapter-static",
   "./adapters/drizzle/sqlite/libsql": "adapter-static",
   "./adapters/drizzle/indexes": "adapter-static",
+  "./adapters/drizzle/engine": "adapter-static",
 };
 
 const RECORDED_ENTRYPOINTS = Object.keys(RECORDED_CLASSIFICATIONS);
+/**
+ * The entrypoints expected to reach Drizzle eagerly at every grain and
+ * mode — classification-derived (`adapter-static`).
+ */
 const RECORDED_TRUE_ADAPTER_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
-  (entrypoint) => entrypoint.startsWith("./adapters/drizzle/"),
+  (entrypoint) => RECORDED_CLASSIFICATIONS[entrypoint] === "adapter-static",
 );
 const RECORDED_NON_ADAPTER_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
   (entrypoint) => !entrypoint.startsWith("./adapters/drizzle/"),
@@ -89,15 +88,15 @@ const RECORDED_PORTABLE_ENTRYPOINTS = RECORDED_ENTRYPOINTS.filter(
 );
 
 /**
- * Recorded at HEAD by `--grain=source` (`14 / 36 dirty`), restructured this
- * batch (B4b) into a per-mode verdict TUPLE — mirroring
- * {@link RECORDED_DIST_VERDICTS}'s shape — rather than a single collapsed
- * verdict, because `./sqlite/local` and `./postgres/pglite` no longer agree
- * across modes: their factories moved their connection construction behind
- * `await import("./*-store-impl")`, so `load` (static edges only) is clean
- * for both while `deferred` (every edge) stays dirty. Every portable
- * entrypoint is clean at both modes; every true `./adapters/drizzle/*`
- * entrypoint stays dirty at both modes by design (§3.1, §4.6).
+ * Recorded at HEAD by `--grain=source` (`16 / 38 dirty`), as a per-mode
+ * verdict TUPLE — mirroring {@link RECORDED_DIST_VERDICTS}'s shape — rather
+ * than a single collapsed verdict, since not every entrypoint agrees across
+ * modes: `./sqlite/local` and `./postgres/pglite`'s factories construct
+ * their connection behind `await import("./*-store-impl")`, so `load`
+ * (static edges only) is clean for both while `deferred` (every edge) stays
+ * dirty. Every portable entrypoint is clean at both modes; every
+ * `adapter-static` `./adapters/drizzle/*` entrypoint — `./adapters/drizzle/engine`
+ * included — stays dirty at both modes by design.
  */
 const RECORDED_SOURCE_VERDICTS: Readonly<
   Record<
@@ -134,6 +133,7 @@ const RECORDED_SOURCE_VERDICTS: Readonly<
   "./adapters/drizzle/sqlite/local": { load: "dirty", deferred: "dirty" },
   "./adapters/drizzle/sqlite/libsql": { load: "dirty", deferred: "dirty" },
   "./adapters/drizzle/indexes": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/engine": { load: "dirty", deferred: "dirty" },
 };
 
 /**
@@ -160,7 +160,8 @@ function sourceVerdictsFor(
  * owner of "what classification implies about verdicts", so the derived
  * assertions below (source grain, ungated; dist grain, both formats) bind
  * `classifyEntrypoints()`'s real output to a measured scan rather than
- * re-deriving the expectation inline at each call site.
+ * re-deriving the expectation inline at each call site. Every
+ * classification answers the same tuple at both grains.
  */
 function expectedVerdictsForClassification(
   classification: EntrypointClassification,
@@ -273,22 +274,23 @@ const RECORDED_ABSENT_ROUTES = {
 /**
  * Recorded at HEAD by `rm -rf dist && NODE_OPTIONS=--max-old-space-size=8192
  * pnpm build`, then `node --import tsx scripts/drizzle-reachability-scan.ts
- * --grain=dist` (a fresh build; the emitted `28 / 72 dirty`, not a
+ * --grain=dist` (a fresh build; the emitted `32 / 76 dirty`, not a
  * prediction) — I3's per-mode verdict TUPLE, not a single `load` verdict.
  * All ten portable entrypoints are clean at both `load` and `deferred`, in
- * both artifact formats. The six true `./adapters/drizzle/*` entrypoints are
- * dirty at both modes, in both formats. The two "batteries included"
- * entrypoints (`./sqlite/local`, `./postgres/pglite`) are, as of B4b, clean
- * at `load` and dirty at `deferred`, in BOTH formats — measured against
- * `tsup@8.5.1`'s real `splitting: true` output: the ESM artifact's factory
- * body is `await import('./local-store-impl-HASH.js')`, landing in its own
- * chunk, and the CJS artifact's factory body is the equivalent
- * `await import('./local-store-impl-HASH.cjs')` (a genuine dynamic
+ * both artifact formats. The seven true `adapter-static` `./adapters/drizzle/*`
+ * entrypoints — `./adapters/drizzle/engine` included — are dirty at both
+ * modes, in both formats. The two "batteries included" entrypoints
+ * (`./sqlite/local`, `./postgres/pglite`) are clean at `load` and dirty at
+ * `deferred`, in BOTH formats — measured against `tsup@8.5.1`'s real
+ * `splitting: true` output: the ESM artifact's factory body is `await
+ * import('./local-store-impl-HASH.js')`, landing in its own chunk, and the
+ * CJS artifact's factory body is the equivalent `await
+ * import('./local-store-impl-HASH.cjs')` (a genuine dynamic
  * `ImportExpression`, not a `require`), also in its own chunk — so Node's
  * module loader never resolves `drizzle-orm` for either format unless the
  * factory actually runs, which is exactly what makes the missing-peer typed
  * refusal in `src/backend/missing-peer-ledger.ts` reachable in the shipped
- * artifact (I12, design §4.4b).
+ * artifact.
  */
 const RECORDED_DIST_VERDICTS: Readonly<
   Record<
@@ -314,6 +316,7 @@ const RECORDED_DIST_VERDICTS: Readonly<
   "./adapters/drizzle/sqlite/local": { load: "dirty", deferred: "dirty" },
   "./adapters/drizzle/sqlite/libsql": { load: "dirty", deferred: "dirty" },
   "./adapters/drizzle/indexes": { load: "dirty", deferred: "dirty" },
+  "./adapters/drizzle/engine": { load: "dirty", deferred: "dirty" },
 };
 
 /**
@@ -409,10 +412,10 @@ describe("drizzle reachability — source grain", () => {
   });
 
   it(
-    "records today's source verdicts for all 18 entrypoints in both modes (2 of 12 non-adapter adapter-dynamic-only: ./sqlite/local, ./postgres/pglite)",
+    "records today's source verdicts for all 19 entrypoints in both modes (2 of 12 non-adapter adapter-dynamic-only: ./sqlite/local, ./postgres/pglite)",
     { timeout: REPOSITORY_SCAN_TIMEOUT_MS },
     () => {
-      expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(6);
+      expect(RECORDED_TRUE_ADAPTER_ENTRYPOINTS.length).toBe(7);
       expect(RECORDED_NON_ADAPTER_ENTRYPOINTS.length).toBe(12);
 
       // Both-directions set equality against the CLASSIFICATION table, not a
@@ -706,7 +709,7 @@ describe("drizzle reachability — dist grain", () => {
       process.env["TYPEGRAPH_REQUIRE_DIST_GRAIN"],
     ),
   )("shipped artifacts", () => {
-    it("covers both artifact formats of all 18 entrypoints", () => {
+    it("covers both artifact formats of all 19 entrypoints", () => {
       const findings = scanDistributionReachability();
       expect(findings.length).toBe(RECORDED_ENTRYPOINTS.length * 2 * 2);
 
@@ -763,7 +766,7 @@ describe("drizzle reachability — dist grain", () => {
       }
     });
 
-    it("records the load and deferred dist verdicts for all 18 entrypoints in both formats (0 of 10 portable dirty at either mode; 2 of 8 adapter entrypoints adapter-dynamic-only: load clean, deferred dirty)", () => {
+    it("records the load and deferred dist verdicts for all 19 entrypoints in both formats (0 of 10 portable dirty at either mode; 2 of 9 adapter entrypoints adapter-dynamic-only: load clean, deferred dirty)", () => {
       expect(Object.keys(RECORDED_DIST_VERDICTS).length).toBe(
         RECORDED_ENTRYPOINTS.length,
       );
@@ -777,7 +780,7 @@ describe("drizzle reachability — dist grain", () => {
       );
       expect(dirtyPortableAtEitherMode).toEqual([]);
 
-      // The six true `./adapters/drizzle/*` entrypoints are recorded dirty
+      // The seven true `./adapters/drizzle/*` entrypoints are recorded dirty
       // at BOTH modes — they reach Drizzle eagerly, with no dynamic import.
       const dirtyTrueAdapterAtBothModes =
         RECORDED_TRUE_ADAPTER_ENTRYPOINTS.filter(

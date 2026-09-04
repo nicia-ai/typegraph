@@ -93,10 +93,12 @@
  *
  * Every `GraphBackend` in this package is built by `createSqliteBackend` or
  * `createPostgresBackend` (the batteries-included factories — local
- * better-sqlite3, libSQL, PGlite — and every decorator go through one of them),
- * so those two factories are the only places a mark is applied, and this list is
- * the whole population. Predicates are named rather than line-cited so the
- * inventory stays greppable as the files move.
+ * better-sqlite3, libSQL, PGlite — and every decorator go through one of them).
+ * Both resolve the verdict and hand it to `createSqlBackend`
+ * (`drizzle/engine/create-sql-backend.ts`), which applies the mark once
+ * before the backend object escapes — so that is the only place a mark is
+ * applied, and this list is the whole population. Predicates are named
+ * rather than line-cited so the inventory stays greppable as the files move.
  *
  * MARKED — the factory resolves the resource before the backend object exists,
  * so no wrapper can observe it unmarked:

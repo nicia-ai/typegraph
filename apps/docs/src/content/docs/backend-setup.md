@@ -1045,9 +1045,10 @@ absent, reject with a typed `ConfigurationError` (`MISSING_PEER_DEPENDENCY`)
 naming the package and the install command (`npm install drizzle-orm`) rather
 than a bare module-resolution stack. The explicit `/adapters/drizzle/...`
 entrypoints below expose Drizzle-native backends, connections, or schema
-builders and load `drizzle-orm` when the module is evaluated. Importing one
-without the peer installed therefore surfaces the raw module-resolution
-error, which names the same package.
+builders — or, for `/adapters/drizzle/engine`, the factory that assembles a
+backend from a caller-supplied engine profile — and load `drizzle-orm` when
+the module is evaluated. Importing one without the peer installed therefore
+surfaces the raw module-resolution error, which names the same package.
 
 ## Drizzle Adapter Entrypoints
 
@@ -1059,6 +1060,7 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
+- `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend` and the `SqlEngineProfile` types
 
 Import from the entrypoint matching your database:
 
@@ -1069,6 +1071,44 @@ import { createLibsqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/sqlite
 import { createPostgresBackend, tables } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
 import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres/pglite";
 ```
+
+### Engine profiles
+
+`createPostgresBackend` and `createSqliteBackend` are each `createSqlBackend`
+applied to a profile built by `buildPostgresEngineProfile` /
+`buildSqliteEngineProfile`:
+
+```typescript
+import { createSqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/engine";
+
+const backend = createSqlBackend(buildPostgresEngineProfile(db, options));
+```
+
+The two bundled builders are internal to the SQLite and PostgreSQL adapters —
+the snippet shows the shape `createPostgresBackend` uses, not an import you
+can write. A third-party engine supplies its own profile builder and passes
+the result to `createSqlBackend`.
+
+A profile owns everything that genuinely differs between engines: dialect
+tokens, the execution adapter, transaction framing, fence SQL, provisioning
+DDL, strategies, and limits. `createSqlBackend` owns everything that is the
+same for every SQL engine: deriving the final capabilities, resolving the
+write-fence decision once, assembling the mirrored member groups, auditing
+the backend's resource shape, and applying the trust marks. A backend minted
+this way earns the marks its own declarations back: the schema-fenced-insert
+mark only when the resolved fence plan actually fences writers, the
+root-autocommit mark only when the profile declares single-statement
+durability, and the atomic-program registrations only when its capabilities
+support root atomic batching — whether the profile is for a PostgreSQL-wire
+engine with a different locking story or an embedded engine with a different
+transaction model.
+
+`createSqlBackend` refuses a profile whose resolved capabilities omit
+`pessimisticLocks` — every mark and registration it applies assumes a
+resolvable write-fence decision, and a profile that does not declare one
+cannot back that decision soundly. `buildPostgresEngineProfile` and
+`buildSqliteEngineProfile` are the reference profiles to read when modeling a
+new one; neither is a symbol you can import.
 
 ## Cloudflare D1
 

@@ -22,7 +22,7 @@
  * to unify. The four `render*` functions build the portable fixture's
  * generated files as strings (no new repo-level `.mjs`/`.cjs` file), and
  * {@link renderLedgerWalkModule}'s output, `walk.cjs`, is the SINGLE owner of
- * the two ledger arms' distinguishing assertions — neither generated runner
+ * the ledger arms' distinguishing assertions — neither generated runner
  * (`run.mjs`, `run.cjs`) contains that decision, only a reference to it.
  */
 import { spawn } from "node:child_process";
@@ -505,7 +505,7 @@ export function renderPortableFixtureIndex(
 }
 
 /**
- * `walk.cjs` — the SINGLE owner of the two ledger arms' distinguishing
+ * `walk.cjs` — the SINGLE owner of the ledger arms' distinguishing
  * assertions (design §4.4c step 5, §5). CommonJS so both runners can consume
  * it with one form (`require` in CJS, a static `import` in ESM — Node's
  * CJS/ESM interop statically analyzes this file's `module.exports` object

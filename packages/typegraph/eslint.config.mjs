@@ -77,9 +77,10 @@ const CARRY_MESSAGE =
 const AUDIT_MESSAGE =
   "auditBackendResource records a backend's serialized-resource verdict, and " +
   "it is written ONCE by the factory that built the backend, before the " +
-  "object escapes. Only the two drizzle factories may import it; anything " +
-  "else either derives through src/backend/derive-backend.ts (which carries " +
-  "the verdict) or reads it through resolveBackendAudit.";
+  "object escapes. Only src/backend/drizzle/engine/create-sql-backend.ts may " +
+  "import it; anything else either derives through " +
+  "src/backend/derive-backend.ts (which carries the verdict) or reads it " +
+  "through resolveBackendAudit.";
 
 /**
  * The I1 import ban. Exported so the exemption ratchet resolves THESE selectors
@@ -381,6 +382,10 @@ export const DRIZZLE_ZONE = [
   },
   {
     file: "src/backend/drizzle/ddl.ts",
+    reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
+  },
+  {
+    file: "src/backend/drizzle/engine/members/contribution-members.ts",
     reason: DRIZZLE_ADAPTER_IMPLEMENTATION_REASON,
   },
   {
@@ -899,8 +904,8 @@ const LINT_BLOCKS = [
 
   // Audited same-surface decorator over transaction-scoped backends. Retains
   // every guardrail except the seam import ban, which it needs because it
-  // decorates through deriveBackend. It gets no audit exemption: only the two
-  // drizzle factories write a verdict.
+  // decorates through deriveBackend. It gets no audit exemption: only the
+  // shared engine factory below writes a verdict.
   {
     files: ["src/backend/drizzle/contribution-materializations.ts"],
     rules: {
@@ -917,12 +922,14 @@ const LINT_BLOCKS = [
     },
   },
 
-  // The two backend factories are the only modules that WRITE a verdict, so
-  // each is exempted from the audit import ban and from nothing else. They are
-  // separate blocks — one shared block would hand the audit setter to
-  // contribution-materializations.ts for free. The PostgreSQL factory also
-  // decorates trusted transactions through the seam, so it drops the seam
-  // import ban; the SQLite factory imports no seam and keeps it.
+  // The two backend factories no longer write a verdict themselves — they
+  // resolve it (`resolveDeclaredBackendResource`) and hand it to the shared
+  // engine factory below, which applies the mark — so neither needs the
+  // audit-import exemption and both keep the full restriction list. The
+  // PostgreSQL factory still decorates trusted transactions through the
+  // seam, so it alone drops the seam import ban; the SQLite factory needs
+  // no exemption at all and so gets no block of its own (it falls through
+  // to the general `src/**/*.ts` block above).
   {
     files: ["src/backend/drizzle/postgres.ts"],
     rules: {
@@ -933,12 +940,16 @@ const LINT_BLOCKS = [
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
+        ...BACKEND_AUDIT_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
       ],
     },
   },
+  // The shared engine factory both dialect factories delegate to
+  // (`createSqlBackend`) is the sole module that writes a verdict, so it is
+  // the only block exempted from the audit import ban.
   {
-    files: ["src/backend/drizzle/sqlite.ts"],
+    files: ["src/backend/drizzle/engine/create-sql-backend.ts"],
     rules: {
       "no-restricted-syntax": [
         "error",

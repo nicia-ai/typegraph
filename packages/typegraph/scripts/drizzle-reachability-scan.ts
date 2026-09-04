@@ -42,7 +42,10 @@ export type WalkMode = "load" | "deferred";
 /** Which half of a dual-format shipped artifact a dist-grain finding describes. */
 export type ArtifactFormat = "import" | "require";
 
-/** An entrypoint's expected shape, derived from `package.json#exports` minus `ADAPTER_ENTRYPOINTS`. */
+/**
+ * An entrypoint's expected shape, derived from `package.json#exports` minus
+ * `ADAPTER_ENTRYPOINTS`.
+ */
 export type EntrypointClassification =
   "portable" | "adapter-static" | "adapter-dynamic-only";
 
@@ -102,18 +105,24 @@ export const DRIZZLE_SPECIFIER_PATTERN =
 /**
  * The published entrypoints that are EXPECTED to reach Drizzle, and how.
  *
- * The six true `./adapters/drizzle/*` entrypoints are `adapter-static`: their
- * factories are synchronous and take a caller-constructed Drizzle handle, so
- * their connection construction reaches Drizzle eagerly, at both `load` and
- * `deferred` mode. The two "batteries included" entrypoints (`./sqlite/local`,
- * `./postgres/pglite`) are `adapter-dynamic-only` as of B4b: their factories
- * moved their connection construction behind an `await import(...)` of a
- * sibling `*-store-impl.ts` module (design §4.4b, I12), so Node's module
+ * The seven `./adapters/drizzle/*` entrypoints are `adapter-static`: each
+ * one's module tree imports a Drizzle package as a value, so it measures
+ * dirty at both grains, in every mode and format. Six take a
+ * caller-constructed Drizzle handle directly; `./adapters/drizzle/engine`'s
+ * one value export (`createSqlBackend`) takes a caller-assembled engine
+ * profile instead, but its module tree imports the shared member modules
+ * that construct Drizzle-backed row access (`contribution-materializations.ts`
+ * and its `drizzle-orm` import, reached through
+ * `engine/members/contribution-members.ts`), so it reaches Drizzle exactly
+ * the same way the other six do. The two "batteries included" entrypoints
+ * (`./sqlite/local`, `./postgres/pglite`) are `adapter-dynamic-only`: their
+ * factories moved their connection construction behind an `await
+ * import(...)` of a sibling `*-store-impl.ts` module, so Node's module
  * loader never resolves `drizzle-orm` for them (`load` is clean) unless the
  * factory actually runs (`deferred` is dirty) — which is also what makes the
  * typed missing-peer refusal in `src/backend/missing-peer-ledger.ts`
- * reachable in the first place. This is a reviewed diff in this table, never
- * a silent flip: every other published entrypoint not listed here is
+ * reachable in the first place. This is a reviewed diff in this table,
+ * never a silent flip: every other published entrypoint not listed here is
  * `portable` by default and must go clean.
  */
 export const ADAPTER_ENTRYPOINTS: Readonly<
@@ -125,6 +134,7 @@ export const ADAPTER_ENTRYPOINTS: Readonly<
   "./adapters/drizzle/sqlite/local": "adapter-static",
   "./adapters/drizzle/sqlite/libsql": "adapter-static",
   "./adapters/drizzle/indexes": "adapter-static",
+  "./adapters/drizzle/engine": "adapter-static",
   "./sqlite/local": "adapter-dynamic-only",
   "./postgres/pglite": "adapter-dynamic-only",
 };

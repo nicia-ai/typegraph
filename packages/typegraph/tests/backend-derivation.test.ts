@@ -14,7 +14,10 @@ import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
-import { resolveWriteFencePlan } from "../src/backend/capabilities/write-fence";
+import {
+  markFirstPartyFactory,
+  resolveWriteFencePlan,
+} from "../src/backend/capabilities/write-fence";
 import {
   deriveBackend,
   deriveTransactionSessionBackend,
@@ -378,22 +381,31 @@ describe("factories audit unconditionally", () => {
   });
 });
 
+/**
+ * A backend carrying the first-party write-fence mark whose declared
+ * capabilities omit `pessimisticLocks` — the shape that exercises
+ * `resolveWriteFencePlan`'s dialect-derivation fallback arm. The bundled
+ * factories can no longer mint this shape themselves: `createSqlBackend`
+ * refuses to build a backend whose resolved capabilities omit
+ * `pessimisticLocks`, so the only way left to reach the fallback arm on a
+ * first-party-marked backend is to mark a plain literal directly.
+ */
+function createFirstPartyMarkedBackendWithoutPessimisticLocks(): GraphBackend {
+  const backend = {
+    dialect: "sqlite",
+    capabilities: { ...SQLITE_CAPABILITIES, pessimisticLocks: undefined },
+    close: () => Promise.resolve(),
+  } as GraphBackend;
+  return markFirstPartyFactory(backend);
+}
+
 describe("the seam carries the first-party write-fence mark (§5.3)", () => {
-  // `pessimisticLocks: undefined` forces the "absent" arm of
-  // `resolveWriteFencePlan` on an otherwise-real factory backend — after
-  // A1/A2, no first-party factory ever omits the declaration, so this is the
-  // only way to exercise the dialect-derivation fallback the mark gates. If
-  // `deriveBackend`/`projectGraphBackend` lost the mark (the #435 defect
+  // If `deriveBackend`/`projectGraphBackend` lost the mark (the #435 defect
   // class applied to write-fence.ts instead of transaction-resource.ts), the
   // derived/projected backend would resolve `unfenced` here while the source
   // still resolves `engine-serialized` — two answers to one question.
   it("a deriveBackend-decorated first-party backend resolves the same plan as its source", () => {
-    const db: AnySqliteDatabase = drizzleSqliteProxy(() =>
-      Promise.resolve({ rows: [] }),
-    );
-    const backend = createSqliteBackend(db, {
-      capabilities: { pessimisticLocks: undefined },
-    });
+    const backend = createFirstPartyMarkedBackendWithoutPessimisticLocks();
 
     const decorated = deriveBackend(backend, {});
 
@@ -406,12 +418,7 @@ describe("the seam carries the first-party write-fence mark (§5.3)", () => {
   });
 
   it("a projectGraphBackend-projected first-party backend resolves the same plan as its source", () => {
-    const db: AnySqliteDatabase = drizzleSqliteProxy(() =>
-      Promise.resolve({ rows: [] }),
-    );
-    const backend = createSqliteBackend(db, {
-      capabilities: { pessimisticLocks: undefined },
-    });
+    const backend = createFirstPartyMarkedBackendWithoutPessimisticLocks();
 
     const projected = projectGraphBackend(backend);
 
