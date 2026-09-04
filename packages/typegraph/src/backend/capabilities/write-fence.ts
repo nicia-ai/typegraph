@@ -317,8 +317,11 @@ function planFromLockCapabilities(
   }
   // A declared table-locks-only engine (no advisoryLocks, no
   // serializedWriters) resolves `unfenced`: every TypeGraph fence needs
-  // either the advisory key or the writer slot, and no lock site here takes
-  // a table lock without first having taken the advisory one.
+  // either the advisory key or the writer slot. Trusted import is the one
+  // site that takes a table lock with no advisory lock above it — it owns
+  // the whole node and edge relations for the duration of its own
+  // transaction, so there is no shared resource left for a second writer to
+  // race it on, and no wider fence for an advisory key to nest inside.
   if (declared.serializedWriters) return { kind: "engine-serialized" };
   return { kind: "unfenced" };
 }

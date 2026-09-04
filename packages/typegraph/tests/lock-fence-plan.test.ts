@@ -41,6 +41,15 @@
  * than through a first-party factory (which, after A1/A2, can never produce
  * one).
  *
+ * A ninth site, `lockPostgresTrustedImportTables` (J18 in the inventory —
+ * see `tests/lock-fence-plan-inventory.test.ts`), is covered separately
+ * below rather than folded into the 5-posture matrix above: it is a
+ * PostgreSQL-only table lock with no advisory lock preceding it, so postures
+ * 1 and 5 do not apply to it the way they do to J1-J8. Its own block covers
+ * the postures that DO apply: PostgreSQL factory (lock taken, statement
+ * pinned), declared-advisory-only (refuses — the `tableLocks: false` pin),
+ * and declared-unfenced (refuses).
+ *
  * *Mutation A*: flip `serializedWriters` to `false` on `SQLITE_CAPABILITIES`
  * → the SQLite rows demand locks SQLite cannot take (J2-J8 refuse) — those
  * rows fail.
@@ -65,6 +74,8 @@ import {
   createContributionMaterializer,
 } from "../src/backend/drizzle/contribution-materializations";
 import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
+import { lockPostgresTrustedImportTables } from "../src/backend/drizzle/trusted-import";
+import type { TransactionBackend } from "../src/backend/types";
 import { openProvenanceStore } from "../src/graph-merge";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
@@ -1076,6 +1087,108 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       statements,
     );
     await expect(rebuild(deps)).rejects.toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "WRITE_FENCE_UNAVAILABLE",
+        }) as unknown,
+      }),
+    );
+    expect(statements).toHaveLength(0);
+  });
+});
+
+/**
+ * A synthetic `TransactionBackend`, undeclared-non-factory in shape like
+ * `mockContributionDeps`'s `fenceTarget`: only the two members
+ * `lockPostgresTrustedImportTables` actually reads (`resolveWriteFencePlan`'s
+ * `dialect`/`capabilities`/`fenceSql`, and `executeStatement`) are real: no
+ * driver, no transaction. `executeStatement` records the rendered statement
+ * the same way `mockContributionDeps`'s `record` does.
+ */
+function mockTrustedImportBackend(
+  capabilities: TransactionBackend["capabilities"],
+  statements: { query: string; params: readonly unknown[] }[],
+): TransactionBackend {
+  return {
+    dialect: "postgres",
+    capabilities,
+    fenceSql: postgresFenceSql,
+    executeStatement: (query: unknown): Promise<void> => {
+      const rendered = renderPostgres(query as SqlFragment);
+      statements.push({ query: rendered.sql, params: rendered.params });
+      return Promise.resolve();
+    },
+  } as unknown as TransactionBackend;
+}
+
+const TRUSTED_IMPORT_TABLE_NAMES = Object.freeze({
+  nodes: "typegraph_nodes",
+  edges: "typegraph_edges",
+});
+
+describe("T15 — J18 lockPostgresTrustedImportTables", () => {
+  it("PostgreSQL factory: table lock present, exact statement pinned", async () => {
+    const statements: { query: string; params: readonly unknown[] }[] = [];
+    const backend = mockTrustedImportBackend(
+      {
+        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        windowFunctions: true,
+        pessimisticLocks: {
+          advisoryLocks: true,
+          tableLocks: true,
+          serializedWriters: false,
+        },
+      },
+      statements,
+    );
+    await lockPostgresTrustedImportTables(backend, TRUSTED_IMPORT_TABLE_NAMES);
+    expect(hasTableLock(statements)).toBe(true);
+    // Pins the exact statement text this site takes — byte-identical to what
+    // it spelled inline before it started resolving the fence plan.
+    expect(
+      statements.some(
+        (statement) =>
+          statement.query ===
+          'LOCK TABLE "typegraph_nodes", "typegraph_edges" IN ACCESS EXCLUSIVE MODE',
+      ),
+    ).toBe(true);
+  });
+
+  it("declared-advisory-only: refuses before any statement (WRITE_FENCE_UNAVAILABLE)", async () => {
+    const statements: { query: string; params: readonly unknown[] }[] = [];
+    const backend = mockTrustedImportBackend(
+      {
+        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        windowFunctions: true,
+        pessimisticLocks: ADVISORY_ONLY_CAPABILITIES,
+      },
+      statements,
+    );
+    await expect(
+      lockPostgresTrustedImportTables(backend, TRUSTED_IMPORT_TABLE_NAMES),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "WRITE_FENCE_UNAVAILABLE",
+        }) as unknown,
+      }),
+    );
+    expect(statements).toHaveLength(0);
+  });
+
+  it("declared-unfenced: refuses before any statement", async () => {
+    const statements: { query: string; params: readonly unknown[] }[] = [];
+    const backend = mockTrustedImportBackend(
+      {
+        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        windowFunctions: true,
+        pessimisticLocks: UNFENCED_CAPABILITIES,
+      },
+      statements,
+    );
+    await expect(
+      lockPostgresTrustedImportTables(backend, TRUSTED_IMPORT_TABLE_NAMES),
+    ).rejects.toThrow(
       expect.objectContaining({
         details: expect.objectContaining({
           code: "WRITE_FENCE_UNAVAILABLE",
