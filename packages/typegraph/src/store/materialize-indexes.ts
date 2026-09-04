@@ -23,7 +23,8 @@
  * - Failed `CONCURRENTLY` builds leave invalid indexes behind
  *   (`pg_index.indisvalid = false`). Relational rebuilds self-heal: the
  *   claim-holding materializer drops an invalid leftover with the
- *   declaration's name before rebuilding (see dropInvalidIndexLeftover).
+ *   declaration's name before rebuilding (see the backend's
+ *   `catalog.dropInvalidIndex`, called from materializeWithClaim).
  *   Vector per-field index leftovers remain operator-repair.
  * - Two materializers racing the SAME index name serialize through a
  *   durable claim in the status table (see materializeWithClaim) —
@@ -31,6 +32,10 @@
  *   Postgres (no safe-snapshot exemption).
  */
 import { type RawBackend } from "../backend/branded";
+import {
+  type BackendCatalogProbes,
+  requireCatalog,
+} from "../backend/capabilities/catalog";
 import {
   type CreateVectorIndexParams,
   type GraphBackend,
@@ -54,10 +59,7 @@ import {
   type RelationalIndexDeclaration,
   type VectorIndexDeclaration,
 } from "../indexes/types";
-import { sqlValueList } from "../query/compiler/predicate-utils";
 import { type SqlDialect } from "../query/dialect/types";
-import { sql } from "../query/sql-fragment";
-import { asCompiledRowsSql } from "../query/sql-intent";
 import { sortedReplacer } from "../schema/canonical";
 import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
@@ -84,26 +86,6 @@ const CLAIM_LEASE_MS = 15 * 60_000;
 const CLAIM_RETRY_DELAY_MS = 200;
 const CLAIM_WAIT_TIMEOUT_MS = CLAIM_LEASE_MS + 60_000;
 const TRIGRAM_EXTENSION_DDL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;";
-
-const INDEX_DIALECT_BEHAVIOR = {
-  postgres: {
-    concurrentBuilds: true,
-    hasInvalidIndexState: true,
-    supportsGinFamily: true,
-  },
-  sqlite: {
-    concurrentBuilds: false,
-    hasInvalidIndexState: false,
-    supportsGinFamily: false,
-  },
-} as const satisfies Record<
-  SqlDialect,
-  Readonly<{
-    concurrentBuilds: boolean;
-    hasInvalidIndexState: boolean;
-    supportsGinFamily: boolean;
-  }>
->;
 
 /**
  * Whether the backend implements the FULL cross-caller build-claim
@@ -272,11 +254,12 @@ export async function materializeIndexes(
     backend.ensureIndexMaterializationsTable,
   );
 
+  const catalog = requireCatalog(backend, "store.materializeIndexes()");
   const dialect = backend.dialect;
   const tableNames = backend.tableNames;
   const ddlOptions = {
     ifNotExists: true,
-    concurrent: INDEX_DIALECT_BEHAVIOR[dialect].concurrentBuilds,
+    concurrent: catalog.indexBehavior.concurrentBuilds,
     ...(tableNames?.nodes === undefined ?
       {}
     : { nodesTableName: tableNames.nodes }),
@@ -309,7 +292,7 @@ export async function materializeIndexes(
     .filter((declaration) => declaration.entity !== "vector")
     .map((declaration) => declaration.name);
   const invalidLeftovers = await preloadInvalidIndexLeftovers(
-    backend,
+    catalog,
     relationalPhysicalNames,
   );
 
@@ -344,6 +327,7 @@ export async function materializeIndexes(
         materializeVectorIndex(
           declaration,
           backend,
+          catalog,
           graphId,
           schemaVersion,
           existingByStatusKey,
@@ -352,6 +336,7 @@ export async function materializeIndexes(
       : materializeRelationalIndex(
           declaration,
           backend,
+          catalog,
           dialect,
           ddlOptions,
           graphId,
@@ -445,6 +430,7 @@ function parallelBucketKey(declaration: IndexDeclaration): IndexEntity {
 async function materializeRelationalIndex(
   declaration: RelationalIndexDeclaration,
   backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   dialect: SqlDialect,
   ddlOptions: Readonly<{
     ifNotExists: boolean;
@@ -463,7 +449,7 @@ async function materializeRelationalIndex(
   // contract as vector indexes on engines without vector support.
   if (
     declaration.method !== undefined &&
-    !INDEX_DIALECT_BEHAVIOR[dialect].supportsGinFamily
+    !catalog.indexBehavior.supportsGinFamily
   ) {
     return {
       indexName: declaration.name,
@@ -487,7 +473,7 @@ async function materializeRelationalIndex(
     targetTable,
     declaration,
   );
-  return materializeOne(declaration, backend, graphId, schemaVersion, {
+  return materializeOne(declaration, backend, catalog, graphId, schemaVersion, {
     statusKey: declaration.name,
     signature,
     driftLabel: "Index",
@@ -517,6 +503,7 @@ async function materializeRelationalIndex(
 async function materializeVectorIndex(
   declaration: VectorIndexDeclaration,
   backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   graphId: string,
   schemaVersion: number,
   existingByStatusKey: ReadonlyMap<string, IndexMaterializationRow>,
@@ -591,9 +578,9 @@ async function materializeVectorIndex(
         {}
       : { lists: declaration.indexParams.lists }),
     },
-    concurrent: INDEX_DIALECT_BEHAVIOR[backend.dialect].concurrentBuilds,
+    concurrent: catalog.indexBehavior.concurrentBuilds,
   };
-  return materializeOne(declaration, backend, graphId, schemaVersion, {
+  return materializeOne(declaration, backend, catalog, graphId, schemaVersion, {
     // Compound status-table key for vector entries. Pgvector creates
     // one physical index per (graphId, kind, field) — so the
     // per-deployment status table needs to disambiguate entries that
@@ -631,6 +618,7 @@ type MaterializableIndexIdentity = Readonly<{
 async function materializeOne(
   declaration: MaterializableIndexIdentity,
   backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   graphId: string,
   schemaVersion: number,
   action: Readonly<{
@@ -697,18 +685,25 @@ async function materializeOne(
   // claim primitive; one caller builds, the rest wait and converge through
   // the already-materialized check on re-claim.
   if (hasIndexBuildClaimProtocol(backend)) {
-    return materializeWithClaim(declaration, backend, graphId, schemaVersion, {
-      statusKey,
-      signature,
-      driftLabel,
-      run,
-      ...(action.freshNeedsPhysicalRebuild === undefined ?
-        {}
-      : { freshNeedsPhysicalRebuild: action.freshNeedsPhysicalRebuild }),
-      ...(action.rebuildWithoutClaim === undefined ?
-        {}
-      : { rebuildWithoutClaim: action.rebuildWithoutClaim }),
-    });
+    return materializeWithClaim(
+      declaration,
+      backend,
+      catalog,
+      graphId,
+      schemaVersion,
+      {
+        statusKey,
+        signature,
+        driftLabel,
+        run,
+        ...(action.freshNeedsPhysicalRebuild === undefined ?
+          {}
+        : { freshNeedsPhysicalRebuild: action.freshNeedsPhysicalRebuild }),
+        ...(action.rebuildWithoutClaim === undefined ?
+          {}
+        : { rebuildWithoutClaim: action.rebuildWithoutClaim }),
+      },
+    );
   }
 
   try {
@@ -830,6 +825,7 @@ async function settleAgainstExisting(
 async function materializeWithClaim(
   declaration: MaterializableIndexIdentity,
   backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   graphId: string,
   schemaVersion: number,
   action: Readonly<{
@@ -897,7 +893,7 @@ async function materializeWithClaim(
           needsPhysicalRebuild:
             action.freshNeedsPhysicalRebuild ??
             ((physicalIndexName) =>
-              hasInvalidIndexLeftover(backend, physicalIndexName)),
+              hasInvalidIndexLeftover(catalog, physicalIndexName)),
           ...(action.rebuildWithoutClaim === undefined ?
             {}
           : { rebuildWithoutClaim: action.rebuildWithoutClaim }),
@@ -906,7 +902,11 @@ async function materializeWithClaim(
       if (settled !== undefined) return settled;
 
       if (declaration.entity !== "vector") {
-        await dropInvalidIndexLeftover(backend, declaration.name);
+        // `dropInvalidIndex` re-probes `indisvalid` itself before issuing
+        // `DROP INDEX CONCURRENTLY`, so this is a no-op for a valid or
+        // absent index on every engine — the same guard this call used to
+        // run inline.
+        await catalog.dropInvalidIndex(declaration.name);
       }
 
       try {
@@ -967,95 +967,60 @@ async function materializeWithClaim(
 /**
  * Whether an index with this name exists but is INVALID (an interrupted
  * CONCURRENTLY build's leftover). False for absent or valid indexes and
- * on non-Postgres dialects.
+ * on engines whose `indexBehavior.hasInvalidIndexState` is `false`.
  */
 async function hasInvalidIndexLeftover(
-  backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   physicalIndexName: string,
 ): Promise<boolean> {
-  if (!INDEX_DIALECT_BEHAVIOR[backend.dialect].hasInvalidIndexState) {
-    return false;
-  }
-  // Scoped to the session search_path like preloadPhysicalIndexStates —
-  // an unscoped probe could steer the unqualified DROP INDEX heal at
-  // another schema's identically-named (valid) index.
-  const rows = await backend.execute<{ invalid: boolean }>(
-    asCompiledRowsSql(sql`
-      SELECT NOT i.indisvalid AS invalid
-      FROM pg_class c
-      JOIN pg_index i ON i.indexrelid = c.oid
-      WHERE c.relname = ${physicalIndexName}
-        AND pg_catalog.pg_table_is_visible(c.oid)
-    `),
-  );
-  return rows[0]?.invalid === true;
+  if (!catalog.indexBehavior.hasInvalidIndexState) return false;
+  const [state] = await catalog.indexStates([physicalIndexName]);
+  return state?.invalid === true;
 }
 
 /**
  * Bulk variant of `hasInvalidIndexLeftover`: the set of INVALID leftover
- * index names among `physicalIndexNames`, resolved in ONE `pg_index` query.
- * Empty set on non-Postgres dialects or empty input.
+ * index names among `physicalIndexNames`, resolved in ONE catalog round
+ * trip. Empty set on engines whose `indexBehavior.hasInvalidIndexState` is
+ * `false`, or on empty input.
  *
  * A warm start (every index already materialized with a matching signature)
  * would otherwise fire `hasInvalidIndexLeftover` once per already-materialized
- * relational index inside `settleAgainstExisting` — N `pg_index` round-trips.
+ * relational index inside `settleAgainstExisting` — N catalog round trips.
  * Preloading the whole set collapses that to one, mirroring how
  * `preloadMaterializations` batches the status reads it sits beside.
  */
 async function preloadInvalidIndexLeftovers(
-  backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   physicalIndexNames: readonly string[],
 ): Promise<ReadonlySet<string>> {
   if (
-    !INDEX_DIALECT_BEHAVIOR[backend.dialect].hasInvalidIndexState ||
+    !catalog.indexBehavior.hasInvalidIndexState ||
     physicalIndexNames.length === 0
   ) {
     return new Set();
   }
   const { invalid } = await preloadPhysicalIndexStates(
-    backend,
+    catalog,
     physicalIndexNames,
   );
   return invalid;
 }
 
 /**
- * The subset of `tableNames` that exist as tables in the engine catalog,
- * in one query — `search_path`-scoped on Postgres like the index probes.
+ * The subset of `tableNames` that exist as tables (not views or other
+ * relations) in the engine catalog, in one round trip via
+ * `BackendCatalogProbes.tablesExist`.
  */
 async function preloadExistingTables(
-  backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   tableNames: readonly string[],
 ): Promise<ReadonlySet<string>> {
   if (tableNames.length === 0) return new Set();
-  switch (backend.dialect) {
-    case "postgres": {
-      const rows = await backend.execute<{ name: string }>(
-        asCompiledRowsSql(sql`
-          SELECT c.relname AS name
-          FROM pg_class c
-          WHERE c.relname IN (${sqlValueList(tableNames)})
-            AND c.relkind IN ('r', 'p')
-            AND pg_catalog.pg_table_is_visible(c.oid)
-        `),
-      );
-      return new Set(rows.map((row) => row.name));
-    }
-    case "sqlite": {
-      const rows = await backend.execute<{ name: string }>(
-        asCompiledRowsSql(sql`
-          SELECT name
-          FROM sqlite_master
-          WHERE type = 'table'
-            AND name IN (${sqlValueList(tableNames)})
-        `),
-      );
-      return new Set(rows.map((row) => row.name));
-    }
-    default: {
-      return backend.dialect satisfies never;
-    }
-  }
+  const states = await catalog.tablesExist(tableNames);
+  return new Set(
+    states.filter((state) => state.exists).map((state) => state.name),
+  );
 }
 
 type PhysicalIndexStates = Readonly<{
@@ -1066,70 +1031,27 @@ type PhysicalIndexStates = Readonly<{
 }>;
 
 /**
- * Partitions `physicalIndexNames` by their catalog state in ONE query:
- * `valid` (usable index exists) and `invalid` (Postgres CONCURRENTLY
- * leftover needing the healing build path). SQLite has no invalid state,
- * so its `invalid` set is always empty. The single query serves both the
+ * Partitions `physicalIndexNames` by their catalog state in ONE round trip
+ * via `BackendCatalogProbes.indexStates`: `valid` (usable index exists) and
+ * `invalid` (Postgres CONCURRENTLY leftover needing the healing build path).
+ * An absent name lands in neither set. SQLite has no invalid state, so its
+ * `invalid` set is always empty. This single probe serves both the
  * relational runner's leftover preload and the system runner's
- * name-presence fast path — the two predicates are complementary halves
- * of the same `pg_class ⋈ pg_index` probe.
+ * name-presence fast path.
  */
 async function preloadPhysicalIndexStates(
-  backend: GraphBackend,
+  catalog: BackendCatalogProbes,
   physicalIndexNames: readonly string[],
 ): Promise<PhysicalIndexStates> {
   const valid = new Set<string>();
   const invalid = new Set<string>();
   if (physicalIndexNames.length === 0) return { valid, invalid };
-  switch (backend.dialect) {
-    case "postgres": {
-      // Scope to search_path, matching unqualified CREATE/DROP INDEX DDL.
-      const rows = await backend.execute<{ name: string; valid: boolean }>(
-        asCompiledRowsSql(sql`
-          SELECT c.relname AS name, i.indisvalid AS valid
-          FROM pg_class c
-          JOIN pg_index i ON i.indexrelid = c.oid
-          WHERE c.relname IN (${sqlValueList(physicalIndexNames)})
-            AND pg_catalog.pg_table_is_visible(c.oid)
-        `),
-      );
-      for (const row of rows) (row.valid ? valid : invalid).add(row.name);
-      return { valid, invalid };
-    }
-    case "sqlite": {
-      const rows = await backend.execute<{ name: string }>(
-        asCompiledRowsSql(sql`
-          SELECT name
-          FROM sqlite_master
-          WHERE type = 'index'
-            AND name IN (${sqlValueList(physicalIndexNames)})
-        `),
-      );
-      for (const row of rows) valid.add(row.name);
-      return { valid, invalid };
-    }
-    default: {
-      return backend.dialect satisfies never;
-    }
+  const states = await catalog.indexStates(physicalIndexNames);
+  for (const state of states) {
+    if (!state.exists) continue;
+    (state.invalid ? invalid : valid).add(state.name);
   }
-}
-
-/**
- * Self-heals an interrupted CONCURRENTLY build: a crashed CIC leaves an
- * INVALID index behind, and a later `CREATE INDEX CONCURRENTLY IF NOT
- * EXISTS` would see the name and silently no-op — recording success over an
- * index the planner will never use. Detect via `hasInvalidIndexLeftover` and
- * drop (also CONCURRENTLY — same no-transaction rule). Valid indexes are
- * never touched.
- */
-async function dropInvalidIndexLeftover(
-  backend: GraphBackend,
-  physicalIndexName: string,
-): Promise<void> {
-  if (backend.executeDdl === undefined) return;
-  if (!(await hasInvalidIndexLeftover(backend, physicalIndexName))) return;
-  const quoted = `"${physicalIndexName.replaceAll('"', '""')}"`;
-  await backend.executeDdl(`DROP INDEX CONCURRENTLY IF EXISTS ${quoted};`);
+  return { valid, invalid };
 }
 
 function entry(
@@ -1336,7 +1258,8 @@ export async function materializeSystemIndexes(
     backend.ensureIndexMaterializationsTable,
   );
 
-  const concurrent = INDEX_DIALECT_BEHAVIOR[backend.dialect].concurrentBuilds;
+  const catalog = requireCatalog(backend, "store.materializeSystemIndexes()");
+  const concurrent = catalog.indexBehavior.concurrentBuilds;
   const candidates: readonly SystemIndexCandidate[] =
     SYSTEM_INDEX_DECLARATIONS.map((declaration) => {
       const physicalTable = resolveSystemIndexTableName(
@@ -1360,8 +1283,8 @@ export async function materializeSystemIndexes(
   const [existingByStatusKey, physicalStates, existingTables] =
     await Promise.all([
       preloadMaterializations(backend, statusKeys),
-      preloadPhysicalIndexStates(backend, statusKeys),
-      preloadExistingTables(backend, targetTables),
+      preloadPhysicalIndexStates(catalog, statusKeys),
+      preloadExistingTables(catalog, targetTables),
     ]);
   const { valid: physicallyPresent } = physicalStates;
   // Physical state is authoritative for system indexes: absent or INVALID
@@ -1439,7 +1362,7 @@ export async function materializeSystemIndexes(
       candidate.physicalTable,
       { concurrent },
     );
-    return materializeOne(identity, backend, graphId, schemaVersion, {
+    return materializeOne(identity, backend, catalog, graphId, schemaVersion, {
       statusKey: candidate.name,
       signature,
       driftLabel: "System index",
@@ -1447,7 +1370,7 @@ export async function materializeSystemIndexes(
       existingByStatusKey,
       physicalRebuildPreload,
       freshNeedsPhysicalRebuild: async (physicalIndexName) => {
-        const fresh = await preloadPhysicalIndexStates(backend, [
+        const fresh = await preloadPhysicalIndexStates(catalog, [
           physicalIndexName,
         ]);
         return !fresh.valid.has(physicalIndexName);

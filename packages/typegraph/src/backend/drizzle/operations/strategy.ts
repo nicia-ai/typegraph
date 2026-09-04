@@ -700,6 +700,33 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildGetSchemaVersion,
 } as const satisfies TableOperationBuilderMap;
 
+/**
+ * `CommonOperationStrategy.buildTableExists`'s per-dialect query, keyed by
+ * dialect rather than switched on it — the same shape
+ * `SCHEMA_DIALECT_STRATEGIES` (operations/schema.ts) and
+ * `EXISTING_COLUMN_QUALIFIERS` (operations/shared.ts) already use for a
+ * decision one shared function must make for both dialects.
+ */
+const TABLE_EXISTS_QUERIES = {
+  // `pg_table_is_visible` resolves visibility through the session
+  // `search_path` — exactly how the unqualified DELETE / ANALYZE this probe
+  // guards resolves `tableName`. Scoping to `current_schema()` instead would
+  // report the table missing whenever it lives in a search_path schema that
+  // is not the current one (a shared-schema / multi-tenant deployment),
+  // skipping a statement that would in fact have hit the table — a guard
+  // narrower than what it protects.
+  postgres: (tableName: string): SQL => sql`
+    SELECT c.relname AS table_name
+    FROM pg_catalog.pg_class AS c
+    WHERE c.relname = ${tableName}
+      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      AND pg_catalog.pg_table_is_visible(c.oid)
+    LIMIT 1
+  `,
+  sqlite: (tableName: string): SQL =>
+    sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`,
+} satisfies Record<SqlDialect, (tableName: string) => SQL>;
+
 function createCommonOperationStrategy(
   tables: Tables,
   dialect: SqlDialect,
@@ -1213,31 +1240,7 @@ function createCommonOperationStrategy(
       return buildSetActiveSchema(tables, graphId, version, dialect);
     },
     buildTableExists(tableName: string): SQL {
-      switch (dialect) {
-        case "postgres": {
-          // `pg_table_is_visible` resolves visibility through the session
-          // `search_path` — exactly how the unqualified DELETE / ANALYZE this
-          // probe guards resolves `tableName`. Scoping to `current_schema()`
-          // instead would report the table missing whenever it lives in a
-          // search_path schema that is not the current one (a shared-schema /
-          // multi-tenant deployment), skipping a statement that would in fact
-          // have hit the table — a guard narrower than what it protects.
-          return sql`
-            SELECT c.relname AS table_name
-            FROM pg_catalog.pg_class AS c
-            WHERE c.relname = ${tableName}
-              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-              AND pg_catalog.pg_table_is_visible(c.oid)
-            LIMIT 1
-          `;
-        }
-        case "sqlite": {
-          return sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`;
-        }
-        default: {
-          return dialect satisfies never;
-        }
-      }
+      return TABLE_EXISTS_QUERIES[dialect](tableName);
     },
     buildClearGraph(graphId: string): readonly ClearGraphStatement[] {
       return buildClearGraph(tables, graphId, fulltextStrategy);

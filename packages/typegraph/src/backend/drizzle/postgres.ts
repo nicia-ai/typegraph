@@ -555,12 +555,12 @@ function createPostgresCatalogProbes(
       valid: boolean;
     }>(
       portableSql`
-        SELECT c.relname AS name, i.indisvalid AS valid
-        FROM pg_class c
-        JOIN pg_index i ON i.indexrelid = c.oid
-        WHERE c.relname IN (${sqlValueList(names)})
-          AND pg_catalog.pg_table_is_visible(c.oid)
-      `,
+          SELECT c.relname AS name, i.indisvalid AS valid
+          FROM pg_class c
+          JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relname IN (${sqlValueList(names)})
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        `,
     );
     const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
     return names.map((name) => {

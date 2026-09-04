@@ -220,13 +220,6 @@ const LOCK_SITE_FILES: readonly string[] = [
 const NON_LOCK_EXEMPTIONS: readonly InventoryEntry[] = [
   {
     file: "backend/migrate-recorded-time.ts",
-    line: 'target.dialect === "sqlite" ?',
-    site: "J12-a",
-    reason:
-      "columnNames selects which introspection query to run (PRAGMA table_info vs information_schema) — not a lock.",
-  },
-  {
-    file: "backend/migrate-recorded-time.ts",
     line: 'const revisionType = dialect === "postgres" ? "BIGINT" : "INTEGER";',
     site: "J12",
     reason: "Column-type selection in a migration — not a lock.",

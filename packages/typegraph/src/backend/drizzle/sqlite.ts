@@ -653,66 +653,79 @@ async function dropSqliteInvalidIndex(_name: string): Promise<void> {}
  * profile's own connection, so a probe issued through a transaction-scoped
  * backend's `catalog` runs on that transaction's own session — reading its
  * own uncommitted state, not the outer connection's.
+ *
+ * Every probe runs through the SAME `serializedQueue` every other root
+ * operation does (`undefined` on a transaction-scoped backend, which
+ * carries no queue of its own — see `CreateSqliteTransactionBackendOptions`)
+ * — a catalog read has no special exemption from the ordering guarantee
+ * the queue gives every other backend call issued against this connection.
  */
 function createSqliteCatalogProbes(
   executionAdapter: SqliteExecutionAdapter,
   operationStrategy: ReturnType<typeof createSqliteOperationStrategy>,
+  serializedQueue: SerializedExecutionQueue | undefined,
 ): BackendCatalogProbes {
   return {
-    async tableExists(tableName: string): Promise<boolean> {
-      const rows = await executionAdapter.execute<Record<string, unknown>>(
-        operationStrategy.buildTableExists(tableName),
-      );
-      return tableExistsFromRow(rows[0]);
+    tableExists(tableName: string): Promise<boolean> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        const rows = await executionAdapter.execute<Record<string, unknown>>(
+          operationStrategy.buildTableExists(tableName),
+        );
+        return tableExistsFromRow(rows[0]);
+      });
     },
-    async tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
-      if (names.length === 0) return [];
-      const rows = await executionAdapter.execute<{ name: string }>(
-        portableSql`
+    tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        if (names.length === 0) return [];
+        const rows = await executionAdapter.execute<{ name: string }>(
+          portableSql`
           SELECT name
           FROM sqlite_master
           WHERE type = 'table'
             AND name IN (${sqlValueList(names)})
         `,
-      );
-      const existing = new Set(rows.map((row) => row.name));
-      return names.map((name) => ({ name, exists: existing.has(name) }));
+        );
+        const existing = new Set(rows.map((row) => row.name));
+        return names.map((name) => ({ name, exists: existing.has(name) }));
+      });
     },
-    async indexStates(
-      names: readonly string[],
-    ): Promise<readonly IndexState[]> {
-      if (names.length === 0) return [];
-      const rows = await executionAdapter.execute<{ name: string }>(
-        portableSql`
+    indexStates(names: readonly string[]): Promise<readonly IndexState[]> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        if (names.length === 0) return [];
+        const rows = await executionAdapter.execute<{ name: string }>(
+          portableSql`
           SELECT name
           FROM sqlite_master
           WHERE type = 'index'
             AND name IN (${sqlValueList(names)})
         `,
-      );
-      const existing = new Set(rows.map((row) => row.name));
-      return names.map((name) => ({
-        name,
-        exists: existing.has(name),
-        invalid: false,
-      }));
+        );
+        const existing = new Set(rows.map((row) => row.name));
+        return names.map((name) => ({
+          name,
+          exists: existing.has(name),
+          invalid: false,
+        }));
+      });
     },
     dropInvalidIndex: dropSqliteInvalidIndex,
-    async columnTypes(table: string): Promise<readonly CatalogColumn[]> {
-      const rows = await executionAdapter.execute<{
-        name: unknown;
-        type: unknown;
-      }>(portableSql`PRAGMA table_info(${portableSql.identifier(table)})`);
-      return rows.flatMap((row) => {
-        if (typeof row.name !== "string" || typeof row.type !== "string") {
-          return [];
-        }
-        return [
-          {
-            name: row.name,
-            kind: normalizeSqliteColumnKind(row.type.trim().toLowerCase()),
-          },
-        ];
+    columnTypes(table: string): Promise<readonly CatalogColumn[]> {
+      return runWithSerializedQueue(serializedQueue, async () => {
+        const rows = await executionAdapter.execute<{
+          name: unknown;
+          type: unknown;
+        }>(portableSql`PRAGMA table_info(${portableSql.identifier(table)})`);
+        return rows.flatMap((row) => {
+          if (typeof row.name !== "string" || typeof row.type !== "string") {
+            return [];
+          }
+          return [
+            {
+              name: row.name,
+              kind: normalizeSqliteColumnKind(row.type.trim().toLowerCase()),
+            },
+          ];
+        });
       });
     },
     indexBehavior: {
@@ -1101,7 +1114,7 @@ function createSqliteOperationBackend(
   return {
     ...operations,
     ...vectorEmbeddingMethods,
-    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy),
+    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
   };
 }
 
@@ -1532,7 +1545,7 @@ export function buildSqliteEngineProfile(
     },
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
-    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy),
+    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`

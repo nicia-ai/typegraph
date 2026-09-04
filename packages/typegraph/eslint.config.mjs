@@ -301,27 +301,6 @@ export const DIALECT_SEAM_RESTRICTIONS = [
  */
 export const DIALECT_LITERAL_EXEMPTIONS = [
   {
-    file: "src/backend/drizzle/operations/strategy.ts",
-    reason:
-      "Probes table existence with dialect-specific catalog SQL; a later commit resolves it through the backend's catalog member.",
-    permanent: false,
-    sites: 1,
-  },
-  {
-    file: "src/store/materialize-indexes.ts",
-    reason:
-      "Reads table and index catalog state with dialect-specific SQL at two call sites; a later commit resolves the same data through the backend's catalog member.",
-    permanent: false,
-    sites: 2,
-  },
-  {
-    file: "src/store/recorded-capture/schema-version.ts",
-    reason:
-      "Probes catalog column types with dialect-specific introspection SQL (readColumnTypes) and classifies a declared column's type compatibility by dialect (isCompatibleColumnType); a later commit resolves both through a normalized column kind returned from the catalog probe.",
-    permanent: false,
-    sites: 2,
-  },
-  {
     file: "src/store/store.ts",
     reason:
       "Passes ownsWriteLock=true only for SQLite's BEGIN IMMEDIATE transactions, which already hold the write lock recorded-clock allocation would otherwise re-acquire — the one boolean flag this preflight path threads through.",
@@ -338,9 +317,9 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/backend/migrate-recorded-time.ts",
     reason:
-      "Selects a dialect-specific introspection query, at two further sites the DDL column types the recorded-time migration writes, and at a fourth site the legacy mapping column the backfill joins on; provisioning code, not query compilation.",
+      "At two sites the DDL column types the recorded-time migration writes, and at a third site the legacy mapping column the backfill joins on; provisioning code, not query compilation.",
     permanent: true,
-    sites: 4,
+    sites: 3,
   },
   {
     file: "src/backend/repair-validity-windows.ts",
