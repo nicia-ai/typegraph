@@ -719,10 +719,12 @@ function createSqliteCatalogProbes(
           if (typeof row.name !== "string" || typeof row.type !== "string") {
             return [];
           }
+          const declaredType = row.type.trim().toLowerCase();
           return [
             {
               name: row.name,
-              kind: normalizeSqliteColumnKind(row.type.trim().toLowerCase()),
+              kind: normalizeSqliteColumnKind(declaredType),
+              declaredType,
             },
           ];
         });
@@ -767,6 +769,14 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   contributionMaterializer: ContributionMaterializer;
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
+  /**
+   * The root backend's own `catalog` bag, threaded through so this call
+   * exposes the SAME object rather than building a second one from `db` /
+   * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
+   * transaction-scoped call, which has no root bag to share and instead
+   * builds its own probes bound to the transaction's own session.
+   */
+  catalog?: BackendCatalogProbes | undefined;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -807,6 +817,7 @@ function createSqliteOperationBackend(
     vectorStrategy,
     contributionMaterializer,
     transactionScoped,
+    catalog,
   } = options;
 
   // CRUD statements route through the execution adapter's compiled path on
@@ -1106,15 +1117,20 @@ function createSqliteOperationBackend(
   });
 
   // `hybridSearch` is not part of the shared assembly — see
-  // `vectorEmbeddingMethods`'s own comment above. `catalog` is bound to
-  // THIS call's own `executionAdapter` — the outer connection when this is
-  // the root operation backend, the transaction's own adapter when
-  // `transactionScoped` — so every catalog probe on a transaction-scoped
-  // backend runs on the transaction's own session.
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is the root's
+  // own bag when the caller supplied one (`options.catalog`, threaded
+  // through from `EngineProvisioning.catalog` — the SAME object exposed as
+  // `backend.catalog`, built once); when absent — the transaction-scoped
+  // call, which shares no bag of its own — this builds a fresh one bound to
+  // THIS call's own `executionAdapter` (the transaction's own adapter), so
+  // every catalog probe on a transaction-scoped backend runs on the
+  // transaction's own session.
   return {
     ...operations,
     ...vectorEmbeddingMethods,
-    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
+    catalog:
+      catalog ??
+      createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
   };
 }
 
@@ -1468,6 +1484,10 @@ export function buildSqliteEngineProfile(
       contributionMaterializer: ctx.contributionMaterializer,
       transactionScoped: false,
       ...(serializedQueue === undefined ? {} : { serializedQueue }),
+      // The SAME object exposed as `backend.catalog` (via
+      // `provisioning.catalog`), not a second one built from this call's own
+      // `executionAdapter` — see `CreateSqliteOperationBackendOptions.catalog`.
+      catalog: provisioning.catalog,
     });
   }
 

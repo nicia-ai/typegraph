@@ -11,17 +11,22 @@
  * `tests/backends/postgres/materialize-indexes.test.ts`.
  */
 import { eq, sql } from "drizzle-orm";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { KindNotFoundError } from "../src";
+import { type BackendCatalogProbes } from "../src/backend/capabilities/catalog";
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { tables as defaultSqliteTables } from "../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import { ConfigurationError } from "../src/errors";
 import { defineNodeIndex } from "../src/indexes";
-import { computeIndexSignature } from "../src/store/materialize-indexes";
+import {
+  computeIndexSignature,
+  dropInvalidIndexLeftover,
+} from "../src/store/materialize-indexes";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
@@ -339,5 +344,49 @@ describe("graph-extension-declared relational indexes flow through materializeIn
     // Graph-extension-declared relational indexes go through the same DDL
     // path as compile-time ones — `created` confirms the SQL ran.
     expect(paperIndex?.status).toBe("created");
+  });
+});
+
+function fakeCatalog(): {
+  catalog: BackendCatalogProbes;
+  drop: ReturnType<typeof vi.fn>;
+} {
+  const drop = vi.fn(() => Promise.resolve());
+  return {
+    catalog: { dropInvalidIndex: drop } as unknown as BackendCatalogProbes,
+    drop,
+  };
+}
+
+describe("dropInvalidIndexLeftover", () => {
+  it("calls catalog.dropInvalidIndex when the backend has executeDdl", async () => {
+    const backend = createTestBackend();
+    const { catalog, drop } = fakeCatalog();
+
+    await dropInvalidIndexLeftover(
+      backend,
+      catalog,
+      "zz_fake_invalid_leftover",
+    );
+
+    expect(drop).toHaveBeenCalledExactlyOnceWith("zz_fake_invalid_leftover");
+  });
+
+  // Drop matrix: a backend narrowed without `executeDdl` — the same
+  // narrowing a history-enabled Store's projection applies — must never
+  // reach `catalog.dropInvalidIndex`, even though the catalog member has no
+  // such check of its own (a "fake invalid leftover": the spy stands in for
+  // an index the catalog would otherwise report invalid and drop).
+  it("never calls catalog.dropInvalidIndex when the backend is narrowed to omit executeDdl", async () => {
+    const backend = projectBackendWithout(createTestBackend(), ["executeDdl"]);
+    const { catalog, drop } = fakeCatalog();
+
+    await dropInvalidIndexLeftover(
+      backend,
+      catalog,
+      "zz_fake_invalid_leftover",
+    );
+
+    expect(drop).not.toHaveBeenCalled();
   });
 });

@@ -2801,6 +2801,24 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
 ]
 `;
 
+exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: tableExists probe (catalog member) > pglite-table-exists-probe 1`] = `
+[
+  {
+    "params": [
+      "engine_profile_parity_probe_table",
+    ],
+    "sql": "
+            SELECT c.relname AS table_name
+            FROM pg_catalog.pg_class AS c
+            WHERE c.relname = $1
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND pg_catalog.pg_table_is_visible(c.oid)
+            LIMIT 1
+          ",
+  },
+]
+`;
+
 exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: efSearch override refuses (no ANN frontier parameter) > sqlite-ordered-statements 1`] = `
 [
   {
@@ -4582,6 +4600,17 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       last_error = excluded.last_error
     RETURNING graph_id
   ",
+  },
+]
+`;
+
+exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: tableExists probe (catalog member) > sqlite-table-exists-probe 1`] = `
+[
+  {
+    "params": [
+      "engine_profile_parity_probe_table",
+    ],
+    "sql": "SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
   },
 ]
 `;

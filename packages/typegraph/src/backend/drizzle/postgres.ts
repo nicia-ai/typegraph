@@ -538,11 +538,17 @@ async function executeRawDdl(db: AnyPgDatabase, ddl: string): Promise<void> {
  * closed over the profile's own connection, so a probe issued through a
  * transaction-scoped backend's `catalog` runs on that transaction's own
  * session — reading its own uncommitted state, not the outer connection's.
+ *
+ * `transactionScoped` governs `dropInvalidIndex` only: PostgreSQL refuses
+ * `DROP INDEX CONCURRENTLY` inside a transaction block (every other probe
+ * here is a plain read, unaffected), so a transaction-scoped bag refuses
+ * that one member instead of issuing DDL its own session cannot run.
  */
 function createPostgresCatalogProbes(
   db: AnyPgDatabase,
   executionAdapter: PostgresExecutionAdapter,
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
+  transactionScoped: boolean,
 ): BackendCatalogProbes {
   async function indexStates(
     names: readonly string[],
@@ -592,6 +598,19 @@ function createPostgresCatalogProbes(
     },
     indexStates,
     async dropInvalidIndex(name: string): Promise<void> {
+      if (transactionScoped) {
+        throw new ConfigurationError(
+          "dropInvalidIndex requires a root PostgreSQL backend: PostgreSQL refuses DROP INDEX CONCURRENTLY inside a transaction block, so a transaction()-scoped catalog cannot issue it.",
+          {
+            code: "CATALOG_DROP_INVALID_INDEX_REQUIRES_ROOT_BACKEND",
+            operation: "dropInvalidIndex",
+          },
+          {
+            suggestion:
+              "Call dropInvalidIndex through the root backend (the object createPostgresBackend returned), not a transaction() handle.",
+          },
+        );
+      }
       // A no-op for a valid or absent index on every engine: only an
       // interrupted `CREATE INDEX CONCURRENTLY` leftover is ever dropped.
       const [state] = await indexStates([name]);
@@ -615,10 +634,12 @@ function createPostgresCatalogProbes(
         if (typeof row.name !== "string" || typeof row.type !== "string") {
           return [];
         }
+        const declaredType = row.type.trim().toLowerCase();
         return [
           {
             name: row.name,
-            kind: normalizePostgresColumnKind(row.type.trim().toLowerCase()),
+            kind: normalizePostgresColumnKind(declaredType),
+            declaredType,
           },
         ];
       });
@@ -1214,6 +1235,10 @@ export function buildPostgresEngineProfile(
       schemaVersionsTable: tables.schemaVersions,
       fenceTarget: ctx.fenceTarget,
       transactionScoped: false,
+      // The SAME object exposed as `backend.catalog` (via
+      // `provisioning.catalog`), not a second one built from this call's own
+      // `db`/`executionAdapter` — see `CreatePostgresOperationBackendOptions.catalog`.
+      catalog: provisioning.catalog,
     });
   }
 
@@ -1318,7 +1343,12 @@ export function buildPostgresEngineProfile(
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
-    catalog: createPostgresCatalogProbes(db, executionAdapter, operationStrategy),
+    catalog: createPostgresCatalogProbes(
+      db,
+      executionAdapter,
+      operationStrategy,
+      false,
+    ),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
@@ -2266,6 +2296,14 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   fenceTarget: WriteFenceTarget;
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
+  /**
+   * The root backend's own `catalog` bag, threaded through so this call
+   * exposes the SAME object rather than building a second one from `db` /
+   * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
+   * transaction-scoped call, which has no root bag to share and instead
+   * builds its own probes bound to the transaction's own session.
+   */
+  catalog?: BackendCatalogProbes | undefined;
 }>;
 
 type CreatePostgresTransactionBackendOptions = Readonly<{
@@ -2313,6 +2351,7 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     fenceTarget,
     transactionScoped,
+    catalog,
   } = options;
   // Route through the execution adapter so driver-specific result shapes
   // (`{rows}` for node-postgres / neon-serverless; bare array for
@@ -2949,15 +2988,25 @@ function createPostgresOperationBackend(
   });
 
   // `hybridSearch` is not part of the shared assembly — see
-  // `vectorEmbeddingMethods`'s own comment above. `catalog` is bound to
-  // THIS call's own `db`/`executionAdapter` — the outer connection when
-  // this is the root operation backend, the pinned transaction client when
-  // `transactionScoped` — so every catalog probe on a transaction-scoped
-  // backend runs on the transaction's own session.
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is the root's
+  // own bag when the caller supplied one (`options.catalog`, threaded
+  // through from `EngineProvisioning.catalog` — the SAME object exposed as
+  // `backend.catalog`, built once); when absent — the transaction-scoped
+  // call, which shares no bag of its own — this builds a fresh one bound to
+  // THIS call's own `db`/`executionAdapter` (the pinned transaction client),
+  // so every catalog probe on a transaction-scoped backend runs on the
+  // transaction's own session.
   return {
     ...operations,
     ...vectorEmbeddingMethods,
-    catalog: createPostgresCatalogProbes(db, executionAdapter, operationStrategy),
+    catalog:
+      catalog ??
+      createPostgresCatalogProbes(
+        db,
+        executionAdapter,
+        operationStrategy,
+        transactionScoped,
+      ),
   };
 }
 

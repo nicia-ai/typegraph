@@ -75,6 +75,7 @@ type CatalogBackend = Pick<GraphBackend, "catalog">;
 type CatalogColumn = Readonly<{
     name: string;
     kind: NormalizedColumnKind;
+    declaredType: string;
 }>;
 
 // @public

@@ -1,4 +1,5 @@
 import {
+  type CatalogColumn,
   type NormalizedColumnKind,
   requireCatalog,
   REVISION_COLUMN_KINDS,
@@ -19,10 +20,10 @@ type RequiredRecordedColumn = Readonly<{
 async function readColumnTypes(
   backend: Pick<GraphBackend, "catalog">,
   table: string,
-): Promise<ReadonlyMap<string, NormalizedColumnKind>> {
+): Promise<ReadonlyMap<string, CatalogColumn>> {
   const catalog = requireCatalog(backend, "assertCurrentRecordedSchema");
   const columns = await catalog.columnTypes(table);
-  return new Map(columns.map((column) => [column.name, column.kind]));
+  return new Map(columns.map((column) => [column.name, column]));
 }
 
 /**
@@ -138,14 +139,14 @@ export async function assertCurrentRecordedSchema(
     );
   }
   const incompatible = requirements.flatMap((requirement) => {
-    const actual = columnTypes.get(requirement.table)?.get(requirement.column);
+    const column = columnTypes.get(requirement.table)?.get(requirement.column);
     if (
-      actual !== undefined &&
-      isCompatibleColumnKind(requirement.kind, actual)
+      column !== undefined &&
+      isCompatibleColumnKind(requirement.kind, column.kind)
     ) {
       return [];
     }
-    return [{ ...requirement, actual: actual ?? "missing" }];
+    return [{ ...requirement, actual: column?.declaredType ?? "missing" }];
   });
   if (incompatible.length === 0) return;
 

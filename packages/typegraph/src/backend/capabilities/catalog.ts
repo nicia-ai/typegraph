@@ -55,9 +55,10 @@ export type NormalizedColumnKind =
  * The `columnTypes` kinds that count as a revision counter. Both dialects
  * normalize one to `"integer"`, so this is a single-member set today — named
  * and exported so a caller compares against ONE owned set instead of
- * re-spelling `=== "integer"` inline, the way `schema-version.ts`'s
- * `isCompatibleColumnType` and its SQLite-affinity twin did before this
- * member existed to replace them.
+ * re-spelling `=== "integer"` inline. Consumed by
+ * `store/recorded-capture/schema-version.ts`'s `isCompatibleColumnKind`,
+ * which replaced that file's dialect-branching `isCompatibleColumnType` and
+ * its SQLite-affinity twin (`hasSqliteAffinity`) with this owned set.
  */
 export const REVISION_COLUMN_KINDS: readonly NormalizedColumnKind[] = [
   "integer",
@@ -68,17 +69,28 @@ export const REVISION_COLUMN_KINDS: readonly NormalizedColumnKind[] = [
  * stores one as an ISO-8601 string (`"text"`); PostgreSQL stores one as
  * `timestamp with time zone` (`"timestamp-with-time-zone"`) and never
  * normalizes a declared column to `"text"` at all — so this set stays exact
- * on both dialects without a caller ever branching on `dialect`.
+ * on both dialects without a caller ever branching on `dialect`. Consumed
+ * by `store/recorded-capture/schema-version.ts`'s `isCompatibleColumnKind`,
+ * alongside {@link REVISION_COLUMN_KINDS}.
  */
 export const WALL_TIME_COLUMN_KINDS: readonly NormalizedColumnKind[] = [
   "text",
   "timestamp-with-time-zone",
 ];
 
-/** One physical column's name and normalized type family. */
+/**
+ * One physical column's name, normalized type family, and raw declared
+ * type — trimmed and lower-cased, but otherwise exactly what the engine's
+ * own catalog reports (`"bigint"`, `"timestamp with time zone"`, a SQLite
+ * declared type such as `"integer"` or `"text"`, and so on). `kind` is what
+ * a comparison should classify against; `declaredType` is what a
+ * diagnostic should show a human, since `kind` discards the declared
+ * spelling entirely.
+ */
 export type CatalogColumn = Readonly<{
   name: string;
   kind: NormalizedColumnKind;
+  declaredType: string;
 }>;
 
 /** One physical table's catalog presence. See {@link BackendCatalogProbes.tablesExist}. */
@@ -153,6 +165,12 @@ export type BackendCatalogProbes = Readonly<{
    * leftover from an interrupted `CREATE INDEX CONCURRENTLY`. A no-op on
    * an engine whose `indexBehavior.hasInvalidIndexState` is `false`, and
    * a no-op for a valid or absent index on every engine.
+   *
+   * A ROOT-BACKEND operation: PostgreSQL refuses `DROP INDEX CONCURRENTLY`
+   * inside a transaction block, so the `catalog` a `transaction()` handle
+   * exposes throws a typed `ConfigurationError` from this member instead of
+   * attempting the DDL — every other member here stays a plain read on
+   * that same transaction-scoped bag.
    */
   dropInvalidIndex: (this: void, name: string) => Promise<void>;
   /** Every column's name and normalized type family for one physical table. */

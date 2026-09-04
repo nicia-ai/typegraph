@@ -715,14 +715,19 @@ const TABLE_EXISTS_QUERIES = {
   // is not the current one (a shared-schema / multi-tenant deployment),
   // skipping a statement that would in fact have hit the table — a guard
   // narrower than what it protects.
+  // The template's inner-line indentation (12/14/12 spaces) is pinned to
+  // match the exact text the prior `switch`-based implementation emitted —
+  // see tests/engine-profile-parity.test.ts's tableExists-probe pins — not
+  // this object literal's own 2-space nesting.
+  // eslint-disable-next-line unicorn/template-indent -- this SQL text is snapshot-asserted verbatim (tests/engine-profile-parity.test.ts); autofix would reindent it to this object literal's nesting depth and change the captured statement text.
   postgres: (tableName: string): SQL => sql`
-    SELECT c.relname AS table_name
-    FROM pg_catalog.pg_class AS c
-    WHERE c.relname = ${tableName}
-      AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-      AND pg_catalog.pg_table_is_visible(c.oid)
-    LIMIT 1
-  `,
+            SELECT c.relname AS table_name
+            FROM pg_catalog.pg_class AS c
+            WHERE c.relname = ${tableName}
+              AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+              AND pg_catalog.pg_table_is_visible(c.oid)
+            LIMIT 1
+          `,
   sqlite: (tableName: string): SQL =>
     sql`SELECT name AS table_name FROM sqlite_master WHERE type IN ('table', 'view') AND name = ${tableName}`,
 } satisfies Record<SqlDialect, (tableName: string) => SQL>;

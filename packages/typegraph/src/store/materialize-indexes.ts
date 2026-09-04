@@ -809,6 +809,34 @@ async function settleAgainstExisting(
 }
 
 /**
+ * Drops `physicalIndexName` through `catalog.dropInvalidIndex` — a no-op
+ * for a valid or absent index on every engine, since that member re-probes
+ * `indisvalid` itself before ever issuing `DROP INDEX CONCURRENTLY` — but
+ * ONLY when this backend carries `executeDdl`.
+ *
+ * Every current caller reaches this only after
+ * `assertBackendSupportsIndexMaterialization` has already confirmed
+ * `executeDdl` is present on the SAME backend, so the guard below is
+ * currently unreachable through the public `materializeIndexes` /
+ * `materializeSystemIndexes` surface — restored anyway (mirroring the
+ * deleted `dropInvalidIndexLeftover` helper this replaced, which carried
+ * the identical check) because `catalog.dropInvalidIndex` has its own,
+ * independent DDL path: nothing about the catalog member itself requires a
+ * backend that implements it to also implement `executeDdl`. A caller
+ * reaching this function with a backend narrowed to omit `executeDdl`
+ * (`projectBackendWithout(["executeDdl"])`, say) must never have that
+ * narrowing bypassed through the catalog's own back door.
+ */
+export async function dropInvalidIndexLeftover(
+  backend: GraphBackend,
+  catalog: BackendCatalogProbes,
+  physicalIndexName: string,
+): Promise<void> {
+  if (backend.executeDdl === undefined) return;
+  await catalog.dropInvalidIndex(physicalIndexName);
+}
+
+/**
  * Builds one index under the cross-caller claim protocol.
  *
  * Claim → re-check → build → record → release. Losers retry the claim on
@@ -902,11 +930,7 @@ async function materializeWithClaim(
       if (settled !== undefined) return settled;
 
       if (declaration.entity !== "vector") {
-        // `dropInvalidIndex` re-probes `indisvalid` itself before issuing
-        // `DROP INDEX CONCURRENTLY`, so this is a no-op for a valid or
-        // absent index on every engine — the same guard this call used to
-        // run inline.
-        await catalog.dropInvalidIndex(declaration.name);
+        await dropInvalidIndexLeftover(backend, catalog, declaration.name);
       }
 
       try {

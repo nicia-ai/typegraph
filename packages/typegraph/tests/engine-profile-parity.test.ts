@@ -48,6 +48,7 @@ import {
   UnsupportedBackendCapabilityError,
 } from "../src";
 import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
+import { requireCatalog } from "../src/backend/capabilities/catalog";
 import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
 import { isFirstPartyFactory } from "../src/backend/capabilities/write-fence";
 import { PGLITE_MAX_BIND_PARAMETERS } from "../src/backend/drizzle/execution/postgres-execution";
@@ -765,6 +766,52 @@ describe("engine-profile parity: ordered compiled-SQL capture", () => {
 
     expect(normalizeCapturedStatements(collected)).toMatchSnapshot(
       "sqlite-graph-template-statements",
+    );
+  });
+
+  // `catalog.tableExists`'s emitted text moved from `operations/strategy.ts`'s
+  // `buildTableExists` (a `switch` on dialect) to `TABLE_EXISTS_QUERIES`, a
+  // dialect-keyed dispatch table — pinned here so a future edit to that
+  // table cannot silently reindent, reword, or otherwise change the probe's
+  // SQL text on either engine without this snapshot catching it.
+  it("PGlite: tableExists probe (catalog member)", async () => {
+    const client = await PGlite.create();
+    cleanups.push(() => client.close());
+
+    const collected: CapturedStatement[] = [];
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    instrumentPostgresCapture(client, collected);
+
+    await requireCatalog(backend, "test: tableExists probe").tableExists(
+      "engine_profile_parity_probe_table",
+    );
+
+    expect(normalizeCapturedStatements(collected)).toMatchSnapshot(
+      "pglite-table-exists-probe",
+    );
+  });
+
+  it("better-sqlite3: tableExists probe (catalog member)", async () => {
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+      return Promise.resolve();
+    });
+    const backend = createSqliteBackend(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+    });
+
+    const collected: CapturedStatement[] = [];
+    instrumentSqliteCapture(sqlite, collected);
+
+    await requireCatalog(backend, "test: tableExists probe").tableExists(
+      "engine_profile_parity_probe_table",
+    );
+
+    expect(normalizeCapturedStatements(collected)).toMatchSnapshot(
+      "sqlite-table-exists-probe",
     );
   });
 });

@@ -8,15 +8,21 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { requireCatalog } from "../src/backend/capabilities/catalog";
+import {
+  type CatalogIndexBehavior,
+  requireCatalog,
+} from "../src/backend/capabilities/catalog";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
   type NormalizedColumnKind,
 } from "../src/backend/types";
+import { ConfigurationError } from "../src/errors";
+import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledStatementSql } from "../src/query/sql-intent";
+import { assertCurrentRecordedSchema } from "../src/store/recorded-capture";
 import { requireDefined } from "../src/utils/presence";
 
 /** The default physical name of `recordedClock` on both bundled schemas. */
@@ -26,6 +32,21 @@ type CatalogFixture = Readonly<{
   backend: GraphBackend;
   /** `recordedClock.recorded_at`'s normalized kind on this dialect. */
   wallTimeKind: NormalizedColumnKind;
+  /**
+   * A declared column type this dialect classifies as `"other"` /
+   * `"text"` (never `"integer"`) whose own spelling is NOT the normalized
+   * kind's name — `VARCHAR(10)` classifies as text-like on both dialects,
+   * but SQLite's declared-type text stays `"varchar(10)"` while
+   * PostgreSQL's `information_schema` reports the length-free
+   * `"character varying"`. Used to prove a diagnostic reports the raw
+   * declared type, not the coarser kind, since a column whose kind and
+   * declared-type spelling happened to coincide couldn't tell the two
+   * apart.
+   */
+  mismatchedRevisionColumnDdl: string;
+  mismatchedRevisionDeclaredType: string;
+  /** This dialect's full `indexBehavior` bag — see `CatalogIndexBehavior`. */
+  expectedIndexBehavior: CatalogIndexBehavior;
   close: () => Promise<void>;
 }>;
 
@@ -34,6 +55,13 @@ function createSqliteFixture(): CatalogFixture {
   return {
     backend,
     wallTimeKind: "text",
+    mismatchedRevisionColumnDdl: "VARCHAR(10)",
+    mismatchedRevisionDeclaredType: "varchar(10)",
+    expectedIndexBehavior: {
+      concurrentBuilds: false,
+      hasInvalidIndexState: false,
+      supportsGinFamily: false,
+    },
     close: () => backend.close(),
   };
 }
@@ -43,8 +71,27 @@ async function createPostgresFixture(): Promise<CatalogFixture> {
   return {
     backend,
     wallTimeKind: "timestamp-with-time-zone",
+    mismatchedRevisionColumnDdl: "VARCHAR(10)",
+    mismatchedRevisionDeclaredType: "character varying",
+    expectedIndexBehavior: {
+      concurrentBuilds: true,
+      hasInvalidIndexState: true,
+      supportsGinFamily: true,
+    },
     close: () => backend.close(),
   };
+}
+
+async function captureConfigurationError(
+  promise: Promise<unknown>,
+): Promise<ConfigurationError> {
+  try {
+    await promise;
+  } catch (error) {
+    if (error instanceof ConfigurationError) return error;
+    throw error;
+  }
+  throw new Error("Expected ConfigurationError");
 }
 
 describe.each([
@@ -120,6 +167,30 @@ describe.each([
     expect(kindByName.get("recorded_at")).toBe(fixture.wallTimeKind);
   });
 
+  it("also reports each column's raw declared type alongside its normalized kind", async () => {
+    const catalog = requireCatalog(fixture.backend, "test");
+
+    const columns = await catalog.columnTypes(RECORDED_CLOCK_TABLE);
+    const declaredTypeByName = new Map(
+      columns.map((column) => [column.name, column.declaredType] as const),
+    );
+
+    // Present, non-empty, and lower-cased — the exact spelling is dialect's
+    // own (`"integer"` vs `"bigint"`), asserted precisely by the
+    // incompatibility-diagnostic test below.
+    expect(declaredTypeByName.get("revision")).toEqual(
+      expect.stringMatching(/^[a-z]/),
+    );
+  });
+
+  it("reports this dialect's whole indexBehavior bag, not just individual fields", () => {
+    const catalog = requireCatalog(fixture.backend, "test");
+
+    // The WHOLE bag, not one field at a time: a typo or a swapped value on
+    // an untouched field would slip past a narrower per-field assertion.
+    expect(catalog.indexBehavior).toEqual(fixture.expectedIndexBehavior);
+  });
+
   it("leaves a VALID index in place — dropInvalidIndex is a no-op for it on every engine", async () => {
     const catalog = requireCatalog(fixture.backend, "test");
     const indexName = "zz_catalog_probe_valid_idx";
@@ -154,7 +225,13 @@ describe.each([
         // Read through the TRANSACTION's own catalog, not the outer
         // backend's — this is the fact under test: the index this
         // transaction just created, and has not committed, is visible to a
-        // probe bound to its own session.
+        // probe bound to its own session. Genuine SESSION binding is only
+        // exercised by the PGlite arm: better-sqlite3 has exactly one
+        // connection for the whole backend, root and transaction alike, so
+        // its arm passes regardless of whether `tx.catalog` is bound to a
+        // distinct session — it still proves the wiring reaches
+        // `tx.catalog` and returns the right answer, just not the
+        // session-isolation fact PGlite's arm actually tests.
         const [state] = await requireDefined(tx.catalog).indexStates([
           indexName,
         ]);
@@ -171,5 +248,41 @@ describe.each([
     const catalog = requireCatalog(fixture.backend, "test");
     const [afterRollback] = await catalog.indexStates([indexName]);
     expect(requireDefined(afterRollback).exists).toBe(false);
+  });
+
+  it("reports the raw declared type, not the normalized kind, in a recorded-schema incompatibility diagnostic", async () => {
+    const scratchTable = "zz_recorded_schema_probe_clock";
+    await requireDefined(fixture.backend.executeDdl)(
+      `CREATE TABLE ${scratchTable} (revision ${fixture.mismatchedRevisionColumnDdl} NOT NULL)`,
+    );
+    // Only `recordedClock` is redirected to the scratch table; `recordedNodes`
+    // / `recordedEdges` keep resolving to the fixture's real, already
+    // schema-compatible tables, so the only incompatibility this produces is
+    // the one under test.
+    const schema = createSqlSchema({
+      ...fixture.backend.tableNames,
+      recordedClock: scratchTable,
+    });
+
+    const error = await captureConfigurationError(
+      assertCurrentRecordedSchema(fixture.backend, schema),
+    );
+
+    expect(error.details["code"]).toBe("RECORDED_SCHEMA_INCOMPATIBLE");
+    const incompatible = error.details["incompatible"] as readonly Readonly<{
+      table: string;
+      column: string;
+      actual: unknown;
+    }>[];
+    const revisionEntry = incompatible.find(
+      (entry) => entry.table === scratchTable && entry.column === "revision",
+    );
+    // Pinned: reverting `schema-version.ts` to report `column.kind` here
+    // instead of `column.declaredType` makes this fail — the mismatched
+    // column's kind ("text" on SQLite, "other" on PostgreSQL) is not this
+    // dialect's actual declared type spelling.
+    expect(requireDefined(revisionEntry).actual).toBe(
+      fixture.mismatchedRevisionDeclaredType,
+    );
   });
 });

@@ -1297,6 +1297,7 @@ export type CatalogBackend = Pick<GraphBackend, "catalog">;
 export type CatalogColumn = Readonly<{
     name: string;
     kind: NormalizedColumnKind;
+    declaredType: string;
 }>;
 
 // @public
