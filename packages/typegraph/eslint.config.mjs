@@ -331,7 +331,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/backend/capabilities/write-fence.ts",
     reason:
-      "resolveWriteFencePlan is the one owner of the pessimistic-lock decision across its six branch points and must know which dialect's lock primitives and isolation semantics it is planning around.",
+      "The dialect-keyed default lock capabilities the fence planner starts from (deriveFromDialect), plus the refusal and declaration-guidance messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable, pessimisticLockDeclarationLine, unfencedRefusalMessage).",
     permanent: true,
     sites: 6,
   },

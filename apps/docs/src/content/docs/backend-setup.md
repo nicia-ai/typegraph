@@ -1168,6 +1168,51 @@ cannot back that decision soundly. `buildPostgresEngineProfile` and
 `buildSqliteEngineProfile` are the reference profiles to read when modeling a
 new one; neither is a symbol you can import.
 
+A profile's `provisioning.catalog` supplies the backend's optional `catalog`
+member: physical-schema introspection (table and index existence, a
+normalized column-type family, and this engine's index-build facts) for the
+handful of store paths that need to read the engine catalog directly instead
+of compiling a portable query — index materialization
+(`store.materializeIndexes()` and `store.materializeSystemIndexes()`), the
+recorded-time schema check, and the recorded-time migration's column read. A
+profile that leaves `catalog` unset builds a backend with no `catalog` member
+at all; those paths then refuse with a `ConfigurationError` naming `catalog`
+rather than guessing at engine-specific SQL. For `store.materializeIndexes()`
+that refusal is not the first thing a catalog-less backend sees: the call
+already short-circuits on an empty candidate set before touching the backend,
+and past that point it first ensures the index-materialization status table
+exists (issuing its own `CREATE TABLE`) before checking for `catalog` — so a
+catalog-less backend can execute that DDL, and even return an empty
+`{ results: [] }` for a no-candidate call, without ever reaching the refusal.
+
+A dialect also declares `subgraphMembershipStrategy`, naming a decision the
+dialect adapter makes, not one a profile supplies directly — `DialectCapabilities`
+is a fixed record keyed by `SqlDialect`, so a profile inherits whichever of
+the two dialects its own `dialect` field names. It is the plan-shape choice
+behind `store.subgraph()`'s reachable-node filter: `"materialized-ids"` fetches
+the traversal closure once and filters both the node and edge queries against
+that fixed id list (the shape PostgreSQL uses, trading one extra round trip for
+a parameter-driven plan), while `"inline-cte"` embeds the recursive closure in
+each fetch instead (the shape SQLite uses, where an in-process traversal is
+cheap and a growing parameter list would pressure the bind budget). This is a
+control-flow and prepared-plan decision, not SQL text a shared token could
+express identically on both shapes, so it lives on `DialectCapabilities`
+rather than in the query compiler.
+
+The bundled PostgreSQL fence spelling exposes two lock forms as bare
+`SqlFragment` EXPRESSIONS rather than only as standalone statements:
+`advisoryLockExpression` (the two-argument, namespaced form every ordinary
+fence site takes) and `advisoryLockSingleExpression` (the one-argument form
+on a bare key, which PostgreSQL stores in a distinct lock space from the
+two-argument form and which the schema-commit fence and graph-template
+instantiation both take on the same key so the two mutually exclude) — like
+the reference profiles above, neither expression is a symbol you can import;
+a custom profile spells its own equivalent inside its fence SQL. A statement
+that must compose a lock inside a CTE — so the lock stays co-atomic with the
+surrounding INSERT, rather than running as its own preceding statement —
+embeds the expression form directly inside the CTE body instead of wrapping
+it in a `SELECT` of its own.
+
 ## Cloudflare D1
 
 TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.

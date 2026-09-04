@@ -108,10 +108,10 @@ export type CatalogIndexBehavior = Readonly<{
  * self-heal, normalized column types, and the per-dialect index-build
  * facts above.
  *
- * Optional: a custom backend that omits it loses only the store paths that
- * consult it directly — index materialization's leftover self-heal and the
- * recorded-time schema/migration checks — every other capability this
- * library offers is unaffected.
+ * Optional: a custom backend that omits it loses the store paths that
+ * consult it directly — index materialization (`store.materializeIndexes()`
+ * and `store.materializeSystemIndexes()` both refuse outright), the
+ * recorded-time schema check, and the recorded-time migration's column read.
  */
 export type BackendCatalogProbes = Readonly<{
   /**
