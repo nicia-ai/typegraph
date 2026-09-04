@@ -53,10 +53,11 @@
  *     ratchets cannot disagree about what a dialect literal is.
  *  3. The four PostgreSQL lock-statement tokens (`pg_advisory_xact_lock`,
  *     `hashtext(`, `LOCK TABLE`, `current_setting('transaction_isolation')`)
- *     appear nowhere in the ten sites' files, including
+ *     appear nowhere in the ten files this ratchet scans
+ *     ({@link FENCE_TOKEN_SCANNED_FILES}), including
  *     `backend/drizzle/trusted-import.ts` (J18, which now resolves the fence
  *     plan and calls `fence.sql.lockTables(...)` instead of spelling
- *     `LOCK TABLE` itself), or in `backend/drizzle/operations/schema.ts` —
+ *     `LOCK TABLE` itself) and `backend/drizzle/operations/schema.ts` —
  *     every one of those consumes a resolved plan's `fence.sql.*` (or, for
  *     the one PostgreSQL-only builder that lives outside the plan, calls
  *     back into the fence module's own exported expressions) instead of
@@ -473,7 +474,7 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
  * that was never one of these four tokens), and `backend/drizzle/trusted-
  * import.ts` (J18: its table lock now resolves the same plan and calls
  * `fence.sql.lockTables(...)` instead of spelling `LOCK TABLE` itself) —
- * every one of these consumes `fence.sql.*` (or, for the fused schema+graph
+ * ten files in all — every one of these consumes `fence.sql.*` (or, for the fused schema+graph
  * statement, calls back into `postgres-fence-sql.ts`'s exported bare
  * expressions) rather than spelling a token itself. Deliberately narrower
  * than "all of `src/`": `backend/drizzle/postgres.ts` (the one-off

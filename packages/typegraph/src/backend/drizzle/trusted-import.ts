@@ -101,8 +101,9 @@ export async function assertTrustedImportDatabaseEmpty(
  * preceding it — see the note in `write-fence.ts` next to
  * `planFromLockCapabilities`.
  *
- * Resolves a {@link resolveWriteFencePlan}: the `lock` arm takes the
- * relation lock below, spelled by the target's own `fenceSql`.
+ * Resolves the write-fence plan through {@link resolveWriteFencePlan}; the
+ * `lock` arm takes the relation lock below, spelled by the target's own
+ * `fenceSql`.
  */
 export async function lockPostgresTrustedImportTables(
   backend: TransactionBackend,

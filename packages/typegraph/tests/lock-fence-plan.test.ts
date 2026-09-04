@@ -48,7 +48,10 @@
  * 1 and 5 do not apply to it the way they do to J1-J8. Its own block covers
  * the postures that DO apply: PostgreSQL factory (lock taken, statement
  * pinned), declared-advisory-only (refuses — the `tableLocks: false` pin),
- * and declared-unfenced (refuses).
+ * declared-unfenced (refuses), and declared-table-locks-only (refuses — the
+ * plan model has no table-lock-alone arm, so `{advisoryLocks: false,
+ * tableLocks: true, serializedWriters: false}` resolves `unfenced` same as
+ * declared-unfenced does).
  *
  * *Mutation A*: flip `serializedWriters` to `false` on `SQLITE_CAPABILITIES`
  * → the SQLite rows demand locks SQLite cannot take (J2-J8 refuse) — those
@@ -101,6 +104,7 @@ import {
   createLoggedSqliteBackend,
   type LoggedBackend,
   overlayCapabilities,
+  TABLE_LOCKS_ONLY_CAPABILITIES,
   UNFENCED_CAPABILITIES,
 } from "./lock-fence-test-utils";
 
@@ -1183,6 +1187,28 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
         execution: { interactiveTransactions: true, atomicBatch: "none" },
         windowFunctions: true,
         pessimisticLocks: UNFENCED_CAPABILITIES,
+      },
+      statements,
+    );
+    await expect(
+      lockPostgresTrustedImportTables(backend, TRUSTED_IMPORT_TABLE_NAMES),
+    ).rejects.toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "WRITE_FENCE_UNAVAILABLE",
+        }) as unknown,
+      }),
+    );
+    expect(statements).toHaveLength(0);
+  });
+
+  it("declared-table-locks-only: refuses before any statement (no table-lock-alone arm)", async () => {
+    const statements: { query: string; params: readonly unknown[] }[] = [];
+    const backend = mockTrustedImportBackend(
+      {
+        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        windowFunctions: true,
+        pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
       },
       statements,
     );

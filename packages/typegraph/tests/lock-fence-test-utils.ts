@@ -222,3 +222,17 @@ export const ADVISORY_ONLY_CAPABILITIES: NonNullable<
   tableLocks: false,
   serializedWriters: false,
 });
+
+/**
+ * The declaration the plan model has no arm for: a table lock with neither
+ * an advisory lock above it nor a serialized-writer slot beneath it.
+ * `resolveWriteFencePlan` resolves this to `unfenced` — see the note next to
+ * `planFromLockCapabilities` in `write-fence.ts`.
+ */
+export const TABLE_LOCKS_ONLY_CAPABILITIES: NonNullable<
+  BackendCapabilities["pessimisticLocks"]
+> = Object.freeze({
+  advisoryLocks: false,
+  tableLocks: true,
+  serializedWriters: false,
+});

@@ -31,6 +31,18 @@ resource audit, a SQLite-only transaction write-lock flag, or the write-fence pl
 dialect-keyed lock semantics) and carries a reason and a site count. No bundled backend's emitted
 SQL, capabilities, or behavior changes.
 
+**Behavior change:** trusted import's PostgreSQL table lock now resolves the same write-fence plan
+every other lock site does, instead of unconditionally taking `LOCK TABLE ... ACCESS EXCLUSIVE`.
+Trusted import now refuses up front (`WRITE_FENCE_UNAVAILABLE`, or `WRITE_FENCE_SQL_UNAVAILABLE`
+when `fenceSql` is also missing — either way, before any statement runs) for any custom PostgreSQL
+backend whose `pessimisticLocks` declaration does not resolve a `lock` plan carrying
+`tableLocks: true`. That is every posture except the bundled one: a table-locks-only declaration
+(`{ advisoryLocks: false, tableLocks: true, serializedWriters: false }`, which the plan model has no
+arm for), an advisory-only declaration (`{ advisoryLocks: true, tableLocks: false }`), and an absent
+`pessimisticLocks` on a target that isn't the bundled first-party factory all now refuse where they
+previously locked. Declare both `advisoryLocks: true` and `tableLocks: true` — the bundled
+`createPostgresBackend` default, which also supplies `fenceSql` — to restore the lock.
+
 **Author-facing:** `CommonOperationStrategy` no longer carries `dynamicEdgeConvergence`. That field
 was required, so every external `SqlEngineProfile.strategy` literal now fails to typecheck; delete
 it from the literal. The flag it carried — whether a convergent edge create's non-durable match may
