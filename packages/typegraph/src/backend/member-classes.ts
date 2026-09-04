@@ -45,6 +45,7 @@ const IDENTITY_MEMBERS = [
   "tableNames",
   "fulltextStrategy",
   "vectorStrategy",
+  "fenceSql",
 ] as const satisfies readonly (keyof GraphBackend)[];
 
 /**

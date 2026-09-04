@@ -64,6 +64,7 @@ import {
   type ContributionMaterializerDeps,
   createContributionMaterializer,
 } from "../src/backend/drizzle/contribution-materializations";
+import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { openProvenanceStore } from "../src/graph-merge";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
@@ -521,7 +522,18 @@ describe("T15 — J4 lockIdentityEnablementNodes", () => {
           lockIdentityEnablementNodes(tx, schema),
         ),
       ).resolves.toBeUndefined();
-      expect(tableLockIndices(logged.statements, "nodes")).toHaveLength(1);
+      const lockStatements = logged.statements.filter(
+        (statement) =>
+          statement.query.includes("LOCK TABLE") &&
+          statement.query.includes("nodes"),
+      );
+      expect(lockStatements).toHaveLength(1);
+      // Pins the exact lock MODE this site takes — a mode swap (e.g. to
+      // "access-exclusive") would still satisfy `tableLockIndices`'s
+      // substring check but must fail here.
+      expect(lockStatements[0]?.query).toBe(
+        'LOCK TABLE "typegraph_nodes" IN SHARE MODE',
+      );
     } finally {
       await logged.close();
     }
@@ -780,7 +792,20 @@ describe("T15 — J6 drainUnfencedRowWriters (via openProvenanceStore)", () => {
       await expect(
         openProvenanceStore(logged.backend, freshGraphId()),
       ).resolves.toBeDefined();
-      expect(tableLockIndices(logged.statements, "nodes")).toHaveLength(1);
+      const lockStatements = logged.statements.filter(
+        (statement) =>
+          statement.query.includes("LOCK TABLE") &&
+          statement.query.includes("nodes"),
+      );
+      expect(lockStatements).toHaveLength(1);
+      // Pins the exact tables AND lock MODE this site takes — either a mode
+      // swap or reverting to a single-table lock (which would reintroduce
+      // the lock-upgrade deadlock `provenance-store.ts` documents) would
+      // still satisfy `tableLockIndices`'s substring check but must fail
+      // here.
+      expect(lockStatements[0]?.query).toBe(
+        'LOCK TABLE "typegraph_nodes", "typegraph_edges" IN SHARE ROW EXCLUSIVE MODE',
+      );
     } finally {
       await logged.close();
     }
@@ -963,12 +988,23 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
             serializedWriters: false,
           },
         },
+        fenceSql: postgresFenceSql,
       },
       statements,
     );
     await expect(rebuild(deps)).resolves.toBeDefined();
     expect(hasContributionAdvisoryLock(statements)).toBe(true);
     expect(hasTableLock(statements)).toBe(true);
+    // Pins the exact lock MODE this site takes — a mode swap (e.g. to
+    // "share") would still satisfy `hasTableLock`'s substring check but
+    // must fail here.
+    expect(
+      statements.some(
+        (statement) =>
+          statement.query ===
+          'LOCK TABLE "typegraph_node_fulltext" IN ACCESS EXCLUSIVE MODE',
+      ),
+    ).toBe(true);
   });
 
   it("declared-unfenced: refuses before any lock statement", async () => {
@@ -1012,6 +1048,7 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
             serializedWriters: false,
           },
         },
+        fenceSql: postgresFenceSql,
       },
       statements,
     );

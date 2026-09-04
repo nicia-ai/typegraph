@@ -328,6 +328,7 @@ export type {
   EdgeEntityWriteBackend,
   EdgeExistsBetweenParams,
   EdgeRow,
+  FenceSql,
   FilteredApproximateSearch,
   FilteredApproximateSearchMode,
   FindEdgesByEndpointSetParams,

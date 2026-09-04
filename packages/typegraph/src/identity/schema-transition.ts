@@ -11,7 +11,6 @@ import {
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
-import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
@@ -429,9 +428,7 @@ async function lockIdentityDdl(target: IdentityTarget): Promise<void> {
   switch (fence.kind) {
     case "lock": {
       await target.execute(
-        asCompiledRowsSql(sql`
-          SELECT pg_advisory_xact_lock(hashtext(${IDENTITY_DDL_LOCK_KEY}), 0)
-        `),
+        asCompiledRowsSql(fence.sql.advisoryLock(IDENTITY_DDL_LOCK_KEY, 0)),
       );
       return;
     }

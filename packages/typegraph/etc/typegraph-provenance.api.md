@@ -121,7 +121,7 @@ type BackendCapabilities = Readonly<{
 }>;
 
 // @public (undocumented)
-type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy">;
+type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
 // @public
 type BackendValidityEndMutation = Readonly<{
@@ -1759,6 +1759,14 @@ type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
 type FactKindsFromConfig<G extends GraphDef, C extends ProvenanceRetractionConfig<G>> = KindsFromRef<G, C["fact"]>;
 
 // @public
+type FenceSql = Readonly<{
+    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
+    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    isolationFact: () => SqlFragment;
+}>;
+
+// @public
 type FieldAccessor<T> = FieldAccessorForType<NonNullable<T>>;
 
 // @public (undocumented)
@@ -2045,6 +2053,7 @@ type GraphBackend = Readonly<{
     tableNames?: SqlTableNames | undefined;
     fulltextStrategy?: FulltextStrategy | undefined;
     vectorStrategy?: VectorStrategy | undefined;
+    fenceSql?: FenceSql | undefined;
     insertNode: (this: void, params: InsertNodeParams) => Promise<NodeRow>;
     insertNodeIfAbsent?: (this: void, params: InsertNodeParams) => Promise<NodeRow | undefined>;
     insertNodeIfAbsentWithSchemaFence?: (this: void, params: InsertNodeParams, schemaFence: SchemaWriteFenceParams) => Promise<NodeRow | undefined>;

@@ -229,6 +229,7 @@ import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
 } from "./operations/strategy";
+import { postgresFenceSql } from "./postgres-fence-sql";
 import {
   createPostgresTables as buildPostgresTables,
   type PostgresTables,
@@ -1809,6 +1810,7 @@ export function buildPostgresEngineProfile(
     // marks this backend and its fence target first-party, exactly as it did
     // before either was gated on the token.
     firstParty: mintFirstPartyProfileToken(),
+    fenceSql: postgresFenceSql,
     tableNames,
     execution: executionAdapter,
     strategy: operationStrategy,
@@ -2801,6 +2803,9 @@ function createPostgresOperationBackend(
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
     dialect: "postgres",
     tableNames,
+    ...(fenceTarget.fenceSql === undefined ?
+      {}
+    : { fenceSql: fenceTarget.fenceSql }),
   });
 
   // `hybridSearch` is not part of the shared assembly — see

@@ -33,7 +33,6 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { sql as portableSql } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -1710,7 +1709,7 @@ export function createContributionMaterializer(
       case "lock": {
         await tx.execute(
           asCompiledRowsSql(
-            portableSql`SELECT pg_advisory_xact_lock(hashtext(${CONTRIBUTION_DDL_LOCK_KEY}), 0)`,
+            fence.sql.advisoryLock(CONTRIBUTION_DDL_LOCK_KEY, 0),
           ),
         );
         return;
@@ -1766,7 +1765,7 @@ export function createContributionMaterializer(
       case "lock": {
         await tx.executeStatement(
           asCompiledStatementSql(
-            portableSql`LOCK TABLE ${portableSql.identifier(tableName)} IN ACCESS EXCLUSIVE MODE`,
+            fence.sql.lockTables([tableName], "access-exclusive"),
           ),
         );
         return;

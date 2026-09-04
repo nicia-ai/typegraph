@@ -20,7 +20,10 @@ import {
   type WriteFenceTarget,
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
-import type { AdapterBackend, SchemaWriteTransactionBackend } from "../../types";
+import type {
+  AdapterBackend,
+  SchemaWriteTransactionBackend,
+} from "../../types";
 import { gateFulltextMethods } from "../contribution-materializations";
 import { finalizeEngineCapabilities } from "./capabilities";
 import { applyEngineMarks } from "./marks";
@@ -57,12 +60,15 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
 ): AdapterBackend<TTx> {
-  const capabilities = finalizeEngineCapabilities(profile.declaredCapabilities, {
-    execution: profile.execution,
-    vectorStrategy: profile.vector,
-    fulltextStrategy: profile.fulltext,
-    fulltextTableName: profile.tableNames.fulltext,
-  });
+  const capabilities = finalizeEngineCapabilities(
+    profile.declaredCapabilities,
+    {
+      execution: profile.execution,
+      vectorStrategy: profile.vector,
+      fulltextStrategy: profile.fulltext,
+      fulltextTableName: profile.tableNames.fulltext,
+    },
+  );
 
   if (capabilities.pessimisticLocks === undefined) {
     throw new ConfigurationError(
@@ -102,6 +108,7 @@ export function createSqlBackend<TTx>(
   const fenceTargetBase: WriteFenceTarget = {
     dialect: profile.dialect,
     capabilities,
+    ...(profile.fenceSql === undefined ? {} : { fenceSql: profile.fenceSql }),
   };
   const fenceTarget: WriteFenceTarget =
     isFirstParty ? markFirstPartyFactory(fenceTargetBase) : fenceTargetBase;
@@ -137,7 +144,8 @@ export function createSqlBackend<TTx>(
         schemaWriteTransaction: <T>(
           graphId: string,
           fn: (tx: SchemaWriteTransactionBackend) => Promise<T>,
-        ) => late.fence.runSchemaWriteTransaction(graphId, (target) => fn(target)),
+        ) =>
+          late.fence.runSchemaWriteTransaction(graphId, (target) => fn(target)),
       }
     : {}),
   });

@@ -17,6 +17,7 @@ import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy"
 import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import type {
+  FenceSql,
   FirstPartyProfileToken,
   WriteFencePlan,
   WriteFenceTarget,
@@ -281,7 +282,10 @@ export type IndexMaterializationRuntime = Omit<
  * member group, beyond `ensureTable` (from `provisioning`). See
  * `members/kind-removal-members.ts`.
  */
-export type KindRemovalRuntime = Omit<CreateKindRemovalMembersDeps, "ensureTable">;
+export type KindRemovalRuntime = Omit<
+  CreateKindRemovalMembersDeps,
+  "ensureTable"
+>;
 
 /**
  * Everything one SQL engine contributes to `createSqlBackend`: a HEAD of
@@ -349,6 +353,13 @@ export type SqlEngineProfile<TTx> = Readonly<{
    */
   autocommit: Readonly<{ singleStatementDurable: boolean }>;
   provisioning: EngineProvisioning;
+  /**
+   * The lock-statement spelling this engine's fence plan carries when it
+   * resolves to `lock`: `createSqlBackend` folds it into the one fence
+   * target it builds, and the backend advertises it as `fenceSql`. Absent
+   * on an engine whose fence is `engine-serialized`.
+   */
+  fenceSql?: FenceSql;
   /** Deps for the contribution-marker member group; see {@link ContributionRuntime}. */
   contributionRuntime: ContributionRuntime;
   /** Deps for the identity/recorded-relation member group; see {@link IdentityRuntime}. */

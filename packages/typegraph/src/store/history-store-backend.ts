@@ -49,6 +49,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "deleteVectorSlotContribution",
   "dialect",
   "dropVectorIndex",
+  "fenceSql",
   "adoptBaseSchema",
   "assertBaseSchemaCurrent",
   "edgeExistsBetween",

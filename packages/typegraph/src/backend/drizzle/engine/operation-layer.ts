@@ -22,6 +22,7 @@ import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import type { SqlFragment } from "../../../query/sql-fragment";
 import type { AtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
+import type { FenceSql } from "../../capabilities/write-fence";
 import type {
   BackendCapabilities,
   InsertNodeParams,
@@ -271,6 +272,12 @@ export type CreateEngineOperationBackendDeps = Readonly<{
   fulltextStrategy: FulltextStrategy | undefined;
   /** Absent when this connection has no vector extension loaded. */
   vectorStrategy?: VectorStrategy;
+  /**
+   * The profile's declared lock-statement spelling — see
+   * `GraphBackend.fenceSql`. Absent on a dialect that serializes writers
+   * instead of taking a lock (SQLite).
+   */
+  fenceSql?: FenceSql | undefined;
 }>;
 
 /**
@@ -295,6 +302,7 @@ export function createEngineOperationBackend(
     tableNames,
     fulltextStrategy,
     vectorStrategy,
+    fenceSql,
   } = deps;
 
   return {
@@ -308,6 +316,7 @@ export function createEngineOperationBackend(
     tableNames,
     ...(fulltextStrategy === undefined ? {} : { fulltextStrategy }),
     ...(vectorStrategy === undefined ? {} : { vectorStrategy }),
+    ...(fenceSql === undefined ? {} : { fenceSql }),
 
     lockSchemaVersionForWrite,
 

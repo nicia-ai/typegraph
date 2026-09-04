@@ -22,6 +22,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "tableNames",
   "fulltextStrategy",
   "vectorStrategy",
+  "fenceSql",
   "insertNode",
   "insertNodeIfAbsent",
   "commands",

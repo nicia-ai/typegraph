@@ -3,6 +3,7 @@ import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind"
 import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
+  type FenceSql,
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
@@ -10,6 +11,7 @@ import {
   mintGraphCommandCoordination,
   normalizeGraphCommandIsolation,
 } from "../../backend/command-contract";
+import { postgresFenceSql } from "../../backend/drizzle/postgres-fence-sql";
 import type {
   GraphBackend,
   GraphCommandCoordination,
@@ -56,7 +58,14 @@ const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 
 /**
- * Builds a `pg_advisory_xact_lock` call scoped to a `(namespace, graphId)` pair.
+ * Renders the bundled PostgreSQL spelling of this module's two advisory
+ * locks, for a caller that needs the actual SQL text rather than a resolved
+ * plan — a test driving a raw connection, or a competing manual lock. The
+ * lock SITES themselves (`lockRecordedClock`, `acquireRecordedGraphWriteLock`)
+ * never call these: they consume `fence.sql.*` from their own resolved
+ * {@link resolveWriteFencePlan}, so a backend with a different lock spelling
+ * is honored instead of overridden by this module's PostgreSQL default.
+ *
  * Keep lock namespaces tied to acquire order, not to feature names:
  *
  * - recorded graph writes take `typegraph:recorded-graph-write` before any row
@@ -67,30 +76,20 @@ const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
  * Sharing one key across those two acquire-order positions creates a circular
  * wait under ordinary concurrent load.
  */
-function graphAdvisoryLockSql(namespace: string, graphId: string): SqlFragment {
-  return sql`
-    SELECT pg_advisory_xact_lock(
-      hashtext(${namespace}),
-      hashtext(${graphId})
-    )
-  `;
-}
-
 export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
-  return graphAdvisoryLockSql(RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE, graphId);
+  return postgresFenceSql.advisoryLock(
+    RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
+    graphId,
+  );
 }
 
 export function recordedGraphWriteAdvisoryLockSql(
   graphId: string,
 ): SqlFragment {
-  return sql`
-    SELECT
-      pg_advisory_xact_lock(
-        hashtext(${RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE}),
-        hashtext(${graphId})
-      ),
-      current_setting('transaction_isolation') AS transaction_isolation
-  `;
+  return postgresFenceSql.advisoryLockWithIsolation(
+    RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+    graphId,
+  );
 }
 
 /**
@@ -205,11 +204,19 @@ export function registerRecordedGraphLockMemo(
 
 async function acquireRecordedGraphWriteLock(
   target: Pick<GraphBackend, "execute">,
+  fenceSql: FenceSql,
   graphId: string,
 ): Promise<GraphCommandIsolation> {
   const rows = await target.execute<
     Readonly<{ transaction_isolation: unknown }>
-  >(asCompiledRowsSql(recordedGraphWriteAdvisoryLockSql(graphId)));
+  >(
+    asCompiledRowsSql(
+      fenceSql.advisoryLockWithIsolation(
+        RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
+        graphId,
+      ),
+    ),
+  );
   return normalizeGraphCommandIsolation(rows[0]?.transaction_isolation);
 }
 
@@ -243,12 +250,16 @@ export async function lockRecordedGraphWrite(
   }
   const effectiveMemo = memo ?? recordedGraphLockMemos.get(target);
   if (effectiveMemo === undefined) {
-    const isolation = await acquireRecordedGraphWriteLock(target, graphId);
+    const isolation = await acquireRecordedGraphWriteLock(
+      target,
+      fence.sql,
+      graphId,
+    );
     return acquiredGraphWriteLock(target, graphId, isolation);
   }
   let pending = effectiveMemo.get(graphId);
   if (pending === undefined) {
-    pending = acquireRecordedGraphWriteLock(target, graphId).catch(
+    pending = acquireRecordedGraphWriteLock(target, fence.sql, graphId).catch(
       (error: unknown) => {
         effectiveMemo.delete(graphId);
         throw error;
@@ -517,7 +528,12 @@ async function lockRecordedClock(
   switch (fence.kind) {
     case "lock": {
       await target.execute(
-        asCompiledRowsSql(recordedClockAdvisoryLockSql(graphId)),
+        asCompiledRowsSql(
+          fence.sql.advisoryLock(
+            RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
+            graphId,
+          ),
+        ),
       );
       return;
     }

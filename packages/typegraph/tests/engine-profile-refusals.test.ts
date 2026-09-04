@@ -40,6 +40,7 @@ import { buildSqliteEngineProfile } from "../src/backend/drizzle/sqlite";
 import { ConfigurationError } from "../src/errors";
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { buildVectorCapabilities } from "../src/query/dialect/vector-strategy";
+import { assertRecordedCaptureTransactionIsolation } from "../src/store/recorded-capture/guards";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -105,6 +106,36 @@ describe("createSqlBackend refusals", () => {
     // Everything else this factory marks is unaffected by this gate.
     expect(isFirstPartyFactory(backend)).toBe(true);
     expect(isSchemaFencedInsertEligible(backend)).toBe(true);
+  });
+
+  it("refuses a profile that declares advisoryLocks: true but supplies no fenceSql", () => {
+    const base = createRealSqliteProfile();
+    const profile = {
+      ...base,
+      declaredCapabilities: {
+        ...base.declaredCapabilities,
+        pessimisticLocks: {
+          advisoryLocks: true,
+          tableLocks: true,
+          serializedWriters: false,
+        },
+      },
+    };
+    // `base.fenceTarget` (the real SQLite profile's) carries no `fenceSql` —
+    // exactly the shape a lock declaration without a spelling refuses.
+
+    let thrown: unknown;
+    try {
+      createSqlBackend(profile);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "WRITE_FENCE_SQL_UNAVAILABLE",
+    );
   });
 
   it("marks isSchemaFencedInsertEligible only when the resolved fence plan is not unfenced", () => {
@@ -307,5 +338,69 @@ describe("finalizeEngineCapabilities", () => {
     expect(capabilities.contributions?.rebuild).toBe(
       base.declaredCapabilities.execution.interactiveTransactions,
     );
+  });
+});
+
+describe("resolveWriteFencePlan refusals", () => {
+  it("refuses a postgres-dialect target that declares advisoryLocks: true but supplies no fenceSql, naming postgresFenceSql", () => {
+    const base = createRealSqliteProfile();
+
+    let thrown: unknown;
+    try {
+      resolveWriteFencePlan({
+        dialect: "postgres",
+        capabilities: {
+          ...base.declaredCapabilities,
+          pessimisticLocks: {
+            advisoryLocks: true,
+            tableLocks: true,
+            serializedWriters: false,
+          },
+        },
+        // No `fenceSql` — the exact shape a lock declaration without a
+        // spelling refuses, reached this time through `resolveWriteFencePlan`
+        // directly rather than through `createSqlBackend`'s construction-time
+        // gate above.
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "WRITE_FENCE_SQL_UNAVAILABLE",
+    );
+    expect(configurationError.suggestion).toContain("postgresFenceSql");
+  });
+});
+
+describe("assertRecordedCaptureTransactionIsolation refusals", () => {
+  it("refuses a postgres-dialect target with no fenceSql via the session-fact refusal, not the lock refusal", async () => {
+    // This target declares NO `pessimisticLocks` at all — the exact
+    // extensibility case (a custom backend with `serializedWriters: true`
+    // and no advisory locks) the lock-plan refusal's message would
+    // misdescribe by claiming `advisoryLocks: true`.
+    const target = {
+      dialect: "postgres" as const,
+      fenceSql: undefined,
+      execute: () => Promise.reject(new Error("must not be called")),
+    };
+
+    let thrown: unknown;
+    try {
+      await assertRecordedCaptureTransactionIsolation(target);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "WRITE_FENCE_SQL_UNAVAILABLE",
+    );
+    expect(configurationError.message).not.toContain("advisoryLocks: true");
+    expect(configurationError.message).toContain("fenceSql");
+    expect(configurationError.suggestion).toContain("postgresFenceSql");
   });
 });

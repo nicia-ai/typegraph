@@ -440,10 +440,17 @@ async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
   );
   switch (fence.kind) {
     case "lock": {
+      // Built fresh from `tx.tableNames` — always the live-relation schema,
+      // never a recorded-read view — so `schema.tables.nodes/.edges` (the
+      // physical names `lockTables` needs) name the same relations
+      // `schema.nodesTable/.edgesTable` would.
       const schema = createSqlSchema(tx.tableNames);
       await tx.executeStatement(
         asCompiledStatementSql(
-          sql`LOCK TABLE ${schema.nodesTable}, ${schema.edgesTable} IN SHARE ROW EXCLUSIVE MODE`,
+          fence.sql.lockTables(
+            [schema.tables.nodes, schema.tables.edges],
+            "share-row-exclusive",
+          ),
         ),
       );
       return;

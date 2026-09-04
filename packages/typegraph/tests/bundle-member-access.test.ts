@@ -33,19 +33,19 @@ const PILOT_COUNT = 0;
 const ANNOTATED_RESIDUE_COUNT = 7;
 const ANNOTATED_RESIDUE_PAIR_COUNT = 3;
 const STATICALLY_REQUIRED_COUNT = 2;
-const REASONED_FLOOR = 88;
+const REASONED_FLOOR = 90;
 const DEFERRED_LIVE_TOTAL = 213;
 const DEFERRED_DECLARED_TOTAL = 217;
 const EXCLUDED_COUNT = 5;
-const TOTAL_ROW_COUNT = 315;
+const TOTAL_ROW_COUNT = 317;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:160#executeStatement",
   "backend/migrate-recorded-time.ts:167#executeStatement",
   "identity/sql-target.ts:101#executeStatement",
   "identity/sql-target.ts:155#executeStatement",
-  "store/recorded-capture/guards.ts:67#executeStatement",
-  "store/recorded-capture/guards.ts:84#executeStatement",
-  "store/recorded-capture/guards.ts:219#executeStatement",
+  "store/recorded-capture/guards.ts:68#executeStatement",
+  "store/recorded-capture/guards.ts:85#executeStatement",
+  "store/recorded-capture/guards.ts:229#executeStatement",
 ] as const;
 
 function rowKey(
@@ -184,7 +184,7 @@ describe("live bundle member access scan (I6, T21)", () => {
     expect(scan.byClass.deferred).toBe(DEFERRED_LIVE_TOTAL);
   });
 
-  it("the class partition covers every scanned row (total 315)", () => {
+  it("the class partition covers every scanned row (total 317)", () => {
     // STATICALLY_REQUIRED_SITES asserted positively: each must appear in the
     // scan output, so an arm-(b) regression that stops resolving them fails
     // loudly here rather than silently shrinking the bucket.

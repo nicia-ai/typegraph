@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { postgresFenceSql } from "../../src/backend/drizzle/postgres-fence-sql";
 import { type TransactionBackend } from "../../src/backend/types";
 import { StaleVersionError } from "../../src/errors";
 import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
@@ -22,6 +23,7 @@ function makeBackend(
         serializedWriters: false,
       },
     },
+    fenceSql: postgresFenceSql,
     lockSchemaVersionForWrite: async () => {
       events.push("schema");
       if (staleSchema) {

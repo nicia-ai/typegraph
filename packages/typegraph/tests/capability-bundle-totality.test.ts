@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 79 unbundled = 94, with no member counted twice", () => {
+  it("15 pilot + 80 unbundled = 95, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(79);
+    expect(unbundledNames.length).toBe(80);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(94);
+    expect(bundledSet.size + unbundledNames.length).toBe(95);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("29 reasoned entries sum to 88 accesses; 50 deferred entries sum to 217", () => {
+  it("30 reasoned entries sum to 90 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(29);
+    expect(reasoned.length).toBe(30);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -124,7 +124,12 @@ describe("capability bundle totality (T9)", () => {
     // adds one empty-kind fence and one optional preflight selection. The
     // set-based edge-delete fallback adds one batch write access, and atomic
     // node-delete refusal diagnosis adds one heterogeneous endpoint-set read.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(88);
+    // Resolving the write-fence spelling through the fence plan then added
+    // `fenceSql`, a reasoned member with 2 live accesses: every lock site
+    // reads `fence.sql`, never `.fenceSql` itself, except the one dialect-
+    // gated isolation check that has no resolved plan to read a spelling
+    // through (see the registry's own entry) — 88 -> 90.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(90);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });
