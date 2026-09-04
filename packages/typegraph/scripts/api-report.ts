@@ -228,6 +228,15 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * `./interchange`, `./profiler`, `./schema`, `./graph-merge`, `./provenance`,
  * `./sqlite/local`, `./postgres/pglite`, and the five `./adapters/drizzle/*`
  * entrypoints. `./backend` is unaffected: it exports `FenceSql` directly.
+ *
+ * Graph-template statement builder split: `CreateGraphTemplateMembersDeps`
+ * drops its `dialect` field and gains `instantiateStatement`, a profile-owned
+ * builder keyed on the params shape the two statement builders in
+ * `graph-template-sql.ts` already took. That params type,
+ * `InstantiateGraphTemplateSqlParams`, is newly reachable through
+ * `./adapters/drizzle/engine`'s already-unexported `Create*MembersDeps`
+ * family — the one entrypoint that renders this internal vocabulary at all
+ * — for +1.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -241,8 +250,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "6f8d263c3fc9822abe5352c7ed921b09d2af0e490f49650f795b28ba1fcbebb6",
   },
   "./adapters/drizzle/engine": {
-    count: 323,
-    sha256: "4e84ecfc3e39591f4d005a8f5330bcf58d6fedd10642e453beda62539ab0d1e9",
+    count: 324,
+    sha256: "1ad2bc43dc7b72536068aa87a65756368db1a258f81593a57e47c967fb56e9ee",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

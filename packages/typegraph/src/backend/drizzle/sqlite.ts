@@ -120,7 +120,10 @@ import {
   type SqliteExecutionProfileHints,
 } from "./execution/sqlite-execution";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
-import { copyGraphTemplateContributionMarkersStatement } from "./graph-template-sql";
+import {
+  copyGraphTemplateContributionMarkersStatement,
+  sqliteInstantiateGraphTemplateStatement,
+} from "./graph-template-sql";
 import { isLocalLibsqlClient } from "./libsql-client";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
@@ -1410,10 +1413,10 @@ export function buildSqliteEngineProfile(
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
   };
 
-  // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
-  // head), `ensureTable` (`provisioning`), and `execute` (the operation
-  // layer's own `execute`, built once `createSqlBackend` has a contribution
-  // materializer to hand `buildOperations`).
+  // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
+  // (`provisioning`) and `execute` (the operation layer's own `execute`,
+  // built once `createSqlBackend` has a contribution materializer to hand
+  // `buildOperations`).
   const graphTemplateRuntime: GraphTemplateRuntime = {
     graphTemplatesTableDdl: generateSqliteCreateTableSQL(tables.graphTemplates),
     tableNames: {
@@ -1423,6 +1426,7 @@ export function buildSqliteEngineProfile(
         tables.contributionMaterializations,
       ),
     },
+    instantiateStatement: sqliteInstantiateGraphTemplateStatement,
     toSchemaVersionRow,
     rowAccess: {
       async insertIgnoringConflict(params) {

@@ -208,6 +208,7 @@ import {
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
+import { postgresInstantiateGraphTemplateStatement } from "./graph-template-sql";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -229,7 +230,10 @@ import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
 } from "./operations/strategy";
-import { postgresFenceSql } from "./postgres-fence-sql";
+import {
+  advisoryLockSingleExpression,
+  postgresFenceSql,
+} from "./postgres-fence-sql";
 import {
   createPostgresTables as buildPostgresTables,
   type PostgresTables,
@@ -1189,10 +1193,10 @@ export function buildPostgresEngineProfile(
     ensureIndexMaterializationColumns,
   };
 
-  // Deps for `createGraphTemplateMembers`, beyond `dialect` (the profile
-  // head), `ensureTable` (`provisioning`), and `execute` (the operation
-  // layer's own `execute`, built once `createSqlBackend` has a contribution
-  // materializer to hand `buildOperations`).
+  // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
+  // (`provisioning`) and `execute` (the operation layer's own `execute`,
+  // built once `createSqlBackend` has a contribution materializer to hand
+  // `buildOperations`).
   const graphTemplateRuntime: GraphTemplateRuntime = {
     graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
     tableNames: {
@@ -1202,6 +1206,7 @@ export function buildPostgresEngineProfile(
         tables.contributionMaterializations,
       ),
     },
+    instantiateStatement: postgresInstantiateGraphTemplateStatement,
     toSchemaVersionRow,
     rowAccess: {
       async insertIgnoringConflict(params) {
@@ -1384,9 +1389,15 @@ export function buildPostgresEngineProfile(
           // hashes land — the schema fence is therefore independent of every
           // lock taken INSIDE it. Normalizing this to the two-argument form
           // would merge the spaces and put that independence at the mercy of
-          // `hashtext` collisions.
+          // `hashtext` collisions. `advisoryLockSingleExpression` is the one
+          // owner of this spelling; the graph-template instantiation
+          // statement takes the identical lock on the identical key so the
+          // two mutually exclude.
           await tx.execute(
-            sql`SELECT pg_advisory_xact_lock(hashtext(${graphId}))`,
+            toDrizzleSql(
+              portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
+              "postgres",
+            ),
           );
           // Managed entity writers lock this row FOR SHARE. Locking it FOR
           // UPDATE before any emptiness probe makes a writer-first commit

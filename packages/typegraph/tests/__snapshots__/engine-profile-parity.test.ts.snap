@@ -1982,6 +1982,821 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
 ]
 `;
 
+exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-template registration and instantiation > pglite-graph-template-statements 1`] = `
+[
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      ""typegraph_edges"",
+      ""typegraph_edges"",
+      ""typegraph_edges"",
+      ""typegraph_edges"",
+      "typegraph_edges_match_identity_pair_check",
+      ""typegraph_edges_match_identity_uq"",
+    ],
+    "sql": "SELECT
+        to_regclass($1) AS table_name,
+        EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass($2)
+            AND attname = 'match_identity_name' AND NOT attisdropped
+        ) AS has_name,
+        EXISTS (
+          SELECT 1 FROM pg_attribute
+          WHERE attrelid = to_regclass($3)
+            AND attname = 'match_identity_key' AND NOT attisdropped
+        ) AS has_key,
+        EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = to_regclass($4)
+            AND conname = $5
+        ) AS has_check,
+        to_regclass($6) IS NOT NULL AS has_index",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_nodes" (
+  "graph_id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "props" JSONB NOT NULL,
+  "version" INTEGER NOT NULL DEFAULT 1,
+  "valid_from" TIMESTAMPTZ,
+  "valid_to" TIMESTAMPTZ,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id", "kind", "id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_kind_idx" ON "typegraph_nodes" ("graph_id", "kind");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_kind_created_idx" ON "typegraph_nodes" ("graph_id", "kind", "deleted_at", "created_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_deleted_idx" ON "typegraph_nodes" ("graph_id", "deleted_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_valid_idx" ON "typegraph_nodes" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_id_idx" ON "typegraph_nodes" ("graph_id", "id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_edges" (
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "from_kind" TEXT NOT NULL,
+  "from_id" TEXT NOT NULL,
+  "to_kind" TEXT NOT NULL,
+  "to_id" TEXT NOT NULL,
+  "props" JSONB NOT NULL,
+  "match_identity_name" TEXT,
+  "match_identity_key" TEXT,
+  "valid_from" TIMESTAMPTZ,
+  "valid_to" TIMESTAMPTZ,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id", "id"),
+  CONSTRAINT "typegraph_edges_match_identity_pair_check" CHECK (("match_identity_name" IS NULL) = ("match_identity_key" IS NULL))
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq" ON "typegraph_edges" ("graph_id", "kind", "match_identity_name", "match_identity_key");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_kind_idx" ON "typegraph_edges" ("graph_id", "kind");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_from_idx" ON "typegraph_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "deleted_at", "valid_from", "valid_to", "to_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_to_idx" ON "typegraph_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "deleted_at", "valid_from", "valid_to", "from_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_kind_created_idx" ON "typegraph_edges" ("graph_id", "kind", "deleted_at", "created_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_deleted_idx" ON "typegraph_edges" ("graph_id", "deleted_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_valid_idx" ON "typegraph_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_cardinality_idx" ON "typegraph_edges" ("graph_id", "kind", "from_kind", "from_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_nodes" (
+  "history_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "props" JSONB NOT NULL,
+  "version" INTEGER NOT NULL,
+  "valid_from" TIMESTAMPTZ,
+  "valid_to" TIMESTAMPTZ,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  "recorded_from" BIGINT NOT NULL,
+  "recorded_to" BIGINT NOT NULL,
+  "op" TEXT NOT NULL,
+  "schema_version" INTEGER,
+  "tx_id" TEXT,
+  "meta" JSONB,
+  PRIMARY KEY ("history_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_entity_idx" ON "typegraph_recorded_nodes" ("graph_id", "kind", "id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_open_idx" ON "typegraph_recorded_nodes" ("graph_id", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_valid_idx" ON "typegraph_recorded_nodes" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_id_idx" ON "typegraph_recorded_nodes" ("graph_id", "id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_edges" (
+  "history_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "from_kind" TEXT NOT NULL,
+  "from_id" TEXT NOT NULL,
+  "to_kind" TEXT NOT NULL,
+  "to_id" TEXT NOT NULL,
+  "props" JSONB NOT NULL,
+  "valid_from" TIMESTAMPTZ,
+  "valid_to" TIMESTAMPTZ,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  "recorded_from" BIGINT NOT NULL,
+  "recorded_to" BIGINT NOT NULL,
+  "op" TEXT NOT NULL,
+  "schema_version" INTEGER,
+  "tx_id" TEXT,
+  "meta" JSONB,
+  PRIMARY KEY ("history_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_entity_idx" ON "typegraph_recorded_edges" ("graph_id", "kind", "id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_open_idx" ON "typegraph_recorded_edges" ("graph_id", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_valid_idx" ON "typegraph_recorded_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_clock" (
+  "graph_id" TEXT NOT NULL,
+  "revision" BIGINT NOT NULL,
+  "recorded_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_origins" (
+  "graph_id" TEXT NOT NULL,
+  "origin" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_assertions" (
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "rel" TEXT NOT NULL,
+  "a_kind" TEXT NOT NULL,
+  "a_id" TEXT NOT NULL,
+  "b_kind" TEXT NOT NULL,
+  "b_id" TEXT NOT NULL,
+  "valid_from" TIMESTAMPTZ NOT NULL,
+  "valid_to" TIMESTAMPTZ,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  "ended_by_kind" TEXT,
+  "ended_by_id" TEXT,
+  PRIMARY KEY ("graph_id", "id"),
+  CONSTRAINT "typegraph_identity_assertions_ended_by_check" CHECK ((ended_by_kind IS NULL) = (ended_by_id IS NULL) AND (ended_by_kind IS NULL OR (valid_to IS NOT NULL AND ((ended_by_kind = a_kind AND ended_by_id = a_id) OR (ended_by_kind = b_kind AND ended_by_id = b_id)))))
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_assertions_a_idx" ON "typegraph_identity_assertions" ("graph_id", "a_kind", "a_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_assertions_b_idx" ON "typegraph_identity_assertions" ("graph_id", "b_kind", "b_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_identity_assertions_current_pair_idx" ON "typegraph_identity_assertions" ("graph_id", "rel", "a_kind", "a_id", "b_kind", "b_id") WHERE "valid_to" IS NULL;",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_identity_assertions" (
+  "history_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "rel" TEXT NOT NULL,
+  "a_kind" TEXT NOT NULL,
+  "a_id" TEXT NOT NULL,
+  "b_kind" TEXT NOT NULL,
+  "b_id" TEXT NOT NULL,
+  "valid_from" TIMESTAMPTZ NOT NULL,
+  "valid_to" TIMESTAMPTZ,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  "ended_by_kind" TEXT,
+  "ended_by_id" TEXT,
+  "recorded_from" BIGINT NOT NULL,
+  "recorded_to" BIGINT NOT NULL,
+  "op" TEXT NOT NULL,
+  "schema_version" INTEGER,
+  "tx_id" TEXT,
+  "meta" JSONB,
+  PRIMARY KEY ("history_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_entity_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_a_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "a_kind", "a_id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_b_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "b_kind", "b_id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_closure" (
+  "graph_id" TEXT NOT NULL,
+  "member_kind" TEXT NOT NULL,
+  "member_id" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "member_kind", "member_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_closure_class_idx" ON "typegraph_identity_closure" ("graph_id", "class_kind", "class_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_separation" (
+  "graph_id" TEXT NOT NULL,
+  "class_key_low" TEXT NOT NULL,
+  "class_key_high" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "class_key_low", "class_key_high"),
+  CONSTRAINT "typegraph_identity_separation_ordered_pair_check" CHECK (class_key_low COLLATE "C" < class_key_high COLLATE "C")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_separation_high_idx" ON "typegraph_identity_separation" ("graph_id", "class_key_high");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_node_uniques" (
+  "graph_id" TEXT NOT NULL,
+  "node_kind" TEXT NOT NULL,
+  "constraint_name" TEXT NOT NULL,
+  "key" TEXT NOT NULL,
+  "node_id" TEXT NOT NULL,
+  "concrete_kind" TEXT NOT NULL,
+  "deleted_at" TIMESTAMPTZ,
+  PRIMARY KEY ("graph_id", "node_kind", "constraint_name", "key")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_uniques_node_idx" ON "typegraph_node_uniques" ("graph_id", "concrete_kind", "node_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_edge_claims" (
+  "graph_id" TEXT NOT NULL,
+  "axis" TEXT NOT NULL,
+  "key" TEXT NOT NULL,
+  "edge_id" TEXT NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id", "axis", "key")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edge_claims_edge_idx" ON "typegraph_edge_claims" ("graph_id", "edge_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_base_schema_versions" (
+  "installation" INTEGER NOT NULL,
+  "version" INTEGER NOT NULL,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("installation"),
+  CONSTRAINT "typegraph_base_schema_versions_singleton_check" CHECK ("installation" = 1)
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_schema_versions" (
+  "graph_id" TEXT NOT NULL,
+  "version" INTEGER NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" JSONB NOT NULL,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  "is_active" BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY ("graph_id", "version")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_schema_versions_active_idx" ON "typegraph_schema_versions" ("graph_id", "is_active");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_schema_versions_one_active_per_graph_idx" ON "typegraph_schema_versions" ("graph_id") WHERE "is_active" = TRUE;",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (
+  "template_id" TEXT NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" JSONB NOT NULL,
+  "created_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("template_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_index_materializations" (
+  "index_name" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "schema_version" INTEGER NOT NULL,
+  "materialized_at" TIMESTAMPTZ,
+  "last_attempted_at" TIMESTAMPTZ NOT NULL,
+  "last_error" TEXT,
+  "building_since" TIMESTAMPTZ,
+  "claim_token" TEXT,
+  PRIMARY KEY ("index_name")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
+  "graph_id" TEXT NOT NULL,
+  "logical_name" TEXT NOT NULL,
+  "owner" TEXT NOT NULL,
+  "table_name" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "materialized_at" TIMESTAMPTZ,
+  "last_attempted_at" TIMESTAMPTZ NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("graph_id", "logical_name", "owner", "table_name")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_kind_removals" (
+  "graph_id" TEXT NOT NULL,
+  "kind_name" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "schema_version" INTEGER NOT NULL,
+  "removed_at" TIMESTAMPTZ,
+  "last_attempted_at" TIMESTAMPTZ NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("graph_id", "kind_name", "entity", "schema_version")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_reconciliation_markers" (
+  "graph_id" TEXT NOT NULL,
+  "reconciled_to_version" INTEGER NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_node_fulltext" (
+  "graph_id" TEXT NOT NULL,
+  "node_kind" TEXT NOT NULL,
+  "node_id" TEXT NOT NULL,
+  "content" TEXT NOT NULL,
+  "language" regconfig NOT NULL,
+  "tsv" tsvector NOT NULL
+    GENERATED ALWAYS AS (to_tsvector("language", "content")) STORED,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id", "node_kind", "node_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_fulltext_tsv_idx" ON "typegraph_node_fulltext" USING GIN ("tsv");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_fulltext_kind_idx" ON "typegraph_node_fulltext" ("graph_id", "node_kind");",
+  },
+  {
+    "params": [
+      1,
+      1,
+      "<<TIMESTAMP>>",
+      1,
+      "<<TIMESTAMP>>",
+      1,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "
+    SELECT * FROM "typegraph_schema_versions"
+    WHERE "typegraph_schema_versions"."graph_id" = $1
+      AND "typegraph_schema_versions"."is_active" = TRUE
+  ",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [],
+    "sql": "-- BEGIN (native transaction) --",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "SELECT pg_advisory_xact_lock(hashtext($1))",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "
+          SELECT "typegraph_schema_versions"."version"
+          FROM "typegraph_schema_versions"
+          WHERE "typegraph_schema_versions"."graph_id" = $1
+            AND "typegraph_schema_versions"."is_active" = TRUE
+          FOR UPDATE
+        ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+      1,
+    ],
+    "sql": "
+    SELECT * FROM "typegraph_schema_versions"
+    WHERE "typegraph_schema_versions"."graph_id" = $1
+      AND "typegraph_schema_versions"."version" = $2
+  ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "
+    SELECT * FROM "typegraph_schema_versions"
+    WHERE "typegraph_schema_versions"."graph_id" = $1
+      AND "typegraph_schema_versions"."is_active" = TRUE
+  ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+      1,
+      "86ff54f2bbb8c236",
+      "{"graphId":"engine_profile_parity_template_source","version":1,"generatedAt":"<<TIMESTAMP>>","nodes":{"Person":{"kind":"Person","properties":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},"uniqueConstraints":[],"onDelete":"restrict"}},"edges":{},"ontology":{"metaEdges":{},"relations":[],"closures":{"subClassAncestors":{},"subClassDescendants":{},"broaderClosure":{},"narrowerClosure":{},"equivalenceSets":{},"disjointPairs":[],"partOfClosure":{},"hasPartClosure":{},"iriToKind":{},"edgeInverses":{},"edgeImplicationsClosure":{},"edgeImplyingClosure":{}}},"defaults":{"onNodeDelete":"restrict","temporalMode":"current"}}",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "
+    INSERT INTO "typegraph_schema_versions" ("graph_id", "version", "schema_hash", "schema_doc", "created_at", "is_active")
+    VALUES (
+      $1, $2,
+      $3, $4,
+      $5, TRUE
+    )
+    RETURNING *
+  ",
+  },
+  {
+    "params": [],
+    "sql": "-- COMMIT --",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
+  "graph_id" TEXT NOT NULL,
+  "logical_name" TEXT NOT NULL,
+  "owner" TEXT NOT NULL,
+  "table_name" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "materialized_at" TIMESTAMPTZ,
+  "last_attempted_at" TIMESTAMPTZ NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("graph_id", "logical_name", "owner", "table_name")
+);",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = $1",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_node_fulltext" (
+  "graph_id" TEXT NOT NULL,
+  "node_kind" TEXT NOT NULL,
+  "node_id" TEXT NOT NULL,
+  "content" TEXT NOT NULL,
+  "language" regconfig NOT NULL,
+  "tsv" tsvector NOT NULL
+    GENERATED ALWAYS AS (to_tsvector("language", "content")) STORED,
+  "updated_at" TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY ("graph_id", "node_kind", "node_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_fulltext_tsv_idx" ON "typegraph_node_fulltext" USING GIN ("tsv");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_fulltext_kind_idx" ON "typegraph_node_fulltext" ("graph_id", "node_kind");",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+      "fulltext",
+      "tsvector",
+      "typegraph_node_fulltext",
+      "e552ac23db646e657a018b806bbc0539",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_contribution_materializations" ("graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error") values ($1, $2, $3, $4, $5, $6, $7, default) on conflict ("graph_id","logical_name","owner","table_name") do update set "signature" = excluded."signature", "materialized_at" = excluded."materialized_at", "last_attempted_at" = excluded."last_attempted_at", "last_error" = excluded."last_error"",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_index_materializations" (
+  "index_name" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "schema_version" INTEGER NOT NULL,
+  "materialized_at" TIMESTAMPTZ,
+  "last_attempted_at" TIMESTAMPTZ NOT NULL,
+  "last_error" TEXT,
+  "building_since" TIMESTAMPTZ,
+  "claim_token" TEXT,
+  PRIMARY KEY ("index_name")
+);",
+  },
+  {
+    "params": [],
+    "sql": "ALTER TABLE "typegraph_index_materializations" ADD COLUMN IF NOT EXISTS "building_since" timestamptz;",
+  },
+  {
+    "params": [],
+    "sql": "ALTER TABLE "typegraph_index_materializations" ADD COLUMN IF NOT EXISTS "claim_token" text;",
+  },
+  {
+    "params": [
+      "typegraph_nodes_kind_idx",
+      "typegraph_nodes_kind_created_idx",
+      "typegraph_nodes_deleted_idx",
+      "typegraph_nodes_valid_idx",
+      "typegraph_nodes_id_idx",
+      "typegraph_edges_kind_idx",
+      "typegraph_edges_from_idx",
+      "typegraph_edges_to_idx",
+      "typegraph_edges_kind_created_idx",
+      "typegraph_edges_deleted_idx",
+      "typegraph_edges_valid_idx",
+      "typegraph_edges_cardinality_idx",
+      "typegraph_recorded_nodes_entity_idx",
+      "typegraph_recorded_nodes_open_idx",
+      "typegraph_recorded_nodes_valid_idx",
+      "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_edges_entity_idx",
+      "typegraph_recorded_edges_open_idx",
+      "typegraph_recorded_edges_from_idx",
+      "typegraph_recorded_edges_to_idx",
+      "typegraph_recorded_edges_valid_idx",
+    ],
+    "sql": "
+          SELECT c.relname AS name, i.indisvalid AS valid
+          FROM pg_class c
+          JOIN pg_index i ON i.indexrelid = c.oid
+          WHERE c.relname IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        ",
+  },
+  {
+    "params": [
+      "typegraph_nodes",
+      "typegraph_edges",
+      "typegraph_recorded_nodes",
+      "typegraph_recorded_edges",
+    ],
+    "sql": "
+          SELECT c.relname AS name
+          FROM pg_class c
+          WHERE c.relname IN ($1, $2, $3, $4)
+            AND c.relkind IN ('r', 'p')
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        ",
+  },
+  {
+    "params": [
+      "typegraph_nodes_kind_idx",
+      "typegraph_nodes_kind_created_idx",
+      "typegraph_nodes_deleted_idx",
+      "typegraph_nodes_valid_idx",
+      "typegraph_nodes_id_idx",
+      "typegraph_edges_kind_idx",
+      "typegraph_edges_from_idx",
+      "typegraph_edges_to_idx",
+      "typegraph_edges_kind_created_idx",
+      "typegraph_edges_deleted_idx",
+      "typegraph_edges_valid_idx",
+      "typegraph_edges_cardinality_idx",
+      "typegraph_recorded_nodes_entity_idx",
+      "typegraph_recorded_nodes_open_idx",
+      "typegraph_recorded_nodes_valid_idx",
+      "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_edges_entity_idx",
+      "typegraph_recorded_edges_open_idx",
+      "typegraph_recorded_edges_from_idx",
+      "typegraph_recorded_edges_to_idx",
+      "typegraph_recorded_edges_valid_idx",
+    ],
+    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error", "building_since", "claim_token" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      "engine-profile-parity-template",
+      "86ff54f2bbb8c236",
+      "{"graphId":"engine_profile_parity_template_source","version":1,"generatedAt":"<<TIMESTAMP>>","nodes":{"Person":{"kind":"Person","properties":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},"uniqueConstraints":[],"onDelete":"restrict"}},"edges":{},"ontology":{"metaEdges":{},"relations":[],"closures":{"subClassAncestors":{},"subClassDescendants":{},"broaderClosure":{},"narrowerClosure":{},"equivalenceSets":{},"disjointPairs":[],"partOfClosure":{},"hasPartClosure":{},"iriToKind":{},"edgeInverses":{},"edgeImplicationsClosure":{},"edgeImplyingClosure":{}}},"defaults":{"onNodeDelete":"restrict","temporalMode":"current"}}",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_graph_templates" ("template_id", "schema_hash", "schema_doc", "created_at") values ($1, $2, $3, $4) on conflict do nothing",
+  },
+  {
+    "params": [
+      "engine-profile-parity-template",
+    ],
+    "sql": "select "template_id", "schema_hash", "schema_doc", "created_at" from "typegraph_graph_templates" where "typegraph_graph_templates"."template_id" = $1",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_target",
+      "engine-profile-parity-template",
+      "86ff54f2bbb8c236",
+      "engine_profile_parity_template_target",
+      "bc20ca6eea28682a",
+      "engine_profile_parity_template_target",
+      "engine_profile_parity_template_target",
+      "bc20ca6eea28682a",
+      "engine_profile_parity_template_target",
+    ],
+    "sql": "
+    WITH locked AS (
+      SELECT pg_advisory_xact_lock(hashtext($1))
+    ), template AS (
+      SELECT schema_hash, schema_doc FROM "typegraph_graph_templates"
+      WHERE template_id = $2
+        AND schema_hash = $3
+    ), inserted AS (
+      INSERT INTO "typegraph_schema_versions" (graph_id, version, schema_hash, schema_doc, created_at, is_active)
+      SELECT $4, 1, $5,
+        jsonb_set(jsonb_set(jsonb_set(template.schema_doc, '{graphId}', to_jsonb($6::text), true), '{version}', '1'::jsonb, true), '{generatedAt}', to_jsonb(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')), true),
+        clock_timestamp(), TRUE
+      FROM template, locked
+      WHERE NOT EXISTS (
+        SELECT 1 FROM "typegraph_schema_versions"
+        WHERE graph_id = $7
+          AND (version != 1 OR schema_hash != $8 OR is_active != TRUE)
+      )
+      ON CONFLICT(graph_id, version) DO UPDATE SET schema_hash = EXCLUDED.schema_hash
+      WHERE "typegraph_schema_versions".schema_hash = EXCLUDED.schema_hash AND "typegraph_schema_versions".is_active = TRUE
+      RETURNING *
+    ), markers AS (
+      INSERT INTO "typegraph_contribution_materializations" (
+        graph_id, logical_name, owner, table_name, signature,
+        materialized_at, last_attempted_at, last_error
+      )
+      SELECT $9, source.logical_name, source.owner, source.table_name,
+        source.signature, source.materialized_at, source.last_attempted_at,
+        source.last_error
+      FROM template
+      CROSS JOIN inserted
+      JOIN "typegraph_contribution_materializations" AS source
+        ON source.graph_id = (template.schema_doc ->> 'graphId')
+      ON CONFLICT (graph_id, logical_name, owner, table_name) DO UPDATE SET
+        signature = EXCLUDED.signature,
+        materialized_at = EXCLUDED.materialized_at,
+        last_attempted_at = EXCLUDED.last_attempted_at,
+        last_error = EXCLUDED.last_error
+    )
+    SELECT * FROM inserted
+  ",
+  },
+]
+`;
+
 exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: efSearch override refuses (no ANN frontier parameter) > sqlite-ordered-statements 1`] = `
 [
   {
@@ -3020,6 +3835,749 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       ) AS vec_inner
     )
    SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC LIMIT ?",
+  },
+]
+`;
+
+exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: graph-template registration and instantiation > sqlite-graph-template-statements 1`] = `
+[
+  {
+    "params": [],
+    "sql": "PRAGMA table_info("typegraph_edges")",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_nodes" (
+  "graph_id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "props" TEXT NOT NULL,
+  "version" INTEGER NOT NULL DEFAULT 1,
+  "valid_from" TEXT,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  PRIMARY KEY ("graph_id", "kind", "id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_kind_idx" ON "typegraph_nodes" ("graph_id", "kind");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_kind_created_idx" ON "typegraph_nodes" ("graph_id", "kind", "deleted_at", "created_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_deleted_idx" ON "typegraph_nodes" ("graph_id", "deleted_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_valid_idx" ON "typegraph_nodes" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_nodes_id_idx" ON "typegraph_nodes" ("graph_id", "id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_edges" (
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "from_kind" TEXT NOT NULL,
+  "from_id" TEXT NOT NULL,
+  "to_kind" TEXT NOT NULL,
+  "to_id" TEXT NOT NULL,
+  "props" TEXT NOT NULL,
+  "match_identity_name" TEXT,
+  "match_identity_key" TEXT,
+  "valid_from" TEXT,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  PRIMARY KEY ("graph_id", "id"),
+  CONSTRAINT "typegraph_edges_match_identity_pair_check" CHECK (("match_identity_name" IS NULL) = ("match_identity_key" IS NULL))
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_edges_match_identity_uq" ON "typegraph_edges" ("graph_id", "kind", "match_identity_name", "match_identity_key");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_kind_idx" ON "typegraph_edges" ("graph_id", "kind");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_from_idx" ON "typegraph_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "deleted_at", "valid_from", "valid_to", "to_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_to_idx" ON "typegraph_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "deleted_at", "valid_from", "valid_to", "from_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_kind_created_idx" ON "typegraph_edges" ("graph_id", "kind", "deleted_at", "created_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_deleted_idx" ON "typegraph_edges" ("graph_id", "deleted_at");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_valid_idx" ON "typegraph_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edges_cardinality_idx" ON "typegraph_edges" ("graph_id", "kind", "from_kind", "from_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_nodes" (
+  "history_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "props" TEXT NOT NULL,
+  "version" INTEGER NOT NULL,
+  "valid_from" TEXT,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  "recorded_from" INTEGER NOT NULL,
+  "recorded_to" INTEGER NOT NULL,
+  "op" TEXT NOT NULL,
+  "schema_version" INTEGER,
+  "tx_id" TEXT,
+  "meta" TEXT,
+  PRIMARY KEY ("history_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_entity_idx" ON "typegraph_recorded_nodes" ("graph_id", "kind", "id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_open_idx" ON "typegraph_recorded_nodes" ("graph_id", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_valid_idx" ON "typegraph_recorded_nodes" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_id_idx" ON "typegraph_recorded_nodes" ("graph_id", "id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_edges" (
+  "history_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "from_kind" TEXT NOT NULL,
+  "from_id" TEXT NOT NULL,
+  "to_kind" TEXT NOT NULL,
+  "to_id" TEXT NOT NULL,
+  "props" TEXT NOT NULL,
+  "valid_from" TEXT,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  "recorded_from" INTEGER NOT NULL,
+  "recorded_to" INTEGER NOT NULL,
+  "op" TEXT NOT NULL,
+  "schema_version" INTEGER,
+  "tx_id" TEXT,
+  "meta" TEXT,
+  PRIMARY KEY ("history_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_entity_idx" ON "typegraph_recorded_edges" ("graph_id", "kind", "id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_open_idx" ON "typegraph_recorded_edges" ("graph_id", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_from_idx" ON "typegraph_recorded_edges" ("graph_id", "from_kind", "from_id", "kind", "to_kind", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_to_idx" ON "typegraph_recorded_edges" ("graph_id", "to_kind", "to_id", "kind", "from_kind", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_valid_idx" ON "typegraph_recorded_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_clock" (
+  "graph_id" TEXT NOT NULL,
+  "revision" INTEGER NOT NULL,
+  "recorded_at" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_revision_origins" (
+  "graph_id" TEXT NOT NULL,
+  "origin" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_assertions" (
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "rel" TEXT NOT NULL,
+  "a_kind" TEXT NOT NULL,
+  "a_id" TEXT NOT NULL,
+  "b_kind" TEXT NOT NULL,
+  "b_id" TEXT NOT NULL,
+  "valid_from" TEXT NOT NULL,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  "ended_by_kind" TEXT,
+  "ended_by_id" TEXT,
+  PRIMARY KEY ("graph_id", "id"),
+  CONSTRAINT "typegraph_identity_assertions_ended_by_check" CHECK ((ended_by_kind IS NULL) = (ended_by_id IS NULL) AND (ended_by_kind IS NULL OR (valid_to IS NOT NULL AND ((ended_by_kind = a_kind AND ended_by_id = a_id) OR (ended_by_kind = b_kind AND ended_by_id = b_id)))))
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_assertions_a_idx" ON "typegraph_identity_assertions" ("graph_id", "a_kind", "a_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_assertions_b_idx" ON "typegraph_identity_assertions" ("graph_id", "b_kind", "b_id", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_identity_assertions_current_pair_idx" ON "typegraph_identity_assertions" ("graph_id", "rel", "a_kind", "a_id", "b_kind", "b_id") WHERE "valid_to" IS NULL;",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_identity_assertions" (
+  "history_id" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "id" TEXT NOT NULL,
+  "rel" TEXT NOT NULL,
+  "a_kind" TEXT NOT NULL,
+  "a_id" TEXT NOT NULL,
+  "b_kind" TEXT NOT NULL,
+  "b_id" TEXT NOT NULL,
+  "valid_from" TEXT NOT NULL,
+  "valid_to" TEXT,
+  "created_at" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  "ended_by_kind" TEXT,
+  "ended_by_id" TEXT,
+  "recorded_from" INTEGER NOT NULL,
+  "recorded_to" INTEGER NOT NULL,
+  "op" TEXT NOT NULL,
+  "schema_version" INTEGER,
+  "tx_id" TEXT,
+  "meta" TEXT,
+  PRIMARY KEY ("history_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_entity_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_a_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "a_kind", "a_id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_b_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "b_kind", "b_id", "recorded_from", "recorded_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_closure" (
+  "graph_id" TEXT NOT NULL,
+  "member_kind" TEXT NOT NULL,
+  "member_id" TEXT NOT NULL,
+  "class_kind" TEXT NOT NULL,
+  "class_id" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "member_kind", "member_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_closure_class_idx" ON "typegraph_identity_closure" ("graph_id", "class_kind", "class_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_separation" (
+  "graph_id" TEXT NOT NULL,
+  "class_key_low" TEXT NOT NULL,
+  "class_key_high" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "class_key_low", "class_key_high"),
+  CONSTRAINT "typegraph_identity_separation_ordered_pair_check" CHECK (class_key_low < class_key_high)
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_identity_separation_high_idx" ON "typegraph_identity_separation" ("graph_id", "class_key_high");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_node_uniques" (
+  "graph_id" TEXT NOT NULL,
+  "node_kind" TEXT NOT NULL,
+  "constraint_name" TEXT NOT NULL,
+  "key" TEXT NOT NULL,
+  "node_id" TEXT NOT NULL,
+  "concrete_kind" TEXT NOT NULL,
+  "deleted_at" TEXT,
+  PRIMARY KEY ("graph_id", "node_kind", "constraint_name", "key")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_node_uniques_node_idx" ON "typegraph_node_uniques" ("graph_id", "concrete_kind", "node_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_edge_claims" (
+  "graph_id" TEXT NOT NULL,
+  "axis" TEXT NOT NULL,
+  "key" TEXT NOT NULL,
+  "edge_id" TEXT NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  PRIMARY KEY ("graph_id", "axis", "key")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_edge_claims_edge_idx" ON "typegraph_edge_claims" ("graph_id", "edge_id");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_base_schema_versions" (
+  "installation" INTEGER NOT NULL,
+  "version" INTEGER NOT NULL,
+  "updated_at" TEXT NOT NULL,
+  PRIMARY KEY ("installation"),
+  CONSTRAINT "typegraph_base_schema_versions_singleton_check" CHECK ("installation" = 1)
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_schema_versions" (
+  "graph_id" TEXT NOT NULL,
+  "version" INTEGER NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" TEXT NOT NULL,
+  "created_at" TEXT NOT NULL,
+  "is_active" TEXT NOT NULL DEFAULT 0,
+  PRIMARY KEY ("graph_id", "version")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_schema_versions_active_idx" ON "typegraph_schema_versions" ("graph_id", "is_active");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE UNIQUE INDEX IF NOT EXISTS "typegraph_schema_versions_one_active_per_graph_idx" ON "typegraph_schema_versions" ("graph_id") WHERE "is_active" = 1;",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_graph_templates" (
+  "template_id" TEXT NOT NULL,
+  "schema_hash" TEXT NOT NULL,
+  "schema_doc" TEXT NOT NULL,
+  "created_at" TEXT NOT NULL,
+  PRIMARY KEY ("template_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_index_materializations" (
+  "index_name" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "schema_version" INTEGER NOT NULL,
+  "materialized_at" TEXT,
+  "last_attempted_at" TEXT NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("index_name")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
+  "graph_id" TEXT NOT NULL,
+  "logical_name" TEXT NOT NULL,
+  "owner" TEXT NOT NULL,
+  "table_name" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "materialized_at" TEXT,
+  "last_attempted_at" TEXT NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("graph_id", "logical_name", "owner", "table_name")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_kind_removals" (
+  "graph_id" TEXT NOT NULL,
+  "kind_name" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "schema_version" INTEGER NOT NULL,
+  "removed_at" TEXT,
+  "last_attempted_at" TEXT NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("graph_id", "kind_name", "entity", "schema_version")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_reconciliation_markers" (
+  "graph_id" TEXT NOT NULL,
+  "reconciled_to_version" INTEGER NOT NULL,
+  PRIMARY KEY ("graph_id")
+);",
+  },
+  {
+    "params": [],
+    "sql": "CREATE VIRTUAL TABLE IF NOT EXISTS "typegraph_node_fulltext" USING fts5(
+  graph_id UNINDEXED,
+  node_kind UNINDEXED,
+  node_id UNINDEXED,
+  language UNINDEXED,
+  updated_at UNINDEXED,
+  content,
+  tokenize='porter unicode61 remove_diacritics 2'
+);",
+  },
+  {
+    "params": [
+      1,
+      1,
+      "<<TIMESTAMP>>",
+      1,
+      "<<TIMESTAMP>>",
+      1,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "
+    SELECT * FROM "typegraph_schema_versions"
+    WHERE "typegraph_schema_versions"."graph_id" = ?
+      AND "typegraph_schema_versions"."is_active" = 1
+  ",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [],
+    "sql": "BEGIN IMMEDIATE",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+      1,
+    ],
+    "sql": "
+    SELECT * FROM "typegraph_schema_versions"
+    WHERE "typegraph_schema_versions"."graph_id" = ?
+      AND "typegraph_schema_versions"."version" = ?
+  ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "
+    SELECT * FROM "typegraph_schema_versions"
+    WHERE "typegraph_schema_versions"."graph_id" = ?
+      AND "typegraph_schema_versions"."is_active" = 1
+  ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+      1,
+      "86ff54f2bbb8c236",
+      "{"graphId":"engine_profile_parity_template_source","version":1,"generatedAt":"<<TIMESTAMP>>","nodes":{"Person":{"kind":"Person","properties":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},"uniqueConstraints":[],"onDelete":"restrict"}},"edges":{},"ontology":{"metaEdges":{},"relations":[],"closures":{"subClassAncestors":{},"subClassDescendants":{},"broaderClosure":{},"narrowerClosure":{},"equivalenceSets":{},"disjointPairs":[],"partOfClosure":{},"hasPartClosure":{},"iriToKind":{},"edgeInverses":{},"edgeImplicationsClosure":{},"edgeImplyingClosure":{}}},"defaults":{"onNodeDelete":"restrict","temporalMode":"current"}}",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "
+    INSERT INTO "typegraph_schema_versions" ("graph_id", "version", "schema_hash", "schema_doc", "created_at", "is_active")
+    VALUES (
+      ?, ?,
+      ?, ?,
+      ?, 1
+    )
+    RETURNING *
+  ",
+  },
+  {
+    "params": [],
+    "sql": "COMMIT",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_contribution_materializations" (
+  "graph_id" TEXT NOT NULL,
+  "logical_name" TEXT NOT NULL,
+  "owner" TEXT NOT NULL,
+  "table_name" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "materialized_at" TEXT,
+  "last_attempted_at" TEXT NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("graph_id", "logical_name", "owner", "table_name")
+);",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+    ],
+    "sql": "select "graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error" from "typegraph_contribution_materializations" where "typegraph_contribution_materializations"."graph_id" = ?",
+  },
+  {
+    "params": [],
+    "sql": "CREATE VIRTUAL TABLE IF NOT EXISTS "typegraph_node_fulltext" USING fts5(
+  graph_id UNINDEXED,
+  node_kind UNINDEXED,
+  node_id UNINDEXED,
+  language UNINDEXED,
+  updated_at UNINDEXED,
+  content,
+  tokenize='porter unicode61 remove_diacritics 2'
+);",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_source",
+      "fulltext",
+      "fts5",
+      "typegraph_node_fulltext",
+      "98fcbf03ae80b355e3c3d3931ca487bb",
+      "<<TIMESTAMP>>",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_contribution_materializations" ("graph_id", "logical_name", "owner", "table_name", "signature", "materialized_at", "last_attempted_at", "last_error") values (?, ?, ?, ?, ?, ?, ?, null) on conflict ("typegraph_contribution_materializations"."graph_id", "typegraph_contribution_materializations"."logical_name", "typegraph_contribution_materializations"."owner", "typegraph_contribution_materializations"."table_name") do update set "signature" = excluded."signature", "materialized_at" = excluded."materialized_at", "last_attempted_at" = excluded."last_attempted_at", "last_error" = excluded."last_error"",
+  },
+  {
+    "params": [],
+    "sql": "CREATE TABLE IF NOT EXISTS "typegraph_index_materializations" (
+  "index_name" TEXT NOT NULL,
+  "graph_id" TEXT NOT NULL,
+  "entity" TEXT NOT NULL,
+  "kind" TEXT NOT NULL,
+  "signature" TEXT NOT NULL,
+  "schema_version" INTEGER NOT NULL,
+  "materialized_at" TEXT,
+  "last_attempted_at" TEXT NOT NULL,
+  "last_error" TEXT,
+  PRIMARY KEY ("index_name")
+);",
+  },
+  {
+    "params": [
+      "typegraph_nodes_kind_idx",
+      "typegraph_nodes_kind_created_idx",
+      "typegraph_nodes_deleted_idx",
+      "typegraph_nodes_valid_idx",
+      "typegraph_nodes_id_idx",
+      "typegraph_edges_kind_idx",
+      "typegraph_edges_from_idx",
+      "typegraph_edges_to_idx",
+      "typegraph_edges_kind_created_idx",
+      "typegraph_edges_deleted_idx",
+      "typegraph_edges_valid_idx",
+      "typegraph_edges_cardinality_idx",
+      "typegraph_recorded_nodes_entity_idx",
+      "typegraph_recorded_nodes_open_idx",
+      "typegraph_recorded_nodes_valid_idx",
+      "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_edges_entity_idx",
+      "typegraph_recorded_edges_open_idx",
+      "typegraph_recorded_edges_from_idx",
+      "typegraph_recorded_edges_to_idx",
+      "typegraph_recorded_edges_valid_idx",
+    ],
+    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  },
+  {
+    "params": [
+      "typegraph_nodes_kind_idx",
+      "typegraph_nodes_kind_created_idx",
+      "typegraph_nodes_deleted_idx",
+      "typegraph_nodes_valid_idx",
+      "typegraph_nodes_id_idx",
+      "typegraph_edges_kind_idx",
+      "typegraph_edges_from_idx",
+      "typegraph_edges_to_idx",
+      "typegraph_edges_kind_created_idx",
+      "typegraph_edges_deleted_idx",
+      "typegraph_edges_valid_idx",
+      "typegraph_edges_cardinality_idx",
+      "typegraph_recorded_nodes_entity_idx",
+      "typegraph_recorded_nodes_open_idx",
+      "typegraph_recorded_nodes_valid_idx",
+      "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_edges_entity_idx",
+      "typegraph_recorded_edges_open_idx",
+      "typegraph_recorded_edges_from_idx",
+      "typegraph_recorded_edges_to_idx",
+      "typegraph_recorded_edges_valid_idx",
+    ],
+    "sql": "
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+  },
+  {
+    "params": [
+      "typegraph_nodes",
+      "typegraph_edges",
+      "typegraph_recorded_nodes",
+      "typegraph_recorded_edges",
+    ],
+    "sql": "
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (?, ?, ?, ?)
+        ",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      "engine-profile-parity-template",
+      "86ff54f2bbb8c236",
+      "{"graphId":"engine_profile_parity_template_source","version":1,"generatedAt":"<<TIMESTAMP>>","nodes":{"Person":{"kind":"Person","properties":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false},"uniqueConstraints":[],"onDelete":"restrict"}},"edges":{},"ontology":{"metaEdges":{},"relations":[],"closures":{"subClassAncestors":{},"subClassDescendants":{},"broaderClosure":{},"narrowerClosure":{},"equivalenceSets":{},"disjointPairs":[],"partOfClosure":{},"hasPartClosure":{},"iriToKind":{},"edgeInverses":{},"edgeImplicationsClosure":{},"edgeImplyingClosure":{}}},"defaults":{"onNodeDelete":"restrict","temporalMode":"current"}}",
+      "<<TIMESTAMP>>",
+    ],
+    "sql": "insert into "typegraph_graph_templates" ("template_id", "schema_hash", "schema_doc", "created_at") values (?, ?, ?, ?) on conflict do nothing",
+  },
+  {
+    "params": [
+      "engine-profile-parity-template",
+    ],
+    "sql": "select "template_id", "schema_hash", "schema_doc", "created_at" from "typegraph_graph_templates" where "typegraph_graph_templates"."template_id" = ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_target",
+      "bc20ca6eea28682a",
+      "engine_profile_parity_template_target",
+      "engine-profile-parity-template",
+      "86ff54f2bbb8c236",
+      "engine_profile_parity_template_target",
+      "bc20ca6eea28682a",
+    ],
+    "sql": "
+    INSERT INTO "typegraph_schema_versions" (graph_id, version, schema_hash, schema_doc, created_at, is_active)
+    SELECT ?, 1, ?,
+      json_set(schema_doc, '$.graphId', ?, '$.version', 1, '$.generatedAt', strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 1
+    FROM "typegraph_graph_templates"
+    WHERE template_id = ?
+      AND schema_hash = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM "typegraph_schema_versions"
+        WHERE graph_id = ?
+          AND (version != 1 OR schema_hash != ? OR is_active != 1)
+      )
+    ON CONFLICT(graph_id, version) DO UPDATE SET schema_hash = excluded.schema_hash
+    WHERE schema_hash = excluded.schema_hash AND is_active = 1
+    RETURNING *
+  ",
+  },
+  {
+    "params": [
+      "engine_profile_parity_template_target",
+      "engine-profile-parity-template",
+      "86ff54f2bbb8c236",
+      "engine_profile_parity_template_target",
+      "bc20ca6eea28682a",
+    ],
+    "sql": "
+    INSERT INTO "typegraph_contribution_materializations" (
+      graph_id, logical_name, owner, table_name, signature,
+      materialized_at, last_attempted_at, last_error
+    )
+    SELECT ?, source.logical_name, source.owner, source.table_name,
+      source.signature, source.materialized_at, source.last_attempted_at,
+      source.last_error
+    FROM "typegraph_graph_templates" AS template
+    JOIN "typegraph_contribution_materializations" AS source
+      ON source.graph_id = json_extract(template.schema_doc, '$.graphId')
+    WHERE template.template_id = ?
+      AND template.schema_hash = ?
+      AND EXISTS (
+        SELECT 1 FROM "typegraph_schema_versions"
+        WHERE graph_id = ?
+          AND version = 1
+          AND schema_hash = ?
+          AND is_active = 1
+      )
+    ON CONFLICT(graph_id, logical_name, owner, table_name) DO UPDATE SET
+      signature = excluded.signature,
+      materialized_at = excluded.materialized_at,
+      last_attempted_at = excluded.last_attempted_at,
+      last_error = excluded.last_error
+    RETURNING graph_id
+  ",
   },
 ]
 `;

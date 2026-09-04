@@ -301,13 +301,6 @@ export const DIALECT_SEAM_RESTRICTIONS = [
  */
 export const DIALECT_LITERAL_EXEMPTIONS = [
   {
-    file: "src/backend/drizzle/graph-template-sql.ts",
-    reason:
-      "Selects between PostgreSQL's single data-modifying-CTE statement and SQLite's insert-plus-marker-copy pair; a later commit deletes this dialect parameter and reaches each shape through a profile-owned statement builder.",
-    permanent: false,
-    sites: 1,
-  },
-  {
     file: "src/backend/drizzle/operations/strategy.ts",
     reason:
       "Probes table existence with dialect-specific catalog SQL; a later commit resolves it through the backend's catalog member.",

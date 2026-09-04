@@ -918,11 +918,11 @@ type CreateContributionMembersDeps = Readonly<{
 
 // @public (undocumented)
 type CreateGraphTemplateMembersDeps = Readonly<{
-    dialect: SqlDialect;
     graphTemplatesTableDdl: string;
     ensureTable: (ddl: string) => Promise<void>;
     execute: GraphTemplateExecute;
     tableNames: GraphTemplateTableNames;
+    instantiateStatement: (params: InstantiateGraphTemplateSqlParams) => SqlFragment;
     toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
     rowAccess: GraphTemplateRowAccess;
     copyContributionMarkers?: (execute: GraphTemplateExecute, params: CopyGraphTemplateContributionMarkersSqlParams) => Promise<void>;
@@ -1789,7 +1789,7 @@ type GraphTemplateRowAccess = Readonly<{
 }>;
 
 // @public
-export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "dialect" | "ensureTable" | "execute">;
+export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "ensureTable" | "execute">;
 
 // @public
 type GraphTemplateTableNames = Readonly<{
@@ -2033,6 +2033,17 @@ type InsertUniqueParams = Readonly<{
     key: string;
     nodeId: string;
     concreteKind: string;
+}>;
+
+// @public (undocumented)
+type InstantiateGraphTemplateSqlParams = Readonly<{
+    graphId: string;
+    schemaHash: string;
+    schemaVersionsTableName: string;
+    templatesTableName: string;
+    contributionMaterializationsTableName: string;
+    templateId: string;
+    templateSchemaHash: string;
 }>;
 
 // @public (undocumented)

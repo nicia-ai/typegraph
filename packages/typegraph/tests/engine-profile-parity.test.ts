@@ -54,6 +54,7 @@ import { PGLITE_MAX_BIND_PARAMETERS } from "../src/backend/drizzle/execution/pos
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import {
+  type AdapterBackend,
   type GraphBackend,
   MODERN_SQLITE_MAX_BIND_PARAMETERS,
 } from "../src/backend/types";
@@ -65,7 +66,15 @@ import {
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
-import { createStore, createStoreWithSchema } from "../src/store";
+import {
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../src/schema/graph-templates";
+import {
+  createAdapterStoreWithSchema,
+  createStore,
+  createStoreWithSchema,
+} from "../src/store";
 import { requireDefined } from "../src/utils/presence";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -537,6 +546,20 @@ function scriptGraphData(nodes: GraphData["nodes"]): GraphData {
 }
 
 /**
+ * A schema-only graph (no embedding field, unlike `scriptGraph`) — graph
+ * templates refuse a source with a vector contribution, since vector storage
+ * is graph-scoped and cannot be instantiated schema-only.
+ */
+const TemplatePerson = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+const graphTemplateSourceGraph = defineGraph({
+  id: "engine_profile_parity_template_source",
+  nodes: { Person: { type: TemplatePerson } },
+  edges: {},
+});
+
+/**
  * One fixed sequence of backend operations, run identically against both
  * dialects, with every statement each operation issues captured in order.
  *
@@ -632,6 +655,35 @@ async function runCapturedScript(
   return { vectorSearchOutcome };
 }
 
+/**
+ * Registers a graph template and instantiates it into a fresh target graph
+ * — a second fixed script, run identically on both dialects, that captures
+ * `registerGraphTemplate` and `instantiateGraphTemplate` in one ordered
+ * sequence. Kept separate from {@link runCapturedScript}'s backend so a
+ * template statement's exact text is pinned in isolation, not interleaved
+ * with the fulltext/vector script's own statements. Takes no `collected`
+ * array of its own: every statement it issues reaches the caller's array
+ * through the driver-level capture instrumented on `backend`'s underlying
+ * client before this runs.
+ */
+async function runCapturedGraphTemplateScript<TNativeTransaction>(
+  backend: AdapterBackend<TNativeTransaction>,
+): Promise<void> {
+  await backend.bootstrapTables?.();
+  const [source] = await createAdapterStoreWithSchema(
+    graphTemplateSourceGraph,
+    backend,
+  );
+  const template = await registerGraphTemplate(backend, {
+    templateId: "engine-profile-parity-template",
+    reconciled: source.reconciledSchema,
+  });
+  await instantiateGraphTemplate(backend, {
+    template,
+    graphId: "engine_profile_parity_template_target",
+  });
+}
+
 describe("engine-profile parity: ordered compiled-SQL capture", () => {
   it("PGlite: efSearch override applies (GUC wrapping)", async () => {
     const pgvectorModule = await import("@electric-sql/pglite-pgvector");
@@ -676,6 +728,43 @@ describe("engine-profile parity: ordered compiled-SQL capture", () => {
     expect(vectorSearchOutcome).toBe("refused");
     expect(normalizeCapturedStatements(collected)).toMatchSnapshot(
       "sqlite-ordered-statements",
+    );
+  });
+
+  it("PGlite: graph-template registration and instantiation", async () => {
+    const client = await PGlite.create();
+    cleanups.push(() => client.close());
+
+    const collected: CapturedStatement[] = [];
+    const backend = createPostgresBackend(drizzlePglite(client), {
+      vector: false,
+    });
+    instrumentPostgresCapture(client, collected);
+
+    await runCapturedGraphTemplateScript(backend);
+
+    expect(normalizeCapturedStatements(collected)).toMatchSnapshot(
+      "pglite-graph-template-statements",
+    );
+  });
+
+  it("better-sqlite3: graph-template registration and instantiation", async () => {
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+      return Promise.resolve();
+    });
+    const backend = createSqliteBackend(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+    });
+
+    const collected: CapturedStatement[] = [];
+    instrumentSqliteCapture(sqlite, collected);
+
+    await runCapturedGraphTemplateScript(backend);
+
+    expect(normalizeCapturedStatements(collected)).toMatchSnapshot(
+      "sqlite-graph-template-statements",
     );
   });
 });

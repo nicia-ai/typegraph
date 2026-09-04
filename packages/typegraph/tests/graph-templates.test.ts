@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { deriveBackend } from "../src/backend/derive-backend";
-import { instantiateGraphTemplateStatement } from "../src/backend/drizzle/graph-template-sql";
+import { sqliteInstantiateGraphTemplateStatement } from "../src/backend/drizzle/graph-template-sql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
@@ -32,8 +32,7 @@ const templateGraph = defineGraph({
 describe("graph templates", () => {
   it("uses one schema-document-free SQLite statement for instantiation", () => {
     const rendered = renderSqlite(
-      instantiateGraphTemplateStatement({
-        dialect: "sqlite",
+      sqliteInstantiateGraphTemplateStatement({
         graphId: "tenant-a",
         schemaHash: "target-hash",
         schemaVersionsTableName: "typegraph_schema_versions",
