@@ -498,6 +498,16 @@ export type BackendCapabilities = Readonly<{
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
+// @public
+export type BackendCatalogProbes = Readonly<{
+    tableExists: (this: void, name: string) => Promise<boolean>;
+    tablesExist: (this: void, names: readonly string[]) => Promise<readonly TableState[]>;
+    indexStates: (this: void, names: readonly string[]) => Promise<readonly IndexState[]>;
+    dropInvalidIndex: (this: void, name: string) => Promise<void>;
+    columnTypes: (this: void, table: string) => Promise<readonly CatalogColumn[]>;
+    indexBehavior: CatalogIndexBehavior;
+}>;
+
 // @public (undocumented)
 export type BackendExecutionCapabilities = BackendCapabilities["execution"];
 
@@ -1279,6 +1289,22 @@ export type CapabilityExtraSpec = Readonly<Record<string, OptionalGraphBackendMe
 
 // @public
 export type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
+export type CatalogBackend = Pick<GraphBackend, "catalog">;
+
+// @public
+export type CatalogColumn = Readonly<{
+    name: string;
+    kind: NormalizedColumnKind;
+}>;
+
+// @public
+export type CatalogIndexBehavior = Readonly<{
+    concurrentBuilds: boolean;
+    hasInvalidIndexState: boolean;
+    supportsGinFamily: boolean;
+}>;
 
 // @public
 export type CheckUniqueBatchParams = Readonly<{
@@ -2530,6 +2556,7 @@ export type GraphBackend = Readonly<{
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
+    catalog?: BackendCatalogProbes | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -2796,6 +2823,13 @@ export type IndexScope =
 * Do not prefix index keys with TypeGraph system columns.
 */
 | "none";
+
+// @public
+export type IndexState = Readonly<{
+    name: string;
+    exists: boolean;
+    invalid: boolean;
+}>;
 
 // @public (undocumented)
 export type IndexWhereExpression = Readonly<{
@@ -3135,6 +3169,9 @@ export type NodeRow = Readonly<{
     updated_at: string;
     deleted_at: string | undefined;
 }>;
+
+// @public
+export type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
 export function normalizeGraphAnalyticsCapabilities(capabilities: BackendCapabilities): BackendCapabilities;
@@ -3864,6 +3901,12 @@ export type TableContribution = Readonly<{
 }>;
 
 // @public
+export type TableState = Readonly<{
+    name: string;
+    exists: boolean;
+}>;
+
+// @public
 export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
@@ -3872,7 +3915,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -4088,6 +4131,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly workstream: "WS5b";
         readonly bundle: "vectorSlotContributions";
         readonly ceiling: 1;
+    };
+    readonly catalog: {
+        readonly kind: "reasoned";
+        readonly reason: "Physical-schema introspection (table/index presence, PostgreSQL's invalid-index leftover state, normalized column types) a store path consults directly rather than through a bundle disposition; its own absence has one typed refusal naming it, not a per-operation fallback. That refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory), so its access count is measured as zero even though the refusal reads the member.";
+        readonly accesses: 0;
     };
     readonly claimIndexMaterialization: {
         readonly kind: "deferred";

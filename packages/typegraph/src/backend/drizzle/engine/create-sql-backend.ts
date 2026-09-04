@@ -268,6 +268,9 @@ export function createSqlBackend<TTx>(
     ...indexMaterializationMembers,
     ...contributionMembers,
     ...kindRemovalMembers,
+    ...(profile.provisioning.catalog === undefined ?
+      {}
+    : { catalog: profile.provisioning.catalog }),
     close: profile.close,
   } satisfies AdapterBackend<TTx>;
 

@@ -142,6 +142,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "compileSql",
   "executeDdl",
   "ensureExtension",
+  "catalog",
   "transaction",
   "close",
 ] as const satisfies readonly (keyof GraphBackend)[];

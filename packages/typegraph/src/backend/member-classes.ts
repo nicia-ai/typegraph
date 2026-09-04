@@ -208,6 +208,7 @@ const PROVISIONING_MEMBERS = [
   "adoptBaseSchema",
   "assertBaseSchemaCurrent",
   "bootstrapTables",
+  "catalog",
   "ensureExtension",
   "ensureTrigramExtension",
   "ensureFulltextTable",

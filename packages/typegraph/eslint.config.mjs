@@ -988,6 +988,7 @@ const LINT_BLOCKS = [
   // TypeScript this parameter, not a void-valued data field.
   {
     files: [
+      "src/backend/capabilities/catalog.ts",
       "src/backend/types.ts",
       "src/query/dialect/fulltext-strategy.ts",
       "src/query/dialect/types.ts",

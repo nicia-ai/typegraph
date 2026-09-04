@@ -129,6 +129,16 @@ type BackendCapabilities = Readonly<{
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
+// @public
+type BackendCatalogProbes = Readonly<{
+    tableExists: (this: void, name: string) => Promise<boolean>;
+    tablesExist: (this: void, names: readonly string[]) => Promise<readonly TableState[]>;
+    indexStates: (this: void, names: readonly string[]) => Promise<readonly IndexState[]>;
+    dropInvalidIndex: (this: void, name: string) => Promise<void>;
+    columnTypes: (this: void, table: string) => Promise<readonly CatalogColumn[]>;
+    indexBehavior: CatalogIndexBehavior;
+}>;
+
 // @public (undocumented)
 type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
@@ -699,6 +709,22 @@ export function captureCandidateWriteSetTarget<G extends GraphDef>(target: Store
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
+
+// @public
+type CatalogBackend = Pick<GraphBackend, "catalog">;
+
+// @public
+type CatalogColumn = Readonly<{
+    name: string;
+    kind: NormalizedColumnKind;
+}>;
+
+// @public
+type CatalogIndexBehavior = Readonly<{
+    concurrentBuilds: boolean;
+    hasInvalidIndexState: boolean;
+    supportsGinFamily: boolean;
+}>;
 
 // @public
 type ChangeSeverity = "safe" | "warning" | "breaking";
@@ -2504,6 +2530,7 @@ type GraphBackend = Readonly<{
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
+    catalog?: BackendCatalogProbes | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -2983,6 +3010,13 @@ type IndexScope =
 * Do not prefix index keys with TypeGraph system columns.
 */
 | "none";
+
+// @public
+type IndexState = Readonly<{
+    name: string;
+    exists: boolean;
+    invalid: boolean;
+}>;
 
 // @public (undocumented)
 type IndexWhereExpression = Readonly<{
@@ -4475,6 +4509,9 @@ type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
 type NoRecordedCoordinate = Readonly<{
     recordedAsOf?: never;
 }>;
+
+// @public
+type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
 export type NormalizedMergeOptions<G extends GraphDef = GraphDef> = Readonly<{
@@ -6451,6 +6488,12 @@ type TableContribution = Readonly<{
 }>;
 
 // @public
+type TableState = Readonly<{
+    name: string;
+    exists: boolean;
+}>;
+
+// @public
 type TemporalAlgorithmOptions = NoRecordedCoordinate & Readonly<{
     temporalMode?: TemporalMode;
     asOf?: string;
@@ -6481,7 +6524,7 @@ type TemporalOptions = Readonly<{
 const TRANSACTION_RUNTIME: unique symbol;
 
 // @public
-type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 type TransactionCollections<G extends GraphDef> = Readonly<{

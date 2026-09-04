@@ -63,6 +63,7 @@ import {
   ConfigurationError,
   StaleVersionError,
 } from "../../errors";
+import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   type FulltextStrategy,
@@ -133,23 +134,28 @@ import {
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type BackendCatalogProbes,
   type BundledBackendCapabilityOverrides,
+  type CatalogColumn,
   type ClaimIndexMaterializationParams,
   DATABASE_EXTENSION_NAMES,
   type DatabaseExtensionName,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IndexState,
   type InsertNodeParams,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type LockSchemaVersionForWriteParams,
   type ManagedNodeCreatePlan,
+  type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
   POSTGRES_CAPABILITIES,
   POSTGRES_MAX_BIND_PARAMETERS,
   type RecordKindRemovalParams,
   type ReleaseIndexMaterializationClaimParams,
   type SchemaWriteTransactionBackend,
+  type TableState,
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
@@ -229,6 +235,7 @@ import { mapHybridSearchRow } from "./operations/hybrid";
 import {
   createCachedTableExistence,
   createPostgresOperationStrategy,
+  tableExistsFromRow,
 } from "./operations/strategy";
 import {
   advisoryLockSingleExpression,
@@ -500,6 +507,128 @@ async function withConcurrentCreateRetry<T>(run: () => Promise<T>): Promise<T> {
  */
 function extensionDdlLockKey(extension: DatabaseExtensionName): string {
   return `typegraph:extension-ddl:${extension}`;
+}
+
+/**
+ * Normalizes one PostgreSQL declared column type to the family
+ * `catalog.columnTypes` reports. PostgreSQL's own type system already
+ * distinguishes these exactly, unlike SQLite's affinity rules, so this is
+ * an exact match rather than a substring test.
+ */
+function normalizePostgresColumnKind(
+  declaredType: string,
+): NormalizedColumnKind {
+  if (declaredType === "bigint") return "integer";
+  if (declaredType === "timestamp with time zone") {
+    return "timestamp-with-time-zone";
+  }
+  return "other";
+}
+
+/** Runs ONE DDL statement against `db` with no concurrency handling — see `EngineProvisioning.executeDdl`. */
+async function executeRawDdl(db: AnyPgDatabase, ddl: string): Promise<void> {
+  await db.execute(sql.raw(ddl));
+}
+
+/**
+ * Builds this dialect's `catalog` probes bound to one execution session —
+ * the profile's own connection for the root backend, or a transaction's
+ * pinned client for a transaction-scoped backend, via `db` and
+ * `executionAdapter` supplied by the caller. Bound this way rather than
+ * closed over the profile's own connection, so a probe issued through a
+ * transaction-scoped backend's `catalog` runs on that transaction's own
+ * session — reading its own uncommitted state, not the outer connection's.
+ */
+function createPostgresCatalogProbes(
+  db: AnyPgDatabase,
+  executionAdapter: PostgresExecutionAdapter,
+  operationStrategy: ReturnType<typeof createPostgresOperationStrategy>,
+): BackendCatalogProbes {
+  async function indexStates(
+    names: readonly string[],
+  ): Promise<readonly IndexState[]> {
+    if (names.length === 0) return [];
+    // Scoped to `search_path`, matching the unqualified CREATE/DROP INDEX
+    // DDL a caller issues against these names.
+    const rows = await executionAdapter.execute<{
+      name: string;
+      valid: boolean;
+    }>(
+      portableSql`
+        SELECT c.relname AS name, i.indisvalid AS valid
+        FROM pg_class c
+        JOIN pg_index i ON i.indexrelid = c.oid
+        WHERE c.relname IN (${sqlValueList(names)})
+          AND pg_catalog.pg_table_is_visible(c.oid)
+      `,
+    );
+    const byName = new Map(rows.map((row) => [row.name, row.valid] as const));
+    return names.map((name) => {
+      const valid = byName.get(name);
+      return { name, exists: valid !== undefined, invalid: valid === false };
+    });
+  }
+
+  return {
+    async tableExists(tableName: string): Promise<boolean> {
+      const rows = await executionAdapter.execute<Record<string, unknown>>(
+        operationStrategy.buildTableExists(tableName),
+      );
+      return tableExistsFromRow(rows[0]);
+    },
+    async tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+      if (names.length === 0) return [];
+      const rows = await executionAdapter.execute<{ name: string }>(
+        portableSql`
+          SELECT c.relname AS name
+          FROM pg_class c
+          WHERE c.relname IN (${sqlValueList(names)})
+            AND c.relkind IN ('r', 'p')
+            AND pg_catalog.pg_table_is_visible(c.oid)
+        `,
+      );
+      const existing = new Set(rows.map((row) => row.name));
+      return names.map((name) => ({ name, exists: existing.has(name) }));
+    },
+    indexStates,
+    async dropInvalidIndex(name: string): Promise<void> {
+      // A no-op for a valid or absent index on every engine: only an
+      // interrupted `CREATE INDEX CONCURRENTLY` leftover is ever dropped.
+      const [state] = await indexStates([name]);
+      if (!state?.invalid) return;
+      const quoted = `"${name.replaceAll('"', '""')}"`;
+      await executeRawDdl(db, `DROP INDEX CONCURRENTLY IF EXISTS ${quoted};`);
+    },
+    async columnTypes(table: string): Promise<readonly CatalogColumn[]> {
+      const rows = await executionAdapter.execute<{
+        name: unknown;
+        type: unknown;
+      }>(
+        portableSql`
+          SELECT column_name AS name, data_type AS type
+          FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = ${table}
+        `,
+      );
+      return rows.flatMap((row) => {
+        if (typeof row.name !== "string" || typeof row.type !== "string") {
+          return [];
+        }
+        return [
+          {
+            name: row.name,
+            kind: normalizePostgresColumnKind(row.type.trim().toLowerCase()),
+          },
+        ];
+      });
+    },
+    indexBehavior: {
+      concurrentBuilds: true,
+      hasInvalidIndexState: true,
+      supportsGinFamily: true,
+    },
+  };
 }
 
 type ExecutePostgresStatement = (statement: ExecutableSql) => Promise<void>;
@@ -1185,12 +1314,11 @@ export function buildPostgresEngineProfile(
   }
 
   const provisioning: EngineProvisioning = {
-    async executeDdl(ddl: string): Promise<void> {
-      await db.execute(sql.raw(ddl));
-    },
+    executeDdl: (ddl) => executeRawDdl(db, ddl),
     ensureTable: executeConcurrentCreateDdl,
     generateDdl: () => generatePostgresDDL(tables, fulltextStrategy ?? false),
     ensureIndexMaterializationColumns,
+    catalog: createPostgresCatalogProbes(db, executionAdapter, operationStrategy),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
@@ -2821,8 +2949,16 @@ function createPostgresOperationBackend(
   });
 
   // `hybridSearch` is not part of the shared assembly — see
-  // `vectorEmbeddingMethods`'s own comment above.
-  return { ...operations, ...vectorEmbeddingMethods };
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is bound to
+  // THIS call's own `db`/`executionAdapter` — the outer connection when
+  // this is the root operation backend, the pinned transaction client when
+  // `transactionScoped` — so every catalog probe on a transaction-scoped
+  // backend runs on the transaction's own session.
+  return {
+    ...operations,
+    ...vectorEmbeddingMethods,
+    catalog: createPostgresCatalogProbes(db, executionAdapter, operationStrategy),
+  };
 }
 
 /**

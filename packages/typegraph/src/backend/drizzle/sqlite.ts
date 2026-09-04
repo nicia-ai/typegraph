@@ -55,6 +55,7 @@ import {
   CompilerInvariantError,
   ConfigurationError,
 } from "../../errors";
+import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
   fts5Strategy,
@@ -90,19 +91,24 @@ import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type AdapterBackend,
   type BackendCapabilities,
+  type BackendCatalogProbes,
   type BundledBackendCapabilityOverrides,
+  type CatalogColumn,
   type GraphAnalyticsCapabilities,
   type GraphBackend,
   type HybridSearchParams,
   type HybridSearchRow,
+  type IndexState,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
   type LockSchemaVersionForWriteParams,
+  type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
   type RecordKindRemovalParams,
   type SchemaWriteTransactionBackend,
   SQLITE_CAPABILITIES,
   SQLITE_MAX_BIND_PARAMETERS,
+  type TableState,
   type TransactionBackend,
   type TrustedImportOptions,
   type TrustedImportSession,
@@ -194,7 +200,10 @@ import {
   type InternalOperationBackend,
 } from "./operation-backend-core";
 import { mapHybridSearchRow } from "./operations/hybrid";
-import { createSqliteOperationStrategy } from "./operations/strategy";
+import {
+  createSqliteOperationStrategy,
+  tableExistsFromRow,
+} from "./operations/strategy";
 import {
   createSqliteTables as buildSqliteTables,
   type SqliteTables,
@@ -610,6 +619,110 @@ function resolveSqliteGraphAnalyticsCapabilities(
   return { ...requested, supported: false };
 }
 
+/**
+ * Normalizes one SQLite declared column type to the family
+ * `catalog.columnTypes` reports, by type AFFINITY — the same substring
+ * rule SQLite itself applies when deciding how to store a value, since a
+ * declared type is otherwise free text SQLite does not enforce.
+ */
+function normalizeSqliteColumnKind(declaredType: string): NormalizedColumnKind {
+  if (declaredType.includes("int")) return "integer";
+  if (
+    declaredType.includes("char") ||
+    declaredType.includes("clob") ||
+    declaredType.includes("text")
+  ) {
+    return "text";
+  }
+  return "other";
+}
+
+/**
+ * SQLite has no invalid-build leftover state
+ * (`indexBehavior.hasInvalidIndexState` is `false`): every index either
+ * exists and is usable, or does not exist. Nothing to drop.
+ */
+// eslint-disable-next-line @typescript-eslint/no-empty-function
+async function dropSqliteInvalidIndex(_name: string): Promise<void> {}
+
+/**
+ * Builds this dialect's `catalog` probes bound to one execution session —
+ * the profile's own connection for the root backend, or a transaction's
+ * own adapter for a transaction-scoped backend, via `executionAdapter`
+ * supplied by the caller. Bound this way rather than closed over the
+ * profile's own connection, so a probe issued through a transaction-scoped
+ * backend's `catalog` runs on that transaction's own session — reading its
+ * own uncommitted state, not the outer connection's.
+ */
+function createSqliteCatalogProbes(
+  executionAdapter: SqliteExecutionAdapter,
+  operationStrategy: ReturnType<typeof createSqliteOperationStrategy>,
+): BackendCatalogProbes {
+  return {
+    async tableExists(tableName: string): Promise<boolean> {
+      const rows = await executionAdapter.execute<Record<string, unknown>>(
+        operationStrategy.buildTableExists(tableName),
+      );
+      return tableExistsFromRow(rows[0]);
+    },
+    async tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+      if (names.length === 0) return [];
+      const rows = await executionAdapter.execute<{ name: string }>(
+        portableSql`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'table'
+            AND name IN (${sqlValueList(names)})
+        `,
+      );
+      const existing = new Set(rows.map((row) => row.name));
+      return names.map((name) => ({ name, exists: existing.has(name) }));
+    },
+    async indexStates(
+      names: readonly string[],
+    ): Promise<readonly IndexState[]> {
+      if (names.length === 0) return [];
+      const rows = await executionAdapter.execute<{ name: string }>(
+        portableSql`
+          SELECT name
+          FROM sqlite_master
+          WHERE type = 'index'
+            AND name IN (${sqlValueList(names)})
+        `,
+      );
+      const existing = new Set(rows.map((row) => row.name));
+      return names.map((name) => ({
+        name,
+        exists: existing.has(name),
+        invalid: false,
+      }));
+    },
+    dropInvalidIndex: dropSqliteInvalidIndex,
+    async columnTypes(table: string): Promise<readonly CatalogColumn[]> {
+      const rows = await executionAdapter.execute<{
+        name: unknown;
+        type: unknown;
+      }>(portableSql`PRAGMA table_info(${portableSql.identifier(table)})`);
+      return rows.flatMap((row) => {
+        if (typeof row.name !== "string" || typeof row.type !== "string") {
+          return [];
+        }
+        return [
+          {
+            name: row.name,
+            kind: normalizeSqliteColumnKind(row.type.trim().toLowerCase()),
+          },
+        ];
+      });
+    },
+    indexBehavior: {
+      concurrentBuilds: false,
+      hasInvalidIndexState: false,
+      supportsGinFamily: false,
+    },
+  };
+}
+
 // ============================================================
 // Backend Factory
 // ============================================================
@@ -980,8 +1093,16 @@ function createSqliteOperationBackend(
   });
 
   // `hybridSearch` is not part of the shared assembly — see
-  // `vectorEmbeddingMethods`'s own comment above.
-  return { ...operations, ...vectorEmbeddingMethods };
+  // `vectorEmbeddingMethods`'s own comment above. `catalog` is bound to
+  // THIS call's own `executionAdapter` — the outer connection when this is
+  // the root operation backend, the transaction's own adapter when
+  // `transactionScoped` — so every catalog probe on a transaction-scoped
+  // backend runs on the transaction's own session.
+  return {
+    ...operations,
+    ...vectorEmbeddingMethods,
+    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy),
+  };
 }
 
 /**
@@ -1411,6 +1532,7 @@ export function buildSqliteEngineProfile(
     },
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
+    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`

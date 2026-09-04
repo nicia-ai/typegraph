@@ -220,6 +220,16 @@ export type BackendCapabilities = Readonly<{
 }>;
 
 // @public
+type BackendCatalogProbes = Readonly<{
+    tableExists: (this: void, name: string) => Promise<boolean>;
+    tablesExist: (this: void, names: readonly string[]) => Promise<readonly TableState[]>;
+    indexStates: (this: void, names: readonly string[]) => Promise<readonly IndexState[]>;
+    dropInvalidIndex: (this: void, name: string) => Promise<void>;
+    columnTypes: (this: void, table: string) => Promise<readonly CatalogColumn[]>;
+    indexBehavior: CatalogIndexBehavior;
+}>;
+
+// @public
 export class BackendDisposedError extends TypeGraphError {
     constructor(options?: {
         cause?: unknown;
@@ -594,6 +604,22 @@ export type CardinalityErrorDetails = Readonly<{
     fromId: string;
     cardinality: string;
     existingCount: number;
+}>;
+
+// @public
+type CatalogBackend = Pick<GraphBackend, "catalog">;
+
+// @public
+type CatalogColumn = Readonly<{
+    name: string;
+    kind: NormalizedColumnKind;
+}>;
+
+// @public
+type CatalogIndexBehavior = Readonly<{
+    concurrentBuilds: boolean;
+    hasInvalidIndexState: boolean;
+    supportsGinFamily: boolean;
 }>;
 
 // @public
@@ -3179,6 +3205,7 @@ export type GraphBackend = Readonly<{
     recordIndexMaterialization?: (this: void, params: RecordIndexMaterializationParams) => Promise<void>;
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
+    catalog?: BackendCatalogProbes | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -3494,7 +3521,7 @@ export function havingLt(aggregate: AggregateExpr, value: number): AggregateComp
 export function havingLte(aggregate: AggregateExpr, value: number): AggregateComparisonPredicate;
 
 // @public
-const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
+const HISTORY_STORE_BACKEND_KEYS: readonly ["assertRuntimeContributionsInitialized", "assertVectorSlotInitialized", "assertVectorSlotsInitialized", "bootstrapTables", "capabilities", "catalog", "checkUnique", "checkUniqueBatch", "claimEdgeCardinality", "claimEdgeCardinalityGuarded", "claimEdgeCardinalityBatch", "claimIndexMaterialization", "close", "commitSchemaVersion", "commitSchemaVersionIfKindsEmpty", "lockSchemaVersionForWrite", "lockSchemaVersionAndGraphWrite", "compileSql", "countEdgesByKind", "countEdgesFrom", "countNodesByKind", "createVectorIndex", "deleteEdge", "deleteEdgesBatch", "deleteEmbedding", "deleteEmbeddingBatch", "deleteFulltext", "deleteFulltextBatch", "deleteNode", "deleteUnique", "hardDeleteUniquesByNodeIds", "deleteVectorSlotContribution", "dialect", "dropVectorIndex", "fenceSql", "adoptBaseSchema", "assertBaseSchemaCurrent", "edgeExistsBetween", "ensureContributionMaterializationsTable", "ensureExtension", "ensureEdgeMatchIdentityStorage", "ensureFulltextTable", "ensureIndexMaterializationsTable", "ensureKindRemovalsTable", "ensureReconciliationMarkersTable", "ensureRevisionOriginsTable", "ensureRuntimeContributions", "ensureTrigramExtension", "ensureVectorSlotContribution", "ensureVectorSlotContributions", "execute", "executeTemporaryStatement", "findEdgesByKind", "findEdgesByEndpointSet", "findEdgesByHeterogeneousEndpointSet", "findEdgesConnectedTo", "findNodesByKind", "fulltextSearch", "fulltextStrategy", "getActiveSchema", "getAllKindRemovals", "getContributionMaterialization", "getEdge", "getEdges", "getIndexMaterialization", "getIndexMaterializations", "getNode", "getNodes", "getPendingKindRemovals", "getReconciliationMarker", "getSchemaVersion", "hardDeleteEdge", "hardDeleteEdgesBatch", "hardDeleteNode", "hardDeleteUniquesByConcreteKind", "hardDeleteUniquesByNodeIds", "hybridSearch", "insertEdge", "commands", "insertEdgeNoReturn", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "insertNode", "insertNodeIfAbsent", "insertNodeIfAbsentWithSchemaFence", "insertNodeWithSchemaFence", "insertNodeNoReturn", "insertNodesBatch", "insertNodesBatchReturning", "insertUnique", "insertUniqueBatch", "probeContributions", "purgeEdgeClaims", "readConstraintFenceViolations", "recordContributionMaterialization", "recordIndexMaterialization", "recordKindRemoval", "refreshStatistics", "releaseIndexMaterializationClaim", "setActiveVersion", "setReconciliationMarker", "tableNames", "updateEdge", "updateNode", "compareAndSetNode", "updateNodeSet", "upsertEmbedding", "upsertEmbeddingBatch", "upsertFulltext", "upsertFulltextBatch", "vectorSearch", "vectorStrategy", "verifyContributions"];
 
 // @public (undocumented)
 export type HistoryStore<G extends GraphDef> = StoreCore<G> & StoreTransactions<G> & StoreEvolution<G, HistoryStore<G>> & Readonly<{
@@ -3913,6 +3940,13 @@ export type IndexScope =
 * Do not prefix index keys with TypeGraph system columns.
 */
 | "none";
+
+// @public
+type IndexState = Readonly<{
+    name: string;
+    exists: boolean;
+    invalid: boolean;
+}>;
 
 // @public (undocumented)
 type IndexWhereComparableValue<T> = NonNullable<T> extends string ? string : NonNullable<T> extends number ? number : NonNullable<T> extends boolean ? boolean : NonNullable<T> extends Date ? Date | string : never;
@@ -5149,6 +5183,9 @@ type NonNegativeIntegerString = Exclude<`${bigint}`, `-${string}`>;
 export type NoRecordedCoordinate = Readonly<{
     recordedAsOf?: never;
 }>;
+
+// @public
+type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
 type NormalizedEdges<TNodes extends Record<string, NodeRegistration>, TEdges extends Record<string, EdgeEntry>> = {
@@ -7382,6 +7419,12 @@ export type TableContribution = Readonly<{
 }>;
 
 // @public
+type TableState = Readonly<{
+    name: string;
+    exists: boolean;
+}>;
+
+// @public
 export type TemporalAlgorithmOptions = NoRecordedCoordinate & Readonly<{
     temporalMode?: TemporalMode;
     asOf?: string;
@@ -7412,7 +7455,7 @@ type TemporalOptions = Readonly<{
 const TRANSACTION_RUNTIME: unique symbol;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export class TransactionClosedError extends TypeGraphError {

@@ -24,6 +24,7 @@ import { drizzle as drizzlePg } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
+import { requireCatalog } from "../src/backend/capabilities/catalog";
 import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
 import {
   isFirstPartyFactory,
@@ -402,5 +403,42 @@ describe("assertRecordedCaptureTransactionIsolation refusals", () => {
     expect(configurationError.message).not.toContain("advisoryLocks: true");
     expect(configurationError.message).toContain("fenceSql");
     expect(configurationError.suggestion).toContain("postgresFenceSql");
+  });
+});
+
+describe("requireCatalog refusals", () => {
+  it("refuses a backend with no catalog member, naming both catalog and the caller's operation", () => {
+    const backendWithNoCatalog = { catalog: undefined };
+
+    let thrown: unknown;
+    try {
+      requireCatalog(backendWithNoCatalog, "index materialization");
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe("CATALOG_UNAVAILABLE");
+    expect(configurationError.message).toContain("catalog");
+    expect(configurationError.message).toContain("index materialization");
+  });
+
+  it("returns the backend's own catalog probes, on the root and on a transaction() handle it opens, when present", async () => {
+    const sqliteBackend = createSqlBackend(createRealSqliteProfile());
+    expect(requireCatalog(sqliteBackend, "test")).toBe(sqliteBackend.catalog);
+    await sqliteBackend.transaction((tx) => {
+      expect(requireCatalog(tx, "test")).toBe(tx.catalog);
+      return Promise.resolve();
+    });
+
+    const postgresBackend = createSqlBackend(await createRealPostgresProfile());
+    expect(requireCatalog(postgresBackend, "test")).toBe(
+      postgresBackend.catalog,
+    );
+    await postgresBackend.transaction((tx) => {
+      expect(requireCatalog(tx, "test")).toBe(tx.catalog);
+      return Promise.resolve();
+    });
   });
 });
