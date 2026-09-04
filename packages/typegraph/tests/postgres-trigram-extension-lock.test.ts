@@ -9,7 +9,10 @@ import { z } from "zod";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { type AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
 import { createPostgresBackend } from "../src/backend/drizzle/postgres";
-import { type GraphBackend } from "../src/backend/types";
+import {
+  type BackendCatalogProbes,
+  type GraphBackend,
+} from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import { defineNodeIndex } from "../src/indexes";
@@ -77,8 +80,19 @@ async function initializedCustomPostgresBackend(
 ): Promise<GraphBackend> {
   const baseBackend = createTestBackend();
   await createStoreWithSchema(graph, baseBackend);
+  // The SQLite base supplies the catalog probes; only the index-build facts
+  // are overridden so the store treats this mock as a PostgreSQL engine.
+  const catalog: BackendCatalogProbes = {
+    ...requireDefined(baseBackend.catalog),
+    indexBehavior: {
+      concurrentBuilds: true,
+      hasInvalidIndexState: true,
+      supportsGinFamily: true,
+    },
+  };
   return deriveBackend(deriveBackend(baseBackend, overlay), {
     dialect: "postgres",
+    catalog,
     execute<T>(): Promise<readonly T[]> {
       return Promise.resolve([]);
     },
