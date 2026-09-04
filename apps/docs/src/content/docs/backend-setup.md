@@ -1186,18 +1186,19 @@ catalog-less backend can execute that DDL, and even return an empty
 `{ results: [] }` for a no-candidate call, without ever reaching the refusal.
 
 A dialect also declares `subgraphMembershipStrategy`, naming a decision the
-dialect adapter makes, not one a profile supplies directly — `DialectCapabilities`
-is a fixed record keyed by `SqlDialect`, so a profile inherits whichever of
-the two dialects its own `dialect` field names. It is the plan-shape choice
-behind `store.subgraph()`'s reachable-node filter: `"materialized-ids"` fetches
-the traversal closure once and filters both the node and edge queries against
-that fixed id list (the shape PostgreSQL uses, trading one extra round trip for
-a parameter-driven plan), while `"inline-cte"` embeds the recursive closure in
-each fetch instead (the shape SQLite uses, where an in-process traversal is
-cheap and a growing parameter list would pressure the bind budget). This is a
-control-flow and prepared-plan decision, not SQL text a shared token could
-express identically on both shapes, so it lives on `DialectCapabilities`
-rather than in the query compiler.
+dialect adapter makes, not one a profile supplies directly — the dialect
+adapters are a fixed record keyed by `SqlDialect`, and each adapter's
+capabilities (`DialectCapabilities`) declares `subgraphMembershipStrategy`, so a
+profile inherits whichever of the two dialects its own `dialect` field names. It
+is the plan-shape choice behind `store.subgraph()`'s reachable-node filter:
+`"materialized-ids"` fetches the traversal closure once and filters both the
+node and edge queries against that fixed id list (the shape PostgreSQL uses,
+trading one extra round trip for a parameter-driven plan), while `"inline-cte"`
+embeds the recursive closure in each fetch instead (the shape SQLite uses, where
+an in-process traversal is cheap and a growing parameter list would pressure the
+bind budget). This is a control-flow and prepared-plan decision, not SQL text a
+shared token could express identically on both shapes, so it lives on
+`DialectCapabilities` rather than in the query compiler.
 
 The bundled PostgreSQL fence spelling exposes two lock forms as bare
 `SqlFragment` EXPRESSIONS rather than only as standalone statements:
@@ -1209,9 +1210,11 @@ instantiation both take on the same key so the two mutually exclude) — like
 the reference profiles above, neither expression is a symbol you can import;
 a custom profile spells its own equivalent inside its fence SQL. A statement
 that must compose a lock inside a CTE — so the lock stays co-atomic with the
-surrounding INSERT, rather than running as its own preceding statement —
-embeds the expression form directly inside the CTE body instead of wrapping
-it in a `SELECT` of its own.
+surrounding INSERT, rather than running as its own preceding statement — puts
+the expression in its own CTE's `SELECT` (`locked AS (SELECT ...)` in the
+graph-template instantiation statement, `SELECT ... AS "lock_token"` in the
+schema write fence) instead of running the module's standalone lock statement
+first.
 
 ## Cloudflare D1
 

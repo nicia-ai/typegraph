@@ -122,7 +122,10 @@ export type CatalogIndexBehavior = Readonly<{
  *
  * Optional: a custom backend that omits it loses the store paths that
  * consult it directly — index materialization (`store.materializeIndexes()`
- * and `store.materializeSystemIndexes()` both refuse outright), the
+ * refuses only once its empty-candidate short circuit and the index-
+ * materialization status table's `CREATE TABLE` have already run;
+ * `store.materializeSystemIndexes()`, which has no candidate short circuit,
+ * refuses only once that same status-table `CREATE TABLE` has run), the
  * recorded-time schema check, and the recorded-time migration's column read.
  */
 export type BackendCatalogProbes = Readonly<{

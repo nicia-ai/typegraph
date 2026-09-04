@@ -324,7 +324,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/backend/repair-validity-windows.ts",
     reason:
-      "Selects a dialect-specific repair query and skips the SQLite-only backfill on Postgres; a one-shot provisioning tool, not query compilation.",
+      "One site drops the SQLite-only canonical-instant GLOB predicates when scoping the repair on the other dialect; the other skips the non-canonical-window count on PostgreSQL, always reporting zero there. A one-shot provisioning tool, not query compilation.",
     permanent: true,
     sites: 2,
   },
@@ -338,7 +338,7 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/store/algorithms/iterative-graph-operation.ts",
     reason:
-      "Classifies a PostgreSQL-specific serialization-failure error code and selects a dialect-appropriate retry value; error handling, not query compilation.",
+      "Gated to PostgreSQL only: classifies the SQL state of a refused read-write transaction open (a replica refusing the round's BEGIN before it starts) and, separately, of a failed working-table CREATE, so both can raise the same typed temporary-table-capability error; SQLite has no equivalent SQL state to classify. Error handling, not query compilation.",
     permanent: true,
     sites: 2,
   },

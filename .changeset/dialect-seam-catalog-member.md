@@ -4,16 +4,18 @@
 
 `GraphBackend` and `TransactionBackend` gain an optional `catalog` member (`BackendCatalogProbes`):
 `tableExists`, `tablesExist`, `indexStates`, `dropInvalidIndex`, `columnTypes`, and an
-`indexBehavior` bag (`concurrentBuilds`, `hasInvalidIndexState`, `supportsGinFamily`). It is the
-one physical-schema introspection surface a store path consults directly instead of compiling a
-portable query, and four call sites across three modules require it: `store.materializeIndexes()`
-and `store.materializeSystemIndexes()` refuse outright without it, and the recorded-time schema
-check and the recorded-time migration's column read likewise need it. `EngineProvisioning` gains a
-matching optional `catalog` field; a profile that builds one populates the backend's member, and a
-profile that omits it produces a backend with no `catalog` — those four call sites then refuse
-with a `ConfigurationError` naming `catalog` instead of reaching engine-specific SQL with nothing
-to spell it. `createPostgresBackend` and `createSqliteBackend` both supply `catalog`, each
-transaction reading its own session's uncommitted state rather than the root connection's.
+`indexBehavior` bag (`concurrentBuilds`, `hasInvalidIndexState`, `supportsGinFamily`). It is the one
+physical-schema introspection surface a store path consults directly instead of compiling a portable
+query, and four call sites across three modules require it: `store.materializeIndexes()` refuses
+only once its empty-candidate short circuit and the index-materialization status table's `CREATE
+TABLE` have already run; `store.materializeSystemIndexes()`, which has no candidate short circuit,
+refuses only once that same status-table `CREATE TABLE` has run; the recorded-time schema check and
+the recorded-time migration's column read likewise need it. `EngineProvisioning` gains a matching
+optional `catalog` field; a profile that builds one populates the backend's member, and a profile
+that omits it produces a backend with no `catalog` — those four call sites then refuse with a
+`ConfigurationError` naming `catalog` instead of reaching engine-specific SQL with nothing to spell
+it. `createPostgresBackend` and `createSqliteBackend` both supply `catalog`, each transaction
+reading its own session's uncommitted state rather than the root connection's.
 
 `DialectCapabilities` gains `subgraphMembershipStrategy` (`"materialized-ids" | "inline-cte"`),
 naming the plan-shape decision `store.subgraph()`'s reachable-node filter already made per
@@ -50,4 +52,9 @@ inspect JSON match fields — moved onto `OperationFusionHooks.dynamicEdgeConver
 bundled dialect factories pass to `buildCommonOperationOptions`. Neither `OperationFusionHooks` nor
 `buildCommonOperationOptions` is exported from any entrypoint (nothing under
 `src/backend/drizzle/engine/` re-exports them), so a custom profile has no field to set; it
-implements whatever convergent-match behavior it wants in its own `buildOperations`.
+implements whatever convergent-match behavior it wants in its own `buildOperations`. The
+`adapters/drizzle/engine` authoring entrypoint that carries `SqlEngineProfile` and
+`CommonOperationStrategy` ships for the first time in this release — no released
+`etc/*.api.md` at the latest published `@nicia-ai/typegraph` tag mentions
+`CommonOperationStrategy` — so this field never appeared in a published version; the note above
+only affects authors who have been building a custom profile against `main`.
