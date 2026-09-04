@@ -4125,7 +4125,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "fulltextOperations";
-        readonly ceiling: 11;
+        readonly ceiling: 12;
     };
     readonly deleteFulltextBatch: {
         readonly kind: "deferred";
@@ -4347,7 +4347,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "fulltextOperations";
-        readonly ceiling: 9;
+        readonly ceiling: 10;
     };
     readonly upsertFulltextBatch: {
         readonly kind: "deferred";
