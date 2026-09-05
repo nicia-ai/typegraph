@@ -81,6 +81,7 @@ import type {
   CompiledAtomicSqlStatement,
 } from "../capabilities/atomic-sql-program";
 import { rephaseNonTransactionalNodeClaimPlan } from "../capabilities/node-insert-projections";
+import type { FenceSql } from "../capabilities/write-fence";
 import {
   assertGraphCommandConvergenceIsolation,
   assertGraphCommandCoordination,
@@ -701,6 +702,17 @@ type CreateCommonOperationBackendOptions = Readonly<{
   schemaFenceLockClause?: SQL | undefined;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   schemaGraphWriteLockNamespace?: string | undefined;
+  /**
+   * The resolved fence target's own lock-statement spelling — present
+   * whenever the profile declares one, root or transaction-scoped alike.
+   * `lockSchemaVersionAndGraphWrite` builds only when this,
+   * `schemaGraphWriteLockNamespace`, and `operationStrategy
+   * .buildLockSchemaVersionAndGraphWrite` are ALL present, and passes this
+   * spelling through to the strategy hook rather than letting it default to
+   * the bundled one: a derived profile's fused write must lock the same key
+   * its portable lock sites do.
+   */
+  fenceSql?: FenceSql | undefined;
   /** Present only for a bundled PostgreSQL transaction-scoped backend. */
   edgeCardinalityInsertFusion?: boolean | undefined;
   /**
@@ -3951,10 +3963,12 @@ export function createCommonOperationBackend(
   const schemaGraphWriteLockNamespace = options.schemaGraphWriteLockNamespace;
   const buildLockSchemaVersionAndGraphWrite =
     operationStrategy.buildLockSchemaVersionAndGraphWrite;
+  const schemaGraphWriteFenceSql = options.fenceSql;
   const schemaGraphWriteFenceMembers =
     (
       schemaGraphWriteLockNamespace === undefined ||
-      buildLockSchemaVersionAndGraphWrite === undefined
+      buildLockSchemaVersionAndGraphWrite === undefined ||
+      schemaGraphWriteFenceSql === undefined
     ) ?
       {}
     : {
@@ -3963,6 +3977,7 @@ export function createCommonOperationBackend(
             buildLockSchemaVersionAndGraphWrite(
               params,
               schemaGraphWriteLockNamespace,
+              schemaGraphWriteFenceSql,
             ),
           );
           if (row !== undefined) {

@@ -1225,21 +1225,28 @@ their own profiles; neither is exported, so a from-scratch profile reaches the s
 copying a bundled profile and adapting its statement, while a derived profile can replace the whole
 `graphTemplateRuntime` bag through `deriveEngineProfile`.
 
-The bundled PostgreSQL fence spelling exposes two lock forms as bare
-`SqlFragment` EXPRESSIONS rather than only as standalone statements:
-`advisoryLockExpression` (the two-argument, namespaced form every ordinary
-fence site takes) and `advisoryLockSingleExpression` (the one-argument form
-on a bare key, which PostgreSQL stores in a distinct lock space from the
-two-argument form and which the schema-commit fence and graph-template
-instantiation both take on the same key so the two mutually exclude) — neither
-expression is a symbol you can import; a custom profile spells its own
-equivalent inside its fence SQL. A statement
-that must compose a lock inside a CTE — so the lock stays co-atomic with the
-surrounding INSERT, rather than running as its own preceding statement — puts
-the expression in its own CTE's `SELECT` (`locked AS (SELECT ...)` in the
-graph-template instantiation statement, `SELECT ... AS "lock_token"` in the
-schema write fence) instead of running the module's standalone lock statement
-first.
+`FenceSql` (see [Write fence declaration](#write-fence-declaration-pessimisticlocks))
+declares `advisoryLockExpression` and `isolationFactExpression` as composable,
+no-`SELECT` forms alongside their standalone-statement counterparts
+(`advisoryLock`, `isolationFact`): a statement that must compose a lock or an
+isolation read INSIDE a larger query it builds itself — a CTE, a
+data-modifying statement — embeds the bare expression directly, rather than
+running the standalone form as its own preceding statement. The graph-template
+instantiation statement and the schema write fence's fused schema + graph-write
+statement (`postgres-schema-write-fence.ts`) are the two sites that need this:
+each puts the expression in its own CTE's `SELECT` (`locked AS (SELECT ...)` in
+the graph-template statement, `SELECT ... AS "lock_token"` in the schema write
+fence). Both resolve the fence target's OWN `FenceSql` — the bundled
+`postgresFenceSql` for a bundled backend, a derived profile's own override
+otherwise — so a custom spelling backs these fused statements exactly as it
+backs every ordinary lock site.
+
+The ONE lock form with no override point is `advisoryLockSingleExpression`,
+the ONE-argument form on a bare key: PostgreSQL stores it in a lock space
+distinct from every namespaced two-argument lock, and the schema-commit fence
+and graph-template instantiation both take it on the same key so the two
+mutually exclude. It is not a `FenceSql` member — both bundled builders bake it
+in directly, and a custom profile has no way to replace it.
 
 ## Cloudflare D1
 
@@ -1529,7 +1536,9 @@ The two bundled backends declare exactly these lines — copy the one matching y
 A backend that declares `advisoryLocks: true` also supplies `fenceSql`, the statement spelling
 `resolveWriteFencePlan`'s `lock` arm hands to every lock site: `advisoryLock`, `advisoryLockWithIsolation`
 (the lock plus the session's isolation-level fact, read in the same statement it locks in),
-`lockTables`, and `isolationFact`. The bundled PostgreSQL spelling is exported as `postgresFenceSql`
+`lockTables`, `isolationFact`, and the two composable, no-`SELECT` forms `advisoryLockExpression` /
+`isolationFactExpression` a statement embeds inside a larger query it builds itself (see the
+graph-template and schema-write-fence discussion above). The bundled PostgreSQL spelling is exported as `postgresFenceSql`
 from `@nicia-ai/typegraph/adapters/drizzle/postgres` — pass it straight through as `fenceSql` when
 wrapping that backend, or supply a custom `FenceSql` matching a different engine's lock syntax. A
 backend that declares `advisoryLocks: true` with no `fenceSql` is refused at construction with

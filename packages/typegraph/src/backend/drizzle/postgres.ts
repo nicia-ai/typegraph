@@ -2631,6 +2631,9 @@ function createPostgresOperationBackend(
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
         dynamicEdgeConvergence: true,
+        ...(fenceTarget.fenceSql === undefined ?
+          {}
+        : { fenceSql: fenceTarget.fenceSql }),
         async beforeNodeProjectionInsert(params, plan): Promise<void> {
           const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
             params,

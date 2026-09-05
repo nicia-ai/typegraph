@@ -89,6 +89,13 @@ type OperationFusionHooks = Readonly<{
   ) => Promise<never>;
   /** Present only for a transaction-scoped operation backend. */
   schemaGraphWriteLockNamespace?: string;
+  /**
+   * The resolved fence target's own lock-statement spelling — present
+   * whenever the profile declares one, root or transaction-scoped alike; see
+   * `CreateCommonOperationBackendOptions.fenceSql` (`../operation-backend-
+   * core`) for what it gates.
+   */
+  fenceSql?: FenceSql | undefined;
   /** Present only for a transaction-scoped operation backend. */
   edgeCardinalityInsertFusion?: true;
   /** Present only for a transaction-scoped operation backend; claim plans require a caller-owned transaction to roll back refusals. */
@@ -216,6 +223,7 @@ export function buildCommonOperationOptions(
     : {
         schemaGraphWriteLockNamespace: fusion.schemaGraphWriteLockNamespace,
       }),
+    ...(fusion.fenceSql === undefined ? {} : { fenceSql: fusion.fenceSql }),
     ...(fusion.edgeCardinalityInsertFusion === undefined ?
       {}
     : { edgeCardinalityInsertFusion: fusion.edgeCardinalityInsertFusion }),

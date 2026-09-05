@@ -63,8 +63,9 @@
  *     `LOCK TABLE` itself) and `backend/drizzle/operations/schema.ts` —
  *     every one of those consumes a resolved plan's `fence.sql.*` (or, for
  *     the one PostgreSQL-only builder that lives outside the plan, calls
- *     back into the fence module's own exported expressions) instead of
- *     spelling the statement itself — and DOES appear in
+ *     the resolved fence target's own `advisoryLockExpression` /
+ *     `isolationFactExpression` members) instead of spelling the statement
+ *     itself — and DOES appear in
  *     `backend/drizzle/postgres-fence-sql.ts`, the one module that owns the
  *     spelling. This ratchet's file list is deliberately narrower than "all
  *     of `src/`": `backend/drizzle/postgres.ts` (the one-off extension-DDL
@@ -478,8 +479,8 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
  * import.ts` (J18: its table lock now resolves the same plan and calls
  * `fence.sql.lockTables(...)` instead of spelling `LOCK TABLE` itself) —
  * ten files in all — every one of these consumes `fence.sql.*` (or, for the fused schema+graph
- * statement, calls back into `postgres-fence-sql.ts`'s exported bare
- * expressions) rather than spelling a token itself. Deliberately narrower
+ * statement, the resolved fence target's own `advisoryLockExpression` /
+ * `isolationFactExpression` members) rather than spelling a token itself. Deliberately narrower
  * than "all of `src/`": `backend/drizzle/postgres.ts` (the one-off
  * extension-DDL advisory lock documented as the remaining leftover in #622,
  * and a lock space deliberately kept separate from every namespaced lock)

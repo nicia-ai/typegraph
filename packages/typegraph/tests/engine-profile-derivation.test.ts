@@ -16,7 +16,12 @@ import { drizzle as drizzlePg } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { createAdapterStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  createAdapterStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../src";
 import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
 import {
   type FenceSql,
@@ -136,27 +141,38 @@ function instrumentPostgresCapture(
 // ============================================================
 
 /**
- * A valid but distinct advisory-lock spelling: `hashtext` of ONE
- * concatenated string rather than the bundled two-argument
- * `pg_advisory_xact_lock(hashtext($namespace), hashtext($key))` form.
+ * The bare `pg_advisory_xact_lock(...)` call, with no `SELECT` around it —
+ * `hashtext` of ONE concatenated string rather than the bundled
+ * two-argument `pg_advisory_xact_lock(hashtext($namespace), hashtext($key))`
+ * form. `customAdvisoryLock` wraps this in the standalone-statement form
+ * every ordinary lock site consumes; `postgres-schema-write-fence.ts`'s
+ * fused statement embeds this bare form directly when this `FenceSql` backs
+ * a derived profile — the same split the bundled `advisoryLockExpression`
+ * (`postgres-fence-sql.ts`) makes.
  */
-function customAdvisoryLock(
+function customAdvisoryLockExpression(
   namespace: string,
   key: string | number,
 ): SqlFragment {
   const keyText = typeof key === "number" ? String(key) : key;
-  return sql`SELECT pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
+  return sql`pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
+}
+
+function customAdvisoryLock(
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`SELECT ${customAdvisoryLockExpression(namespace, key)}`;
 }
 
 function customAdvisoryLockWithIsolation(
   namespace: string,
   key: string | number,
 ): SqlFragment {
-  const keyText = typeof key === "number" ? String(key) : key;
   return sql`
     SELECT
-      pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText})),
-      current_setting('transaction_isolation') AS transaction_isolation
+      ${customAdvisoryLockExpression(namespace, key)},
+      ${customIsolationFactExpression()} AS transaction_isolation
   `;
 }
 
@@ -179,11 +195,21 @@ function customLockTables(
   )} ${sql.raw(CUSTOM_LOCK_TABLE_MODE_CLAUSE[mode])}`;
 }
 
+/**
+ * The bare `current_setting('transaction_isolation')` read, with no
+ * `SELECT`/alias around it — `customIsolationFact` wraps this in the
+ * standalone-statement form; `postgres-schema-write-fence.ts`'s fused
+ * statement embeds this bare form directly.
+ */
+function customIsolationFactExpression(): SqlFragment {
+  return sql`current_setting('transaction_isolation')`;
+}
+
 function customIsolationFact(): SqlFragment {
   // The `transaction_isolation` alias is a hard contract, not a stylistic
   // choice: `assertRecordedCaptureTransactionIsolation` reads the row back
   // by that column name regardless of which `FenceSql` produced it.
-  return sql`SELECT current_setting('transaction_isolation') AS transaction_isolation`;
+  return sql`SELECT ${customIsolationFactExpression()} AS transaction_isolation`;
 }
 
 const customFenceSql: FenceSql = {
@@ -191,10 +217,22 @@ const customFenceSql: FenceSql = {
   advisoryLockWithIsolation: customAdvisoryLockWithIsolation,
   lockTables: customLockTables,
   isolationFact: customIsolationFact,
+  advisoryLockExpression: customAdvisoryLockExpression,
+  isolationFactExpression: customIsolationFactExpression,
 };
 
-/** A one-argument `hashtext(...)` call is the custom spelling's signature. */
-const CUSTOM_ADVISORY_LOCK_MARKER = "hashtext($1 || ':' || $2)";
+/**
+ * The custom spelling's signature: ONE `hashtext(...)` call over a
+ * concatenated string, never a namespace/key pair separately hashed. Keyed
+ * on bind-parameter PLACEHOLDERS (`$\d+`), not fixed numbers: the fused
+ * schema + graph-write statement binds the schema fence's own `graphId` /
+ * `expectedVersion` params ahead of the lock's, so the lock's own
+ * placeholders land at `$3`/`$4` there and `$1`/`$2` in the identity lock's
+ * standalone statement — both are the SAME spelling, just at a different
+ * position in their own statement's parameter list.
+ */
+const CUSTOM_ADVISORY_LOCK_PATTERN =
+  /pg_advisory_xact_lock\(hashtext\(\$\d+ \|\| ':' \|\| \$\d+\)\)/;
 /**
  * The bundled spelling's signature: TWO separately hashed arguments to
  * `pg_advisory_xact_lock`, joined by a comma — never produced by
@@ -212,6 +250,39 @@ const derivationIdentityGraph = defineGraph({
   nodes: { Person: { type: DerivationPerson } },
   edges: {},
   identity: { sameIdAcrossKinds: "fold" },
+});
+
+// ============================================================
+// Case 1b's own graph — a cardinality-constrained edge, not history/identity,
+// is what needs the graph-write lock here: `edgeWriteNeedsConstraintFence`
+// (`src/store/constraints.ts`) fences every edge cardinality but `"many"`,
+// so a `"one"` edge create sets `fencesConstraintProbe` and reaches the same
+// `combinedSchemaGraphFence` branch a history-enabled write does — without
+// opening recorded-time capture, which on PostgreSQL needs `fenceSql` for an
+// entirely different, dialect-gated reason (its own isolation-level read,
+// `assertRecordedCaptureTransactionIsolation` in `store/recorded-capture/
+// guards.ts`) that a `pessimisticLocks` posture cannot satisfy either way.
+// ============================================================
+
+const PortableFenceProbePerson = defineNode("Person", {
+  schema: z.object({ name: z.string() }),
+});
+
+const portableFenceProbeKnows = defineEdge("knows", {
+  schema: z.object({}),
+});
+
+const portableFenceProbeGraph = defineGraph({
+  id: "engine_profile_derivation_portable_fence_probe",
+  nodes: { Person: { type: PortableFenceProbePerson } },
+  edges: {
+    knows: {
+      type: portableFenceProbeKnows,
+      from: [PortableFenceProbePerson],
+      to: [PortableFenceProbePerson],
+      cardinality: "one",
+    },
+  },
 });
 
 describe("deriveEngineProfile", () => {
@@ -239,33 +310,90 @@ describe("deriveEngineProfile", () => {
     const bob = await store.nodes.Person.create({ name: "Bob" }, { id: "bob" });
     await store.identity.assertDifferent(alice, bob);
 
-    // Two OTHER statements in this capture also name
-    // `pg_advisory_xact_lock`, neither of them the identity lock this test
-    // targets: the schema-version commit's own lock (spelled directly
-    // through `advisoryLockSingleExpression`, a single-argument call
-    // unconditionally bundled — see `postgres.ts`'s own doc comment) and
-    // history capture's recorded-graph-write lock, which `operationStrategy
-    // .buildLockSchemaVersionAndGraphWrite` FUSES into the schema-fence CTE
-    // (the `"graph_write_lock"` CTE below) using the bundled spelling
-    // directly, by construction: that fused command lives on
-    // `profile.strategy`, a field `deriveEngineProfile` cannot touch (see
-    // `DERIVABLE_ENGINE_PROFILE_KEYS`), so overriding `fenceSql` alone never
-    // reaches it — a real, documented limit of fenceSql-only derivation, not
-    // a defect this test polices. What IS derivable, and what this
-    // assertion actually targets, is the identity lock
-    // (`lockIdentityGraph`), the only OTHER two-argument advisory-lock call
-    // this trace contains.
+    // One OTHER statement in this capture also names `pg_advisory_xact_lock`
+    // but is never expected to carry the custom spelling: the schema-version
+    // commit's own lock, spelled through `advisoryLockSingleExpression` — a
+    // ONE-argument call occupying a deliberately different lock space than
+    // every namespaced two-argument lock (see `postgres.ts`'s own doc
+    // comment), so `BUNDLED_ADVISORY_LOCK_PATTERN` below (which matches only
+    // the TWO-argument form) never matches it regardless.
+    //
+    // History capture's recorded-graph-write lock — `operationStrategy
+    // .buildLockSchemaVersionAndGraphWrite`, FUSED into the schema-fence CTE
+    // (the `"graph_write_lock"` CTE below) — now takes the resolved fence
+    // target's own spelling as a parameter instead of hardcoding the bundled
+    // one, so it carries the SAME custom spelling the identity lock
+    // (`lockIdentityGraph`) does. Both are asserted below with no
+    // `graph_write_lock` exclusion.
     const customSpellingStatements = captured.filter((statement) =>
-      statement.sql.includes(CUSTOM_ADVISORY_LOCK_MARKER),
+      CUSTOM_ADVISORY_LOCK_PATTERN.test(statement.sql),
     );
     expect(customSpellingStatements.length).toBeGreaterThan(0);
 
-    const bundledTwoArgumentSpellingStatements = captured.filter(
-      (statement) =>
-        BUNDLED_ADVISORY_LOCK_PATTERN.test(statement.sql) &&
-        !statement.sql.includes("graph_write_lock"),
+    const fusedGraphWriteLockStatements = captured.filter((statement) =>
+      statement.sql.includes("graph_write_lock"),
+    );
+    expect(fusedGraphWriteLockStatements.length).toBeGreaterThan(0);
+    for (const statement of fusedGraphWriteLockStatements) {
+      expect(CUSTOM_ADVISORY_LOCK_PATTERN.test(statement.sql)).toBe(true);
+    }
+
+    const bundledTwoArgumentSpellingStatements = captured.filter((statement) =>
+      BUNDLED_ADVISORY_LOCK_PATTERN.test(statement.sql),
     );
     expect(bundledTwoArgumentSpellingStatements).toHaveLength(0);
+  });
+
+  it("case 1b: a derived PostgreSQL profile with fenceSql: undefined and pessimisticLocks.serializedWriters has no lockSchemaVersionAndGraphWrite member on the root or a transaction() handle, and a graph-write-lock-needing write still succeeds through the portable path", async () => {
+    const { profile: baseProfile } =
+      await createRealPostgresProfileWithClient();
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      fenceSql: undefined,
+      declaredCapabilities: {
+        ...baseProfile.declaredCapabilities,
+        pessimisticLocks: {
+          advisoryLocks: false,
+          tableLocks: false,
+          serializedWriters: true,
+        },
+      },
+    });
+
+    const backend = createSqlBackend(derivedProfile);
+    // Before the fix this member existed regardless of `fenceSql` — the
+    // fused statement spelled the BUNDLED lock unconditionally, silently
+    // ignoring a derived profile's dropped spelling — so this assertion is
+    // the direct proof: it fails against the unfixed code, and passes only
+    // because the member now builds solely when `fenceSql` is also present.
+    expect(backend.lockSchemaVersionAndGraphWrite).toBeUndefined();
+    await backend.transaction((tx) => {
+      expect(tx.lockSchemaVersionAndGraphWrite).toBeUndefined();
+      return Promise.resolve();
+    });
+
+    const [store] = await createAdapterStoreWithSchema(
+      portableFenceProbeGraph,
+      backend,
+    );
+
+    const alice = await store.nodes.Person.create(
+      { name: "Alice" },
+      { id: "alice-portable" },
+    );
+    const bob = await store.nodes.Person.create(
+      { name: "Bob" },
+      { id: "bob-portable" },
+    );
+
+    // A `"one"`-cardinality edge create is a constrained write
+    // (`edgeWriteNeedsConstraintFence`), so it needs the per-graph write
+    // lock exactly as a history-enabled write does. Reaching the fused
+    // member would throw (it does not exist); this only succeeds if the
+    // Store fell back to the two-statement portable fence
+    // (`lockSchemaVersionForStoreWrite` + `lockRecordedGraphWrite`), which
+    // needs no `fenceSql` at all under an `engine-serialized` plan.
+    const edge = await store.edges.knows.create(alice, bob, {});
+    expect(edge).toBeDefined();
   });
 
   it("case 2: a derived SQLite profile with an all-false pessimisticLocks declaration refuses the identity lock as unfenced (declared-none)", async () => {
@@ -536,5 +664,100 @@ describe("deriveEngineProfile refuses the declaredCapabilities/resourceAudit sub
     expect(
       derivedProfile.declaredCapabilities.execution.interactiveTransactions,
     ).toBe(baseProfile.declaredCapabilities.execution.interactiveTransactions);
+  });
+});
+
+describe("registerFirstPartyProfile freezes the trust-bearing bags a derived profile shares with its base by reference", () => {
+  it("a derived SQLite profile's shared resourceAudit and declaredCapabilities (including a nested capability leaf) throw on assignment and leave the base unchanged", () => {
+    const baseProfile = createRealSqliteProfile();
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      autocommit: { singleStatementDurable: false },
+    });
+
+    // Neither override names `resourceAudit` or `declaredCapabilities`, so
+    // `deriveEngineProfile`'s `{...base, ...overrides}` carries the SAME
+    // objects forward — the sharing this freeze exists to make safe.
+    expect(derivedProfile.resourceAudit).toBe(baseProfile.resourceAudit);
+    expect(derivedProfile.declaredCapabilities).toBe(
+      baseProfile.declaredCapabilities,
+    );
+
+    const originalResourceAuditKind = baseProfile.resourceAudit.kind;
+    const flippedResourceAuditKind =
+      originalResourceAuditKind === "serialized" ? "independent" : "serialized";
+    expect(() => {
+      (derivedProfile.resourceAudit as { kind: string }).kind =
+        flippedResourceAuditKind;
+    }).toThrow(TypeError);
+    expect(baseProfile.resourceAudit.kind).toBe(originalResourceAuditKind);
+
+    const originalWindowFunctions =
+      baseProfile.declaredCapabilities.windowFunctions;
+    expect(() => {
+      (
+        derivedProfile.declaredCapabilities as { windowFunctions: boolean }
+      ).windowFunctions = !originalWindowFunctions;
+    }).toThrow(TypeError);
+    expect(baseProfile.declaredCapabilities.windowFunctions).toBe(
+      originalWindowFunctions,
+    );
+
+    // A nested capability leaf, two levels deep — proves the freeze is not
+    // limited to `declaredCapabilities`'s own top-level fields.
+    const originalInteractiveTransactions =
+      baseProfile.declaredCapabilities.execution.interactiveTransactions;
+    expect(() => {
+      (
+        derivedProfile.declaredCapabilities.execution as {
+          interactiveTransactions: boolean;
+        }
+      ).interactiveTransactions = !originalInteractiveTransactions;
+    }).toThrow(TypeError);
+    expect(
+      baseProfile.declaredCapabilities.execution.interactiveTransactions,
+    ).toBe(originalInteractiveTransactions);
+  });
+
+  it("a derived PostgreSQL profile's shared resourceAudit and declaredCapabilities.pessimisticLocks throw on assignment and leave the base unchanged", async () => {
+    const { profile: baseProfile } =
+      await createRealPostgresProfileWithClient();
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      autocommit: { singleStatementDurable: false },
+    });
+
+    const originalResourceAuditKind = baseProfile.resourceAudit.kind;
+    expect(() => {
+      (derivedProfile.resourceAudit as { kind: string }).kind =
+        "flipped-for-the-test";
+    }).toThrow(TypeError);
+    expect(baseProfile.resourceAudit.kind).toBe(originalResourceAuditKind);
+
+    const originalPessimisticLocks =
+      baseProfile.declaredCapabilities.pessimisticLocks;
+    expect(() => {
+      (
+        derivedProfile.declaredCapabilities as { pessimisticLocks: unknown }
+      ).pessimisticLocks = undefined;
+    }).toThrow(TypeError);
+    expect(baseProfile.declaredCapabilities.pessimisticLocks).toBe(
+      originalPessimisticLocks,
+    );
+  });
+
+  it("an overridden declaredCapabilities literal on a derived profile is a fresh, unfrozen object — spreading a frozen source does not freeze the copy", () => {
+    const baseProfile = createRealSqliteProfile();
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      declaredCapabilities: { ...baseProfile.declaredCapabilities },
+    });
+
+    expect(derivedProfile.declaredCapabilities).not.toBe(
+      baseProfile.declaredCapabilities,
+    );
+    expect(Object.isFrozen(derivedProfile.declaredCapabilities)).toBe(false);
+    expect(() => {
+      (
+        derivedProfile.declaredCapabilities as { windowFunctions: boolean }
+      ).windowFunctions = !derivedProfile.declaredCapabilities.windowFunctions;
+    }).not.toThrow();
   });
 });

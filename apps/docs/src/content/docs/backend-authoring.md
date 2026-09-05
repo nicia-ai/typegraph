@@ -159,22 +159,28 @@ import { postgresFenceSql } from "@nicia-ai/typegraph/adapters/drizzle/postgres"
 import type { FenceSql } from "@nicia-ai/typegraph/backend";
 import { sql, type SqlFragment } from "@nicia-ai/typegraph";
 
-function customAdvisoryLock(
+function customAdvisoryLockExpression(
   namespace: string,
   key: string | number,
 ): SqlFragment {
   const keyText = typeof key === "number" ? String(key) : key;
-  return sql`SELECT pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
+  return sql`pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
+}
+
+function customAdvisoryLock(
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`SELECT ${customAdvisoryLockExpression(namespace, key)}`;
 }
 
 function customAdvisoryLockWithIsolation(
   namespace: string,
   key: string | number,
 ): SqlFragment {
-  const keyText = typeof key === "number" ? String(key) : key;
   return sql`
     SELECT
-      pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText})),
+      ${customAdvisoryLockExpression(namespace, key)},
       current_setting('transaction_isolation') AS transaction_isolation
   `;
 }
@@ -184,6 +190,8 @@ const customFenceSql: FenceSql = {
   advisoryLockWithIsolation: customAdvisoryLockWithIsolation,
   lockTables: postgresFenceSql.lockTables,
   isolationFact: postgresFenceSql.isolationFact,
+  advisoryLockExpression: customAdvisoryLockExpression,
+  isolationFactExpression: postgresFenceSql.isolationFactExpression,
 };
 
 const baseProfile = buildPostgresEngineProfile(db, options);
@@ -194,32 +202,29 @@ const derivedProfile = deriveEngineProfile(baseProfile, {
 const backend = createSqlBackend(derivedProfile);
 ```
 
-Only `advisoryLock` and `advisoryLockWithIsolation` are the custom spelling
-here; `lockTables` and `isolationFact` are the bundled PostgreSQL builders,
-reused because this example leaves them unchanged — a custom `FenceSql`
-need not replace every builder. This is the same `customAdvisoryLock` /
-`customAdvisoryLockWithIsolation` pair pinned by
+`advisoryLock`, `advisoryLockWithIsolation`, and the composable
+`advisoryLockExpression` are the custom spelling here; `lockTables`,
+`isolationFact`, and `isolationFactExpression` are the bundled PostgreSQL
+builders, reused because this example leaves them unchanged — a custom
+`FenceSql` need not replace every member. This is the same
+`customAdvisoryLock` / `customAdvisoryLockWithIsolation` pair pinned by
 `tests/engine-profile-derivation.test.ts` against a real PostgreSQL
 connection, trimmed of the `customLockTables` / `customIsolationFact`
 coverage this example doesn't need.
 
 Every write-fence lock site now spells its lock through `customFenceSql`
-instead of the bundled one, with two exceptions, neither reachable through
-`fenceSql`:
-
-- The schema-commit fence (`acquireSchemaWriteFence` in `postgres.ts`)
-  emits a standalone, single-argument `pg_advisory_xact_lock` call through
-  `advisoryLockSingleExpression`, baked directly into
-  `buildPostgresEngineProfile`'s closure rather than read off `fenceSql`.
-  It deliberately occupies a different lock space from every two-argument
-  lock `fenceSql` spells, so it is not an oversight `fenceSql` could close
-  even if it were derivable.
-- The recorded graph-write fence fuses its lock into its own CTE
-  (`buildLockSchemaVersionAndGraphWrite`) on `profile.strategy`, which is
-  not itself derivable (see
-  [What you cannot override](#what-you-cannot-override)).
-
-Reaching either one needs a from-scratch profile (see
+instead of the bundled one — including the recorded graph-write fence, which
+fuses its lock into its own CTE (`buildLockSchemaVersionAndGraphWrite`) but
+reads `advisoryLockExpression` / `isolationFactExpression` off the resolved
+fence target rather than a hardcoded bundled spelling, so this derivation
+reaches it too. The ONE exception, not reachable through `fenceSql`, is the
+schema-commit fence (`acquireSchemaWriteFence` in `postgres.ts`): it emits a
+standalone, single-argument `pg_advisory_xact_lock` call through
+`advisoryLockSingleExpression`, baked directly into
+`buildPostgresEngineProfile`'s closure. It deliberately occupies a different
+lock space from every two-argument lock `fenceSql` spells, so it is not an
+oversight `fenceSql` could close even if it were derivable — reaching it
+needs a from-scratch profile (see
 [What is not derivable yet](#what-is-not-derivable-yet)). The graph-template
 instantiation statement is a different, already-reachable case: it is the
 `instantiateStatement` member of `graphTemplateRuntime`, one of the fields

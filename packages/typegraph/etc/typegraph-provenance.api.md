@@ -1791,6 +1791,8 @@ type FenceSql = Readonly<{
     advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
     lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
     isolationFact: () => SqlFragment;
+    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression: () => SqlFragment;
 }>;
 
 // @public

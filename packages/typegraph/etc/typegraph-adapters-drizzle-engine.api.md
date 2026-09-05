@@ -471,7 +471,7 @@ type CommonOperationStrategy = Readonly<{
     buildContendedEdgeRowAudit: (graphId: string, cardinality: ConstrainedCardinality, edgeKinds: readonly string[]) => SQL;
     buildDisjointOverlapAudit: (graphId: string, kinds: readonly [string, string]) => SQL;
     buildGetActiveSchema: (graphId: string) => SQL;
-    buildLockSchemaVersionAndGraphWrite?: (params: SchemaWriteFenceParams, advisoryLockNamespace: string) => SQL;
+    buildLockSchemaVersionAndGraphWrite?: (params: SchemaWriteFenceParams, advisoryLockNamespace: string, fenceSql: FenceSql) => SQL;
     buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
     buildGetSchemaVersion: (graphId: string, version: number) => SQL;
     buildSetActiveSchema: (graphId: string, version: number) => Readonly<{
@@ -7416,6 +7416,8 @@ type FenceSql = Readonly<{
     advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
     lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
     isolationFact: () => SqlFragment;
+    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression: () => SqlFragment;
 }>;
 
 // @public

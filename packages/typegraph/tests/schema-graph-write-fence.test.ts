@@ -13,6 +13,7 @@ import {
 } from "../src";
 import { generatePostgresDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresOperationStrategy } from "../src/backend/drizzle/operations/strategy";
+import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { tables as postgresTables } from "../src/backend/drizzle/schema/postgres";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -73,6 +74,7 @@ describe("schema + graph write fence", () => {
         requireDefined(strategy.buildLockSchemaVersionAndGraphWrite)(
           { expectedVersion: 1, graphId: "fused-lock" },
           "typegraph:recorded-graph-write",
+          postgresFenceSql,
         ),
       );
       const statement = compiled.sql.toLowerCase();

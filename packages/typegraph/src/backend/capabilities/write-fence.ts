@@ -22,6 +22,17 @@ import { type BackendCapabilities } from "../types";
  * that key on a constant second argument (`0`) rather than a hashed value —
  * the two-argument `pg_advisory_xact_lock` overload takes that second
  * argument as a plain integer, never as `hashtext(...)` of one.
+ *
+ * `advisoryLockExpression` / `isolationFactExpression` are the composable,
+ * no-`SELECT` forms of `advisoryLock` / `isolationFact`: a statement that
+ * must embed the lock or the isolation read INSIDE a larger query it composes
+ * itself — a CTE, a data-modifying statement — takes the bare expression
+ * rather than the standalone-statement form. PostgreSQL's fused schema +
+ * graph-write fence (`postgres-schema-write-fence.ts`) is the one site that
+ * needs this: it reaches the schema table, so it cannot be built from a
+ * bundled bare export directly, but it must still spell the SAME lock and
+ * isolation read a derived `FenceSql` declares, not the bundled one
+ * unconditionally.
  */
 export type FenceSql = Readonly<{
   /** A keyed lock scoped to the transaction, e.g. `pg_advisory_xact_lock`. */
@@ -42,6 +53,13 @@ export type FenceSql = Readonly<{
   ) => SqlFragment;
   /** The bare session isolation-level read, with no lock. */
   isolationFact: () => SqlFragment;
+  /** The bare lock expression `advisoryLock` wraps in a standalone `SELECT`. */
+  advisoryLockExpression: (
+    namespace: string,
+    key: string | number,
+  ) => SqlFragment;
+  /** The bare isolation-fact expression `isolationFact` wraps in a standalone `SELECT`. */
+  isolationFactExpression: () => SqlFragment;
 }>;
 
 /**
@@ -196,6 +214,52 @@ export function carryFirstPartyFactoryMark(
 const FIRST_PARTY_PROFILES = new WeakSet<object>();
 
 /**
+ * Whether `value` is a plain object — `{}` or `Object.create(null)` — as
+ * opposed to a class instance, a function, a Drizzle query builder, or a
+ * connection handle. {@link freezeDeep}'s recursion boundary: it must never
+ * walk into a value that merely happens to be an object, only into the plain
+ * data a profile's declared-capabilities bag is built from.
+ */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+/**
+ * Recursively freezes every plain object and array reachable from `value`,
+ * leaving anything else — functions, class instances, connection handles —
+ * untouched. Used only on `declaredCapabilities`, which is nothing but
+ * booleans, strings, numbers, and nested plain objects/arrays: a value this
+ * function would ever need to skip never appears inside it.
+ */
+function freezeDeep(value: unknown): void {
+  if (Array.isArray(value)) {
+    Object.freeze(value);
+    for (const item of value) freezeDeep(item);
+    return;
+  }
+  if (isPlainObject(value)) {
+    Object.freeze(value);
+    for (const key of Object.keys(value)) freezeDeep(value[key]);
+  }
+}
+
+/**
+ * The `SqlEngineProfile` fields `registerFirstPartyProfile` freezes beyond
+ * the profile object itself — read through this narrow structural shape
+ * rather than `SqlEngineProfile` itself, so this module (below
+ * `create-sql-backend.ts` and `./profile` in the dependency order) need not
+ * import the profile type to reach them.
+ */
+type ProfileTrustBearingBags = Readonly<{
+  declaredCapabilities?: object;
+  resourceAudit?: object;
+  autocommit?: object;
+  tableNames?: object;
+}>;
+
+/**
  * Registers `profile` as first-party and returns the SAME object, frozen —
  * a builder writes `const profile: SqlEngineProfile<...> = {...}; return
  * registerFirstPartyProfile(profile);` and hands its caller back exactly the
@@ -207,25 +271,46 @@ const FIRST_PARTY_PROFILES = new WeakSet<object>();
  * including one built by spreading a bundled profile's fields into a new
  * object literal, is a different object and is never registered.
  *
- * The `Object.freeze` is what makes that standing mean anything once a
- * caller can hold the bundled object directly (both builders are exported
- * from the authoring entrypoint): without it, a caller could mutate a field
- * on the exact object this set recognizes and keep every effect first-party
- * standing grants — the dialect-derivation fallback, the lazy schema-fence
- * lease — while the profile no longer matches what either builder actually
- * built. The freeze is shallow: it binds the profile's own fields, not the
- * values behind them, so a caller can still mutate a bag such as
- * `declaredCapabilities` in place. A blanked `pessimisticLocks` on a
- * first-party profile is covered by the dialect-derivation fallback in
- * `resolveWriteFencePlan`, which is sound for the two bundled dialects.
- * `deriveEngineProfile` is unaffected: it reads `base`'s fields and spreads
- * them into a NEW object literal, which spreading a frozen source object
- * does not freeze.
+ * The `Object.freeze` on `profile` itself binds its own fields — a caller
+ * cannot replace `profile.resourceAudit` with a different object — but that
+ * alone leaves every sub-object still mutable in place. That matters because
+ * `deriveEngineProfile` builds a derived profile as `{...base, ...overrides}`:
+ * any field `overrides` does not name is the SAME sub-object `base` holds,
+ * not a copy, so `derived.resourceAudit.kind = "serialized"` would otherwise
+ * mutate `base.resourceAudit` directly — corrupting a bundled builder's own
+ * verdict through a handle `deriveEngineProfile`'s own override validation
+ * never sees, since that validation runs against `overrides`, not against a
+ * later direct mutation of the object it returned. So this also freezes the
+ * bags a derived profile shares with `base` by reference whenever an
+ * override does not replace them: `declaredCapabilities` is deep-frozen (it
+ * is nothing but plain data, so nothing on it should ever be mutable), and
+ * `resourceAudit`, `autocommit`, and `tableNames` are shallow-frozen — their
+ * OWN fields, not what those fields point to. `resourceAudit.resource` and
+ * `identityLeaseResource` stay reachable and mutable: those are the driver's
+ * own connection handles, not data TypeGraph owns, and freezing the
+ * `resourceAudit` object itself already blocks swapping which handle it
+ * names. Every other profile field is either a closure this module has no
+ * business freezing (`execution`, `provisioning`, the six `*Runtime` bags,
+ * `assembly`) or `fenceSql`, a bag of functions with nothing mutable on it to
+ * begin with.
+ *
+ * `deriveEngineProfile` itself is unaffected beyond this: it reads `base`'s
+ * fields and spreads them into a NEW object literal, which spreading a
+ * frozen source object does not freeze — a caller who overrides
+ * `declaredCapabilities` with a fresh literal gets back a profile whose
+ * `declaredCapabilities` is that fresh, unfrozen object, exactly as before.
  *
  * @internal
  */
 export function registerFirstPartyProfile<T extends object>(profile: T): T {
   FIRST_PARTY_PROFILES.add(profile);
+  const bags = profile as ProfileTrustBearingBags;
+  if (bags.declaredCapabilities !== undefined) {
+    freezeDeep(bags.declaredCapabilities);
+  }
+  if (bags.resourceAudit !== undefined) Object.freeze(bags.resourceAudit);
+  if (bags.autocommit !== undefined) Object.freeze(bags.autocommit);
+  if (bags.tableNames !== undefined) Object.freeze(bags.tableNames);
   return Object.freeze(profile);
 }
 
