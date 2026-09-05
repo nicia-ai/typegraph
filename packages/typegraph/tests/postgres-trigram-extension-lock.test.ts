@@ -6,9 +6,17 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { type FenceSql } from "../src/backend/capabilities/write-fence";
 import { deriveBackend } from "../src/backend/derive-backend";
+import {
+  createSqlBackend,
+  deriveEngineProfile,
+} from "../src/backend/drizzle/engine";
 import { type AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
-import { createPostgresBackend } from "../src/backend/drizzle/postgres";
+import {
+  buildPostgresEngineProfile,
+  createPostgresBackend,
+} from "../src/backend/drizzle/postgres";
 import {
   type BackendCatalogProbes,
   type GraphBackend,
@@ -16,19 +24,36 @@ import {
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import { defineNodeIndex } from "../src/indexes";
+import {
+  sql as portableSql,
+  type SqlFragment,
+} from "../src/query/sql-fragment";
 import { createStore, createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
+/**
+ * Renders one Drizzle `SQL` chunk to text. `sql\`...\`` (drizzle-orm's own
+ * tag) embeds a literal template segment as a bare `StringChunk` — `.value`
+ * IS the string array — but `toDrizzleSql`'s conversion of a portable
+ * `SqlFragment` builds each text segment via `drizzleSql.raw(...)`, which
+ * wraps that same `StringChunk` inside its own nested `SQL` object. This
+ * recurses through that nesting so both shapes flatten to the same text; a
+ * `Param` chunk has no `queryChunks` and falls through to its bound value.
+ */
+function chunkText(chunk: unknown): string {
+  const nested = (chunk as { queryChunks?: readonly unknown[] }).queryChunks;
+  if (Array.isArray(nested)) {
+    return nested.map((inner) => chunkText(inner)).join("");
+  }
+  const value = (chunk as { value?: unknown }).value;
+  return Array.isArray(value) ? value.join("") : String(value ?? chunk);
+}
+
 function statementText(statement: unknown): string {
   const chunks =
     (statement as { queryChunks?: readonly unknown[] }).queryChunks ?? [];
-  return chunks
-    .map((chunk) => {
-      const value = (chunk as { value?: unknown }).value;
-      return Array.isArray(value) ? value.join("") : String(value ?? chunk);
-    })
-    .join("");
+  return chunks.map((chunk) => chunkText(chunk)).join("");
 }
 
 function stubTransactionalDatabase(): Readonly<{
@@ -58,6 +83,47 @@ function duplicateKeyError(): Error {
     code: "23505",
   });
 }
+
+/**
+ * A derived profile's custom lock spelling: ONE `hashtext(...)` call over a
+ * concatenated string, unlike the bundled two-argument
+ * `pg_advisory_xact_lock(hashtext($namespace), $key)` form the extension
+ * install otherwise emits. Mirrors `engine-profile-derivation.test.ts`'s own
+ * `customFenceSql`, kept local rather than imported so this suite's fixture
+ * does not depend on that file's internal (unexported) helpers.
+ */
+function customExtensionAdvisoryLockExpression(
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  const keyText = typeof key === "number" ? String(key) : key;
+  return portableSql`pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
+}
+
+function customExtensionLockTables(): SqlFragment {
+  throw new Error("not exercised by the extension-install lock");
+}
+
+function customExtensionIsolationFactExpression(): SqlFragment {
+  return portableSql`current_setting('transaction_isolation')`;
+}
+
+const customExtensionFenceSql: FenceSql = {
+  lockTables: customExtensionLockTables,
+  advisoryLockExpression: customExtensionAdvisoryLockExpression,
+  isolationFactExpression: customExtensionIsolationFactExpression,
+};
+
+/**
+ * The custom spelling's signature — never produced by the bundled
+ * `postgresFenceSql`. This suite's stub reconstructs statement text straight
+ * from the Drizzle `SQL` chunk tree (`statementText` above), which embeds
+ * each bound value's own text rather than a `$1`-style placeholder — unlike
+ * `engine-profile-derivation.test.ts`'s live-PGlite capture, which observes
+ * the placeholder form the wire protocol actually sends.
+ */
+const CUSTOM_EXTENSION_LOCK_PATTERN =
+  /pg_advisory_xact_lock\(hashtext\(.+ \|\| ':' \|\| .+\)\)/;
 
 const Document = defineNode("Document", {
   schema: z.object({ title: z.string() }),
@@ -244,5 +310,62 @@ describe("Postgres pg_trgm extension prerequisite", () => {
     expect(events[0]).toBe("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
     expect(events[1]).toBe("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
     expect(events[2]).toContain("CREATE INDEX CONCURRENTLY IF NOT EXISTS");
+  });
+
+  // The extension-install lock now resolves the SAME write-fence plan every
+  // other lock site does, so a derived profile's own `fenceSql` backs it —
+  // never the bundled spelling unconditionally.
+  it("emits a derived profile's custom fenceSql spelling for the extension-install lock, not the bundled one", async () => {
+    const { db, statements } = stubTransactionalDatabase();
+    const baseProfile = buildPostgresEngineProfile(db, { vector: false });
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      fenceSql: customExtensionFenceSql,
+    });
+    const backend = createSqlBackend(derivedProfile);
+
+    await requireDefined(backend.ensureExtension)("pg_trgm");
+
+    expect(statements).toHaveLength(2);
+    expect(statements[0]).toMatch(CUSTOM_EXTENSION_LOCK_PATTERN);
+    expect(statements[0]).toContain("typegraph:extension-ddl:pg_trgm");
+    expect(statements[1]).toContain('CREATE EXTENSION IF NOT EXISTS "pg_trgm"');
+  });
+
+  // A plan that resolves `engine-serialized` (or `unfenced`) takes no lock at
+  // all: this is the one lock site that DEGRADES instead of refusing,
+  // because the duplicate-key retry — not the lock — is what makes a
+  // concurrent install correct on such a backend.
+  it("takes no lock when the resolved plan is engine-serialized, and still retries a first duplicate-key rejection", async () => {
+    const statements: string[] = [];
+    const db = {
+      $client: { query: () => Promise.resolve({ rows: [] }) },
+      execute(
+        statement: unknown,
+      ): Promise<Readonly<{ rows: readonly unknown[] }>> {
+        statements.push(statementText(statement));
+        if (statements.length === 1) return Promise.reject(duplicateKeyError());
+        return Promise.resolve({ rows: [] });
+      },
+    } as unknown as AnyPgDatabase;
+    const baseProfile = buildPostgresEngineProfile(db, { vector: false });
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      fenceSql: undefined,
+      declaredCapabilities: {
+        ...baseProfile.declaredCapabilities,
+        pessimisticLocks: {
+          advisoryLocks: false,
+          tableLocks: false,
+          serializedWriters: true,
+        },
+      },
+    });
+    const backend = createSqlBackend(derivedProfile);
+
+    await requireDefined(backend.ensureExtension)("pg_trgm");
+
+    expect(statements).toHaveLength(2);
+    expect(new Set(statements)).toEqual(
+      new Set(['CREATE EXTENSION IF NOT EXISTS "pg_trgm";']),
+    );
   });
 });
