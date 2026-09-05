@@ -277,6 +277,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * API Extractor inlines the full column-builder shape for every column of
  * every bundled table — the bulk of this batch's line count. No other
  * entrypoint moved.
+ *
+ * `deriveEngineProfile` batch: exporting `deriveEngineProfile`,
+ * `DerivableEngineProfileKey`, `DerivableEngineProfileOverrides`,
+ * `DERIVABLE_ENGINE_PROFILE_KEYS`, and `BackendResourceAudit` from
+ * `./adapters/drizzle/engine` reaches no vocabulary this entrypoint's type
+ * graph did not already render as forgotten-export debt (`SqlEngineProfile`,
+ * `FenceSql`, and `BackendResourceAudit` itself were already reachable
+ * through the builders' own return types) — except `BackendResourceAudit`
+ * moving from forgotten to directly exported, which reduces this
+ * entrypoint's debt count by exactly the one name (−1). No other entrypoint
+ * moved.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -290,8 +301,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "11f038ecdf42bbad583047a01c5b5106f226a42291f67f19d588448764a6cbeb",
   },
   "./adapters/drizzle/engine": {
-    count: 348,
-    sha256: "da7a4a59f3beea2c438ec79cb1f70f64c78b03322be078f9e77f6fc8c38b162f",
+    count: 347,
+    sha256: "f91cafe0028c733f2fbd8e7418ea7c263e6bde3d67d2bdbbcafcf5fd00f4f180",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

@@ -359,7 +359,7 @@ type BackendCatalogProbes = Readonly<{
 type BackendIdentity = Pick<GraphBackend, "dialect" | "capabilities" | "tableNames" | "fulltextStrategy" | "vectorStrategy" | "fenceSql">;
 
 // @public
-type BackendResourceAudit = Readonly<{
+export type BackendResourceAudit = Readonly<{
     kind: "serialized";
     resource: object;
 }> | Readonly<{
@@ -7308,6 +7308,20 @@ type DeleteUniqueParams = Readonly<{
     concreteKind: string;
     nodeId: string;
 }>;
+
+// @public
+export const DERIVABLE_ENGINE_PROFILE_KEYS: readonly ["declaredCapabilities", "fenceSql", "resourceAudit", "autocommit", "contributionRuntime", "identityRuntime", "graphTemplateRuntime", "baseSchemaRuntime", "indexMaterializationRuntime", "kindRemovalRuntime", "close"];
+
+// @public
+export type DerivableEngineProfileKey = (typeof DERIVABLE_ENGINE_PROFILE_KEYS)[number];
+
+// @public
+export type DerivableEngineProfileOverrides<TTx> = Partial<Omit<Pick<SqlEngineProfile<TTx>, DerivableEngineProfileKey>, "fenceSql">> & Readonly<{
+    fenceSql?: FenceSql | undefined;
+}>;
+
+// @public
+export function deriveEngineProfile<TTx>(base: SqlEngineProfile<TTx>, overrides: DerivableEngineProfileOverrides<TTx>): SqlEngineProfile<TTx>;
 
 // @public
 type DisjointOverlapRow = Readonly<{

@@ -1,10 +1,16 @@
 /**
  * The SQL engine profile barrel: the profile types every engine builds
  * against, the one factory (`createSqlBackend`) that assembles a backend
- * from one, and the two bundled builders that produce a profile in the
- * first place.
+ * from one, the two bundled builders that produce a profile in the first
+ * place, and `deriveEngineProfile` for building a variant of one.
  */
 export { createSqlBackend } from "./create-sql-backend";
+export {
+  DERIVABLE_ENGINE_PROFILE_KEYS,
+  type DerivableEngineProfileKey,
+  type DerivableEngineProfileOverrides,
+  deriveEngineProfile,
+} from "./derive-profile";
 export type {
   BaseSchemaRuntime,
   ContributionRuntime,
@@ -19,6 +25,14 @@ export type {
   KindRemovalRuntime,
   SqlEngineProfile,
 } from "./profile";
+/**
+ * The serialized-resource verdict a profile carries as `resourceAudit`
+ * (`SqlEngineProfile.resourceAudit`) — public here because
+ * `DerivableEngineProfileOverrides` exposes that field for override, so an
+ * author building a derived profile's replacement verdict needs the type to
+ * construct one.
+ */
+export type { BackendResourceAudit } from "../../transaction-resource";
 /**
  * The PostgreSQL {@link SqlEngineProfile} builder — the derivation base
  * `deriveEngineProfile` (this entrypoint) starts every derived PostgreSQL
