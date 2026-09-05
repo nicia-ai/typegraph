@@ -1,0 +1,7 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+`@nicia-ai/typegraph/adapters/drizzle/engine` now exports `buildPostgresEngineProfile` and `buildSqliteEngineProfile`, the bundled `SqlEngineProfile` builders, so a caller can derive a variant of one instead of only consuming a finished backend. It also exports `deriveEngineProfile` (with `DerivableEngineProfileOverrides`, `DerivableEngineProfileKey`, and `DERIVABLE_ENGINE_PROFILE_KEYS`), which builds a fresh profile from a bundled one with a bounded set of fields overridden — a lock spelling, a declared capability, a resource-audit verdict, or a runtime dependency bag — refusing any other field with a typed error. `SqlEngineProfile.firstParty` is removed; first-party standing is now bound to the exact profile object a bundled builder returned rather than to a field, so a copy or derived profile never carries it forward. `SqlEngineProfile.buildOperations` and `.lateMembers` are replaced by one opaque `assembly` field, constructible only by the two bundled builders. `BackendResourceAudit` is now public on the engine entrypoint. This entrypoint is unreleased, so none of the above is a breaking change; the two bundled backends' emitted SQL, capabilities, marks, and behavior are unchanged.
+
+See [Authoring an engine profile](https://typegraph.dev/backend-authoring) for the derivable-field table, the refusals a custom profile can hit, and a worked example.

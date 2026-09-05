@@ -51,6 +51,7 @@ const sidebar = [
       { label: "Fulltext Search", slug: "fulltext-search" },
       { label: "Graph Algorithms", slug: "graph-algorithms" },
       { label: "Backend Setup", slug: "backend-setup" },
+      { label: "Authoring an engine profile", slug: "backend-authoring" },
       { label: "Schema Migrations", slug: "schema-management" },
       { label: "Evolving Schemas", slug: "schema-evolution" },
       { label: "Graph Extensions", slug: "graph-extensions" },
