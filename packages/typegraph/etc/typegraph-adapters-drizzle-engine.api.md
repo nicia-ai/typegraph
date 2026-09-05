@@ -50,56 +50,10 @@ type AtomicConvergeEdgesParams = Readonly<{
 }>;
 
 // @public
-type AtomicDeleteBatchResult = Readonly<{
-    affectedCount: number;
-    schemaFenceMatched: boolean;
-}>;
-
-// @public
-type AtomicEdgeBatchCountInput = Readonly<{
-    claims: readonly ClaimEdgeCardinalityParams[];
-    params: readonly InsertEdgeParams[];
-    resultMode: "count";
-    schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-interface AtomicEdgeBatchExecutor {
-    // (undocumented)
-    (input: AtomicEdgeBatchCountInput): Promise<number>;
-    // (undocumented)
-    (input: AtomicEdgeBatchRowsInput): Promise<readonly EdgeRow[]>;
-}
-
-// @public
-type AtomicEdgeBatchRowsInput = Readonly<{
-    claims: readonly ClaimEdgeCardinalityParams[];
-    params: readonly InsertEdgeParams[];
-    resultMode: "rows";
-    schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
 type AtomicEdgeConvergenceEntry = Readonly<{
     params: InsertEdgeParams;
     match: EdgeConvergenceMatch;
 }>;
-
-// @public
-type AtomicEdgeConvergenceInput = Readonly<{
-    kind: "durable-convergence";
-    entries: readonly AtomicEdgeConvergenceEntry[];
-    schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-type AtomicEdgeConvergenceResult = Readonly<{
-    row: EdgeRow;
-    outcome: "created" | "found";
-}>;
-
-// @public
-type AtomicEdgeDeleteBatchExecutor = (input: AtomicEdgeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>;
 
 // @public
 type AtomicEdgeDeleteBatchInput = Readonly<{
@@ -108,43 +62,6 @@ type AtomicEdgeDeleteBatchInput = Readonly<{
     ids: readonly string[];
     schemaFence: SchemaWriteFenceParams;
 }>;
-
-// @public
-interface AtomicEdgeMutationProgramExecutor {
-    // (undocumented)
-    (input: AtomicEdgeResolvedMutationSetInput): Promise<AtomicEdgeResolvedMutationSetResult>;
-    // (undocumented)
-    (input: AtomicEdgeConvergenceInput): Promise<readonly AtomicEdgeConvergenceResult[]>;
-    // (undocumented)
-    readonly maxEntries: Readonly<{
-        resolvedSet: number;
-        durableConvergence: number;
-    }>;
-}
-
-// @public
-type AtomicEdgeResolvedMutationSetInput = Readonly<{
-    kind: "resolved-set";
-    creates: readonly InsertEdgeParams[];
-    updates: readonly AtomicEdgeResolvedUpdateEntry[];
-    schemaFence: SchemaWriteFenceParams;
-}>;
-
-// @public
-type AtomicEdgeResolvedMutationSetResult = Readonly<{
-    created: readonly EdgeRow[];
-    updated: readonly EdgeRow[];
-}>;
-
-// @public
-interface AtomicEdgeResolvedUpdateBatchExecutor {
-    // (undocumented)
-    (input: Readonly<{
-        entries: readonly AtomicEdgeResolvedUpdateEntry[];
-        schemaFence: SchemaWriteFenceParams;
-    }>): Promise<readonly EdgeRow[]>;
-    readonly maxEntries: number;
-}
 
 // @public
 type AtomicEdgeResolvedUpdateEntry = Readonly<{
@@ -161,28 +78,7 @@ type AtomicNodeBatchEntry = Readonly<{
 }>;
 
 // @public
-interface AtomicNodeBatchExecutor {
-    // (undocumented)
-    (input: AtomicNodeBatchInput & Readonly<{
-        resultMode: "count";
-    }>): Promise<number>;
-    // (undocumented)
-    (input: AtomicNodeBatchInput & Readonly<{
-        resultMode: "rows";
-    }>): Promise<readonly NodeRow[]>;
-    readonly claimSupport?: AtomicNodeClaimSupport;
-    readonly projectionSupport?: AtomicNodeProjectionSupport;
-}
-
-// @public
 type AtomicNodeBatchIdSource = "generated" | "caller";
-
-// @public
-type AtomicNodeBatchInput = Readonly<{
-    entries: readonly AtomicNodeBatchEntry[];
-    resultMode: AtomicNodeBatchResultMode;
-    schemaFence: SchemaWriteFenceParams;
-}>;
 
 // @public
 type AtomicNodeBatchResultMode = "count" | "rows";
@@ -194,20 +90,6 @@ type AtomicNodeClaimEntry<TEntry extends AtomicNodePostimageEntry = AtomicNodeBa
     entry: TEntry;
     claim: NodeInsertClaim;
 }>;
-
-// @public
-type AtomicNodeClaimFamily = "disjointness" | "uniqueness";
-
-// @public
-type AtomicNodeClaimSupport = Readonly<{
-    families: readonly AtomicNodeClaimFamily[];
-    maxInputCostPerEntry: number;
-}>;
-
-// @public
-type AtomicNodeDeleteBatchExecutor = Readonly<{
-    releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
-}> & ((input: AtomicNodeDeleteBatchInput) => Promise<AtomicDeleteBatchResult>);
 
 // @public
 type AtomicNodeDeleteBatchInput = Readonly<{
@@ -252,63 +134,11 @@ type AtomicNodeProjection = Extract<NodeInsertProjection, {
 type AtomicNodeProjectionFamily = "embedding" | "fulltext";
 
 // @public
-type AtomicNodeProjectionSupport = Readonly<{
-    families: readonly AtomicNodeProjectionFamily[];
-}>;
-
-// @public
-interface AtomicNodeReplacementBatchExecutor {
-    // (undocumented)
-    (input: Readonly<{
-        entries: readonly AtomicNodeReplacementEntry[];
-        releaseClaims: boolean;
-        schemaFence: SchemaWriteFenceParams;
-    }>): Promise<readonly NodeRow[]>;
-    readonly accepts?: (entries: readonly AtomicNodeReplacementEntry[]) => boolean;
-    readonly claimSupport?: AtomicNodeClaimSupport;
-    readonly maxEntries: Readonly<{
-        plain: number;
-        claimed: number;
-    }>;
-    readonly projectionSupport?: AtomicNodeProjectionSupport;
-    readonly releasedClaimFamilies?: readonly AtomicNodeClaimFamily[];
-}
-
-// @public
 type AtomicNodeReplacementEntry = Readonly<{
     params: InsertNodeParams;
     claims?: readonly NodeInsertClaim[];
     projections?: readonly AtomicNodeProjection[];
 }>;
-
-// @public
-interface AtomicNodeResolvedMutationSetExecutor {
-    // (undocumented)
-    (input: Readonly<{
-        creates: readonly AtomicNodeBatchEntry[];
-        updates: readonly AtomicNodeResolvedUpdateEntry[];
-        schemaFence: SchemaWriteFenceParams;
-    }>): Promise<AtomicNodeResolvedMutationSetResult>;
-    readonly maxEntries: number;
-    readonly projectionSupport?: AtomicNodeProjectionSupport;
-}
-
-// @public
-type AtomicNodeResolvedMutationSetResult = Readonly<{
-    created: readonly NodeRow[];
-    updated: readonly NodeRow[];
-}>;
-
-// @public
-interface AtomicNodeResolvedUpdateBatchExecutor {
-    // (undocumented)
-    (input: Readonly<{
-        entries: readonly AtomicNodeResolvedUpdateEntry[];
-        schemaFence: SchemaWriteFenceParams;
-    }>): Promise<readonly NodeRow[]>;
-    readonly maxEntries: number;
-    readonly projectionSupport?: AtomicNodeProjectionSupport;
-}
 
 // @public
 type AtomicNodeResolvedUpdateEntry = Readonly<{
@@ -489,25 +319,6 @@ type CommitSchemaVersionParams = Readonly<{
     schemaHash: string;
     schemaDoc: SerializedSchema;
 }>;
-
-// @public
-type CommonOperationBackend = Pick<TransactionBackend, "checkUnique" | "checkUniqueBatch" | "clearGraph" | "compareAndSetNode" | "countEdgesByKind" | "countEdgesFrom" | "countNodesByKind" | "deleteEdge" | "deleteEdgesBatch" | "deleteNode" | "deleteUnique" | "edgeExistsBetween" | "executeTemporaryStatement" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "findEdgesConnectedTo" | "findNodesByKind" | "getActiveSchema" | "getEdge" | "getEdges" | "getNode" | "getNodes" | "getSchemaVersion" | "hardDeleteEdge" | "hardDeleteEdgesBatch" | "hardDeleteNode" | "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "hardDeleteUniquesByConcreteKind" | "hardDeleteUniquesByNodeIds" | "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "lockSchemaVersionAndGraphWrite" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "insertUnique" | "insertUniqueBatch" | "purgeEdgeClaims" | "updateEdge" | "updateNode" | "updateNodeSet"> & Readonly<{
-    executeAtomicNodeBatch?: AtomicNodeBatchExecutor;
-    executeAtomicNodeReplacementBatch?: AtomicNodeReplacementBatchExecutor;
-    executeAtomicNodeDeleteBatch?: AtomicNodeDeleteBatchExecutor;
-    executeAtomicNodeResolvedUpdateBatch?: AtomicNodeResolvedUpdateBatchExecutor;
-    executeAtomicNodeResolvedMutationSet?: AtomicNodeResolvedMutationSetExecutor;
-    executeAtomicEdgeBatch?: AtomicEdgeBatchExecutor;
-    executeAtomicEdgeDeleteBatch?: AtomicEdgeDeleteBatchExecutor;
-    executeAtomicEdgeResolvedUpdateBatch?: AtomicEdgeResolvedUpdateBatchExecutor;
-    executeAtomicEdgeMutationProgram?: AtomicEdgeMutationProgramExecutor;
-    readConstraintFenceViolations: NonNullable<GraphBackend["readConstraintFenceViolations"]>;
-    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
-    commitSchemaVersion: (params: CommitSchemaVersionParams) => Promise<SchemaVersionRow>;
-    setActiveVersion: (params: SetActiveVersionParams) => Promise<void>;
-    executeSchemaDdl: (ddl: string) => Promise<void>;
-    tableExists: (tableName: string) => Promise<boolean>;
-}> & DurableEdgeBatchMembers;
 
 // @public (undocumented)
 type CommonOperationStrategy = Readonly<{
@@ -793,45 +604,6 @@ type ContributionMaterializationRow = Readonly<{
     materializedAt: string | undefined;
     lastAttemptedAt: string;
     lastError: string | undefined;
-}>;
-
-// @public (undocumented)
-type ContributionMaterializer = Readonly<{
-    ensureRuntimeContributions: (graphId: string) => Promise<void>;
-    assertInitialized: (graphId: string) => Promise<void>;
-    refuseUnavailableFulltext: RefuseUnavailableFulltext;
-    refuseUnavailableNodeInsertProjections: (graphId: string, projections: Readonly<{
-        fulltext: boolean;
-        vectorSlots: readonly VectorSlot[];
-    }>, error: unknown) => Promise<never>;
-    ensureVectorSlot: (slot: VectorSlot, options?: Readonly<{
-        force?: boolean;
-        onDrift?: "throw" | "skip";
-    }>) => Promise<void>;
-    ensureVectorSlots: (slots: readonly VectorSlot[], options?: Readonly<{
-        force?: boolean;
-        onDrift?: "throw" | "skip";
-    }>) => Promise<void>;
-    assertVectorSlot: (slot: VectorSlot) => Promise<void>;
-    assertVectorSlots: (slots: readonly VectorSlot[]) => Promise<void>;
-    assertNodeInsertProjections: (graphId: string, projections: Readonly<{
-        fulltext: boolean;
-        vectorSlots: readonly VectorSlot[];
-    }>) => Promise<void>;
-    resolveNodeProjectionEvidence: (graphId: string, projections: Readonly<{
-        fulltext: boolean;
-        vectorSlots: readonly VectorSlot[];
-    }>) => Promise<readonly AtomicContributionEvidence[]>;
-    diagnoseNodeProjectionEvidence: (graphId: string, projections: Readonly<{
-        fulltext: boolean;
-        vectorSlots: readonly VectorSlot[];
-    }>) => Promise<void>;
-    dropVectorSlot: (slot: VectorSlot) => Promise<void>;
-    evictVectorSlot: (slot: VectorSlot) => void;
-    verifyContributions: (graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionDiagnostic[]>;
-    repairContributions: (graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<ContributionRepairResult>;
-    probeContributions: (graphId: string, vectorSlots: readonly VectorSlot[]) => Promise<readonly ContributionProbeEntry[]>;
-    rebuildContribution: (graphId: string, scope: ContributionRebuildScope, repopulate: (target: TransactionBackend) => Promise<ContributionRepopulationStats>) => Promise<ContributionRebuildResult>;
 }>;
 
 // @public
@@ -7475,31 +7247,12 @@ type EdgeRow = Readonly<{
 // @public
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
-// @public
-export type EngineAssemblyContext<TTx> = EngineOperationsContext & Readonly<{
-    operations: InternalOperationBackend;
-    self: () => AdapterBackend<TTx>;
-}>;
+// @public (undocumented)
+const ENGINE_ASSEMBLY_BRAND: unique symbol;
 
 // @public
-export type EngineLateMembers<TTx> = Readonly<{
-    transactions: Pick<AdapterBackend<TTx>, "transaction" | "transactionWithNative" | "adoptTransaction" | "schemaWriteTransaction">;
-    fence: Readonly<{
-        runSchemaWriteTransaction: <T>(graphId: string, fn: (target: InternalOperationBackend) => Promise<T>) => Promise<T>;
-    }>;
-    rawSql: Pick<TransactionBackend, "execute" | "executeRaw">;
-    maintenance: Pick<AdapterBackend<TTx>, "refreshStatistics">;
-    trustedImport?: AdapterBackend<TTx>["trustedImport"];
-    extensions?: Partial<Pick<AdapterBackend<TTx>, "ensureExtension" | "ensureTrigramExtension" | "claimIndexMaterialization" | "releaseIndexMaterializationClaim" | "ensureEdgeMatchIdentityStorage">>;
-}>;
-
-// @public
-export type EngineOperationsContext = Readonly<{
-    capabilities: BackendCapabilities;
-    fencePlan: WriteFencePlan;
-    fenceTarget: WriteFenceTarget;
-    contributionMaterializer: ContributionMaterializer;
-    isFirstParty: boolean;
+export type EngineAssembly<TTx> = Readonly<{
+    readonly [ENGINE_ASSEMBLY_BRAND]: (transaction: TTx) => TTx;
 }>;
 
 // @public
@@ -8337,11 +8090,6 @@ type IntentSql<I extends SqlIntent> = SqlFragment & Readonly<{
     [SqlIntentBrand]: I;
 }>;
 
-// @public
-type InternalOperationBackend = TransactionBackend & CommonOperationBackend & Readonly<{
-    deleteSchemaVectorSlotContribution: (slot: VectorSlot) => Promise<void>;
-}>;
-
 // @public (undocumented)
 type JsonPointer = string & {
     readonly __jsonPointer: unique symbol;
@@ -8751,9 +8499,6 @@ type RecursiveTraversalCapability = Readonly<{
     reason?: string;
 }>;
 
-// @public (undocumented)
-type RefuseUnavailableFulltext = (graphId: string, error: unknown) => Promise<never>;
-
 // @public
 type RegisterGraphTemplateParams = Readonly<{
     templateId: string;
@@ -8981,9 +8726,8 @@ export type SqlEngineProfile<TTx> = Readonly<{
     baseSchemaRuntime: BaseSchemaRuntime;
     indexMaterializationRuntime: IndexMaterializationRuntime;
     kindRemovalRuntime: KindRemovalRuntime;
-    buildOperations: (ctx: EngineOperationsContext) => InternalOperationBackend;
     close: () => Promise<void>;
-    lateMembers: (ctx: EngineAssemblyContext<TTx>) => EngineLateMembers<TTx>;
+    assembly: EngineAssembly<TTx>;
 }>;
 
 // @public (undocumented)
@@ -9135,9 +8879,6 @@ type TrustedImportSession = Readonly<{
     insertNodes: (params: readonly InsertNodeParams[]) => Promise<void>;
     insertEdges: (params: readonly InsertEdgeParams[]) => Promise<void>;
 }>;
-
-// @public
-type UnfencedReason = "undeclared" | "declared-none" | "table-locks-only";
 
 // @public (undocumented)
 type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
@@ -9363,29 +9104,6 @@ type VectorStrategy = Readonly<{
         concurrent?: boolean;
     }>) => SqlFragment | undefined;
     buildDropIndex?: (this: void, slot: VectorSlot) => SqlFragment | undefined;
-}>;
-
-// @public
-type WriteFencePlan =
-/**
-* Take the keyed/table lock, spelled by `sql` — the target's OWN declared
-* spelling: a lock site never hand-writes the statement, it resolves
-* a plan and consumes `sql.<builder>(…)`.
-*/
-Readonly<{
-    kind: "lock";
-    advisoryLocks: true;
-    tableLocks: boolean;
-    sql: FenceSql;
-}>
-/** No lock needed: the engine serializes writers. */
-| Readonly<{
-    kind: "engine-serialized";
-}>
-/** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
-| Readonly<{
-    kind: "unfenced";
-    reason: UnfencedReason;
 }>;
 
 // @public

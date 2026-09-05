@@ -32,7 +32,11 @@ import {
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
 } from "../src/backend/capabilities/write-fence";
-import { createSqlBackend } from "../src/backend/drizzle/engine";
+import {
+  createSqlBackend,
+  deriveEngineProfile,
+} from "../src/backend/drizzle/engine";
+import { resolveEngineAssembly } from "../src/backend/drizzle/engine/assembly";
 import { finalizeEngineCapabilities } from "../src/backend/drizzle/engine/capabilities";
 import type { SqlEngineProfile } from "../src/backend/drizzle/engine/profile";
 import type { AnyPgTransaction } from "../src/backend/drizzle/execution/postgres-execution";
@@ -94,6 +98,32 @@ describe("createSqlBackend refusals", () => {
     );
     expect(configurationError.message).toContain(
       pessimisticLockDeclarationLine("sqlite"),
+    );
+  });
+
+  it("refuses a hand-built profile whose assembly is a plain object, naming ENGINE_ASSEMBLY_UNRECOGNIZED", () => {
+    const base = createRealSqliteProfile();
+    const profile = {
+      ...base,
+      // A profile built by hand can copy every other field off a bundled
+      // builder's result, but it cannot fabricate a real `EngineAssembly`:
+      // the brand is opaque and the only constructor (`assembleEngine`) is
+      // exported from no entrypoint. This plain object is exactly the shape
+      // such a caller would end up with.
+      assembly: {} as SqlEngineProfile<AnySqliteDatabase>["assembly"],
+    };
+
+    let thrown: unknown;
+    try {
+      createSqlBackend(profile);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "ENGINE_ASSEMBLY_UNRECOGNIZED",
     );
   });
 
@@ -459,9 +489,13 @@ describe("requireCatalog refusals", () => {
     // different bag would still leave `backend.catalog` looking correct.
     // Spying on `buildOperations` itself catches exactly that — the bag it
     // actually returned, before `createSqlBackend` overwrites `catalog` on
-    // the final object.
+    // the final object. `buildOperations` lives inside the profile's opaque
+    // `assembly` rather than on the profile directly, so the spy target is
+    // the resolved parts object `resolveEngineAssembly` returns — the SAME
+    // object `createSqlBackend` itself resolves `profile.assembly` to.
     const sqliteProfile = createRealSqliteProfile();
-    const sqliteBuildOperations = vi.spyOn(sqliteProfile, "buildOperations");
+    const sqliteParts = resolveEngineAssembly(sqliteProfile.assembly);
+    const sqliteBuildOperations = vi.spyOn(sqliteParts, "buildOperations");
     createSqlBackend(sqliteProfile);
     const sqliteOperations = requireDefined(
       sqliteBuildOperations.mock.results[0],
@@ -469,10 +503,8 @@ describe("requireCatalog refusals", () => {
     expect(sqliteOperations.catalog).toBe(sqliteProfile.provisioning.catalog);
 
     const postgresProfile = await createRealPostgresProfile();
-    const postgresBuildOperations = vi.spyOn(
-      postgresProfile,
-      "buildOperations",
-    );
+    const postgresParts = resolveEngineAssembly(postgresProfile.assembly);
+    const postgresBuildOperations = vi.spyOn(postgresParts, "buildOperations");
     createSqlBackend(postgresProfile);
     const postgresOperations = requireDefined(
       postgresBuildOperations.mock.results[0],
@@ -509,5 +541,32 @@ describe("requireCatalog refusals", () => {
         "zz_catalog_probe_tx_drop_invalid_index",
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("registerFirstPartyProfile freezes the bundled profile", () => {
+  it("assigning to a field of a bundled profile throws a TypeError", () => {
+    const profile = createRealSqliteProfile();
+    // Cast to a mutable view of the SAME object rather than `@ts-expect-error`
+    // past `SqlEngineProfile`'s own `Readonly`: this exercises the runtime
+    // `Object.freeze` `registerFirstPartyProfile` applies, not the type.
+    const mutableProfile = profile as { autocommit: unknown };
+
+    expect(() => {
+      mutableProfile.autocommit = { singleStatementDurable: false };
+    }).toThrow(TypeError);
+  });
+
+  it("deriveEngineProfile still works on a frozen base — spreading a frozen object is fine", () => {
+    const baseProfile = createRealSqliteProfile();
+    expect(Object.isFrozen(baseProfile)).toBe(true);
+
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      autocommit: { singleStatementDurable: false },
+    });
+
+    expect(Object.isFrozen(derivedProfile)).toBe(false);
+    expect(derivedProfile.autocommit.singleStatementDurable).toBe(false);
+    expect(baseProfile.autocommit.singleStatementDurable).toBe(true);
   });
 });

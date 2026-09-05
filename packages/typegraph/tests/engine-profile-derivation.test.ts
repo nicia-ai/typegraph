@@ -417,6 +417,20 @@ describe("deriveEngineProfile", () => {
     const backend = createSqlBackend(droppedFenceSqlWithSerializedWriters);
     expect(resolveWriteFencePlan(backend).kind).toBe("engine-serialized");
   });
+
+  it("case 7: a derived profile's assembly is the SAME object as the base profile's own", () => {
+    const baseProfile = createRealSqliteProfile();
+
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      autocommit: { singleStatementDurable: false },
+    });
+
+    // `assembly` is not in `DERIVABLE_ENGINE_PROFILE_KEYS`, so
+    // `{...base, ...overrides}` carries `base.assembly` forward untouched —
+    // the derived profile resolves to the identical `buildOperations` /
+    // `lateMembers` pair the base builder closed over, not a copy.
+    expect(derivedProfile.assembly).toBe(baseProfile.assembly);
+  });
 });
 
 describe("deriveEngineProfile refuses the declaredCapabilities/resourceAudit sub-fields the bundled PostgreSQL builder bakes into its execution adapter", () => {

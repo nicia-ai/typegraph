@@ -196,22 +196,32 @@ export function carryFirstPartyFactoryMark(
 const FIRST_PARTY_PROFILES = new WeakSet<object>();
 
 /**
- * Registers `profile` as first-party and returns the SAME object, so a
- * builder can write `return registerFirstPartyProfile({ ...fields })` and
- * hand its caller back exactly the object this set now recognizes. Called
- * once each by `buildSqliteEngineProfile` and `buildPostgresEngineProfile`
- * on the exact object they return. Not exported from
- * `src/backend/index.ts` or the `adapters/drizzle/engine` entrypoint, so
- * nothing outside this module can grant a profile first-party standing —
- * a profile assembled anywhere else, including one built by spreading a
- * bundled profile's fields into a new object literal, is a different
- * object and is never registered.
+ * Registers `profile` as first-party and returns the SAME object, frozen —
+ * a builder writes `const profile: SqlEngineProfile<...> = {...}; return
+ * registerFirstPartyProfile(profile);` and hands its caller back exactly the
+ * object this set now recognizes. Called once each by
+ * `buildSqliteEngineProfile` and `buildPostgresEngineProfile` on the exact
+ * object they return. Not exported from `src/backend/index.ts` or the
+ * `adapters/drizzle/engine` entrypoint, so nothing outside this module can
+ * grant a profile first-party standing — a profile assembled anywhere else,
+ * including one built by spreading a bundled profile's fields into a new
+ * object literal, is a different object and is never registered.
+ *
+ * The `Object.freeze` is what makes that standing mean anything once a
+ * caller can hold the bundled object directly (both builders are exported
+ * from the authoring entrypoint): without it, a caller could mutate a field
+ * on the exact object this set recognizes and keep every effect first-party
+ * standing grants — the dialect-derivation fallback, the lazy schema-fence
+ * lease — while the profile no longer matches what either builder actually
+ * built. `deriveEngineProfile` is unaffected: it reads `base`'s fields and
+ * spreads them into a NEW object literal, which spreading a frozen source
+ * object does not freeze.
  *
  * @internal
  */
 export function registerFirstPartyProfile<T extends object>(profile: T): T {
   FIRST_PARTY_PROFILES.add(profile);
-  return profile;
+  return Object.freeze(profile);
 }
 
 /**

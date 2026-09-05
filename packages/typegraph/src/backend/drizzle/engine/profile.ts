@@ -4,13 +4,14 @@
  * profile that need the assembled pipeline rather than raw configuration.
  *
  * A profile is a HEAD of plain data and dialect closures that exist before
- * any backend object does, plus a `lateMembers` factory for the handful of
- * members that are self-referential (a transaction's own body calls back
- * into the backend that opened it) or that otherwise need the assembled
- * pipeline. Nothing here ever closes over a `backend` binding directly —
- * `EngineAssemblyContext.self()` is the one sanctioned way a late member
- * reaches the backend `createSqlBackend` is building, and it resolves only
- * once that backend object exists.
+ * any backend object does, plus an opaque `assembly` ({@link EngineAssembly},
+ * `./assembly`) wrapping the operation-backend builder and the late-member
+ * factory for the handful of members that are self-referential (a
+ * transaction's own body calls back into the backend that opened it) or that
+ * otherwise need the assembled pipeline. Nothing here ever closes over a
+ * `backend` binding directly — `EngineAssemblyContext.self()` is the one
+ * sanctioned way a late member reaches the backend `createSqlBackend` is
+ * building, and it resolves only once that backend object exists.
  */
 import type { ResolvedSqlTableNames } from "../../../query/compiler/schema";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
@@ -32,6 +33,7 @@ import type { ContributionMaterializer } from "../contribution-materializations"
 import type { SqlExecutionAdapter } from "../execution/types";
 import type { InternalOperationBackend } from "../operation-backend-core";
 import type { CommonOperationStrategy } from "../operations/strategy";
+import type { EngineAssembly } from "./assembly";
 import type { CreateBaseSchemaMembersDeps } from "./members/base-schema-members";
 import type { CreateContributionMembersDeps } from "./members/contribution-members";
 import type { CreateGraphTemplateMembersDeps } from "./members/graph-template-members";
@@ -82,8 +84,10 @@ export type EngineProvisioning = Readonly<{
 }>;
 
 /**
- * What `SqlEngineProfile.buildOperations` receives instead of only the
- * contribution materializer: the capabilities, fence plan, and fence target
+ * What a profile's `buildOperations` closure (wrapped, along with
+ * `lateMembers`, into the opaque `assembly` {@link SqlEngineProfile} carries
+ * — see `./assembly`) receives instead of only the contribution
+ * materializer: the capabilities, fence plan, and fence target
  * {@link createSqlBackend} has already resolved from the profile's own
  * `declaredCapabilities`, before any member group — including the operation-
  * backend layer this builds — is assembled.
@@ -297,8 +301,9 @@ export type KindRemovalRuntime = Omit<
 
 /**
  * Everything one SQL engine contributes to `createSqlBackend`: a HEAD of
- * data and dialect closures that exist before any backend object does, and
- * a `lateMembers` factory for the members that need the assembled
+ * data and dialect closures that exist before any backend object does,
+ * including the opaque `assembly` that wraps the operation-backend builder
+ * and the late-member factory for the members that need the assembled
  * pipeline (see the module doc comment for why the split exists).
  *
  * First-party standing — `resolveWriteFencePlan`'s dialect-derivation
@@ -313,7 +318,6 @@ export type KindRemovalRuntime = Omit<
  * no field could grant it the way a spread grants every other key.
  */
 export type SqlEngineProfile<TTx> = Readonly<{
-  // ---- head: data and dialect closures with no dependency on the backend ----
   /**
    * The dialect this profile is for. `createSqlBackend` threads it through
    * unexamined — into the write-fence declaration line, the fence-target
@@ -376,24 +380,15 @@ export type SqlEngineProfile<TTx> = Readonly<{
   indexMaterializationRuntime: IndexMaterializationRuntime;
   /** Deps for the kind-removals member group; see {@link KindRemovalRuntime}. */
   kindRemovalRuntime: KindRemovalRuntime;
-  /**
-   * Builds this dialect's `InternalOperationBackend` once the assembled
-   * pipeline exists — deferred rather than head data because the operation
-   * layer's own assembly (`buildCommonOperationOptions`) needs the
-   * contribution materializer to build its projection-evidence callbacks,
-   * and because the capabilities and fence target it builds against are
-   * `createSqlBackend`'s own resolved values (`EngineOperationsContext`),
-   * not a copy this profile derives itself.
-   */
-  buildOperations: (ctx: EngineOperationsContext) => InternalOperationBackend;
   /** The `GraphBackend` member of the same name. */
   close: () => Promise<void>;
-  // ---- late: everything that needs the assembled pipeline ----
   /**
-   * Builds the member groups that need the assembled pipeline — the
-   * resolved capabilities, the fence plan, the operation-backend layer, and
-   * `self()` — rather than raw head data. See {@link EngineAssemblyContext}
-   * and {@link EngineLateMembers}.
+   * This dialect's operation-backend builder and late-member factory,
+   * wrapped opaquely — see {@link EngineAssembly} (`./assembly`) for what it
+   * hides and why. Bundled-only: the two builders are the only callers of
+   * `assembleEngine`, `createSqlBackend` resolves it once via
+   * `resolveEngineAssembly`, and `deriveEngineProfile` carries a base
+   * profile's `assembly` forward by reference rather than building its own.
    */
-  lateMembers: (ctx: EngineAssemblyContext<TTx>) => EngineLateMembers<TTx>;
+  assembly: EngineAssembly<TTx>;
 }>;

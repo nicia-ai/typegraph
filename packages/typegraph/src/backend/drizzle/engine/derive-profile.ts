@@ -27,10 +27,16 @@
  * `identityLeaseResource`, …) stays freely derivable, because none of those
  * reach the adapter's construction. Every other field — `dialect`,
  * `tableNames`, `execution`, `strategy`, `fulltext`, `vector`,
- * `provisioning`, `buildOperations`, `lateMembers` — is also captured by one
- * or more of the builder's own closures (`buildOperations`, `lateMembers`,
- * and the member groups they build), so overriding only the head field would
- * leave those closures reading the value the builder closed over instead.
+ * `provisioning` — is also captured by one or more of the builder's own
+ * closures (the `buildOperations`/`lateMembers` pair the profile's opaque
+ * `assembly` wraps, see `./assembly`, and the member groups they build), so
+ * overriding only the head field would leave those closures reading the
+ * value the builder closed over instead. `assembly` itself is non-derivable
+ * for a further, simpler reason on top of that: it is opaque and
+ * bundled-only, so there is no way to build a replacement value outside the
+ * two bundled builders at all — a derived profile always carries the base's
+ * `assembly` object forward by reference (see the closing paragraph of
+ * `deriveEngineProfile`'s own doc comment below).
  * `DERIVABLE_ENGINE_PROFILE_KEYS` is the exact set for which that split is
  * safe (net of the carve-out above); `tests/engine-profile-derivable-keys.test.ts`
  * ratchets it against every field `SqlEngineProfile` declares, and
@@ -145,7 +151,11 @@ export type DerivableEngineProfileOverrides<TTx> = Partial<
  * naming the sub-field, for the reason the module doc comment states.
  *
  * The result goes through every `createSqlBackend` gate unchanged, and is
- * never first-party — see the module doc comment for what that costs.
+ * never first-party — see the module doc comment for what that costs. Its
+ * `assembly` is the SAME object `base.assembly` is: `overrides` can never
+ * name that key, so `resolveEngineAssembly` (`./assembly`) resolves the
+ * derived profile to the identical `buildOperations`/`lateMembers` pair the
+ * base builder closed over.
  */
 export function deriveEngineProfile<TTx>(
   base: SqlEngineProfile<TTx>,
@@ -185,6 +195,12 @@ export function deriveEngineProfile<TTx>(
   // to infer that equivalence structurally for an optional field whose
   // override type includes `undefined`; it does not describe a real
   // divergence in the value this function returns.
+  //
+  // `base.assembly` rides along unchanged: `overrides` can never name it
+  // (see the module doc comment), so the spread below carries forward the
+  // SAME opaque object `base` carries, which `resolveEngineAssembly`
+  // (`./assembly`) resolves to the identical `buildOperations`/`lateMembers`
+  // pair the base builder closed over.
   return { ...base, ...overrides } as SqlEngineProfile<TTx>;
 }
 

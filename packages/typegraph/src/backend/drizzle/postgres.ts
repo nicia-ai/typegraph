@@ -13,8 +13,8 @@
  * (`EngineLateMembers.transactions` / `fence` / `rawSql` / `maintenance` /
  * `trustedImport` / `extensions`), the DDL and extension provisioning
  * `EngineProvisioning` wires through, the dialect's own operation-backend
- * construction (which `SqlEngineProfile.buildOperations` defers until the
- * contribution materializer exists), and `hybridSearch` (an
+ * construction (deferred, via `assembleEngine`'s `buildOperations`, until
+ * the contribution materializer exists), and `hybridSearch` (an
  * embedding-adjacent member kept inline on both dialects rather than part
  * of the shared assembly).
  *
@@ -181,9 +181,6 @@ import {
   type BaseSchemaRuntime,
   type ContributionRuntime,
   createSqlBackend,
-  type EngineAssemblyContext,
-  type EngineLateMembers,
-  type EngineOperationsContext,
   type EngineProvisioning,
   type GraphTemplateRuntime,
   type IdentityRuntime,
@@ -191,6 +188,7 @@ import {
   type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
+import { assembleEngine } from "./engine/assembly";
 import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
@@ -198,6 +196,11 @@ import {
   buildCommonOperationOptions,
   createEngineOperationBackend,
 } from "./engine/operation-layer";
+import type {
+  EngineAssemblyContext,
+  EngineLateMembers,
+  EngineOperationsContext,
+} from "./engine/profile";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -1972,10 +1975,15 @@ export function buildPostgresEngineProfile(
     };
   }
 
-  // Registered by object identity on the exact object returned below — so
+  // Assigned to an explicitly typed `const` rather than passed to
+  // `registerFirstPartyProfile` as an inline literal: excess-property
+  // checking only runs against a fresh object literal assigned to a KNOWN
+  // type, and `registerFirstPartyProfile<T extends object>` would otherwise
+  // infer `T` from the literal itself, checking nothing. Registered by
+  // object identity on the exact object returned below — so
   // `createSqlBackend` marks this backend and its fence target first-party
   // — rather than by a field a copy or spread could carry forward.
-  return registerFirstPartyProfile({
+  const profile: SqlEngineProfile<AnyPgTransaction> = {
     dialect: "postgres",
     fenceSql: postgresFenceSql,
     tableNames,
@@ -1993,13 +2001,13 @@ export function buildPostgresEngineProfile(
     baseSchemaRuntime,
     indexMaterializationRuntime,
     kindRemovalRuntime,
-    buildOperations,
     async close(): Promise<void> {
       // Drizzle doesn't expose a close method
       // Users manage connection lifecycle themselves
     },
-    lateMembers,
-  });
+    assembly: assembleEngine({ buildOperations, lateMembers }),
+  };
+  return registerFirstPartyProfile(profile);
 }
 
 /**

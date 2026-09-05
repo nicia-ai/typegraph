@@ -14,9 +14,6 @@ export {
 export type {
   BaseSchemaRuntime,
   ContributionRuntime,
-  EngineAssemblyContext,
-  EngineLateMembers,
-  EngineOperationsContext,
   EngineProvisioning,
   EngineTableNames,
   GraphTemplateRuntime,
@@ -25,6 +22,15 @@ export type {
   KindRemovalRuntime,
   SqlEngineProfile,
 } from "./profile";
+/**
+ * The opaque type `SqlEngineProfile.assembly` carries — see `./assembly`'s
+ * module doc for what it hides. Exported so the type is nameable at this
+ * entrypoint; its only constructor, `assembleEngine`, and the resolver
+ * `createSqlBackend` uses, `resolveEngineAssembly`, are exported from
+ * `./assembly` for the two bundled builders and `createSqlBackend` alone,
+ * never from here.
+ */
+export type { EngineAssembly } from "./assembly";
 /**
  * The serialized-resource verdict a profile carries as `resourceAudit`
  * (`SqlEngineProfile.resourceAudit`) — public here because

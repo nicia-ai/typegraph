@@ -4,11 +4,12 @@
  * `createSqlBackend` owns what is the same for every SQL engine: deriving
  * the final capabilities, building the ONE write-fence target and resolving
  * its plan once, refusing a profile that cannot back the marks it is about
- * to earn, building the contribution-marker and operation-backend layers
- * from the profile's own deps, assembling every mirrored adapter member
- * group, auditing the backend's resource shape, and applying the trust
- * marks and atomic-program registrations. A profile owns only what
- * genuinely differs between engines.
+ * to earn, resolving the profile's opaque `assembly` (`./assembly`) into its
+ * `buildOperations`/`lateMembers` pair, building the contribution-marker and
+ * operation-backend layers from the profile's own deps, assembling every
+ * mirrored adapter member group, auditing the backend's resource shape, and
+ * applying the trust marks and atomic-program registrations. A profile owns
+ * only what genuinely differs between engines.
  */
 import { ConfigurationError } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
@@ -25,6 +26,7 @@ import type {
   SchemaWriteTransactionBackend,
 } from "../../types";
 import { gateFulltextMethods } from "../contribution-materializations";
+import { resolveEngineAssembly } from "./assembly";
 import { finalizeEngineCapabilities } from "./capabilities";
 import { applyEngineMarks } from "./marks";
 import { createBaseSchemaMembers } from "./members/base-schema-members";
@@ -114,10 +116,19 @@ export function createSqlBackend<TTx>(
 
   const fencePlan = resolveWriteFencePlan(fenceTarget);
 
+  // Resolved once and reused below for both the operation-backend build and
+  // the late-member build — see `./assembly` for what this hides and why a
+  // hand-built profile whose `assembly` is not one of the two bundled
+  // builders' own values throws here instead of silently producing a
+  // half-assembled backend.
+  const { buildOperations, lateMembers } = resolveEngineAssembly(
+    profile.assembly,
+  );
+
   // The contribution materializer's destructive rebuild runs under the SAME
   // per-graph fence a schema commit does — `late.fence.runSchemaWriteTransaction`
-  // — but `late` does not exist until `profile.lateMembers(ctx)` runs, which
-  // in turn needs the materializer this call is building (through
+  // — but `late` does not exist until `lateMembers(ctx)` runs, which in turn
+  // needs the materializer this call is building (through
   // `ctx.contributionMaterializer`). This forward reference is how that
   // circularity resolves: the wrapper below only READS `late` once a caller
   // actually invokes a rebuild, long after `late` is assigned below: nothing
@@ -155,7 +166,7 @@ export function createSqlBackend<TTx>(
     contributionTableExists,
   });
 
-  const operations = profile.buildOperations({
+  const operations = buildOperations({
     capabilities,
     fencePlan,
     fenceTarget,
@@ -209,7 +220,7 @@ export function createSqlBackend<TTx>(
     self: () => backend,
   };
 
-  const late = profile.lateMembers(ctx);
+  const late = lateMembers(ctx);
 
   // Annotated against the real `AdapterBackend<TTx>` declarations (`this:
   // void` included, and `commitSchemaVersionWithPreflight`'s

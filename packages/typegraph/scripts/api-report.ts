@@ -288,6 +288,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * moving from forgotten to directly exported, which reduces this
  * entrypoint's debt count by exactly the one name (−1). No other entrypoint
  * moved.
+ *
+ * Opaque assembly batch: replacing `SqlEngineProfile.buildOperations` /
+ * `.lateMembers` with one opaque `assembly: EngineAssembly<TTx>` field
+ * removes `EngineAssemblyContext`, `EngineOperationsContext`,
+ * `EngineLateMembers`, and everything reachable only through them
+ * (`InternalOperationBackend`, `ContributionMaterializer`, and one of the
+ * two prior occurrences of `WriteFenceTarget`) from this entrypoint's type
+ * graph. `WriteFenceTarget` itself does not disappear: `ContributionRuntime`
+ * still reaches it through `CreateContributionMembersDeps.fenceTarget`, an
+ * already-unexported field this batch does not touch. 347 → 320 (−27). No
+ * other entrypoint moved.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -301,8 +312,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "11f038ecdf42bbad583047a01c5b5106f226a42291f67f19d588448764a6cbeb",
   },
   "./adapters/drizzle/engine": {
-    count: 347,
-    sha256: "f91cafe0028c733f2fbd8e7418ea7c263e6bde3d67d2bdbbcafcf5fd00f4f180",
+    count: 320,
+    sha256: "de637873ab980dde2778687f620ffbc5cef77e54e4d422050c0bb2dc181eee7d",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

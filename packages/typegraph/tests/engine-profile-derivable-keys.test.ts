@@ -95,8 +95,8 @@ const NON_DERIVABLE_KEY_REASONS = {
   vector: "captured by buildOperations and every transaction handle",
   provisioning:
     "ensureTable and catalog are captured by migrations and transaction handles",
-  buildOperations: "replacing it is authoring, not derivation",
-  lateMembers: "replacing it is authoring, not derivation",
+  assembly:
+    "opaque, bundled-only; a derived profile carries the base's assembly by reference",
 } satisfies Record<NonDerivableEngineProfileKey, string>;
 
 async function createRealPostgresProfile(): Promise<
