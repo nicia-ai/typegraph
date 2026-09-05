@@ -111,7 +111,7 @@ import { scopeAtomicBatchToSession } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
-  mintFirstPartyProfileToken,
+  registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
   type WriteFenceTarget,
@@ -1972,13 +1972,11 @@ export function buildPostgresEngineProfile(
     };
   }
 
-  return {
+  // Registered by object identity on the exact object returned below — so
+  // `createSqlBackend` marks this backend and its fence target first-party
+  // — rather than by a field a copy or spread could carry forward.
+  return registerFirstPartyProfile({
     dialect: "postgres",
-    // Minted fresh for this profile instance — recognized only by this
-    // module's own `isRecognizedFirstPartyProfileToken`, so `createSqlBackend`
-    // marks this backend and its fence target first-party, exactly as it did
-    // before either was gated on the token.
-    firstParty: mintFirstPartyProfileToken(),
     fenceSql: postgresFenceSql,
     tableNames,
     execution: executionAdapter,
@@ -2001,7 +1999,7 @@ export function buildPostgresEngineProfile(
       // Users manage connection lifecycle themselves
     },
     lateMembers,
-  };
+  });
 }
 
 /**

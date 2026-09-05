@@ -13,7 +13,7 @@
 import { ConfigurationError } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
 import {
-  isRecognizedFirstPartyProfileToken,
+  isFirstPartyProfile,
   markFirstPartyFactory,
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
@@ -51,11 +51,12 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
  * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
  * A fourth gate, resolved once as `isFirstParty` below and threaded to both
  * `applyEngineMarks` and the fence target this factory builds, decides
- * `markFirstPartyFactory` itself: only a profile carrying a token
- * `mintFirstPartyProfileToken` actually minted (`../../capabilities/write-fence`)
- * earns that mark, so the dialect-derivation fallback above and the lazy
+ * `markFirstPartyFactory` itself: only the exact profile object
+ * `isFirstPartyProfile` (`../../capabilities/write-fence`) recognizes earns
+ * that mark, so the dialect-derivation fallback above and the lazy
  * schema-fence lease it feeds stay closed to a profile that merely resembles
- * a bundled one.
+ * a bundled one — a copy, spread, or otherwise derived profile is a
+ * different object and is never recognized.
  */
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
@@ -89,14 +90,12 @@ export function createSqlBackend<TTx>(
     );
   }
 
-  // Resolved once and reused for both marks below: whether `profile.firstParty`
-  // is a token this factory's own `mintFirstPartyProfileToken` actually
-  // minted, not merely an object shaped like one. Only the two bundled
-  // builders can produce a recognized token, so this is `false` for any
-  // profile assembled elsewhere — including one built by copying a bundled
-  // profile's fields into a plain object literal without carrying the field
-  // forward.
-  const isFirstParty = isRecognizedFirstPartyProfileToken(profile.firstParty);
+  // Resolved once and reused for both marks below: whether `profile` is the
+  // exact object one of the two bundled builders returned, not merely an
+  // object shaped like one. Only that object was ever registered, so this
+  // is `false` for any profile assembled elsewhere — including one built
+  // by copying a bundled profile's fields into a plain object literal.
+  const isFirstParty = isFirstPartyProfile(profile);
 
   // ONE fence target for the whole backend and every transaction-scoped one
   // it builds, marked first-party only under the same gate as the backend

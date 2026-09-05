@@ -6,8 +6,9 @@
  * overridden is a coherent way to build a variant — because `createSqlBackend`
  * is the single place capabilities, the write-fence plan, and the
  * first-party mark are all derived. Nothing downstream holds a second copy
- * that an override could leave stale, and nothing outside the two bundled
- * builders can mint the token that grants first-party standing.
+ * that an override could leave stale, and first-party standing is bound to
+ * the exact object each bundled builder returns — a copy or spread is a new
+ * object and never carries it forward.
  *
  * Every profile here starts from a real `buildSqliteEngineProfile` or
  * `buildPostgresEngineProfile` result — built against a real database
@@ -106,8 +107,11 @@ describe("createSqlBackend refusals", () => {
     const backend = createSqlBackend(profile);
 
     expect(isBundledRootAutocommitEligible(backend)).toBe(false);
-    // Everything else this factory marks is unaffected by this gate.
-    expect(isFirstPartyFactory(backend)).toBe(true);
+    // A spread copy is a new object, so it is never first-party regardless
+    // of which field the spread overrode — a fact this factory's other
+    // marks (schema-fenced-insert eligibility here) are otherwise
+    // unaffected by.
+    expect(isFirstPartyFactory(backend)).toBe(false);
     expect(isSchemaFencedInsertEligible(backend)).toBe(true);
   });
 
@@ -159,8 +163,10 @@ describe("createSqlBackend refusals", () => {
 
     expect(isSchemaFencedInsertEligible(backend)).toBe(false);
     // The refusal above already required a declared value, so this profile
-    // still constructs, and the other two marks are unaffected by this gate.
-    expect(isFirstPartyFactory(backend)).toBe(true);
+    // still constructs. A spread copy is a new object and is never
+    // first-party regardless of which field the spread overrode; the
+    // autocommit mark is otherwise unaffected by this gate.
+    expect(isFirstPartyFactory(backend)).toBe(false);
     expect(isBundledRootAutocommitEligible(backend)).toBe(true);
   });
 
@@ -190,7 +196,7 @@ describe("createSqlBackend refusals", () => {
     });
   });
 
-  it("reports isFirstPartyFactory true for both bundled roots, and false for a copy of each with no firstParty token — including on a transaction() handle each backend opens", async () => {
+  it("reports isFirstPartyFactory true for both bundled roots, and false for a spread copy of each — including on a transaction() handle each backend opens", async () => {
     const sqliteProfile = createRealSqliteProfile();
     const postgresProfile = await createRealPostgresProfile();
 
@@ -200,7 +206,7 @@ describe("createSqlBackend refusals", () => {
     expect(isFirstPartyFactory(postgresBackend)).toBe(true);
     // Pinned again here, on top of `engine-profile-parity.test.ts`'s own
     // pin, because this test is what proves the CONTRAST with the
-    // no-token copy below.
+    // spread copy below.
     await sqliteBackend.transaction((tx) => {
       expect(isFirstPartyFactory(tx)).toBe(true);
       return Promise.resolve();
@@ -210,28 +216,29 @@ describe("createSqlBackend refusals", () => {
       return Promise.resolve();
     });
 
-    // The destructured `firstParty` bindings are deliberately unused
-    // (`ignoreRestSiblings`): what matters is that each rest object carries
-    // every OTHER field forward unchanged, with the token gone.
-    const { firstParty: _sqliteToken, ...sqliteWithoutToken } = sqliteProfile;
-    const { firstParty: _postgresToken, ...postgresWithoutToken } =
-      postgresProfile;
+    // A spread copy with every field unchanged is still a NEW object:
+    // first-party standing is bound to the object identity the bundled
+    // builder returned, not to anything the object contains, so this
+    // profile is never recognized even though it is field-for-field
+    // identical to one that is.
+    const sqliteProfileCopy = { ...sqliteProfile };
+    const postgresProfileCopy = { ...postgresProfile };
 
-    const sqliteBackendWithoutToken = createSqlBackend(sqliteWithoutToken);
-    const postgresBackendWithoutToken = createSqlBackend(postgresWithoutToken);
-    expect(isFirstPartyFactory(sqliteBackendWithoutToken)).toBe(false);
-    expect(isFirstPartyFactory(postgresBackendWithoutToken)).toBe(false);
+    const sqliteBackendFromCopy = createSqlBackend(sqliteProfileCopy);
+    const postgresBackendFromCopy = createSqlBackend(postgresProfileCopy);
+    expect(isFirstPartyFactory(sqliteBackendFromCopy)).toBe(false);
+    expect(isFirstPartyFactory(postgresBackendFromCopy)).toBe(false);
 
-    // The root/handle disagreement this token exists to remove: a
-    // transaction() handle opened on a profile this factory did not mint a
-    // token for must NOT carry the mark either, even though
+    // The root/handle disagreement identity-bound standing exists to
+    // remove: a transaction() handle opened on a profile this factory
+    // never registered must NOT carry the mark either, even though
     // `createTransactionBackend` used to apply it unconditionally
     // regardless of the root's own standing.
-    await sqliteBackendWithoutToken.transaction((tx) => {
+    await sqliteBackendFromCopy.transaction((tx) => {
       expect(isFirstPartyFactory(tx)).toBe(false);
       return Promise.resolve();
     });
-    await postgresBackendWithoutToken.transaction((tx) => {
+    await postgresBackendFromCopy.transaction((tx) => {
       expect(isFirstPartyFactory(tx)).toBe(false);
       return Promise.resolve();
     });

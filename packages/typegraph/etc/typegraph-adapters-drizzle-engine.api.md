@@ -5,6 +5,13 @@
 ```ts
 
 import { AnyColumn } from 'drizzle-orm';
+import { BaseSQLiteDatabase } from 'drizzle-orm/sqlite-core';
+import * as drizzle_orm_pg_core from 'drizzle-orm/pg-core';
+import * as drizzle_orm_sqlite_core from 'drizzle-orm/sqlite-core';
+import { ExtractTablesWithRelations } from 'drizzle-orm/relations';
+import { PgDatabase } from 'drizzle-orm/pg-core';
+import { PgQueryResultHKT } from 'drizzle-orm/pg-core';
+import { PgTransaction } from 'drizzle-orm/pg-core';
 import { SQL } from 'drizzle-orm';
 
 // @public
@@ -15,6 +22,15 @@ type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
 
 // @public (undocumented)
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
+
+// @public (undocumented)
+type AnyPgDatabase = PgDatabase<PgQueryResultHKT, Record<string, unknown>>;
+
+// @public
+type AnyPgTransaction = PgTransaction<PgQueryResultHKT, Record<string, unknown>, ExtractTablesWithRelations<Record<string, unknown>>>;
+
+// @public (undocumented)
+type AnySqliteDatabase = BaseSQLiteDatabase<"sync" | "async", unknown>;
 
 // @public
 type AtomicContributionEvidence = Readonly<{
@@ -362,6 +378,19 @@ type BackendValidityEndMutation = Readonly<{
 
 // @public
 export type BaseSchemaRuntime = Omit<CreateBaseSchemaMembersDeps, "ensureTable" | "executeDdl" | "generateDdl" | "ensureGraphTemplatesTable">;
+
+// @public
+export function buildPostgresEngineProfile(db: AnyPgDatabase, options?: PostgresBackendOptions): SqlEngineProfile<AnyPgTransaction>;
+
+// @public
+export function buildSqliteEngineProfile(db: AnySqliteDatabase, options?: SqliteBackendOptions): SqlEngineProfile<AnySqliteDatabase>;
+
+// @public
+type BundledBackendCapabilityOverrides = Readonly<Omit<Partial<BackendCapabilities>, "execution"> & {
+    execution?: Readonly<{
+        interactiveTransactions?: boolean;
+    }>;
+}>;
 
 // @public
 type Cardinality = "many" | "one" | "unique" | "oneActive";
@@ -987,7 +1016,6217 @@ type CreateKindRemovalMembersDeps = Readonly<{
 }>;
 
 // @public
+function createPostgresTables(names?: Partial<PostgresTableNames>, options?: CreatePostgresTablesOptions): {
+    readonly nodes: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kind: drizzle_orm_pg_core.PgColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            props: drizzle_orm_pg_core.PgColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            version: drizzle_orm_pg_core.PgColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: true;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validTo: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly edges: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kind: drizzle_orm_pg_core.PgColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            fromKind: drizzle_orm_pg_core.PgColumn<{
+                name: "from_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            fromId: drizzle_orm_pg_core.PgColumn<{
+                name: "from_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            toKind: drizzle_orm_pg_core.PgColumn<{
+                name: "to_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            toId: drizzle_orm_pg_core.PgColumn<{
+                name: "to_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            props: drizzle_orm_pg_core.PgColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            matchIdentityName: drizzle_orm_pg_core.PgColumn<{
+                name: "match_identity_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            matchIdentityKey: drizzle_orm_pg_core.PgColumn<{
+                name: "match_identity_key";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validTo: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly recordedNodes: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            historyId: drizzle_orm_pg_core.PgColumn<{
+                name: "history_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kind: drizzle_orm_pg_core.PgColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            props: drizzle_orm_pg_core.PgColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            version: drizzle_orm_pg_core.PgColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validTo: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_from";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedTo: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_to";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            op: drizzle_orm_pg_core.PgColumn<{
+                name: "op";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaVersion: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_pg_core.PgColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            meta: drizzle_orm_pg_core.PgColumn<{
+                name: "meta";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly recordedEdges: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            historyId: drizzle_orm_pg_core.PgColumn<{
+                name: "history_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kind: drizzle_orm_pg_core.PgColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            fromKind: drizzle_orm_pg_core.PgColumn<{
+                name: "from_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            fromId: drizzle_orm_pg_core.PgColumn<{
+                name: "from_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            toKind: drizzle_orm_pg_core.PgColumn<{
+                name: "to_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            toId: drizzle_orm_pg_core.PgColumn<{
+                name: "to_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            props: drizzle_orm_pg_core.PgColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validTo: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_from";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedTo: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_to";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            op: drizzle_orm_pg_core.PgColumn<{
+                name: "op";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaVersion: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_pg_core.PgColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            meta: drizzle_orm_pg_core.PgColumn<{
+                name: "meta";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly recordedClock: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            revision: drizzle_orm_pg_core.PgColumn<{
+                name: "revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly revisionOrigins: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            origin: drizzle_orm_pg_core.PgColumn<{
+                name: "origin";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly identityAssertions: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            relation: drizzle_orm_pg_core.PgColumn<{
+                name: "rel";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            aKind: drizzle_orm_pg_core.PgColumn<{
+                name: "a_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            aId: drizzle_orm_pg_core.PgColumn<{
+                name: "a_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            bKind: drizzle_orm_pg_core.PgColumn<{
+                name: "b_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            bId: drizzle_orm_pg_core.PgColumn<{
+                name: "b_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validTo: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            endedByKind: drizzle_orm_pg_core.PgColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            endedById: drizzle_orm_pg_core.PgColumn<{
+                name: "ended_by_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly recordedIdentityAssertions: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            historyId: drizzle_orm_pg_core.PgColumn<{
+                name: "history_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            id: drizzle_orm_pg_core.PgColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            relation: drizzle_orm_pg_core.PgColumn<{
+                name: "rel";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            aKind: drizzle_orm_pg_core.PgColumn<{
+                name: "a_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            aId: drizzle_orm_pg_core.PgColumn<{
+                name: "a_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            bKind: drizzle_orm_pg_core.PgColumn<{
+                name: "b_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            bId: drizzle_orm_pg_core.PgColumn<{
+                name: "b_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validTo: drizzle_orm_pg_core.PgColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            endedByKind: drizzle_orm_pg_core.PgColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            endedById: drizzle_orm_pg_core.PgColumn<{
+                name: "ended_by_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedFrom: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_from";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedTo: drizzle_orm_pg_core.PgColumn<{
+                name: "recorded_to";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            op: drizzle_orm_pg_core.PgColumn<{
+                name: "op";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaVersion: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_pg_core.PgColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            meta: drizzle_orm_pg_core.PgColumn<{
+                name: "meta";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly identityClosure: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            memberKind: drizzle_orm_pg_core.PgColumn<{
+                name: "member_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            memberId: drizzle_orm_pg_core.PgColumn<{
+                name: "member_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            classKind: drizzle_orm_pg_core.PgColumn<{
+                name: "class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            classId: drizzle_orm_pg_core.PgColumn<{
+                name: "class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly identitySeparation: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            classKeyLow: drizzle_orm_pg_core.PgColumn<{
+                name: "class_key_low";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            classKeyHigh: drizzle_orm_pg_core.PgColumn<{
+                name: "class_key_high";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly uniques: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            nodeKind: drizzle_orm_pg_core.PgColumn<{
+                name: "node_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            constraintName: drizzle_orm_pg_core.PgColumn<{
+                name: "constraint_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            key: drizzle_orm_pg_core.PgColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            nodeId: drizzle_orm_pg_core.PgColumn<{
+                name: "node_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            concreteKind: drizzle_orm_pg_core.PgColumn<{
+                name: "concrete_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            deletedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly edgeClaims: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            axis: drizzle_orm_pg_core.PgColumn<{
+                name: "axis";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            key: drizzle_orm_pg_core.PgColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            edgeId: drizzle_orm_pg_core.PgColumn<{
+                name: "edge_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly baseSchemaVersions: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            installation: drizzle_orm_pg_core.PgColumn<{
+                name: "installation";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            version: drizzle_orm_pg_core.PgColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly schemaVersions: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            version: drizzle_orm_pg_core.PgColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaHash: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_hash";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaDoc: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_doc";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            isActive: drizzle_orm_pg_core.PgColumn<{
+                name: "is_active";
+                tableName: string;
+                dataType: "boolean";
+                columnType: "PgBoolean";
+                data: boolean;
+                driverParam: boolean;
+                notNull: true;
+                hasDefault: true;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly graphTemplates: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            templateId: drizzle_orm_pg_core.PgColumn<{
+                name: "template_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaHash: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_hash";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaDoc: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_doc";
+                tableName: string;
+                dataType: "json";
+                columnType: "PgJsonb";
+                data: unknown;
+                driverParam: unknown;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            createdAt: drizzle_orm_pg_core.PgColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly indexMaterializations: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            indexName: drizzle_orm_pg_core.PgColumn<{
+                name: "index_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            entity: drizzle_orm_pg_core.PgColumn<{
+                name: "entity";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kind: drizzle_orm_pg_core.PgColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            signature: drizzle_orm_pg_core.PgColumn<{
+                name: "signature";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaVersion: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            materializedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "materialized_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            lastAttemptedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "last_attempted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            lastError: drizzle_orm_pg_core.PgColumn<{
+                name: "last_error";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            buildingSince: drizzle_orm_pg_core.PgColumn<{
+                name: "building_since";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            claimToken: drizzle_orm_pg_core.PgColumn<{
+                name: "claim_token";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly contributionMaterializations: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            logicalName: drizzle_orm_pg_core.PgColumn<{
+                name: "logical_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            owner: drizzle_orm_pg_core.PgColumn<{
+                name: "owner";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            tableName: drizzle_orm_pg_core.PgColumn<{
+                name: "table_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            signature: drizzle_orm_pg_core.PgColumn<{
+                name: "signature";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            materializedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "materialized_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            lastAttemptedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "last_attempted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            lastError: drizzle_orm_pg_core.PgColumn<{
+                name: "last_error";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly kindRemovals: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            kindName: drizzle_orm_pg_core.PgColumn<{
+                name: "kind_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            entity: drizzle_orm_pg_core.PgColumn<{
+                name: "entity";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaVersion: drizzle_orm_pg_core.PgColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            removedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "removed_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            lastAttemptedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "last_attempted_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            lastError: drizzle_orm_pg_core.PgColumn<{
+                name: "last_error";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly reconciliationMarkers: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            reconciledToVersion: drizzle_orm_pg_core.PgColumn<{
+                name: "reconciled_to_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgInteger";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly fulltext: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_pg_core.PgColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            nodeKind: drizzle_orm_pg_core.PgColumn<{
+                name: "node_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            nodeId: drizzle_orm_pg_core.PgColumn<{
+                name: "node_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            content: drizzle_orm_pg_core.PgColumn<{
+                name: "content";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            language: drizzle_orm_pg_core.PgColumn<{
+                name: "language";
+                tableName: string;
+                dataType: "custom";
+                columnType: "PgCustomColumn";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                pgColumnBuilderBrand: "PgCustomColumnBuilderBrand";
+            }>;
+            tsv: drizzle_orm_pg_core.PgColumn<{
+                name: "tsv";
+                tableName: string;
+                dataType: "custom";
+                columnType: "PgCustomColumn";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: true;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: {
+                    type: "always";
+                };
+            }, {}, {
+                pgColumnBuilderBrand: "PgCustomColumnBuilderBrand";
+            }>;
+            updatedAt: drizzle_orm_pg_core.PgColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "date";
+                columnType: "PgTimestamp";
+                data: Date;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly fulltextTableName: string;
+};
+
+// @public (undocumented)
+type CreatePostgresTablesOptions = Readonly<{
+    indexes?: readonly IndexDeclaration[] | undefined;
+}>;
+
+// @public
 export function createSqlBackend<TTx>(profile: SqlEngineProfile<TTx>): AdapterBackend<TTx>;
+
+// @public
+function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateSqliteTablesOptions): {
+    readonly nodes: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            kind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            id: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            props: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            version: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: true;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly edges: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            id: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            kind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            fromKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "from_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            fromId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "from_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            toKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "to_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            toId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "to_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            props: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            matchIdentityName: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "match_identity_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            matchIdentityKey: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "match_identity_key";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly recordedNodes: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            historyId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "history_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            kind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            id: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            props: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            version: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            validFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            recordedFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_from";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_to";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            op: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "op";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            meta: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "meta";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly recordedEdges: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            historyId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "history_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            id: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            kind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            fromKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "from_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            fromId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "from_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            toKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "to_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            toId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "to_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            props: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "props";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            recordedFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_from";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_to";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            op: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "op";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            meta: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "meta";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly recordedClock: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            revision: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "revision";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly revisionOrigins: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            origin: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "origin";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly identityAssertions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            id: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            relation: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "rel";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            aKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "a_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            aId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "a_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            bKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "b_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            bId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "b_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedByKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedById: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly recordedIdentityAssertions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            historyId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "history_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            id: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            relation: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "rel";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            aKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "a_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            aId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "a_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            bKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "b_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            bId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "b_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_from";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            validTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "valid_to";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedByKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            endedById: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "ended_by_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            recordedFrom: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_from";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            recordedTo: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "recorded_to";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            op: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "op";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            txId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "tx_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            meta: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "meta";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly identityClosure: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            memberKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "member_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            memberId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "member_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly identitySeparation: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classKeyLow: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_key_low";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            classKeyHigh: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "class_key_high";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly uniques: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            nodeKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "node_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            constraintName: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "constraint_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            key: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            nodeId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "node_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            concreteKind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "concrete_kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            deletedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "deleted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly edgeClaims: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            axis: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "axis";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            key: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            edgeId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "edge_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly baseSchemaVersions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            installation: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "installation";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            version: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            updatedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "updated_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly schemaVersions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            version: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            schemaHash: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_hash";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaDoc: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_doc";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            isActive: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "is_active";
+                tableName: string;
+                dataType: "boolean";
+                columnType: "SQLiteBoolean";
+                data: boolean;
+                driverParam: number;
+                notNull: true;
+                hasDefault: true;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly graphTemplates: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            templateId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "template_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaHash: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_hash";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaDoc: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_doc";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            createdAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "created_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly indexMaterializations: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            indexName: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "index_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            entity: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "entity";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            kind: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "kind";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            signature: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "signature";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            materializedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "materialized_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            lastAttemptedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "last_attempted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            lastError: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "last_error";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly contributionMaterializations: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            logicalName: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "logical_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            owner: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "owner";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            tableName: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "table_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            signature: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "signature";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            materializedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "materialized_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            lastAttemptedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "last_attempted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            lastError: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "last_error";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly kindRemovals: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            kindName: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "kind_name";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            entity: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "entity";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            schemaVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "schema_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            removedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "removed_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            lastAttemptedAt: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "last_attempted_at";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            lastError: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "last_error";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: false;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly reconciliationMarkers: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            graphId: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "graph_id";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            reconciledToVersion: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "reconciled_to_version";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "sqlite";
+    }>;
+    readonly fulltextTableName: string;
+};
+
+// @public (undocumented)
+type CreateSqliteTablesOptions = Readonly<{
+    indexes?: readonly IndexDeclaration[] | undefined;
+}>;
 
 // @public
 type CreateVectorIndexParams = Readonly<{
@@ -1489,9 +7728,6 @@ type FindNodesByKindParams = Readonly<{
     orderBy?: "id" | "created_at";
     after?: string;
 }>;
-
-// @internal
-type FirstPartyProfileToken = Readonly<Record<never, never>>;
 
 // @public
 type FulltextBatchRow = Readonly<{
@@ -2316,6 +8552,44 @@ type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
 }>;
 
 // @public
+type PostgresBackendOptions = Readonly<{
+    tables?: PostgresTables;
+    fulltext?: FulltextStrategy | false;
+    vector?: VectorStrategy | false;
+    capabilities?: BundledBackendCapabilityOverrides;
+    prepareStatements?: boolean;
+    preparedStatementCacheMax?: number;
+    serializedResource?: SerializedResourceDeclaration;
+}>;
+
+// @public
+type PostgresTableNames = Readonly<{
+    nodes: string;
+    edges: string;
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedClock: string;
+    revisionOrigins: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+    uniques: string;
+    edgeClaims: string;
+    baseSchemaVersions: string;
+    schemaVersions: string;
+    graphTemplates: string;
+    fulltext: string;
+    indexMaterializations: string;
+    contributionMaterializations: string;
+    kindRemovals: string;
+    reconciliationMarkers: string;
+}>;
+
+// @public
+type PostgresTables = ReturnType<typeof createPostgresTables>;
+
+// @public
 type PreparedSqlStatement = Readonly<{
     execute: <TRow>(params: readonly unknown[]) => Promise<readonly TRow[]>;
 }>;
@@ -2616,6 +8890,16 @@ type SerializedOntologyRelation = Readonly<{
 }>;
 
 // @public
+type SerializedResourceDeclaration = Readonly<{
+    mode: "detect";
+}> | Readonly<{
+    mode: "shared";
+    resource: object;
+}> | Readonly<{
+    mode: "independent";
+}>;
+
+// @public
 type SerializedSchema = Readonly<{
     graphId: string;
     annotations?: GraphAnnotations;
@@ -2665,7 +8949,6 @@ type SqlDialect = "sqlite" | "postgres";
 // @public
 export type SqlEngineProfile<TTx> = Readonly<{
     dialect: SqlDialect;
-    firstParty?: FirstPartyProfileToken;
     tableNames: EngineTableNames;
     execution: SqlExecutionAdapter;
     strategy: CommonOperationStrategy;
@@ -2717,6 +9000,52 @@ type SqlIntent = "rows" | "statement" | "temporary-statement";
 
 // @public (undocumented)
 const SqlIntentBrand: unique symbol;
+
+// @public
+type SqliteBackendOptions = Readonly<{
+    tables?: SqliteTables;
+    executionProfile?: SqliteExecutionProfileHints;
+    fulltext?: FulltextStrategy | false;
+    vector?: VectorStrategy;
+    capabilities?: BundledBackendCapabilityOverrides;
+    serializedResource?: SerializedResourceDeclaration;
+}>;
+
+// @public (undocumented)
+type SqliteExecutionProfileHints = Readonly<{
+    isSync?: boolean;
+    transactionMode?: SqliteTransactionMode;
+}>;
+
+// @public
+type SqliteTableNames = Readonly<{
+    nodes: string;
+    edges: string;
+    recordedNodes: string;
+    recordedEdges: string;
+    recordedClock: string;
+    revisionOrigins: string;
+    identityAssertions: string;
+    recordedIdentityAssertions: string;
+    identityClosure: string;
+    identitySeparation: string;
+    uniques: string;
+    edgeClaims: string;
+    baseSchemaVersions: string;
+    schemaVersions: string;
+    graphTemplates: string;
+    fulltext: string;
+    indexMaterializations: string;
+    contributionMaterializations: string;
+    kindRemovals: string;
+    reconciliationMarkers: string;
+}>;
+
+// @public
+type SqliteTables = ReturnType<typeof createSqliteTables>;
+
+// @public
+type SqliteTransactionMode = "sql" | "drizzle" | "none" | "do-sqlite";
 
 // @public (undocumented)
 type SqlParameterChunk = Readonly<{

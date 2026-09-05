@@ -254,6 +254,29 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * seventh name — `TableState` — newly reachable at the same fourteen
  * entrypoints (+1 each, on top of the six above). `./backend` again exports
  * it directly, so its debt stays unchanged.
+ *
+ * Builder export batch: exporting `buildPostgresEngineProfile` and
+ * `buildSqliteEngineProfile` from `./adapters/drizzle/engine` — previously
+ * reachable only through `createPostgresBackend`/`createSqliteBackend` in
+ * the released `./adapters/drizzle/postgres` / `./adapters/drizzle/sqlite`
+ * entrypoints, which export each builder's own options and table types
+ * directly — makes their full parameter and return type graph newly
+ * reachable and unexported HERE: the two dialect-database aliases each
+ * function's `db` parameter needs (`AnyPgDatabase`, `AnyPgTransaction`,
+ * `AnySqliteDatabase`), each `options` parameter type
+ * (`PostgresBackendOptions` / `SqliteBackendOptions`) and everything its
+ * `tables` field reaches (`PostgresTables`/`SqliteTables`,
+ * `CreatePostgresTablesOptions`/`CreateSqliteTablesOptions`,
+ * `PostgresTableNames`/`SqliteTableNames`), plus
+ * `BundledBackendCapabilityOverrides`, `SqliteTransactionMode`,
+ * `SerializedResourceDeclaration`, `GraphIdentityConfig`, and the
+ * contribution-diagnostic shapes each options type's `capabilities`/
+ * `contributionRepair` fields reach. `PostgresTables`/`SqliteTables` are
+ * inferred from the anonymous Drizzle table-builder return type of
+ * `createPostgresTables`/`createSqliteTables` rather than a named export, so
+ * API Extractor inlines the full column-builder shape for every column of
+ * every bundled table — the bulk of this batch's line count. No other
+ * entrypoint moved.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -267,8 +290,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "11f038ecdf42bbad583047a01c5b5106f226a42291f67f19d588448764a6cbeb",
   },
   "./adapters/drizzle/engine": {
-    count: 332,
-    sha256: "897ea05b4706a8f424132359f2b9bb97143289bf4545d5ddbb1d95f1f867f652",
+    count: 348,
+    sha256: "da7a4a59f3beea2c438ec79cb1f70f64c78b03322be078f9e77f6fc8c38b162f",
   },
   "./adapters/drizzle/indexes": {
     count: 24,

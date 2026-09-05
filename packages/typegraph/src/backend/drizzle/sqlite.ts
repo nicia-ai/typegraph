@@ -84,7 +84,7 @@ import { downgradeAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
-  mintFirstPartyProfileToken,
+  registerFirstPartyProfile,
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -2212,13 +2212,11 @@ export function buildSqliteEngineProfile(
     };
   }
 
-  return {
+  // Registered by object identity on the exact object returned below — so
+  // `createSqlBackend` marks this backend and its fence target first-party
+  // — rather than by a field a copy or spread could carry forward.
+  return registerFirstPartyProfile({
     dialect: "sqlite",
-    // Minted fresh for this profile instance — recognized only by this
-    // module's own `isRecognizedFirstPartyProfileToken`, so `createSqlBackend`
-    // marks this backend and its fence target first-party, exactly as it did
-    // before either was gated on the token.
-    firstParty: mintFirstPartyProfileToken(),
     tableNames,
     execution: executionAdapter,
     strategy: operationStrategy,
@@ -2240,7 +2238,7 @@ export function buildSqliteEngineProfile(
       return Promise.resolve();
     },
     lateMembers,
-  };
+  });
 }
 
 function createTransactionBackend(

@@ -18,7 +18,6 @@ import type { SqlDialect } from "../../../query/dialect/types";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import type {
   FenceSql,
-  FirstPartyProfileToken,
   WriteFencePlan,
   WriteFenceTarget,
 } from "../../capabilities/write-fence";
@@ -110,12 +109,13 @@ export type EngineOperationsContext = Readonly<{
   /** The contribution materializer `createSqlBackend` built from `profile.contributionRuntime`. */
   contributionMaterializer: ContributionMaterializer;
   /**
-   * Whether `profile.firstParty` was a token `mintFirstPartyProfileToken`
-   * actually minted — resolved once by `createSqlBackend` and reused for
-   * every transaction-scoped backend a dialect's `lateMembers` opens, so a
-   * handle it hands out carries the SAME standing as the root rather than
-   * re-deriving one from a copied token field it may or may not still
-   * carry. A dialect gates its own `markFirstPartyFactory` call on a
+   * Whether `profile` is the exact object `isFirstPartyProfile`
+   * (`../../capabilities/write-fence`) recognizes — resolved once by
+   * `createSqlBackend` and reused for every transaction-scoped backend a
+   * dialect's `lateMembers` opens, so a handle it hands out carries the
+   * SAME standing as the root rather than re-checking a copy, spread, or
+   * otherwise derived profile that is a different object and is never
+   * first-party. A dialect gates its own `markFirstPartyFactory` call on a
    * TypeGraph-opened transaction handle on this flag exactly as
    * `createSqlBackend` gates the root and fence-target marks on it;
    * `adoptTransaction` — a caller-driven, unaudited transaction lifetime —
@@ -300,6 +300,17 @@ export type KindRemovalRuntime = Omit<
  * data and dialect closures that exist before any backend object does, and
  * a `lateMembers` factory for the members that need the assembled
  * pipeline (see the module doc comment for why the split exists).
+ *
+ * First-party standing — `resolveWriteFencePlan`'s dialect-derivation
+ * fallback (sound only for the two bundled dialects) and the lazy
+ * schema-fence lease `store/operations/write-transaction.ts` takes out
+ * under `isFirstPartyFactory` — is not a field on this type. It is bound to
+ * the exact object `buildSqliteEngineProfile` / `buildPostgresEngineProfile`
+ * returned, via `isFirstPartyProfile` (`../../capabilities/write-fence`), an
+ * identity check `createSqlBackend` runs on the `profile` argument it
+ * receives. A copy, spread, or otherwise derived profile is a new object
+ * that check has never seen, so it never carries this standing forward —
+ * no field could grant it the way a spread grants every other key.
  */
 export type SqlEngineProfile<TTx> = Readonly<{
   // ---- head: data and dialect closures with no dependency on the backend ----
@@ -309,21 +320,6 @@ export type SqlEngineProfile<TTx> = Readonly<{
    * marker, and the profile-refusal error — never branches on it itself.
    */
   dialect: SqlDialect;
-  /**
-   * An unforgeable token only `buildSqliteEngineProfile` and
-   * `buildPostgresEngineProfile` can mint (`mintFirstPartyProfileToken`,
-   * `../../capabilities/write-fence`). Present and recognized, it tells
-   * `createSqlBackend` this profile came from a factory whose transaction
-   * lifetime, connection ownership, and DDL surface TypeGraph has audited,
-   * and grants exactly two things: `resolveWriteFencePlan`'s
-   * dialect-derivation fallback (sound only for the two bundled dialects)
-   * and the lazy schema-fence lease `store/operations/write-transaction.ts`
-   * takes out under `isFirstPartyFactory`. Absent on a profile assembled by
-   * hand, or by copying a bundled profile's fields into a plain object
-   * literal — minting a recognized token is not reachable from outside
-   * `write-fence.ts`, so a profile cannot claim this standing for itself.
-   */
-  firstParty?: FirstPartyProfileToken;
   tableNames: EngineTableNames;
   /**
    * Every statement any shared member group issues goes through this

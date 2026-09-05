@@ -5,9 +5,9 @@
  *
  * Every gate here mirrors the profile-refusal reasoning in
  * `create-sql-backend.ts`'s own doc comment: `markFirstPartyFactory` trusts
- * only a profile carrying a token `mintFirstPartyProfileToken` actually
- * minted, never a profile that merely resembles a bundled one;
- * `markBundledRootAutocommitEligible` trusts the profile's own
+ * only the exact profile object `isFirstPartyProfile` recognizes, never a
+ * copy, spread, or otherwise derived profile that merely resembles a
+ * bundled one; `markBundledRootAutocommitEligible` trusts the profile's own
  * `autocommit.singleStatementDurable` declaration, never construction site
  * alone, because it is a durability claim; and `markSchemaFencedInsertEligible`
  * trusts the resolved fence plan actually fencing something
@@ -35,9 +35,9 @@ import type { SqlExecutionAdapter } from "../execution/types";
 
 export type ApplyEngineMarksDeps = Readonly<{
   /**
-   * Whether `profile.firstParty` was a token `mintFirstPartyProfileToken`
-   * actually minted (`isRecognizedFirstPartyProfileToken`, resolved once by
-   * `createSqlBackend`) — the sole gate on `markFirstPartyFactory`.
+   * Whether `profile` is the exact object `isFirstPartyProfile` recognizes
+   * (resolved once by `createSqlBackend`) — the sole gate on
+   * `markFirstPartyFactory`.
    */
   isFirstParty: boolean;
   /** The backend's capabilities after `finalizeEngineCapabilities` runs — what `supportsRootAtomicBatch` gates the atomic-program registrations on. */
