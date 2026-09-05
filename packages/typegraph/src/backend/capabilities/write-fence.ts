@@ -214,38 +214,6 @@ export function carryFirstPartyFactoryMark(
 const FIRST_PARTY_PROFILES = new WeakSet<object>();
 
 /**
- * Whether `value` is a plain object — `{}` or `Object.create(null)` — as
- * opposed to a class instance, a function, a Drizzle query builder, or a
- * connection handle. {@link freezeDeep}'s recursion boundary: it must never
- * walk into a value that merely happens to be an object, only into the plain
- * data a profile's declared-capabilities bag is built from.
- */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-/**
- * Recursively freezes every plain object and array reachable from `value`,
- * leaving anything else — functions, class instances, connection handles —
- * untouched. Used only on `declaredCapabilities`, which is nothing but
- * booleans, strings, numbers, and nested plain objects/arrays: a value this
- * function would ever need to skip never appears inside it.
- */
-function freezeDeep(value: unknown): void {
-  if (Array.isArray(value)) {
-    Object.freeze(value);
-    for (const item of value) freezeDeep(item);
-    return;
-  }
-  if (isPlainObject(value)) {
-    Object.freeze(value);
-    for (const key of Object.keys(value)) freezeDeep(value[key]);
-  }
-}
-
-/**
  * The `SqlEngineProfile` fields `registerFirstPartyProfile` freezes beyond
  * the profile object itself — read through this narrow structural shape
  * rather than `SqlEngineProfile` itself, so this module (below
@@ -277,15 +245,15 @@ type ProfileTrustBearingBags = Readonly<{
  * `deriveEngineProfile` builds a derived profile as `{...base, ...overrides}`:
  * any field `overrides` does not name is the SAME sub-object `base` holds,
  * not a copy, so `derived.resourceAudit.kind = "serialized"` would otherwise
- * mutate `base.resourceAudit` directly — corrupting a bundled builder's own
- * verdict through a handle `deriveEngineProfile`'s own override validation
- * never sees, since that validation runs against `overrides`, not against a
- * later direct mutation of the object it returned. So this also freezes the
- * bags a derived profile shares with `base` by reference whenever an
- * override does not replace them: `declaredCapabilities` is deep-frozen (it
- * is nothing but plain data, so nothing on it should ever be mutable), and
- * `resourceAudit`, `autocommit`, and `tableNames` are shallow-frozen — their
- * OWN fields, not what those fields point to. `resourceAudit.resource` and
+ * mutate `base.resourceAudit` directly, behind the override validation that
+ * only ever sees `overrides`. So this also freezes the bags a derived
+ * profile shares with `base` by reference: `resourceAudit`, `autocommit`,
+ * `tableNames`, and `declaredCapabilities` — their OWN fields, not what those
+ * fields point to. `declaredCapabilities` arrives already sealed: each
+ * builder passes its declaration through `sealCapabilityDeclaration`
+ * (`./declarations`), the one owner of "clone, then deep-freeze", so the bag
+ * is immutable all the way down and never aliases an object the caller
+ * supplied as an override. `resourceAudit.resource` and
  * `identityLeaseResource` stay reachable and mutable: those are the driver's
  * own connection handles, not data TypeGraph owns, and freezing the
  * `resourceAudit` object itself already blocks swapping which handle it
@@ -306,7 +274,7 @@ export function registerFirstPartyProfile<T extends object>(profile: T): T {
   FIRST_PARTY_PROFILES.add(profile);
   const bags = profile as ProfileTrustBearingBags;
   if (bags.declaredCapabilities !== undefined) {
-    freezeDeep(bags.declaredCapabilities);
+    Object.freeze(bags.declaredCapabilities);
   }
   if (bags.resourceAudit !== undefined) Object.freeze(bags.resourceAudit);
   if (bags.autocommit !== undefined) Object.freeze(bags.autocommit);

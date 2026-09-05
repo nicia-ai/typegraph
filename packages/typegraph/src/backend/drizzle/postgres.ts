@@ -106,7 +106,10 @@ import {
   createAtomicSqlProgramExecutor,
   registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
-import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
+import {
+  assertNoLegacyTransactionCapability,
+  sealCapabilityDeclaration,
+} from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
@@ -585,7 +588,9 @@ function createPostgresCatalogProbes(
       );
       return tableExistsFromRow(rows[0]);
     },
-    async tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+    async tablesExist(
+      names: readonly string[],
+    ): Promise<readonly TableState[]> {
       if (names.length === 0) return [];
       const rows = await executionAdapter.execute<{ name: string }>(
         portableSql`
@@ -940,18 +945,20 @@ export function buildPostgresEngineProfile(
         tableLocks: requestedPessimisticLocks.tableLocks,
         serializedWriters: false,
       };
-  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
-    ...baseCapabilities,
-    ...httpOnlyOverrides,
-    ...options.capabilities,
-    execution: {
-      ...baseCapabilities.execution,
-      ...httpOnlyOverrides.execution,
-      ...options.capabilities?.execution,
-    },
-    ...driverBindParameterOverrides,
-    pessimisticLocks,
-  });
+  const declaredCapabilities = sealCapabilityDeclaration(
+    normalizeGraphAnalyticsCapabilities({
+      ...baseCapabilities,
+      ...httpOnlyOverrides,
+      ...options.capabilities,
+      execution: {
+        ...baseCapabilities.execution,
+        ...httpOnlyOverrides.execution,
+        ...options.capabilities?.execution,
+      },
+      ...driverBindParameterOverrides,
+      pessimisticLocks,
+    }),
+  );
   // Derived last and not overridable: how far up the contribution health
   // ladder this backend goes is a structural fact about the wiring below
   // (durable markers, a catalog probe, a strategy that declares teardown

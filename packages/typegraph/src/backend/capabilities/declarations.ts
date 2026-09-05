@@ -112,5 +112,20 @@ export function assertBundledCapabilityDeclarations(
       },
     );
   }
+  return sealCapabilityDeclaration(capabilities);
+}
+
+/**
+ * THE one way a capability declaration becomes immutable: a structured clone
+ * (so nothing the caller passed in is retained or frozen — I14) that is then
+ * deep-frozen. `assertBundledCapabilityDeclarations` seals the finalized
+ * capabilities every backend exposes; the two bundled profile builders seal
+ * their `declaredCapabilities` the same way before the profile exists, so a
+ * profile derived from a bundled one shares an immutable bag rather than a
+ * mutable alias of the builder's own declaration.
+ */
+export function sealCapabilityDeclaration(
+  capabilities: BackendCapabilities,
+): BackendCapabilities {
   return deepFreeze(structuredClone(capabilities));
 }

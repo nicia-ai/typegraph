@@ -79,7 +79,10 @@ import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
 } from "../capabilities/atomic-sql-program";
-import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
+import {
+  assertNoLegacyTransactionCapability,
+  sealCapabilityDeclaration,
+} from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
@@ -1133,7 +1136,11 @@ function createSqliteOperationBackend(
     ...vectorEmbeddingMethods,
     catalog:
       catalog ??
-      createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
+      createSqliteCatalogProbes(
+        executionAdapter,
+        operationStrategy,
+        serializedQueue,
+      ),
   };
 }
 
@@ -1289,22 +1296,24 @@ export function buildSqliteEngineProfile(
     transactionMode,
     maxBindParameters: executionAdapter.profile.maxBindParameters,
   });
-  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
-    ...baseCapabilities,
-    ...capabilityOverrides,
-    execution: {
-      ...baseCapabilities.execution,
-      ...capabilityOverrides.execution,
-    },
-    maxBindParameters: resolveMaxBindParametersCapability(
-      executionAdapter.profile,
-      capabilityOverrides.maxBindParameters,
-    ),
-    graphAnalytics: resolveSqliteGraphAnalyticsCapabilities(
-      executionAdapter.profile,
-      capabilityOverrides.graphAnalytics,
-    ),
-  });
+  const declaredCapabilities = sealCapabilityDeclaration(
+    normalizeGraphAnalyticsCapabilities({
+      ...baseCapabilities,
+      ...capabilityOverrides,
+      execution: {
+        ...baseCapabilities.execution,
+        ...capabilityOverrides.execution,
+      },
+      maxBindParameters: resolveMaxBindParametersCapability(
+        executionAdapter.profile,
+        capabilityOverrides.maxBindParameters,
+      ),
+      graphAnalytics: resolveSqliteGraphAnalyticsCapabilities(
+        executionAdapter.profile,
+        capabilityOverrides.graphAnalytics,
+      ),
+    }),
+  );
   // `declaredCapabilities` above is this profile's contribution; the
   // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
   // that derives `execution.atomicBatch`, `vector` (from `vectorStrategy`
@@ -1568,7 +1577,11 @@ export function buildSqliteEngineProfile(
     },
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
-    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
+    catalog: createSqliteCatalogProbes(
+      executionAdapter,
+      operationStrategy,
+      serializedQueue,
+    ),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
