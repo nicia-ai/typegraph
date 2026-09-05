@@ -180,7 +180,6 @@ import type {
 } from "./staging";
 import { stageBranches } from "./staging";
 import type { ModifiedNode } from "./state-diff";
-import { withTxConflictRetry } from "./tx-retry";
 import type { ReconcileClusterInput } from "./type-reconcile";
 import { mostSpecificCommonKind, reconcileTypes } from "./type-reconcile";
 import type {
@@ -204,6 +203,7 @@ import {
   forceWriteTransactionRevision,
   readRecordedClock,
   readRevisionOrigin,
+  runRetriedUnit,
   storeBackend,
   storeRuntime,
   transactionBackend,
@@ -2141,6 +2141,15 @@ async function applyInternalMergePlan<G extends GraphDef>(
 }
 
 /**
+ * Attempt budget for every merge commit transaction. A serialization failure
+ * or deadlock aborts the whole transaction with nothing committed, so
+ * re-running it from the top (the documented PostgreSQL protocol for both) is
+ * safe; three attempts absorbs the occasional lost race without masking a
+ * genuinely contended target.
+ */
+const MERGE_COMMIT_ATTEMPTS = 3;
+
+/**
  * Applies a resolved {@link MergePlan} to the target via the typed transaction
  * collection API. Surviving inherited modifications are upserted by id, canonical
  * cluster nodes are upserted by id with their unioned + (optionally) retyped
@@ -2176,38 +2185,40 @@ export async function commitPlan<G extends GraphDef>(
     );
   }
   return runMergeCommit(() =>
-    withTxConflictRetry(() =>
-      target.transaction(async (tx) => {
-        // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
-        // transaction, so the target may have been written between the base@V
-        // precondition and this commit. Revision-anchored stores check their
-        // durable clock under the graph write lock; legacy stores re-derive the
-        // content fingerprint through this transaction's snapshot. Either proof
-        // ensures the plan still describes the live target before committing.
-        if (expectedBaseVersion !== undefined) {
-          await assertTargetUnchanged(
-            transactionBackend(tx),
+    runRetriedUnit(
+      { operation: "commitPlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      () =>
+        target.transaction(async (tx) => {
+          // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
+          // transaction, so the target may have been written between the base@V
+          // precondition and this commit. Revision-anchored stores check their
+          // durable clock under the graph write lock; legacy stores re-derive the
+          // content fingerprint through this transaction's snapshot. Either proof
+          // ensures the plan still describes the live target before committing.
+          if (expectedBaseVersion !== undefined) {
+            await assertTargetUnchanged(
+              transactionBackend(tx),
+              target,
+              expectedBaseVersion,
+            );
+          }
+          // Identity ids are re-validated EXPLICITLY even under a base@V match:
+          // the legacy fingerprint ranges over CURRENT assertions only, so a row
+          // that claimed a planned id in the window and was then ended would pass
+          // the token check and fail generically inside the applier.
+          await assertPlannedIdentityIdsFresh(
             target,
-            expectedBaseVersion,
+            transactionBackend(tx),
+            plan,
           );
-        }
-        // Identity ids are re-validated EXPLICITLY even under a base@V match:
-        // the legacy fingerprint ranges over CURRENT assertions only, so a row
-        // that claimed a planned id in the window and was then ended would pass
-        // the token check and fail generically inside the applier.
-        await assertPlannedIdentityIdsFresh(
-          target,
-          transactionBackend(tx),
-          plan,
-        );
-        return applyInternalMergePlan(
-          plan,
-          tx.nodes as unknown as TxNodes,
-          tx.edges as unknown as TxEdges,
-          target,
-          transactionBackend(tx),
-        );
-      }, mergeCommitTransactionOptions(target)),
+          return applyInternalMergePlan(
+            plan,
+            tx.nodes as unknown as TxNodes,
+            tx.edges as unknown as TxEdges,
+            target,
+            transactionBackend(tx),
+          );
+        }, mergeCommitTransactionOptions(target)),
     ),
   );
 }
@@ -2227,8 +2238,9 @@ async function runMergeCommit<Output>(
  * Isolation for the merge commit transaction. SERIALIZABLE closes the window
  * between the in-transaction re-validation reads and COMMIT on multi-writer
  * Postgres (SSI aborts a racing writer with SQLSTATE 40001, which
- * {@link withTxConflictRetry} retries); SQLite and PGlite serialize writers by
- * construction, and the SQLite backend ignores the option.
+ * {@link file://./typegraph-internal.ts runRetriedUnit} retries); SQLite and
+ * PGlite serialize writers by construction, and the SQLite backend ignores
+ * the option.
  */
 const MERGE_COMMIT_TX_OPTIONS = {
   isolationLevel: "serializable",
@@ -3885,46 +3897,48 @@ export async function applyMergePlan<G extends GraphDef>(
     if (provenanceStore !== undefined && isErr(provenanceStore)) {
       return err(provenanceStore.error);
     }
-    const merged = await withTxConflictRetry(() =>
-      target.transaction(async (tx) => {
-        const txBackend = transactionBackend(tx);
-        await assertMergePlanFenceInsideTransaction(
-          target,
-          txBackend,
-          artifact,
-          composed,
-        );
-        if (beforeApply !== undefined) {
-          assertMergeCallbackResult(
-            await beforeApply(mergePlanReadContext(tx, target.graph)),
-            "beforeApply",
+    const merged = await runRetriedUnit(
+      { operation: "applyMergePlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      () =>
+        target.transaction(async (tx) => {
+          const txBackend = transactionBackend(tx);
+          await assertMergePlanFenceInsideTransaction(
+            target,
+            txBackend,
+            artifact,
+            composed,
           );
-        }
-        await preflightWireMergeWrites(
-          target,
-          tx.nodes as unknown as TxNodes,
-          tx.edges as unknown as TxEdges,
-          artifact,
-        );
-        await assertPlannedIdentityIdsFresh(target, txBackend, {
-          identityAssertions: artifact.writes.identityAssertions,
-          identityRetractions: artifact.writes.identityRetractions,
-        });
-        const applied = await applyWireMergeWrites(
-          target,
-          tx.nodes as unknown as TxNodes,
-          tx.edges as unknown as TxEdges,
-          txBackend,
-          artifact,
-        );
-        if (afterApply !== undefined) {
-          assertMergeCallbackResult(
-            await afterApply(tx, { merged: structuredClone(applied) }),
-            "afterApply",
+          if (beforeApply !== undefined) {
+            assertMergeCallbackResult(
+              await beforeApply(mergePlanReadContext(tx, target.graph)),
+              "beforeApply",
+            );
+          }
+          await preflightWireMergeWrites(
+            target,
+            tx.nodes as unknown as TxNodes,
+            tx.edges as unknown as TxEdges,
+            artifact,
           );
-        }
-        return applied;
-      }, transactionOptions),
+          await assertPlannedIdentityIdsFresh(target, txBackend, {
+            identityAssertions: artifact.writes.identityAssertions,
+            identityRetractions: artifact.writes.identityRetractions,
+          });
+          const applied = await applyWireMergeWrites(
+            target,
+            tx.nodes as unknown as TxNodes,
+            tx.edges as unknown as TxEdges,
+            txBackend,
+            artifact,
+          );
+          if (afterApply !== undefined) {
+            assertMergeCallbackResult(
+              await afterApply(tx, { merged: structuredClone(applied) }),
+              "afterApply",
+            );
+          }
+          return applied;
+        }, transactionOptions),
     );
     const warnings = [...artifact.review.warnings];
     let provenancePersisted: MergeReport<G>["provenancePersisted"];
@@ -4888,65 +4902,67 @@ async function commitIncrementalPlan<G extends GraphDef>(
   // landed before the lock was acquired, while the lock excludes later tracked
   // writes until this plan commits.
   return runMergeCommit(() =>
-    withTxConflictRetry(() =>
-      target.transaction(async (tx) => {
-        await lockMergeTargetWrite(transactionBackend(tx), {
-          graphId: target.graphId,
-          schemaVersion: target.introspect().schemaVersion,
-          graphLock:
-            target.revisionTrackingEnabled ? "required" : "not-required",
-          staleSchemaError: (cause) =>
-            new BaseVersionMismatchError(
-              "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
-              { cause },
-            ),
-        });
-        // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
-        // against is re-read here, so a write to it in the plan→commit window
-        // refuses the merge instead of committing diffs against a fork point
-        // that has moved. Runs first: it is the premise every later guard's
-        // baseline was derived under, and on a revision-anchored fork point it
-        // is an O(1) read.
-        await assertForkPointUnchanged(guard.forkPoint);
-        const nodesApi = tx.nodes as unknown as TxNodes;
-        const edgesApi = tx.edges as unknown as TxEdges;
-        // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
-        // this transaction, so re-derive them here (tx snapshot) and refuse the
-        // plan if a matching committed row appeared in the window. `tx` exposes
-        // the same `.nodes` collection record a `BaseLookupStore` needs.
-        await assertBaseResolutionStable(
-          tx as unknown as BaseLookupStore,
-          guard,
-        );
-        // Identity window guards: the by-id freshness check runs DIRECTLY (not
-        // via the probe guard, whose early return must never be able to skip
-        // it), then the probe-based layers revalidate peers, classes, the
-        // negative ledger, and finally re-run the full identity simulation on
-        // the tx snapshot.
-        await assertPlannedIdentityIdsFresh(
-          target,
-          transactionBackend(tx),
-          plan,
-        );
-        await assertIdentityPeersStable(
-          target,
-          transactionBackend(tx),
-          guard.identityPeerProbe,
-          plan,
-        );
-        // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
-        // writes or deletes changed since it was observed at plan time (lost update).
-        await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
-        await validateIncrementalNodeWrites(target, nodesApi, plan);
-        await validateIncrementalEdgeWrites(target, edgesApi, plan);
-        return applyInternalMergePlan(
-          plan,
-          nodesApi,
-          edgesApi,
-          target,
-          transactionBackend(tx),
-        );
-      }, mergeCommitTransactionOptions(target)),
+    runRetriedUnit(
+      { operation: "commitIncrementalPlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      () =>
+        target.transaction(async (tx) => {
+          await lockMergeTargetWrite(transactionBackend(tx), {
+            graphId: target.graphId,
+            schemaVersion: target.introspect().schemaVersion,
+            graphLock:
+              target.revisionTrackingEnabled ? "required" : "not-required",
+            staleSchemaError: (cause) =>
+              new BaseVersionMismatchError(
+                "The merge target schema changed before the incremental commit transaction; the resolved plan was not applied.",
+                { cause },
+              ),
+          });
+          // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
+          // against is re-read here, so a write to it in the plan→commit window
+          // refuses the merge instead of committing diffs against a fork point
+          // that has moved. Runs first: it is the premise every later guard's
+          // baseline was derived under, and on a revision-anchored fork point it
+          // is an O(1) read.
+          await assertForkPointUnchanged(guard.forkPoint);
+          const nodesApi = tx.nodes as unknown as TxNodes;
+          const edgesApi = tx.edges as unknown as TxEdges;
+          // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
+          // this transaction, so re-derive them here (tx snapshot) and refuse the
+          // plan if a matching committed row appeared in the window. `tx` exposes
+          // the same `.nodes` collection record a `BaseLookupStore` needs.
+          await assertBaseResolutionStable(
+            tx as unknown as BaseLookupStore,
+            guard,
+          );
+          // Identity window guards: the by-id freshness check runs DIRECTLY (not
+          // via the probe guard, whose early return must never be able to skip
+          // it), then the probe-based layers revalidate peers, classes, the
+          // negative ledger, and finally re-run the full identity simulation on
+          // the tx snapshot.
+          await assertPlannedIdentityIdsFresh(
+            target,
+            transactionBackend(tx),
+            plan,
+          );
+          await assertIdentityPeersStable(
+            target,
+            transactionBackend(tx),
+            guard.identityPeerProbe,
+            plan,
+          );
+          // Inherited-row TOCTOU guard: refuse if a committed node OR edge the plan
+          // writes or deletes changed since it was observed at plan time (lost update).
+          await assertInheritedTargetUnchanged(nodesApi, edgesApi, guard, plan);
+          await validateIncrementalNodeWrites(target, nodesApi, plan);
+          await validateIncrementalEdgeWrites(target, edgesApi, plan);
+          return applyInternalMergePlan(
+            plan,
+            nodesApi,
+            edgesApi,
+            target,
+            transactionBackend(tx),
+          );
+        }, mergeCommitTransactionOptions(target)),
     ),
   );
 }

@@ -71,11 +71,18 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
-import { ConfigurationError, StaleVersionError } from "../../errors";
+import {
+  ConfigurationError,
+  StaleVersionError,
+  TransactionConflictError,
+} from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
-import { isSqliteStaleSnapshotError } from "../../utils/sql-errors";
+import {
+  isSerializationFailure,
+  isSqliteStaleSnapshotError,
+} from "../../utils/sql-errors";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
@@ -726,5 +733,110 @@ export function runHookedWriteOperation<T>(
     opContext,
     () => runInWriteTransaction(ctx, backend, body, options),
     options?.didWrite,
+  );
+}
+
+/**
+ * Milliseconds the backoff schedule starts from once it begins growing (from
+ * the third attempt on; see {@link retryBackoffDelayMs}). The sole owner of
+ * this number — nothing else in the codebase computes a retry delay.
+ */
+const RETRY_BACKOFF_BASE_MS = 5;
+
+/** Backoff never waits longer than this, no matter how many attempts failed. */
+const RETRY_BACKOFF_CAP_MS = 50;
+
+/**
+ * Jitter applied symmetrically around the capped exponential delay, as a
+ * fraction of it (0.5 means the delay actually used is anywhere from half to
+ * one and a half times the capped value).
+ */
+const RETRY_BACKOFF_JITTER_RATIO = 0.5;
+
+/**
+ * Delay, in milliseconds, before running `attemptNumber` after the previous
+ * attempt failed with a retryable conflict. Attempt 2 (run immediately after
+ * attempt 1 fails) waits zero: a single lost race deserves an immediate
+ * re-open, not a pause. From attempt 3 on, the delay grows exponentially from
+ * {@link RETRY_BACKOFF_BASE_MS}, capped at {@link RETRY_BACKOFF_CAP_MS} and
+ * jittered by {@link RETRY_BACKOFF_JITTER_RATIO} so that several transactions
+ * retrying the same conflict do not all wake up and collide again together.
+ */
+function retryBackoffDelayMs(attemptNumber: number): number {
+  if (attemptNumber <= 2) return 0;
+  const exponential = RETRY_BACKOFF_BASE_MS * 2 ** (attemptNumber - 2);
+  const capped = Math.min(RETRY_BACKOFF_CAP_MS, exponential);
+  const jitterMultiplier =
+    1 + (Math.random() * 2 - 1) * RETRY_BACKOFF_JITTER_RATIO;
+  return capped * jitterMultiplier;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  if (milliseconds <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/**
+ * One attempt of a unit of work run by {@link runRetriedUnit}: given a fresh
+ * `frame`, performs the work and resolves with its result, or throws/rejects
+ * to signal that the attempt did not commit.
+ */
+export type RetriedUnitAttempt<T> = (
+  frame: Readonly<{ attempt: number }>,
+) => Promise<T>;
+
+/**
+ * Runs `attempt` up to `options.attempts` times, re-running it from the top
+ * whenever it fails with a transaction conflict
+ * ({@link isSerializationFailure}), and raising a
+ * {@link TransactionConflictError} — carrying `options.operation`,
+ * `options.attempts`, and the last failure as `cause` — if every attempt is
+ * exhausted. A failure `isSerializationFailure` does not recognize propagates
+ * unchanged on the attempt that raised it; it is never retried.
+ *
+ * This is the one retry owner in the codebase: every store-owned unit of work
+ * that may be replayed on a transaction conflict runs through this function,
+ * never a second, parallel retry loop.
+ *
+ * ## The replay contract
+ *
+ * `attempt` receives a fresh `frame` on every call and MUST satisfy:
+ *
+ * - **Await all of its work** before resolving or rejecting. A retried
+ *   attempt that left a fire-and-forget side effect in flight from a
+ *   previous, failed attempt could observe — or duplicate — work the caller
+ *   never sees fail.
+ * - **Use only the supplied `frame`, and values created fresh inside this
+ *   call.** A failed attempt's transaction rolled back, so anything it left
+ *   behind in memory (a counter, a buffer, an id set) is state no committed
+ *   database agrees with; reading it on the next attempt would let a rolled
+ *   back attempt leak into a committed one.
+ * - **Perform no effect external to its own transaction.** The whole attempt
+ *   re-runs on retry, so anything it does outside that transaction (a network
+ *   call, a write to a different store) runs again too.
+ * - **Tolerate being run up to `attempts` times.** The caller is supplying a
+ *   callback willing to be invoked that many times, not exactly once.
+ */
+export async function runRetriedUnit<T>(
+  options: Readonly<{ operation: string; attempts: number }>,
+  attempt: RetriedUnitAttempt<T>,
+): Promise<T> {
+  let lastFailure: unknown;
+  for (
+    let attemptNumber = 1;
+    attemptNumber <= options.attempts;
+    attemptNumber += 1
+  ) {
+    await delay(retryBackoffDelayMs(attemptNumber));
+    try {
+      return await attempt({ attempt: attemptNumber });
+    } catch (error) {
+      if (!isSerializationFailure(error)) throw error;
+      lastFailure = error;
+    }
+  }
+  throw new TransactionConflictError(
+    { operation: options.operation, attempts: options.attempts },
+    { cause: lastFailure },
   );
 }

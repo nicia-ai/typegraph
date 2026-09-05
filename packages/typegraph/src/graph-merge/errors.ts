@@ -1,5 +1,5 @@
 import type { TypeGraphErrorOptions } from "./typegraph-internal";
-import { TypeGraphError } from "./typegraph-internal";
+import { TransactionConflictError, TypeGraphError } from "./typegraph-internal";
 
 /**
  * Error hierarchy for the graph-merge primitive.
@@ -195,14 +195,28 @@ export class MergeConstraintConflictError extends MergeError {
 }
 
 /**
- * Translates only deterministic store-constraint refusals at a merge commit
- * boundary. Identity conflicts have their own established merge error surface;
- * infrastructure and stale-plan failures are not category `constraint`.
+ * Translates a merge commit's transaction-conflict exhaustion into a
+ * {@link MergeError} the merge boundary's callers already know how to handle,
+ * and deterministic store-constraint refusals into
+ * {@link MergeConstraintConflictError}. Identity conflicts have their own
+ * established merge error surface; infrastructure and stale-plan failures are
+ * not category `constraint`.
  *
  * @internal
  */
 export function translateMergeCommitError(error: unknown): unknown {
   if (error instanceof MergeError) return error;
+  if (error instanceof TransactionConflictError) {
+    return new MergeError(
+      `Merge commit aborted by transaction conflicts (serialization failure or deadlock) on ${error.details.attempts} consecutive attempt(s); giving up.`,
+      {
+        cause: error,
+        details: { attempts: error.details.attempts },
+        suggestion:
+          "Reduce concurrent writes to the merge target, or serialize merges against it.",
+      },
+    );
+  }
   if (!(error instanceof TypeGraphError)) return error;
   if (error.category !== "constraint" || error.code.startsWith("IDENTITY_")) {
     return error;

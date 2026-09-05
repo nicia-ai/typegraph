@@ -13,7 +13,7 @@
  * `mergeAgainstBase()` (no branch-level precondition) gets the same
  * plan-stability guard from a token captured at plan start, so it is covered
  * here too. The serialization-retry half of the commit path is unit-tested in
- * `tx-retry.test.ts`; true multi-session SSI races need concurrent server
+ * `commit-retry.test.ts`; true multi-session SSI races need concurrent server
  * connections that in-process backends cannot produce.
  */
 

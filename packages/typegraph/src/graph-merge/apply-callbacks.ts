@@ -41,10 +41,11 @@ export type MergePlanReadContext<G extends GraphDef> = Readonly<{
 export type MergePlanApplied = Readonly<{ merged: MergedCounts }>;
 
 /**
- * Work composed with merge application in its own protected transaction.
- * Both callbacks may be replayed (up to three attempts) on transaction conflicts.
- * Await all work, use only the supplied context, and perform no external effects.
- * Throw/reject to abort; returning a value (including a Result) is refused.
+ * Work composed with merge application in its own protected transaction. Both
+ * callbacks run inside the commit's {@link file://../store/operations/write-transaction.ts runRetriedUnit}
+ * attempt and are bound by its replay contract (documented there): await all
+ * work, use only the supplied context, perform no external effects. Throw/reject
+ * to abort; returning a value (including a Result) is refused.
  */
 export type MergePlanApplyOptions<G extends GraphDef> = Readonly<{
   /** Runs after the target fence is checked, before plan writes. Reads only. */
