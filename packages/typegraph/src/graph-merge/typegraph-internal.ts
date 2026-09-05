@@ -70,3 +70,4 @@ export { compareCodePoints } from "../utils/compare";
 export { canonicalizeDatabaseTimestamp } from "../utils/date";
 export { sha256Hex } from "../utils/hash";
 export { generateId } from "../utils/id";
+export { isSerializationFailure } from "../utils/sql-errors";

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import { MergeError } from "../../src/graph-merge/errors";
 import {
-  isRetryableTxConflict,
   MAX_COMMIT_ATTEMPTS,
   withTxConflictRetry,
 } from "../../src/graph-merge/tx-retry";
@@ -13,50 +12,6 @@ function pgError(code: string, message = "tx failed"): Error {
   (error as Error & { code: string }).code = code;
   return error;
 }
-
-describe("isRetryableTxConflict", () => {
-  it("detects a serialization failure (40001) by SQLSTATE", () => {
-    expect(isRetryableTxConflict(pgError("40001"))).toBe(true);
-  });
-
-  it("detects a deadlock (40P01) by SQLSTATE", () => {
-    expect(isRetryableTxConflict(pgError("40P01"))).toBe(true);
-  });
-
-  it("detects a conflict buried in a wrapped cause chain", () => {
-    const wrapped = new Error("Merge failed", {
-      cause: new Error("drizzle tx", { cause: pgError("40001") }),
-    });
-    expect(isRetryableTxConflict(wrapped)).toBe(true);
-  });
-
-  it("detects the fixed Postgres message when the SQLSTATE was lost", () => {
-    expect(
-      isRetryableTxConflict(
-        new Error(
-          "could not serialize access due to read/write dependencies among transactions",
-        ),
-      ),
-    ).toBe(true);
-    expect(isRetryableTxConflict(new Error("deadlock detected"))).toBe(true);
-  });
-
-  it("rejects non-conflict SQLSTATEs and plain errors", () => {
-    expect(isRetryableTxConflict(pgError("23505"))).toBe(false);
-    expect(isRetryableTxConflict(new Error("cardinality violation"))).toBe(
-      false,
-    );
-    expect(isRetryableTxConflict(null)).toBe(false);
-    expect(isRetryableTxConflict("40001")).toBe(false);
-  });
-
-  it("terminates on a cyclic cause chain", () => {
-    const first = new Error("a");
-    const second = new Error("b", { cause: first });
-    (first as Error & { cause: unknown }).cause = second;
-    expect(isRetryableTxConflict(first)).toBe(false);
-  });
-});
 
 describe("withTxConflictRetry", () => {
   it("retries a retryable conflict and returns the eventual result", async () => {

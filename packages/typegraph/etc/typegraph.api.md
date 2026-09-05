@@ -7478,6 +7478,21 @@ type TransactionCollections<G extends GraphDef> = Readonly<{
 }> : Readonly<Record<never, never>>);
 
 // @public
+export class TransactionConflictError extends TypeGraphError {
+    constructor(details: TransactionConflictErrorDetails, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionConflictErrorDetails;
+}
+
+// @public
+export type TransactionConflictErrorDetails = Readonly<{
+    operation: string;
+    attempts: number;
+}>;
+
+// @public
 export type TransactionContext<G extends GraphDef> = TransactionCollections<G>;
 
 // @public

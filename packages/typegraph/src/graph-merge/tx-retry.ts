@@ -17,64 +17,17 @@
  */
 
 import { MergeError } from "./errors";
-
-/** SQLSTATEs that mean "transaction aborted, safe to re-run verbatim". */
-const RETRYABLE_SQLSTATES: ReadonlySet<string> = new Set(["40001", "40P01"]);
-
-/**
- * Driver-message fallback for errors whose SQLSTATE was lost in wrapping.
- * Matches the fixed Postgres texts for serialization failure and deadlock.
- */
-const RETRYABLE_MESSAGE_PATTERN =
-  /could not serialize access|deadlock detected/i;
+import { isSerializationFailure } from "./typegraph-internal";
 
 /** Bounded number of commit attempts before giving up with a typed error. */
 export const MAX_COMMIT_ATTEMPTS = 3;
 
 /**
- * Whether `error` (or anything in its cause chain) is a retryable transaction
- * conflict — a Postgres serialization failure (40001) or deadlock (40P01).
- * Walks the `cause` chain because drivers and wrappers (pg → Drizzle →
- * TypeGraph) re-wrap the original error; a visited set guards against cyclic
- * cause chains.
- */
-export function isRetryableTxConflict(error: unknown): boolean {
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  while (
-    current !== undefined &&
-    current !== null &&
-    typeof current === "object" &&
-    !seen.has(current)
-  ) {
-    seen.add(current);
-    const candidate = current as Readonly<{
-      code?: unknown;
-      message?: unknown;
-      cause?: unknown;
-    }>;
-    if (
-      typeof candidate.code === "string" &&
-      RETRYABLE_SQLSTATES.has(candidate.code)
-    ) {
-      return true;
-    }
-    if (
-      typeof candidate.message === "string" &&
-      RETRYABLE_MESSAGE_PATTERN.test(candidate.message)
-    ) {
-      return true;
-    }
-    current = candidate.cause;
-  }
-  return false;
-}
-
-/**
  * Runs `commit` (a function that opens and completes ONE transaction attempt),
- * retrying up to {@link MAX_COMMIT_ATTEMPTS} times on retryable conflicts.
- * Non-retryable errors propagate immediately; exhaustion raises a
- * {@link MergeError} carrying the final conflict as its cause.
+ * retrying up to {@link MAX_COMMIT_ATTEMPTS} times on a transaction conflict
+ * ({@link isSerializationFailure}). Non-retryable errors propagate
+ * immediately; exhaustion raises a {@link MergeError} carrying the final
+ * conflict as its cause.
  */
 export async function withTxConflictRetry<T>(
   commit: () => Promise<T>,
@@ -84,7 +37,7 @@ export async function withTxConflictRetry<T>(
     try {
       return await commit();
     } catch (error) {
-      if (!isRetryableTxConflict(error)) {
+      if (!isSerializationFailure(error)) {
         throw error;
       }
       lastConflict = error;
