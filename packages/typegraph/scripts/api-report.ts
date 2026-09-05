@@ -299,6 +299,17 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * still reaches it through `CreateContributionMembersDeps.fenceTarget`, an
  * already-unexported field this batch does not touch. 347 → 320 (−27). No
  * other entrypoint moved.
+ *
+ * Canonical fence-statement spelling: `FenceSql` shrinks to its two
+ * author-supplied expressions plus `lockTables`; the new `FenceStatements`
+ * type (`FenceSql` intersected with the three derived standalone-statement
+ * forms `resolveWriteFencePlan`'s `lock` arm now carries as `sql`, in place
+ * of the bare `FenceSql` it carried before) is newly reachable only through
+ * `WriteFencePlan`, which only `./backend` renders anywhere in its type
+ * graph (+1: `FenceStatements`, 16 → 17). The 14 entrypoints the fence-plan
+ * spelling batch above moved reach `FenceSql` through `GraphBackend
+ * .fenceSql` instead, a field whose type is unchanged by this shrink, so
+ * none of them render `WriteFencePlan`/`FenceStatements` and none move here.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -340,8 +351,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "17154fcd67efb82e904e7ed3fa57cc984114bdd75b7acaebb6ed5782d7f8c3cf",
   },
   "./backend": {
-    count: 16,
-    sha256: "8fe4a8c3a1c1b997735418d441a12fe07c37d647267af642776f6d58e255f6f7",
+    count: 17,
+    sha256: "d7be94fc8aff9a4c4f7e304ce209aaf05f426ad2a8e808fa8b5066bfae75f19e",
   },
   "./core": {
     count: 72,

@@ -1226,20 +1226,24 @@ copying a bundled profile and adapting its statement, while a derived profile ca
 `graphTemplateRuntime` bag through `deriveEngineProfile`.
 
 `FenceSql` (see [Write fence declaration](#write-fence-declaration-pessimisticlocks))
-declares `advisoryLockExpression` and `isolationFactExpression` as composable,
-no-`SELECT` forms alongside their standalone-statement counterparts
-(`advisoryLock`, `isolationFact`): a statement that must compose a lock or an
-isolation read INSIDE a larger query it builds itself — a CTE, a
-data-modifying statement — embeds the bare expression directly, rather than
-running the standalone form as its own preceding statement. The graph-template
-instantiation statement and the schema write fence's fused schema + graph-write
-statement (`postgres-schema-write-fence.ts`) are the two sites that need this:
-each puts the expression in its own CTE's `SELECT` (`locked AS (SELECT ...)` in
-the graph-template statement, `SELECT ... AS "lock_token"` in the schema write
-fence). Both resolve the fence target's OWN `FenceSql` — the bundled
-`postgresFenceSql` for a bundled backend, a derived profile's own override
-otherwise — so a custom spelling backs these fused statements exactly as it
-backs every ordinary lock site.
+declares `advisoryLockExpression` and `isolationFactExpression` as the two
+composable, no-`SELECT` forms a backend author supplies; TypeGraph derives
+the standalone-statement counterparts (`advisoryLock`,
+`advisoryLockWithIsolation`, `isolationFact`) from them. A statement that
+must compose a lock or an isolation read INSIDE a larger query it builds
+itself — a CTE, a data-modifying statement — embeds the bare expression
+directly, rather than running the derived standalone form as its own
+preceding statement. The schema write fence's fused schema + graph-write
+statement (`postgres-schema-write-fence.ts`) is the one site that needs
+this: it puts the expression in its own CTE's `SELECT ... AS "lock_token"`,
+resolving the fence target's OWN `FenceSql` — the bundled `postgresFenceSql`
+for a bundled backend, a derived profile's own override otherwise — so a
+custom spelling backs this fused statement exactly as it backs every
+ordinary lock site.
+
+The graph-template instantiation statement's `locked AS (SELECT ...)` CTE is
+a DIFFERENT case, not a `FenceSql` consumer at all: it composes the baked
+single-argument `advisoryLockSingleExpression` directly.
 
 The ONE lock form with no override point is `advisoryLockSingleExpression`,
 the ONE-argument form on a bare key: PostgreSQL stores it in a lock space
@@ -1533,12 +1537,14 @@ The two bundled backends declare exactly these lines — copy the one matching y
 - PostgreSQL: `pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false }`
 - SQLite: `pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: true }`
 
-A backend that declares `advisoryLocks: true` also supplies `fenceSql`, the statement spelling
-`resolveWriteFencePlan`'s `lock` arm hands to every lock site: `advisoryLock`, `advisoryLockWithIsolation`
-(the lock plus the session's isolation-level fact, read in the same statement it locks in),
-`lockTables`, `isolationFact`, and the two composable, no-`SELECT` forms `advisoryLockExpression` /
-`isolationFactExpression` a statement embeds inside a larger query it builds itself (see the
-graph-template and schema-write-fence discussion above). The bundled PostgreSQL spelling is exported as `postgresFenceSql`
+A backend that declares `advisoryLocks: true` also supplies `fenceSql`: `lockTables` plus the two
+composable, no-`SELECT` forms `advisoryLockExpression` / `isolationFactExpression` a statement embeds
+inside a larger query it builds itself (see the schema-write-fence discussion above) — the complete,
+three-member `FenceSql` bag. `resolveWriteFencePlan`'s `lock` arm derives the standalone-statement
+forms every ordinary lock site actually calls — `advisoryLock`; `advisoryLockWithIsolation` (the
+lock plus the session's isolation-level fact, read in the same statement it locks in); and
+`isolationFact` — from those two expressions, so a backend author never spells both forms separately.
+The bundled PostgreSQL spelling is exported as `postgresFenceSql`
 from `@nicia-ai/typegraph/adapters/drizzle/postgres` — pass it straight through as `fenceSql` when
 wrapping that backend, or supply a custom `FenceSql` matching a different engine's lock syntax. A
 backend that declares `advisoryLocks: true` with no `fenceSql` is refused at construction with

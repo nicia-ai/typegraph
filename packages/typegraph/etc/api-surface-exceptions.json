@@ -2,36 +2,9 @@
   {
     "entrypoint": "typegraph-backend.api.md",
     "declaration": "FenceSql",
-    "member": "advisoryLock",
-    "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
-    "issue": "#622",
-    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceSql",
-    "member": "advisoryLockWithIsolation",
-    "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
-    "issue": "#622",
-    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceSql",
     "member": "lockTables",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
-    "issue": "#622",
-    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceSql",
-    "member": "isolationFact",
-    "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell the two composable expressions a fused statement embeds directly (the lock and the isolation read) plus the table-lock builder, so the three builders are required as a set rather than optional at the boundary. TypeGraph derives the standalone-statement forms every ordinary lock site consumes from those two expressions, so a backend author never spells both forms separately.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
   },
@@ -40,7 +13,7 @@
     "declaration": "FenceSql",
     "member": "advisoryLockExpression",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell the two composable expressions a fused statement embeds directly (the lock and the isolation read) plus the table-lock builder, so the three builders are required as a set rather than optional at the boundary. TypeGraph derives the standalone-statement forms every ordinary lock site consumes from those two expressions, so a backend author never spells both forms separately.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
   },
@@ -49,8 +22,32 @@
     "declaration": "FenceSql",
     "member": "isolationFactExpression",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell the two composable expressions a fused statement embeds directly (the lock and the isolation read) plus the table-lock builder, so the three builders are required as a set rather than optional at the boundary. TypeGraph derives the standalone-statement forms every ordinary lock site consumes from those two expressions, so a backend author never spells both forms separately.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "advisoryLock",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "advisoryLockWithIsolation",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "isolationFact",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
+    "issue": "#622"
   }
 ]

@@ -2238,12 +2238,16 @@ export type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
 
 // @public
 export type FenceSql = Readonly<{
-    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
-    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
     lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
-    isolationFact: () => SqlFragment;
     advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
     isolationFactExpression: () => SqlFragment;
+}>;
+
+// @public
+type FenceStatements = FenceSql & Readonly<{
+    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
+    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    isolationFact: () => SqlFragment;
 }>;
 
 // @public
@@ -4806,7 +4810,7 @@ Readonly<{
     kind: "lock";
     advisoryLocks: true;
     tableLocks: boolean;
-    sql: FenceSql;
+    sql: FenceStatements;
 }>
 /** No lock needed: the engine serializes writers. */
 | Readonly<{

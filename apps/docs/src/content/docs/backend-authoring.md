@@ -167,30 +167,9 @@ function customAdvisoryLockExpression(
   return sql`pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
 }
 
-function customAdvisoryLock(
-  namespace: string,
-  key: string | number,
-): SqlFragment {
-  return sql`SELECT ${customAdvisoryLockExpression(namespace, key)}`;
-}
-
-function customAdvisoryLockWithIsolation(
-  namespace: string,
-  key: string | number,
-): SqlFragment {
-  return sql`
-    SELECT
-      ${customAdvisoryLockExpression(namespace, key)},
-      current_setting('transaction_isolation') AS transaction_isolation
-  `;
-}
-
 const customFenceSql: FenceSql = {
-  advisoryLock: customAdvisoryLock,
-  advisoryLockWithIsolation: customAdvisoryLockWithIsolation,
-  lockTables: postgresFenceSql.lockTables,
-  isolationFact: postgresFenceSql.isolationFact,
   advisoryLockExpression: customAdvisoryLockExpression,
+  lockTables: postgresFenceSql.lockTables,
   isolationFactExpression: postgresFenceSql.isolationFactExpression,
 };
 
@@ -202,15 +181,17 @@ const derivedProfile = deriveEngineProfile(baseProfile, {
 const backend = createSqlBackend(derivedProfile);
 ```
 
-`advisoryLock`, `advisoryLockWithIsolation`, and the composable
-`advisoryLockExpression` are the custom spelling here; `lockTables`,
-`isolationFact`, and `isolationFactExpression` are the bundled PostgreSQL
-builders, reused because this example leaves them unchanged — a custom
-`FenceSql` need not replace every member. This is the same
-`customAdvisoryLock` / `customAdvisoryLockWithIsolation` pair pinned by
-`tests/engine-profile-derivation.test.ts` against a real PostgreSQL
-connection, trimmed of the `customLockTables` / `customIsolationFact`
-coverage this example doesn't need.
+`advisoryLockExpression` is the custom spelling here; `lockTables` and
+`isolationFactExpression` are the bundled PostgreSQL builders, reused
+because this example leaves them unchanged — a custom `FenceSql` need not
+replace every member. TypeGraph derives the standalone-statement forms
+every lock site actually calls (`advisoryLock`, `advisoryLockWithIsolation`,
+`isolationFact`) from these two expressions, so `customFenceSql` never
+spells a statement and its expression separately — the two cannot disagree
+about what they lock or read. This is the same `customAdvisoryLockExpression`
+pinned by `tests/engine-profile-derivation.test.ts` against a real
+PostgreSQL connection, trimmed of the `customLockTables` /
+`customIsolationFactExpression` coverage this example doesn't need.
 
 Every write-fence lock site now spells its lock through `customFenceSql`
 instead of the bundled one — including the recorded graph-write fence, which

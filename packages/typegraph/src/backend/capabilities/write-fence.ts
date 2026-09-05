@@ -8,59 +8,127 @@
  */
 import { ConfigurationError } from "../../errors";
 import { type SqlDialect } from "../../query/dialect/types";
-import { type SqlFragment } from "../../query/sql-fragment";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type BackendCapabilities } from "../types";
 
 /**
  * The lock-statement spelling a backend supplies alongside its
- * `pessimisticLocks` declaration: a small bag of {@link SqlFragment} builders,
- * one per shape a lock site needs. A backend that declares `advisoryLocks:
- * true` must supply this; one that only serializes writers
+ * `pessimisticLocks` declaration: the two composable, no-`SELECT`
+ * expressions a fused statement (a CTE, a data-modifying statement) embeds
+ * directly, plus the one relation-lock builder. A backend that declares
+ * `advisoryLocks: true` must supply this; one that only serializes writers
  * needs none.
  *
- * `advisoryLock`'s `key` accepts a `number` for the database-scoped locks
- * that key on a constant second argument (`0`) rather than a hashed value —
- * the two-argument `pg_advisory_xact_lock` overload takes that second
- * argument as a plain integer, never as `hashtext(...)` of one.
+ * This is deliberately the ONLY spelling a backend author writes.
+ * {@link resolveFenceStatements} derives the standalone-statement forms
+ * (`advisoryLock`, `advisoryLockWithIsolation`, `isolationFact`) from
+ * `advisoryLockExpression` / `isolationFactExpression` — a backend never
+ * spells both a statement and the expression it wraps separately, so the
+ * fused embedding and the standalone statement can never disagree about
+ * what they lock or read.
  *
- * `advisoryLockExpression` / `isolationFactExpression` are the composable,
- * no-`SELECT` forms of `advisoryLock` / `isolationFact`: a statement that
- * must embed the lock or the isolation read INSIDE a larger query it composes
- * itself — a CTE, a data-modifying statement — takes the bare expression
- * rather than the standalone-statement form. PostgreSQL's fused schema +
- * graph-write fence (`postgres-schema-write-fence.ts`) is the one site that
- * needs this: it reaches the schema table, so it cannot be built from a
- * bundled bare export directly, but it must still spell the SAME lock and
- * isolation read a derived `FenceSql` declares, not the bundled one
- * unconditionally.
+ * `advisoryLockExpression`'s `key` accepts a `number` for the
+ * database-scoped locks that key on a constant second argument (`0`) rather
+ * than a hashed value — the two-argument `pg_advisory_xact_lock(int4, int4)`
+ * overload takes that second argument as a plain integer, never as
+ * `hashtext(...)` of one.
  */
 export type FenceSql = Readonly<{
-  /** A keyed lock scoped to the transaction, e.g. `pg_advisory_xact_lock`. */
-  advisoryLock: (namespace: string, key: string | number) => SqlFragment;
-  /**
-   * The same lock plus the session's isolation-level fact, in ONE statement
-   * — the "session facts come from the session that enforces them" contract:
-   * the fact is read on the exact connection the lock was just taken on.
-   */
-  advisoryLockWithIsolation: (
-    namespace: string,
-    key: string | number,
-  ) => SqlFragment;
   /** A relation lock, e.g. `LOCK TABLE ... IN ... MODE`. */
   lockTables: (
     tables: readonly string[],
     mode: "share" | "share-row-exclusive" | "access-exclusive",
   ) => SqlFragment;
-  /** The bare session isolation-level read, with no lock. */
-  isolationFact: () => SqlFragment;
-  /** The bare lock expression `advisoryLock` wraps in a standalone `SELECT`. */
+  /**
+   * The bare lock expression, with no `SELECT` around it. A statement that
+   * must take the lock INSIDE a larger query it composes itself embeds this
+   * directly — PostgreSQL's fused schema + graph-write fence
+   * (`postgres-schema-write-fence.ts`) is the one site that needs this: it
+   * reaches the schema table, so it cannot be built from a standalone
+   * statement. Every other lock site consumes
+   * {@link resolveFenceStatements}'s derived `advisoryLock`, which wraps
+   * this in a standalone `SELECT`.
+   */
   advisoryLockExpression: (
     namespace: string,
     key: string | number,
   ) => SqlFragment;
-  /** The bare isolation-fact expression `isolationFact` wraps in a standalone `SELECT`. */
+  /**
+   * The bare session isolation-level read, with no `SELECT`/alias around
+   * it — embedded the same way `advisoryLockExpression` is, and wrapped by
+   * {@link resolveFenceStatements}'s derived `isolationFact` /
+   * `advisoryLockWithIsolation` for every other site.
+   */
   isolationFactExpression: () => SqlFragment;
 }>;
+
+/**
+ * `FenceSql`'s two author-supplied expressions plus the three
+ * standalone-statement forms {@link resolveFenceStatements} derives from
+ * them — what a `lock` plan's `sql` field actually carries, and what every
+ * ordinary lock site consumes.
+ */
+export type FenceStatements = FenceSql &
+  Readonly<{
+    /** A keyed lock scoped to the transaction, e.g. `pg_advisory_xact_lock`. */
+    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
+    /**
+     * The same lock plus the session's isolation-level fact, in ONE
+     * statement — the "session facts come from the session that enforces
+     * them" contract: the fact is read on the exact connection the lock
+     * was just taken on.
+     */
+    advisoryLockWithIsolation: (
+      namespace: string,
+      key: string | number,
+    ) => SqlFragment;
+    /** The bare session isolation-level read, with no lock. */
+    isolationFact: () => SqlFragment;
+  }>;
+
+function advisoryLockStatement(
+  fenceSql: FenceSql,
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`SELECT ${fenceSql.advisoryLockExpression(namespace, key)}`;
+}
+
+function advisoryLockWithIsolationStatement(
+  fenceSql: FenceSql,
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`
+    SELECT
+      ${fenceSql.advisoryLockExpression(namespace, key)},
+      ${fenceSql.isolationFactExpression()} AS transaction_isolation
+  `;
+}
+
+function isolationFactStatement(fenceSql: FenceSql): SqlFragment {
+  return sql`SELECT ${fenceSql.isolationFactExpression()} AS transaction_isolation`;
+}
+
+/**
+ * THE one owner of "wrap a fence expression in its standalone statement
+ * form": derives `advisoryLock`, `advisoryLockWithIsolation`, and
+ * `isolationFact` from `fenceSql`'s `advisoryLockExpression` /
+ * `isolationFactExpression` — the only way to reach those three forms, so a
+ * fused embedding and a portable lock site can never spell the lock or the
+ * isolation read differently. Called once, by `planFromLockCapabilities`,
+ * when a `lock` plan resolves.
+ */
+export function resolveFenceStatements(fenceSql: FenceSql): FenceStatements {
+  return {
+    ...fenceSql,
+    advisoryLock: (namespace: string, key: string | number) =>
+      advisoryLockStatement(fenceSql, namespace, key),
+    advisoryLockWithIsolation: (namespace: string, key: string | number) =>
+      advisoryLockWithIsolationStatement(fenceSql, namespace, key),
+    isolationFact: () => isolationFactStatement(fenceSql),
+  };
+}
 
 /**
  * The two independent facts a backend can report about concurrent-writer
@@ -115,7 +183,7 @@ export type WriteFencePlan =
       kind: "lock";
       advisoryLocks: true;
       tableLocks: boolean;
-      sql: FenceSql;
+      sql: FenceStatements;
     }>
   /** No lock needed: the engine serializes writers. */
   | Readonly<{ kind: "engine-serialized" }>
@@ -225,6 +293,7 @@ type ProfileTrustBearingBags = Readonly<{
   resourceAudit?: object;
   autocommit?: object;
   tableNames?: object;
+  fenceSql?: object;
 }>;
 
 /**
@@ -248,19 +317,23 @@ type ProfileTrustBearingBags = Readonly<{
  * mutate `base.resourceAudit` directly, behind the override validation that
  * only ever sees `overrides`. So this also freezes the bags a derived
  * profile shares with `base` by reference: `resourceAudit`, `autocommit`,
- * `tableNames`, and `declaredCapabilities` — their OWN fields, not what those
- * fields point to. `declaredCapabilities` arrives already sealed: each
- * builder passes its declaration through `sealCapabilityDeclaration`
- * (`./declarations`), the one owner of "clone, then deep-freeze", so the bag
- * is immutable all the way down and never aliases an object the caller
- * supplied as an override. `resourceAudit.resource` and
- * `identityLeaseResource` stay reachable and mutable: those are the driver's
- * own connection handles, not data TypeGraph owns, and freezing the
- * `resourceAudit` object itself already blocks swapping which handle it
- * names. Every other profile field is either a closure this module has no
- * business freezing (`execution`, `provisioning`, the six `*Runtime` bags,
- * `assembly`) or `fenceSql`, a bag of functions with nothing mutable on it to
- * begin with.
+ * `tableNames`, `fenceSql`, and `declaredCapabilities` — their OWN fields,
+ * not what those fields point to. `declaredCapabilities` arrives already
+ * sealed: each builder passes its declaration through
+ * `sealCapabilityDeclaration` (`./declarations`), the one owner of "clone,
+ * then deep-freeze", so the bag is immutable all the way down and never
+ * aliases an object the caller supplied as an override. `resourceAudit
+ * .resource` and `identityLeaseResource` stay reachable and mutable: those
+ * are the driver's own connection handles, not data TypeGraph owns, and
+ * freezing the `resourceAudit` object itself already blocks swapping which
+ * handle it names. `fenceSql`'s own functions stay reachable and mutable
+ * too — this freeze binds only the CONTAINER, so a derived profile can
+ * still be constructed with a fresh `fenceSql` override, but it blocks a
+ * caller from reassigning `derived.fenceSql.advisoryLockExpression` (or any
+ * other member) in place, which would otherwise silently rewrite the
+ * spelling `base.fenceSql` hands back too. Every other profile field is a
+ * closure this module has no business freezing (`execution`, `provisioning`,
+ * the six `*Runtime` bags, `assembly`).
  *
  * `deriveEngineProfile` itself is unaffected beyond this: it reads `base`'s
  * fields and spreads them into a NEW object literal, which spreading a
@@ -279,6 +352,7 @@ export function registerFirstPartyProfile<T extends object>(profile: T): T {
   if (bags.resourceAudit !== undefined) Object.freeze(bags.resourceAudit);
   if (bags.autocommit !== undefined) Object.freeze(bags.autocommit);
   if (bags.tableNames !== undefined) Object.freeze(bags.tableNames);
+  if (bags.fenceSql !== undefined) Object.freeze(bags.fenceSql);
   return Object.freeze(profile);
 }
 
@@ -390,7 +464,7 @@ function planFromLockCapabilities(
       kind: "lock",
       advisoryLocks: true,
       tableLocks: declared.tableLocks,
-      sql: target.fenceSql,
+      sql: resolveFenceStatements(target.fenceSql),
     };
   }
   if (declared.serializedWriters) return { kind: "engine-serialized" };

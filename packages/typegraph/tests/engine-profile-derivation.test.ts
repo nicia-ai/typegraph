@@ -26,6 +26,7 @@ import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema
 import {
   type FenceSql,
   isFirstPartyFactory,
+  resolveFenceStatements,
   resolveWriteFencePlan,
 } from "../src/backend/capabilities/write-fence";
 import {
@@ -38,7 +39,11 @@ import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-
 import { buildPostgresEngineProfile } from "../src/backend/drizzle/postgres";
 import { buildSqliteEngineProfile } from "../src/backend/drizzle/sqlite";
 import { ConfigurationError } from "../src/errors";
-import { sql, type SqlFragment } from "../src/query/sql-fragment";
+import {
+  renderPostgres,
+  sql,
+  type SqlFragment,
+} from "../src/query/sql-fragment";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -144,11 +149,12 @@ function instrumentPostgresCapture(
  * The bare `pg_advisory_xact_lock(...)` call, with no `SELECT` around it —
  * `hashtext` of ONE concatenated string rather than the bundled
  * two-argument `pg_advisory_xact_lock(hashtext($namespace), hashtext($key))`
- * form. `customAdvisoryLock` wraps this in the standalone-statement form
+ * form. `resolveFenceStatements` wraps this in the standalone-statement form
  * every ordinary lock site consumes; `postgres-schema-write-fence.ts`'s
  * fused statement embeds this bare form directly when this `FenceSql` backs
  * a derived profile — the same split the bundled `advisoryLockExpression`
- * (`postgres-fence-sql.ts`) makes.
+ * (`postgres-fence-sql.ts`) makes. Both readers call this SAME function, so
+ * they cannot spell the lock differently — see case 1c below.
  */
 function customAdvisoryLockExpression(
   namespace: string,
@@ -156,24 +162,6 @@ function customAdvisoryLockExpression(
 ): SqlFragment {
   const keyText = typeof key === "number" ? String(key) : key;
   return sql`pg_advisory_xact_lock(hashtext(${namespace} || ':' || ${keyText}))`;
-}
-
-function customAdvisoryLock(
-  namespace: string,
-  key: string | number,
-): SqlFragment {
-  return sql`SELECT ${customAdvisoryLockExpression(namespace, key)}`;
-}
-
-function customAdvisoryLockWithIsolation(
-  namespace: string,
-  key: string | number,
-): SqlFragment {
-  return sql`
-    SELECT
-      ${customAdvisoryLockExpression(namespace, key)},
-      ${customIsolationFactExpression()} AS transaction_isolation
-  `;
 }
 
 const CUSTOM_LOCK_TABLE_MODE_CLAUSE = {
@@ -197,26 +185,20 @@ function customLockTables(
 
 /**
  * The bare `current_setting('transaction_isolation')` read, with no
- * `SELECT`/alias around it — `customIsolationFact` wraps this in the
+ * `SELECT`/alias around it — `resolveFenceStatements` wraps this in the
  * standalone-statement form; `postgres-schema-write-fence.ts`'s fused
- * statement embeds this bare form directly.
+ * statement embeds this bare form directly. The `transaction_isolation`
+ * alias `resolveFenceStatements` gives its derived `isolationFact` /
+ * `advisoryLockWithIsolation` is a hard contract, not a stylistic choice:
+ * `assertRecordedCaptureTransactionIsolation` reads the row back by that
+ * column name regardless of which `FenceSql` produced it.
  */
 function customIsolationFactExpression(): SqlFragment {
   return sql`current_setting('transaction_isolation')`;
 }
 
-function customIsolationFact(): SqlFragment {
-  // The `transaction_isolation` alias is a hard contract, not a stylistic
-  // choice: `assertRecordedCaptureTransactionIsolation` reads the row back
-  // by that column name regardless of which `FenceSql` produced it.
-  return sql`SELECT ${customIsolationFactExpression()} AS transaction_isolation`;
-}
-
 const customFenceSql: FenceSql = {
-  advisoryLock: customAdvisoryLock,
-  advisoryLockWithIsolation: customAdvisoryLockWithIsolation,
   lockTables: customLockTables,
-  isolationFact: customIsolationFact,
   advisoryLockExpression: customAdvisoryLockExpression,
   isolationFactExpression: customIsolationFactExpression,
 };
@@ -342,6 +324,30 @@ describe("deriveEngineProfile", () => {
       BUNDLED_ADVISORY_LOCK_PATTERN.test(statement.sql),
     );
     expect(bundledTwoArgumentSpellingStatements).toHaveLength(0);
+  });
+
+  it("case 1c: for a derived custom spelling, resolveFenceStatements's portable advisoryLock statement and the fused graph_write_lock CTE's embedded expression render the IDENTICAL expression text — they now cannot differ", () => {
+    // No live connection needed: this isolates the claim case 1 proves
+    // end-to-end (both readers of `customFenceSql` agree) down to the exact
+    // mechanism that makes it true. `resolveFenceStatements`'s `advisoryLock`
+    // is `SELECT ${fenceSql.advisoryLockExpression(...)}` — it calls the
+    // SAME `advisoryLockExpression` function `postgres-schema-write-fence
+    // .ts`'s fused CTE embeds directly, so the portable statement and the
+    // fused embedding can never spell the lock differently: there is only
+    // ever one `advisoryLockExpression` call to diverge from.
+    const derivedStatements = resolveFenceStatements(customFenceSql);
+    const namespace = "typegraph:identity";
+    const key = "graph-1";
+
+    const portableStatementText = renderPostgres(
+      derivedStatements.advisoryLock(namespace, key),
+    ).sql;
+    const fusedEmbeddedExpressionText = renderPostgres(
+      customFenceSql.advisoryLockExpression(namespace, key),
+    ).sql;
+
+    expect(fusedEmbeddedExpressionText).toMatch(CUSTOM_ADVISORY_LOCK_PATTERN);
+    expect(portableStatementText).toBe(`SELECT ${fusedEmbeddedExpressionText}`);
   });
 
   it("case 1b: a derived PostgreSQL profile with fenceSql: undefined and pessimisticLocks.serializedWriters has no lockSchemaVersionAndGraphWrite member on the root or a transaction() handle, and a graph-write-lock-needing write still succeeds through the portable path", async () => {
@@ -742,6 +748,42 @@ describe("registerFirstPartyProfile freezes the trust-bearing bags a derived pro
     expect(baseProfile.declaredCapabilities.pessimisticLocks).toBe(
       originalPessimisticLocks,
     );
+  });
+
+  it("a derived PostgreSQL profile's shared fenceSql container throws on assignment and leaves the base unchanged, without freezing its function values", async () => {
+    const { profile: baseProfile } =
+      await createRealPostgresProfileWithClient();
+    const derivedProfile = deriveEngineProfile(baseProfile, {
+      autocommit: { singleStatementDurable: false },
+    });
+
+    // Neither override names `fenceSql`, so `deriveEngineProfile`'s
+    // `{...base, ...overrides}` carries the SAME `fenceSql` object forward —
+    // the sharing this freeze exists to make safe, exactly like
+    // `resourceAudit` and `declaredCapabilities` above.
+    expect(derivedProfile.fenceSql).toBe(baseProfile.fenceSql);
+
+    const originalAdvisoryLockExpression =
+      baseProfile.fenceSql?.advisoryLockExpression;
+    expect(() => {
+      (
+        derivedProfile.fenceSql as { advisoryLockExpression: unknown }
+      ).advisoryLockExpression = () => {
+        throw new Error("unreachable");
+      };
+    }).toThrow(TypeError);
+    expect(baseProfile.fenceSql?.advisoryLockExpression).toBe(
+      originalAdvisoryLockExpression,
+    );
+
+    // The freeze is shallow: it binds the CONTAINER's own fields, never the
+    // function values themselves, which stay ordinary callable functions.
+    expect(typeof derivedProfile.fenceSql?.advisoryLockExpression).toBe(
+      "function",
+    );
+    expect(
+      Object.isFrozen(derivedProfile.fenceSql?.advisoryLockExpression),
+    ).toBe(false);
   });
 
   it("an overridden declaredCapabilities literal on a derived profile is a fresh, unfrozen object — spreading a frozen source does not freeze the copy", () => {
