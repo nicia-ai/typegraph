@@ -4,7 +4,7 @@
     "declaration": "FenceSql",
     "member": "advisoryLock",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, so the four builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
   },
@@ -13,7 +13,7 @@
     "declaration": "FenceSql",
     "member": "advisoryLockWithIsolation",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, so the four builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
   },
@@ -22,7 +22,7 @@
     "declaration": "FenceSql",
     "member": "lockTables",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, so the four builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
   },
@@ -31,7 +31,25 @@
     "declaration": "FenceSql",
     "member": "isolationFact",
     "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, so the four builders are required as a set rather than optional at the boundary.",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
+    "issue": "#622",
+    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceSql",
+    "member": "advisoryLockExpression",
+    "kind": "required-member-added",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
+    "issue": "#622",
+    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceSql",
+    "member": "isolationFactExpression",
+    "kind": "required-member-added",
+    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell every fence a lock site can take, including the bare expression forms the fused recorded-write fence composes inside its CTE, so the six builders are required as a set rather than optional at the boundary.",
     "issue": "#622",
     "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
   }
