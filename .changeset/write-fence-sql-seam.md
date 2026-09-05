@@ -2,10 +2,13 @@
 "@nicia-ai/typegraph": minor
 ---
 
-`GraphBackend` gains an optional `fenceSql` member: the lock-statement spelling a backend
-supplies alongside `capabilities.pessimisticLocks`. `resolveWriteFencePlan`'s `lock` arm now
-carries `sql: FenceSql` — a bag of `advisoryLock`, `advisoryLockWithIsolation`, `lockTables`, and
-`isolationFact` builders — so every write-fence lock site consumes `fence.sql.<builder>(...)`
+`GraphBackend` gains an optional `fenceSql` member: the lock spelling a backend supplies
+alongside `capabilities.pessimisticLocks`, as `FenceSql` — three builders,
+`advisoryLockExpression`, `isolationFactExpression`, and `lockTables`. `resolveWriteFencePlan`'s
+`lock` arm carries `sql: FenceStatements`: those three plus the standalone `advisoryLock`,
+`advisoryLockWithIsolation`, and `isolationFact` statements, which `resolveFenceStatements`
+derives from the two expressions so the portable lock sites and the fused recorded-write fence
+always spell the same key. Every write-fence lock site consumes `fence.sql.<builder>(...)`
 instead of hand-writing PostgreSQL lock syntax inline.
 
 The bundled PostgreSQL spelling is exported as `postgresFenceSql` from

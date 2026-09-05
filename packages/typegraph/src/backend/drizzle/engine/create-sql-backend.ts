@@ -4,16 +4,17 @@
  * `createSqlBackend` owns what is the same for every SQL engine: deriving
  * the final capabilities, building the ONE write-fence target and resolving
  * its plan once, refusing a profile that cannot back the marks it is about
- * to earn, building the contribution-marker and operation-backend layers
- * from the profile's own deps, assembling every mirrored adapter member
- * group, auditing the backend's resource shape, and applying the trust
- * marks and atomic-program registrations. A profile owns only what
- * genuinely differs between engines.
+ * to earn, resolving the profile's opaque `assembly` (`./assembly`) into its
+ * `buildOperations`/`lateMembers` pair, building the contribution-marker and
+ * operation-backend layers from the profile's own deps, assembling every
+ * mirrored adapter member group, auditing the backend's resource shape, and
+ * applying the trust marks and atomic-program registrations. A profile owns
+ * only what genuinely differs between engines.
  */
 import { ConfigurationError } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
 import {
-  isRecognizedFirstPartyProfileToken,
+  isFirstPartyProfile,
   markFirstPartyFactory,
   pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
@@ -25,6 +26,7 @@ import type {
   SchemaWriteTransactionBackend,
 } from "../../types";
 import { gateFulltextMethods } from "../contribution-materializations";
+import { resolveEngineAssembly } from "./assembly";
 import { finalizeEngineCapabilities } from "./capabilities";
 import { applyEngineMarks } from "./marks";
 import { createBaseSchemaMembers } from "./members/base-schema-members";
@@ -51,11 +53,12 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
  * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
  * A fourth gate, resolved once as `isFirstParty` below and threaded to both
  * `applyEngineMarks` and the fence target this factory builds, decides
- * `markFirstPartyFactory` itself: only a profile carrying a token
- * `mintFirstPartyProfileToken` actually minted (`../../capabilities/write-fence`)
- * earns that mark, so the dialect-derivation fallback above and the lazy
+ * `markFirstPartyFactory` itself: only the exact profile object
+ * `isFirstPartyProfile` (`../../capabilities/write-fence`) recognizes earns
+ * that mark, so the dialect-derivation fallback above and the lazy
  * schema-fence lease it feeds stay closed to a profile that merely resembles
- * a bundled one.
+ * a bundled one — a copy, spread, or otherwise derived profile is a
+ * different object and is never recognized.
  */
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
@@ -89,14 +92,12 @@ export function createSqlBackend<TTx>(
     );
   }
 
-  // Resolved once and reused for both marks below: whether `profile.firstParty`
-  // is a token this factory's own `mintFirstPartyProfileToken` actually
-  // minted, not merely an object shaped like one. Only the two bundled
-  // builders can produce a recognized token, so this is `false` for any
-  // profile assembled elsewhere — including one built by copying a bundled
-  // profile's fields into a plain object literal without carrying the field
-  // forward.
-  const isFirstParty = isRecognizedFirstPartyProfileToken(profile.firstParty);
+  // Resolved once and reused for both marks below: whether `profile` is the
+  // exact object one of the two bundled builders returned, not merely an
+  // object shaped like one. Only that object was ever registered, so this
+  // is `false` for any profile assembled elsewhere — including one built
+  // by copying a bundled profile's fields into a plain object literal.
+  const isFirstParty = isFirstPartyProfile(profile);
 
   // ONE fence target for the whole backend and every transaction-scoped one
   // it builds, marked first-party only under the same gate as the backend
@@ -115,10 +116,19 @@ export function createSqlBackend<TTx>(
 
   const fencePlan = resolveWriteFencePlan(fenceTarget);
 
+  // Resolved once and reused below for both the operation-backend build and
+  // the late-member build — see `./assembly` for what this hides and why a
+  // hand-built profile whose `assembly` is not one of the two bundled
+  // builders' own values throws here instead of silently producing a
+  // half-assembled backend.
+  const { buildOperations, lateMembers } = resolveEngineAssembly(
+    profile.assembly,
+  );
+
   // The contribution materializer's destructive rebuild runs under the SAME
   // per-graph fence a schema commit does — `late.fence.runSchemaWriteTransaction`
-  // — but `late` does not exist until `profile.lateMembers(ctx)` runs, which
-  // in turn needs the materializer this call is building (through
+  // — but `late` does not exist until `lateMembers(ctx)` runs, which in turn
+  // needs the materializer this call is building (through
   // `ctx.contributionMaterializer`). This forward reference is how that
   // circularity resolves: the wrapper below only READS `late` once a caller
   // actually invokes a rebuild, long after `late` is assigned below: nothing
@@ -156,7 +166,7 @@ export function createSqlBackend<TTx>(
     contributionTableExists,
   });
 
-  const operations = profile.buildOperations({
+  const operations = buildOperations({
     capabilities,
     fencePlan,
     fenceTarget,
@@ -210,7 +220,7 @@ export function createSqlBackend<TTx>(
     self: () => backend,
   };
 
-  const late = profile.lateMembers(ctx);
+  const late = lateMembers(ctx);
 
   // Annotated against the real `AdapterBackend<TTx>` declarations (`this:
   // void` included, and `commitSchemaVersionWithPreflight`'s

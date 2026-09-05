@@ -15,20 +15,31 @@
  * (a raw-connection test fixture, or a session-fact read gated purely on
  * `dialect === "postgres"` rather than on a resolved lock plan).
  *
- * `advisoryLockExpression` / `isolationFactExpression` are exported bare
- * sub-expressions, not members of the `FenceSql` bag: `./postgres-schema-
- * write-fence.ts` needs `drizzle-orm` to reach the schema table, so it
- * cannot live in this module (which imports none), but its fused statement
- * still spells its lock and its isolation read by calling back into these
- * two functions rather than holding a second copy of the tokens.
+ * `postgresFenceSql` supplies only the two composable expressions and
+ * `lockTables` — `FenceSql`'s complete member set. The standalone-statement
+ * forms every ordinary lock site actually calls (`advisoryLock`,
+ * `advisoryLockWithIsolation`, `isolationFact`) are never spelled here: THE
+ * one owner of "wrap this expression in a standalone `SELECT`" is
+ * `resolveWriteFencePlan`'s `resolveFenceStatements`
+ * (`../capabilities/write-fence.ts`), which derives them from this module's
+ * two expressions for every resolved `lock` plan, bundled or custom alike.
+ * `./postgres-schema-write-fence.ts` needs `drizzle-orm` to reach the schema
+ * table, so it cannot live in this module (which imports none); it instead
+ * takes the resolved fence target's own `advisoryLockExpression` /
+ * `isolationFactExpression` members as a parameter and calls them directly,
+ * converting each to Drizzle's own `SQL` at the embedding boundary — so a
+ * derived profile's own `FenceSql` backs that fused statement exactly as it
+ * backs every other lock site, never the bundled spelling unconditionally.
  *
- * `advisoryLockSingleExpression` is the same kind of bare export for the
- * ONE-argument `pg_advisory_xact_lock(bigint)` form, which occupies a lock
- * space distinct from every namespaced two-argument lock this module builds.
- * The schema-commit fence and the graph-template instantiation statement
- * both take it on `hashtext(graphId)`, so they mutually exclude — calling
- * back into this one function is what keeps that guarantee from drifting
- * into two independently spelled lock calls.
+ * `advisoryLockSingleExpression` is exported bare, unlike the module's other
+ * two expressions: it spells the ONE-argument `pg_advisory_xact_lock(bigint)`
+ * form, which occupies a lock space distinct from every namespaced
+ * two-argument lock this module builds and is not a `FenceSql` member — the
+ * schema-commit fence (`postgres.ts`) and the graph-template instantiation
+ * statement (`graph-template-sql.ts`) both import it directly and take it on
+ * `hashtext(graphId)`, so they mutually exclude — calling back into this one
+ * function is what keeps that guarantee from drifting into two independently
+ * spelled lock calls.
  */
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type FenceSql } from "../capabilities/write-fence";
@@ -58,13 +69,15 @@ function advisoryLockKeyExpression(key: string | number): SqlFragment {
 
 /**
  * The bare `pg_advisory_xact_lock(...)` call, with no `SELECT` around it —
- * exported so `buildLockSchemaVersionAndGraphWrite` (a Drizzle-zone module,
- * since it also reaches the schema table) can embed the SAME spelling inside
- * its fused CTE rather than re-deriving it, converting this fragment to
- * Drizzle's own `SQL` at the embedding boundary. `advisoryLock` below wraps
- * this in the standalone-statement form every other lock site consumes.
+ * reachable from outside this module only as `postgresFenceSql`'s
+ * `advisoryLockExpression` MEMBER: `postgres-schema-write-fence.ts` composes
+ * it off the resolved `FenceSql` it is building a statement for, and
+ * `resolveWriteFencePlan`'s `resolveFenceStatements` wraps it in the
+ * standalone-statement form (`advisoryLock`) every other lock site consumes
+ * — never off this bare function by direct import, so a derived profile's
+ * own `FenceSql` backs both forms exactly as the bundled spelling does.
  */
-export function advisoryLockExpression(
+function advisoryLockExpression(
   namespace: string,
   key: string | number,
 ): SqlFragment {
@@ -80,26 +93,10 @@ export function advisoryLockExpression(
  * two-argument form produces, however the hashes land. Exported bare, like
  * {@link advisoryLockExpression}, so a caller that must keep this lock
  * co-atomic with a surrounding statement (a data-modifying CTE, for one)
- * can embed it directly instead of wrapping it in this module's own
- * standalone `SELECT`.
+ * can embed it directly instead of wrapping it in a standalone `SELECT`.
  */
 export function advisoryLockSingleExpression(key: string): SqlFragment {
   return sql`pg_advisory_xact_lock(hashtext(${key}))`;
-}
-
-function advisoryLock(namespace: string, key: string | number): SqlFragment {
-  return sql`SELECT ${advisoryLockExpression(namespace, key)}`;
-}
-
-function advisoryLockWithIsolation(
-  namespace: string,
-  key: string | number,
-): SqlFragment {
-  return sql`
-    SELECT
-      ${advisoryLockExpression(namespace, key)},
-      ${isolationFactExpression()} AS transaction_isolation
-  `;
 }
 
 function lockTables(
@@ -114,22 +111,17 @@ function lockTables(
 
 /**
  * The bare `current_setting('transaction_isolation')` read, with no
- * `SELECT`/alias around it — exported for the same reason as
- * {@link advisoryLockExpression}: `buildLockSchemaVersionAndGraphWrite`
- * embeds this exact spelling rather than re-deriving it.
+ * `SELECT`/alias around it — reachable from outside this module only as
+ * `postgresFenceSql`'s `isolationFactExpression` member, for the same
+ * reason as {@link advisoryLockExpression}.
  */
-export function isolationFactExpression(): SqlFragment {
+function isolationFactExpression(): SqlFragment {
   return sql`current_setting('transaction_isolation')`;
-}
-
-function isolationFact(): SqlFragment {
-  return sql`SELECT ${isolationFactExpression()} AS transaction_isolation`;
 }
 
 /** The bundled PostgreSQL backend's {@link FenceSql} declaration. */
 export const postgresFenceSql: FenceSql = {
-  advisoryLock,
-  advisoryLockWithIsolation,
   lockTables,
-  isolationFact,
+  advisoryLockExpression,
+  isolationFactExpression,
 };

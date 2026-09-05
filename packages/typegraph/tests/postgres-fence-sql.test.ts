@@ -1,9 +1,10 @@
 /**
  * Golden rendering test for the bundled PostgreSQL lock spelling
- * (`postgresFenceSql`): every builder in the `FenceSql` bag, rendered through
- * `renderPostgres` exactly as a lock site does, asserting the exact SQL text
- * and bound parameters. This pins two things a behavioral test over the lock
- * SITES cannot see because they only assert a statement ran, not its text:
+ * (`postgresFenceSql`): every builder `resolveFenceStatements` derives from
+ * `postgresFenceSql`'s two expressions, rendered through `renderPostgres`
+ * exactly as a lock site does, asserting the exact SQL text and bound
+ * parameters. This pins three things a behavioral test over the lock SITES
+ * cannot see because they only assert a statement ran, not its text:
  *
  *  - `LOCK_TABLE_MODE_CLAUSE`'s three modes each render their own distinct
  *    clause (a mutation that swaps one mode's text for another's changes no
@@ -13,17 +14,25 @@
  *    statement as the lock, not a separate one (dropping the isolation
  *    column changes the statement's SHAPE, which a site-level test that
  *    only reads `rows[0]?.transaction_isolation` would still tolerate if the
- *    column merely moved).
+ *    column merely moved);
+ *  - the text `resolveFenceStatements` derives from `postgresFenceSql` is
+ *    BYTE-IDENTICAL to what this module's own `advisoryLock` /
+ *    `advisoryLockWithIsolation` / `isolationFact` rendered before they were
+ *    deleted in favor of the derivation — the exact strings below are
+ *    unchanged from that prior spelling.
  */
 import { describe, expect, it } from "vitest";
 
+import { resolveFenceStatements } from "../src/backend/capabilities/write-fence";
 import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { renderPostgres } from "../src/query/sql-fragment";
+
+const fenceStatements = resolveFenceStatements(postgresFenceSql);
 
 describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
   it("advisoryLock: hashtext(namespace), hashtext(key) for a string key", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLock("typegraph:identity", "graph-1"),
+      fenceStatements.advisoryLock("typegraph:identity", "graph-1"),
     );
     expect(rendered.sql).toBe(
       "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
@@ -33,7 +42,7 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
 
   it("advisoryLock: the database-scoped constant key renders as a bare integer literal, unbound", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLock("typegraph:identity-ddl", 0),
+      fenceStatements.advisoryLock("typegraph:identity-ddl", 0),
     );
     expect(rendered.sql).toBe("SELECT pg_advisory_xact_lock(hashtext($1), 0)");
     expect(rendered.params).toEqual(["typegraph:identity-ddl"]);
@@ -41,7 +50,7 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
 
   it("advisoryLockWithIsolation: the lock and the isolation fact in one statement", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLockWithIsolation(
+      fenceStatements.advisoryLockWithIsolation(
         "typegraph:recorded-graph-write",
         "graph-1",
       ),
@@ -64,14 +73,14 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
     ["access-exclusive", "ACCESS EXCLUSIVE MODE"],
   ] as const)("lockTables: %s renders %s", (mode, clause) => {
     const rendered = renderPostgres(
-      postgresFenceSql.lockTables(["nodes", "edges"], mode),
+      fenceStatements.lockTables(["nodes", "edges"], mode),
     );
     expect(rendered.sql).toBe(`LOCK TABLE "nodes", "edges" IN ${clause}`);
     expect(rendered.params).toEqual([]);
   });
 
   it("isolationFact: the bare session isolation-level read, with no lock", () => {
-    const rendered = renderPostgres(postgresFenceSql.isolationFact());
+    const rendered = renderPostgres(fenceStatements.isolationFact());
     expect(rendered.sql).toBe(
       "SELECT current_setting('transaction_isolation') AS transaction_isolation",
     );
@@ -90,7 +99,7 @@ describe("postgresFenceSql renders the bundled PostgreSQL spelling", () => {
 describe("postgresFenceSql: every lock site's real call, pinned", () => {
   it("store/recorded-capture/clock.ts lockRecordedGraphWrite: advisoryLockWithIsolation(typegraph:recorded-graph-write, graphId)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLockWithIsolation(
+      fenceStatements.advisoryLockWithIsolation(
         "typegraph:recorded-graph-write",
         "graph-1",
       ),
@@ -109,7 +118,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("store/recorded-capture/clock.ts lockRecordedClock: advisoryLock(typegraph:recorded-clock, graphId)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLock("typegraph:recorded-clock", "graph-1"),
+      fenceStatements.advisoryLock("typegraph:recorded-clock", "graph-1"),
     );
     expect(rendered.sql).toBe(
       "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
@@ -119,7 +128,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("identity/service-read.ts lockIdentityGraph: advisoryLock(typegraph:identity, graphId)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLock("typegraph:identity", "graph-1"),
+      fenceStatements.advisoryLock("typegraph:identity", "graph-1"),
     );
     expect(rendered.sql).toBe(
       "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
@@ -129,7 +138,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("identity/service-read.ts lockIdentityEnablementNodes: lockTables([typegraph_nodes], share)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.lockTables(["typegraph_nodes"], "share"),
+      fenceStatements.lockTables(["typegraph_nodes"], "share"),
     );
     expect(rendered.sql).toBe('LOCK TABLE "typegraph_nodes" IN SHARE MODE');
     expect(rendered.params).toEqual([]);
@@ -137,7 +146,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("identity/schema-transition.ts lockIdentityDdl: advisoryLock(typegraph:identity-ddl, 0)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLock("typegraph:identity-ddl", 0),
+      fenceStatements.advisoryLock("typegraph:identity-ddl", 0),
     );
     expect(rendered.sql).toBe("SELECT pg_advisory_xact_lock(hashtext($1), 0)");
     expect(rendered.params).toEqual(["typegraph:identity-ddl"]);
@@ -145,7 +154,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("graph-merge/provenance-store.ts drainUnfencedRowWriters: lockTables([typegraph_nodes, typegraph_edges], share-row-exclusive)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.lockTables(
+      fenceStatements.lockTables(
         ["typegraph_nodes", "typegraph_edges"],
         "share-row-exclusive",
       ),
@@ -158,7 +167,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("backend/drizzle/contribution-materializations.ts lockContributionDdl: advisoryLock(typegraph:contribution-ddl, 0)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.advisoryLock("typegraph:contribution-ddl", 0),
+      fenceStatements.advisoryLock("typegraph:contribution-ddl", 0),
     );
     expect(rendered.sql).toBe("SELECT pg_advisory_xact_lock(hashtext($1), 0)");
     expect(rendered.params).toEqual(["typegraph:contribution-ddl"]);
@@ -166,7 +175,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
 
   it("backend/drizzle/contribution-materializations.ts lockSharedFulltextTable: lockTables([typegraph_node_fulltext], access-exclusive)", () => {
     const rendered = renderPostgres(
-      postgresFenceSql.lockTables(
+      fenceStatements.lockTables(
         ["typegraph_node_fulltext"],
         "access-exclusive",
       ),
@@ -178,7 +187,7 @@ describe("postgresFenceSql: every lock site's real call, pinned", () => {
   });
 
   it("store/recorded-capture/guards.ts assertRecordedCaptureTransactionIsolation: isolationFact()", () => {
-    const rendered = renderPostgres(postgresFenceSql.isolationFact());
+    const rendered = renderPostgres(fenceStatements.isolationFact());
     expect(rendered.sql).toBe(
       "SELECT current_setting('transaction_isolation') AS transaction_isolation",
     );

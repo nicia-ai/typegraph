@@ -2741,10 +2741,9 @@ type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
 
 // @public
 type FenceSql = Readonly<{
-    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
-    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
     lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
-    isolationFact: () => SqlFragment;
+    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression: () => SqlFragment;
 }>;
 
 // @public

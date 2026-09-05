@@ -22,6 +22,8 @@ export const PGLITE_TEST_FILES = [
   "tests/edge-match-identity-ddl.test.ts",
   "tests/engine-catalog-probes.test.ts",
   "tests/engine-operation-layer-transaction-scope.test.ts",
+  "tests/engine-profile-derivable-keys.test.ts",
+  "tests/engine-profile-derivation.test.ts",
   "tests/engine-profile-parity.test.ts",
   "tests/engine-profile-refusals.test.ts",
   "tests/fused-edge-endpoints.test.ts",

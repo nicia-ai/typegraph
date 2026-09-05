@@ -1117,7 +1117,7 @@ TypeGraph exposes Drizzle adapters through public entrypoints:
 - `@nicia-ai/typegraph/adapters/drizzle/sqlite/libsql` — Batteries-included libsql wrapper (Node.js, Workers, browser)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres` — PostgreSQL adapter (any Drizzle Postgres driver)
 - `@nicia-ai/typegraph/adapters/drizzle/postgres/pglite` — Batteries-included PGlite (Postgres-in-WASM) wrapper
-- `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend` and the `SqlEngineProfile` types
+- `@nicia-ai/typegraph/adapters/drizzle/engine` — `createSqlBackend`, `deriveEngineProfile`, the bundled builders, `SqlEngineProfile`
 
 Import from the entrypoint matching your database:
 
@@ -1133,18 +1133,26 @@ import { createLocalPgliteBackend } from "@nicia-ai/typegraph/adapters/drizzle/p
 
 `createPostgresBackend` and `createSqliteBackend` are each `createSqlBackend`
 applied to a profile built by `buildPostgresEngineProfile` /
-`buildSqliteEngineProfile`:
+`buildSqliteEngineProfile`, both exported alongside `createSqlBackend` and
+`deriveEngineProfile` from the engine entrypoint:
 
 ```typescript
-import { createSqlBackend } from "@nicia-ai/typegraph/adapters/drizzle/engine";
+import {
+  buildPostgresEngineProfile,
+  createSqlBackend,
+} from "@nicia-ai/typegraph/adapters/drizzle/engine";
 
 const backend = createSqlBackend(buildPostgresEngineProfile(db, options));
 ```
 
-The two bundled builders are internal to the SQLite and PostgreSQL adapters —
-the snippet shows the shape `createPostgresBackend` uses, not an import you
-can write. A third-party engine supplies its own profile builder and passes
-the result to `createSqlBackend`.
+Most callers adapting a bundled backend want `deriveEngineProfile`, which
+builds a variant of a bundled profile — a different lock spelling, a looser
+declared capability, a replaced resource-audit verdict — without hand-copying
+every other field. A profile written from scratch is not constructible today:
+the assembly constructor is unexported, and `createSqlBackend` refuses a
+hand-built assembly. See [Authoring an engine profile](/backend-authoring) for
+the derivable-field table, the refusals a custom profile can hit, a worked
+example, and [what is not derivable yet](/backend-authoring#what-is-not-derivable-yet).
 
 A profile owns everything that genuinely differs between engines: dialect
 tokens, the execution adapter, transaction framing, its `fenceSql` lock
@@ -1166,7 +1174,7 @@ transaction model.
 resolvable write-fence decision, and a profile that does not declare one
 cannot back that decision soundly. `buildPostgresEngineProfile` and
 `buildSqliteEngineProfile` are the reference profiles to read when modeling a
-new one; neither is a symbol you can import.
+new one.
 
 A profile's `provisioning.catalog` supplies the backend's optional `catalog`
 member: physical-schema introspection — table and index existence, each
@@ -1199,8 +1207,9 @@ bind budget). This is a control-flow and prepared-plan decision, not SQL text a
 shared token could express identically on both shapes, so it lives on
 `DialectCapabilities` rather than in the query compiler.
 
-A profile's `graphTemplateRuntime.instantiateStatement` is a required builder cloning a durable
-schema template into a fresh graph. Given the template and target graph's ids and schema hashes
+`instantiateStatement` — a member of the profile's `graphTemplateRuntime` bag, and so one of the
+fields `deriveEngineProfile` can override — is a required builder cloning a durable schema template
+into a fresh graph. Given the template and target graph's ids and schema hashes
 (`InstantiateGraphTemplateSqlParams`: `templateId`, `templateSchemaHash`, `graphId`, `schemaHash`,
 and the three physical table names it reads), it must return the statement that inserts the target
 graph's `schema_versions` row from the template's stored document and copies the template's
@@ -1212,25 +1221,36 @@ supplies the optional `copyContributionMarkers` dep, which runs the marker copy 
 statement once the schema row is confirmed. The bundled
 `postgresInstantiateGraphTemplateStatement` and `sqliteInstantiateGraphTemplateStatement` builders
 (`graph-template-sql.ts`) are what `createPostgresBackend` and `createSqliteBackend` supply to
-their own profiles — like the reference profiles and the bundled fence expressions below, neither
-is a symbol you can import; a custom profile reaches the same shape only by copying a bundled
-profile and adapting its statement.
+their own profiles; neither is exported, so a from-scratch profile reaches the same shape only by
+copying a bundled profile and adapting its statement, while a derived profile can replace the whole
+`graphTemplateRuntime` bag through `deriveEngineProfile`.
 
-The bundled PostgreSQL fence spelling exposes two lock forms as bare
-`SqlFragment` EXPRESSIONS rather than only as standalone statements:
-`advisoryLockExpression` (the two-argument, namespaced form every ordinary
-fence site takes) and `advisoryLockSingleExpression` (the one-argument form
-on a bare key, which PostgreSQL stores in a distinct lock space from the
-two-argument form and which the schema-commit fence and graph-template
-instantiation both take on the same key so the two mutually exclude) — like
-the reference profiles above, neither expression is a symbol you can import;
-a custom profile spells its own equivalent inside its fence SQL. A statement
-that must compose a lock inside a CTE — so the lock stays co-atomic with the
-surrounding INSERT, rather than running as its own preceding statement — puts
-the expression in its own CTE's `SELECT` (`locked AS (SELECT ...)` in the
-graph-template instantiation statement, `SELECT ... AS "lock_token"` in the
-schema write fence) instead of running the module's standalone lock statement
-first.
+`FenceSql` (see [Write fence declaration](#write-fence-declaration-pessimisticlocks))
+declares `advisoryLockExpression` and `isolationFactExpression` as the two
+composable, no-`SELECT` forms a backend author supplies; TypeGraph derives
+the standalone-statement counterparts (`advisoryLock`,
+`advisoryLockWithIsolation`, `isolationFact`) from them. A statement that
+must compose a lock or an isolation read INSIDE a larger query it builds
+itself — a CTE, a data-modifying statement — embeds the bare expression
+directly, rather than running the derived standalone form as its own
+preceding statement. The schema write fence's fused schema + graph-write
+statement (`postgres-schema-write-fence.ts`) is the one site that needs
+this: it puts the expression in its own CTE's `SELECT ... AS "lock_token"`,
+resolving the fence target's OWN `FenceSql` — the bundled `postgresFenceSql`
+for a bundled backend, a derived profile's own override otherwise — so a
+custom spelling backs this fused statement exactly as it backs every
+ordinary lock site.
+
+The graph-template instantiation statement's `locked AS (SELECT ...)` CTE is
+a DIFFERENT case, not a `FenceSql` consumer at all: it composes the baked
+single-argument `advisoryLockSingleExpression` directly.
+
+The ONE lock form with no override point is `advisoryLockSingleExpression`,
+the ONE-argument form on a bare key: PostgreSQL stores it in a lock space
+distinct from every namespaced two-argument lock, and the schema-commit fence
+and graph-template instantiation both take it on the same key so the two
+mutually exclude. It is not a `FenceSql` member — both bundled builders bake it
+in directly, and a custom profile has no way to replace it.
 
 ## Cloudflare D1
 
@@ -1517,10 +1537,14 @@ The two bundled backends declare exactly these lines — copy the one matching y
 - PostgreSQL: `pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false }`
 - SQLite: `pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: true }`
 
-A backend that declares `advisoryLocks: true` also supplies `fenceSql`, the statement spelling
-`resolveWriteFencePlan`'s `lock` arm hands to every lock site: `advisoryLock`, `advisoryLockWithIsolation`
-(the lock plus the session's isolation-level fact, read in the same statement it locks in),
-`lockTables`, and `isolationFact`. The bundled PostgreSQL spelling is exported as `postgresFenceSql`
+A backend that declares `advisoryLocks: true` also supplies `fenceSql`: `lockTables` plus the two
+composable, no-`SELECT` forms `advisoryLockExpression` / `isolationFactExpression` a statement embeds
+inside a larger query it builds itself (see the schema-write-fence discussion above) — the complete,
+three-member `FenceSql` bag. `resolveWriteFencePlan`'s `lock` arm derives the standalone-statement
+forms every ordinary lock site actually calls — `advisoryLock`; `advisoryLockWithIsolation` (the
+lock plus the session's isolation-level fact, read in the same statement it locks in); and
+`isolationFact` — from those two expressions, so a backend author never spells both forms separately.
+The bundled PostgreSQL spelling is exported as `postgresFenceSql`
 from `@nicia-ai/typegraph/adapters/drizzle/postgres` — pass it straight through as `fenceSql` when
 wrapping that backend, or supply a custom `FenceSql` matching a different engine's lock syntax. A
 backend that declares `advisoryLocks: true` with no `fenceSql` is refused at construction with

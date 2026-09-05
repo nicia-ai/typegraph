@@ -17,6 +17,7 @@ import type {
   AtomicNodeReplacementEntry,
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
+import type { FenceSql } from "../../capabilities/write-fence";
 import { nowIso } from "../../row-mappers";
 import type {
   CheckUniqueBatchParams,
@@ -578,10 +579,17 @@ export type CommonOperationStrategy = Readonly<{
     kinds: readonly [string, string],
   ) => SQL;
   buildGetActiveSchema: (graphId: string) => SQL;
-  /** PostgreSQL-only dependent schema-row + graph-advisory fence. */
+  /**
+   * PostgreSQL-only dependent schema-row + graph-advisory fence. `fenceSql`
+   * is the resolved fence target's own spelling — never spelled by this
+   * builder itself — so the fused statement and the portable lock sites a
+   * derived profile's `FenceSql` override backs always exclude on the same
+   * key.
+   */
   buildLockSchemaVersionAndGraphWrite?: (
     params: SchemaWriteFenceParams,
     advisoryLockNamespace: string,
+    fenceSql: FenceSql,
   ) => SQL;
   buildInsertSchema: (params: InsertSchemaParams, timestamp: string) => SQL;
   buildGetSchemaVersion: (graphId: string, version: number) => SQL;
@@ -1374,11 +1382,16 @@ export function createPostgresOperationStrategy(
         claim,
         timestamp,
       ),
-    buildLockSchemaVersionAndGraphWrite: (params, advisoryLockNamespace) =>
+    buildLockSchemaVersionAndGraphWrite: (
+      params,
+      advisoryLockNamespace,
+      fenceSql,
+    ) =>
       buildLockSchemaVersionAndGraphWrite(
         tables,
         params,
         advisoryLockNamespace,
+        fenceSql,
       ),
   };
 }

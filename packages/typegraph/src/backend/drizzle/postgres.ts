@@ -13,8 +13,8 @@
  * (`EngineLateMembers.transactions` / `fence` / `rawSql` / `maintenance` /
  * `trustedImport` / `extensions`), the DDL and extension provisioning
  * `EngineProvisioning` wires through, the dialect's own operation-backend
- * construction (which `SqlEngineProfile.buildOperations` defers until the
- * contribution materializer exists), and `hybridSearch` (an
+ * construction (deferred, via `assembleEngine`'s `buildOperations`, until
+ * the contribution materializer exists), and `hybridSearch` (an
  * embedding-adjacent member kept inline on both dialects rather than part
  * of the shared assembly).
  *
@@ -106,12 +106,15 @@ import {
   createAtomicSqlProgramExecutor,
   registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
-import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
+import {
+  assertNoLegacyTransactionCapability,
+  sealCapabilityDeclaration,
+} from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
-  mintFirstPartyProfileToken,
+  registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
   type WriteFenceTarget,
@@ -181,9 +184,6 @@ import {
   type BaseSchemaRuntime,
   type ContributionRuntime,
   createSqlBackend,
-  type EngineAssemblyContext,
-  type EngineLateMembers,
-  type EngineOperationsContext,
   type EngineProvisioning,
   type GraphTemplateRuntime,
   type IdentityRuntime,
@@ -191,6 +191,7 @@ import {
   type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
+import { assembleEngine } from "./engine/assembly";
 import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
@@ -198,6 +199,11 @@ import {
   buildCommonOperationOptions,
   createEngineOperationBackend,
 } from "./engine/operation-layer";
+import type {
+  EngineAssemblyContext,
+  EngineLateMembers,
+  EngineOperationsContext,
+} from "./engine/profile";
 import {
   type AnyPgDatabase,
   type AnyPgTransaction,
@@ -582,7 +588,9 @@ function createPostgresCatalogProbes(
       );
       return tableExistsFromRow(rows[0]);
     },
-    async tablesExist(names: readonly string[]): Promise<readonly TableState[]> {
+    async tablesExist(
+      names: readonly string[],
+    ): Promise<readonly TableState[]> {
       if (names.length === 0) return [];
       const rows = await executionAdapter.execute<{ name: string }>(
         portableSql`
@@ -937,18 +945,20 @@ export function buildPostgresEngineProfile(
         tableLocks: requestedPessimisticLocks.tableLocks,
         serializedWriters: false,
       };
-  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
-    ...baseCapabilities,
-    ...httpOnlyOverrides,
-    ...options.capabilities,
-    execution: {
-      ...baseCapabilities.execution,
-      ...httpOnlyOverrides.execution,
-      ...options.capabilities?.execution,
-    },
-    ...driverBindParameterOverrides,
-    pessimisticLocks,
-  });
+  const declaredCapabilities = sealCapabilityDeclaration(
+    normalizeGraphAnalyticsCapabilities({
+      ...baseCapabilities,
+      ...httpOnlyOverrides,
+      ...options.capabilities,
+      execution: {
+        ...baseCapabilities.execution,
+        ...httpOnlyOverrides.execution,
+        ...options.capabilities?.execution,
+      },
+      ...driverBindParameterOverrides,
+      pessimisticLocks,
+    }),
+  );
   // Derived last and not overridable: how far up the contribution health
   // ladder this backend goes is a structural fact about the wiring below
   // (durable markers, a catalog probe, a strategy that declares teardown
@@ -1972,13 +1982,16 @@ export function buildPostgresEngineProfile(
     };
   }
 
-  return {
+  // Assigned to an explicitly typed `const` rather than passed to
+  // `registerFirstPartyProfile` as an inline literal: excess-property
+  // checking only runs against a fresh object literal assigned to a KNOWN
+  // type, and `registerFirstPartyProfile<T extends object>` would otherwise
+  // infer `T` from the literal itself, checking nothing. Registered by
+  // object identity on the exact object returned below — so
+  // `createSqlBackend` marks this backend and its fence target first-party
+  // — rather than by a field a copy or spread could carry forward.
+  const profile: SqlEngineProfile<AnyPgTransaction> = {
     dialect: "postgres",
-    // Minted fresh for this profile instance — recognized only by this
-    // module's own `isRecognizedFirstPartyProfileToken`, so `createSqlBackend`
-    // marks this backend and its fence target first-party, exactly as it did
-    // before either was gated on the token.
-    firstParty: mintFirstPartyProfileToken(),
     fenceSql: postgresFenceSql,
     tableNames,
     execution: executionAdapter,
@@ -1995,13 +2008,13 @@ export function buildPostgresEngineProfile(
     baseSchemaRuntime,
     indexMaterializationRuntime,
     kindRemovalRuntime,
-    buildOperations,
     async close(): Promise<void> {
       // Drizzle doesn't expose a close method
       // Users manage connection lifecycle themselves
     },
-    lateMembers,
+    assembly: assembleEngine({ buildOperations, lateMembers }),
   };
+  return registerFirstPartyProfile(profile);
 }
 
 /**
@@ -2625,6 +2638,9 @@ function createPostgresOperationBackend(
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
         dynamicEdgeConvergence: true,
+        ...(fenceTarget.fenceSql === undefined ?
+          {}
+        : { fenceSql: fenceTarget.fenceSql }),
         async beforeNodeProjectionInsert(params, plan): Promise<void> {
           const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
             params,

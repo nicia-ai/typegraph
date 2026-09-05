@@ -13,8 +13,8 @@
  * transaction framing across all four transaction modes
  * (`EngineLateMembers.transactions` / `fence` / `rawSql` / `maintenance` /
  * `trustedImport` / `extensions`), the DDL provisioning `EngineProvisioning`
- * wires through, the dialect's own operation-backend construction (which
- * `SqlEngineProfile.buildOperations` defers until the contribution
+ * wires through, the dialect's own operation-backend construction (deferred,
+ * via `assembleEngine`'s `buildOperations`, until the contribution
  * materializer exists), `hybridSearch` (an embedding-adjacent member kept
  * inline on both dialects rather than part of the shared assembly), and
  * the per-backend serialized execution queue that orders top-level
@@ -79,12 +79,15 @@ import {
   type AtomicSqlProgramExecutor,
   createAtomicSqlProgramExecutor,
 } from "../capabilities/atomic-sql-program";
-import { assertNoLegacyTransactionCapability } from "../capabilities/declarations";
+import {
+  assertNoLegacyTransactionCapability,
+  sealCapabilityDeclaration,
+} from "../capabilities/declarations";
 import { downgradeAtomicBatch } from "../capabilities/execution";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
-  mintFirstPartyProfileToken,
+  registerFirstPartyProfile,
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -166,9 +169,6 @@ import {
   type BaseSchemaRuntime,
   type ContributionRuntime,
   createSqlBackend,
-  type EngineAssemblyContext,
-  type EngineLateMembers,
-  type EngineOperationsContext,
   type EngineProvisioning,
   type GraphTemplateRuntime,
   type IdentityRuntime,
@@ -176,6 +176,7 @@ import {
   type KindRemovalRuntime,
   type SqlEngineProfile,
 } from "./engine";
+import { assembleEngine } from "./engine/assembly";
 import { createContributionOperationMembers } from "./engine/members/contribution-members";
 import { createFulltextMembers } from "./engine/members/fulltext-members";
 import { createVectorMembers } from "./engine/members/vector-members";
@@ -183,6 +184,11 @@ import {
   buildCommonOperationOptions,
   createEngineOperationBackend,
 } from "./engine/operation-layer";
+import type {
+  EngineAssemblyContext,
+  EngineLateMembers,
+  EngineOperationsContext,
+} from "./engine/profile";
 import {
   buildMaterializationInsertValues,
   buildMaterializationOnConflictSet,
@@ -1130,7 +1136,11 @@ function createSqliteOperationBackend(
     ...vectorEmbeddingMethods,
     catalog:
       catalog ??
-      createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
+      createSqliteCatalogProbes(
+        executionAdapter,
+        operationStrategy,
+        serializedQueue,
+      ),
   };
 }
 
@@ -1286,22 +1296,24 @@ export function buildSqliteEngineProfile(
     transactionMode,
     maxBindParameters: executionAdapter.profile.maxBindParameters,
   });
-  const declaredCapabilities = normalizeGraphAnalyticsCapabilities({
-    ...baseCapabilities,
-    ...capabilityOverrides,
-    execution: {
-      ...baseCapabilities.execution,
-      ...capabilityOverrides.execution,
-    },
-    maxBindParameters: resolveMaxBindParametersCapability(
-      executionAdapter.profile,
-      capabilityOverrides.maxBindParameters,
-    ),
-    graphAnalytics: resolveSqliteGraphAnalyticsCapabilities(
-      executionAdapter.profile,
-      capabilityOverrides.graphAnalytics,
-    ),
-  });
+  const declaredCapabilities = sealCapabilityDeclaration(
+    normalizeGraphAnalyticsCapabilities({
+      ...baseCapabilities,
+      ...capabilityOverrides,
+      execution: {
+        ...baseCapabilities.execution,
+        ...capabilityOverrides.execution,
+      },
+      maxBindParameters: resolveMaxBindParametersCapability(
+        executionAdapter.profile,
+        capabilityOverrides.maxBindParameters,
+      ),
+      graphAnalytics: resolveSqliteGraphAnalyticsCapabilities(
+        executionAdapter.profile,
+        capabilityOverrides.graphAnalytics,
+      ),
+    }),
+  );
   // `declaredCapabilities` above is this profile's contribution; the
   // capability tail (`finalizeEngineCapabilities`, `./engine/capabilities`)
   // that derives `execution.atomicBatch`, `vector` (from `vectorStrategy`
@@ -1565,7 +1577,11 @@ export function buildSqliteEngineProfile(
     },
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
-    catalog: createSqliteCatalogProbes(executionAdapter, operationStrategy, serializedQueue),
+    catalog: createSqliteCatalogProbes(
+      executionAdapter,
+      operationStrategy,
+      serializedQueue,
+    ),
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
@@ -2212,13 +2228,16 @@ export function buildSqliteEngineProfile(
     };
   }
 
-  return {
+  // Assigned to an explicitly typed `const` rather than passed to
+  // `registerFirstPartyProfile` as an inline literal: excess-property
+  // checking only runs against a fresh object literal assigned to a KNOWN
+  // type, and `registerFirstPartyProfile<T extends object>` would otherwise
+  // infer `T` from the literal itself, checking nothing. Registered by
+  // object identity on the exact object returned below — so
+  // `createSqlBackend` marks this backend and its fence target first-party
+  // — rather than by a field a copy or spread could carry forward.
+  const profile: SqlEngineProfile<AnySqliteDatabase> = {
     dialect: "sqlite",
-    // Minted fresh for this profile instance — recognized only by this
-    // module's own `isRecognizedFirstPartyProfileToken`, so `createSqlBackend`
-    // marks this backend and its fence target first-party, exactly as it did
-    // before either was gated on the token.
-    firstParty: mintFirstPartyProfileToken(),
     tableNames,
     execution: executionAdapter,
     strategy: operationStrategy,
@@ -2234,13 +2253,13 @@ export function buildSqliteEngineProfile(
     baseSchemaRuntime,
     indexMaterializationRuntime,
     kindRemovalRuntime,
-    buildOperations,
     close(): Promise<void> {
       serializedQueue?.dispose();
       return Promise.resolve();
     },
-    lateMembers,
+    assembly: assembleEngine({ buildOperations, lateMembers }),
   };
+  return registerFirstPartyProfile(profile);
 }
 
 function createTransactionBackend(

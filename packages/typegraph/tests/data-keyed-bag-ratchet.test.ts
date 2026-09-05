@@ -71,12 +71,6 @@ const ALLOWLIST: readonly AllowedSite[] = [
       "`gated` is keyed by `keyof GatableFulltextBackend` — a closed set of method names written in this file, not data.",
   },
   {
-    file: "backend/capabilities/write-fence.ts",
-    line: "const token: FirstPartyProfileToken = {};",
-    reason:
-      "An identity sentinel recognized by reference through a WeakSet; no key is ever assigned to it.",
-  },
-  {
     file: "backend/drizzle/sqlite.ts",
     line: "const taskMarker: object = {};",
     reason:

@@ -8,41 +8,127 @@
  */
 import { ConfigurationError } from "../../errors";
 import { type SqlDialect } from "../../query/dialect/types";
-import { type SqlFragment } from "../../query/sql-fragment";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type BackendCapabilities } from "../types";
 
 /**
  * The lock-statement spelling a backend supplies alongside its
- * `pessimisticLocks` declaration: a small bag of {@link SqlFragment} builders,
- * one per shape a lock site needs. A backend that declares `advisoryLocks:
- * true` must supply this; one that only serializes writers
+ * `pessimisticLocks` declaration: the two composable, no-`SELECT`
+ * expressions a fused statement (a CTE, a data-modifying statement) embeds
+ * directly, plus the one relation-lock builder. A backend that declares
+ * `advisoryLocks: true` must supply this; one that only serializes writers
  * needs none.
  *
- * `advisoryLock`'s `key` accepts a `number` for the database-scoped locks
- * that key on a constant second argument (`0`) rather than a hashed value —
- * the two-argument `pg_advisory_xact_lock` overload takes that second
- * argument as a plain integer, never as `hashtext(...)` of one.
+ * This is deliberately the ONLY spelling a backend author writes.
+ * {@link resolveFenceStatements} derives the standalone-statement forms
+ * (`advisoryLock`, `advisoryLockWithIsolation`, `isolationFact`) from
+ * `advisoryLockExpression` / `isolationFactExpression` — a backend never
+ * spells both a statement and the expression it wraps separately, so the
+ * fused embedding and the standalone statement can never disagree about
+ * what they lock or read.
+ *
+ * `advisoryLockExpression`'s `key` accepts a `number` for the
+ * database-scoped locks that key on a constant second argument (`0`) rather
+ * than a hashed value — the two-argument `pg_advisory_xact_lock(int4, int4)`
+ * overload takes that second argument as a plain integer, never as
+ * `hashtext(...)` of one.
  */
 export type FenceSql = Readonly<{
-  /** A keyed lock scoped to the transaction, e.g. `pg_advisory_xact_lock`. */
-  advisoryLock: (namespace: string, key: string | number) => SqlFragment;
-  /**
-   * The same lock plus the session's isolation-level fact, in ONE statement
-   * — the "session facts come from the session that enforces them" contract:
-   * the fact is read on the exact connection the lock was just taken on.
-   */
-  advisoryLockWithIsolation: (
-    namespace: string,
-    key: string | number,
-  ) => SqlFragment;
   /** A relation lock, e.g. `LOCK TABLE ... IN ... MODE`. */
   lockTables: (
     tables: readonly string[],
     mode: "share" | "share-row-exclusive" | "access-exclusive",
   ) => SqlFragment;
-  /** The bare session isolation-level read, with no lock. */
-  isolationFact: () => SqlFragment;
+  /**
+   * The bare lock expression, with no `SELECT` around it. A statement that
+   * must take the lock INSIDE a larger query it composes itself embeds this
+   * directly — PostgreSQL's fused schema + graph-write fence
+   * (`postgres-schema-write-fence.ts`) is the one site that needs this: it
+   * reaches the schema table, so it cannot be built from a standalone
+   * statement. Every other lock site consumes
+   * {@link resolveFenceStatements}'s derived `advisoryLock`, which wraps
+   * this in a standalone `SELECT`.
+   */
+  advisoryLockExpression: (
+    namespace: string,
+    key: string | number,
+  ) => SqlFragment;
+  /**
+   * The bare session isolation-level read, with no `SELECT`/alias around
+   * it — embedded the same way `advisoryLockExpression` is, and wrapped by
+   * {@link resolveFenceStatements}'s derived `isolationFact` /
+   * `advisoryLockWithIsolation` for every other site.
+   */
+  isolationFactExpression: () => SqlFragment;
 }>;
+
+/**
+ * `FenceSql`'s two author-supplied expressions plus the three
+ * standalone-statement forms {@link resolveFenceStatements} derives from
+ * them — what a `lock` plan's `sql` field actually carries, and what every
+ * ordinary lock site consumes.
+ */
+export type FenceStatements = FenceSql &
+  Readonly<{
+    /** A keyed lock scoped to the transaction, e.g. `pg_advisory_xact_lock`. */
+    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
+    /**
+     * The same lock plus the session's isolation-level fact, in ONE
+     * statement — the "session facts come from the session that enforces
+     * them" contract: the fact is read on the exact connection the lock
+     * was just taken on.
+     */
+    advisoryLockWithIsolation: (
+      namespace: string,
+      key: string | number,
+    ) => SqlFragment;
+    /** The bare session isolation-level read, with no lock. */
+    isolationFact: () => SqlFragment;
+  }>;
+
+function advisoryLockStatement(
+  fenceSql: FenceSql,
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`SELECT ${fenceSql.advisoryLockExpression(namespace, key)}`;
+}
+
+function advisoryLockWithIsolationStatement(
+  fenceSql: FenceSql,
+  namespace: string,
+  key: string | number,
+): SqlFragment {
+  return sql`
+    SELECT
+      ${fenceSql.advisoryLockExpression(namespace, key)},
+      ${fenceSql.isolationFactExpression()} AS transaction_isolation
+  `;
+}
+
+function isolationFactStatement(fenceSql: FenceSql): SqlFragment {
+  return sql`SELECT ${fenceSql.isolationFactExpression()} AS transaction_isolation`;
+}
+
+/**
+ * THE one owner of "wrap a fence expression in its standalone statement
+ * form": derives `advisoryLock`, `advisoryLockWithIsolation`, and
+ * `isolationFact` from `fenceSql`'s `advisoryLockExpression` /
+ * `isolationFactExpression` — the only way to reach those three forms, so a
+ * fused embedding and a portable lock site can never spell the lock or the
+ * isolation read differently. Called once, by `planFromLockCapabilities`,
+ * when a `lock` plan resolves.
+ */
+export function resolveFenceStatements(fenceSql: FenceSql): FenceStatements {
+  return {
+    ...fenceSql,
+    advisoryLock: (namespace: string, key: string | number) =>
+      advisoryLockStatement(fenceSql, namespace, key),
+    advisoryLockWithIsolation: (namespace: string, key: string | number) =>
+      advisoryLockWithIsolationStatement(fenceSql, namespace, key),
+    isolationFact: () => isolationFactStatement(fenceSql),
+  };
+}
 
 /**
  * The two independent facts a backend can report about concurrent-writer
@@ -97,7 +183,7 @@ export type WriteFencePlan =
       kind: "lock";
       advisoryLocks: true;
       tableLocks: boolean;
-      sql: FenceSql;
+      sql: FenceStatements;
     }>
   /** No lock needed: the engine serializes writers. */
   | Readonly<{ kind: "engine-serialized" }>
@@ -184,65 +270,109 @@ export function carryFirstPartyFactoryMark(
 }
 
 /**
- * The token `SqlEngineProfile.firstParty` carries. Structurally this type
- * grants nothing — like {@link WriteFenceTarget}, a plain object literal of
- * this shape (`{}`) type-checks fine. What makes it unforgeable is the same
- * technique as the mark itself: a `WeakSet` recording exactly the objects
- * {@link mintFirstPartyProfileToken} produced, so a hand-built lookalike a
- * profile author assembles by reading this type is never recognized.
+ * The bundled-profile objects `buildSqliteEngineProfile` and
+ * `buildPostgresEngineProfile` returned, keyed by object identity rather
+ * than a field. Module-private for the same reason
+ * `FIRST_PARTY_FACTORY_BACKENDS` is: `registerFirstPartyProfile` grants
+ * standing to the ONE object each builder returns, so a copy, spread, or
+ * otherwise derived profile is a new object this set has never seen and is
+ * never first-party — no field on it could carry the standing forward the
+ * way a spread carries every other key.
+ */
+const FIRST_PARTY_PROFILES = new WeakSet<object>();
+
+/**
+ * The `SqlEngineProfile` fields `registerFirstPartyProfile` freezes beyond
+ * the profile object itself — read through this narrow structural shape
+ * rather than `SqlEngineProfile` itself, so this module (below
+ * `create-sql-backend.ts` and `./profile` in the dependency order) need not
+ * import the profile type to reach them.
+ */
+type ProfileTrustBearingBags = Readonly<{
+  declaredCapabilities?: object;
+  resourceAudit?: object;
+  autocommit?: object;
+  tableNames?: object;
+  fenceSql?: object;
+}>;
+
+/**
+ * Registers `profile` as first-party and returns the SAME object, frozen —
+ * a builder writes `const profile: SqlEngineProfile<...> = {...}; return
+ * registerFirstPartyProfile(profile);` and hands its caller back exactly the
+ * object this set now recognizes. Called once each by
+ * `buildSqliteEngineProfile` and `buildPostgresEngineProfile` on the exact
+ * object they return. Not exported from `src/backend/index.ts` or the
+ * `adapters/drizzle/engine` entrypoint, so nothing outside this module can
+ * grant a profile first-party standing — a profile assembled anywhere else,
+ * including one built by spreading a bundled profile's fields into a new
+ * object literal, is a different object and is never registered.
+ *
+ * The `Object.freeze` on `profile` itself binds its own fields — a caller
+ * cannot replace `profile.resourceAudit` with a different object — but that
+ * alone leaves every sub-object still mutable in place. That matters because
+ * `deriveEngineProfile` builds a derived profile as `{...base, ...overrides}`:
+ * any field `overrides` does not name is the SAME sub-object `base` holds,
+ * not a copy, so `derived.resourceAudit.kind = "serialized"` would otherwise
+ * mutate `base.resourceAudit` directly, behind the override validation that
+ * only ever sees `overrides`. So this also freezes the bags a derived
+ * profile shares with `base` by reference: `resourceAudit`, `autocommit`,
+ * `tableNames`, `fenceSql`, and `declaredCapabilities` — their OWN fields,
+ * not what those fields point to. `declaredCapabilities` arrives already
+ * sealed: each builder passes its declaration through
+ * `sealCapabilityDeclaration` (`./declarations`), the one owner of "clone,
+ * then deep-freeze", so the bag is immutable all the way down and never
+ * aliases an object the caller supplied as an override. `resourceAudit
+ * .resource` and `identityLeaseResource` stay reachable and mutable: those
+ * are the driver's own connection handles, not data TypeGraph owns, and
+ * freezing the `resourceAudit` object itself already blocks swapping which
+ * handle it names. `fenceSql`'s own functions stay reachable and mutable
+ * too — this freeze binds only the CONTAINER, so a derived profile can
+ * still be constructed with a fresh `fenceSql` override, but it blocks a
+ * caller from reassigning `derived.fenceSql.advisoryLockExpression` (or any
+ * other member) in place, which would otherwise silently rewrite the
+ * spelling `base.fenceSql` hands back too. Every other profile field is a
+ * closure this module has no business freezing (`execution`, `provisioning`,
+ * the six `*Runtime` bags, `assembly`).
+ *
+ * `deriveEngineProfile` itself is unaffected beyond this: it reads `base`'s
+ * fields and spreads them into a NEW object literal, which spreading a
+ * frozen source object does not freeze — a caller who overrides
+ * `declaredCapabilities` with a fresh literal gets back a profile whose
+ * `declaredCapabilities` is that fresh, unfrozen object, exactly as before.
  *
  * @internal
  */
-export type FirstPartyProfileToken = Readonly<Record<never, never>>;
-
-/**
- * The tokens {@link mintFirstPartyProfileToken} has actually minted.
- * Module-private for the same reason `FIRST_PARTY_FACTORY_BACKENDS` is: the
- * unforgeability this buys `isRecognizedFirstPartyProfileToken` depends on
- * nothing outside this file ever adding to it.
- */
-const RECOGNIZED_FIRST_PARTY_PROFILE_TOKENS = new WeakSet<object>();
-
-/**
- * Mints a fresh {@link FirstPartyProfileToken}. Called once each by
- * `buildSqliteEngineProfile` and `buildPostgresEngineProfile` and stored on
- * the profile's `firstParty` field. Not exported from `src/backend/index.ts`
- * or the `adapters/drizzle/engine` entrypoint, so nothing outside this module
- * can mint a token {@link isRecognizedFirstPartyProfileToken} accepts — a
- * profile assembled anywhere else, including one built by spreading a
- * bundled profile's fields into a plain object literal, cannot manufacture
- * first-party standing for itself.
- *
- * @internal
- */
-export function mintFirstPartyProfileToken(): FirstPartyProfileToken {
-  const token: FirstPartyProfileToken = {};
-  RECOGNIZED_FIRST_PARTY_PROFILE_TOKENS.add(token);
-  return token;
+export function registerFirstPartyProfile<T extends object>(profile: T): T {
+  FIRST_PARTY_PROFILES.add(profile);
+  const bags = profile as ProfileTrustBearingBags;
+  if (bags.declaredCapabilities !== undefined) {
+    Object.freeze(bags.declaredCapabilities);
+  }
+  if (bags.resourceAudit !== undefined) Object.freeze(bags.resourceAudit);
+  if (bags.autocommit !== undefined) Object.freeze(bags.autocommit);
+  if (bags.tableNames !== undefined) Object.freeze(bags.tableNames);
+  if (bags.fenceSql !== undefined) Object.freeze(bags.fenceSql);
+  return Object.freeze(profile);
 }
 
 /**
- * Whether `token` is one this module actually minted; `undefined` (a
- * profile that never set `firstParty`) and a hand-built object of the same
- * shape both answer `false`.
+ * Whether `profile` is an object {@link registerFirstPartyProfile} has
+ * actually registered.
  *
  * `createSqlBackend` calls this once per assembly and uses the result to
  * gate every `markFirstPartyFactory` call it makes — on the backend it
- * returns and on the one fence target it builds. An absent or unrecognized
- * token leaves both unmarked, which in turn keeps two things closed to a
- * profile this factory did not mint a token for: `resolveWriteFencePlan`'s
- * dialect-derivation fallback (sound only for the two bundled dialects) and
- * the lazy schema-fence lease `src/store/operations/write-transaction.ts`
- * takes out under `isFirstPartyFactory`.
+ * returns and on the one fence target it builds. A profile this module
+ * never registered leaves both unmarked, which in turn keeps two things
+ * closed to it: `resolveWriteFencePlan`'s dialect-derivation fallback
+ * (sound only for the two bundled dialects) and the lazy schema-fence
+ * lease `src/store/operations/write-transaction.ts` takes out under
+ * `isFirstPartyFactory`.
  *
  * @internal
  */
-export function isRecognizedFirstPartyProfileToken(
-  token: FirstPartyProfileToken | undefined,
-): boolean {
-  return (
-    token !== undefined && RECOGNIZED_FIRST_PARTY_PROFILE_TOKENS.has(token)
-  );
+export function isFirstPartyProfile(profile: object): boolean {
+  return FIRST_PARTY_PROFILES.has(profile);
 }
 
 function deriveFromDialect(dialect: SqlDialect): PessimisticLockCapabilities {
@@ -334,7 +464,7 @@ function planFromLockCapabilities(
       kind: "lock",
       advisoryLocks: true,
       tableLocks: declared.tableLocks,
-      sql: target.fenceSql,
+      sql: resolveFenceStatements(target.fenceSql),
     };
   }
   if (declared.serializedWriters) return { kind: "engine-serialized" };

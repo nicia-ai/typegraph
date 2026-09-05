@@ -3,8 +3,9 @@ import { recordedRevisionOriginsMembers } from "../../backend/capabilities/bind"
 import { type RECORDED_REVISION_ORIGINS } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
-  type FenceSql,
+  type FenceStatements,
   requireWriteFence,
+  resolveFenceStatements,
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
 import {
@@ -58,6 +59,15 @@ const RECORDED_MIN_TIME = "1970-01-01T00:00:00.000Z";
 const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
 
 /**
+ * `resolveFenceStatements(postgresFenceSql)`, hoisted once: the bundled
+ * PostgreSQL spelling's derived standalone-statement forms, for the two
+ * functions below that render this module's advisory locks' actual SQL text
+ * for a caller that needs it directly rather than through a resolved plan —
+ * a test driving a raw connection, or a competing manual lock.
+ */
+const postgresFenceStatements = resolveFenceStatements(postgresFenceSql);
+
+/**
  * Renders the bundled PostgreSQL spelling of this module's two advisory
  * locks, for a caller that needs the actual SQL text rather than a resolved
  * plan — a test driving a raw connection, or a competing manual lock. The
@@ -77,7 +87,7 @@ const RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE = "typegraph:recorded-clock";
  * wait under ordinary concurrent load.
  */
 export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
-  return postgresFenceSql.advisoryLock(
+  return postgresFenceStatements.advisoryLock(
     RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
     graphId,
   );
@@ -86,7 +96,7 @@ export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
 export function recordedGraphWriteAdvisoryLockSql(
   graphId: string,
 ): SqlFragment {
-  return postgresFenceSql.advisoryLockWithIsolation(
+  return postgresFenceStatements.advisoryLockWithIsolation(
     RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
     graphId,
   );
@@ -204,7 +214,7 @@ export function registerRecordedGraphLockMemo(
 
 async function acquireRecordedGraphWriteLock(
   target: Pick<GraphBackend, "execute">,
-  fenceSql: FenceSql,
+  fenceSql: FenceStatements,
   graphId: string,
 ): Promise<GraphCommandIsolation> {
   const rows = await target.execute<

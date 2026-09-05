@@ -254,6 +254,62 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * seventh name — `TableState` — newly reachable at the same fourteen
  * entrypoints (+1 each, on top of the six above). `./backend` again exports
  * it directly, so its debt stays unchanged.
+ *
+ * Builder export batch: exporting `buildPostgresEngineProfile` and
+ * `buildSqliteEngineProfile` from `./adapters/drizzle/engine` — previously
+ * reachable only through `createPostgresBackend`/`createSqliteBackend` in
+ * the released `./adapters/drizzle/postgres` / `./adapters/drizzle/sqlite`
+ * entrypoints, which export each builder's own options and table types
+ * directly — makes their full parameter and return type graph newly
+ * reachable and unexported HERE: the two dialect-database aliases each
+ * function's `db` parameter needs (`AnyPgDatabase`, `AnyPgTransaction`,
+ * `AnySqliteDatabase`), each `options` parameter type
+ * (`PostgresBackendOptions` / `SqliteBackendOptions`) and everything its
+ * `tables` field reaches (`PostgresTables`/`SqliteTables`,
+ * `CreatePostgresTablesOptions`/`CreateSqliteTablesOptions`,
+ * `PostgresTableNames`/`SqliteTableNames`), plus
+ * `BundledBackendCapabilityOverrides`, `SqliteTransactionMode`,
+ * `SerializedResourceDeclaration`, `GraphIdentityConfig`, and the
+ * contribution-diagnostic shapes each options type's `capabilities`/
+ * `contributionRepair` fields reach. `PostgresTables`/`SqliteTables` are
+ * inferred from the anonymous Drizzle table-builder return type of
+ * `createPostgresTables`/`createSqliteTables` rather than a named export, so
+ * API Extractor inlines the full column-builder shape for every column of
+ * every bundled table — the bulk of this batch's line count. No other
+ * entrypoint moved.
+ *
+ * `deriveEngineProfile` batch: exporting `deriveEngineProfile`,
+ * `DerivableEngineProfileKey`, `DerivableEngineProfileOverrides`,
+ * `DERIVABLE_ENGINE_PROFILE_KEYS`, and `BackendResourceAudit` from
+ * `./adapters/drizzle/engine` reaches no vocabulary this entrypoint's type
+ * graph did not already render as forgotten-export debt (`SqlEngineProfile`,
+ * `FenceSql`, and `BackendResourceAudit` itself were already reachable
+ * through the builders' own return types) — except `BackendResourceAudit`
+ * moving from forgotten to directly exported, which reduces this
+ * entrypoint's debt count by exactly the one name (−1). No other entrypoint
+ * moved.
+ *
+ * Opaque assembly batch: replacing `SqlEngineProfile.buildOperations` /
+ * `.lateMembers` with one opaque `assembly: EngineAssembly<TTx>` field
+ * removes `EngineAssemblyContext`, `EngineOperationsContext`,
+ * `EngineLateMembers`, and everything reachable only through them
+ * (`InternalOperationBackend`, `ContributionMaterializer`, and one of the
+ * two prior occurrences of `WriteFenceTarget`) from this entrypoint's type
+ * graph. `WriteFenceTarget` itself does not disappear: `ContributionRuntime`
+ * still reaches it through `CreateContributionMembersDeps.fenceTarget`, an
+ * already-unexported field this batch does not touch. 347 → 320 (−27). No
+ * other entrypoint moved.
+ *
+ * Canonical fence-statement spelling: `FenceSql` shrinks to its two
+ * author-supplied expressions plus `lockTables`; the new `FenceStatements`
+ * type (`FenceSql` intersected with the three derived standalone-statement
+ * forms `resolveWriteFencePlan`'s `lock` arm now carries as `sql`, in place
+ * of the bare `FenceSql` it carried before) is newly reachable only through
+ * `WriteFencePlan`, which only `./backend` renders anywhere in its type
+ * graph (+1: `FenceStatements`, 16 → 17). The 14 entrypoints the fence-plan
+ * spelling batch above moved reach `FenceSql` through `GraphBackend
+ * .fenceSql` instead, a field whose type is unchanged by this shrink, so
+ * none of them render `WriteFencePlan`/`FenceStatements` and none move here.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -267,8 +323,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "11f038ecdf42bbad583047a01c5b5106f226a42291f67f19d588448764a6cbeb",
   },
   "./adapters/drizzle/engine": {
-    count: 332,
-    sha256: "897ea05b4706a8f424132359f2b9bb97143289bf4545d5ddbb1d95f1f867f652",
+    count: 320,
+    sha256: "de637873ab980dde2778687f620ffbc5cef77e54e4d422050c0bb2dc181eee7d",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
@@ -295,8 +351,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "17154fcd67efb82e904e7ed3fa57cc984114bdd75b7acaebb6ed5782d7f8c3cf",
   },
   "./backend": {
-    count: 16,
-    sha256: "8fe4a8c3a1c1b997735418d441a12fe07c37d647267af642776f6d58e255f6f7",
+    count: 17,
+    sha256: "d7be94fc8aff9a4c4f7e304ce209aaf05f426ad2a8e808fa8b5066bfae75f19e",
   },
   "./core": {
     count: 72,
