@@ -79,6 +79,7 @@ import {
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
+import { delay } from "../../utils/delay";
 import {
   isSerializationFailure,
   isSqliteStaleSnapshotError,
@@ -738,8 +739,8 @@ export function runHookedWriteOperation<T>(
 
 /**
  * Milliseconds the backoff schedule starts from once it begins growing (from
- * the third attempt on; see {@link retryBackoffDelayMs}). The sole owner of
- * this number — nothing else in the codebase computes a retry delay.
+ * the third attempt on; see {@link retryBackoffDelayMs}). The only backoff
+ * for transaction-conflict replay.
  */
 const RETRY_BACKOFF_BASE_MS = 5;
 
@@ -771,11 +772,6 @@ function retryBackoffDelayMs(attemptNumber: number): number {
   return capped * jitterMultiplier;
 }
 
-function delay(milliseconds: number): Promise<void> {
-  if (milliseconds <= 0) return Promise.resolve();
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
 /**
  * How {@link runRetriedUnit} disposes of a failure one attempt raised:
  * whether it will re-run the unit, and — when it will not — the exact value
@@ -787,28 +783,52 @@ type RetriedUnitFailureDisposition = Readonly<
 >;
 
 /**
+ * An attempt that itself runs a nested unit of work through this same owner —
+ * graph-merge's commit sites call `target.transaction(...)`, which is
+ * `store.transaction()` run with no `retry` option, so a conflict inside it
+ * already comes back wrapped as a one-attempt {@link TransactionConflictError}
+ * (see `store.ts#runTransaction`) — reports THAT wrapper as its failure, not
+ * the driver error underneath. Classifying the wrapper as-is would still work
+ * ({@link isSerializationFailure} walks into its `cause`), but the
+ * exhaustion `TransactionConflictError` this loop mints would then wrap the
+ * INNER `TransactionConflictError` instead of the driver error it wraps in
+ * turn, chaining two conflict errors where the replay contract promises one.
+ * Unwrapping first makes the classification, and the eventual `cause`, the
+ * same regardless of whether an attempt calls the driver directly or through
+ * a nested single-attempt unit.
+ */
+function unwrapNestedConflict(error: unknown): unknown {
+  return error instanceof TransactionConflictError ? error.cause : error;
+}
+
+/**
  * The one classification a retryable failure gets, called both by the retry
  * loop itself and by {@link RetriedUnitFrame} so an attempt can learn — from
  * the very same decision, not a re-spelled copy of it — how its own failure
  * will be disposed of before the loop ever sees it.
  *
- * A failure {@link isSerializationFailure} does not recognize is never
- * retried and is reported as itself, unchanged. A recognized failure retries
- * while attempts remain; once they don't, it is reported as the
- * {@link TransactionConflictError} the loop raises for it.
+ * A failure {@link isSerializationFailure} does not recognize — after
+ * {@link unwrapNestedConflict} — is never retried and is reported as the
+ * ORIGINAL `error`, unchanged. A recognized failure retries while attempts
+ * remain; once they don't, it is reported as the {@link TransactionConflictError}
+ * the loop raises for it, whose `cause` is always the unwrapped failure, so
+ * exhaustion is ever only one conflict error deep.
  */
 function classifyRetriedUnitFailure(
   error: unknown,
   attemptNumber: number,
   options: Readonly<{ operation: string; attempts: number }>,
 ): RetriedUnitFailureDisposition {
-  if (!isSerializationFailure(error)) return { retry: false, reported: error };
+  const unwrapped = unwrapNestedConflict(error);
+  if (!isSerializationFailure(unwrapped)) {
+    return { retry: false, reported: error };
+  }
   if (attemptNumber < options.attempts) return { retry: true };
   return {
     retry: false,
     reported: new TransactionConflictError(
       { operation: options.operation, attempts: options.attempts },
-      { cause: error },
+      { cause: unwrapped },
     ),
   };
 }
@@ -850,7 +870,7 @@ function createMemoizedFailureClassifier(
  * The per-attempt handle {@link runRetriedUnit} passes to its `attempt`
  * factory.
  */
-export type RetriedUnitFrame = Readonly<{
+type RetriedUnitFrame = Readonly<{
   /** 1-based number of this attempt. */
   attempt: number;
   /**
@@ -891,6 +911,15 @@ export type RetriedUnitAttempt<T> = (frame: RetriedUnitFrame) => Promise<T>;
  * This is the one retry owner in the codebase: every store-owned unit of work
  * that may be replayed on a transaction conflict runs through this function,
  * never a second, parallel retry loop.
+ *
+ * When `attempt` itself fails with a `TransactionConflictError` — the shape a
+ * nested single-attempt unit reports (e.g. graph-merge's commit sites call
+ * `target.transaction(...)`, which is `store.transaction()` run with no
+ * `retry` option) — this loop classifies, and on exhaustion wraps, that
+ * error's OWN `cause` rather than the wrapper itself
+ * ({@link unwrapNestedConflict}). Exhaustion is therefore always exactly one
+ * `TransactionConflictError` deep, whose `cause` is the underlying driver
+ * error, never a chain of two conflict errors.
  *
  * `options.attempts` must be a positive integer — the budget for a unit that
  * has not tried even once is a configuration mistake, not a valid zero-retry
