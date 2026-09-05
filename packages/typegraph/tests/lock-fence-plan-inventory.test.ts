@@ -56,23 +56,26 @@
  *     ratchets cannot disagree about what a dialect literal is.
  *  3. The four PostgreSQL lock-statement tokens (`pg_advisory_xact_lock`,
  *     `hashtext(`, `LOCK TABLE`, `current_setting('transaction_isolation')`)
- *     appear nowhere in the ten files this ratchet scans
+ *     appear nowhere in the eleven files this ratchet scans
  *     ({@link FENCE_TOKEN_SCANNED_FILES}), including
  *     `backend/drizzle/trusted-import.ts` (J18, which now resolves the fence
  *     plan and calls `fence.sql.lockTables(...)` instead of spelling
- *     `LOCK TABLE` itself) and `backend/drizzle/operations/schema.ts` —
- *     every one of those consumes a resolved plan's `fence.sql.*` (or, for
- *     the one PostgreSQL-only builder that lives outside the plan, calls
- *     the resolved fence target's own `advisoryLockExpression` /
+ *     `LOCK TABLE` itself), `backend/drizzle/operations/schema.ts`, and
+ *     `backend/drizzle/postgres.ts` (the extension-DDL advisory lock, which
+ *     now resolves the same plan every other lock site does and calls
+ *     `fence.sql.advisoryLock(...)` instead of spelling the statement
+ *     inline) — every one of those consumes a resolved plan's `fence.sql.*`
+ *     (or, for the one PostgreSQL-only builder that lives outside the plan,
+ *     calls the resolved fence target's own `advisoryLockExpression` /
  *     `isolationFactExpression` members) instead of spelling the statement
  *     itself — and DOES appear in
  *     `backend/drizzle/postgres-fence-sql.ts`, the one module that owns the
  *     spelling. This ratchet's file list is deliberately narrower than "all
- *     of `src/`": `backend/drizzle/postgres.ts` (the one-off extension-DDL
- *     advisory lock documented as the remaining leftover in #622, and a
- *     one-argument advisory lock keyed on a deliberately different lock
- *     space than every namespaced two-argument lock) still spells one of
- *     these tokens inline and is not one of the sites this model covers.
+ *     of `src/`": `backend/capabilities/write-fence.ts` names
+ *     `pg_advisory_xact_lock` and `LOCK TABLE` twice inside the prose of a
+ *     refusal-message string (documentation of the capability to declare,
+ *     not a competing statement spelling) and is not one of the sites this
+ *     model covers.
  *
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
@@ -475,17 +478,22 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
  * the tokens when the PostgreSQL-only one relocated), that relocated
  * builder's own module, `graph-template-sql.ts` (whose `is_active`
  * literal was the only thing it ever spelled outside a resolved plan, and
- * that was never one of these four tokens), and `backend/drizzle/trusted-
+ * that was never one of these four tokens), `backend/drizzle/trusted-
  * import.ts` (J18: its table lock now resolves the same plan and calls
- * `fence.sql.lockTables(...)` instead of spelling `LOCK TABLE` itself) —
- * ten files in all — every one of these consumes `fence.sql.*` (or, for the fused schema+graph
- * statement, the resolved fence target's own `advisoryLockExpression` /
- * `isolationFactExpression` members) rather than spelling a token itself. Deliberately narrower
- * than "all of `src/`": `backend/drizzle/postgres.ts` (the one-off
- * extension-DDL advisory lock documented as the remaining leftover in #622,
- * and a lock space deliberately kept separate from every namespaced lock)
- * still spells one of these tokens inline and is not one of the sites this
- * ratchet covers.
+ * `fence.sql.lockTables(...)` instead of spelling `LOCK TABLE` itself), and
+ * `backend/drizzle/postgres.ts` (the extension-DDL advisory lock, once the
+ * remaining leftover documented in #622, now resolves the SAME plan
+ * `lateMembers` builds for every other lock site and calls
+ * `fence.sql.advisoryLock(...)` instead of spelling the statement inline) —
+ * eleven files in all — every one of these consumes `fence.sql.*` (or, for
+ * the fused schema+graph statement, the resolved fence target's own
+ * `advisoryLockExpression` / `isolationFactExpression` members) rather than
+ * spelling a token itself. Deliberately narrower than "all of `src/`":
+ * `backend/capabilities/write-fence.ts` names `pg_advisory_xact_lock` and
+ * `LOCK TABLE` twice, inside the prose of `unfencedRefusalMessage`'s two
+ * dialect-description strings — documentation naming the capability a
+ * backend should declare, not a competing spelling of the lock statement
+ * itself — and is not one of the files this ratchet scans.
  */
 const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
   "store/recorded-capture/clock.ts",
@@ -493,6 +501,7 @@ const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
   "identity/service-read.ts",
   "identity/schema-transition.ts",
   "graph-merge/provenance-store.ts",
+  "backend/drizzle/postgres.ts",
   "backend/drizzle/contribution-materializations.ts",
   "backend/drizzle/operations/schema.ts",
   "backend/drizzle/postgres-schema-write-fence.ts",

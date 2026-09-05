@@ -117,6 +117,7 @@ import {
   registerFirstPartyProfile,
   requireWriteFence,
   resolveWriteFencePlan,
+  type WriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import { deriveBackend } from "../derive-backend";
@@ -1094,26 +1095,36 @@ export function buildPostgresEngineProfile(
    * objects still race on `pg_extension_name_index`. Two fences answer that,
    * and both are here because they answer different halves of it:
    *
-   *  - the advisory lock serializes same-key installers inside this process
-   *    group so the common case never raises at all (#475). It is keyed on the
-   *    extension so installing `vector` does not queue behind `pg_trgm`;
+   *  - the resolved write-fence plan's advisory lock — spelled through
+   *    `fencePlan.sql.advisoryLock`, like every other lock site, rather than
+   *    inline — serializes same-key installers inside this process group so
+   *    the common case never raises at all (#475). It is keyed on the
+   *    extension so installing `vector` does not queue behind `pg_trgm`. This
+   *    is the one lock site that DEGRADES instead of refusing: a plan that
+   *    resolves `engine-serialized` or `unfenced` takes no lock and falls
+   *    through to the same retry-only path as the non-interactive branch
+   *    below, because the retry — not the lock — is what makes a concurrent
+   *    install correct;
    *  - {@link withConcurrentCreateRetry} clears the 23505 an installer that did
-   *    NOT take this lock can still hand us — a peer on an older version, whose
-   *    lock key differs, or a `capabilities.execution.interactiveTransactions: false` backend which
-   *    has no transaction to hang a `pg_advisory_xact_lock` on (#446).
+   *    NOT take the lock can still hand us — a peer on an older version, whose
+   *    lock key differs, a `capabilities.execution.interactiveTransactions: false`
+   *    backend which has no transaction to hang the lock on (#446), or a
+   *    backend whose resolved plan takes no lock at all.
    *
    * The lock runs in its own transaction on purpose: a 23505 poisons an
    * enclosing transaction (the next statement fails `25P02`), so the retry is
    * sound only when the failed unit of work is one this function owns
    * end-to-end.
    */
-  // Takes `capabilities` explicitly rather than closing over a head-level
-  // constant: this backend's finalized capabilities are `createSqlBackend`'s
+  // Takes `capabilities` and `fencePlan` explicitly rather than closing over
+  // head-level constants: this backend's finalized capabilities and its
+  // resolved write-fence plan are `createSqlBackend`'s
   // (`EngineOperationsContext.capabilities` / `EngineAssemblyContext
-  // .capabilities`), and this function's only caller — `lateMembers.extensions`
-  // — already has that value on `ctx`.
+  // .fencePlan`), and this function's only caller — `lateMembers.extensions`
+  // — already has both values on `ctx`.
   async function ensureDatabaseExtension(
     capabilities: BackendCapabilities,
+    fencePlan: WriteFencePlan,
     name: DatabaseExtensionName,
   ): Promise<void> {
     // The name reaches DDL by interpolation, so the allowlist — not the
@@ -1131,14 +1142,20 @@ export function buildPostgresEngineProfile(
       );
     }
     const ddl = `CREATE EXTENSION IF NOT EXISTS "${validated}";`;
-    if (!capabilities.execution.interactiveTransactions) {
+    if (
+      !capabilities.execution.interactiveTransactions ||
+      fencePlan.kind !== "lock"
+    ) {
       await executeConcurrentCreateDdl(ddl);
       return;
     }
     await withConcurrentCreateRetry(async () => {
       await db.transaction(async (tx) => {
         await tx.execute(
-          sql`SELECT pg_advisory_xact_lock(hashtext(${extensionDdlLockKey(validated)}), 0)`,
+          toDrizzleSql(
+            fencePlan.sql.advisoryLock(extensionDdlLockKey(validated), 0),
+            "postgres",
+          ),
         );
         await tx.execute(sql.raw(ddl));
       });
@@ -1922,9 +1939,10 @@ export function buildPostgresEngineProfile(
       : {}),
 
       extensions: {
-        ensureExtension: (name) => ensureDatabaseExtension(capabilities, name),
+        ensureExtension: (name) =>
+          ensureDatabaseExtension(capabilities, fencePlan, name),
         ensureTrigramExtension(): Promise<void> {
-          return ensureDatabaseExtension(capabilities, "pg_trgm");
+          return ensureDatabaseExtension(capabilities, fencePlan, "pg_trgm");
         },
         async claimIndexMaterialization(
           params: ClaimIndexMaterializationParams,
