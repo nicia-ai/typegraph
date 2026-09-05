@@ -136,6 +136,12 @@ An override naming any of these throws `ConfigurationError` with code
 type would have allowed it — the check runs against the overrides
 object's own keys at runtime, not only its declared type.
 
+These refusals are `deriveEngineProfile`'s contract, not `createSqlBackend`'s.
+A profile spread by hand (`{ ...base, execution: mine }`) carries the base's
+`assembly` by reference, so `createSqlBackend` accepts it and applies the
+override to some members while others keep the builder's value — exactly the
+split the refusal exists to prevent. Derive through `deriveEngineProfile`.
+
 ## Worked example: a custom advisory-lock spelling
 
 An engine that spells its advisory lock differently from the bundled

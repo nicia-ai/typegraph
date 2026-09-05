@@ -80,8 +80,14 @@ const ENGINE_ASSEMBLIES = new WeakMap<object, EngineAssemblyParts<never>>();
 export function assembleEngine<TTx>(
   parts: EngineAssemblyParts<TTx>,
 ): EngineAssembly<TTx> {
-  const assembly = {} as unknown as EngineAssembly<TTx>;
-  ENGINE_ASSEMBLIES.set(assembly, parts as unknown as EngineAssemblyParts<never>);
+  // A frozen, prototype-less handle: it carries no properties of its own
+  // (the brand is type-level only) and can never acquire any, so identity in
+  // the map above is the whole of what an assembly value is.
+  const assembly = Object.freeze(Object.create(null) as EngineAssembly<TTx>);
+  ENGINE_ASSEMBLIES.set(
+    assembly,
+    parts as unknown as EngineAssemblyParts<never>,
+  );
   return assembly;
 }
 

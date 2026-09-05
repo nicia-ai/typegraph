@@ -213,9 +213,14 @@ const FIRST_PARTY_PROFILES = new WeakSet<object>();
  * on the exact object this set recognizes and keep every effect first-party
  * standing grants — the dialect-derivation fallback, the lazy schema-fence
  * lease — while the profile no longer matches what either builder actually
- * built. `deriveEngineProfile` is unaffected: it reads `base`'s fields and
- * spreads them into a NEW object literal, which spreading a frozen source
- * object does not freeze.
+ * built. The freeze is shallow: it binds the profile's own fields, not the
+ * values behind them, so a caller can still mutate a bag such as
+ * `declaredCapabilities` in place. A blanked `pessimisticLocks` on a
+ * first-party profile is covered by the dialect-derivation fallback in
+ * `resolveWriteFencePlan`, which is sound for the two bundled dialects.
+ * `deriveEngineProfile` is unaffected: it reads `base`'s fields and spreads
+ * them into a NEW object literal, which spreading a frozen source object
+ * does not freeze.
  *
  * @internal
  */

@@ -139,7 +139,7 @@ export type EngineOperationsContext = Readonly<{
  */
 export type EngineAssemblyContext<TTx> = EngineOperationsContext &
   Readonly<{
-    /** The operation-backend layer `createSqlBackend` built from `profile.buildOperations`. */
+    /** The operation-backend layer `createSqlBackend` built from the `buildOperations` closure the profile's assembly wraps (`./assembly`). */
     operations: InternalOperationBackend;
     /** Resolves to the backend `createSqlBackend` is building. */
     self: () => AdapterBackend<TTx>;

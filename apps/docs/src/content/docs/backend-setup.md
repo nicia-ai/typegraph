@@ -1148,10 +1148,11 @@ const backend = createSqlBackend(buildPostgresEngineProfile(db, options));
 Most callers adapting a bundled backend want `deriveEngineProfile`, which
 builds a variant of a bundled profile — a different lock spelling, a looser
 declared capability, a replaced resource-audit verdict — without hand-copying
-every other field. A third-party engine with no bundled profile to start from
-supplies its own from scratch and passes it to `createSqlBackend` directly.
-See [Authoring an engine profile](/backend-authoring) for the derivable-field
-table, the refusals a custom profile can hit, and a worked example.
+every other field. A profile written from scratch is not constructible today:
+the assembly constructor is unexported, and `createSqlBackend` refuses a
+hand-built assembly. See [Authoring an engine profile](/backend-authoring) for
+the derivable-field table, the refusals a custom profile can hit, a worked
+example, and [what is not derivable yet](/backend-authoring#what-is-not-derivable-yet).
 
 A profile owns everything that genuinely differs between engines: dialect
 tokens, the execution adapter, transaction framing, its `fenceSql` lock

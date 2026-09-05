@@ -44,8 +44,10 @@ export type { BackendResourceAudit } from "../../transaction-resource";
  * `deriveEngineProfile` (this entrypoint) starts every derived PostgreSQL
  * profile from. Exported here, not from `./adapters/drizzle/postgres`: that
  * entrypoint is released and only ever hands a caller a finished backend,
- * so exporting a profile-returning function there would make every type
- * behind `buildOperations`/`lateMembers` reachable from a released surface.
+ * so exporting a profile-returning function there would pull the profile's
+ * whole head type graph (`execution`, `strategy`, `provisioning`, the
+ * `*Runtime` deps) onto a released surface; the opaque `assembly` keeps only
+ * the operation and late-member closures off it.
  * This entrypoint is unreleased and is exactly where profile instances
  * belong. The returned object, and only that object, is first-party — see
  * `SqlEngineProfile`'s own doc comment.
