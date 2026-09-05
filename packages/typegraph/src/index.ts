@@ -538,6 +538,7 @@ export type {
   StoreAnalysisSchemaCoordinate,
   StoreDescription,
   StorePopulationStatistics,
+  StoreTransactionOptions,
   StoreValidationFailure,
   StoreValidationPage,
   UniqueIntrospection,

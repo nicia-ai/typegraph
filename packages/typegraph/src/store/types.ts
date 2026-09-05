@@ -271,6 +271,14 @@ export type HookContext = Readonly<{
   graphId: string;
   /** Timestamp when operation started */
   startedAt: Date;
+  /**
+   * 1-based try number that produced this context. Always `1` outside a
+   * `store.transaction(fn, { retry: { attempts } })` call; inside one, a
+   * value above 1 marks a replay of the same logical operation after an
+   * earlier attempt hit a transaction conflict, so a listener can tell a
+   * retried attempt from a genuinely new operation.
+   */
+  attempt: number;
 }>;
 
 /**

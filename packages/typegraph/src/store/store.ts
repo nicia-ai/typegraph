@@ -297,7 +297,9 @@ import {
   prepareNodeReplacement,
 } from "./operations";
 import {
+  type RetriedUnitAttempt,
   runInWriteTransaction,
+  runRetriedUnit,
   withTransactionSchemaFenceLease,
   withWriteTransactionSession,
   type WriteTransactionContext,
@@ -573,6 +575,19 @@ type PendingOperationOutcome =
 type TransactionRunResult<T> = Readonly<{
   result: T;
   recordedByGraph: RecordedFlushInstants | undefined;
+  /** The committed attempt's own receipt recorder, when one was requested. */
+  recorder: TransactionReceiptRecorder | undefined;
+  /**
+   * The committed attempt's own buffered operation outcomes, awaiting the
+   * `onOperationEnd`/`onBulkOperationEnd` flush. Returned rather than
+   * flushed inside the attempt so that flush runs OUTSIDE `runRetriedUnit`:
+   * a hook it calls is user code that can throw for reasons that have
+   * nothing to do with the transaction, and by the time this value exists
+   * the backend has already committed — a throwing hook must propagate once,
+   * never be mistaken for a conflict and replay a transaction that already
+   * durably succeeded.
+   */
+  pending: readonly PendingOperationOutcome[];
 }>;
 
 /**
@@ -762,14 +777,43 @@ type StoreCore<G extends GraphDef> = Readonly<{
 }> &
   StoreIdentityAccess<G>;
 
+/**
+ * Options for {@link Store.transaction} and {@link Store.transactionWithReceipt}.
+ * `retry` is TypeGraph's own option: it is read here and never forwarded to
+ * the backend, which only ever sees the {@link TransactionOptions} fields.
+ *
+ * Without `retry`, the callback runs once; a transaction conflict the backend
+ * reports (a serialization failure or deadlock) surfaces as
+ * `TransactionConflictError` with `attempts: 1` instead of the raw driver
+ * error. With `retry`, such a conflict re-runs the WHOLE callback from the
+ * top — up to `attempts` times total — so the callback must tolerate being
+ * invoked more than once: await all of its own work before returning, read
+ * and write only values it creates fresh on each call (never something a
+ * previous, rolled-back try left in memory), and perform no effect outside
+ * its own transaction. Every hook the callback's operations fire carries the
+ * 1-based attempt number that produced it; a rolled-back attempt's completed
+ * operations report no `onOperationEnd` and no `onError` of their own —
+ * only the attempt that actually commits (or the last one, once `attempts`
+ * is exhausted) is reported.
+ */
+export type StoreTransactionOptions = TransactionOptions &
+  Readonly<{
+    /**
+     * Opts the callback into replay on a transaction conflict. The total
+     * number of tries, including the first. Exhausting it throws
+     * `TransactionConflictError`.
+     */
+    retry?: Readonly<{ attempts: number }>;
+  }>;
+
 type StoreTransactions<G extends GraphDef> = Readonly<{
   transaction: <T>(
     fn: (tx: TransactionContext<G>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<T>;
   transactionWithReceipt: <T>(
     fn: (tx: MeasurableTransactionContext<G>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
 }>;
 
@@ -904,13 +948,13 @@ type AdapterStoreTransactions<
 > = Readonly<{
   transaction: <T>(
     fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<T>;
   transactionWithReceipt: <T>(
     fn: (
       tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
   withTransaction: (
     externalTransaction: TNativeTransaction,
@@ -3125,14 +3169,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * }
    * ```
    *
-   * @param fn The callback run inside the transaction boundary.
-   * @param options Optional {@link TransactionOptions} forwarded to the
-   *   backend (e.g. `isolationLevel: "serializable"` on Postgres). Backends
-   *   without isolation-level support ignore it. On non-transactional
-   *   backends, the method refuses before invoking `fn`. A concurrent schema commit can make a
-   *   snapshot-isolated PostgreSQL write fail with the database's normal
-   *   serialization error; retry the whole transaction. Graph-merge commits
-   *   retry serialization failures automatically. Stores created with
+   * @param fn The callback run inside the transaction boundary. See
+   *   {@link StoreTransactionOptions} for what `options.retry` requires of it.
+   * @param options Optional {@link StoreTransactionOptions}. Every field but
+   *   `retry` is forwarded to the backend verbatim (e.g.
+   *   `isolationLevel: "serializable"` on Postgres — backends without
+   *   isolation-level support ignore it). On non-transactional backends, the
+   *   method refuses before invoking `fn`. A concurrent schema commit can make
+   *   a snapshot-isolated PostgreSQL write fail with the database's normal
+   *   serialization error; without `retry` that surfaces as
+   *   `TransactionConflictError` after one try. Stores created with
    *   `{ history: true }` require read-committed semantics for recorded-clock
    *   capture.
    */
@@ -3141,12 +3187,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     fn: (
       tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T>;
 
   transaction<T>(
     fn: (tx: AdapterTransactionContext<G, TNativeTransaction>) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T>;
 
   async transaction<T>(
@@ -3155,7 +3201,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       | ((
           tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
         ) => Promise<T>),
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<T> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
@@ -3214,14 +3260,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     fn: (
       tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   transactionWithReceipt<T>(
     fn: (
       tx: MeasurableAdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<TransactionOutcome<T>>;
 
   async transactionWithReceipt<T>(
@@ -3232,21 +3278,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       | ((
           tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
         ) => Promise<T>),
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ): Promise<TransactionOutcome<T>> {
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const receiptRecorder = createTransactionReceiptRecorder();
-    const { result, recordedByGraph } = await this.#runTransaction(
+    // The receipt recorder is attempt-scoped (a rolled-back attempt's counts
+    // must never survive into the one that commits), so `#runTransaction`
+    // builds a fresh one per attempt from this factory and hands back the
+    // committed attempt's own recorder.
+    const { result, recordedByGraph, recorder } = await this.#runTransaction(
       invoke,
       options,
-      receiptRecorder,
+      createTransactionReceiptRecorder,
       "store.transactionWithReceipt()",
     );
     return transactionOutcome(
       result,
-      receiptRecorder,
+      requireDefined(
+        recorder,
+        "store.transactionWithReceipt(): the committed attempt produced no receipt recorder",
+      ),
       recordedByGraph,
       this.graphId,
     );
@@ -3256,8 +3308,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     invoke: (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    backendOptions: TransactionOptions | undefined,
-    receiptRecorder: TransactionReceiptRecorder | undefined,
+    options: StoreTransactionOptions | undefined,
+    createReceiptRecorder: (() => TransactionReceiptRecorder) | undefined,
     operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
     if (!this.#backend.capabilities.execution.interactiveTransactions) {
@@ -3268,6 +3320,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         "Use a backend with transaction support, or call ordinary Store write methods when non-atomic work is intentional.",
       );
     }
+
+    // `retry` is TypeGraph's own option and is never part of what the
+    // backend sees; every other field forwards verbatim. This is the one
+    // place that strips it.
+    const { retry, ...backendOptions } = options ?? {};
+    const attempts = retry?.attempts ?? 1;
 
     // #134/#135: no gate here. The backend's transaction() wraps the
     // tx-scoped fulltext methods so the durable-marker assert fires at
@@ -3294,85 +3352,119 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // onOperationEnd is held back until after COMMIT — and converted into
     // onError when the transaction fails — keeping "success" synonymous with
     // "durable" even for tx-scoped collection operations.
-    const pending: PendingOperationOutcome[] = [];
-    const runHooks = this.#createBufferedHookRunner(pending);
-    const runBulkHooks = this.#createBufferedBulkHookRunner(pending);
-    let recordedByGraph: RecordedFlushInstants | undefined;
-    const transactionOptions =
-      receiptRecorder !== undefined && this.#captureEnabled ?
-        withRecordedFlushObserver(backendOptions, (instants) => {
-          recordedByGraph = instants;
-        })
-      : backendOptions;
-    try {
-      const run = async (
-        txBackend: TransactionBackend,
-        nativeTransaction: TNativeTransaction | undefined,
-      ): Promise<T> => {
-        const invokeTransaction = (): Promise<T> =>
-          invoke(
-            this.#buildTransactionContext(
-              txBackend,
-              nativeTransaction,
-              runHooks,
-              receiptRecorder,
-              runBulkHooks,
-            ),
+    //
+    // Everything below is the ATTEMPT: `runRetriedUnit` may invoke it more
+    // than once, and every value it touches — the pending buffer, the hook
+    // runners, the receipt recorder, the flush observer — is built fresh on
+    // each call, so a rolled-back attempt leaves nothing for the next one to
+    // read. A retryable failure with attempts left discards this attempt's
+    // buffer without reporting it; a final failure (exhausted budget, or a
+    // failure the retry owner does not recognize) reports it through
+    // `onError` exactly as a non-retried transaction always has, using the
+    // same object `runRetriedUnit` itself will raise. The committed attempt's
+    // buffer is returned rather than flushed here — the flush runs once the
+    // backend transaction has already committed, so it belongs to the caller
+    // of `runRetriedUnit`, past any point a hook's own failure could be
+    // mistaken for a conflict on the transaction that just succeeded.
+    const runAttempt: RetriedUnitAttempt<TransactionRunResult<T>> = async (
+      frame,
+    ) => {
+      const pending: PendingOperationOutcome[] = [];
+      const runHooks = this.#createBufferedHookRunner(pending);
+      const runBulkHooks = this.#createBufferedBulkHookRunner(pending);
+      const receiptRecorder = createReceiptRecorder?.();
+      let recordedByGraph: RecordedFlushInstants | undefined;
+      const transactionOptions =
+        receiptRecorder !== undefined && this.#captureEnabled ?
+          withRecordedFlushObserver(backendOptions, (instants) => {
+            recordedByGraph = instants;
+          })
+        : backendOptions;
+      try {
+        const run = async (
+          txBackend: TransactionBackend,
+          nativeTransaction: TNativeTransaction | undefined,
+        ): Promise<T> => {
+          const invokeTransaction = (): Promise<T> =>
+            invoke(
+              this.#buildTransactionContext(
+                txBackend,
+                nativeTransaction,
+                runHooks,
+                receiptRecorder,
+                runBulkHooks,
+                frame.attempt,
+              ),
+            );
+          const invokeWithSchemaFenceLease = (): Promise<T> =>
+            this.#adapterBackend === undefined ?
+              withTransactionSchemaFenceLease(
+                {
+                  graphId: this.graphId,
+                  schemaVersion: this.#schemaMetadata.schemaVersion,
+                },
+                txBackend,
+                invokeTransaction,
+              )
+            : invokeTransaction();
+          return withWriteTransactionSession(
+            txBackend,
+            {
+              graphId: this.graphId,
+              schemaVersion: this.#schemaMetadata.schemaVersion,
+              historyEnabled: this.#captureEnabled,
+              revisionTrackingEnabled: this.#revisionTrackingEnabled,
+              revisionSchema: this.#sqlSchema(),
+            },
+            invokeWithSchemaFenceLease,
           );
-        const invokeWithSchemaFenceLease = (): Promise<T> =>
-          this.#adapterBackend === undefined ?
-            withTransactionSchemaFenceLease(
-              {
-                graphId: this.graphId,
-                schemaVersion: this.#schemaMetadata.schemaVersion,
-              },
-              txBackend,
-              invokeTransaction,
+        };
+        const result =
+          this.#captureEnabled || this.#adapterBackend === undefined ?
+            await this.#backend.transaction(
+              (txBackend) => run(txBackend, undefined),
+              transactionOptions,
             )
-          : invokeTransaction();
-        return withWriteTransactionSession(
-          txBackend,
-          {
-            graphId: this.graphId,
-            schemaVersion: this.#schemaMetadata.schemaVersion,
-            historyEnabled: this.#captureEnabled,
-            revisionTrackingEnabled: this.#revisionTrackingEnabled,
-            revisionSchema: this.#sqlSchema(),
-          },
-          invokeWithSchemaFenceLease,
-        );
-      };
-      const result =
-        this.#captureEnabled || this.#adapterBackend === undefined ?
-          await this.#backend.transaction(
-            (txBackend) => run(txBackend, undefined),
-            transactionOptions,
-          )
-        : await this.#adapterBackend.transactionWithNative(
-            (txBackend, nativeTransaction) => run(txBackend, nativeTransaction),
-            transactionOptions,
-          );
-      for (const outcome of pending) {
-        if (outcome.type === "bulkOperation") {
-          this.#hooks.onBulkOperationEnd?.(outcome.ctx, {
-            affectedCount: outcome.affectedCount,
-            durationMs: outcome.durationMs,
-          });
-        } else {
-          this.#hooks.onOperationEnd?.(outcome.ctx, {
-            durationMs: outcome.durationMs,
-            outcome: outcome.outcome,
-          });
+          : await this.#adapterBackend.transactionWithNative(
+              (txBackend, nativeTransaction) =>
+                run(txBackend, nativeTransaction),
+              transactionOptions,
+            );
+        // The COMMIT above already succeeded: flushing `onOperationEnd` is
+        // done by the caller of `runRetriedUnit`, not here, so a hook that
+        // throws can never be mistaken for a conflict on an attempt that
+        // already durably committed. See `TransactionRunResult.pending`.
+        return { result, recordedByGraph, recorder: receiptRecorder, pending };
+      } catch (error) {
+        // `frame.willRetry`/`frame.reportedFailure` are the same decision
+        // `runRetriedUnit` itself will apply to this very error — never a
+        // second, independently computed verdict — so the object reported to
+        // `onError` here is always the one the eventual caller also sees.
+        if (!frame.willRetry(error)) {
+          const failure = asError(frame.reportedFailure(error));
+          for (const outcome of pending) {
+            this.#hooks.onError?.(outcome.ctx, failure);
+          }
         }
+        throw error;
       }
-      return { result, recordedByGraph };
-    } catch (error) {
-      const failure = asError(error);
-      for (const outcome of pending) {
-        this.#hooks.onError?.(outcome.ctx, failure);
+    };
+
+    const runResult = await runRetriedUnit({ operation, attempts }, runAttempt);
+    for (const outcome of runResult.pending) {
+      if (outcome.type === "bulkOperation") {
+        this.#hooks.onBulkOperationEnd?.(outcome.ctx, {
+          affectedCount: outcome.affectedCount,
+          durationMs: outcome.durationMs,
+        });
+      } else {
+        this.#hooks.onOperationEnd?.(outcome.ctx, {
+          durationMs: outcome.durationMs,
+          outcome: outcome.outcome,
+        });
       }
-      throw error;
     }
+    return runResult;
   }
 
   /**
@@ -3702,20 +3794,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     receiptRecorder?: TransactionReceiptRecorder,
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
+    // 1 outside a retried `store.transaction`; the retry owner's attempt
+    // factory is the only caller that supplies anything else.
+    attempt = 1,
   ): AdapterTransactionContext<G, TNativeTransaction> {
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
     const txNodeOperations: NodeOperations = {
       ...this.#buildNodeOperations(
-        this.#createNodeOperationContext(runHooks, runBulkHooks),
+        this.#createNodeOperationContext(runHooks, runBulkHooks, attempt),
       ),
-      createQuery: () => this.#createQueryForBackend(txBackend),
+      createQuery: () =>
+        this.#createQueryForBackend(txBackend, undefined, attempt),
       maybeRefreshStatisticsAfterBulk: undefined,
     };
     const txEdgeOperations: EdgeOperations = {
-      ...this.#buildEdgeOperations(this.#createEdgeOperationContext(runHooks)),
-      createQuery: () => this.#createQueryForBackend(txBackend),
+      ...this.#buildEdgeOperations(
+        this.#createEdgeOperationContext(runHooks, attempt),
+      ),
+      createQuery: () =>
+        this.#createQueryForBackend(txBackend, undefined, attempt),
       maybeRefreshStatisticsAfterBulk: undefined,
     };
 
@@ -3725,7 +3824,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       id: string,
       fn: () => Promise<T>,
     ): Promise<T> =>
-      runHooks(this.#createOperationContext(operation, "node", kind, id), fn);
+      runHooks(
+        this.#createOperationContext(operation, "node", kind, id, attempt),
+        fn,
+      );
 
     let nodes = createNodeCollectionsProxy(
       this.#graph,
@@ -5390,6 +5492,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #createNodeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
     runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(),
+    attempt = 1,
   ): NodeOperationContext<G> {
     const identityConfig = this.#graph.identity;
     return {
@@ -5457,10 +5560,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           },
         }),
       createOperationContext: (operation, entity, kind, id) =>
-        this.#createOperationContext(operation, entity, kind, id),
+        this.#createOperationContext(operation, entity, kind, id, attempt),
       withOperationHooks: runHooks,
       createBulkOperationContext: (operation, kind) => ({
-        ...this.#createHookContext(),
+        ...this.#createHookContext(attempt),
         operation,
         entity: "node",
         kind,
@@ -5471,6 +5574,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   #createEdgeOperationContext(
     runHooks: OperationHookRunner = this.#immediateHookRunner(),
+    attempt = 1,
   ): EdgeOperationContext<G> {
     return {
       graph: this.#graph,
@@ -5486,7 +5590,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       uniqueSidecarBatch: this.#uniqueSidecarBatch,
       statementExecution: this.#statementExecution,
       createOperationContext: (operation, entity, kind, id) =>
-        this.#createOperationContext(operation, entity, kind, id),
+        this.#createOperationContext(operation, entity, kind, id, attempt),
       withOperationHooks: runHooks,
     };
   }
@@ -5510,6 +5614,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   #createHookedQueryBackend(
     backend: GraphBackend | TransactionBackend,
+    attempt = 1,
   ): GraphBackend {
     if (
       this.#hooks.onQueryStart === undefined &&
@@ -5531,8 +5636,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           compileSql === undefined ?
             renderSql(query, backend.dialect)
           : compileSql(query);
-        return this.#withQueryHooks(compiled.sql, compiled.params, () =>
-          backend.execute<T>(query),
+        return this.#withQueryHooks(
+          compiled.sql,
+          compiled.params,
+          () => backend.execute<T>(query),
+          attempt,
         );
       },
       ...(executeRaw === undefined ?
@@ -5542,8 +5650,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             sqlText: string,
             params: readonly unknown[],
           ): Promise<readonly T[]> =>
-            this.#withQueryHooks(sqlText, params, () =>
-              executeRaw<T>(sqlText, params),
+            this.#withQueryHooks(
+              sqlText,
+              params,
+              () => executeRaw<T>(sqlText, params),
+              attempt,
             ),
         }),
     });
@@ -5553,9 +5664,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     sql: string,
     params: readonly unknown[],
     execute: () => Promise<readonly T[]>,
+    attempt = 1,
   ): Promise<readonly T[]> {
     const ctx: QueryHookContext = {
-      ...this.#createHookContext(),
+      ...this.#createHookContext(attempt),
       sql,
       params,
     };
@@ -5574,11 +5686,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
   }
 
-  #createHookContext(): HookContext {
+  /**
+   * `attempt` is 1 everywhere outside a retried `store.transaction`; its
+   * attempt factory is the only caller that threads its own attempt number
+   * through, so a listener can tell a replay from a fresh operation.
+   */
+  #createHookContext(attempt = 1): HookContext {
     return {
       operationId: generateId(),
       graphId: this.graphId,
       startedAt: new Date(),
+      attempt,
     };
   }
 
@@ -5587,9 +5705,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     entity: KindEntity,
     kind: string,
     id: string,
+    attempt = 1,
   ): OperationHookContext {
     return {
-      ...this.#createHookContext(),
+      ...this.#createHookContext(attempt),
       operation,
       entity,
       kind,
@@ -5748,8 +5867,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #createQueryForBackend<CoordinateState extends QueryCoordinateState = "open">(
     backend: GraphBackend | TransactionBackend,
     sealedCoordinate?: ReadCoordinate,
+    attempt = 1,
   ): InitialQueryBuilder<G, CoordinateState> {
-    const queryBackend = this.#createHookedQueryBackend(backend);
+    const queryBackend = this.#createHookedQueryBackend(backend, attempt);
     return createInternalQueryBuilder<G, CoordinateState>(
       this.graphId,
       this.#registry,
@@ -6051,13 +6171,13 @@ type AdapterHistoryStoreTransactions<
     fn: (
       tx: AdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<T>;
   transactionWithReceipt: <T>(
     fn: (
       tx: MeasurableAdapterHistoryTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
-    options?: TransactionOptions,
+    options?: StoreTransactionOptions,
   ) => Promise<TransactionOutcome<T>>;
   withRecordedTransaction: <T>(
     externalTransaction: TNativeTransaction,

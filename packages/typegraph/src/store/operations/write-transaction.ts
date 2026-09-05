@@ -777,13 +777,107 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 /**
+ * How {@link runRetriedUnit} disposes of a failure one attempt raised:
+ * whether it will re-run the unit, and — when it will not — the exact value
+ * it raises to its own caller. `reported` is `undefined` while `retry` is
+ * `true`; it is meaningless there and never read.
+ */
+type RetriedUnitFailureDisposition = Readonly<
+  { retry: true; reported?: undefined } | { retry: false; reported: unknown }
+>;
+
+/**
+ * The one classification a retryable failure gets, called both by the retry
+ * loop itself and by {@link RetriedUnitFrame} so an attempt can learn — from
+ * the very same decision, not a re-spelled copy of it — how its own failure
+ * will be disposed of before the loop ever sees it.
+ *
+ * A failure {@link isSerializationFailure} does not recognize is never
+ * retried and is reported as itself, unchanged. A recognized failure retries
+ * while attempts remain; once they don't, it is reported as the
+ * {@link TransactionConflictError} the loop raises for it.
+ */
+function classifyRetriedUnitFailure(
+  error: unknown,
+  attemptNumber: number,
+  options: Readonly<{ operation: string; attempts: number }>,
+): RetriedUnitFailureDisposition {
+  if (!isSerializationFailure(error)) return { retry: false, reported: error };
+  if (attemptNumber < options.attempts) return { retry: true };
+  return {
+    retry: false,
+    reported: new TransactionConflictError(
+      { operation: options.operation, attempts: options.attempts },
+      { cause: error },
+    ),
+  };
+}
+
+/**
+ * Wraps {@link classifyRetriedUnitFailure} in a one-slot memo keyed by
+ * reference identity, so every call this attempt makes with the SAME error
+ * object — from `frame.willRetry`/`frame.reportedFailure` inside the
+ * attempt's own `catch`, and from the loop's `catch` once that same error
+ * propagates out of it — resolves to the exact same disposition. That is
+ * what lets an attempt report a value (to a hook, say) that is REFERENCE-
+ * EQUAL to what `runRetriedUnit` goes on to raise, without minting the
+ * `TransactionConflictError` twice: the attempt always rethrows the raw
+ * error unchanged (never the disposition), so the loop's own classification
+ * of it is the cache hit, not a second mint.
+ */
+function createMemoizedFailureClassifier(
+  attemptNumber: number,
+  options: Readonly<{ operation: string; attempts: number }>,
+): (error: unknown) => RetriedUnitFailureDisposition {
+  let cache:
+    | Readonly<{ error: unknown; disposition: RetriedUnitFailureDisposition }>
+    | undefined;
+  return (error) => {
+    if (cache !== undefined && Object.is(cache.error, error)) {
+      return cache.disposition;
+    }
+    const disposition = classifyRetriedUnitFailure(
+      error,
+      attemptNumber,
+      options,
+    );
+    cache = { error, disposition };
+    return disposition;
+  };
+}
+
+/**
+ * The per-attempt handle {@link runRetriedUnit} passes to its `attempt`
+ * factory.
+ */
+export type RetriedUnitFrame = Readonly<{
+  /** 1-based number of this attempt. */
+  attempt: number;
+  /**
+   * Whether `runRetriedUnit` will re-run the unit if this attempt fails with
+   * `error`. An attempt-scoped effect that must not survive a retry (a
+   * buffered hook, say) reads this to decide whether to discard itself
+   * instead of reporting.
+   */
+  willRetry: (error: unknown) => boolean;
+  /**
+   * The exact value `runRetriedUnit` raises to its caller when it does not
+   * retry `error` — the driver error itself when `error` was never
+   * retryable, or the {@link TransactionConflictError} the loop mints on
+   * exhaustion. An attempt that reports its own failure to something other
+   * than its return value (a hook, a log) uses this so that value always
+   * matches what the eventual caller sees, never a second, independently
+   * chosen error.
+   */
+  reportedFailure: (error: unknown) => unknown;
+}>;
+
+/**
  * One attempt of a unit of work run by {@link runRetriedUnit}: given a fresh
  * `frame`, performs the work and resolves with its result, or throws/rejects
  * to signal that the attempt did not commit.
  */
-export type RetriedUnitAttempt<T> = (
-  frame: Readonly<{ attempt: number }>,
-) => Promise<T>;
+export type RetriedUnitAttempt<T> = (frame: RetriedUnitFrame) => Promise<T>;
 
 /**
  * Runs `attempt` up to `options.attempts` times, re-running it from the top
@@ -797,6 +891,11 @@ export type RetriedUnitAttempt<T> = (
  * This is the one retry owner in the codebase: every store-owned unit of work
  * that may be replayed on a transaction conflict runs through this function,
  * never a second, parallel retry loop.
+ *
+ * `options.attempts` must be a positive integer — the budget for a unit that
+ * has not tried even once is a configuration mistake, not a valid zero-retry
+ * request, so it is refused with {@link ConfigurationError} before `attempt`
+ * is ever called.
  *
  * ## The replay contract
  *
@@ -821,22 +920,29 @@ export async function runRetriedUnit<T>(
   options: Readonly<{ operation: string; attempts: number }>,
   attempt: RetriedUnitAttempt<T>,
 ): Promise<T> {
-  let lastFailure: unknown;
-  for (
-    let attemptNumber = 1;
-    attemptNumber <= options.attempts;
-    attemptNumber += 1
-  ) {
+  if (!Number.isInteger(options.attempts) || options.attempts < 1) {
+    throw new ConfigurationError(
+      `runRetriedUnit(${JSON.stringify(options.operation)}): options.attempts must be a positive integer, got ${options.attempts}.`,
+      { operation: options.operation, attempts: options.attempts },
+    );
+  }
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
     await delay(retryBackoffDelayMs(attemptNumber));
+    const classify = createMemoizedFailureClassifier(attemptNumber, options);
+    const frame: RetriedUnitFrame = {
+      attempt: attemptNumber,
+      willRetry: (error) => classify(error).retry,
+      reportedFailure: (error) => {
+        const disposition = classify(error);
+        return disposition.retry ? error : disposition.reported;
+      },
+    };
     try {
-      return await attempt({ attempt: attemptNumber });
+      return await attempt(frame);
     } catch (error) {
-      if (!isSerializationFailure(error)) throw error;
-      lastFailure = error;
+      const disposition = classify(error);
+      if (disposition.retry) continue;
+      throw disposition.reported;
     }
   }
-  throw new TransactionConflictError(
-    { operation: options.operation, attempts: options.attempts },
-    { cause: lastFailure },
-  );
 }
