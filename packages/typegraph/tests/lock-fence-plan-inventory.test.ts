@@ -56,26 +56,16 @@
  *     ratchets cannot disagree about what a dialect literal is.
  *  3. The four PostgreSQL lock-statement tokens (`pg_advisory_xact_lock`,
  *     `hashtext(`, `LOCK TABLE`, `current_setting('transaction_isolation')`)
- *     appear nowhere in the eleven files this ratchet scans
- *     ({@link FENCE_TOKEN_SCANNED_FILES}), including
- *     `backend/drizzle/trusted-import.ts` (J18, which now resolves the fence
- *     plan and calls `fence.sql.lockTables(...)` instead of spelling
- *     `LOCK TABLE` itself), `backend/drizzle/operations/schema.ts`, and
- *     `backend/drizzle/postgres.ts` (the extension-DDL advisory lock, which
- *     now resolves the same plan every other lock site does and calls
- *     `fence.sql.advisoryLock(...)` instead of spelling the statement
- *     inline) — every one of those consumes a resolved plan's `fence.sql.*`
- *     (or, for the one PostgreSQL-only builder that lives outside the plan,
- *     calls the resolved fence target's own `advisoryLockExpression` /
- *     `isolationFactExpression` members) instead of spelling the statement
- *     itself — and DOES appear in
- *     `backend/drizzle/postgres-fence-sql.ts`, the one module that owns the
- *     spelling. This ratchet's file list is deliberately narrower than "all
- *     of `src/`": `backend/capabilities/write-fence.ts` names
- *     `pg_advisory_xact_lock` and `LOCK TABLE` twice inside the prose of a
- *     refusal-message string (documentation of the capability to declare,
- *     not a competing statement spelling) and is not one of the sites this
- *     model covers.
+ *     appear in exactly one module under all of `src/`,
+ *     `backend/drizzle/postgres-fence-sql.ts`, which owns the spelling.
+ *     Every lock site — the J-rows above, `backend/drizzle/trusted-import.ts`
+ *     (J18), and the extension-install lock in `backend/drizzle/postgres.ts`
+ *     — consumes a resolved plan's `fence.sql.*` instead, and the one
+ *     PostgreSQL-only builder that lives outside the plan composes the
+ *     resolved fence target's own `advisoryLockExpression` /
+ *     `isolationFactExpression` members. The whole tree is scanned; the only
+ *     permitted mentions outside the owning module are the prose rows in
+ *     {@link FENCE_TOKEN_PROSE_EXEMPTIONS}, asserted both directions.
  *
  * *Mutation*: re-inline a dialect check at any lock site → fails naming the
  * file (both the "no resolveWriteFencePlan call added" half and the
@@ -474,39 +464,30 @@ const FENCE_TOKENS: readonly string[] = [
 const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
 
 /**
- * The nine sites' six files, `operations/schema.ts` (whose two builders lost
- * the tokens when the PostgreSQL-only one relocated), that relocated
- * builder's own module, `graph-template-sql.ts` (whose `is_active`
- * literal was the only thing it ever spelled outside a resolved plan, and
- * that was never one of these four tokens), `backend/drizzle/trusted-
- * import.ts` (J18: its table lock now resolves the same plan and calls
- * `fence.sql.lockTables(...)` instead of spelling `LOCK TABLE` itself), and
- * `backend/drizzle/postgres.ts` (the extension-DDL advisory lock, once the
- * remaining leftover documented in #622, now resolves the SAME plan
- * `lateMembers` builds for every other lock site and calls
- * `fence.sql.advisoryLock(...)` instead of spelling the statement inline) —
- * eleven files in all — every one of these consumes `fence.sql.*` (or, for
- * the fused schema+graph statement, the resolved fence target's own
- * `advisoryLockExpression` / `isolationFactExpression` members) rather than
- * spelling a token itself. Deliberately narrower than "all of `src/`":
- * `backend/capabilities/write-fence.ts` names `pg_advisory_xact_lock` and
- * `LOCK TABLE` twice, inside the prose of `unfencedRefusalMessage`'s two
- * dialect-description strings — documentation naming the capability a
- * backend should declare, not a competing spelling of the lock statement
- * itself — and is not one of the files this ratchet scans.
+ * The only string or template literals anywhere under `src/`, outside
+ * {@link FENCE_MODULE_FILE}, that mention one of {@link FENCE_TOKENS} — and
+ * every one is prose, not a spelling: `unfencedRefusalMessage`'s two
+ * dialect-description strings name the capability a backend should declare
+ * ("an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"). The
+ * whole source tree is scanned, so a new file that spells a lock statement
+ * itself fails here; a new prose mention is declared as a row, with its
+ * reason, or it fails too. Asserted both directions.
  */
-const FENCE_TOKEN_SCANNED_FILES: readonly string[] = [
-  "store/recorded-capture/clock.ts",
-  "store/recorded-capture/guards.ts",
-  "identity/service-read.ts",
-  "identity/schema-transition.ts",
-  "graph-merge/provenance-store.ts",
-  "backend/drizzle/postgres.ts",
-  "backend/drizzle/contribution-materializations.ts",
-  "backend/drizzle/operations/schema.ts",
-  "backend/drizzle/postgres-schema-write-fence.ts",
-  "backend/drizzle/graph-template-sql.ts",
-  "backend/drizzle/trusted-import.ts",
+const FENCE_TOKEN_PROSE_EXEMPTIONS: readonly InventoryEntry[] = [
+  {
+    file: "backend/capabilities/write-fence.ts",
+    line: '"an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"',
+    site: "prose",
+    reason:
+      "The PostgreSQL half of the unfenced refusal's dialect description — names the capability to declare, spells no statement.",
+  },
+  {
+    file: "backend/capabilities/write-fence.ts",
+    line: '"an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"',
+    site: "prose",
+    reason:
+      "The same description for the other dialect's recommendation line in that message.",
+  },
 ];
 
 /** String and template-literal AST tokens — comments and identifiers never match. */
@@ -580,23 +561,35 @@ function scanForFenceTokens(
 }
 
 describe("T17 — the four PostgreSQL lock-statement tokens have exactly one owner", () => {
-  const scannedFound = scanFiles(FENCE_TOKEN_SCANNED_FILES, scanForFenceTokens);
+  const treeFound = scanSourceTree(scanForFenceTokens).filter(
+    (site) => site.file !== FENCE_MODULE_FILE,
+  );
+  const proseDiff = diffAgainstInventory(
+    treeFound,
+    FENCE_TOKEN_PROSE_EXEMPTIONS,
+  );
   const schemaFound = scanFiles(
     ["backend/drizzle/operations/schema.ts"],
     scanForFenceTokens,
   );
   const moduleFound = scanFiles([FENCE_MODULE_FILE], scanForFenceTokens);
 
-  it("has zero fence lock-statement tokens across the scanned files", () => {
-    const reported = scannedFound.map(
+  it(`has no fence lock-statement token anywhere under src/ outside ${FENCE_MODULE_FILE} beyond the declared prose rows`, () => {
+    const reported = proseDiff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );
     if (reported.length > 0) {
       throw new Error(
-        `A PostgreSQL lock-statement token remains outside ${FENCE_MODULE_FILE} — the lock spelling has re-acquired a second owner:\n\n${reported.join("\n")}`,
+        `A PostgreSQL lock-statement token appears outside ${FENCE_MODULE_FILE} and is not a declared prose row — the lock spelling has re-acquired a second owner:\n\n${reported.join("\n")}`,
       );
     }
     expect(reported).toEqual([]);
+  });
+
+  it("declares no prose row that the tree no longer contains", () => {
+    expect(
+      proseDiff.stale.map((entry) => `${entry.file}  ${entry.line}`),
+    ).toEqual([]);
   });
 
   it("operations/schema.ts specifically contains none of the four tokens", () => {
