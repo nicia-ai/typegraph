@@ -2164,8 +2164,18 @@ import { TransactionConflictError } from "@nicia-ai/typegraph";
 try {
   await store.transaction(
     async (tx) => {
-      await tx.nodes.Account.compareAndSet(fromId, { balance: fromBalance - 10 });
-      await tx.nodes.Account.compareAndSet(toId, { balance: toBalance + 10 });
+      // Read inside the callback: a replayed attempt must see fresh balances.
+      const from = await tx.nodes.Account.getById(fromId);
+      const to = await tx.nodes.Account.getById(toId);
+      if (from === undefined || to === undefined) throw new Error("missing account");
+      await tx.nodes.Account.compareAndSet(fromId, {
+        expected: { balance: from.balance },
+        patch: { balance: from.balance - 10 },
+      });
+      await tx.nodes.Account.compareAndSet(toId, {
+        expected: { balance: to.balance },
+        patch: { balance: to.balance + 10 },
+      });
     },
     { retry: { attempts: 3 } },
   );

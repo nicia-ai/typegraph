@@ -379,6 +379,44 @@ describe("finalizeEngineCapabilities", () => {
       base.declaredCapabilities.execution.interactiveTransactions,
     );
   });
+
+  it("derives execution.unitOfWork from the engine facts and overwrites any declared value", () => {
+    const base = createRealSqliteProfile();
+    const deps = {
+      execution: base.execution,
+      vectorStrategy: undefined,
+      fulltextStrategy: undefined,
+      fulltextTableName: base.tableNames.fulltext,
+    };
+
+    const declaredBatch = finalizeEngineCapabilities(
+      {
+        ...base.declaredCapabilities,
+        execution: {
+          ...base.declaredCapabilities.execution,
+          unitOfWork: "batch",
+        },
+      },
+      deps,
+    );
+    expect(declaredBatch.execution.unitOfWork).toBe("interactive");
+
+    const nonInteractive = finalizeEngineCapabilities(
+      {
+        ...base.declaredCapabilities,
+        execution: {
+          ...base.declaredCapabilities.execution,
+          interactiveTransactions: false,
+          unitOfWork: "interactive",
+        },
+      },
+      deps,
+    );
+    expect(nonInteractive.execution.unitOfWork).toBe(
+      nonInteractive.execution.atomicBatch === "none" ? "none" : "batch",
+    );
+    expect(nonInteractive.execution.unitOfWork).not.toBe("interactive");
+  });
 });
 
 describe("resolveWriteFencePlan refusals", () => {
