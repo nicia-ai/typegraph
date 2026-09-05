@@ -1,5 +1,222 @@
 # @nicia-ai/typegraph
 
+## 0.57.0
+
+### Minor Changes
+
+- [#626](https://github.com/nicia-ai/typegraph/pull/626) [`9b17a68`](https://github.com/nicia-ai/typegraph/commit/9b17a689e109c84500b6faf1e087db001c6b780f) Thanks [@pdlug](https://github.com/pdlug)! - `@nicia-ai/typegraph/adapters/drizzle/engine` now exports `buildPostgresEngineProfile` and `buildSqliteEngineProfile`, the bundled `SqlEngineProfile` builders, so a caller can derive a variant of one instead of only consuming a finished backend. It also exports `deriveEngineProfile` (with `DerivableEngineProfileOverrides`, `DerivableEngineProfileKey`, and `DERIVABLE_ENGINE_PROFILE_KEYS`), which builds a fresh profile from a bundled one with a bounded set of fields overridden — a lock spelling, a declared capability, a resource-audit verdict, or a runtime dependency bag — refusing any other field with a typed error. `SqlEngineProfile.firstParty` is removed; first-party standing is now bound to the exact profile object a bundled builder returned rather than to a field, so a copy or derived profile never carries it forward. `SqlEngineProfile.buildOperations` and `.lateMembers` are replaced by one opaque `assembly` field, constructible only by the two bundled builders. `BackendResourceAudit` is now public on the engine entrypoint. A derived profile's overridden `fenceSql` now also backs PostgreSQL's fused schema-version + recorded-graph-write statement, not only its standalone lock sites. `FenceSql` itself shrinks to three author-supplied members — `advisoryLockExpression`, `isolationFactExpression`, and `lockTables` — with the standalone-statement forms every ordinary lock site calls (`advisoryLock`, `advisoryLockWithIsolation`, `isolationFact`) now derived by TypeGraph from the two expressions, so a backend author never spells both forms separately. The bags a derived profile shares with its base by reference (`declaredCapabilities`, `resourceAudit`, `autocommit`, `tableNames`, `fenceSql`) are frozen so mutating one through the derived profile can no longer corrupt the base's own. This entrypoint is unreleased, so none of the above is a breaking change; the two bundled backends' emitted SQL, capabilities, marks, and behavior are unchanged.
+  
+  See [Authoring an engine profile](https://typegraph.dev/backend-authoring) for the derivable-field table, the refusals a custom profile can hit, and a worked example.
+
+- [#625](https://github.com/nicia-ai/typegraph/pull/625) [`e34d53c`](https://github.com/nicia-ai/typegraph/commit/e34d53cbddc8d5872a778b1e473f44fb6c75b019) Thanks [@pdlug](https://github.com/pdlug)! - `GraphBackend` and `TransactionBackend` gain an optional `catalog` member (`BackendCatalogProbes`):
+  `tableExists`, `tablesExist`, `indexStates`, `dropInvalidIndex`, `columnTypes`, and an
+  `indexBehavior` bag (`concurrentBuilds`, `hasInvalidIndexState`, `supportsGinFamily`). `columnTypes`
+  reports each column as a `CatalogColumn`, `{ name, kind, declaredType }`; `declaredType` is
+  required, and every custom `columnTypes` implementation must populate it alongside the normalized
+  `kind` a comparison classifies against. `dropInvalidIndex` is a root-backend operation on an engine
+  with an invalid-index state: a `transaction()`-scoped PostgreSQL catalog refuses it with
+  `CATALOG_DROP_INVALID_INDEX_REQUIRES_ROOT_BACKEND`, since PostgreSQL refuses `DROP INDEX
+  CONCURRENTLY` inside a transaction block, while SQLite has no invalid-index state and stays a no-op
+  in both scopes. `catalog` is the one physical-schema introspection surface a store path consults
+  directly instead of compiling a portable query, and four call sites across three modules require
+  it: `store.materializeIndexes()` refuses only once its empty-candidate short circuit and the
+  status-table ensure step have already run; `store.materializeSystemIndexes()`, which has no
+  candidate short circuit, refuses only once that same status-table ensure step has run; the
+  recorded-time schema check and the recorded-time migration's column read likewise need it.
+  `EngineProvisioning` gains a matching optional `catalog` field; a profile that builds one populates
+  the backend's member, and a profile that omits it produces a backend with no `catalog` — those four
+  call sites then refuse with a `ConfigurationError` naming `catalog` instead of reaching
+  engine-specific SQL with nothing to spell it. `createPostgresBackend` and `createSqliteBackend` both
+  supply `catalog`, each transaction reading its own session's uncommitted state rather than the root
+  connection's.
+  
+  `DialectCapabilities` gains `subgraphMembershipStrategy` (`"materialized-ids" | "inline-cte"`),
+  naming the plan-shape decision `store.subgraph()`'s reachable-node filter already made per
+  dialect: fetch the traversal closure once and filter against a fixed id list, or embed the
+  recursive closure in each fetch. This capability replaces an inline dialect comparison in
+  `store/subgraph.ts`; emitted SQL, round-trip counts, and the resulting query's prepared-plan
+  shape are unchanged for both bundled backends.
+  
+  The dialect-literal ESLint ban (previously scoped to the query compiler) now also covers
+  `src/backend` and `src/store`, behind a named, ratcheted exemption inventory
+  (`DIALECT_LITERAL_EXEMPTIONS` in `eslint.config.mjs`) asserted against the tree in both
+  directions by `tests/dialect-literal-inventory.test.ts`. Every remaining exemption is a decision
+  that is not query compilation (error classification, one-shot migrations, a driver-specific
+  resource audit, a SQLite-only transaction write-lock flag, or the write-fence planner's own
+  dialect-keyed lock semantics) and carries a reason and a site count. No bundled backend's emitted
+  SQL, capabilities, or behavior changes.
+  
+  **Behavior change:** trusted import's PostgreSQL table lock now resolves the same write-fence plan
+  every other lock site does, instead of unconditionally taking `LOCK TABLE ... ACCESS EXCLUSIVE`.
+  Trusted import now refuses up front, before any statement runs, when a custom PostgreSQL backend's
+  `pessimisticLocks` declaration resolves `unfenced` (absent, present but declaring all three of
+  `advisoryLocks`/`tableLocks`/`serializedWriters` false, or declaring `{ advisoryLocks: false,
+  tableLocks: true, serializedWriters: false }` — table locks alone, which the plan model has no arm
+  for and resolves `unfenced` exactly like the other two shapes) or resolves a `lock` plan with
+  `tableLocks: false` — this now also catches an advisory-only declaration (`{ advisoryLocks: true,
+  tableLocks: false }`), which previously took the table lock anyway. Every refusal that reaches an
+  `unfenced` plan now names which of the three shapes it declared, rather than one message broad
+  enough to cover all of them. `createPostgresBackend` itself rejects a `pessimisticLocks.
+  serializedWriters: true` capability override at construction (`ConfigurationError`, "PostgreSQL
+  backend capability overrides cannot claim serialized writers"), so a declaration resolving
+  `engine-serialized` is reachable only through a custom `SqlEngineProfile` or a hand-built
+  PostgreSQL-dialect backend for an engine that genuinely serializes writers; for one, trusted import
+  now takes no relation lock at all, where it previously took `LOCK TABLE ... ACCESS EXCLUSIVE` — the
+  declaration states the engine serializes writers, so trusted import's own transaction is fence
+  enough on its own. The `WRITE_FENCE_SQL_UNAVAILABLE` code applies only to the narrower case of an
+  `advisoryLocks: true` declaration with no `fenceSql` to spell the lock; every other refusal above is
+  `WRITE_FENCE_UNAVAILABLE`. Declare both `advisoryLocks: true` and `tableLocks: true` — the bundled
+  `createPostgresBackend` default, which also supplies `fenceSql` — to restore the lock.
+  
+  **Author-facing:** `CommonOperationStrategy` no longer carries `dynamicEdgeConvergence`. That field
+  was required, so every external `SqlEngineProfile.strategy` literal now fails to typecheck; delete
+  it from the literal. The flag it carried — whether a convergent edge create's non-durable match may
+  inspect JSON match fields — moved onto `OperationFusionHooks.dynamicEdgeConvergence`, which the
+  bundled dialect factories pass to `buildCommonOperationOptions`. Neither `OperationFusionHooks` nor
+  `buildCommonOperationOptions` is exported from any entrypoint (nothing under
+  `src/backend/drizzle/engine/` re-exports them), so a custom profile has no field to set; it
+  implements whatever convergent-match behavior it wants in its own `buildOperations`.
+  
+  `SqlEngineProfile.graphTemplateRuntime.instantiateStatement` is a required builder: given a
+  template and target graph's ids and schema hashes (`InstantiateGraphTemplateSqlParams` —
+  `templateId`, `templateSchemaHash`, `graphId`, `schemaHash`, and the three physical table names it
+  reads), it must return the statement that inserts the target graph's `schema_versions` row from the
+  template's stored document and copies the template's contribution-marker rows into the target
+  graph, taking the target graph's write lock — the same key the schema-commit fence takes —
+  co-atomically with the insert on an engine that fences with locks. An engine whose dialect can
+  compose a data-modifying CTE beside the schema INSERT (PostgreSQL) folds the marker copy and the
+  lock into that one statement; an engine that cannot (SQLite) instead supplies the optional
+  `copyContributionMarkers` dep, which runs the marker copy as a second statement once the schema row
+  is confirmed. The bundled `postgresInstantiateGraphTemplateStatement` and
+  `sqliteInstantiateGraphTemplateStatement` builders (`graph-template-sql.ts`) are what
+  `createPostgresBackend` and `createSqliteBackend` supply to their own profiles; neither is exported,
+  so a custom profile reaches the same shape only by copying a bundled profile and adapting its
+  statement, the same as every other engine-owned SQL a profile supplies.
+  
+  The `adapters/drizzle/engine` authoring entrypoint that carries `SqlEngineProfile` and
+  `CommonOperationStrategy` ships for the first time in this release, so neither the removed
+  `dynamicEdgeConvergence` field nor the required `graphTemplateRuntime.instantiateStatement` builder
+  ever appeared in a published version; the notes above only affect authors building a custom profile
+  against `main`.
+
+- [#617](https://github.com/nicia-ai/typegraph/pull/617) [`fa6b468`](https://github.com/nicia-ai/typegraph/commit/fa6b4683e4f39b140089fe369747d76c52620092) Thanks [@pdlug](https://github.com/pdlug)! - `createPostgresBackend` and `createSqliteBackend` accept `fulltext: false`,
+  mirroring the existing `vector: false` option. The backend then advertises
+  no `capabilities.fulltext` and omits the fulltext CRUD/search members
+  (`upsertFulltext`, `deleteFulltext`, `upsertFulltextBatch`,
+  `deleteFulltextBatch`, `fulltextSearch`) along with `hybridSearch` and
+  `fulltextStrategy` instead of stubbing them, and the generated DDL and
+  runtime contributions never create a fulltext table for that backend.
+  
+  A fulltext predicate, a `searchable()` field, `store.search.fulltext`, and
+  hybrid search all refuse with `UnsupportedBackendCapabilityError` (reason
+  `fulltext_unsupported`) against a fulltext-off backend, instead of compiling
+  SQL against a table that does not exist. `hardDeleteNode`'s cascade skips
+  the fulltext delete for such a backend rather than issuing a statement
+  against a missing table; every other cascade step, and every configuration
+  that still has a fulltext strategy, is unchanged.
+  
+  This refusal is not limited to the bundled backends: any `GraphBackend` —
+  including a third-party one — that omits the optional fulltext members now
+  refuses a write to a node kind with `searchable()` fields with the same
+  typed error, rather than silently skipping the fulltext index sync as it
+  did before.
+  
+  The read path keys off `capabilities.fulltext` rather than the optional
+  members: a third-party `GraphBackend` that implements `fulltextSearch` and/or
+  sets `fulltextStrategy` but never declares `capabilities.fulltext` now has a
+  fulltext predicate and `store.search.fulltext`/hybrid refuse with
+  `UnsupportedBackendCapabilityError`, where before they compiled and ran. This
+  also replaces the `ConfigurationError` those two call sites previously threw
+  against a backend with no fulltext strategy at all — callers catching on the
+  old class or error code should switch to `UnsupportedBackendCapabilityError`.
+  
+  `capabilities.contributions.rebuild` on a fulltext-off backend tracks only
+  the transactional-fence condition — with no fulltext contribution to fail
+  the check, that condition is vacuously satisfied — and a `rebuildContribution`
+  call naming the fulltext contribution on such a backend refuses with a typed
+  `ContributionRebuildUnsupportedError` instead of running DDL against nothing.
+  
+  Soft-deleting or hard-deleting a `searchable()` node now succeeds on a
+  fulltext-off backend instead of refusing: a delete removes data rather than
+  accepting a write the backend cannot index, and this backend maintains no
+  fulltext sidecar to issue that removal against, so there is nothing to do.
+  Only create and update of a `searchable()` kind refuse.
+  
+  `createLocalSqliteBackend`, `createLocalPgliteBackend`, `createLocalSqliteStore`,
+  and `createLocalPgliteStore` accept the same `fulltext?: FulltextStrategy | false`
+  option and forward it to both their installation DDL and the underlying
+  backend factory, so a batteries-included store can skip the fulltext table
+  the same way a hand-wired one can.
+  
+  **Upgrade note:** `fulltext: false` stops creating and maintaining the
+  fulltext table; it never drops one. On a database that already has fulltext
+  rows, disabling fulltext leaves them in place and unmaintained — a hard
+  delete performed while fulltext is off leaves an orphaned row behind in the
+  fulltext table, because `hardDeleteNode`'s cascade has no active strategy to
+  build a delete statement from. Re-enabling fulltext later therefore requires
+  the destructive contribution rebuild, `store.rebuildContribution("fulltext")`
+  (which drops and recreates the fulltext table), not
+  `store.search.rebuildFulltext()`: that method pages live nodes to recompute
+  their content, and a hard-deleted node has no row left for it to page, so it
+  never revisits — and therefore never clears — the orphan.
+
+- [#607](https://github.com/nicia-ai/typegraph/pull/607) [`e966b30`](https://github.com/nicia-ai/typegraph/commit/e966b3049755fb4945a7120319f5a9726abab1b0) Thanks [@pdlug](https://github.com/pdlug)! - Add a new entrypoint, `@nicia-ai/typegraph/adapters/drizzle/engine`, exporting
+  `createSqlBackend` and the `SqlEngineProfile` types. `createPostgresBackend`
+  and `createSqliteBackend` are now each `createSqlBackend` applied to a
+  profile built by `buildPostgresEngineProfile` / `buildSqliteEngineProfile`.
+  Emitted SQL, capabilities, marks, transaction framing, and error paths are
+  unchanged for every configuration the two factories accepted before.
+  
+  Two construction-time narrowings apply to the bundled factories as well as
+  to third-party profiles, because both now run through `createSqlBackend`:
+  
+  - A backend whose resolved capabilities carry no `pessimisticLocks`
+    declaration is refused with a `ConfigurationError`
+    (`ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION`) that prints the one
+    declaration line to add. Omitting `pessimisticLocks` from a `capabilities`
+    override is unaffected (the factory's own declaration applies); passing
+    `capabilities: { pessimisticLocks: undefined }` explicitly, which previously
+    built a backend that resolved every write fence through a dialect fallback,
+    now throws at construction.
+  - A backend that declares `pessimisticLocks` as all `false` no longer earns
+    the schema-fenced-insert eligibility mark, so a schema-managed first write
+    on it now refuses with `WRITE_FENCE_UNAVAILABLE` instead of fusing the
+    insert. Schema commits on such a backend already refused, so a working
+    configuration is unaffected.
+
+- [#623](https://github.com/nicia-ai/typegraph/pull/623) [`04ce22c`](https://github.com/nicia-ai/typegraph/commit/04ce22cc87ffbf4f3cc44c47408d0ff18198dd31) Thanks [@pdlug](https://github.com/pdlug)! - `GraphBackend` gains an optional `fenceSql` member: the lock spelling a backend supplies
+  alongside `capabilities.pessimisticLocks`, as `FenceSql` — three builders,
+  `advisoryLockExpression`, `isolationFactExpression`, and `lockTables`. `resolveWriteFencePlan`'s
+  `lock` arm carries `sql: FenceStatements`: those three plus the standalone `advisoryLock`,
+  `advisoryLockWithIsolation`, and `isolationFact` statements, which `resolveFenceStatements`
+  derives from the two expressions so the portable lock sites and the fused recorded-write fence
+  always spell the same key. Every write-fence lock site consumes `fence.sql.<builder>(...)`
+  instead of hand-writing PostgreSQL lock syntax inline.
+  
+  The bundled PostgreSQL spelling is exported as `postgresFenceSql` from
+  `@nicia-ai/typegraph/adapters/drizzle/postgres`. `createPostgresBackend` supplies it
+  automatically; `createSqliteBackend` supplies no `fenceSql` since its fence is
+  `engine-serialized` and takes no lock. A backend that declares
+  `capabilities.pessimisticLocks.advisoryLocks: true` but supplies no `fenceSql` is now refused at
+  construction with a typed `ConfigurationError` (`WRITE_FENCE_SQL_UNAVAILABLE`) naming the member
+  to supply, rather than reaching a lock site with nothing to spell the statement.
+  
+  For both bundled backends the locks taken, their order, and their modes are unchanged, and
+  the PostgreSQL statement text is equivalent: two advisory-lock sites now bind the lock
+  namespace as a parameter instead of an inline string literal (`hashtext` hashes the value
+  either way), and insignificant whitespace in three statements changed with the move.
+  
+  Two behavior changes reach custom `dialect: "postgres"` backends. A backend declaring
+  `pessimisticLocks.advisoryLocks: true` without `fenceSql` is refused at construction (above).
+  A backend declaring only `serializedWriters: true` and no `fenceSql` is refused when a
+  history-capturing transaction reads its isolation level, which previously ran a hard-coded
+  `current_setting('transaction_isolation')` read; supply `fenceSql` (or `postgresFenceSql`) to
+  restore it.
+
+### Patch Changes
+
+- [#627](https://github.com/nicia-ai/typegraph/pull/627) [`4cec2b0`](https://github.com/nicia-ai/typegraph/commit/4cec2b0096d5fad833d32ce8b5ed6fb3978d1dc2) Thanks [@pdlug](https://github.com/pdlug)! - The PostgreSQL backend's database-extension install now resolves the write-fence plan and spells its advisory lock through the backend's `fenceSql`, like every other lock site, instead of hardcoding `pg_advisory_xact_lock(hashtext(...), 0)` inline. A custom or derived PostgreSQL profile whose resolved plan is `engine-serialized` or `unfenced` installs extensions without taking that lock and relies solely on the duplicate-key retry, which was already the fence's correctness owner in that case. The bundled PostgreSQL backend's behavior and emitted SQL are unchanged.
+
 ## 0.56.0
 
 ### Highlights
