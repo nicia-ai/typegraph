@@ -1382,7 +1382,7 @@ can inspect the same object as `backend.capabilities`. The shape is:
 
 | Field                                                                      | Meaning                                                                                             |
 | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `execution`                                                                | Execution boundaries: `interactiveTransactions` and exact-resource `atomicBatch` support            |
+| `execution`                                                                | Execution boundaries: `interactiveTransactions`, exact-resource `atomicBatch` support, and derived `unitOfWork` |
 | `windowFunctions`                                                          | SQL window functions such as `ROW_NUMBER()` are available                                           |
 | `constraintClaims?`                                                        | The backend carries the claim relations that fence declared constraints without a lock (see below)  |
 | `durableEdgeMatchIdentity?`                                                | Edge writes persist and atomically arbitrate a schema-declared endpoint/property identity            |
@@ -1403,6 +1403,14 @@ overrides. Bundled PostgreSQL transaction factories may expose
 `atomicBatch: "session"` on the exact already-open transaction object. That
 declaration is paired with fresh transport and semantic registrations and is
 never inherited by an ordinary derived backend.
+
+`execution.unitOfWork` is derived, never declared by a factory or override:
+`"interactive"` when `interactiveTransactions` is `true`, else `"batch"` when
+`atomicBatch` is not `"none"` (an HTTP-only driver such as `drizzle-orm/neon-http`,
+which cannot hold an open session but does support a native atomic program),
+else `"none"`. Nothing in the store consumes it yet — it exists so a caller can
+tell the three execution shapes apart without re-deriving the same distinction
+from `interactiveTransactions` and `atomicBatch` separately.
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can

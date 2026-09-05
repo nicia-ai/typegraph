@@ -1167,6 +1167,34 @@ the orphaned promise yourself. To avoid orphaning writes at all, use
 transaction ends — so this error cannot arise there. It remains the caller's
 job to await every graph write before committing.
 
+### `TransactionConflictError`
+
+Thrown when a transaction was aborted by a serialization failure or deadlock
+on every attempt available to it. `details.operation` names the transaction
+that failed, `details.attempts` the number tried, and `cause` is the last
+attempt's driver error — PostgreSQL's own protocol for both conditions is to
+re-run the whole transaction from the top, which is what this error reports
+as exhausted.
+
+`store.transaction()` and `store.transactionWithReceipt()` raise it with
+`attempts: 1` for a conflict on their single attempt; passing
+`retry: { attempts }` (see
+[Retrying on conflict](/schemas-stores/#retrying-on-conflict)) raises it only
+once every attempt has conflicted. Graph-merge's commit paths raise
+`MergeError` on the same exhaustion, with a `TransactionConflictError` as its
+`cause`.
+
+```typescript
+try {
+  await store.transaction(fn, { retry: { attempts: 3 } });
+} catch (error) {
+  if (error instanceof TransactionConflictError) {
+    console.log(error.details.attempts); // 3
+    console.log(error.cause); // the last driver error
+  }
+}
+```
+
 **The serialization covers TypeGraph's own statements, not `tx.sql`.** The raw
 Drizzle handle you get for writing your own relational tables in the same
 transaction shares the one pinned connection but bypasses the queue. Running a
@@ -1355,3 +1383,4 @@ try {
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
+| `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |

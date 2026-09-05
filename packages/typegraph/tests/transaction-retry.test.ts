@@ -2,15 +2,38 @@
  * Unit tests for the store's retry owner, {@link runRetriedUnit}, and
  * acceptance tests exercising it end to end through `store.transaction` and
  * `store.transactionWithReceipt` against real SQLite and PGlite backends.
- * Import's own attempt-scoped state is covered separately, once import is
- * routed through the owner.
+ *
+ * The last section drives import's own attempt-scoped state directly through
+ * the owner: import itself is not routed through it, so the only way to prove
+ * a rolled-back attempt's counts never survive is to run its write-plan
+ * attempt function through `runRetriedUnit` by hand.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../src";
+import {
+  batchPointReadVerdict,
+  createClaimsVerdictThunk,
+  statementExecutionVerdict,
+  uniqueSidecarBatchVerdict,
+} from "../src/backend/capabilities/resolve";
 import { ConfigurationError, TransactionConflictError } from "../src/errors";
+import {
+  buildEdgeSchemaMap,
+  buildNodeSchemaMap,
+  type ImportAttemptInputs,
+  runImportWritePlanAttempt,
+} from "../src/interchange/import";
+import {
+  FORMAT_VERSION,
+  type GraphData,
+  ImportOptionsSchema,
+} from "../src/interchange/types";
+import { runWritePlan } from "../src/store/operations/write-executor";
+import { mixedWritePlan } from "../src/store/operations/write-plan";
 import { runRetriedUnit } from "../src/store/operations/write-transaction";
+import { storeBackend, storeRuntime } from "../src/store/runtime-port";
 import {
   createTransactionFaultInjector,
   type FaultInjectableEngine,
@@ -464,5 +487,87 @@ describe.each(ENGINES)("store.transaction retry (%s)", (engine) => {
 
     expect(callbackRuns).toBe(0);
     expect(await store.nodes.Person.count()).toBe(0);
+  });
+});
+
+describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
+  it("reports exactly the second attempt's created counts and errors when the first attempt's commit conflicts", async () => {
+    const { injector, store } = await buildFaultyStore(engine, {
+      shape: "40001",
+      failCommits: 1,
+    });
+
+    const graphId = store.graphId;
+    const registry = store.registry;
+    const backend = storeBackend(store);
+    const runtime = storeRuntime(store);
+    const data: GraphData = {
+      formatVersion: FORMAT_VERSION,
+      exportedAt: new Date().toISOString(),
+      source: { type: "external", description: "retry-owner test" },
+      nodes: [
+        { kind: "Person", id: "alice", properties: { name: "Alice" } },
+        { kind: "Person", id: "bob", properties: { name: "Bob" } },
+      ],
+      edges: [],
+    };
+    const options = ImportOptionsSchema.parse({ onConflict: "skip" });
+    const attemptInputs: ImportAttemptInputs<typeof RETRY_ACCEPTANCE_GRAPH> = {
+      graphId,
+      registry,
+      data,
+      nodeSchemas: buildNodeSchemaMap(store.graph),
+      edgeSchemas: buildEdgeSchemaMap(store.graph),
+      options,
+      runtime,
+      batchPointRead: batchPointReadVerdict(backend),
+      uniqueSidecarBatch: uniqueSidecarBatchVerdict(backend),
+      statementExecution: statementExecutionVerdict(backend),
+    };
+
+    // Drives import's write-plan attempt function directly through the
+    // retry owner and a fault-injected backend — import itself is never
+    // routed through `runRetriedUnit` in production; this is the seam
+    // that proves `createImportAttemptState()` gives every attempt a
+    // clean slate regardless.
+    const attemptState = await runRetriedUnit(
+      { operation: "import-attempt-test", attempts: 2 },
+      () =>
+        runWritePlan(
+          {
+            graphId,
+            registry,
+            claimsVerdict: createClaimsVerdictThunk(backend),
+            uniqueSidecarBatch: attemptInputs.uniqueSidecarBatch,
+            statementExecution: attemptInputs.statementExecution,
+            schemaVersion: store.introspect().schemaVersion,
+            historyEnabled: store.historyEnabled,
+            revisionTrackingEnabled: store.revisionTrackingEnabled,
+            revisionSchema: store.revisionSchema,
+            identityLock: (target) => runtime.lockIdentityImportTarget(target),
+          },
+          mixedWritePlan(undefined, true),
+          backend,
+          (session, target, overlaidSession, _lock, transactionMode) =>
+            runImportWritePlanAttempt(
+              attemptInputs,
+              session,
+              target,
+              overlaidSession,
+              transactionMode,
+            ),
+        ),
+    );
+
+    // The first attempt's commit conflicted after inserting both nodes for
+    // real; had their counts survived into the second attempt (the bug a
+    // counter hoisted outside the attempt factory would reintroduce), this
+    // would read 4, not 2.
+    expect(injector.commitAttempts()).toBe(2);
+    expect(attemptState.result.nodes.created).toBe(2);
+    expect(attemptState.result.nodes.updated).toBe(0);
+    expect(attemptState.result.nodes.skipped).toBe(0);
+    expect(attemptState.errors).toEqual([]);
+    expect(await store.nodes.Person.count()).toBe(2);
   });
 });
