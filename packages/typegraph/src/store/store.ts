@@ -3443,14 +3443,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         if (!frame.willRetry(error)) {
           const failure = asError(frame.reportedFailure(error));
           for (const outcome of pending) {
-            // A hook that throws while being told about a failure must not
-            // replace that failure: the caller — and, for a nested unit, the
-            // retry owner classifying it — receives the original error.
-            try {
-              this.#hooks.onError?.(outcome.ctx, failure);
-            } catch {
-              // Discarded on purpose; see `StoreHooks.onError`.
-            }
+            this.#reportError(outcome.ctx, failure);
           }
         }
         throw error;
@@ -5688,7 +5681,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
       return rows;
     } catch (error) {
-      this.#hooks.onError?.(ctx, asError(error));
+      this.#reportError(ctx, asError(error));
       throw error;
     }
   }
@@ -5741,7 +5734,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
       return result;
     } catch (error) {
-      this.#hooks.onError?.(ctx, asError(error));
+      this.#reportError(ctx, asError(error));
       throw error;
     }
   }
@@ -5760,8 +5753,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       });
       return result;
     } catch (error) {
-      this.#hooks.onError?.(ctx, asError(error));
+      this.#reportError(ctx, asError(error));
       throw error;
+    }
+  }
+
+  /**
+   * THE one caller of `hooks.onError`. A hook that throws while being told
+   * about a failure must not replace that failure: the error being reported
+   * is what the caller — and, for a unit nested in a retried transaction,
+   * the retry owner classifying it — receives, so the hook's own exception
+   * is discarded here (see `StoreHooks.onError`).
+   */
+  #reportError(ctx: HookContext, error: Error): void {
+    try {
+      this.#hooks.onError?.(ctx, error);
+    } catch {
+      // Discarded on purpose; see `StoreHooks.onError`.
     }
   }
 
@@ -5798,7 +5806,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         });
         return result;
       } catch (error) {
-        this.#hooks.onError?.(ctx, asError(error));
+        this.#reportError(ctx, asError(error));
         throw error;
       }
     };
@@ -5824,7 +5832,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         });
         return result;
       } catch (error) {
-        this.#hooks.onError?.(ctx, asError(error));
+        this.#reportError(ctx, asError(error));
         throw error;
       }
     };

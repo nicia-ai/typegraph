@@ -490,6 +490,32 @@ describe.each(ENGINES)("store.transaction retry (%s)", (engine) => {
     expect(await retriedStore.nodes.Person.count()).toBe(1);
   });
 
+  it("a throwing onError hook on a statement-level conflict still lets the owner retry", async () => {
+    // The immediate per-operation onError path, not the transaction-level
+    // conversion: the first write statement of attempt 1 conflicts, the
+    // operation's own onError fires and throws, and the owner must still
+    // see the conflict — not the hook's exception — and replay.
+    const { injector, store } = await buildFaultyStore(
+      engine,
+      { shape: "40001", failAtStatementCall: 1 },
+      {
+        hooks: {
+          onError: () => {
+            throw new Error("hook boom");
+          },
+        },
+      },
+    );
+    await store.transaction(
+      async (tx) => {
+        await tx.nodes.Person.create({ name: "Carol" }, { id: "carol" });
+      },
+      { retry: { attempts: 2 } },
+    );
+    expect(injector.commitAttempts()).toBe(2);
+    expect(await store.nodes.Person.count()).toBe(1);
+  });
+
   it("a throwing onOperationEnd hook cannot retry an attempt whose backend transaction already committed", async () => {
     const hookFailure = pgError("40001", "hook boom");
     const { store } = await buildFaultyStore(
