@@ -735,6 +735,41 @@ and retry it with `BEGIN IMMEDIATE`; TypeGraph-owned transactions already use
 that mode. The refusal happens before the constraint probe, so the write is
 fenced or refused rather than allowed to rely on a stale decision.
 
+#### `BATCH_WRITE_UNSUPPORTED`
+
+A backend whose `capabilities.execution.unitOfWork` is `"batch"` (Cloudflare
+D1's `batch()`, Neon HTTP's `transaction(queries)`) fixes every statement
+before the first one runs and commits them together with no session in
+between. Every fused write on such a backend — a static batch and a
+certified atomic program alike — asserts the active schema version inside
+the very statement that writes, so a stale version writes nothing and the
+store reports `StaleVersionError`. See
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares).
+
+A write that needs more than that one guarded statement refuses, but
+`BATCH_WRITE_UNSUPPORTED` is not itself a top-level error code: the
+enforcing gate keeps its own class and code
+(`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, `UNSUPPORTED_BACKEND_CAPABILITY`,
+`IDENTITY_REQUIRES_ATOMIC_BACKEND`, or a plain `ConfigurationError` for
+`history` / `revisionTracking` / a schema commit) and nests
+`{ code: "BATCH_WRITE_UNSUPPORTED", reason }` under `details.batchRefusal`,
+naming what a closed batch cannot supply:
+
+| `details.batchRefusal.reason` | What it needs | Raised by |
+| --- | --- | --- |
+| `interactive-callback` | Hold an interactive callback transaction open across several round trips. | `store.transaction(fn)` / `store.transactionWithReceipt(fn)` |
+| `constraint-needs-probe` | Read a value it wrote earlier in the same write before deciding what to write next. | A declared constraint's probe-then-write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`, above) |
+| `identity` | Read and write Operational Identity's closure across several round trips inside one held transaction. | `Store` construction, or `requireAtomicIdentityBackend`, when `graph.identity` is declared |
+| `history` | Hold the per-graph write lock and clock open across a whole write cascade. | `history: true` or `revisionTracking: true` |
+| `schema-commit` | Hold one transaction across its compare-and-swap read and its activating write. | `commitSchemaVersion` / `setActiveVersion` |
+
+`SCHEMA_WRITE_FENCE_UNSUPPORTED` — the portable schema-version fence an
+ineligible write falls back to (see [Schema Migrations](/schema-management))
+— does not carry `batchRefusal`. It is reached from many fuse failures that
+are not specific to a batch-tier backend (an ineligible write kind, a
+derived backend, a provenance mismatch), so it states its plain limitation
+without guessing which of the reasons above, if any, applies.
+
 #### Write-fence declaration codes
 
 `capabilities.writeFence` resolves one of four write-fence plans a lock site

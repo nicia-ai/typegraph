@@ -101,6 +101,51 @@ root `getOrCreateByEndpoints` calls can therefore use the authoritative
 one-statement command. The durable identity does not make unrelated Store
 operations, claims, or history/revision side effects transactionless.
 
+### The guard every fused write shares
+
+Every static batch and every certified atomic program asserts the active
+schema version inside the very statement that writes, never as a preceding
+check — the fused create's `WHERE … is_active` predicate, or the program's
+leading `schema_fence` CTE. A stale version makes that statement match zero
+rows, so the write commits nothing, and the store re-reads and reports
+`StaleVersionError` instead of writing against a version that already moved
+on. This is what lets a `"batch"`-tier backend (`capabilities.execution.unitOfWork === "batch"`
+— Cloudflare D1's `batch()`, Neon HTTP's `transaction(queries)`, which fix
+every statement before the first one runs and commit them together with no
+session in between) run schema-managed creates, updates and deletes, and
+bulk writes at all: the fence travels inside the one exchange it can hold,
+instead of needing a session to hold it separately. A singleton node or edge
+update, `upsertById`, or delete fuses the same way as a create, through a
+one-entry certified atomic program, whenever its kind carries no declared
+unique constraint (and, for a node delete, no disjointness or uniqueness
+claim the backend has not proven it can release in that same statement).
+
+A write that needs more than that one guarded statement — because it must
+read a value it wrote earlier in the same write, hold an interactive
+callback open across round trips, maintain Operational Identity's closure,
+hold history's per-graph lock across a whole write cascade, or hold one
+transaction across a schema commit's compare-and-swap — refuses on a
+`"batch"`-tier backend with `BATCH_WRITE_UNSUPPORTED`, naming which of those
+it needed:
+
+| `reason` | What it needs |
+| --- | --- |
+| `interactive-callback` | Hold an interactive callback transaction open across several round trips (`store.transaction(fn)`). |
+| `constraint-needs-probe` | Read a value it wrote earlier in the same write before deciding what to write next (a declared constraint's probe-then-write). |
+| `identity` | Read and write Operational Identity's closure across several round trips inside one held transaction. |
+| `history` | Hold the per-graph write lock and clock open across a whole write cascade (`history: true` / `revisionTracking: true`). |
+| `schema-commit` | Hold one transaction across its compare-and-swap read and its activating write (`commitSchemaVersion` / `setActiveVersion`). |
+
+A write that simply cannot fuse — an ineligible write kind, a singleton
+create/update/`upsertById` on a kind with a declared unique constraint, a
+tombstone-resurrection write a supplied id falls through to, or a derived
+backend — refuses with `SCHEMA_WRITE_FENCE_UNSUPPORTED` instead and carries
+no `batchRefusal` reason: that gate has no proven need to name, only its own
+plain limitation.
+
+See [`BATCH_WRITE_UNSUPPORTED`](/errors#batch_write_unsupported) for where
+each reason surfaces in an error's `details`.
+
 ## libsql Single-Connection Transactions
 
 For local `@libsql/client` connections (`file:` paths and `file::memory:`),

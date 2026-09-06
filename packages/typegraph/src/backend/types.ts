@@ -328,7 +328,11 @@ export type BackendCapabilities = Readonly<{
      * when `atomicBatch` is not `"none"`, else `"none"` — overwriting
      * whatever a profile's own `declaredCapabilities` set. Optional so a
      * custom `GraphBackend` implementation, which nothing derives this for,
-     * is not forced to declare it; no consumer reads it yet.
+     * is not forced to declare it. Two readers key off the `"batch"` value:
+     * the batch-tier write verdict (`resolveBatchWriteVerdict` in
+     * `backend/capabilities/batch-write-verdict.ts`) and the autocommit
+     * single-statement eligibility gate
+     * (`canFuseSchemaFenceInFirstWrite`).
      */
     unitOfWork?: "interactive" | "batch" | "none";
   }>;
