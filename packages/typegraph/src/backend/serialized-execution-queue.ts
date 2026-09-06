@@ -36,7 +36,7 @@ export type SerializedExecutionQueue = Readonly<{
  *   Under `"require"`, an unavailable context refuses EVERY submission with
  *   `CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT` instead of running undetected.
  */
-export type ReentrancyMode = "detect" | "require";
+type ReentrancyMode = "detect" | "require";
 
 export type SerializedExecutionQueueOptions = Readonly<{
   reentrancy: ReentrancyMode;
