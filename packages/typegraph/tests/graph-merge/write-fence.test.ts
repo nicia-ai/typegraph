@@ -16,6 +16,7 @@ function makeBackend(
       execution: {
         interactiveTransactions: true,
         atomicBatch: "none",
+        unitOfWork: "interactive",
       },
       pessimisticLocks: {
         advisoryLocks: true,

@@ -63,6 +63,7 @@ import { type SqlDialect } from "../query/dialect/types";
 import { sortedReplacer } from "../schema/canonical";
 import { serializeIndexDeclaration } from "../schema/serializer";
 import { nowIso } from "../utils/date";
+import { delay } from "../utils/delay";
 import { sha256Hex } from "../utils/hash";
 import { requireDefined } from "../utils/presence";
 import { isPostgresConcurrentDdlRaceError } from "../utils/sql-errors";
@@ -99,12 +100,6 @@ function hasIndexBuildClaimProtocol(backend: GraphBackend): boolean {
     backend.claimIndexMaterialization !== undefined &&
     backend.releaseIndexMaterializationClaim !== undefined
   );
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 /**

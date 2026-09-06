@@ -731,6 +731,93 @@ export function isSqliteStaleSnapshotError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * PostgreSQL SQLSTATEs for a transaction that did not commit and whose
+ * documented recovery is to re-run it, verbatim, from the top:
+ * `serialization_failure` (40001, raised under `SERIALIZABLE`/`REPEATABLE
+ * READ` when a concurrent transaction's writes conflict with this one's
+ * reads) and `deadlock_detected` (40P01, raised when the lock manager breaks
+ * a cycle by aborting one participant). Neither means the statement itself
+ * was wrong.
+ */
+const SERIALIZATION_FAILURE_SQL_STATES = ["40001", "40P01"] as const;
+
+/**
+ * The shape of a SQLSTATE: five upper-case alphanumerics. Distinguishes an
+ * engine verdict (`23505`) from a code some other layer minted (a
+ * `TypeGraphError`'s `GRAPH_MERGE_ERROR`, a socket's `ECONNRESET`), which
+ * says nothing about how the engine classified the failure.
+ */
+const SQL_STATE_SHAPE = /^[0-9A-Z]{5}$/;
+
+/**
+ * Driver-message fallback for a serialization failure whose SQLSTATE was
+ * dropped by a wrapper. Matches the fixed PostgreSQL texts for the two
+ * SQLSTATEs above.
+ *
+ * Never consulted when any link carries a SQLSTATE other than the two
+ * above: the engine has already classified that failure. Otherwise
+ * consulted per link, not chain-wide: a link is a candidate for the message
+ * match only when that same link's own `code` is not a string — a link that
+ * carries some other coded failure (a unique violation, say) has already
+ * been classified by the engine, so its message is never consulted even
+ * though a sibling link elsewhere in the chain is coded too. This matters
+ * because every {@link TypeGraphError} carries a string `code`: a driver
+ * error with no SQLSTATE that gets wrapped in one (graph-merge's commit
+ * retry sees exactly this shape) must still have ITS OWN message checked.
+ * Raw string links are never candidates either — a bare string cannot carry
+ * a `code` of its own, so treating it as message evidence would recognize
+ * strings the SQLSTATE pass could never corroborate.
+ */
+const SERIALIZATION_FAILURE_MESSAGE_PATTERN =
+  /could not serialize access|deadlock detected/i;
+
+/**
+ * Whether `error` (or anything in its `.cause` chain) is a PostgreSQL
+ * transaction-conflict failure that the documented protocol says to retry by
+ * re-running the whole transaction: a serialization failure or a deadlock.
+ *
+ * Classification prefers the locale-independent SQLSTATE and falls back to
+ * the fixed driver message on a per-link basis for links with no `code` of
+ * their own (see {@link SERIALIZATION_FAILURE_MESSAGE_PATTERN}). This is the
+ * one predicate every retry owner in the codebase consults; a second,
+ * inline reimplementation of this decision is a defect even while it agrees
+ * with this one, because the two WILL drift.
+ */
+export function isSerializationFailure(error: unknown): boolean {
+  const uncodedLinks: unknown[] = [];
+  let sawOtherSqlState = false;
+  for (const link of errorChain(error)) {
+    if (!canReadProperty(link)) {
+      uncodedLinks.push(link);
+      continue;
+    }
+    const code: unknown = Reflect.get(link, "code");
+    if (isSqlStateIn(code, SERIALIZATION_FAILURE_SQL_STATES)) return true;
+    if (typeof code !== "string") {
+      uncodedLinks.push(link);
+    } else if (SQL_STATE_SHAPE.test(code)) {
+      sawOtherSqlState = true;
+    }
+  }
+  // The engine already classified this failure as something else: a wrapper
+  // whose message merely quotes conflict text (a parameter literal, a
+  // statement's own error string) must not turn a unique violation into a
+  // retried conflict.
+  if (sawOtherSqlState) return false;
+  for (const link of uncodedLinks) {
+    if (typeof link === "string") continue;
+    const message = messageProperty(link);
+    if (
+      typeof message === "string" &&
+      SERIALIZATION_FAILURE_MESSAGE_PATTERN.test(message)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function historyMissingRecordedRelationsError(
   details: Record<string, unknown>,
   cause: unknown,

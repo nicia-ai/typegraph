@@ -96,13 +96,25 @@ export function finalizeEngineCapabilities(
     fulltext: declaredFulltext,
     ...declaredWithoutStrategyCapabilities
   } = declared;
+  const atomicBatch =
+    createAtomicSqlProgramExecutor(deps.execution) === undefined ? "none" : (
+      "root"
+    );
   return assertBundledCapabilityDeclarations({
     ...declaredWithoutStrategyCapabilities,
     execution: {
       ...declared.execution,
-      atomicBatch:
-        createAtomicSqlProgramExecutor(deps.execution) === undefined ? "none"
-        : "root",
+      atomicBatch,
+      // Derived from the two facts above, never taken from `declared`: a
+      // profile that hand-set this field would drift the moment either fact
+      // changed underneath it. `interactiveTransactions` wins outright — an
+      // engine that can hold an open callback transaction groups a write
+      // that way regardless of whether it also happens to expose an atomic
+      // batch primitive.
+      unitOfWork:
+        declared.execution.interactiveTransactions ? "interactive"
+        : atomicBatch === "none" ? "none"
+        : "batch",
     },
     // Absent strategy: omit outright, regardless of what `declared` carried
     // — a value left over from a builder that (wrongly) baked one in, or a

@@ -13,8 +13,9 @@
  * `mergeAgainstBase()` (no branch-level precondition) gets the same
  * plan-stability guard from a token captured at plan start, so it is covered
  * here too. The serialization-retry half of the commit path is unit-tested in
- * `tx-retry.test.ts`; true multi-session SSI races need concurrent server
- * connections that in-process backends cannot produce.
+ * `transaction-retry.test.ts` (the shared retry owner) and `apply-callbacks.test.ts`
+ * (through the real merge commit path); true multi-session SSI races need
+ * concurrent server connections that in-process backends cannot produce.
  */
 
 import type { GraphBackend, Store, StoreOptions } from "@nicia-ai/typegraph";

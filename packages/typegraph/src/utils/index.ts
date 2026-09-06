@@ -1,5 +1,6 @@
 export { compareStrings } from "./compare";
 export { decodeDate, encodeDate, nowIso } from "./date";
+export { delay } from "./delay";
 export { sha256Hex } from "./hash";
 export { generateId, type IdConfig, type IdGenerator } from "./id";
 export {

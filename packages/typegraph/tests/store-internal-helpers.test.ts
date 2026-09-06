@@ -215,7 +215,11 @@ class ClosureGraphBackend {
 
   get capabilities(): GraphBackend["capabilities"] {
     return {
-      execution: { interactiveTransactions: true, atomicBatch: "none" },
+      execution: {
+        interactiveTransactions: true,
+        atomicBatch: "none",
+        unitOfWork: "interactive",
+      },
       windowFunctions: true,
       returning: true,
     };
@@ -749,7 +753,11 @@ describe("recorded capture helpers", () => {
     expect(() =>
       recordedBindParamBudget({
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           maxBindParameters: 0,
         },

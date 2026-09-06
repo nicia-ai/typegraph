@@ -973,7 +973,11 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "sqlite",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: false,
@@ -995,7 +999,11 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: true,
@@ -1028,7 +1036,11 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: false,
@@ -1055,7 +1067,11 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: true,
@@ -1084,7 +1100,11 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
       {
         dialect: "postgres",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
         },
       },
@@ -1135,7 +1155,11 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
     const statements: { query: string; params: readonly unknown[] }[] = [];
     const backend = mockTrustedImportBackend(
       {
-        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
         windowFunctions: true,
         pessimisticLocks: {
           advisoryLocks: true,
@@ -1162,7 +1186,11 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
     const statements: { query: string; params: readonly unknown[] }[] = [];
     const backend = mockTrustedImportBackend(
       {
-        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
         windowFunctions: true,
         pessimisticLocks: ADVISORY_ONLY_CAPABILITIES,
       },
@@ -1184,7 +1212,11 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
     const statements: { query: string; params: readonly unknown[] }[] = [];
     const backend = mockTrustedImportBackend(
       {
-        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
         windowFunctions: true,
         pessimisticLocks: UNFENCED_CAPABILITIES,
       },
@@ -1206,7 +1238,11 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
     const statements: { query: string; params: readonly unknown[] }[] = [];
     const backend = mockTrustedImportBackend(
       {
-        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
         windowFunctions: true,
         pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
       },

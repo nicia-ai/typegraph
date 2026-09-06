@@ -103,6 +103,7 @@ type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
+        unitOfWork?: "interactive" | "batch" | "none";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
@@ -2432,6 +2433,7 @@ type HookContext = Readonly<{
     operationId: string;
     graphId: string;
     startedAt: Date;
+    attempt?: number;
 }>;
 
 // @public (undocumented)
@@ -5062,10 +5064,17 @@ type StoreSearchContext = Readonly<{
     batchPointRead?: BundleVerdictOf<typeof BATCH_POINT_READ> | undefined;
 }>;
 
+// @public
+type StoreTransactionOptions = TransactionOptions & Readonly<{
+    retry?: Readonly<{
+        attempts: number;
+    }>;
+}>;
+
 // @public (undocumented)
 type StoreTransactions<G extends GraphDef> = Readonly<{
-    transaction: <T>(fn: (tx: TransactionContext<G>) => Promise<T>, options?: TransactionOptions) => Promise<T>;
-    transactionWithReceipt: <T>(fn: (tx: MeasurableTransactionContext<G>) => Promise<T>, options?: TransactionOptions) => Promise<TransactionOutcome<T>>;
+    transaction: <T>(fn: (tx: TransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<T>;
+    transactionWithReceipt: <T>(fn: (tx: MeasurableTransactionContext<G>) => Promise<T>, options?: StoreTransactionOptions) => Promise<TransactionOutcome<T>>;
 }>;
 
 // @public (undocumented)

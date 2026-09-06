@@ -2145,6 +2145,78 @@ try {
 }
 ```
 
+#### Retrying on conflict
+
+PostgreSQL can abort a transaction with a serialization failure or deadlock
+when two writers race — its own protocol response is to re-run the whole
+transaction from the top. By default `store.transaction()` and
+`store.transactionWithReceipt()` do this once: a conflict the backend reports
+surfaces as `TransactionConflictError` (code `TRANSACTION_CONFLICT`, with the
+driver error as `cause`) instead of the raw error, and `details.attempts` is
+`1`.
+
+Pass `retry: { attempts }` to have TypeGraph re-run the callback itself, up to
+`attempts` times total, whenever a conflict is detected:
+
+```typescript
+import { TransactionConflictError } from "@nicia-ai/typegraph";
+
+try {
+  await store.transaction(
+    async (tx) => {
+      // Read inside the callback: a replayed attempt must see fresh balances.
+      const from = await tx.nodes.Account.getById(fromId);
+      const to = await tx.nodes.Account.getById(toId);
+      if (from === undefined || to === undefined) throw new Error("missing account");
+      await tx.nodes.Account.compareAndSet(fromId, {
+        expected: { balance: from.balance },
+        patch: { balance: from.balance - 10 },
+      });
+      await tx.nodes.Account.compareAndSet(toId, {
+        expected: { balance: to.balance },
+        patch: { balance: to.balance + 10 },
+      });
+    },
+    { retry: { attempts: 3 } },
+  );
+} catch (error) {
+  if (error instanceof TransactionConflictError) {
+    // every attempt conflicted; error.details.attempts === 3
+  }
+}
+```
+
+A retried callback re-runs unconditionally on conflict, so it must satisfy the
+**replay contract**:
+
+- **Await all of its own work** before returning or throwing. A retried
+  callback that leaves a fire-and-forget effect in flight from a failed try
+  could duplicate that effect, or let the caller observe it after the try that
+  started it was rolled back.
+- **Read and write only values created fresh on each call.** A failed attempt's
+  transaction rolled back, so anything it left in a variable outside the
+  callback — a counter, a buffer, an accumulated list — describes state no
+  committed database agrees with. Reading it on the next attempt lets a rolled
+  back try leak into the one that commits.
+- **Perform no effect outside the transaction itself.** The whole callback
+  re-runs on conflict, so a network call, a write to a different store, or any
+  other side effect the transaction does not own runs again too.
+- **Tolerate being invoked up to `attempts` times**, not exactly once.
+
+Every hook fired by the callback's operations (`onOperationStart`,
+`onBulkOperationStart`, `onQueryStart`, and a failing operation's own
+`onError`) carries the 1-based attempt number that produced it, so a listener
+can tell a replay apart from a new operation. A rolled-back attempt's
+completed operations report neither `onOperationEnd` nor `onError` of their
+own — only the attempt that actually commits (or the last one, once `attempts`
+is exhausted) is reported, and `transactionWithReceipt`'s receipt reflects
+only that same committed attempt's writes.
+
+`retry` changes nothing about which backends `store.transaction()` accepts in
+the first place: a backend without interactive transactions (see
+[Backend support](#backend-support) below) already refuses the call before the
+callback ever runs, `retry` present or not.
+
 #### Nesting
 
 Transactions do **not** nest. The transaction context intentionally omits the
@@ -3027,6 +3099,8 @@ type HookContext = Readonly<{
   operationId: string;
   graphId: string;
   startedAt: Date;
+  /** 1-based attempt inside a retried transaction; absent means 1. */
+  attempt?: number;
 }>;
 
 type QueryHookContext = HookContext &

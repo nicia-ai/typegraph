@@ -317,6 +317,12 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // Generic traversal inference adds only ArrayNodeKinds and EdgeTargetKinds to
 // the seven Store-bearing entrypoints. Removing those names reproduces each
 // preceding fingerprint; these helpers are not new package entrypoint exports.
+// `store.transaction`/`transactionWithReceipt` replacing their `options`
+// parameter's type with the new `StoreTransactionOptions` adds exactly that
+// one name (+1 apiece) to the six Store-bearing entrypoints that were not
+// already at the root (`./graph-merge`, `./interchange`, `./postgres/pglite`,
+// `./profiler`, `./provenance`, `./sqlite/local`); `.` exports the type
+// directly, so its own debt is unchanged.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 388,
@@ -366,36 +372,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 717,
-    sha256: "ff5aad943413e62e5ed119351118e83297595d6bf470f20d5e2fb37dbca1ccd3",
+    count: 718,
+    sha256: "edb32f3b47436fd7c4e2f62c571c106553aa28f2c19bb7cd783f766832336961",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 700,
-    sha256: "4bebeef9090fbb993590a09cbae43e0d5ab4ad0d2141dc1e9f6a0a7017e78c9d",
+    count: 701,
+    sha256: "9bf069f3f6a6f49d1bc2d6ef61d99c53cacc3fd4dc62d0ae966a1d66feaf9579",
   },
   "./postgres/pglite": {
-    count: 704,
-    sha256: "a4dd2833423a44b8691c6de2a4c8566a23416dd10eb08d752b60548a5d7ab297",
+    count: 705,
+    sha256: "d6154cb7bf47cd8c18b885c603287a4bbc54c75da64e72b97bb81c4d50e3f18b",
   },
   "./profiler": {
-    count: 702,
-    sha256: "451e9efb72c1d85a6e4c08a437932dc3ff0f95682a2eb7fba55ebca8d02e3da5",
+    count: 703,
+    sha256: "01d9f20480fae6d947b675be3cd6b71b6280563605ae3c8a61f569fd29466dde",
   },
   "./provenance": {
-    count: 708,
-    sha256: "f0cb0c67e3eeaed506c279f2941c72d14d24df4b08ac0fda6f596db9315e6189",
+    count: 709,
+    sha256: "824fef0bce05b867a867f66be6555931b5f3d074c43dd0ccd44a417d15268ae2",
   },
   "./schema": {
     count: 271,
     sha256: "98937d4bdad02494cdd60bf29a4287e543d9471a673d5846cb6796207d0f7448",
   },
   "./sqlite/local": {
-    count: 704,
-    sha256: "a4dd2833423a44b8691c6de2a4c8566a23416dd10eb08d752b60548a5d7ab297",
+    count: 705,
+    sha256: "d6154cb7bf47cd8c18b885c603287a4bbc54c75da64e72b97bb81c4d50e3f18b",
   },
 };
 
