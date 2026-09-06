@@ -152,6 +152,7 @@ export type {
   SchemaManagerOptions,
   SchemaValidationResult,
   Store,
+  StoreTransactionOptions,
 } from "./store";
 export {
   createAdapterStore,

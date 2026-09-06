@@ -40,7 +40,6 @@ import type {
   TransactionOptions,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
-import { isRetryableTxConflict } from "../../../src/graph-merge/tx-retry";
 import type { CompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { migrateSchema } from "../../../src/schema";
 import {
@@ -49,6 +48,7 @@ import {
   createStoreWithSchema,
 } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { isSerializationFailure } from "../../../src/utils/sql-errors";
 import {
   createGate,
   raceTimeout,
@@ -677,7 +677,7 @@ describe("PostgreSQL Backend - Adapter Specific", () => {
       releaseWrite.open();
 
       await expect(staleWrite).rejects.toSatisfy((error: unknown) =>
-        isRetryableTxConflict(error),
+        isSerializationFailure(error),
       );
       expect(
         requireDefined(await backend.getActiveSchema(testGraph.id)).version,

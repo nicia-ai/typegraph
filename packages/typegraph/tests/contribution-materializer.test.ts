@@ -175,7 +175,11 @@ function createMockMaterializer(
     fenceTarget: {
       dialect,
       capabilities: {
-        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
         windowFunctions: true,
         pessimisticLocks:
           dialect === "postgres" ?
@@ -526,7 +530,11 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       fenceTarget: {
         dialect: "sqlite",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: false,
@@ -591,7 +599,11 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
       fenceTarget: {
         dialect: "postgres",
         capabilities: {
-          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
           windowFunctions: true,
           pessimisticLocks: {
             advisoryLocks: true,

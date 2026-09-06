@@ -9,6 +9,7 @@ const PGLITE_BOOT_MARKERS = [
   /\bcreateLocalPgliteBackend\(/u,
   /\bcreateLoggedPostgresBackend\(/u,
   /\bcreateRecordedPostgresStore\(/u,
+  /\bcreateTransactionFaultInjector\(/u,
 ] as const;
 
 function discoverRootPgliteSuites(): readonly string[] {

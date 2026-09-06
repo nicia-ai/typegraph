@@ -315,6 +315,22 @@ export type BackendCapabilities = Readonly<{
      * to the transaction that makes a closed statement sequence atomic.
      */
     atomicBatch: "none" | "root" | "session";
+    /**
+     * How this backend groups a multi-statement write into one unit: an
+     * `"interactive"` callback/session transaction that can hold a fenced
+     * conversation across several round trips, a `"batch"` atomic program
+     * with no such transaction, or `"none"` when it offers neither and a
+     * managed write can only run its statements one at a time with no
+     * atomicity across them.
+     *
+     * Derived, never hand-declared, on every bundled backend —
+     * `"interactive"` when `interactiveTransactions` is true, else `"batch"`
+     * when `atomicBatch` is not `"none"`, else `"none"` — overwriting
+     * whatever a profile's own `declaredCapabilities` set. Optional so a
+     * custom `GraphBackend` implementation, which nothing derives this for,
+     * is not forced to declare it; no consumer reads it yet.
+     */
+    unitOfWork?: "interactive" | "batch" | "none";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;
@@ -4432,6 +4448,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   execution: Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
+    unitOfWork: "interactive",
   }),
   windowFunctions: true, // SQLite has supported window functions since 3.25.0
   clearValidTo: true,
@@ -4459,6 +4476,7 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   execution: Object.freeze({
     interactiveTransactions: true,
     atomicBatch: "none",
+    unitOfWork: "interactive",
   }),
   windowFunctions: true, // PostgreSQL supports ROW_NUMBER() and related windows
   clearValidTo: true,

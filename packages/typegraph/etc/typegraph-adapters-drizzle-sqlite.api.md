@@ -24,6 +24,7 @@ type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
+        unitOfWork?: "interactive" | "batch" | "none";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;

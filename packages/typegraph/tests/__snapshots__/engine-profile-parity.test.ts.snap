@@ -14,6 +14,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
   "execution": {
     "atomicBatch": "root",
     "interactiveTransactions": true,
+    "unitOfWork": "interactive",
   },
   "fulltext": {
     "highlighting": true,
@@ -234,6 +235,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
   "execution": {
     "atomicBatch": "root",
     "interactiveTransactions": true,
+    "unitOfWork": "interactive",
   },
   "graphAnalytics": {
     "mathFunctions": true,
@@ -429,6 +431,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "execution": {
     "atomicBatch": "none",
     "interactiveTransactions": true,
+    "unitOfWork": "interactive",
   },
   "fulltext": {
     "highlighting": true,
@@ -624,6 +627,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   "execution": {
     "atomicBatch": "none",
     "interactiveTransactions": true,
+    "unitOfWork": "interactive",
   },
   "graphAnalytics": {
     "mathFunctions": false,

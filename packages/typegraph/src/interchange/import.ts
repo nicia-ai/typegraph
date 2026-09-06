@@ -311,6 +311,127 @@ type ImportWriteFrame = Readonly<{
   statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
 }>;
 
+/**
+ * The counters, error list, and imported-id set one import write-plan attempt
+ * accumulates. Never shared across attempts: a rolled-back commit's growth in
+ * these must not leak into the attempt that succeeds. Exported for the same
+ * declaration-file reason as {@link NodeSchemaEntry} — it is
+ * {@link runImportWritePlanAttempt}'s return type, and that function is
+ * test-only.
+ */
+export type ImportAttemptState = Readonly<{
+  result: ImportResult;
+  errors: ImportError[];
+  importedNodeIds: Set<string>;
+}>;
+
+/** Fresh, empty attempt state. Called once at the top of every attempt. */
+function createImportAttemptState(): ImportAttemptState {
+  return {
+    result: emptyImportResult(),
+    errors: [],
+    importedNodeIds: new Set<string>(),
+  };
+}
+
+/**
+ * The inputs one import write-plan attempt needs that stay fixed across every
+ * attempt a retry owner might drive it through: schema maps, the resolved
+ * capability verdicts, and the target-independent pieces of the import
+ * request. None of it is mutated by an attempt, and the verdicts specifically
+ * must stay bound to the root `backend` they were resolved from — re-deriving
+ * them from a transaction target would answer a different question than the
+ * one `importGraphData` already asked once at its own root.
+ */
+export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
+  graphId: string;
+  registry: KindRegistry;
+  data: GraphData;
+  nodeSchemas: ReadonlyMap<string, NodeSchemaEntry>;
+  edgeSchemas: ReadonlyMap<string, EdgeSchemaEntry>;
+  options: ResolvedImportOptions;
+  runtime: ReturnType<typeof storeRuntime<G>>;
+  batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+  uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
+  statementExecution: BundleVerdictOf<typeof STATEMENT_EXECUTION>;
+}>;
+
+/**
+ * One row-work attempt of an import's write plan — the function
+ * `importGraphData` hands to `runWritePlan` as its `rowWork`. Builds fresh
+ * attempt state via {@link createImportAttemptState}, threads it through node,
+ * identity-fold, and edge processing, and returns it, so a rolled-back
+ * attempt leaves nothing behind for a later one to read.
+ *
+ * Exported for `tests/transaction-retry.test.ts` ONLY, which drives this
+ * function directly through `runRetriedUnit` and a fault-injected backend to
+ * prove attempt state is fresh every time. Import itself is NOT routed
+ * through the retry owner in this stage: `importGraphData` still calls this
+ * function exactly once, through its own single-attempt `runWritePlan`. No
+ * published entrypoint re-exports it.
+ */
+export async function runImportWritePlanAttempt<G extends GraphDef>(
+  inputs: ImportAttemptInputs<G>,
+  session: WriteSession,
+  target: WriteTarget,
+  overlaidSession: OverlaidSessionMint<"mixed">,
+  transactionMode: WriteTransactionMode,
+): Promise<ImportAttemptState> {
+  const { result, errors, importedNodeIds } = createImportAttemptState();
+  let nextEdgeSavepointId = 0;
+  const frame: ImportWriteFrame = {
+    session,
+    target,
+    allocateEdgeSavepoint: () =>
+      `typegraph_import_edge_row_${++nextEdgeSavepointId}`,
+    transactionMode,
+    overlaidSession,
+    batchPointRead: inputs.batchPointRead,
+    uniqueSidecarBatch: inputs.uniqueSidecarBatch,
+    statementExecution: inputs.statementExecution,
+  };
+  await processNodes(
+    frame,
+    inputs.graphId,
+    inputs.registry,
+    inputs.data.nodes,
+    inputs.nodeSchemas,
+    inputs.options,
+    result,
+    errors,
+    importedNodeIds,
+  );
+  await inputs.runtime.foldImportedIdentityNodes(
+    target,
+    inputs.data.nodes
+      .filter((node) => importedNodeIds.has(makeNodeKey(node.kind, node.id)))
+      .map((node) => ({ kind: node.kind, id: node.id })),
+  );
+  await processEdges(
+    frame,
+    inputs.graphId,
+    inputs.registry,
+    inputs.data.edges,
+    inputs.edgeSchemas,
+    inputs.nodeSchemas,
+    inputs.options,
+    result,
+    errors,
+    importedNodeIds,
+  );
+  if (inputs.data.identity !== undefined) {
+    await importIdentitySection(
+      inputs.runtime,
+      target,
+      inputs.graphId,
+      inputs.data.identity,
+      result,
+      errors,
+    );
+  }
+  return { result, errors, importedNodeIds };
+}
+
 async function importGraphData<G extends GraphDef>(
   store: Store<G>,
   data: GraphData,
@@ -322,9 +443,6 @@ async function importGraphData<G extends GraphDef>(
   assertIdentityImportSupported(store, data.identity !== undefined);
   validateIdentitySection(data.identity);
 
-  const result = emptyImportResult();
-
-  const errors: ImportError[] = [];
   const graph = store.graph;
   const graphId = store.graphId;
   const backend = storeBackend(store);
@@ -366,14 +484,28 @@ async function importGraphData<G extends GraphDef>(
     );
   }
 
-  // Track imported node IDs for reference validation
-  const importedNodeIds = new Set<string>();
+  // Fixed across every attempt a single write-plan callback runs; built once,
+  // never mutated, and threaded into runImportWritePlanAttempt so the same
+  // schema maps, verdicts, and request pieces reach whichever attempt(s) run.
+  const attemptInputs: ImportAttemptInputs<G> = {
+    graphId,
+    registry,
+    data,
+    nodeSchemas,
+    edgeSchemas,
+    options,
+    runtime,
+    batchPointRead,
+    uniqueSidecarBatch,
+    statementExecution,
+  };
 
   // One transaction on a transactional backend; runs directly otherwise, with
   // the per-graph write lock taken before any row work — see runWritePlan and
   // the runInWriteTransaction contract underneath it, the shared
-  // lock-before-rows discipline every writer follows.
-  await runWritePlan(
+  // lock-before-rows discipline every writer follows. A single, unretried
+  // attempt in this stage — see runImportWritePlanAttempt's doc comment.
+  const { result, errors } = await runWritePlan(
     {
       graphId,
       registry,
@@ -398,61 +530,14 @@ async function importGraphData<G extends GraphDef>(
     // mixed family explicitly instead of receiving either narrower session.
     mixedWritePlan(undefined, true),
     backend,
-    async (session, target, overlaidSession, _lock, transactionMode) => {
-      let nextEdgeSavepointId = 0;
-      const frame: ImportWriteFrame = {
+    (session, target, overlaidSession, _lock, transactionMode) =>
+      runImportWritePlanAttempt(
+        attemptInputs,
         session,
         target,
-        allocateEdgeSavepoint: () =>
-          `typegraph_import_edge_row_${++nextEdgeSavepointId}`,
-        transactionMode,
         overlaidSession,
-        batchPointRead,
-        uniqueSidecarBatch,
-        statementExecution,
-      };
-      await processNodes(
-        frame,
-        graphId,
-        registry,
-        data.nodes,
-        nodeSchemas,
-        options,
-        result,
-        errors,
-        importedNodeIds,
-      );
-      await runtime.foldImportedIdentityNodes(
-        target,
-        data.nodes
-          .filter((node) =>
-            importedNodeIds.has(makeNodeKey(node.kind, node.id)),
-          )
-          .map((node) => ({ kind: node.kind, id: node.id })),
-      );
-      await processEdges(
-        frame,
-        graphId,
-        registry,
-        data.edges,
-        edgeSchemas,
-        nodeSchemas,
-        options,
-        result,
-        errors,
-        importedNodeIds,
-      );
-      if (data.identity !== undefined) {
-        await importIdentitySection(
-          runtime,
-          target,
-          graphId,
-          data.identity,
-          result,
-          errors,
-        );
-      }
-    },
+        transactionMode,
+      ),
   );
 
   // A bulk load runs against stale planner statistics until ANALYZE runs
@@ -1176,17 +1261,29 @@ async function refreshStatisticsAfterImport<G extends GraphDef>(
 // Schema Maps
 // ============================================================
 
-type NodeSchemaEntry = Readonly<{
+/**
+ * Exported so it can appear (structurally, via {@link ImportAttemptInputs}) in
+ * the declaration file for the test-only {@link runImportWritePlanAttempt} —
+ * not otherwise part of any published entrypoint.
+ */
+export type NodeSchemaEntry = Readonly<{
   registration: NodeRegistration;
   schema: z.ZodObject<z.ZodRawShape>;
 }>;
 
-type EdgeSchemaEntry = Readonly<{
+/** See {@link NodeSchemaEntry}. */
+export type EdgeSchemaEntry = Readonly<{
   registration: EdgeRegistration;
   schema: z.ZodObject<z.ZodRawShape>;
 }>;
 
-function buildNodeSchemaMap(
+/**
+ * Exported alongside {@link runImportWritePlanAttempt} so
+ * `tests/transaction-retry.test.ts` can build a real
+ * {@link ImportAttemptInputs} without hand-rolling the registration shape a
+ * schema-map entry carries. Not otherwise part of any published entrypoint.
+ */
+export function buildNodeSchemaMap(
   graph: GraphDef,
 ): ReadonlyMap<string, NodeSchemaEntry> {
   const map = new Map<string, NodeSchemaEntry>();
@@ -1202,7 +1299,8 @@ function buildNodeSchemaMap(
   return map;
 }
 
-function buildEdgeSchemaMap(
+/** See {@link buildNodeSchemaMap}. */
+export function buildEdgeSchemaMap(
   graph: GraphDef,
 ): ReadonlyMap<string, EdgeSchemaEntry> {
   const map = new Map<string, EdgeSchemaEntry>();

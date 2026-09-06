@@ -24,6 +24,7 @@ export {
   ConfigurationError,
   IdentityContradictionError,
   NodeNotFoundError,
+  TransactionConflictError,
   TypeGraphError,
   type TypeGraphErrorOptions,
 } from "../errors";
@@ -50,7 +51,10 @@ export {
   type OntologyIntrospection,
   type UniqueIntrospection,
 } from "../store/introspect";
-export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
+export {
+  forceWriteTransactionRevision,
+  runRetriedUnit,
+} from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
   forceRecordedGraphRevision,

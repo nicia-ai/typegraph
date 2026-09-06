@@ -1013,6 +1013,43 @@ export class VersionConflictError extends TypeGraphError {
   }
 }
 
+/**
+ * Details for TransactionConflictError.
+ */
+export type TransactionConflictErrorDetails = Readonly<{
+  operation: string;
+  attempts: number;
+}>;
+
+/**
+ * Thrown when a transaction was aborted by a serialization failure or
+ * deadlock on every attempt available to it.
+ *
+ * The failing driver error — the last attempt's — is preserved as `cause`.
+ * PostgreSQL's own protocol for both conditions is to re-run the whole
+ * transaction from the top, which is what exhausted the attempt budget here.
+ */
+export class TransactionConflictError extends TypeGraphError {
+  declare readonly details: TransactionConflictErrorDetails;
+
+  constructor(
+    details: TransactionConflictErrorDetails,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Transaction conflict on ${details.operation}: aborted by a serialization failure or deadlock after ${details.attempts} attempt(s)`,
+      "TRANSACTION_CONFLICT",
+      {
+        details,
+        category: "system",
+        suggestion: "Re-run the whole transaction from the top.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "TransactionConflictError";
+  }
+}
+
 // ============================================================
 // Schema Errors (category: "system")
 // ============================================================

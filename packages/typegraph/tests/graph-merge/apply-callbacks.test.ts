@@ -4,12 +4,14 @@ import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
+  TransactionConflictError,
 } from "@nicia-ai/typegraph";
 import {
   applyMergePlan,
   asBranchId,
   branch,
   isErr,
+  MergeError,
   MergePlanCapabilityError,
   planMerge,
   StaleMergePlanError,
@@ -98,6 +100,42 @@ describe("merge callback retry and refusal", () => {
     expect(afterApply).toHaveBeenCalledTimes(3);
     expect(await store.nodes.Item.count()).toBe(0);
     expect(await store.revisionNow()).toEqual(revision);
+  });
+
+  it("wraps a commit that conflicts on every attempt as one TransactionConflictError, not a chain", async () => {
+    const { backend, plan } = await fixture();
+    let commitAttempts = 0;
+    const countingBackend = deriveBackend(backend, {
+      transaction: (fn, options) => {
+        commitAttempts += 1;
+        return backend.transaction(fn, options);
+      },
+    });
+    const store = createStore(graph, countingBackend, { history: true });
+    const injectedErrors: Error[] = [];
+    const afterApply = vi.fn(async () => {
+      const error = conflict();
+      injectedErrors.push(error);
+      throw error;
+    });
+
+    const result = await applyMergePlan(store, plan, { afterApply });
+
+    expect(isErr(result)).toBe(true);
+    const error = isErr(result) ? result.error : undefined;
+    expect(error).toBeInstanceOf(MergeError);
+    expect(error?.details).toMatchObject({ attempts: 3 });
+    expect(error?.cause).toBeInstanceOf(TransactionConflictError);
+    const conflictError = error?.cause as TransactionConflictError;
+    expect(conflictError.details.attempts).toBe(3);
+    // Exactly one conflict error deep: its own cause is the last INJECTED
+    // driver error (identity), never another TransactionConflictError.
+    expect(conflictError.cause).not.toBeInstanceOf(TransactionConflictError);
+    expect(conflictError.cause).toBe(injectedErrors.at(-1));
+    // The merge actually retried at the backend layer, not merely re-ran the
+    // callback in memory.
+    expect(commitAttempts).toBe(3);
+    expect(afterApply).toHaveBeenCalledTimes(3);
   });
 
   it("revalidates the fence after a rolled-back attempt and intervening committed write", async () => {

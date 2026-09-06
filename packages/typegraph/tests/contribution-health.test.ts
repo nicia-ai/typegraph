@@ -119,7 +119,11 @@ function createRefusingMaterializer(
     fenceTarget: {
       dialect: "sqlite",
       capabilities: {
-        execution: { interactiveTransactions: true, atomicBatch: "none" },
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
         windowFunctions: true,
         pessimisticLocks: {
           advisoryLocks: false,
