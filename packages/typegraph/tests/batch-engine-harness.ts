@@ -28,13 +28,11 @@ import { drizzle as drizzleD1 } from "drizzle-orm/d1";
 import { drizzle as drizzleNeonHttp } from "drizzle-orm/neon-http";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 
-import { markBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
+import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import {
   generateSqliteMigrationSQL,
   generateVectorlessPostgresMigrationSQL,
 } from "../src/backend/drizzle/ddl";
-import { type AnyPgDatabase } from "../src/backend/drizzle/execution/postgres-execution";
-import { type AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
 import {
   createPostgresBackend,
   type PostgresBackendOptions,
@@ -210,15 +208,23 @@ export function createD1BatchEngineHarness(
   const d1Db = drizzleD1(
     d1Client as unknown as Parameters<typeof drizzleD1>[0],
   );
-  const backend = markBundledRootAutocommitEligible(
-    createSqliteBackend(d1Db as unknown as AnySqliteDatabase, {
-      tables,
-      fulltext: false,
-      ...(options.capabilities === undefined ?
-        {}
-      : { capabilities: options.capabilities }),
-    }),
-  );
+  const backend = createSqliteBackend(d1Db, {
+    tables,
+    fulltext: false,
+    ...(options.capabilities === undefined ?
+      {}
+    : { capabilities: options.capabilities }),
+  });
+  // `createSqliteBackend` already applies this mark itself (its profile
+  // declares `autocommit.singleStatementDurable: true`). Asserting it here,
+  // instead of marking it again, keeps this harness sensitive to a factory-
+  // mark regression rather than papering over one — the mark is exactly what
+  // the fused supplied-id create path under test depends on.
+  if (!isBundledRootAutocommitEligible(backend)) {
+    throw new Error(
+      "createSqliteBackend did not mark its root backend autocommit-eligible",
+    );
+  }
 
   return {
     backend,
@@ -394,16 +400,24 @@ export async function createNeonHttpBatchEngineHarness(
   const neonDb = drizzleNeonHttp({
     client: neonClient as unknown as NeonQueryFunction<false, false>,
   });
-  const backend = markBundledRootAutocommitEligible(
-    createPostgresBackend(neonDb as unknown as AnyPgDatabase, {
-      tables,
-      vector: false,
-      fulltext: false,
-      ...(options.capabilities === undefined ?
-        {}
-      : { capabilities: options.capabilities }),
-    }),
-  );
+  const backend = createPostgresBackend(neonDb, {
+    tables,
+    vector: false,
+    fulltext: false,
+    ...(options.capabilities === undefined ?
+      {}
+    : { capabilities: options.capabilities }),
+  });
+  // `createPostgresBackend` already applies this mark itself (its profile
+  // declares `autocommit.singleStatementDurable: true`). Asserting it here,
+  // instead of marking it again, keeps this harness sensitive to a factory-
+  // mark regression rather than papering over one — the mark is exactly what
+  // the fused supplied-id create path under test depends on.
+  if (!isBundledRootAutocommitEligible(backend)) {
+    throw new Error(
+      "createPostgresBackend did not mark its root backend autocommit-eligible",
+    );
+  }
 
   return {
     backend,

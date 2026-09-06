@@ -59,6 +59,11 @@
  * would make the claim above false wherever it matters most. Unconstrained
  * writes assert nothing and keep working on those backends.
  */
+import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../../backend/capabilities/batch-write-verdict";
 import { statementExecutionMembers } from "../../backend/capabilities/bind";
 import { type STATEMENT_EXECUTION } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
@@ -357,6 +362,15 @@ async function lockSchemaVersionForStoreWriteUncached(
     "transaction" in backend &&
     !backend.capabilities.execution.interactiveTransactions
   ) {
+    // Reached from every call site above through many different fuse
+    // failures (an ineligible kind, a derived backend an execution-boundary
+    // proof does not cover, a provenance mismatch at the actual write
+    // receiver) — this gate's own inputs (graph id, schema version) name
+    // none of them. It states the plain limitation with no guessed cause;
+    // a caller that HAS proven a specific `BatchWriteRefusalReason` (a
+    // declared constraint, `store.transaction`, identity, history, a schema
+    // commit) reports it through that reason's own enforcing gate instead of
+    // this one.
     throw new ConfigurationError(
       "Schema-managed Store writes require a transactional backend so schema " +
         "changes and entity writes can share one fence.",
@@ -459,6 +473,23 @@ function resolveWriteTransactionMode(
     : "none";
 }
 
+/**
+ * Re-exported beside {@link constraintFenceRefusal} — the two live together
+ * conceptually even though {@link resolveBatchWriteVerdict}'s implementation
+ * sits in a leaf module (`backend/capabilities/batch-write-verdict.ts`) so
+ * that `recorded-capture/guards.ts`, which this module itself imports
+ * through the `recorded-capture` barrel, can import it without a cycle.
+ * `BatchWriteRefusalReason` / `BatchWriteVerdict` are not re-exported here:
+ * every current caller consumes them structurally through
+ * `resolveBatchWriteVerdict`'s return type, with no call site importing
+ * either type by name.
+ */
+export {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../../backend/capabilities/batch-write-verdict";
+
 /** What a caller must change to make each refused constraint class writable. */
 const CONSTRAINT_FENCE_ADVICE = {
   edgeCardinality:
@@ -517,15 +548,21 @@ export function constraintFenceRefusal(
     return undefined;
   }
 
+  const verdict = resolveBatchWriteVerdict(backend, {
+    needs: "constraint-needs-probe",
+  });
+
   return new ConfigurationError(
     "This backend cannot fence a constrained write: enforcing a declared " +
       "constraint requires a transaction — to scope the per-graph write lock " +
       "to, and to commit a reservation row together with the row it gates — " +
-      "and this backend has no transactions.",
+      "and this backend has no transactions." +
+      batchRefusalSuffix(verdict),
     {
       code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
       graphId: ctx.graphId,
       constraint: reason,
+      ...batchRefusalDetails(verdict),
     },
     {
       suggestion:

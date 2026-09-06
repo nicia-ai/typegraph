@@ -13,7 +13,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { EndpointNotFoundError, StaleVersionError } from "../src";
+import {
+  ConfigurationError,
+  EndpointNotFoundError,
+  StaleVersionError,
+  UniquenessError,
+  ValidationError,
+} from "../src";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
@@ -22,6 +28,7 @@ import {
   createD1BatchEngineHarness,
   createNeonHttpBatchEngineHarness,
 } from "./batch-engine-harness";
+import { matchingObject } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const Company = defineNode("Company", {
@@ -64,6 +71,39 @@ const evolvedGraph = defineGraph({
       cardinality: "many",
     },
   },
+});
+
+// A node with a claimed unique field, for the constrained-write-inside-the-
+// claim-envelope scenario: the claim/reservation row and the node row commit
+// or roll back together inside one atomic program.
+const ClaimedPerson = defineNode("ClaimedPerson", {
+  schema: z.object({ email: z.string() }),
+});
+const claimGraph = defineGraph({
+  id: "batch-engine-semantics-claim",
+  nodes: {
+    ClaimedPerson: {
+      type: ClaimedPerson,
+      unique: [
+        {
+          name: "claimed_person_email",
+          fields: ["email"],
+          scope: "kind",
+          collation: "binary",
+        },
+      ],
+    },
+  },
+  edges: {},
+});
+
+// A graph whose identity is on, purely to exercise the Store-construction
+// refusal a batch-tier backend hits before any row is read or written.
+const identityGraph = defineGraph({
+  id: "batch-engine-semantics-identity",
+  nodes: { Person: { type: Person } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
 });
 
 type HarnessKind = "d1" | "neon-http";
@@ -176,6 +216,181 @@ describe.each([
         ]),
       ).rejects.toBeInstanceOf(StaleVersionError);
       await expect(store.edges.worksAt.count()).resolves.toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("conflicts on the claim row for a constrained write inside the claim envelope, leaving no row", async () => {
+    const harness = await createHarness(kind);
+    try {
+      await createStoreWithSchema(claimGraph, harness.interactiveBackend);
+      const [store] = await createStoreWithSchema(claimGraph, harness.backend);
+      // A single `create()` on an own-kind unique constraint takes no lock
+      // fence (the uniques primary key is the whole fence) but also does not
+      // fuse (`uniqueConstraintCount` must be zero to fuse), so it still
+      // needs the portable schema fence a batch engine has no session to
+      // hold. `bulkCreate` runs through the claim envelope's atomic program
+      // instead, which is what this scenario is about.
+      await store.nodes.ClaimedPerson.bulkCreate([
+        { props: { email: "alice@example.com" } },
+      ]);
+
+      // The second item's claim conflicts with the row the earlier
+      // `bulkCreate` already committed, not with the first item of this same
+      // batch. The typed uniqueness error surfaces, and `count()` staying at
+      // 1 (not 2) proves the first item of THIS batch rolled back with it.
+      await expect(
+        store.nodes.ClaimedPerson.bulkInsert([
+          { props: { email: "bob@example.com" } },
+          { props: { email: "alice@example.com" } },
+        ]),
+      ).rejects.toBeInstanceOf(UniquenessError);
+      await expect(store.nodes.ClaimedPerson.count()).resolves.toBe(1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("fuses a supplied-id singleton create, fences it, and reports a duplicate id", async () => {
+    const harness = await createHarness(kind);
+    try {
+      const store = await bootHarnessStore(harness);
+
+      const created = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "explicit-person-id" },
+      );
+      expect(created.id).toBe("explicit-person-id");
+      await expect(store.nodes.Person.count()).resolves.toBe(1);
+
+      // Same id again: the fused if-absent statement writes nothing, and the
+      // duplicate is reported through the ordinary typed error.
+      await expect(
+        store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "explicit-person-id" },
+        ),
+      ).rejects.toBeInstanceOf(ValidationError);
+      await expect(store.nodes.Person.count()).resolves.toBe(1);
+
+      // A stale schema version: the fenced statement writes nothing and the
+      // store re-diagnoses it as StaleVersionError.
+      await migrateSchema(harness.interactiveBackend, evolvedGraph, 1);
+      await expect(
+        store.nodes.Person.create(
+          { name: "Cara" },
+          { id: "another-explicit-id" },
+        ),
+      ).rejects.toBeInstanceOf(StaleVersionError);
+      await expect(store.nodes.Person.count()).resolves.toBe(1);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("refuses to resurrect a supplied-id create over a tombstoned row", async () => {
+    const harness = await createHarness(kind);
+    try {
+      const store = await bootHarnessStore(harness);
+
+      const created = await store.nodes.Person.create(
+        { name: "Alice" },
+        { id: "resurrection-candidate" },
+      );
+      await store.nodes.Person.bulkDelete([created.id]);
+
+      // The fused if-absent INSERT finds the id occupied by a tombstone.
+      // Resurrecting it is a real UPDATE outside the fused statement's
+      // atomicity, so the batch engine — with no session to hold a fence
+      // across it — refuses instead of writing the row unfenced.
+      await expect(
+        store.nodes.Person.create(
+          { name: "Bob" },
+          { id: "resurrection-candidate" },
+        ),
+      ).rejects.toMatchObject({
+        details: matchingObject({ code: "SCHEMA_WRITE_FENCE_UNSUPPORTED" }),
+      });
+      await expect(store.nodes.Person.count()).resolves.toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("reaches every batch-write refusal reason with a reported reason", async () => {
+    const harness = await createHarness(kind);
+    try {
+      const store = await bootHarnessStore(harness);
+
+      // interactive-callback: store.transaction() needs an open callback
+      // session a closed batch program cannot hold.
+      await expect(
+        store.transaction(() => Promise.resolve(undefined)),
+      ).rejects.toMatchObject({
+        details: matchingObject({
+          batchRefusal: {
+            code: "BATCH_WRITE_UNSUPPORTED",
+            reason: "interactive-callback",
+          },
+        }),
+      });
+
+      // constraint-needs-probe: a dynamic match-key convergence write needs a
+      // read that steers what it writes.
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const acme = await store.nodes.Company.create({ name: "Acme" });
+      await expect(
+        store.edges.worksAt.getOrCreateByEndpoints(alice, acme, {
+          role: "Engineer",
+        }),
+      ).rejects.toMatchObject({
+        details: matchingObject({
+          batchRefusal: {
+            code: "BATCH_WRITE_UNSUPPORTED",
+            reason: "constraint-needs-probe",
+          },
+        }),
+      });
+
+      // identity: Operational Identity's closure maintenance needs several
+      // round trips inside one held transaction.
+      await createStoreWithSchema(identityGraph, harness.interactiveBackend);
+      await expect(
+        createStoreWithSchema(identityGraph, harness.backend),
+      ).rejects.toMatchObject({
+        details: matchingObject({
+          batchRefusal: { code: "BATCH_WRITE_UNSUPPORTED", reason: "identity" },
+        }),
+      });
+
+      // history: recorded-time capture needs the per-graph write lock and
+      // clock held across a whole write cascade.
+      await expect(
+        createStoreWithSchema(graph, harness.backend, { history: true }),
+      ).rejects.toMatchObject({
+        details: matchingObject({
+          batchRefusal: { code: "BATCH_WRITE_UNSUPPORTED", reason: "history" },
+        }),
+      });
+
+      // schema-commit: committing a schema version needs one held
+      // transaction across its compare-and-swap read and its activating
+      // write.
+      const schemaCommitRejection = await migrateSchema(
+        harness.backend,
+        evolvedGraph,
+        1,
+      ).catch((error: unknown) => error);
+      expect(schemaCommitRejection).toBeInstanceOf(ConfigurationError);
+      expect(schemaCommitRejection).toMatchObject({
+        details: matchingObject({
+          batchRefusal: {
+            code: "BATCH_WRITE_UNSUPPORTED",
+            reason: "schema-commit",
+          },
+        }),
+      });
     } finally {
       await harness.close();
     }

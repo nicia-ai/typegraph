@@ -1,4 +1,9 @@
 import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../../backend/capabilities/batch-write-verdict";
+import {
   recordedRevisionOriginsVerdict,
   statementExecutionVerdict,
 } from "../../backend/capabilities/resolve";
@@ -251,11 +256,25 @@ export function rawWriteGuards(
   };
 }
 
+/**
+ * Defense-in-depth on the non-interactive branch: `Store`'s constructor
+ * already routes `history: true` through `#revisionTrackingEnabled` and
+ * calls {@link assertRevisionTrackableBackend} — which refuses a batch-tier
+ * backend first — before it ever reaches {@link createRecordedBackend} (and
+ * so this gate). It stays here, re-checked with the same verdict, for any
+ * caller of `createRecordedBackend` that does not go through that
+ * constructor path.
+ */
 export function assertCapturableBackend(backend: GraphBackend): void {
   if (!backend.capabilities.execution.interactiveTransactions) {
+    const verdict = resolveBatchWriteVerdict(backend, { needs: "history" });
     throw new ConfigurationError(
-      "history: true requires a backend with transaction support.",
-      { dialect: backend.dialect },
+      "history: true requires a backend with transaction support." +
+        batchRefusalSuffix(verdict),
+      {
+        dialect: backend.dialect,
+        ...batchRefusalDetails(verdict),
+      },
       {
         suggestion:
           "Use a transactional SQLite/PostgreSQL backend or disable recorded-time capture for this store.",
@@ -301,9 +320,14 @@ export function assertCapturableBackend(backend: GraphBackend): void {
  */
 export function assertRevisionTrackableBackend(backend: GraphBackend): void {
   if (!backend.capabilities.execution.interactiveTransactions) {
+    const verdict = resolveBatchWriteVerdict(backend, { needs: "history" });
     throw new ConfigurationError(
-      "revisionTracking: true requires a backend with transaction support.",
-      { dialect: backend.dialect },
+      "revisionTracking: true requires a backend with transaction support." +
+        batchRefusalSuffix(verdict),
+      {
+        dialect: backend.dialect,
+        ...batchRefusalDetails(verdict),
+      },
       {
         suggestion:
           "Use a transactional SQLite/PostgreSQL backend or leave revision tracking disabled.",

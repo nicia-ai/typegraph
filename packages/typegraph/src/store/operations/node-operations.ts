@@ -2574,7 +2574,16 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           { operation: "insert", entity: "node" },
         );
       }
-      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      // A supplied id's fused statement returned no row because the id is
+      // already occupied (the stale-version case already threw above) — the
+      // occupancy check below re-reads to report the duplicate. On a
+      // transaction this re-fences before that read, matching the
+      // fresh-id branch above; a `"none"`-mode target (a batch engine's
+      // fused statement already carried its own fence) has no ordinary
+      // lock to take here.
+      if (transactionMode !== "none") {
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      }
     }
 
     if (fuseProjections && !fuseSchemaFenceProjections) {
@@ -2620,6 +2629,14 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       }
       if (occupied.deleted_at === undefined) {
         throw createAlreadyExistsError("node", prepared.kind, prepared.id);
+      }
+      // The tombstone-slot classification above is a read; resurrecting it is
+      // a genuine write (`session.reviseNode`) outside the fused INSERT's
+      // atomicity. When that INSERT's own no-row diagnosis left the schema
+      // fence untaken for a `"none"`-mode target (see above), fail closed
+      // here before the write, matching edge create's identical point.
+      if (fuseSchemaFenceInFirstWrite && transactionMode === "none") {
+        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
       }
       const resurrected = await resurrectPreparedNode(
         ctx,
