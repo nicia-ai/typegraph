@@ -2,7 +2,14 @@
  * T16 (I9) — the two construction gates refuse at `createStore`, never
  * mid-flush, and the refusal message is the migration guide (OQ-B).
  *
- * Six rows:
+ * `writeFence` has no mechanism that means "no fence" the way the deleted
+ * legacy `pessimisticLocks` all-false shape once did, so every row below
+ * that needs an `unfenced` backend reaches it by overlaying a normal
+ * backend's capabilities (`unfencedLoggedBackend`) rather than by a factory
+ * override — the same "undeclared, non-first-party target" M-5 always
+ * described, now the ONLY way to reach that plan.
+ *
+ * Rows:
  *
  *  (a) `history: true` on an `unfenced` backend refuses at `createStore`,
  *      zero statements.
@@ -18,26 +25,26 @@
  *  (d) an undeclared non-factory backend refuses (a) and (b) via M-5's
  *      `unfenced` default.
  *  (e) the refusal message contains the LITERAL declaration line for the
- *      backend's dialect, not a substring like "pessimisticLocks".
+ *      backend's dialect, not a substring like "writeFence".
  *  (f) `{ revisionTracking: true }` alone (no `history`) on an `unfenced`
  *      backend refuses, zero statements (ruling F3) — repeated through
  *      `cloneWorkingCopyStrategy`, which propagates the base store's
  *      `revisionTrackingEnabled` into a fresh store without the caller
  *      naming the option.
+ *  (g) the quiescent drain and the caller-serialized mechanism construct
+ *      successfully at both gates.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStore, defineGraph, defineNode } from "../src";
-import { pessimisticLockDeclarationLine } from "../src/backend/capabilities/write-fence";
+import { writeFenceDeclarationLine } from "../src/backend/capabilities/write-fence";
 import { TypeGraphError } from "../src/errors";
 import { cloneWorkingCopyStrategy } from "../src/graph-merge";
 import {
   createLoggedPostgresBackend,
   createLoggedSqliteBackend,
-  overlayCapabilities,
-  TABLE_LOCKS_ONLY_CAPABILITIES,
-  UNFENCED_CAPABILITIES,
+  unfencedLoggedBackend,
 } from "./lock-fence-test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -61,9 +68,7 @@ function writeFenceRefusal(code: string): unknown {
 
 describe("T16 — (a) history: true on unfenced refuses, zero statements", () => {
   it("SQLite unfenced", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
     // Factory construction itself probes the driver (a `PRAGMA
     // compile_options` sync-detection read) — reset AFTER the backend
     // exists so only `createStore`'s own statements (there must be none)
@@ -78,9 +83,7 @@ describe("T16 — (a) history: true on unfenced refuses, zero statements", () =>
 
 describe("T16 — (b) identity graph on unfenced refuses, zero statements", () => {
   it("SQLite unfenced", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
     logged.reset();
     expect(() => createStore(identityGraph, logged.backend)).toThrow(
       writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"),
@@ -91,10 +94,9 @@ describe("T16 — (b) identity graph on unfenced refuses, zero statements", () =
 
 describe("T16 — (c) engine-native interim refusal", () => {
   it("unfenced engine-native + history: refuses with the interim error, zero statements", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-      recordedTimeOwnership: "engine-native",
-    });
+    const logged = unfencedLoggedBackend(
+      createLoggedSqliteBackend({ recordedTimeOwnership: "engine-native" }),
+    );
     logged.reset();
     expect(() =>
       createStore(plainGraph, logged.backend, { history: true }),
@@ -118,18 +120,16 @@ describe("T16 — (c) engine-native interim refusal", () => {
   });
 
   it("R-2 exemption: unfenced engine-native WITHOUT history/revisionTracking constructs successfully", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-      recordedTimeOwnership: "engine-native",
-    });
+    const logged = unfencedLoggedBackend(
+      createLoggedSqliteBackend({ recordedTimeOwnership: "engine-native" }),
+    );
     expect(() => createStore(plainGraph, logged.backend)).not.toThrow();
   });
 
   it("the engine-native interim refusal names no release version", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-      recordedTimeOwnership: "engine-native",
-    });
+    const logged = unfencedLoggedBackend(
+      createLoggedSqliteBackend({ recordedTimeOwnership: "engine-native" }),
+    );
     let caught: unknown;
     try {
       createStore(plainGraph, logged.backend, { history: true });
@@ -151,9 +151,7 @@ describe("T16 — (d) undeclared non-factory refuses (a) and (b)", () => {
   it("history: true", async () => {
     const logged = await createLoggedPostgresBackend();
     try {
-      const { pessimisticLocks: _pessimisticLocks, ...undeclared } =
-        logged.backend.capabilities;
-      const target = overlayCapabilities(logged.backend, undeclared);
+      const target = unfencedLoggedBackend(logged).backend;
       expect(() => createStore(plainGraph, target, { history: true })).toThrow(
         writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"),
       );
@@ -165,9 +163,7 @@ describe("T16 — (d) undeclared non-factory refuses (a) and (b)", () => {
   it("identity graph", async () => {
     const logged = await createLoggedPostgresBackend();
     try {
-      const { pessimisticLocks: _pessimisticLocks, ...undeclared } =
-        logged.backend.capabilities;
-      const target = overlayCapabilities(logged.backend, undeclared);
+      const target = unfencedLoggedBackend(logged).backend;
       expect(() => createStore(identityGraph, target)).toThrow(
         writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"),
       );
@@ -177,40 +173,9 @@ describe("T16 — (d) undeclared non-factory refuses (a) and (b)", () => {
   });
 });
 
-describe("T16 — (h) the undeclared reason names both declaration styles, and both migration-guide lines are indented", () => {
-  it("history: true", async () => {
-    const logged = await createLoggedPostgresBackend();
-    try {
-      const { pessimisticLocks: _pessimisticLocks, ...undeclared } =
-        logged.backend.capabilities;
-      const target = overlayCapabilities(logged.backend, undeclared);
-      let caught: unknown;
-      try {
-        createStore(plainGraph, target, { history: true });
-      } catch (error) {
-        caught = error;
-      }
-      const message = (caught as Error).message;
-      expect(message).toContain(
-        "`capabilities.writeFence` (or the deprecated `capabilities.pessimisticLocks`) is absent",
-      );
-      // Both declaration lines the migration guide prints must be indented —
-      // not only the first (`writeFence`) line, which would leave
-      // "or, legacy:" and the `pessimisticLocks` line flush against the
-      // margin.
-      expect(message).toContain('\n  writeFence: { mechanism: "advisory"');
-      expect(message).toContain("\n  pessimisticLocks: { advisoryLocks: true");
-    } finally {
-      await logged.close();
-    }
-  });
-});
-
 describe("T16 — (e) the refusal message carries the literal declaration line", () => {
-  it('names the exact string, not a substring like "pessimisticLocks"', () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
+  it('names the exact string, and indents it, not a bare mention of "writeFence"', () => {
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
     let caught: unknown;
     try {
       createStore(identityGraph, logged.backend);
@@ -219,65 +184,17 @@ describe("T16 — (e) the refusal message carries the literal declaration line",
     }
     expect(caught).toBeInstanceOf(Error);
     const message = (caught as Error).message;
-    expect(message).toContain(pessimisticLockDeclarationLine("sqlite"));
-    // The exact string, not merely the word "pessimisticLocks" in isolation:
-    // a pointer like "declare pessimisticLocks on this backend" would still
-    // contain the bare word without carrying the migration guide's line.
-    expect(message).not.toBe("pessimisticLocks");
-  });
-});
-
-describe("T16 — (g) a table-locks-only declaration refuses, naming that posture specifically", () => {
-  it("refuseUnfencedClockAllocation names the table-locks-only posture, not the generic absent/all-false message", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
-    });
-    logged.reset();
-    let caught: unknown;
-    try {
-      createStore(plainGraph, logged.backend, { history: true });
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toEqual(
-      writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"),
-    );
-    expect((caught as Error).message).toContain(
-      "table locks without advisory locks or serialized writers",
-    );
-    expect((caught as Error).message).not.toContain(
-      "declares neither advisory/table locks nor serialized writers",
-    );
-    expect(logged.statements).toHaveLength(0);
-  });
-
-  it("refuseUnfencedOperationalIdentity names the table-locks-only posture, not the generic absent/all-false message", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
-    });
-    logged.reset();
-    let caught: unknown;
-    try {
-      createStore(identityGraph, logged.backend);
-    } catch (error) {
-      caught = error;
-    }
-    expect(caught).toEqual(writeFenceRefusal("IDENTITY_REQUIRES_WRITE_FENCE"));
-    expect((caught as Error).message).toContain(
-      "table locks without advisory locks or serialized writers",
-    );
-    expect((caught as Error).message).not.toContain(
-      "declares neither advisory/table locks nor serialized writers",
-    );
-    expect(logged.statements).toHaveLength(0);
+    expect(message).toContain(`  ${writeFenceDeclarationLine("sqlite")}`);
+    // The exact string, not merely the word "writeFence" in isolation: a
+    // pointer like "declare writeFence on this backend" would still contain
+    // the bare word without carrying the migration guide's line.
+    expect(message).not.toBe("writeFence");
   });
 });
 
 describe("T16 — (f) revisionTracking: true alone on unfenced refuses, zero statements", () => {
   it("direct construction", () => {
-    const logged = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
+    const logged = unfencedLoggedBackend(createLoggedSqliteBackend());
     logged.reset();
     expect(() =>
       createStore(plainGraph, logged.backend, { revisionTracking: true }),
@@ -292,63 +209,12 @@ describe("T16 — (f) revisionTracking: true alone on unfenced refuses, zero sta
     });
     expect(baseStore.revisionTrackingEnabled).toBe(true);
 
-    const fresh = createLoggedSqliteBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
+    const fresh = unfencedLoggedBackend(createLoggedSqliteBackend());
     const strategy = cloneWorkingCopyStrategy<typeof plainGraph>(() =>
       Promise.resolve(fresh.backend),
     );
     await expect(strategy.create(baseStore)).rejects.toThrow(
       writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"),
-    );
-  });
-});
-
-/**
- * T16 — the `writeFence`-declared twin of each row above.
- *
- * `writeFence`'s `mechanism` has no arm that means "no fence" the way the
- * legacy boolean triple's all-false shape does, so a target that declares
- * `writeFence` can never resolve `kind: "unfenced"` on its own — there is no
- * "twin" of rows (a)/(b)/(f)/(g) that reaches the SAME `unfenced` reason
- * through `writeFence` alone. What a declared `writeFence` DOES reach,
- * exactly like the legacy shape, is `WRITE_FENCE_DECLARATION_CONFLICT` — and
- * it reaches it even earlier than `createStore`'s two gates do: the backend
- * factory itself resolves the write-fence plan once, at construction, for
- * every backend it builds, so a target declaring both never survives to
- * become a `GraphBackend` a graph could be stored on at all. Each row below
- * is the SAME legacy declaration as its counterpart above, plus a
- * `writeFence` declared alongside it.
- */
-describe("T16 — writeFence-declared twin: declaring writeFence alongside a legacy declaration conflicts at backend construction", () => {
-  it("twin of (a): the SQLite unfenced declaration plus writeFence conflicts before createStore ever runs", () => {
-    expect(() =>
-      createLoggedSqliteBackend({
-        pessimisticLocks: UNFENCED_CAPABILITIES,
-        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
-      }),
-    ).toThrow(writeFenceRefusal("WRITE_FENCE_DECLARATION_CONFLICT"));
-  });
-
-  it("twin of (g): the table-locks-only declaration plus writeFence conflicts too, not the table-locks-only reason", () => {
-    let thrown: unknown;
-    try {
-      createLoggedSqliteBackend({
-        pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
-        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
-      });
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toEqual(
-      writeFenceRefusal("WRITE_FENCE_DECLARATION_CONFLICT"),
-    );
-    // Neither IDENTITY_REQUIRES_WRITE_FENCE nor
-    // RECORDED_CLOCK_REQUIRES_WRITE_FENCE — nor a table-locks-only-flavored
-    // WRITE_FENCE_UNAVAILABLE — fires: the conflict is caught before a
-    // `GraphBackend` exists for `createStore` to inspect at all.
-    expect((thrown as { details: { code: string } }).details.code).toBe(
-      "WRITE_FENCE_DECLARATION_CONFLICT",
     );
   });
 });
@@ -361,7 +227,7 @@ describe("T16 — writeFence-declared twin: declaring writeFence alongside a leg
  * `{advisory, quiescent}` and `{caller-serialized, quiescent}` — must
  * construct successfully, exactly like an ordinary fenced declaration.
  */
-describe("T16 — the quiescent drain and the caller-serialized mechanism construct successfully at both gates", () => {
+describe("T16 — (g) the quiescent drain and the caller-serialized mechanism construct successfully at both gates", () => {
   it("identity graph: {advisory, quiescent}", async () => {
     const logged = await createLoggedPostgresBackend({
       writeFence: { mechanism: "advisory", drain: "quiescent" },

@@ -386,7 +386,6 @@ export type {
   NodePropertyExpectation,
   NodeRow,
   NormalizedColumnKind,
-  PessimisticLockCapabilities,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   QueryExecutionBackend,

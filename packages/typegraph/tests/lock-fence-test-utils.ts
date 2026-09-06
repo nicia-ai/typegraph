@@ -18,9 +18,9 @@
  * Neither mechanism double-counts the other's statements, since each fires
  * on a disjoint execution path.
  *
- * Also exports a capabilities-overlay Proxy for postures a first-party
- * factory cannot construct directly (a present-but-all-false declaration, a
- * declared-advisory-only declaration).
+ * Also exports a capabilities-overlay Proxy for the one posture a
+ * first-party factory cannot construct directly: an undeclared
+ * (`capabilities.writeFence` absent) target.
  */
 import {
   type Extensions,
@@ -194,15 +194,16 @@ export function createLoggedSqliteBackend(
  * A capabilities-overlay `Proxy`: forwards every member of `base` unchanged
  * except `capabilities`.
  *
- * A lock site nested inside `schemaWriteTransaction`'s callback (J5, J6)
- * receives a TRANSACTION-SCOPED object the factory builds from its OWN
- * closed-over `capabilities` constant, not from whatever property this
- * wrapper exposes — so `schemaWriteTransaction` itself is intercepted too,
- * recursively overlaying the `tx` argument the real implementation hands to
- * its callback. A lock site reached through a per-construction closure
- * outside `schemaWriteTransaction` entirely (J7/J8's contribution
- * materializer `fenceTarget`) is NOT reachable through this overlay at
- * all — those two sites test the "undeclared non-factory" posture through
+ * A lock site nested inside `schemaWriteTransaction`'s or `transaction`'s
+ * callback (J5, J6, and any managed write reached through a plain
+ * `backend.transaction(...)`) receives a TRANSACTION-SCOPED object the
+ * factory builds from its OWN closed-over `capabilities` constant, not from
+ * whatever property this wrapper exposes — so both openers are intercepted
+ * too, recursively overlaying the `tx` argument the real implementation
+ * hands to its callback. A lock site reached through a per-construction
+ * closure outside either opener entirely (J7/J8's contribution materializer
+ * `fenceTarget`) is NOT reachable through this overlay at all — those two
+ * sites test the "undeclared non-factory" posture through
  * `createContributionMaterializer` directly instead (see
  * `tests/lock-fence-plan.test.ts`).
  *
@@ -235,37 +236,46 @@ export function overlayCapabilities<T extends object>(
             fn(overlayCapabilities(tx, capabilities)),
           );
       }
+      if (property === "transaction" && typeof value === "function") {
+        const real = value as (
+          fn: (tx: object) => Promise<unknown>,
+          options?: unknown,
+        ) => Promise<unknown>;
+        return (fn: (tx: object) => Promise<unknown>, options?: unknown) =>
+          real(
+            (tx: object) => fn(overlayCapabilities(tx, capabilities)),
+            options,
+          );
+      }
       return value;
     },
   });
 }
 
-export const UNFENCED_CAPABILITIES: NonNullable<
-  BackendCapabilities["pessimisticLocks"]
-> = Object.freeze({
-  advisoryLocks: false,
-  tableLocks: false,
-  serializedWriters: false,
-});
-
+/**
+ * The declared-advisory-only posture: an advisory-lock mechanism with no
+ * drain, so every keyed site (J1, J2, J3, J5, J7) succeeds while every drain
+ * site (J4, J6, J8, J18) refuses naming `drain: "none"`.
+ */
 export const ADVISORY_ONLY_CAPABILITIES: NonNullable<
-  BackendCapabilities["pessimisticLocks"]
+  BackendCapabilities["writeFence"]
 > = Object.freeze({
-  advisoryLocks: true,
-  tableLocks: false,
-  serializedWriters: false,
+  mechanism: "advisory",
+  drain: "none",
 });
 
 /**
- * The declaration the plan model has no arm for: a table lock with neither
- * an advisory lock above it nor a serialized-writer slot beneath it.
- * `resolveWriteFencePlan` resolves this to `unfenced` — see the note next to
- * `planFromLockCapabilities` in `write-fence.ts`.
+ * Overlays `logged`'s backend so `capabilities.writeFence` is absent.
+ * `writeFence` has no mechanism that means "no fence" the way the deleted
+ * legacy `pessimisticLocks` all-false shape once did, so this — an
+ * undeclared, non-first-party target — is the only way left to reach an
+ * `unfenced` plan on an otherwise-real backend.
  */
-export const TABLE_LOCKS_ONLY_CAPABILITIES: NonNullable<
-  BackendCapabilities["pessimisticLocks"]
-> = Object.freeze({
-  advisoryLocks: false,
-  tableLocks: true,
-  serializedWriters: false,
-});
+export function unfencedLoggedBackend(logged: LoggedBackend): LoggedBackend {
+  const { writeFence: _writeFence, ...undeclared } =
+    logged.backend.capabilities;
+  return {
+    ...logged,
+    backend: overlayCapabilities(logged.backend, undeclared),
+  };
+}

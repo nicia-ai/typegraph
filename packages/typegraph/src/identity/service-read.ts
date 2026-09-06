@@ -251,7 +251,7 @@ export async function lockIdentityGraph(
   graphId: string,
 ): Promise<void> {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(plan, "identity graph lock", "advisory-lock");
+  const fence = requireWriteFence(plan, "identity graph lock", "keyed");
   switch (fence.kind) {
     case "lock": {
       await target.execute(
@@ -279,7 +279,7 @@ export async function lockIdentityGraph(
 /**
  * Drains in-flight legacy node writes before the first identity snapshot.
  * Resolves a {@link resolveWriteFencePlan}; the `lock` arm takes the relation
- * lock (needs `tableLocks`), and the `engine-serialized` arm is the SQLite
+ * lock (needs `drain: "table-lock"`), and the `engine-serialized` arm is the SQLite
  * writer-slot case, which has already drained every writer.
  *
  * `schema.tables.nodes` — the physical name, not `schema.nodesTable` — is
@@ -294,11 +294,7 @@ export async function lockIdentityEnablementNodes(
   schema: SqlSchema,
 ): Promise<void> {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(
-    plan,
-    "identity enablement drain",
-    "table-lock",
-  );
+  const fence = requireWriteFence(plan, "identity enablement drain", "drain");
   switch (fence.kind) {
     case "lock": {
       if (fence.drain !== "table-lock") {

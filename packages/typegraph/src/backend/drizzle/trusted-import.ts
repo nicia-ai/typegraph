@@ -98,8 +98,7 @@ export async function assertTrustedImportDatabaseEmpty(
  * transaction (`transactionWithNative` in the PostgreSQL profile builder), so
  * there is no wider fence above it for an advisory key to nest inside. This
  * is the one write-fence site that takes a table lock with no advisory lock
- * preceding it — see the note in `write-fence.ts` next to
- * `planFromLockCapabilities`.
+ * preceding it.
  *
  * Resolves the write-fence plan through {@link resolveWriteFencePlan}; the
  * `lock` arm takes the relation lock below, spelled by the target's own
@@ -111,7 +110,7 @@ export async function lockPostgresTrustedImportTables(
 ): Promise<void> {
   const executeStatement = requireStatementExecution(backend);
   const plan = resolveWriteFencePlan(backend);
-  const fence = requireWriteFence(plan, "trusted import", "table-lock");
+  const fence = requireWriteFence(plan, "trusted import", "drain");
   switch (fence.kind) {
     case "lock": {
       if (fence.drain !== "table-lock") {
@@ -136,8 +135,9 @@ export async function lockPostgresTrustedImportTables(
       // without ever calling this function: it is built by
       // `createSqliteTrustedImportSession`, which inserts under the writer
       // slot `BEGIN IMMEDIATE` already holds. Any target — SQLite dialect
-      // or not — that declares `serializedWriters: true` instead of locks
-      // reaches this arm directly through `resolveWriteFencePlan`, and
+      // or not — that declares `writeFence.mechanism: "engine-serialized"`
+      // instead of locks reaches this arm directly through
+      // `resolveWriteFencePlan`, and
       // taking no relation lock is the deliberate reading of that
       // declaration: the engine already excludes concurrent writers by
       // construction, so this function's own table lock would add nothing.

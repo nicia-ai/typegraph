@@ -22,7 +22,7 @@
  * enforcing the base builder's value. `assertAdapterBackedCapabilitiesUnchanged`
  * below refuses exactly those three sub-values when they would change;
  * every other sub-field on `declaredCapabilities` and `resourceAudit`
- * (`pessimisticLocks`, `windowFunctions`, `clearValidTo`, `returning`,
+ * (`writeFence`, `windowFunctions`, `clearValidTo`, `returning`,
  * `claims`, `graphAnalytics`, `resourceAudit`'s `resource` /
  * `identityLeaseResource`, …) stays freely derivable, because none of those
  * reach the adapter's construction. Every other field — `dialect`,
@@ -55,13 +55,13 @@
  * dialect-derivation fallback (sound only for the two bundled dialects, so it
  * never applies to a derived profile regardless — irrelevant in practice as
  * long as `declaredCapabilities` is kept, since both bundled declarations
- * already carry `pessimisticLocks` explicitly), and the lazy per-transaction
+ * already carry `writeFence` explicitly), and the lazy per-transaction
  * schema-fence lease `store/operations/write-transaction.ts` takes out under
  * `isFirstPartyFactory` (a derived profile's backend takes its own fence on
  * every managed write instead). Every gate `createSqlBackend` runs — the
- * `pessimisticLocks` refusal, the `advisoryLocks: true` without `fenceSql`
- * refusal, the schema-fenced-insert and autocommit marks — still applies to
- * a derived profile exactly as it does to a bundled one.
+ * missing-`writeFence` refusal, the `mechanism: "advisory"` without
+ * `fenceSql` refusal, the schema-fenced-insert and autocommit marks — still
+ * applies to a derived profile exactly as it does to a bundled one.
  */
 import { ConfigurationError } from "../../../errors";
 import type { FenceSql } from "../../capabilities/write-fence";
@@ -111,13 +111,12 @@ const DERIVABLE_ENGINE_PROFILE_KEY_SET: ReadonlySet<string> = new Set(
  *
  * Dropping `fenceSql` alone is not enough to reach a working profile:
  * `createSqlBackend` still resolves a write-fence plan eagerly, and a
- * profile whose `declaredCapabilities.pessimisticLocks.advisoryLocks` is
- * still `true` with no `fenceSql` to spell the lock refuses with
+ * profile whose `declaredCapabilities.writeFence.mechanism` is still
+ * `"advisory"` with no `fenceSql` to spell the lock refuses with
  * `WRITE_FENCE_SQL_UNAVAILABLE`. Pairing `fenceSql: undefined` with a
- * `declaredCapabilities` override that also stops claiming `advisoryLocks`
- * (for example `serializedWriters: true`, resolving `engine-serialized`) is
- * what actually removes the spelling successfully; see
- * `tests/engine-profile-derivation.test.ts`.
+ * `declaredCapabilities` override that also stops claiming `"advisory"`
+ * (for example `mechanism: "engine-serialized"`) is what actually removes
+ * the spelling successfully; see `tests/engine-profile-derivation.test.ts`.
  */
 export type DerivableEngineProfileOverrides<TTx> = Partial<
   Omit<Pick<SqlEngineProfile<TTx>, DerivableEngineProfileKey>, "fenceSql">

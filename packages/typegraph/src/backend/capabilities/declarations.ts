@@ -67,10 +67,9 @@ export function assertNoLegacyTransactionCapability(
  *    declaration claims support while also carrying an explanation for a
  *    lack of it.
  *
- * Deliberately narrow: no `pessimisticLocks` / `graphAnalytics` / surface
- * cross-checks here. An all-`false` lock declaration is legitimate on its
- * own, and declaration-vs-surface consistency is a different concern (a
- * resolved bundle's job, not a bundled declaration's).
+ * Deliberately narrow: no `writeFence` / `graphAnalytics` / surface
+ * cross-checks here — declaration-vs-surface consistency is a different
+ * concern (a resolved bundle's job, not a bundled declaration's).
  *
  * @throws {ConfigurationError} when a declaration contradicts its own shape.
  */

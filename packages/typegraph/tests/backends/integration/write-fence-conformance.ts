@@ -94,8 +94,7 @@ function postgresServerLaneAvailable(): boolean {
 /**
  * Overrides a real `buildPostgresEngineProfile` result's declared write
  * fence through `deriveEngineProfile` — never a hand-copied profile
- * literal — clearing the legacy `pessimisticLocks` the bundled builder
- * injects so the two declarations never collide.
+ * literal.
  */
 function deriveWriteFenceProfile(
   base: SqlEngineProfile<AnyPgTransaction>,
@@ -105,7 +104,6 @@ function deriveWriteFenceProfile(
   return deriveEngineProfile(base, {
     declaredCapabilities: {
       ...base.declaredCapabilities,
-      pessimisticLocks: undefined,
       writeFence,
     },
     ...(fenceSqlOverride === undefined ? {} : { fenceSql: fenceSqlOverride }),
@@ -118,7 +116,6 @@ function withAdvisoryDrainCapabilities(
 ): BackendCapabilities {
   return {
     ...capabilities,
-    pessimisticLocks: undefined,
     writeFence: { mechanism: "advisory", drain },
   };
 }
@@ -210,7 +207,7 @@ export function registerWriteFenceConformanceIntegrationTests(
       const plan = resolveWriteFencePlan(backend);
       const expectedPlan =
         backend.dialect === "postgres" ?
-          { kind: "lock", drain: "table-lock", tableLocks: true }
+          { kind: "lock", drain: "table-lock" }
         : { kind: "engine-serialized" };
       expect(plan).toMatchObject(expectedPlan);
     });
@@ -242,7 +239,6 @@ export function registerWriteFenceConformanceIntegrationTests(
           expect.objectContaining({
             kind: "lock",
             drain: "quiescent",
-            tableLocks: false,
           }),
         );
 
@@ -308,7 +304,6 @@ export function registerWriteFenceConformanceIntegrationTests(
           expect.objectContaining({
             kind: "lock",
             drain: "none",
-            tableLocks: false,
           }),
         );
 

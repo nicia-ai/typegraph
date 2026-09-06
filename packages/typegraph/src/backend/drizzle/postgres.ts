@@ -927,22 +927,10 @@ export function buildPostgresEngineProfile(
         ),
       }
     : {};
-  const requestedPessimisticLocks = options.capabilities?.pessimisticLocks;
-  if (requestedPessimisticLocks?.serializedWriters === true) {
-    throw new ConfigurationError(
-      "PostgreSQL backend capability overrides cannot claim serialized writers.",
-      { requestedPessimisticLocks },
-      {
-        suggestion:
-          "Keep serializedWriters: false. A PostgreSQL pool requires its advisory-lock fence; use a custom backend only when the underlying engine really provides a single writer slot.",
-      },
-    );
-  }
-  // The preferred-declaration twin of the refusal above: a PostgreSQL pool is
-  // never itself an engine with a single writer slot, so `mechanism:
-  // "engine-serialized"` is exactly as false a claim as `serializedWriters:
-  // true`, whichever spelling a caller reaches for. `"caller-serialized"` is
-  // a different claim — a promise about the DEPLOYMENT, not the engine — and
+  // A PostgreSQL pool is never itself an engine with a single writer slot,
+  // so `mechanism: "engine-serialized"` is a false claim about this engine —
+  // the one shape this factory refuses. `"caller-serialized"` is a
+  // different claim — a promise about the DEPLOYMENT, not the engine — and
   // is accepted: this pool still carries its own `fenceSql` underneath it
   // (harmless, since every keyed and drain site under `caller-serialized`
   // already takes no statement), so nothing about this factory's assembly
@@ -958,28 +946,9 @@ export function buildPostgresEngineProfile(
       },
     );
   }
-  // A caller who declares `capabilities.writeFence` is replacing the
-  // legacy declaration, not layering under it: injecting the bundled
-  // `pessimisticLocks` default beneath their `writeFence` would collide the
-  // two declarations at `resolveWriteFencePlan` and blame the caller for a
-  // default THIS factory added. Only fall back to the bundled default when
-  // the caller has declared neither shape — and, since `baseCapabilities`
-  // (`POSTGRES_CAPABILITIES`) itself already carries that default, this has
-  // to be dropped from the spread below, not merely skipped as an override.
-  const declaresWriteFence = options.capabilities?.writeFence !== undefined;
-  const { pessimisticLocks: basePessimisticLocks, ...baseCapabilitiesRest } =
-    baseCapabilities;
-  const pessimisticLocks =
-    requestedPessimisticLocks === undefined ?
-      (declaresWriteFence ? undefined : basePessimisticLocks)
-    : {
-        advisoryLocks: requestedPessimisticLocks.advisoryLocks,
-        tableLocks: requestedPessimisticLocks.tableLocks,
-        serializedWriters: false,
-      };
   const declaredCapabilities = sealCapabilityDeclaration(
     normalizeGraphAnalyticsCapabilities({
-      ...baseCapabilitiesRest,
+      ...baseCapabilities,
       ...httpOnlyOverrides,
       ...options.capabilities,
       execution: {
@@ -988,7 +957,6 @@ export function buildPostgresEngineProfile(
         ...options.capabilities?.execution,
       },
       ...driverBindParameterOverrides,
-      ...(pessimisticLocks === undefined ? {} : { pessimisticLocks }),
     }),
   );
   // Derived last and not overridable: how far up the contribution health
@@ -1579,7 +1547,7 @@ export function buildPostgresEngineProfile(
      * own: it is never taken without the advisory lock above it, so no shipped
      * or plausible engine distinguishes them. An engine that implements
      * `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks`
-     * member of `PessimisticLockCapabilities` would earn its place.
+     * member of `WriteFenceDeclaration` would earn its place.
      */
     async function acquireSchemaWriteFence(
       tx: AnyPgTransaction,
@@ -1588,7 +1556,7 @@ export function buildPostgresEngineProfile(
       const plan = requireWriteFence(
         resolveWriteFencePlan(fenceTarget),
         "The PostgreSQL schema-commit fence",
-        "advisory-lock",
+        "keyed",
       );
       switch (plan.kind) {
         case "lock": {
@@ -2954,7 +2922,7 @@ function createPostgresOperationBackend(
     const plan = requireWriteFence(
       resolveWriteFencePlan(fenceTarget),
       "The PostgreSQL schema write fence",
-      "advisory-lock",
+      "keyed",
     );
     const shareLock = plan.kind === "lock" ? sql`FOR SHARE` : sql``;
     const active = await execGet<{ version: number }>(sql`

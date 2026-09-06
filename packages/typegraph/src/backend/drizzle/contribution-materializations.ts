@@ -1704,7 +1704,7 @@ export function createContributionMaterializer(
     tx: SchemaWriteTransactionBackend,
   ): Promise<void> {
     const plan = resolveWriteFencePlan(deps.fenceTarget);
-    const fence = requireWriteFence(plan, "contribution DDL", "advisory-lock");
+    const fence = requireWriteFence(plan, "contribution DDL", "keyed");
     switch (fence.kind) {
       case "lock": {
         await tx.execute(
@@ -1762,7 +1762,7 @@ export function createContributionMaterializer(
     const fence = requireWriteFence(
       plan,
       "shared fulltext table lock",
-      "table-lock",
+      "drain",
     );
     switch (fence.kind) {
       case "lock": {

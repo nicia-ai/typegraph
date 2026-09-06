@@ -181,13 +181,12 @@ function createMockMaterializer(
           unitOfWork: "interactive",
         },
         windowFunctions: true,
-        pessimisticLocks:
+        writeFence:
           dialect === "postgres" ?
-            { advisoryLocks: true, tableLocks: true, serializedWriters: false }
+            { mechanism: "advisory" as const, drain: "table-lock" as const }
           : {
-              advisoryLocks: false,
-              tableLocks: false,
-              serializedWriters: true,
+              mechanism: "engine-serialized" as const,
+              drain: "table-lock" as const,
             },
       },
     },
@@ -536,11 +535,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
             unitOfWork: "interactive",
           },
           windowFunctions: true,
-          pessimisticLocks: {
-            advisoryLocks: false,
-            tableLocks: false,
-            serializedWriters: true,
-          },
+          writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
         },
       },
       fulltextStrategy: fts5Strategy,
@@ -605,11 +600,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
             unitOfWork: "interactive",
           },
           windowFunctions: true,
-          pessimisticLocks: {
-            advisoryLocks: true,
-            tableLocks: true,
-            serializedWriters: false,
-          },
+          writeFence: { mechanism: "advisory", drain: "table-lock" },
         },
       },
       fulltextStrategy: fts5Strategy,

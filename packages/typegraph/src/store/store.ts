@@ -1130,10 +1130,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (graph.identity !== undefined) {
       const identityFencePlan = resolveWriteFencePlan(backend);
       if (identityFencePlan.kind === "unfenced") {
-        refuseUnfencedOperationalIdentity(
-          backend.dialect,
-          identityFencePlan.reason,
-        );
+        refuseUnfencedOperationalIdentity(backend.dialect);
       }
     }
     this.#baseBackend = asRawBackend(backend);
@@ -1154,7 +1151,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }
       const clockFencePlan = resolveWriteFencePlan(backend);
       if (clockFencePlan.kind === "unfenced") {
-        refuseUnfencedClockAllocation(backend.dialect, clockFencePlan.reason);
+        refuseUnfencedClockAllocation(backend.dialect);
       }
       assertRevisionTrackableBackend(backend);
     }

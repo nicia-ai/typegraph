@@ -210,27 +210,7 @@ describe("PostgreSQL edge convergence command", () => {
     }
   });
 
-  it("refuses a PostgreSQL override that falsely claims serialized writers", async () => {
-    const client = await PGlite.create();
-    try {
-      expect(() =>
-        createPostgresBackend(drizzlePglite(client), {
-          capabilities: {
-            pessimisticLocks: {
-              advisoryLocks: false,
-              tableLocks: false,
-              serializedWriters: true,
-            },
-          },
-          vector: false,
-        }),
-      ).toThrow("cannot claim serialized writers");
-    } finally {
-      await client.close();
-    }
-  });
-
-  it('refuses a PostgreSQL override that declares writeFence.mechanism: "engine-serialized" (the preferred-declaration twin of the pessimisticLocks refusal above)', async () => {
+  it('refuses a PostgreSQL override that declares writeFence.mechanism: "engine-serialized" (a PostgreSQL pool is never a single-writer-slot engine)', async () => {
     const client = await PGlite.create();
     try {
       expect(() =>

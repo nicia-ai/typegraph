@@ -424,7 +424,7 @@ export async function withIdentityDdlRaceRetry<T>(
  */
 async function lockIdentityDdl(target: IdentityTarget): Promise<void> {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(plan, "identity DDL", "advisory-lock");
+  const fence = requireWriteFence(plan, "identity DDL", "keyed");
   switch (fence.kind) {
     case "lock": {
       await target.execute(

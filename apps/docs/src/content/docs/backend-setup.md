@@ -1170,7 +1170,7 @@ engine with a different locking story or an embedded engine with a different
 transaction model.
 
 `createSqlBackend` refuses a profile whose resolved capabilities omit
-`pessimisticLocks` — every mark and registration it applies assumes a
+`writeFence` — every mark and registration it applies assumes a
 resolvable write-fence decision, and a profile that does not declare one
 cannot back that decision soundly. `buildPostgresEngineProfile` and
 `buildSqliteEngineProfile` are the reference profiles to read when modeling a
@@ -1391,7 +1391,6 @@ can inspect the same object as `backend.capabilities`. The shape is:
 | `fulltext?.{supported,languages,phraseQueries,prefixQueries,highlighting}` | Fulltext strategy capabilities                                                                      |
 | `recursiveTraversal?.{supported,reason}`                                   | Whether the engine can compute a bounded transitive closure of a relation in one round trip — a recursive CTE, or a graph-native expansion operator. **Absent means supported** |
 | `writeFence?.{mechanism,drain}`                                            | How this engine excludes concurrent writers, and how far a caller can drain a table lock — see [Write fence declaration](#write-fence-declaration-writefence) |
-| `pessimisticLocks?.{advisoryLocks,tableLocks,serializedWriters}` (deprecated) | The legacy write-fence declaration `writeFence` replaces — see [Write fence declaration](#write-fence-declaration-writefence) |
 | `recordedTimeOwnership?`                                                  | Who allocates recorded-time revisions — see [Recorded-time ownership](#recorded-time-ownership-recordedtimeownership) |
 
 The former top-level `capabilities.transactions` override is not interpreted
@@ -1553,23 +1552,17 @@ take a relation-wide lock on the table a drain site protects:
 - `{ kind: "engine-serialized" }` — no lock needed; the engine serializes writers by construction.
 - `{ kind: "caller-serialized" }` — no lock needed; the deployment's own promise excludes concurrent
   writers (see below).
-- `{ kind: "unfenced", reason }` — none of the above. Every fence that guards a read-then-write
-  across statements refuses rather than running unfenced. Only a predicate carried *inside* the
-  statement it guards degrades, since one statement cannot race itself.
+- `{ kind: "unfenced" }` — no declaration at all. Every fence that guards a read-then-write across
+  statements refuses rather than running unfenced. Only a predicate carried *inside* the statement
+  it guards degrades, since one statement cannot race itself.
 
-Resolution order: (1) the declared `writeFence` value, if present; (2) the deprecated
-`pessimisticLocks` (below), mapped to the same shape, if `writeFence` is absent; (3) both present —
-refused with `WRITE_FENCE_DECLARATION_CONFLICT`, naming both declarations, since exactly one can be
-the effective one; (4) neither present AND the backend was built by `createSqliteBackend` /
-`createPostgresBackend` — derived from `dialect`, which is exactly what every lock site used to
-compute inline; (5) neither present on anything else — `unfenced`, because an undeclared custom
-backend is by definition uncertified and inferring lock support from `dialect` alone is the unsound
-inference this capability replaces.
+Resolution order: (1) the declared `writeFence` value, if present; (2) absent, AND the backend was
+built by `createSqliteBackend` / `createPostgresBackend` — derived from `dialect`, which is exactly
+what every lock site used to compute inline; (3) absent on anything else — `unfenced`, because an
+undeclared custom backend is by definition uncertified and inferring lock support from `dialect`
+alone is the unsound inference this capability replaces.
 
-The two bundled backends resolve exactly these declarations — copy the one matching your engine.
-(In this release they still declare the legacy `pessimisticLocks` shape below, which
-`resolveWriteFencePlan` maps to the line shown; a future release may declare `writeFence` directly,
-with no change to what either backend resolves to.)
+The two bundled backends resolve exactly these declarations — copy the one matching your engine:
 
 - PostgreSQL: `writeFence: { mechanism: "advisory", drain: "table-lock" }`
 - SQLite: `writeFence: { mechanism: "engine-serialized", drain: "table-lock" }` (the writer slot
@@ -1607,32 +1600,8 @@ and TypeGraph only enforces the first:
   `caller-serialized` is asserting it.
 
 `createPostgresBackend` accepts `writeFence: { mechanism: "caller-serialized", drain }` — a claim
-about the deployment — while still refusing the legacy `pessimisticLocks.serializedWriters: true`
-outright, because that boolean is a claim about the *engine*, which this factory's own engine does
-not back.
-
-#### The legacy shape (`pessimisticLocks`)
-
-```typescript
-const capabilities: Partial<BackendCapabilities> = {
-  pessimisticLocks: { advisoryLocks: true, tableLocks: true, serializedWriters: false },
-};
-```
-
-`pessimisticLocks` is deprecated in favor of `writeFence` but stays accepted — `resolveWriteFencePlan`
-maps it through one function, `writeFenceFromLegacyLocks`:
-
-| Legacy declaration | Maps to |
-| --- | --- |
-| `{ advisoryLocks: true, tableLocks }` | `{ mechanism: "advisory", drain: tableLocks ? "table-lock" : "none" }` |
-| `{ serializedWriters: true }` | `{ mechanism: "engine-serialized", drain: "table-lock" }` |
-| `{ advisoryLocks: false, tableLocks: true, serializedWriters: false }` | `unfenced` (reason `"table-locks-only"`) — TypeGraph has no table-lock-only fence |
-| all three `false` | `unfenced` (reason `"declared-none"`) |
-
-The resolved `lock` plan's `tableLocks: boolean` field is kept for source compatibility and is
-derived from `drain` (`=== "table-lock"`) — read `drain` in new code, since it distinguishes a
-declaration that cannot drain a site at all (`"none"`) from one that drains it without a statement
-(`"quiescent"`), a distinction `tableLocks: false` collapses to one case.
+about the deployment — while still refusing `mechanism: "engine-serialized"` outright, because that
+value is a claim about the *engine*, which this factory's own engine does not back.
 
 Constructing Operational Identity, or `history: true` / `revisionTracking: true`, against an
 `unfenced` backend is refused immediately at `createStore` — never mid-flush — with
@@ -1640,10 +1609,10 @@ Constructing Operational Identity, or `history: true` / `revisionTracking: true`
 `RECORDED_CLOCK_REQUIRES_WRITE_FENCE` (recorded-clock allocation), and the refusal message names
 the exact declaration line to add.
 
-A `lock` plan whose `drain` cannot back a site's `requires: "table-lock"` — `drain: "none"` — is
+A `lock` plan whose `drain` cannot back a site's `requires: "drain"` — `drain: "none"` — is
 refused with details code `WRITE_FENCE_UNAVAILABLE`, naming `details.operation` and the drain that
 could not be satisfied. `"engine-serialized"` and `"caller-serialized"` satisfy either `requires`
-value without consulting `drain`.
+value (`"keyed"` or `"drain"`) without consulting `drain`.
 
 The PostgreSQL schema fence refuses too, and it is worth knowing why it is not on the
 degradable side. The per-graph advisory lock plus `SELECT ... FOR UPDATE` a schema commit takes,
@@ -1661,34 +1630,40 @@ itself: with no locking clause the fence subquery still yields no row when the e
 is no longer active, so the INSERT still writes nothing. This is how SQLite has always run the
 path, on the strength of its writer slot.
 
-This matters for **DoltgreSQL**, which speaks the PostgreSQL wire protocol but implements neither
-`pg_advisory_xact_lock` nor the `FOR UPDATE` / `FOR SHARE` clauses
-([doltgresql#2600](https://github.com/dolthub/doltgresql/issues/2600)), and whose engine merges
-concurrent transactions rather than serializing them — so all three facts are false.
+This matters for a PostgreSQL-wire engine that implements neither `pg_advisory_xact_lock` nor the
+`FOR UPDATE` / `FOR SHARE` clauses, and whose engine merges concurrent transactions rather than
+serializing them.
 
 `writeFence` has no arm for "no exclusion mechanism at all" — every `mechanism` value claims
-something real. An engine with neither locks nor a writer slot nor a caller promise to make still
-declares the legacy shape, all three fields `false`:
+something real. An engine with neither locks nor a writer slot nor a caller promise to make has
+nothing honest to declare, and `unfenced` is how that shows up downstream — but neither bundled
+factory will hand you that backend. `createPostgresBackend` and `createSqliteBackend` both build on
+`createSqlBackend`, which refuses at construction, with `ConfigurationError` details code
+`ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION`, when the resolved capabilities carry no
+`writeFence` at all — including `capabilities: { writeFence: undefined }` passed to either factory,
+which no longer builds a backend the way it once did:
 
 ```typescript
-const backend = createPostgresBackend(db, {
-  capabilities: {
-    pessimisticLocks: { advisoryLocks: false, tableLocks: false, serializedWriters: false },
-  },
+createPostgresBackend(db, {
+  capabilities: { writeFence: undefined },
 });
+// throws ConfigurationError: ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION
 ```
 
-Declared that way, the backend is honest about what it can do — and TypeGraph is honest back: a
-schema-managed store is refused at construction, naming the missing capability, rather than
+`unfenced` is reachable only outside that gate: a hand-assembled `GraphBackend` that never goes
+through `createSqlBackend`, or a custom `SqlEngineProfile` whose `declaredCapabilities.writeFence`
+some other override clears before it reaches a call site — never through either bundled factory.
+Getting there is a way of admitting the engine truly has nothing to declare; TypeGraph then refuses
+a schema-managed store built on it at `createStore`, naming the missing capability, rather than
 running a fence the engine cannot enforce.
 
 If the deployment instead knows it is the only writer of this database — a pool clamped to one
 connection, or a single-writer topology otherwise enforced outside TypeGraph — declare
 `writeFence: { mechanism: "caller-serialized", drain: "quiescent" }` instead (see above): that is
-the honest way to spell a deployment convention. Do not reach for `serializedWriters: true` (or
-`mechanism: "engine-serialized"`) for the same purpose — that declaration means the *engine*
-serializes writers by construction, and a deployment convention is not a construction.
-`createPostgresBackend` refuses that particular claim outright for this reason.
+the honest way to spell a deployment convention. Do not reach for `mechanism: "engine-serialized"`
+for the same purpose — that declaration means the *engine* serializes writers by construction, and
+a deployment convention is not a construction. `createPostgresBackend` refuses that particular
+claim outright for this reason.
 
 ### Recorded-time ownership (recordedTimeOwnership)
 
@@ -2071,7 +2046,7 @@ TypeGraph choosing separate query semantics per backend:
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
-| Write fence (`capabilities.pessimisticLocks`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares neither resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
+| Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares neither resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
 | Recorded-time ownership (`capabilities.recordedTimeOwnership`) | `"typegraph-relations"` (default)          | `"typegraph-relations"` (default)          | Both bundled backends own the clock today. `"engine-native"` is refused at construction as an interim measure whenever it is combined with `history`/`revisionTracking`, on either dialect |
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 

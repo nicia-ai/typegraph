@@ -118,7 +118,6 @@ type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
@@ -4056,13 +4055,6 @@ type PersonalizedPageRankSeed<G extends GraphDef> = Readonly<{
     id: string;
     kind: NodeKinds<G>;
     weight?: number;
-}>;
-
-// @public
-type PessimisticLockCapabilities = Readonly<{
-    advisoryLocks: boolean;
-    tableLocks: boolean;
-    serializedWriters: boolean;
 }>;
 
 // @public

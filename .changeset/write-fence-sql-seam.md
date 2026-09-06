@@ -3,7 +3,7 @@
 ---
 
 `GraphBackend` gains an optional `fenceSql` member: the lock spelling a backend supplies
-alongside `capabilities.pessimisticLocks`, as `FenceSql` — three builders,
+alongside `capabilities.writeFence`, as `FenceSql` — three builders,
 `advisoryLockExpression`, `isolationFactExpression`, and `lockTables`. `resolveWriteFencePlan`'s
 `lock` arm carries `sql: FenceStatements`: those three plus the standalone `advisoryLock`,
 `advisoryLockWithIsolation`, and `isolationFact` statements, which `resolveFenceStatements`
@@ -15,7 +15,7 @@ The bundled PostgreSQL spelling is exported as `postgresFenceSql` from
 `@nicia-ai/typegraph/adapters/drizzle/postgres`. `createPostgresBackend` supplies it
 automatically; `createSqliteBackend` supplies no `fenceSql` since its fence is
 `engine-serialized` and takes no lock. A backend that declares
-`capabilities.pessimisticLocks.advisoryLocks: true` but supplies no `fenceSql` is now refused at
+`capabilities.writeFence.mechanism: "advisory"` but supplies no `fenceSql` is now refused at
 construction with a typed `ConfigurationError` (`WRITE_FENCE_SQL_UNAVAILABLE`) naming the member
 to supply, rather than reaching a lock site with nothing to spell the statement.
 
@@ -25,8 +25,8 @@ namespace as a parameter instead of an inline string literal (`hashtext` hashes 
 either way), and insignificant whitespace in three statements changed with the move.
 
 Two behavior changes reach custom `dialect: "postgres"` backends. A backend declaring
-`pessimisticLocks.advisoryLocks: true` without `fenceSql` is refused at construction (above).
-A backend declaring only `serializedWriters: true` and no `fenceSql` is refused when a
+`writeFence.mechanism: "advisory"` without `fenceSql` is refused at construction (above).
+A backend declaring only `mechanism: "engine-serialized"` and no `fenceSql` is refused when a
 history-capturing transaction reads its isolation level, which previously ran a hard-coded
 `current_setting('transaction_isolation')` read; supply `fenceSql` (or `postgresFenceSql`) to
 restore it.

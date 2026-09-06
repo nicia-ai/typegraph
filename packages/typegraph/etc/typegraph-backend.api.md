@@ -496,7 +496,6 @@ export type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
@@ -3208,13 +3207,6 @@ export type PartialBundleBinding<M extends OptionalGraphBackendMember> = Readonl
 }>;
 
 // @public
-export type PessimisticLockCapabilities = Readonly<{
-    advisoryLocks: boolean;
-    tableLocks: boolean;
-    serializedWriters: boolean;
-}>;
-
-// @public
 export class Placeholder {
     // (undocumented)
     readonly [SQL_PLACEHOLDER_BRAND]: true;
@@ -3473,7 +3465,7 @@ export function requireExtras<const D extends CapabilityBundleDefinition, Op ext
 };
 
 // @public
-export function requireWriteFence(plan: WriteFencePlan, operation: string, requires: "advisory-lock" | "table-lock"): Extract<WriteFencePlan, {
+export function requireWriteFence(plan: WriteFencePlan, operation: string, requires: "keyed" | "drain"): Extract<WriteFencePlan, {
     kind: "lock" | "engine-serialized" | "caller-serialized";
 }>;
 
@@ -4015,7 +4007,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
-        readonly reason: "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires (or, in the deprecated legacy shape, `pessimisticLocks.advisoryLocks: true`). Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.";
+        readonly reason: "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.";
         readonly accesses: 2;
     };
     readonly commitSchemaVersionIfKindsEmpty: {
@@ -4434,9 +4426,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
 export type UnbundledOptionalMember = ReasonedUnbundledMember | DeferredUnbundledMember;
 
 // @public
-type UnfencedReason = "undeclared" | "declared-none" | "table-locks-only";
-
-// @public
 export const UNIQUE_SIDECAR_BATCH: {
     readonly id: "uniqueSidecarBatch";
     readonly kind: "graduated";
@@ -4813,16 +4802,9 @@ export type WriteFencePlan =
 * Take the keyed lock, spelled by `sql` — the target's OWN declared
 * spelling: a lock site never hand-writes the statement, it resolves
 * a plan and consumes `sql.<builder>(…)`.
-*
-* `tableLocks` is kept for source compatibility and is derived from
-* `drain`(`=== "table-lock"`); read `drain` instead — it distinguishes a
-* declaration that cannot drain a table-lock site at all (`"none"`) from
-* one that drains it without a statement (`"quiescent"`).
 */
 Readonly<{
     kind: "lock";
-    advisoryLocks: true;
-    tableLocks: boolean;
     drain: "table-lock" | "quiescent" | "none";
     sql: FenceStatements;
 }>
@@ -4838,10 +4820,9 @@ Readonly<{
 | Readonly<{
     kind: "caller-serialized";
 }>
-/** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
+/** Neither. Every non-degradable fence refuses: `capabilities.writeFence` is absent. */
 | Readonly<{
     kind: "unfenced";
-    reason: UnfencedReason;
 }>;
 
 // @public

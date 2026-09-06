@@ -104,7 +104,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * is unaffected: `bindExtraIfReachable` and `missingRequiredExtras` are named
  * exports every caller reaches directly, so neither needed a forgotten name.
  *
- * Write-fence batch (WS5 B10): the same 14 entrypoints B1's
+ * Write-fence batch (WS5 B10, historical — `pessimisticLocks` and
+ * `PessimisticLockCapabilities` were later deleted outright; see the removal
+ * batch note after "Declared write-fence surface (#622)" below for the
+ * current state): the same 14 entrypoints B1's
  * `recursiveTraversal` batch moved (every entrypoint rendering
  * `BackendCapabilities` unexported, plus `.` and `./backend`, which export it
  * directly) each move by exactly +1, but the ADDED SYMBOL is not the same
@@ -133,9 +136,10 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * (mirroring `RecursiveTraversalVerdict`'s treatment at that same barrel), or
  * does not reach a rendered public signature at all. The first-party mark
  * (`markFirstPartyFactory`/`carryFirstPartyFactoryMark`), the two refusal
- * constructors, and `pessimisticLockDeclarationLine` are deliberately not
- * exported anywhere, so none of them can register as a forgotten export
- * either. Delta table (old → new, all +1): `.` 352→353, `./backend` 10→11,
+ * constructors, and `pessimisticLockDeclarationLine` (since deleted along
+ * with the capability it printed, not merely left unexported) were
+ * deliberately not exported anywhere, so none of them ever registered as a
+ * forgotten export either. Delta table (old → new, all +1): `.` 352→353, `./backend` 10→11,
  * `./interchange` 604→605, `./profiler` 606→607, `./schema` 223→224,
  * `./graph-merge` 618→619, `./provenance` 612→613, `./sqlite/local` 608→609,
  * `./postgres/pglite` 608→609, `./adapters/drizzle/sqlite` 203→204,
@@ -223,6 +227,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * Fence-plan spelling: `GraphBackend` gaining an optional `fenceSql: FenceSql`
  * member makes `FenceSql` newly reachable through the same 14 entrypoints the
  * write-fence batch above already moved for `PessimisticLockCapabilities`
+ * (a symbol later deleted outright — see the removal batch note after
+ * "Declared write-fence surface (#622)" below; named here only to identify
+ * which 14 entrypoints share this type graph)
  * (every entrypoint whose public type graph renders `GraphBackend` /
  * `BackendIdentity` without directly exporting it), each +1: `.`,
  * `./interchange`, `./profiler`, `./schema`, `./graph-merge`, `./provenance`,
@@ -329,6 +336,36 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * `BackendCapabilities` unexported too. 14 entrypoints move, all +1, all for
  * the identical symbol; no entrypoint's debt decreases and no 15th
  * entrypoint moves.
+ *
+ * `pessimisticLocks` removal (B10 clean-up): `BackendCapabilities.pessimisticLocks`,
+ * `PessimisticLockCapabilities`, `writeFenceFromLegacyLocks`, and
+ * `pessimisticLockDeclarationLine` are deleted outright — `writeFence` is
+ * now the only write-fence declaration. This is a debt DECREASE, the first
+ * one this family has had: the 14 entrypoints that rendered
+ * `PessimisticLockCapabilities` as a forgotten export (the 13 from the
+ * write-fence batch above plus `./adapters/drizzle/engine`, which joined the
+ * family in the `#622` batch just above) each lose exactly that one name
+ * (−1): `.`, `./interchange`, `./profiler`, `./schema`, `./graph-merge`,
+ * `./provenance`, `./sqlite/local`, `./postgres/pglite`, the five
+ * `./adapters/drizzle/*` sub-entrypoints, and `./adapters/drizzle/engine`.
+ * `./backend` loses a different name (−1): `UnfencedReason` — a forgotten
+ * export there since the `WriteFencePlan`/`resolveWriteFencePlan` batch
+ * above added the `unfenced` arm's `reason` field — is deleted along with
+ * that field now that `undeclared` is the only way to reach `unfenced`.
+ * `WriteFenceTarget`, exported directly at `./backend`, and
+ * `PessimisticLockCapabilities` itself, also exported directly there, both
+ * disappear from that entrypoint's public surface too, but neither was
+ * forgotten-export debt, so neither moves this count. Delta table (old →
+ * new, all −1): `.` 389→388, `./backend` 17→16, `./interchange` 702→701,
+ * `./profiler` 704→703, `./schema` 272→271, `./graph-merge` 719→718,
+ * `./provenance` 710→709, `./sqlite/local` 706→705, `./postgres/pglite`
+ * 706→705, `./adapters/drizzle/sqlite` 248→247, `./adapters/drizzle/postgres`
+ * 247→246, `./adapters/drizzle/postgres/pglite` 251→250,
+ * `./adapters/drizzle/sqlite/local` 251→250,
+ * `./adapters/drizzle/sqlite/libsql` 251→250, `./adapters/drizzle/engine`
+ * 321→320. Gate: every entrypoint's debt DECREASED by exactly 1, the removed
+ * symbol is `PessimisticLockCapabilities` everywhere except `./backend`
+ * (`UnfencedReason`), and exactly 15 entrypoints moved.
  */
 // Dynamic pinned edge lookup adds DynamicStoreViewEdgeCollection to the six
 // non-root Store-bearing entrypoints. Removing that single name reproduces each
@@ -344,40 +381,40 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // directly, so its own debt is unchanged.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 389,
-    sha256: "296798d2cb2a4bdf1b1547394e75c69fb27c504c58c9cceab44d7c6008610ec8",
+    count: 388,
+    sha256: "ba5d322f78a05b64e3c21926da4836acb52a26ee41906b9904915884dae7c6ac",
   },
   "./adapters/drizzle/engine": {
-    count: 321,
-    sha256: "b7c939af039e2b911ef6eec2ac0f9a1793a1061f1de6a3d8f7bcdc136d97f6cc",
+    count: 320,
+    sha256: "e4dd8a48116696b9fa69b13c67a1213c3ba034b0093ed3f646f0dcaa7bbaaefa",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 247,
-    sha256: "bc129772f9e9be4c5d270dc9822645a0c9aa79e5f61cb2c31c5b8a5238fe7f4a",
+    count: 246,
+    sha256: "5fc01b18bbba5ed13dbd7505f6c8272b6c584205e560cc93f07d6ff65c699996",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 251,
-    sha256: "abde0f0eea0abe922eea98c21aa64caad060eb7570b35be72cebca90cfa45e22",
+    count: 250,
+    sha256: "924e5570b2adaaf898c2b60bf40cbdf1253049cf5f84820cb0426e3235df524f",
   },
   "./adapters/drizzle/sqlite": {
-    count: 248,
-    sha256: "a69b25e4df337cac2f22886dae336c4b706537a64b865c87d3706201a97ae194",
+    count: 247,
+    sha256: "6ecc56851e7c322b365927d926ecd116db03998df0eaf6b14edc2106aa88b6ac",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 251,
-    sha256: "2d9ab4e3ed7b55ee1a9a19aaf459db1693cfba5bd048fe87fe49cb2fcca058a3",
+    count: 250,
+    sha256: "25e36fa53b2453fbbc139ce0f52fa55ec9364c305830aaf6c7f726d07bbcd068",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 251,
-    sha256: "2d9ab4e3ed7b55ee1a9a19aaf459db1693cfba5bd048fe87fe49cb2fcca058a3",
+    count: 250,
+    sha256: "25e36fa53b2453fbbc139ce0f52fa55ec9364c305830aaf6c7f726d07bbcd068",
   },
   "./backend": {
-    count: 17,
-    sha256: "d7be94fc8aff9a4c4f7e304ce209aaf05f426ad2a8e808fa8b5066bfae75f19e",
+    count: 16,
+    sha256: "fbcbd40667f4a4374dd0e267e595a852e5dfeec68d3d4e5e775848bc6468738f",
   },
   "./core": {
     count: 72,
@@ -391,36 +428,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 719,
-    sha256: "b4273d0e98554c6f23185c1e8a03537e46c5841bbf156a02a788ed20f0fd4388",
+    count: 718,
+    sha256: "b07fd3180190cdbadbcfedf6fd11ddc0562da1ba2ea5d3c4b48fe903c5655363",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 702,
-    sha256: "2cd7f13f276ed0b8921349904b596b985bf164f06750e511815c6d5b81febb09",
+    count: 701,
+    sha256: "81043bec464594503096ab691a03990c6217ef4285ddd478f0588558e441ac0c",
   },
   "./postgres/pglite": {
-    count: 706,
-    sha256: "a7187bc7f6a7f63a5f02401aedd5e806b1b1fbcb199a7f390a4ffd8357835f19",
+    count: 705,
+    sha256: "1298bd09525e1465a1d8483dd2127d5765a77d882a47940542fdcda623d0bcd3",
   },
   "./profiler": {
-    count: 704,
-    sha256: "f289b42f2e24ee80c53fd99e3424b8e0d6db48452ecd18f8ddfc7cbc64458fd8",
+    count: 703,
+    sha256: "3f48dc86aa37a1ca6de85ac0d82f37a53e83637a867a0412039599a59caf5fd1",
   },
   "./provenance": {
-    count: 710,
-    sha256: "b446a4165ead1c5e61253c1c6881a54b4809cc92afe59b0adda4e70db6889b15",
+    count: 709,
+    sha256: "7337e5c316d4ca805fe6822a6c51bddca1ad02ecd91d5353f7c99f228ce5145f",
   },
   "./schema": {
-    count: 272,
-    sha256: "f5bf2568fcb4d6b76db3c247e0cab49ed4a62a802e4873b3574621141030625e",
+    count: 271,
+    sha256: "a7078b0bb662cbe6f4a1a511cfc1f06971db0cb1e0272a4fa5ea13a8691c56d2",
   },
   "./sqlite/local": {
-    count: 706,
-    sha256: "a7187bc7f6a7f63a5f02401aedd5e806b1b1fbcb199a7f390a4ffd8357835f19",
+    count: 705,
+    sha256: "1298bd09525e1465a1d8483dd2127d5765a77d882a47940542fdcda623d0bcd3",
   },
 };
 

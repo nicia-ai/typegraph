@@ -19,9 +19,8 @@
  *     trusted import's PostgreSQL/SQLite split was always made by calling a
  *     different exported function per engine, never by a dialect literal.
  *     It joins the model here because its table lock now resolves the SAME
- *     plan the other lock sites do, and is the plan's one table-lock-alone
- *     consumer — see `write-fence.ts`'s note next to
- *     `planFromLockCapabilities`.
+ *     plan the other lock sites do: a PostgreSQL-only table lock with no
+ *     advisory lock preceding it.
  *
  *     J17 resolves the plan once, immediately after a profile's capability
  *     tail runs and before any member group is assembled, and gates
@@ -465,30 +464,15 @@ const FENCE_MODULE_FILE = "backend/drizzle/postgres-fence-sql.ts";
 
 /**
  * The only string or template literals anywhere under `src/`, outside
- * {@link FENCE_MODULE_FILE}, that mention one of {@link FENCE_TOKENS} — and
- * every one is prose, not a spelling: `unfencedRefusalMessage`'s two
- * dialect-description strings name the capability a backend should declare
- * ("an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"). The
- * whole source tree is scanned, so a new file that spells a lock statement
- * itself fails here; a new prose mention is declared as a row, with its
- * reason, or it fails too. Asserted both directions.
+ * {@link FENCE_MODULE_FILE}, that mention one of {@link FENCE_TOKENS}. Empty:
+ * `unfencedRefusalMessage`'s single declaration-line message names the
+ * capability to declare (`writeFenceDeclarationLine`), not a lock statement
+ * itself, so no prose row is needed today. The whole source tree is
+ * scanned, so a new file that spells a lock statement itself fails here; a
+ * new prose mention is declared as a row, with its reason, or it fails too.
+ * Asserted both directions.
  */
-const FENCE_TOKEN_PROSE_EXEMPTIONS: readonly InventoryEntry[] = [
-  {
-    file: "backend/capabilities/write-fence.ts",
-    line: '"an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"',
-    site: "prose",
-    reason:
-      "The PostgreSQL half of the unfenced refusal's dialect description — names the capability to declare, spells no statement.",
-  },
-  {
-    file: "backend/capabilities/write-fence.ts",
-    line: '"an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"',
-    site: "prose",
-    reason:
-      "The same description for the other dialect's recommendation line in that message.",
-  },
-];
+const FENCE_TOKEN_PROSE_EXEMPTIONS: readonly InventoryEntry[] = [];
 
 /** String and template-literal AST tokens — comments and identifiers never match. */
 function isStringOrTemplatePart(

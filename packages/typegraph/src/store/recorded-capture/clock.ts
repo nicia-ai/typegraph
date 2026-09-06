@@ -239,11 +239,7 @@ export async function lockRecordedGraphWrite(
   memo?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(
-    plan,
-    "recorded graph write",
-    "advisory-lock",
-  );
+  const fence = requireWriteFence(plan, "recorded graph write", "keyed");
   switch (fence.kind) {
     case "engine-serialized":
     case "caller-serialized": {
@@ -532,11 +528,7 @@ async function lockRecordedClock(
   // concurrent transactions can read the same previous clock value and
   // allocate the same recorded instant.
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(
-    plan,
-    "recorded clock allocation",
-    "advisory-lock",
-  );
+  const fence = requireWriteFence(plan, "recorded clock allocation", "keyed");
   switch (fence.kind) {
     case "lock": {
       await target.execute(

@@ -383,17 +383,17 @@ describe("factories audit unconditionally", () => {
 
 /**
  * A backend carrying the first-party write-fence mark whose declared
- * capabilities omit `pessimisticLocks` — the shape that exercises
+ * capabilities omit `writeFence` — the shape that exercises
  * `resolveWriteFencePlan`'s dialect-derivation fallback arm. The bundled
  * factories can no longer mint this shape themselves: `createSqlBackend`
- * refuses to build a backend whose resolved capabilities omit
- * `pessimisticLocks`, so the only way left to reach the fallback arm on a
- * first-party-marked backend is to mark a plain literal directly.
+ * refuses to build a backend whose resolved capabilities omit `writeFence`,
+ * so the only way left to reach the fallback arm on a first-party-marked
+ * backend is to mark a plain literal directly.
  */
-function createFirstPartyMarkedBackendWithoutPessimisticLocks(): GraphBackend {
+function createFirstPartyMarkedBackendWithoutWriteFence(): GraphBackend {
   const backend = {
     dialect: "sqlite",
-    capabilities: { ...SQLITE_CAPABILITIES, pessimisticLocks: undefined },
+    capabilities: { ...SQLITE_CAPABILITIES, writeFence: undefined },
     close: () => Promise.resolve(),
   } as GraphBackend;
   return markFirstPartyFactory(backend);
@@ -405,7 +405,7 @@ describe("the seam carries the first-party write-fence mark (§5.3)", () => {
   // derived/projected backend would resolve `unfenced` here while the source
   // still resolves `engine-serialized` — two answers to one question.
   it("a deriveBackend-decorated first-party backend resolves the same plan as its source", () => {
-    const backend = createFirstPartyMarkedBackendWithoutPessimisticLocks();
+    const backend = createFirstPartyMarkedBackendWithoutWriteFence();
 
     const decorated = deriveBackend(backend, {});
 
@@ -418,7 +418,7 @@ describe("the seam carries the first-party write-fence mark (§5.3)", () => {
   });
 
   it("a projectGraphBackend-projected first-party backend resolves the same plan as its source", () => {
-    const backend = createFirstPartyMarkedBackendWithoutPessimisticLocks();
+    const backend = createFirstPartyMarkedBackendWithoutWriteFence();
 
     const projected = projectGraphBackend(backend);
 

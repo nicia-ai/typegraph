@@ -40,7 +40,6 @@ type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
-    pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
@@ -1915,13 +1914,6 @@ type OntologyRelation = Readonly<{
 
 // @public
 export function parseSerializedSchema(json: string): SerializedSchema;
-
-// @public
-type PessimisticLockCapabilities = Readonly<{
-    advisoryLocks: boolean;
-    tableLocks: boolean;
-    serializedWriters: boolean;
-}>;
 
 // @public
 class Placeholder {

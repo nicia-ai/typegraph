@@ -135,7 +135,6 @@ export {
 } from "./resolve";
 export {
   type FenceSql,
-  type PessimisticLockCapabilities,
   requireWriteFence,
   resolveWriteFencePlan,
   type WriteFencePlan,

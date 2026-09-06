@@ -164,11 +164,10 @@ export function buildCallerSerializedBackend<TTx>(
  * The write-fence-declaration refusal below is what makes the marking
  * `applyEngineMarks` (`./marks`) performs sound for a profile this factory
  * did not write itself, not only for the two bundled ones: a profile whose
- * resolved capabilities name neither `writeFence` nor the legacy
- * `pessimisticLocks` is refused outright, because every mark and
- * registration `applyEngineMarks` applies assumes a resolvable write-fence
- * decision, and `resolveWriteFencePlan`'s dialect-derivation fallback is
- * sound only for the two bundled dialects.
+ * resolved capabilities name no `writeFence` is refused outright, because
+ * every mark and registration `applyEngineMarks` applies assumes a
+ * resolvable write-fence decision, and `resolveWriteFencePlan`'s
+ * dialect-derivation fallback is sound only for the two bundled dialects.
  * `applyEngineMarks`'s own doc comment covers its two further gates —
  * `markBundledRootAutocommitEligible` on the profile's `autocommit`
  * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
@@ -194,16 +193,12 @@ export function createSqlBackend<TTx>(
     },
   );
 
-  if (
-    capabilities.writeFence === undefined &&
-    capabilities.pessimisticLocks === undefined
-  ) {
+  if (capabilities.writeFence === undefined) {
     throw new ConfigurationError(
-      "This engine profile declares no usable write fence: neither " +
-        "capabilities.writeFence nor the legacy capabilities.pessimisticLocks " +
-        "is present, so createSqlBackend cannot resolve a write-fence " +
-        "decision for it and refuses to mark it as fenced. Add ONE " +
-        "declaration to the capabilities the profile declares:\n\n" +
+      "This engine profile declares no usable write fence: " +
+        "capabilities.writeFence is absent, so createSqlBackend cannot " +
+        "resolve a write-fence decision for it and refuses to mark it as " +
+        "fenced. Declare it on the capabilities the profile declares:\n\n" +
         `${writeFenceDeclarationLine(profile.dialect, "  ")}\n\n` +
         "(that is the correct declaration for this profile's dialect).",
       {
@@ -212,7 +207,7 @@ export function createSqlBackend<TTx>(
       },
       {
         suggestion:
-          "Declare capabilities.writeFence (or the deprecated capabilities.pessimisticLocks) on this profile's declaredCapabilities.",
+          "Declare capabilities.writeFence on this profile's declaredCapabilities.",
       },
     );
   }
@@ -227,8 +222,8 @@ export function createSqlBackend<TTx>(
   // ONE fence target for the whole backend and every transaction-scoped one
   // it builds, marked first-party only under the same gate as the backend
   // itself: `capabilities` here is the object this factory just finalized,
-  // so a recognized-first-party caller who blanked `pessimisticLocks` out of
-  // a profile's declaration still resolves the dialect-derived plan, not
+  // so a recognized-first-party caller who blanked `writeFence` out of a
+  // profile's declaration still resolves the dialect-derived plan, not
   // `unfenced`, for the two bundled dialects — while a profile without a
   // recognized token never reaches that fallback.
   const fenceTargetBase: WriteFenceTarget = {
