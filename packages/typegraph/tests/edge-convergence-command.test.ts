@@ -230,6 +230,40 @@ describe("PostgreSQL edge convergence command", () => {
     }
   });
 
+  it('refuses a PostgreSQL override that declares writeFence.mechanism: "engine-serialized" (the preferred-declaration twin of the pessimisticLocks refusal above)', async () => {
+    const client = await PGlite.create();
+    try {
+      expect(() =>
+        createPostgresBackend(drizzlePglite(client), {
+          capabilities: {
+            writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+          },
+          vector: false,
+        }),
+      ).toThrow('cannot declare writeFence.mechanism: "engine-serialized"');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('accepts a PostgreSQL override that declares writeFence.mechanism: "caller-serialized" — a deployment claim, not an engine claim', async () => {
+    const client = await PGlite.create();
+    try {
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        capabilities: {
+          writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+        },
+        vector: false,
+      });
+      expect(backend.capabilities.writeFence).toEqual({
+        mechanism: "caller-serialized",
+        drain: "quiescent",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
   it("uses exact match-key equality and deterministic winner ordering", () => {
     const strategy = createPostgresOperationStrategy(
       postgresTables,

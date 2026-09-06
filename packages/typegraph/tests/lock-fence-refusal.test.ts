@@ -303,3 +303,110 @@ describe("T16 — (f) revisionTracking: true alone on unfenced refuses, zero sta
     );
   });
 });
+
+/**
+ * T16 — the `writeFence`-declared twin of each row above.
+ *
+ * `writeFence`'s `mechanism` has no arm that means "no fence" the way the
+ * legacy boolean triple's all-false shape does, so a target that declares
+ * `writeFence` can never resolve `kind: "unfenced"` on its own — there is no
+ * "twin" of rows (a)/(b)/(f)/(g) that reaches the SAME `unfenced` reason
+ * through `writeFence` alone. What a declared `writeFence` DOES reach,
+ * exactly like the legacy shape, is `WRITE_FENCE_DECLARATION_CONFLICT` — and
+ * it reaches it even earlier than `createStore`'s two gates do: the backend
+ * factory itself resolves the write-fence plan once, at construction, for
+ * every backend it builds, so a target declaring both never survives to
+ * become a `GraphBackend` a graph could be stored on at all. Each row below
+ * is the SAME legacy declaration as its counterpart above, plus a
+ * `writeFence` declared alongside it.
+ */
+describe("T16 — writeFence-declared twin: declaring writeFence alongside a legacy declaration conflicts at backend construction", () => {
+  it("twin of (a): the SQLite unfenced declaration plus writeFence conflicts before createStore ever runs", () => {
+    expect(() =>
+      createLoggedSqliteBackend({
+        pessimisticLocks: UNFENCED_CAPABILITIES,
+        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+      }),
+    ).toThrow(writeFenceRefusal("WRITE_FENCE_DECLARATION_CONFLICT"));
+  });
+
+  it("twin of (g): the table-locks-only declaration plus writeFence conflicts too, not the table-locks-only reason", () => {
+    let thrown: unknown;
+    try {
+      createLoggedSqliteBackend({
+        pessimisticLocks: TABLE_LOCKS_ONLY_CAPABILITIES,
+        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toEqual(
+      writeFenceRefusal("WRITE_FENCE_DECLARATION_CONFLICT"),
+    );
+    // Neither IDENTITY_REQUIRES_WRITE_FENCE nor
+    // RECORDED_CLOCK_REQUIRES_WRITE_FENCE — nor a table-locks-only-flavored
+    // WRITE_FENCE_UNAVAILABLE — fires: the conflict is caught before a
+    // `GraphBackend` exists for `createStore` to inspect at all.
+    expect((thrown as { details: { code: string } }).details.code).toBe(
+      "WRITE_FENCE_DECLARATION_CONFLICT",
+    );
+  });
+});
+
+/**
+ * T16 — the two store gates recognize the new postures as fenced.
+ *
+ * Neither gate refuses under `kind !== "unfenced"`, so a `writeFence`
+ * declaration using either of the two postures this stage adds —
+ * `{advisory, quiescent}` and `{caller-serialized, quiescent}` — must
+ * construct successfully, exactly like an ordinary fenced declaration.
+ */
+describe("T16 — the quiescent drain and the caller-serialized mechanism construct successfully at both gates", () => {
+  it("identity graph: {advisory, quiescent}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "advisory", drain: "quiescent" },
+    });
+    try {
+      expect(() => createStore(identityGraph, logged.backend)).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("identity graph: {caller-serialized, quiescent}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+    });
+    try {
+      expect(() => createStore(identityGraph, logged.backend)).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("history: true: {advisory, quiescent}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "advisory", drain: "quiescent" },
+    });
+    try {
+      expect(() =>
+        createStore(plainGraph, logged.backend, { history: true }),
+      ).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("history: true: {caller-serialized, quiescent}", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+    });
+    try {
+      expect(() =>
+        createStore(plainGraph, logged.backend, { history: true }),
+      ).not.toThrow();
+    } finally {
+      await logged.close();
+    }
+  });
+});

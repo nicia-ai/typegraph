@@ -198,7 +198,7 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/postgres.ts",
-    line: "const plan = resolveWriteFencePlan(fenceTarget);",
+    line: "const schemaFenceFusionPlan = resolveWriteFencePlan(fenceTarget);",
     site: "J16",
     reason:
       "schemaFenceInsertLockClause resolves the plan for the FOR SHARE the fused managed-insert programs carry INSIDE their own statement. The ONLY degrading site: an in-statement predicate cannot race itself, so an empty clause stays correct.",

@@ -301,6 +301,13 @@ export async function lockIdentityEnablementNodes(
   );
   switch (fence.kind) {
     case "lock": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means (`requireWriteFence` already refused
+        // `drain: "none"` above), so this site takes no statement rather
+        // than one the resource does not need.
+        return;
+      }
       await executeIdentityStatement(
         target,
         fence.sql.lockTables([schema.tables.nodes], "share"),

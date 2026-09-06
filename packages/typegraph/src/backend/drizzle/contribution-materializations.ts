@@ -1766,6 +1766,12 @@ export function createContributionMaterializer(
     );
     switch (fence.kind) {
       case "lock": {
+        if (fence.drain !== "table-lock") {
+          // `drain: "quiescent"`: the declaration already excludes
+          // concurrent writers by some other means, so this site takes no
+          // statement.
+          return;
+        }
         await tx.executeStatement(
           asCompiledStatementSql(
             fence.sql.lockTables([tableName], "access-exclusive"),

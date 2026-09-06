@@ -10,6 +10,7 @@
 import { ConfigurationError } from "../../errors";
 import { type SqlDialect } from "../../query/dialect/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
+import { requireDefined } from "../../utils/presence";
 import { type BackendCapabilities } from "../types";
 
 /**
@@ -523,10 +524,51 @@ function describeResolvedAdvisoryDeclaration(
 }
 
 /**
- * THE refusal for a `lock` decision whose target supplies no spelling to
- * take it with — never defaulted, never silently degraded to
- * `unfenced`: the declaration already promised a real lock exists, so the
- * only honest response to a missing spelling is to say so.
+ * Whether `fenceSql` actually supplies `member` as a callable — the runtime
+ * check behind {@link refuseWriteFenceSqlUnavailable}'s per-member refusal.
+ * `FenceSql`'s type keeps all three members required as a set (a caller
+ * constructing one under TypeScript can never omit one), so this only ever
+ * catches a `fenceSql` built outside that check — a plain JS backend author,
+ * or a test target assembled with a cast — supplying an object that is
+ * missing (or has stubbed `undefined` over) the one member a resolved
+ * mechanism/drain combination actually needs.
+ */
+function fenceSqlMemberPresent(
+  fenceSql: FenceSql | undefined,
+  member: keyof FenceSql,
+): boolean {
+  return typeof fenceSql?.[member] === "function";
+}
+
+/**
+ * What TypeGraph cannot spell without `member` — the phrase
+ * {@link refuseWriteFenceSqlUnavailable} interpolates into its message so a
+ * caller reads which statement is missing, not just that "something" is.
+ */
+function fenceSqlMemberPurpose(member: keyof FenceSql): string {
+  switch (member) {
+    case "advisoryLockExpression": {
+      return "advisory-lock statement this fence needs to take";
+    }
+    case "isolationFactExpression": {
+      return "session isolation-level read this fence needs to take";
+    }
+    case "lockTables": {
+      return 'table-lock statement its drain: "table-lock" declaration needs to take';
+    }
+    default: {
+      return member satisfies never;
+    }
+  }
+}
+
+/**
+ * THE refusal for a `lock` decision whose target supplies no spelling — or
+ * an incomplete one — to take it with: never defaulted, never silently
+ * degraded to `unfenced`. The declaration already promised a real lock
+ * exists, so the only honest response to a missing spelling is to say so,
+ * naming the exact `fenceSql` member the resolved mechanism/drain
+ * combination needed and could not find.
  *
  * The one call site is `planFromWriteFenceDeclaration`, shared by every
  * `resolveWriteFencePlan` arm that can resolve `mechanism: "advisory"` — a
@@ -541,12 +583,18 @@ function refuseWriteFenceSqlUnavailable(
   dialect: SqlDialect,
   declaration: WriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
+  member: keyof FenceSql,
 ): never {
   throw new ConfigurationError(
     `This backend ${describeResolvedAdvisoryDeclaration(declaration, source, dialect)} ` +
-      "but supplies no `fenceSql`, so TypeGraph cannot spell the lock " +
-      "statement this fence needs to take.",
-    { code: "WRITE_FENCE_SQL_UNAVAILABLE", dialect },
+      `but its \`fenceSql\` is missing \`${member}\`, so TypeGraph cannot ` +
+      `spell the ${fenceSqlMemberPurpose(member)}.`,
+    {
+      code: "WRITE_FENCE_SQL_UNAVAILABLE",
+      dialect,
+      member,
+      drain: declaration.drain,
+    },
     {
       suggestion:
         dialect === "postgres" ?
@@ -604,15 +652,44 @@ function planFromWriteFenceDeclaration(
 ): WriteFencePlan {
   switch (declaration.mechanism) {
     case "advisory": {
-      if (target.fenceSql === undefined) {
-        refuseWriteFenceSqlUnavailable(target.dialect, declaration, source);
+      if (!fenceSqlMemberPresent(target.fenceSql, "advisoryLockExpression")) {
+        refuseWriteFenceSqlUnavailable(
+          target.dialect,
+          declaration,
+          source,
+          "advisoryLockExpression",
+        );
+      }
+      if (!fenceSqlMemberPresent(target.fenceSql, "isolationFactExpression")) {
+        refuseWriteFenceSqlUnavailable(
+          target.dialect,
+          declaration,
+          source,
+          "isolationFactExpression",
+        );
+      }
+      if (
+        declaration.drain === "table-lock" &&
+        !fenceSqlMemberPresent(target.fenceSql, "lockTables")
+      ) {
+        refuseWriteFenceSqlUnavailable(
+          target.dialect,
+          declaration,
+          source,
+          "lockTables",
+        );
       }
       return {
         kind: "lock",
         advisoryLocks: true,
         tableLocks: declaration.drain === "table-lock",
         drain: declaration.drain,
-        sql: resolveFenceStatements(target.fenceSql),
+        sql: resolveFenceStatements(
+          requireDefined(
+            target.fenceSql,
+            "resolveWriteFencePlan: fenceSql was validated present above",
+          ),
+        ),
       };
     }
     case "engine-serialized": {

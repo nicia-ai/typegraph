@@ -114,6 +114,11 @@ export async function lockPostgresTrustedImportTables(
   const fence = requireWriteFence(plan, "trusted import", "table-lock");
   switch (fence.kind) {
     case "lock": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means, so this site takes no statement.
+        return;
+      }
       await executeStatement(
         asCompiledStatementSql(
           fence.sql.lockTables(

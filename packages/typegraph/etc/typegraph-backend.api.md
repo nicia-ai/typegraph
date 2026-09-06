@@ -4015,7 +4015,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
-        readonly reason: "The write-fence lock spelling a backend's `pessimisticLocks.advisoryLocks: true` declaration requires. Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.";
+        readonly reason: "The write-fence lock spelling a backend's `writeFence: { mechanism: \"advisory\" }` declaration requires (or, in the deprecated legacy shape, `pessimisticLocks.advisoryLocks: true`). Every lock site reads it exclusively through the resolved `WriteFencePlan`'s `sql` field (`resolveWriteFencePlan`/`requireWriteFence` in `backend/capabilities/write-fence.ts`). The one exception is `assertRecordedCaptureTransactionIsolation` (`store/recorded-capture/guards.ts`), which reads `target.fenceSql` directly: it is gated purely on `dialect`, not on a resolved fence plan, so there is no plan to read the spelling through.";
         readonly accesses: 2;
     };
     readonly commitSchemaVersionIfKindsEmpty: {

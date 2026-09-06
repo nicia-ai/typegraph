@@ -440,6 +440,11 @@ async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
   );
   switch (fence.kind) {
     case "lock": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means, so this site takes no statement.
+        return;
+      }
       // Built fresh from `tx.tableNames` — always the live-relation schema,
       // never a recorded-read view — so `schema.tables.nodes/.edges` (the
       // physical names `lockTables` needs) name the same relations
