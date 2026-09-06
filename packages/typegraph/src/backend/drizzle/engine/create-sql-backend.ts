@@ -457,6 +457,12 @@ export function createSqlBackend<TTx>(
     dialect: profile.dialect,
     capabilities,
     ...(profile.fenceSql === undefined ? {} : { fenceSql: profile.fenceSql }),
+    // Read only by a resolved `row` mechanism (`resolveFenceStatements`'s
+    // fences-relation derivation, off `tableNames.fences`); every profile's
+    // `tableNames` resolves `fences` with a default, so this is always the
+    // physical name TypeGraph spells its acquire statement against, bundled
+    // or custom alike — the SAME `tableNames` the returned backend exposes.
+    tableNames: profile.tableNames,
   };
   const fenceTarget: WriteFenceTarget =
     isFirstParty ? markFirstPartyFactory(fenceTargetBase) : fenceTargetBase;
@@ -526,6 +532,7 @@ export function createSqlBackend<TTx>(
       ...profile.graphTemplateRuntime,
       ensureTable: profile.provisioning.ensureTable,
       execute: operations.execute,
+      fencePlan,
     });
 
   const baseSchemaMembers = createBaseSchemaMembers({

@@ -378,6 +378,14 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // already at the root (`./graph-merge`, `./interchange`, `./postgres/pglite`,
 // `./profiler`, `./provenance`, `./sqlite/local`); `.` exports the type
 // directly, so its own debt is unchanged.
+// `CreateGraphTemplateMembersDeps` gaining `fencePlan: WriteFencePlan` (the
+// PostgreSQL binding's `instantiateStatement` reads it to decide whether the
+// fused CTE's advisory lock is still sound) makes `WriteFencePlan` and its
+// `sql: FenceStatements` member newly reachable at `./adapters/drizzle/engine`,
+// the only entrypoint that names `CreateGraphTemplateMembersDeps` at all —
+// exported directly there instead of booked as debt, so a profile author
+// implementing `instantiateStatement` can name the dep's own type; no count
+// changes anywhere.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 388,

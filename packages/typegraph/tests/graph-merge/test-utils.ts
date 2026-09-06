@@ -174,6 +174,7 @@ function sharedPgliteTableNames(fixtureSequence: number): PostgresTableNames {
     kindRemovals: `${prefix}_kind_removals`,
     reconciliationMarkers: `${prefix}_reconciliation_markers`,
     graphTemplates: `${prefix}_graph_templates`,
+    fences: `${prefix}_fences`,
   };
 }
 

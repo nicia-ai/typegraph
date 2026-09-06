@@ -476,7 +476,7 @@ export function registerWriteFenceConformanceIntegrationTests(
             // of that key, B cannot even start reading until A commits —
             // sequential `await`s on two backends could never distinguish
             // that from B simply running after A finished on its own.
-            // Mutation-proven: deleting the `advisoryLock` call from
+            // Mutation-proven: deleting the `acquireKeyed` call from
             // `lockIdentityGraph`'s `lock` arm (`src/identity/service-read.ts`)
             // left `stillBlocked` false, since nothing then stopped B's
             // transaction from starting immediately.

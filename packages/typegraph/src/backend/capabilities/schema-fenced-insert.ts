@@ -24,13 +24,17 @@ function markSchemaFencedInsertEligible<T extends object>(target: T): T {
 }
 
 /**
- * Marks `target` schema-fenced-insert eligible only when `fencePlan` actually
- * fences concurrent writers — the same `kind !== "unfenced"` gate
- * `createSqlBackend`'s root mark applies (`../drizzle/engine/marks`). The
- * bundled factories' root backend and every TypeGraph-opened transaction
- * handle earn this mark through this function, so the root and every
- * transaction handle it opens can never disagree about eligibility for the
- * same resolved plan.
+ * Marks `target` schema-fenced-insert eligible only when `fencePlan` fences
+ * concurrent writers with a mechanism the fused insert can actually compose
+ * itself into — `kind !== "unfenced"` AND `kind !== "row"`. A `row` plan's
+ * keyed exclusion is a full standalone statement against the fences relation
+ * (`FenceStatements.acquireKeyed`, an `INSERT ... RETURNING`), not a bare
+ * expression like `row`'s `lock` sibling supplies: there is no fragment to
+ * embed inside the fused INSERT the way `FOR SHARE`/an advisory-lock
+ * subquery embeds today. A `row` target's managed write therefore always
+ * runs the portable two-statement path (`lockSchemaVersionForStoreWrite`,
+ * the one place the fence-row acquisition actually happens for a write),
+ * exactly like the no-spelling case this function already excluded.
  *
  * @internal Called only by bundled factories for their root/owned-tx handles.
  */
@@ -38,7 +42,7 @@ export function markSchemaFencedInsertEligibleUnderFence<T extends object>(
   target: T,
   fencePlan: WriteFencePlan,
 ): T {
-  if (fencePlan.kind !== "unfenced") {
+  if (fencePlan.kind !== "unfenced" && fencePlan.kind !== "row") {
     markSchemaFencedInsertEligible(target);
   }
   return target;

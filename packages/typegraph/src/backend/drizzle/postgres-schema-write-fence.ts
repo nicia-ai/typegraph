@@ -20,6 +20,7 @@
  */
 import { type SQL, sql } from "drizzle-orm";
 
+import { requireDefined } from "../../utils/presence";
 import type { FenceSql } from "../capabilities/write-fence";
 import type { SchemaWriteFenceParams } from "../types";
 import { toDrizzleSql } from "./execution/types";
@@ -46,6 +47,23 @@ export function buildLockSchemaVersionAndGraphWrite(
   fenceSql: FenceSql,
 ): SQL {
   const { schemaVersions } = tables;
+  // Both members are optional on `FenceSql` in general (a `row`-mechanism
+  // target supplies neither), but this statement is only ever composed
+  // behind a resolved `mechanism: "advisory"` plan — `postgres.ts` gates
+  // threading `fenceSql` into `fusion` on `schemaFenceFusionPlan.kind ===
+  // "lock"`, and `planFromWriteFenceDeclaration`'s `"advisory"` arm already
+  // refused construction if either were missing. Asserted here, not
+  // silently narrowed, so a caller that ever reaches this with a `row`
+  // target's incomplete `fenceSql` fails loudly instead of embedding
+  // `undefined` in the CTE.
+  const advisoryLockExpression = requireDefined(
+    fenceSql.advisoryLockExpression,
+    "buildLockSchemaVersionAndGraphWrite: advisoryLockExpression was validated present by the resolved advisory plan",
+  );
+  const isolationFactExpression = requireDefined(
+    fenceSql.isolationFactExpression,
+    "buildLockSchemaVersionAndGraphWrite: isolationFactExpression was validated present by the resolved advisory plan",
+  );
   return sql`
     WITH "schema_fence" AS MATERIALIZED (
       SELECT ${schemaVersions.version}
@@ -56,12 +74,12 @@ export function buildLockSchemaVersionAndGraphWrite(
       FOR SHARE
     ),
     "graph_write_lock" AS MATERIALIZED (
-      SELECT ${toDrizzleSql(fenceSql.advisoryLockExpression(advisoryLockNamespace, params.graphId), "postgres")} AS "lock_token"
+      SELECT ${toDrizzleSql(advisoryLockExpression(advisoryLockNamespace, params.graphId), "postgres")} AS "lock_token"
       FROM "schema_fence"
     )
     SELECT
       TRUE AS "fence_acquired",
-      ${toDrizzleSql(fenceSql.isolationFactExpression(), "postgres")} AS "transaction_isolation"
+      ${toDrizzleSql(isolationFactExpression(), "postgres")} AS "transaction_isolation"
     FROM "graph_write_lock"
   `;
 }

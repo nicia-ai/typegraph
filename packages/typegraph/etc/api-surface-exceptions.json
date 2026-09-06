@@ -1,49 +1,6 @@
 [
   {
     "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceSql",
-    "member": "lockTables",
-    "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell the two composable expressions a fused statement embeds directly (the lock and the isolation read) plus the table-lock builder, so the three builders are required as a set rather than optional at the boundary. TypeGraph derives the standalone-statement forms every ordinary lock site consumes from those two expressions, so a backend author never spells both forms separately.",
-    "issue": "#622",
-    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceSql",
-    "member": "advisoryLockExpression",
-    "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell the two composable expressions a fused statement embeds directly (the lock and the isolation read) plus the table-lock builder, so the three builders are required as a set rather than optional at the boundary. TypeGraph derives the standalone-statement forms every ordinary lock site consumes from those two expressions, so a backend author never spells both forms separately.",
-    "issue": "#622",
-    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceSql",
-    "member": "isolationFactExpression",
-    "kind": "required-member-added",
-    "reason": "FenceSql is the lock-statement spelling a backend supplies through the optional GraphBackend.fenceSql member; a backend that omits fenceSql is unaffected, and one that supplies it must spell the two composable expressions a fused statement embeds directly (the lock and the isolation read) plus the table-lock builder, so the three builders are required as a set rather than optional at the boundary. TypeGraph derives the standalone-statement forms every ordinary lock site consumes from those two expressions, so a backend author never spells both forms separately.",
-    "issue": "#622",
-    "refusal": "WRITE_FENCE_SQL_UNAVAILABLE"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceStatements",
-    "member": "advisoryLock",
-    "kind": "required-member-added",
-    "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
-    "declaration": "FenceStatements",
-    "member": "advisoryLockWithIsolation",
-    "kind": "required-member-added",
-    "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
-    "issue": "#622"
-  },
-  {
-    "entrypoint": "typegraph-backend.api.md",
     "declaration": "FenceStatements",
     "member": "isolationFact",
     "kind": "required-member-added",
@@ -512,6 +469,78 @@
     "member": "tableLocks",
     "kind": "member-removed",
     "reason": "removed in favor of the lock arm's drain field per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "acquireKeyed",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved lock or row WriteFencePlan carries as its sql field, derived from FenceSql by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant. acquireKeyed/acquireKeyedWithIsolation replace the deleted advisoryLock/advisoryLockWithIsolation names (already exempted here before the rename) as the mechanism-neutral forms every keyed lock site now calls.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "FenceStatements",
+    "member": "acquireKeyedWithIsolation",
+    "kind": "required-member-added",
+    "reason": "FenceStatements is what a resolved lock or row WriteFencePlan carries as its sql field, derived from FenceSql by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant. acquireKeyed/acquireKeyedWithIsolation replace the deleted advisoryLock/advisoryLockWithIsolation names (already exempted here before the rename) as the mechanism-neutral forms every keyed lock site now calls.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "ResolvedSqlTableNames",
+    "member": "fences",
+    "kind": "required-member-added",
+    "reason": "ResolvedSqlTableNames is the fully-resolved table-name set createSqlSchema returns and GraphBackend.tableNames exposes; fences (default \"typegraph_fences\") joins it as part of the base schema so the row write-fence mechanism can spell its acquire statement through the query builder. The corresponding SqlTableNames input field is optional and defaults, so a caller constructing a schema or table-name override is unaffected; only code that builds a complete ResolvedSqlTableNames object literal by hand (rather than through createSqlSchema/a bundled backend factory) must add it.",
     "issue": "#622"
   }
 ]

@@ -1,4 +1,5 @@
 export {
+  requireFenceLockTables,
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";

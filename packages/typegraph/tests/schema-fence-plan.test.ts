@@ -43,6 +43,7 @@ import {
   defineNode,
   StaleVersionError,
 } from "../src";
+import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
 import { requireDefined } from "../src/utils/presence";
 import {
   createLoggedPostgresBackend,
@@ -65,6 +66,11 @@ const FOR_UPDATE = /for\s+update/i;
 const FOR_SHARE = /for\s+share/i;
 /** The fused managed insert: the fence rides in as a subquery it selects from. */
 const FUSED_SCHEMA_FENCE_INSERT = /insert\s+into[\s\S]*schema_fence/i;
+/** The portable fence-row acquisition a `row`-mechanism target takes instead. */
+const FENCE_ROW_ACQUIRE =
+  /insert\s+into\s+"typegraph_fences"[\s\S]*on conflict/i;
+/** The ordinary (unfused) node insert the portable path runs once the fence row is already held. */
+const NODE_INSERT = /insert\s+into\s+"typegraph_nodes"/i;
 
 /**
  * Bootstraps a store and returns the statements the schema commit emitted,
@@ -133,6 +139,89 @@ describe("schema fence — the fused in-statement predicate runs without a lock 
           }),
       ).catch((error_: unknown) => error_);
       expect(error).toBeInstanceOf(StaleVersionError);
+    } finally {
+      await logged.close();
+    }
+  });
+});
+
+describe("schema fence — a row-mechanism PostgreSQL backend takes the fence row at both halves", () => {
+  it("acquires the fences relation on commit and again on the standalone write-side lock, never the advisory pair", async () => {
+    // A target with no advisory-lock primitive: the schema-commit fence's
+    // two standalone-statement halves (`acquireSchemaWriteFence`,
+    // `lockActiveSchemaVersion`) must each take the fence row instead —
+    // silently taking nothing would reopen exactly the check-then-write
+    // race the `lock` arm's `FOR UPDATE`/`FOR SHARE` pair closes.
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "row", drain: "quiescent", conflict: "wait" },
+    });
+    try {
+      const { commit } = await measure(logged, "j14-row");
+      expect(commit.some((query) => ADVISORY_LOCK.test(query))).toBe(false);
+      expect(commit.some((query) => FOR_UPDATE.test(query))).toBe(false);
+      expect(commit.some((query) => FENCE_ROW_ACQUIRE.test(query))).toBe(true);
+
+      logged.reset();
+      await requireDefined(logged.backend.transaction)(async (tx) =>
+        requireDefined(tx.lockSchemaVersionForWrite)({
+          graphId: "j14-row",
+          expectedVersion: 1,
+        }),
+      );
+      const writeLockStatements = logged.statements.map(
+        (statement) => statement.query,
+      );
+      expect(writeLockStatements.some((query) => FOR_SHARE.test(query))).toBe(
+        false,
+      );
+      expect(
+        writeLockStatements.some((query) => FENCE_ROW_ACQUIRE.test(query)),
+      ).toBe(true);
+
+      logged.reset();
+      const staleError = await requireDefined(logged.backend.transaction)(
+        async (tx) =>
+          requireDefined(tx.lockSchemaVersionForWrite)({
+            graphId: "j14-row",
+            expectedVersion: 99,
+          }),
+      ).catch((error_: unknown) => error_);
+      expect(staleError).toBeInstanceOf(StaleVersionError);
+    } finally {
+      await logged.close();
+    }
+  });
+});
+
+describe("schema fence — the fused schema-fenced insert is not eligible under a row-mechanism target", () => {
+  it("a managed create takes the fence row before its INSERT, and isSchemaFencedInsertEligible is false on the root and a transaction() handle", async () => {
+    // `markSchemaFencedInsertEligibleUnderFence` excludes `kind: "row"`
+    // alongside `"unfenced"`: the fused insert's in-statement lock clause has
+    // nowhere to compose the fences-relation acquisition, so a row target
+    // must always run the portable path — the fence row first, as its own
+    // statement, only then the ordinary (unfenced-in-statement) INSERT.
+    const logged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "row", drain: "quiescent", conflict: "wait" },
+    });
+    try {
+      expect(isSchemaFencedInsertEligible(logged.backend)).toBe(false);
+      await requireDefined(logged.backend.transaction)((tx) => {
+        expect(isSchemaFencedInsertEligible(tx)).toBe(false);
+        return Promise.resolve();
+      });
+
+      const { write } = await measure(logged, "j-row-fused");
+      expect(write.some((query) => FUSED_SCHEMA_FENCE_INSERT.test(query))).toBe(
+        false,
+      );
+      const fenceRowIndex = write.findIndex((query) =>
+        FENCE_ROW_ACQUIRE.test(query),
+      );
+      const nodeInsertIndex = write.findIndex((query) =>
+        NODE_INSERT.test(query),
+      );
+      expect(fenceRowIndex).toBeGreaterThanOrEqual(0);
+      expect(nodeInsertIndex).toBeGreaterThan(fenceRowIndex);
     } finally {
       await logged.close();
     }

@@ -60,6 +60,7 @@ describe("custom table names", () => {
     recordedIdentityAssertions: "app_recorded_identity_assertions",
     identityClosure: "app_identity_closure",
     identitySeparation: "app_identity_separation",
+    fences: "app_fences",
   } as const;
 
   let backend: GraphBackend;
@@ -79,6 +80,7 @@ describe("custom table names", () => {
       recordedIdentityAssertions: CUSTOM_NAMES.recordedIdentityAssertions,
       identityClosure: CUSTOM_NAMES.identityClosure,
       identitySeparation: CUSTOM_NAMES.identitySeparation,
+      fences: CUSTOM_NAMES.fences,
     });
     backend = createTestBackend(tables);
   });
@@ -200,6 +202,7 @@ describe("custom table names", () => {
       recordedIdentityAssertions: "typegraph_recorded_identity_assertions",
       identityClosure: "typegraph_identity_closure",
       identitySeparation: "typegraph_identity_separation",
+      fences: "typegraph_fences",
     });
   });
 });

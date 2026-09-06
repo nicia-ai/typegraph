@@ -40,6 +40,14 @@ export type { EngineAssembly } from "./assembly";
  */
 export type { BackendResourceAudit } from "../../transaction-resource";
 /**
+ * The resolved write-fence plan and its mechanism-neutral statement bag —
+ * public here because `CreateGraphTemplateMembersDeps.fencePlan` (the
+ * PostgreSQL graph-template binding's dep) carries `WriteFencePlan`, and a
+ * profile author implementing `instantiateStatement` needs the type to
+ * switch on its `kind`.
+ */
+export type { FenceStatements, WriteFencePlan } from "../../capabilities/write-fence";
+/**
  * The PostgreSQL {@link SqlEngineProfile} builder — the derivation base
  * `deriveEngineProfile` (this entrypoint) starts every derived PostgreSQL
  * profile from. Exported here, not from `./adapters/drizzle/postgres`: that

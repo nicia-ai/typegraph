@@ -64,6 +64,7 @@ export type SqliteTableNames = Readonly<{
   contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
+  fences: string;
 }>;
 
 // Moved to `../../table-names` (the module that owns physical table-name
@@ -104,6 +105,7 @@ const DEFAULT_TABLE_NAMES: SqliteTableNames = {
   contributionMaterializations: "typegraph_contribution_materializations",
   kindRemovals: "typegraph_kind_removals",
   reconciliationMarkers: "typegraph_reconciliation_markers",
+  fences: "typegraph_fences",
 };
 
 /**
@@ -431,6 +433,23 @@ export function createSqliteTables(
     ],
   );
 
+  // The write-fence rows relation: one row per keyed exclusion a `row`
+  // mechanism has ever acquired, keyed on `<namespace>:<key>` (the existing
+  // advisory namespaces, verbatim). Never dropped, never row-deleted, never
+  // touched by `clear()` — the same never-dropped posture as
+  // `schema_versions`, `recorded_clock`. `generation` is the acquire
+  // statement's own monotonically increasing counter (see
+  // `resolveFenceStatements`'s `row` derivation); it is not consumed here,
+  // only stored.
+  const fences = sqliteTable(
+    n.fences,
+    {
+      key: text("key").notNull(),
+      generation: integer("generation").notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.key] })],
+  );
+
   const baseSchemaVersions = sqliteTable(
     n.baseSchemaVersions,
     {
@@ -597,6 +616,7 @@ export function createSqliteTables(
     identitySeparation,
     uniques,
     edgeClaims,
+    fences,
     baseSchemaVersions,
     schemaVersions,
     graphTemplates,

@@ -41,6 +41,7 @@ import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { errorChain, isMissingTableError } from "../../utils/sql-errors";
 import {
+  requireFenceLockTables,
   requireWriteFence,
   resolveWriteFencePlan,
   type WriteFenceTarget,
@@ -1706,10 +1707,11 @@ export function createContributionMaterializer(
     const plan = resolveWriteFencePlan(deps.fenceTarget);
     const fence = requireWriteFence(plan, "contribution DDL", "keyed");
     switch (fence.kind) {
-      case "lock": {
+      case "lock":
+      case "row": {
         await tx.execute(
           asCompiledRowsSql(
-            fence.sql.advisoryLock(CONTRIBUTION_DDL_LOCK_KEY, 0),
+            fence.sql.acquireKeyed(CONTRIBUTION_DDL_LOCK_KEY, 0),
           ),
         );
         return;
@@ -1765,7 +1767,8 @@ export function createContributionMaterializer(
       "drain",
     );
     switch (fence.kind) {
-      case "lock": {
+      case "lock":
+      case "row": {
         if (fence.drain !== "table-lock") {
           // `drain: "quiescent"`: the declaration already excludes
           // concurrent writers by some other means, so this site takes no
@@ -1774,7 +1777,10 @@ export function createContributionMaterializer(
         }
         await tx.executeStatement(
           asCompiledStatementSql(
-            fence.sql.lockTables([tableName], "access-exclusive"),
+            requireFenceLockTables(fence, "lockSharedFulltextTable")(
+              [tableName],
+              "access-exclusive",
+            ),
           ),
         );
         return;

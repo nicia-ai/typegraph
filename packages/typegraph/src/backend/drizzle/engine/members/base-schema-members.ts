@@ -61,6 +61,15 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
   /** The graph-templates table's own idempotent CREATE, the version-1 adoption step's other half — `graph-template-members.ts`'s `ensureGraphTemplatesTable`. */
   ensureGraphTemplatesTable: () => Promise<void>;
   /**
+   * Idempotent `CREATE TABLE ...` for the write-fence rows relation, the
+   * version-2 adoption step — rendered once by the caller from its own
+   * dialect's table-DDL generator, the same way `baseSchemaVersionsTableDdl`
+   * is. A brand-new relation needs no ALTER-shaped migration, so this step's
+   * `bootstrap` is `"covered-by-generated-ddl"`; `adopt()` still ensures it
+   * for the OFFLINE adoption path, which never calls `generateDdl()`.
+   */
+  fencesTableDdl: string;
+  /**
    * Ensures the edge table's match-identity columns, check constraint, and
    * unique index exist. Dialect-owned: PostgreSQL introspects
    * `pg_attribute`/`pg_constraint` and runs an additive migration; SQLite
@@ -96,6 +105,7 @@ export function createBaseSchemaMembers(
     writeVersion,
     ensureGraphTemplatesTable,
     ensureEdgeMatchIdentityStorage,
+    fencesTableDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -115,6 +125,13 @@ export function createBaseSchemaMembers(
           phase: "before",
           adopt: ensureEdgeMatchIdentityStorage,
         },
+      },
+      {
+        version: 2,
+        async adopt(): Promise<void> {
+          await ensureTable(fencesTableDdl);
+        },
+        bootstrap: { phase: "covered-by-generated-ddl" },
       },
     ],
   });

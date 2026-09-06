@@ -2239,15 +2239,15 @@ export type ExtraVerdicts<X extends CapabilityExtraSpec> = Readonly<{
 
 // @public
 export type FenceSql = Readonly<{
-    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
-    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
-    isolationFactExpression: () => SqlFragment;
+    lockTables?: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    advisoryLockExpression?: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression?: () => SqlFragment;
 }>;
 
 // @public
 type FenceStatements = FenceSql & Readonly<{
-    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
-    advisoryLockWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyed: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyedWithIsolation: (namespace: string, key: string | number) => SqlFragment;
     isolationFact: () => SqlFragment;
 }>;
 
@@ -3466,7 +3466,7 @@ export function requireExtras<const D extends CapabilityBundleDefinition, Op ext
 
 // @public
 export function requireWriteFence(plan: WriteFencePlan, operation: string, requires: "keyed" | "drain"): Extract<WriteFencePlan, {
-    kind: "lock" | "engine-serialized" | "caller-serialized";
+    kind: "lock" | "row" | "engine-serialized" | "caller-serialized";
 }>;
 
 // @public
@@ -3487,6 +3487,7 @@ export type ResolvedSqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims: string;
+    fences: string;
 }>;
 
 // @public
@@ -3730,6 +3731,7 @@ export type SqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
+    fences?: string | undefined;
 }>;
 
 // @public
@@ -4795,6 +4797,10 @@ export type WriteFenceDeclaration = Readonly<{
     mechanism: "advisory";
     drain: "table-lock" | "quiescent" | "none";
 }> | Readonly<{
+    mechanism: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
+}> | Readonly<{
     mechanism: "engine-serialized";
 }> | Readonly<{
     mechanism: "caller-serialized";
@@ -4803,13 +4809,27 @@ export type WriteFenceDeclaration = Readonly<{
 // @public
 export type WriteFencePlan =
 /**
-* Take the keyed lock, spelled by `sql` — the target's OWN declared
-* spelling: a lock site never hand-writes the statement, it resolves
-* a plan and consumes `sql.<builder>(…)`.
+* Take the keyed advisory lock, spelled by `sql` — the target's OWN
+* declared spelling: a lock site never hand-writes the statement, it
+* resolves a plan and consumes `sql.<builder>(…)`.
 */
 Readonly<{
     kind: "lock";
     drain: "table-lock" | "quiescent" | "none";
+    sql: FenceStatements;
+}>
+/**
+* Take the keyed exclusion against the fences relation, spelled by `sql` —
+* mechanism-neutral: a keyed site calls the exact same `sql.acquireKeyed`/
+* `sql.acquireKeyedWithIsolation` a `lock` plan's site calls. `conflict`
+* is the one fact a `row` site (and the tier deriving `optimistic-retry`)
+* reads that a `lock` site never needs, because an advisory engine only
+* ever waits.
+*/
+| Readonly<{
+    kind: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
     sql: FenceStatements;
 }>
 /** No lock needed: the engine serializes writers. */
@@ -4834,6 +4854,7 @@ type WriteFenceTarget = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
     fenceSql?: FenceSql | undefined;
+    tableNames?: SqlTableNames | undefined;
 }>;
 
 // @public

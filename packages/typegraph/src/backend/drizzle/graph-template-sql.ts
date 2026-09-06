@@ -4,6 +4,7 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
+import { type WriteFencePlan } from "../capabilities/write-fence";
 import { advisoryLockSingleExpression } from "./postgres-fence-sql";
 
 export type InstantiateGraphTemplateSqlParams = Readonly<{
@@ -120,18 +121,28 @@ export function sqliteInstantiateGraphTemplateStatement(
 }
 
 /**
- * PostgreSQL's schema-row template clone: one statement, its `locked` CTE
- * taking the exact one-argument advisory lock the schema-commit fence takes
+ * PostgreSQL's schema-row template clone: one statement, its `inserted` CTE
+ * the schema INSERT and its `markers` CTE copying the template's contribution
+ * markers in the same exchange — the one genuine difference from SQLite's
+ * two-statement shape, which this dialect's data-modifying CTEs make
+ * possible. A matching active v1 is returned for an idempotent retry; a
+ * missing template and every incompatible target yield no row.
+ *
+ * Under every `plan.kind` except `"row"`, this statement's `locked` CTE also
+ * takes the exact one-argument advisory lock the schema-commit fence takes
  * (`advisoryLockSingleExpression`, `postgres-fence-sql.ts`) so the two
- * mutually exclude, its `inserted` CTE the schema INSERT, and its `markers`
- * CTE copying the template's contribution markers in the same exchange — the
- * one genuine difference from SQLite's two-statement shape, which this
- * dialect's data-modifying CTEs make possible. A matching active v1 is
- * returned for an idempotent retry; a missing template and every
- * incompatible target yield no row.
+ * mutually exclude — byte-identical to what this function always emitted
+ * before `row` existed. Under `"row"`, the schema-commit fence's OWN
+ * fence-row acquisition excludes concurrent commits instead: the caller
+ * (`postgres.ts`'s `graphTemplateRuntime`) issues that acquisition as a
+ * preceding statement, in the same transaction, against the identical
+ * `typegraph:schema-commit:<graphId>` key `acquireSchemaWriteFence`'s row arm
+ * takes — so this statement carries no lock of its own, the `locked` CTE
+ * omitted and `inserted` reading from `template` alone.
  */
 export function postgresInstantiateGraphTemplateStatement(
   params: InstantiateGraphTemplateSqlParams,
+  plan: WriteFencePlan,
 ): SqlFragment {
   const schemaVersions = sql.identifier(params.schemaVersionsTableName);
   const templates = sql.identifier(params.templatesTableName);
@@ -139,10 +150,16 @@ export function postgresInstantiateGraphTemplateStatement(
     params.contributionMaterializationsTableName,
   );
   const active = getDialect("postgres").booleanLiteral(true);
-  return sql`
-    WITH locked AS (
+  const lockedCte =
+    plan.kind === "row" ? sql.empty() : (
+      // eslint-disable-next-line unicorn/template-indent -- this text is spliced verbatim into the statement below, whose own byte-identical shape is snapshot-asserted (tests/engine-profile-parity.test.ts); autofix would reindent it to this closure's nesting depth and change the captured statement text.
+      sql`locked AS (
       SELECT ${advisoryLockSingleExpression(params.graphId)}
-    ), template AS (
+    ), `
+    );
+  const insertedFrom = plan.kind === "row" ? sql`template` : sql`template, locked`;
+  return sql`
+    WITH ${lockedCte}template AS (
       SELECT schema_hash, schema_doc FROM ${templates}
       WHERE template_id = ${params.templateId}
         AND schema_hash = ${params.templateSchemaHash}
@@ -151,7 +168,7 @@ export function postgresInstantiateGraphTemplateStatement(
       SELECT ${params.graphId}, 1, ${params.schemaHash},
         jsonb_set(jsonb_set(jsonb_set(template.schema_doc, '{graphId}', to_jsonb(${params.graphId}::text), true), '{version}', '1'::jsonb, true), '{generatedAt}', to_jsonb(to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')), true),
         clock_timestamp(), ${active}
-      FROM template, locked
+      FROM ${insertedFrom}
       WHERE NOT EXISTS (
         SELECT 1 FROM ${schemaVersions}
         WHERE graph_id = ${params.graphId}

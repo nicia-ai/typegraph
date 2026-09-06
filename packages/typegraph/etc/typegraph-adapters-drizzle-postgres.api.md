@@ -2507,6 +2507,47 @@ export function createPostgresTables(names?: Partial<PostgresTableNames>, option
         };
         dialect: "pg";
     }>;
+    readonly fences: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            key: drizzle_orm_pg_core.PgColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            generation: drizzle_orm_pg_core.PgColumn<{
+                name: "generation";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
     readonly baseSchemaVersions: drizzle_orm_pg_core.PgTableWithColumns<{
         name: string;
         schema: undefined;
@@ -4126,9 +4167,9 @@ type ExtensionUniqueWhere = Readonly<{
 
 // @public
 type FenceSql = Readonly<{
-    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
-    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
-    isolationFactExpression: () => SqlFragment;
+    lockTables?: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    advisoryLockExpression?: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression?: () => SqlFragment;
 }>;
 
 // @public
@@ -5312,6 +5353,7 @@ export type PostgresTableNames = Readonly<{
     contributionMaterializations: string;
     kindRemovals: string;
     reconciliationMarkers: string;
+    fences: string;
 }>;
 
 // @public
@@ -6434,6 +6476,7 @@ type SqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
+    fences?: string | undefined;
 }>;
 
 // @public (undocumented)
@@ -8618,6 +8661,47 @@ export const tables: {
         };
         dialect: "pg";
     }>;
+    readonly fences: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            key: drizzle_orm_pg_core.PgColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            generation: drizzle_orm_pg_core.PgColumn<{
+                name: "generation";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
     readonly baseSchemaVersions: drizzle_orm_pg_core.PgTableWithColumns<{
         name: string;
         schema: undefined;
@@ -9881,6 +9965,10 @@ type VectorStrategy = Readonly<{
 type WriteFenceDeclaration = Readonly<{
     mechanism: "advisory";
     drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
 }> | Readonly<{
     mechanism: "engine-serialized";
 }> | Readonly<{

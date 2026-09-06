@@ -173,6 +173,46 @@ function tableLockIndices(
     .map(({ index }) => index);
 }
 
+/**
+ * A `row`-mechanism keyed acquisition against the fences relation: the
+ * `INSERT INTO "typegraph_fences" ... ON CONFLICT ... RETURNING generation`
+ * upsert, keyed on the `<namespace>:<key>` composite `resolveFenceStatements`
+ * writes as a bound parameter (never inlined into the statement text, unlike
+ * an advisory lock's namespace literal at some sites).
+ */
+function rowFenceAcquireIndices(
+  statements: LoggedBackend["statements"],
+  namespace: string,
+  key: string,
+): readonly number[] {
+  const compositeKey = `${namespace}:${key}`;
+  return statements
+    .map((statement, index) => ({ statement, index }))
+    .filter(
+      ({ statement }) =>
+        statement.query.includes("typegraph_fences") &&
+        statement.query.includes("ON CONFLICT") &&
+        statement.params.includes(compositeKey),
+    )
+    .map(({ index }) => index);
+}
+
+/**
+ * The posture the conformance suite exercises on PGlite/the server lane in
+ * full (`write-fence-conformance.ts`): `row` with `drain: "quiescent"` and
+ * `conflict: "wait"`, applied here to J1-J8/J18 the same way `{advisory,
+ * quiescent}` already is above — the fences relation stands in for the
+ * advisory lock at every keyed site, and every drain site reads `quiescent`
+ * exactly as it does under `advisory`.
+ */
+const ROW_QUIESCENT_WAIT_CAPABILITIES: NonNullable<
+  BackendCapabilities["writeFence"]
+> = Object.freeze({
+  mechanism: "row",
+  drain: "quiescent",
+  conflict: "wait",
+});
+
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
 const identityGraph = defineGraph({
   id: "lock-fence-plan-identity",
@@ -284,6 +324,33 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
           RECORDED_GRAPH_WRITE_ADVISORY_LOCK,
         ),
       ).toHaveLength(1);
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("declared {row, quiescent, wait}: fence row acquired against typegraph_fences, no advisory lock, no throw", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+    });
+    try {
+      logged.reset();
+      await expect(
+        lockRecordedGraphWrite(logged.backend, "graph-a"),
+      ).resolves.toBeDefined();
+      expect(
+        rowFenceAcquireIndices(
+          logged.statements,
+          RECORDED_GRAPH_WRITE_ADVISORY_LOCK,
+          "graph-a",
+        ),
+      ).toHaveLength(1);
+      expect(
+        advisoryLockIndices(
+          logged.statements,
+          RECORDED_GRAPH_WRITE_ADVISORY_LOCK,
+        ),
+      ).toHaveLength(0);
     } finally {
       await logged.close();
     }
@@ -406,6 +473,30 @@ describe("T15 — J2 lockRecordedClock (via allocateRecordedCommit)", () => {
       expect(
         advisoryLockIndices(logged.statements, RECORDED_CLOCK_ADVISORY_LOCK),
       ).toHaveLength(1);
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("declared {row, quiescent, wait}: fence row acquired against typegraph_fences, no advisory lock", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+    });
+    try {
+      logged.reset();
+      await expect(
+        allocateRecordedCommit(logged.backend, schema, "graph-b", false),
+      ).resolves.toBeDefined();
+      expect(
+        rowFenceAcquireIndices(
+          logged.statements,
+          RECORDED_CLOCK_ADVISORY_LOCK,
+          "graph-b",
+        ),
+      ).toHaveLength(1);
+      expect(
+        advisoryLockIndices(logged.statements, RECORDED_CLOCK_ADVISORY_LOCK),
+      ).toHaveLength(0);
     } finally {
       await logged.close();
     }
@@ -534,6 +625,30 @@ describe("T15 — J3 lockIdentityGraph", () => {
     }
   });
 
+  it("declared {row, quiescent, wait}: fence row acquired against typegraph_fences, no advisory lock", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+    });
+    try {
+      logged.reset();
+      await expect(
+        lockIdentityGraph(logged.backend, "graph-c"),
+      ).resolves.toBeUndefined();
+      expect(
+        rowFenceAcquireIndices(
+          logged.statements,
+          IDENTITY_ADVISORY_LOCK,
+          "graph-c",
+        ),
+      ).toHaveLength(1);
+      expect(
+        advisoryLockIndices(logged.statements, IDENTITY_ADVISORY_LOCK),
+      ).toHaveLength(0);
+    } finally {
+      await logged.close();
+    }
+  });
+
   it("declared {caller-serialized}: no advisory lock, no throw", async () => {
     const logged = await createLoggedPostgresBackend({
       writeFence: { mechanism: "caller-serialized" },
@@ -646,6 +761,22 @@ describe("T15 — J4 lockIdentityEnablementNodes", () => {
         lockIdentityEnablementNodes(logged.backend, schema),
       ).resolves.toBeUndefined();
       expect(tableLockIndices(logged.statements, "nodes")).toHaveLength(0);
+    } finally {
+      await logged.close();
+    }
+  });
+
+  it("declared {row, quiescent, wait}: no throw, no LOCK TABLE, no fence row acquired (a drain site is never keyed)", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+    });
+    try {
+      logged.reset();
+      await expect(
+        lockIdentityEnablementNodes(logged.backend, schema),
+      ).resolves.toBeUndefined();
+      expect(tableLockIndices(logged.statements, "nodes")).toHaveLength(0);
+      expect(logged.statements).toHaveLength(0);
     } finally {
       await logged.close();
     }
@@ -826,6 +957,38 @@ describe("T15 — J5 lockIdentityDdl (via ensureIdentitySchemaStorage)", () => {
     }
   });
 
+  it("declared {row, quiescent, wait}: fence row acquired against typegraph_fences, no advisory lock", async () => {
+    const logged = await createLoggedPostgresBackend();
+    try {
+      await seedIdentityUpgrade(logged);
+      const { writeFence: _writeFence, ...rest } = logged.backend.capabilities;
+      const target = overlayCapabilities(logged.backend, {
+        ...rest,
+        writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+      });
+      logged.reset();
+      await expect(
+        ensureIdentitySchemaStorage(
+          target,
+          schema,
+          identityProvisioningOptions(schema, registry),
+        ),
+      ).resolves.toBeDefined();
+      expect(
+        rowFenceAcquireIndices(
+          logged.statements,
+          IDENTITY_DDL_ADVISORY_LOCK,
+          "0",
+        ),
+      ).toHaveLength(1);
+      expect(
+        advisoryLockIndices(logged.statements, IDENTITY_DDL_ADVISORY_LOCK),
+      ).toHaveLength(0);
+    } finally {
+      await logged.close();
+    }
+  });
+
   it("declared {caller-serialized}: no advisory lock, no throw", async () => {
     const logged = await createLoggedPostgresBackend();
     try {
@@ -954,6 +1117,21 @@ describe("T15 — J6 drainUnfencedRowWriters (via openProvenanceStore)", () => {
     }
   });
 
+  it("declared {row, quiescent, wait}: no throw, no LOCK TABLE (a drain site is never keyed)", async () => {
+    const logged = await createLoggedPostgresBackend({
+      writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+    });
+    try {
+      logged.reset();
+      await expect(
+        openProvenanceStore(logged.backend, freshGraphId()),
+      ).resolves.toBeDefined();
+      expect(tableLockIndices(logged.statements, "nodes")).toHaveLength(0);
+    } finally {
+      await logged.close();
+    }
+  });
+
   it("declared {caller-serialized}: no throw, no LOCK TABLE", async () => {
     const logged = await createLoggedPostgresBackend({
       writeFence: { mechanism: "caller-serialized" },
@@ -1061,6 +1239,28 @@ function hasTableLock(
 ): boolean {
   return statements.some((statement) => statement.query.includes("LOCK TABLE"));
 }
+
+/** Whether any statement is the contribution-DDL fence-row acquisition. */
+function hasContributionRowFenceAcquire(
+  statements: readonly { query: string; params: readonly unknown[] }[],
+): boolean {
+  const compositeKey = `${CONTRIBUTION_DDL_ADVISORY_LOCK}:0`;
+  return statements.some(
+    (statement) =>
+      statement.query.includes("typegraph_fences") &&
+      statement.query.includes("ON CONFLICT") &&
+      statement.params.includes(compositeKey),
+  );
+}
+
+/** The `tableNames` a hand-built `fenceTarget` needs for a `row` posture. */
+const ROW_MOCK_TABLE_NAMES = {
+  nodes: "typegraph_nodes",
+  edges: "typegraph_edges",
+  fulltext: "typegraph_node_fulltext",
+  uniques: "typegraph_node_uniques",
+  fences: "typegraph_fences",
+} as const;
 
 function rebuild(deps: ContributionMaterializerDeps) {
   const materializer = createContributionMaterializer(deps);
@@ -1174,6 +1374,30 @@ describe("T15 — J7/J8 lockContributionDdl / lockSharedFulltextTable", () => {
     );
     await expect(rebuild(deps)).resolves.toBeDefined();
     expect(hasContributionAdvisoryLock(statements)).toBe(true);
+    expect(hasTableLock(statements)).toBe(false);
+  });
+
+  it("declared {row, quiescent, wait}: fence row acquired against typegraph_fences, no advisory lock, no LOCK TABLE, no throw", async () => {
+    const statements: { query: string; params: readonly unknown[] }[] = [];
+    const deps = mockContributionDeps(
+      {
+        dialect: "postgres",
+        capabilities: {
+          execution: {
+            interactiveTransactions: true,
+            atomicBatch: "none",
+            unitOfWork: "interactive",
+          },
+          windowFunctions: true,
+          writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
+        },
+        tableNames: ROW_MOCK_TABLE_NAMES,
+      },
+      statements,
+    );
+    await expect(rebuild(deps)).resolves.toBeDefined();
+    expect(hasContributionRowFenceAcquire(statements)).toBe(true);
+    expect(hasContributionAdvisoryLock(statements)).toBe(false);
     expect(hasTableLock(statements)).toBe(false);
   });
 
@@ -1295,6 +1519,25 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
         },
         windowFunctions: true,
         writeFence: { mechanism: "advisory", drain: "quiescent" },
+      },
+      statements,
+    );
+    await lockPostgresTrustedImportTables(backend, TRUSTED_IMPORT_TABLE_NAMES);
+    expect(hasTableLock(statements)).toBe(false);
+    expect(statements).toHaveLength(0);
+  });
+
+  it("declared {row, quiescent, wait}: no throw, no LOCK TABLE (a drain site is never keyed)", async () => {
+    const statements: { query: string; params: readonly unknown[] }[] = [];
+    const backend = mockTrustedImportBackend(
+      {
+        execution: {
+          interactiveTransactions: true,
+          atomicBatch: "none",
+          unitOfWork: "interactive",
+        },
+        windowFunctions: true,
+        writeFence: ROW_QUIESCENT_WAIT_CAPABILITIES,
       },
       statements,
     );
@@ -1590,7 +1833,12 @@ describe("T15 — validateWriteFenceDeclaration: runtime validation of a JS-shap
           code: "WRITE_FENCE_DECLARATION_INVALID",
           field: "mechanism",
           value: "row-lock",
-          accepted: ["advisory", "engine-serialized", "caller-serialized"],
+          accepted: [
+            "advisory",
+            "row",
+            "engine-serialized",
+            "caller-serialized",
+          ],
         }) as unknown,
       }),
     );
