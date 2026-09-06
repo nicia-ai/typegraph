@@ -190,8 +190,10 @@ preserve that state:
 Managed writes acquire a transaction-scoped fence and revalidate that version
 before changing graph data. On the official SQLite and PostgreSQL backends this
 prevents a stale Store write from landing across a schema commit. A custom or
-non-transactional backend that cannot provide the fence fails closed on its
-first managed write.
+non-transactional backend fails closed on the first managed write that cannot
+fuse the fence into its own statement — see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for which writes fuse and which refuse.
 
 `createStore()` and `createAdapterStore()` without `{ reconciled }` are raw,
 unversioned attaches. Their writes—and calls made directly through a backend—do

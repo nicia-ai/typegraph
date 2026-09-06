@@ -2635,6 +2635,15 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // atomicity. When that INSERT's own no-row diagnosis left the schema
       // fence untaken for a `"none"`-mode target (see above), fail closed
       // here before the write, matching edge create's identical point.
+      // `lockSchemaVersionForStoreWrite` throws the plain
+      // `SCHEMA_WRITE_FENCE_UNSUPPORTED` limitation here, not
+      // `BATCH_WRITE_UNSUPPORTED`: a tombstone resurrection needs a second
+      // write outside the fused INSERT regardless of `unitOfWork`, which is
+      // not one of `BatchWriteRefusalReason`'s five proven needs (an
+      // interactive callback, a constraint probe, identity, history, or a
+      // schema commit) — it is simply a write shape that cannot fuse, the
+      // same plain limitation an ineligible write kind or a derived backend
+      // reaches through this same call.
       if (fuseSchemaFenceInFirstWrite && transactionMode === "none") {
         await lockSchemaVersionForStoreWrite(ctx, targetBackend);
       }

@@ -767,8 +767,9 @@ naming what a closed batch cannot supply:
 ineligible write falls back to (see [Schema Migrations](/schema-management))
 — does not carry `batchRefusal`. It is reached from many fuse failures that
 are not specific to a batch-tier backend (an ineligible write kind, a
-derived backend, a provenance mismatch), so it states its plain limitation
-without guessing which of the reasons above, if any, applies.
+tombstone-resurrection write a supplied id falls through to, a derived
+backend, a provenance mismatch), so it states its plain limitation without
+guessing which of the reasons above, if any, applies.
 
 #### Write-fence declaration codes
 

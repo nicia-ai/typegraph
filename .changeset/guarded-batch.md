@@ -23,8 +23,12 @@ A singleton node `create` with a caller-supplied id now fuses its schema fence o
 backend exactly as a generated id already did, provided the kind carries no declared unique
 constraint: the id-generation gate that existed for an interactive root's autocommit durability no
 longer excludes a batch program, which commits its one statement as a unit regardless of which id it
-carries. The tombstone-resurrection write a supplied id can fall through to is fenced immediately
-before it runs, so it refuses on a batch-tier target rather than writing the row unfenced.
+carries. `isAutocommitSingleStatementWrite` — the separate, stricter classifier for a bundled root's
+transaction-free write — is deliberately not relaxed the same way: the fused supplied-id create
+instead proves `insertNodeIfAbsentWithSchemaFence` through the ordinary hooked write plan, which
+already selects the correct fenced statement per id. The tombstone-resurrection write a supplied id
+can fall through to is fenced immediately before it runs, so it refuses on a batch-tier target rather
+than writing the row unfenced.
 
 `tests/batch-engine-harness.ts` adds a fake D1 client and a fake Neon HTTP client, each backed by a
 real engine (better-sqlite3, PGlite) wrapped in a real transaction, so batch atomicity — a rollback

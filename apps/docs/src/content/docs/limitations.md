@@ -31,9 +31,11 @@ kind: on PostgreSQL, `batch()`'s implicit transaction runs at the default
 read-committed isolation, so queries there can also observe interleaved commits.
 
 Write behavior depends on how the Store was constructed. A schema-managed Store
+fuses its schema fence into a write's own statement when the write fuses, and
 fails closed for writes that need the transaction-scoped schema or constraint
-fence, but eligible plain node batches and `cardinality: "many"` edges can use
-the authoritative one-statement command. A raw `createStore()` /
+fence otherwise — see
+[The guard every fused write shares](#the-guard-every-fused-write-shares)
+below for which writes fuse and which refuse. A raw `createStore()` /
 `createAdapterStore()` without a reconciled snapshot still has no interactive
 transaction boundary. `store.transaction(fn)` refuses with a typed capability
 error rather than pretending to provide rollback; direct backend writes remain
@@ -114,11 +116,13 @@ on. This is what lets a `"batch"`-tier backend (`capabilities.execution.unitOfWo
 every statement before the first one runs and commit them together with no
 session in between) run schema-managed creates, updates and deletes, and
 bulk writes at all: the fence travels inside the one exchange it can hold,
-instead of needing a session to hold it separately. A singleton node or edge
-update, `upsertById`, or delete fuses the same way as a create, through a
-one-entry certified atomic program, whenever its kind carries no declared
-unique constraint (and, for a node delete, no disjointness or uniqueness
-claim the backend has not proven it can release in that same statement).
+instead of needing a session to hold it separately. A singleton node update,
+`upsertById`, or delete fuses the same way as a create, through a one-entry
+certified atomic program, whenever its kind carries no declared unique
+constraint — except a node delete, which fuses even when the kind DOES
+carry one, because the atomic delete program releases that claim in the
+same statement. A singleton edge update or delete fuses the same way
+(`EdgeCollection` has no `upsertById`).
 
 A write that needs more than that one guarded statement — because it must
 read a value it wrote earlier in the same write, hold an interactive

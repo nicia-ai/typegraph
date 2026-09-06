@@ -176,6 +176,7 @@ function createD1HarnessClient(sqlite: Database.Database) {
 
 export type D1BatchHarnessOptions = Readonly<{
   tables?: SqliteTables;
+  /** Applies to the batch-shaped `backend` only — `interactiveBackend` exists solely for schema commits and version bumps. */
   capabilities?: SqliteBackendOptions["capabilities"];
 }>;
 
@@ -368,6 +369,7 @@ function createNeonHarnessClient(client: PGlite) {
 
 export type NeonHttpBatchHarnessOptions = Readonly<{
   tables?: PostgresTables;
+  /** Applies to the batch-shaped `backend` only — `interactiveBackend` exists solely for schema commits and version bumps. */
   capabilities?: PostgresBackendOptions["capabilities"];
 }>;
 
