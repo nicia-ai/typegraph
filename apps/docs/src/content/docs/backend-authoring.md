@@ -76,7 +76,7 @@ consistently.
 
 | Field | What overriding it changes |
 | --- | --- |
-| `declaredCapabilities` | The capabilities `finalizeEngineCapabilities` derives the rest of the backend's advertised capabilities from — for example, declaring `pessimisticLocks` differently changes which write-fence plan resolves. |
+| `declaredCapabilities` | The capabilities `finalizeEngineCapabilities` derives the rest of the backend's advertised capabilities from — for example, declaring `writeFence` (or the deprecated `pessimisticLocks`) differently changes which write-fence plan resolves. |
 | `fenceSql` | The lock-statement spelling the resolved fence plan carries; pass `undefined` to remove it entirely (see [Removing `fenceSql`](#removing-fencesql) below). |
 | `resourceAudit` | The serialized-resource verdict `createSqlBackend` records before the backend escapes. |
 | `autocommit` | Whether a single statement outside an explicit transaction is durable — gates the root-autocommit mark. |
@@ -108,9 +108,10 @@ which is not itself derivable. Deriving from a SQLite base refuses the same
 override even though `buildSqliteEngineProfile`'s operation backend reads
 `maxBindParameters` off the resolved capabilities directly and would honor
 a changed value — the check does not distinguish the two dialects. Every
-other sub-field on both objects — `pessimisticLocks`, `windowFunctions`,
-`clearValidTo`, `returning`, `claims`, `graphAnalytics`, `resourceAudit`'s
-`resource` / `identityLeaseResource`, and so on — stays freely derivable.
+other sub-field on both objects — `writeFence`, `pessimisticLocks`,
+`windowFunctions`, `clearValidTo`, `returning`, `claims`, `graphAnalytics`,
+`resourceAudit`'s `resource` / `identityLeaseResource`, and so on — stays
+freely derivable.
 
 ## What you cannot override
 
@@ -216,11 +217,13 @@ this same derivation can override (see the table above).
 `fenceSql` is the one field a derived profile can clear: pass
 `fenceSql: undefined` to drop the bundled spelling entirely. That alone
 is not enough to reach a working profile — `createSqlBackend` still
-resolves a write-fence plan eagerly, and a profile whose
-`declaredCapabilities.pessimisticLocks.advisoryLocks` is still `true`
-with no `fenceSql` refuses with `WRITE_FENCE_SQL_UNAVAILABLE`. Pair it
-with a `declaredCapabilities` override that stops claiming
-`advisoryLocks` (for example, declaring `serializedWriters: true`
+resolves a write-fence plan eagerly, and a profile whose resolved
+`writeFence.mechanism` (or the deprecated
+`declaredCapabilities.pessimisticLocks.advisoryLocks`) is still
+`"advisory"` (or `true`) with no `fenceSql` refuses with
+`WRITE_FENCE_SQL_UNAVAILABLE`. Pair it with a `declaredCapabilities`
+override that stops claiming `"advisory"` (for example, declaring
+`writeFence: { mechanism: "engine-serialized", drain: "table-lock" }`
 instead) to actually resolve an `engine-serialized` plan that needs no
 lock spelling at all.
 
@@ -228,8 +231,9 @@ lock spelling at all.
 
 | Code | When |
 | --- | --- |
-| `ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION` | The profile's resolved capabilities omit `pessimisticLocks` entirely — `createSqlBackend` has no write-fence decision to resolve and refuses outright, naming the one capabilities line to add. |
-| `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved capabilities declare `pessimisticLocks.advisoryLocks: true` but the profile supplies no `fenceSql` to spell the lock with. |
+| `ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION` | The profile's resolved capabilities omit both `writeFence` and the deprecated `pessimisticLocks` — `createSqlBackend` has no write-fence decision to resolve and refuses outright, naming the one capabilities line to add. |
+| `WRITE_FENCE_DECLARATION_CONFLICT` | The profile's resolved capabilities declare BOTH `writeFence` and `pessimisticLocks` — exactly one write-fence declaration is allowed. |
+| `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved capabilities declare `mechanism: "advisory"` (or the legacy `pessimisticLocks.advisoryLocks: true`) but the profile's `fenceSql` is missing the member that mechanism/drain combination needs. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |
@@ -243,19 +247,19 @@ forward, even when every field is copied from a first-party profile
 unchanged. That costs a derived profile's backend two things:
 
 - **No dialect-derivation fallback.** `resolveWriteFencePlan`'s fallback
-  for a profile with no `pessimisticLocks` declaration is sound only for
-  the two bundled dialects, so it never applies to a derived profile
-  regardless — irrelevant in practice as long as `declaredCapabilities`
-  is kept, since both bundled declarations already carry
-  `pessimisticLocks` explicitly.
+  for a profile with neither `writeFence` nor `pessimisticLocks` declared
+  is sound only for the two bundled dialects, so it never applies to a
+  derived profile regardless — irrelevant in practice as long as
+  `declaredCapabilities` is kept, since both bundled declarations already
+  carry a write-fence declaration explicitly.
 - **No lazy per-transaction schema-fence lease.** The lease
   `store/operations/write-transaction.ts` takes out under
   `isFirstPartyFactory` is closed to a derived profile's backend; each
   managed write takes its own fence instead.
 
-Every gate `createSqlBackend` runs — the `pessimisticLocks` refusal, the
-`advisoryLocks` without `fenceSql` refusal, the schema-fenced-insert and
-autocommit marks — still applies to a derived profile exactly as it does
+Every gate `createSqlBackend` runs — the write-fence-declaration refusal, the
+`mechanism: "advisory"` without `fenceSql` refusal, the schema-fenced-insert
+and autocommit marks — still applies to a derived profile exactly as it does
 to a bundled one.
 
 A bundled profile object is frozen once its builder returns it: mutating a

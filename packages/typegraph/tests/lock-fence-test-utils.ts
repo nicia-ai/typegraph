@@ -22,11 +22,18 @@
  * factory cannot construct directly (a present-but-all-false declaration, a
  * declared-advisory-only declaration).
  */
-import { PGlite, type QueryOptions } from "@electric-sql/pglite";
+import {
+  type Extensions,
+  PGlite,
+  type QueryOptions,
+} from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
-import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import {
+  drizzle as drizzlePglite,
+  type PgliteDatabase,
+} from "drizzle-orm/pglite";
 
 import {
   generatePostgresMigrationSQL,
@@ -53,52 +60,78 @@ export type LoggedBackend = Readonly<{
   execRaw: (statement: string) => Promise<void>;
 }>;
 
+export type LoggedPgliteClient = Readonly<{
+  client: PGlite;
+  db: PgliteDatabase;
+  statements: LoggedStatement[];
+  close: () => Promise<void>;
+}>;
+
 /**
- * A real PostgreSQL backend (PGlite, in-process, no Docker). Every statement
- * the wrapped client actually sends is captured by patching `client.query`
- * itself — the layer `backend.execute`/`executeStatement` calls into on the
- * fast path — so a lock site's SQL is observed regardless of whether it runs
- * inside a top-level call or inside `schemaWriteTransaction`'s callback.
- * `capabilities` — when supplied — is passed as the factory's own override
- * option, so it flows into every closure the factory builds at construction
- * time (the contribution materializer's `fenceTarget` included), not just
- * the returned backend's own property.
+ * The one PGlite-client-plus-capture primitive: a real, in-process
+ * PostgreSQL-dialect connection (no Docker) with every statement the client
+ * actually sends captured at both layers {@link createLoggedPostgresBackend}'s
+ * own doc comment describes — a driver-level patch of `client.query` plus
+ * drizzle's own `logger`, since a lock site reached inside a transaction
+ * callback bypasses the top-level one.
+ *
+ * `extensions` and `ddl` are the caller's own choice so a vector-enabled
+ * backend fixture and a vector-disabled profile fixture can each seed the
+ * schema that matches their own declared capability, from this one capture
+ * primitive, rather than two independent re-implementations drifting apart.
  */
-export async function createLoggedPostgresBackend(
-  capabilities?: Partial<BackendCapabilities>,
-): Promise<LoggedBackend> {
-  const client = await PGlite.create({
-    extensions: { vector: pgvectorExtension },
-  });
-  await client.exec(generatePostgresMigrationSQL());
+export async function createLoggedPgliteClient(
+  options: Readonly<{ extensions?: Extensions; ddl: string }>,
+): Promise<LoggedPgliteClient> {
+  const client = await PGlite.create(
+    options.extensions === undefined ? {} : { extensions: options.extensions },
+  );
+  await client.exec(options.ddl);
   const statements: LoggedStatement[] = [];
   const originalQuery = client.query.bind(client);
   client.query = (<T>(
     query: string,
     params?: unknown[],
-    options?: QueryOptions,
+    queryOptions?: QueryOptions,
   ) => {
     statements.push({ query, params: params ?? [] });
-    return originalQuery<T>(query, params, options);
+    return originalQuery<T>(query, params, queryOptions);
   }) as typeof client.query;
-  const backend = createPostgresBackend(
-    drizzlePglite(client, {
-      logger: {
-        logQuery(query: string, params: unknown[]): void {
-          statements.push({ query, params });
-        },
+  const db = drizzlePglite(client, {
+    logger: {
+      logQuery(query: string, params: unknown[]): void {
+        statements.push({ query, params });
       },
-    }),
-    {
-      vector: false,
-      ...(capabilities === undefined ? {} : { capabilities }),
     },
-  );
+  });
+  return { client, db, statements, close: () => client.close() };
+}
+
+/**
+ * A real PostgreSQL backend (PGlite, in-process, no Docker), built from
+ * {@link createLoggedPgliteClient} with the pgvector extension installed and
+ * the complete bundled-factory migration SQL applied. `capabilities` — when
+ * supplied — is passed as the factory's own override option, so it flows
+ * into every closure the factory builds at construction time (the
+ * contribution materializer's `fenceTarget` included), not just the
+ * returned backend's own property.
+ */
+export async function createLoggedPostgresBackend(
+  capabilities?: Partial<BackendCapabilities>,
+): Promise<LoggedBackend> {
+  const { client, db, statements, close } = await createLoggedPgliteClient({
+    extensions: { vector: pgvectorExtension },
+    ddl: generatePostgresMigrationSQL(),
+  });
+  const backend = createPostgresBackend(db, {
+    vector: false,
+    ...(capabilities === undefined ? {} : { capabilities }),
+  });
   return {
     backend,
     statements,
     reset: () => statements.splice(0),
-    close: () => client.close(),
+    close,
     execRaw: async (statement: string) => {
       await client.exec(statement);
     },

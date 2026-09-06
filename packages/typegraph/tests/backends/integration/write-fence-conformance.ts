@@ -1,0 +1,627 @@
+/**
+ * Conformance coverage for the write-fence declaration: does a real backend
+ * built from a given `mechanism`/`drain` pair actually behave the way that
+ * declaration promises, end to end, rather than only at the level of the
+ * pure `resolveWriteFencePlan`/`requireWriteFence` functions (already
+ * covered exhaustively by `tests/lock-fence-plan.test.ts`)?
+ *
+ * Five configurations: this lane's own bundled backend (PostgreSQL resolves
+ * `{advisory, table-lock}`; SQLite resolves `engine-serialized`), plus three
+ * backends derived from `buildPostgresEngineProfile` through
+ * `deriveEngineProfile` with `declaredCapabilities.writeFence` overridden —
+ * `{advisory, quiescent}`, `{caller-serialized, quiescent}`, and
+ * `{advisory, none}`. Every derived case only applies on a PostgreSQL-dialect
+ * lane (SQLite and libsql skip it: there is no SQLite equivalent of "a
+ * PostgreSQL profile with a different drain").
+ *
+ * Three things are checked wherever the configuration makes them
+ * meaningful: a keyed acquisition blocks a concurrent acquisition of the
+ * same key, and the read that follows observes the previous holder's
+ * commit; a drain site (the identity-enablement node
+ * lock, `lockIdentityEnablementNodes`) takes the table lock under
+ * `"table-lock"`, takes no statement under `"quiescent"`, and refuses naming
+ * the drain under `"none"`; and the session's real isolation level reaches
+ * the coordination token `lockRecordedGraphWrite` mints, which match-key
+ * convergence later reads back.
+ *
+ * Two of those need genuinely independent physical connections to mean
+ * anything (a single-process engine cannot demonstrate one session blocking
+ * another), so they run only when `POSTGRES_URL` is set — the same real
+ * PostgreSQL a caller gets from `pnpm test:postgres`. Rather than provision a
+ * database of their own (this module is imported by every lane's shared
+ * suite at once, so a module-scoped `provisionPostgresTestDatabase` call
+ * would race every one of those lanes over the SAME isolated database name),
+ * they reuse `context.createSerializedBackend()` twice: two independent
+ * connections to the CURRENT lane's own already-migrated database. Every
+ * other assertion needs only one live PostgreSQL-dialect connection and runs
+ * on an in-process PGlite client, so it exercises every PostgreSQL-dialect
+ * lane (the Docker lane, the `postgres-js` lane, and the zero-Docker PGlite
+ * lane) without any of them needing `POSTGRES_URL`.
+ *
+ * `row` (the portable, non-advisory keyed fence) is a later mechanism and is
+ * out of scope here.
+ */
+import { describe, expect, it } from "vitest";
+
+import {
+  type FenceSql,
+  resolveWriteFencePlan,
+  type WriteFenceDeclaration,
+} from "../../../src/backend/capabilities/write-fence";
+import {
+  assertGraphCommandConvergenceIsolation,
+  graphCommandCoordinationIsolation,
+  mintGraphCommandCoordination,
+} from "../../../src/backend/command-contract";
+import { deriveBackend } from "../../../src/backend/derive-backend";
+import { generateVectorlessPostgresMigrationSQL } from "../../../src/backend/drizzle/ddl";
+import {
+  createSqlBackend,
+  deriveEngineProfile,
+  type SqlEngineProfile,
+} from "../../../src/backend/drizzle/engine";
+import { type AnyPgTransaction } from "../../../src/backend/drizzle/execution/postgres-execution";
+import { buildPostgresEngineProfile } from "../../../src/backend/drizzle/postgres";
+import { postgresFenceSql } from "../../../src/backend/drizzle/postgres-fence-sql";
+import {
+  type BackendCapabilities,
+  type GraphBackend,
+} from "../../../src/backend/types";
+import {
+  lockIdentityEnablementNodes,
+  lockIdentityGraph,
+} from "../../../src/identity/service-read";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { lockRecordedGraphWrite } from "../../../src/store/recorded-capture";
+import { generateId } from "../../../src/utils/id";
+import { requireDefined } from "../../../src/utils/presence";
+import { createLoggedPgliteClient } from "../../lock-fence-test-utils";
+import { type IntegrationTestContext } from "./test-context";
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+function postgresServerLaneAvailable(): boolean {
+  const configured = process.env["POSTGRES_URL"];
+  return configured !== undefined && configured !== "";
+}
+
+/**
+ * Overrides a real `buildPostgresEngineProfile` result's declared write
+ * fence through `deriveEngineProfile` — never a hand-copied profile
+ * literal — clearing the legacy `pessimisticLocks` the bundled builder
+ * injects so the two declarations never collide.
+ */
+function deriveWriteFenceProfile(
+  base: SqlEngineProfile<AnyPgTransaction>,
+  writeFence: WriteFenceDeclaration,
+  fenceSqlOverride?: FenceSql,
+): SqlEngineProfile<AnyPgTransaction> {
+  return deriveEngineProfile(base, {
+    declaredCapabilities: {
+      ...base.declaredCapabilities,
+      pessimisticLocks: undefined,
+      writeFence,
+    },
+    ...(fenceSqlOverride === undefined ? {} : { fenceSql: fenceSqlOverride }),
+  });
+}
+
+function withAdvisoryDrainCapabilities(
+  capabilities: BackendCapabilities,
+  drain: WriteFenceDeclaration["drain"],
+): BackendCapabilities {
+  return {
+    ...capabilities,
+    pessimisticLocks: undefined,
+    writeFence: { mechanism: "advisory", drain },
+  };
+}
+
+/**
+ * Overrides an already-live backend's declared write fence in place, through
+ * `deriveBackend` — never a spread — for the two real-connection tests below,
+ * which have a ready-made `GraphBackend` from
+ * `context.createSerializedBackend()` rather than the raw Drizzle database a
+ * profile needs to be built from.
+ *
+ * `deriveBackend` decorates the ROOT object only: `transaction` still
+ * delegates to the base factory's own closure, which builds its `tx`
+ * argument from the capabilities it closed over at construction, not from
+ * whatever this wrapper's `capabilities` property reports. So the override
+ * also replaces `transaction` itself, deriving the SAME override onto the
+ * `tx` handle the real implementation hands to its callback — every lock
+ * site a test below reaches runs inside `backend.transaction(...)`, and
+ * without this the override would never reach `resolveWriteFencePlan` at
+ * all. Each level re-derives from its OWN base capabilities (root's, or the
+ * live transaction's) rather than reusing one captured copy, so a real
+ * transaction's own `execution.atomicBatch: "session"` fact survives the
+ * override instead of being replaced by the root's `"none"`.
+ */
+function deriveAdvisoryDrainOverride(
+  backend: GraphBackend,
+  drain: WriteFenceDeclaration["drain"],
+): GraphBackend {
+  return deriveBackend(backend, {
+    capabilities: withAdvisoryDrainCapabilities(backend.capabilities, drain),
+    transaction: (fn, options) =>
+      backend.transaction(
+        (tx) =>
+          fn(
+            deriveBackend(tx, {
+              capabilities: withAdvisoryDrainCapabilities(
+                tx.capabilities,
+                drain,
+              ),
+            }),
+          ),
+        options,
+      ),
+  });
+}
+
+type ConformanceStatement = Readonly<{
+  query: string;
+  params: readonly unknown[];
+}>;
+
+/**
+ * A real, in-process PostgreSQL-dialect connection (PGlite, no Docker), built
+ * from the one shared capture primitive
+ * (`tests/lock-fence-test-utils.ts`'s `createLoggedPgliteClient`) rather than
+ * a second, independent driver-patch-plus-logger implementation — as a
+ * profile rather than a backend, so a test can derive it through
+ * `deriveEngineProfile` afterward. Seeded with
+ * `generateVectorlessPostgresMigrationSQL`, the same DDL source
+ * `buildPostgresEngineProfile`'s own `{ vector: false }` call below declares
+ * this backend runs without.
+ */
+async function createConformancePostgresFixture(): Promise<
+  Readonly<{
+    profile: SqlEngineProfile<AnyPgTransaction>;
+    statements: ConformanceStatement[];
+    close: () => Promise<void>;
+  }>
+> {
+  const { db, statements, close } = await createLoggedPgliteClient({
+    ddl: generateVectorlessPostgresMigrationSQL(),
+  });
+  const profile = buildPostgresEngineProfile(db, { vector: false });
+  return { profile, statements, close };
+}
+
+function capturedLockTableStatement(
+  statements: readonly ConformanceStatement[],
+): boolean {
+  return statements.some((statement) => statement.query.includes("LOCK TABLE"));
+}
+
+export function registerWriteFenceConformanceIntegrationTests(
+  context: IntegrationTestContext,
+): void {
+  describe("write-fence conformance: mechanism and drain, end to end", () => {
+    it("resolves this lane's own bundled mechanism and drain", () => {
+      const backend = context.getBackend();
+      const plan = resolveWriteFencePlan(backend);
+      const expectedPlan =
+        backend.dialect === "postgres" ?
+          { kind: "lock", drain: "table-lock", tableLocks: true }
+        : { kind: "engine-serialized" };
+      expect(plan).toMatchObject(expectedPlan);
+    });
+
+    it("the identity-enablement drain site behaves per the bundled mechanism", async () => {
+      const backend = context.getBackend();
+      const schema = createSqlSchema();
+      const attempt =
+        backend.dialect === "sqlite" ?
+          lockIdentityEnablementNodes(backend, schema)
+        : backend.transaction((tx) => lockIdentityEnablementNodes(tx, schema));
+      await expect(attempt).resolves.toBeUndefined();
+    });
+
+    it('derived PostgreSQL profile {advisory, quiescent}: resolves "quiescent" and the drain site takes no table lock', async (ctx) => {
+      if (context.getBackend().dialect !== "postgres") {
+        ctx.skip();
+        return;
+      }
+      const fixture = await createConformancePostgresFixture();
+      try {
+        const backend = createSqlBackend(
+          deriveWriteFenceProfile(fixture.profile, {
+            mechanism: "advisory",
+            drain: "quiescent",
+          }),
+        );
+        expect(resolveWriteFencePlan(backend)).toEqual(
+          expect.objectContaining({
+            kind: "lock",
+            drain: "quiescent",
+            tableLocks: false,
+          }),
+        );
+
+        fixture.statements.splice(0);
+        const schema = createSqlSchema();
+        await backend.transaction((tx) =>
+          lockIdentityEnablementNodes(tx, schema),
+        );
+        expect(capturedLockTableStatement(fixture.statements)).toBe(false);
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it('derived PostgreSQL profile {caller-serialized, quiescent}: resolves "caller-serialized" and the drain site takes no statement', async (ctx) => {
+      if (context.getBackend().dialect !== "postgres") {
+        ctx.skip();
+        return;
+      }
+      const fixture = await createConformancePostgresFixture();
+      try {
+        const backend = createSqlBackend(
+          deriveWriteFenceProfile(fixture.profile, {
+            mechanism: "caller-serialized",
+            drain: "quiescent",
+          }),
+        );
+        expect(resolveWriteFencePlan(backend)).toEqual({
+          kind: "caller-serialized",
+        });
+
+        fixture.statements.splice(0);
+        const schema = createSqlSchema();
+        await backend.transaction((tx) =>
+          lockIdentityEnablementNodes(tx, schema),
+        );
+        expect(
+          fixture.statements.some(
+            (statement) =>
+              statement.query.includes("LOCK TABLE") ||
+              statement.query.includes("pg_advisory"),
+          ),
+        ).toBe(false);
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it('derived PostgreSQL profile {advisory, none}: resolves "none" and the drain site refuses, naming the drain', async (ctx) => {
+      if (context.getBackend().dialect !== "postgres") {
+        ctx.skip();
+        return;
+      }
+      const fixture = await createConformancePostgresFixture();
+      try {
+        const backend = createSqlBackend(
+          deriveWriteFenceProfile(fixture.profile, {
+            mechanism: "advisory",
+            drain: "none",
+          }),
+        );
+        expect(resolveWriteFencePlan(backend)).toEqual(
+          expect.objectContaining({
+            kind: "lock",
+            drain: "none",
+            tableLocks: false,
+          }),
+        );
+
+        const schema = createSqlSchema();
+        await expect(
+          backend.transaction((tx) => lockIdentityEnablementNodes(tx, schema)),
+        ).rejects.toEqual(
+          expect.objectContaining({
+            details: expect.objectContaining({
+              code: "WRITE_FENCE_UNAVAILABLE",
+            }) as unknown,
+          }),
+        );
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it("the session's real isolation reaches the coordination token for every advisory-mechanism config, and never for caller-serialized", async (ctx) => {
+      if (context.getBackend().dialect !== "postgres") {
+        ctx.skip();
+        return;
+      }
+      const advisoryDrains: readonly WriteFenceDeclaration["drain"][] = [
+        "table-lock",
+        "quiescent",
+        "none",
+      ];
+      for (const drain of advisoryDrains) {
+        const fixture = await createConformancePostgresFixture();
+        try {
+          const backend = createSqlBackend(
+            deriveWriteFenceProfile(fixture.profile, {
+              mechanism: "advisory",
+              drain,
+            }),
+          );
+          const graphId = `write-fence-conformance-${generateId()}`;
+          await backend.transaction(async (tx) => {
+            const lock = await lockRecordedGraphWrite(tx, graphId);
+            const coordination = requireDefined(
+              lock.coordination,
+              "an advisory-mechanism lock always mints coordination",
+            );
+            expect(
+              graphCommandCoordinationIsolation(
+                tx.commands,
+                graphId,
+                coordination,
+              ),
+            ).toBe("read_committed");
+          });
+        } finally {
+          await fixture.close();
+        }
+      }
+
+      const fixture = await createConformancePostgresFixture();
+      try {
+        const backend = createSqlBackend(
+          deriveWriteFenceProfile(fixture.profile, {
+            mechanism: "caller-serialized",
+            drain: "quiescent",
+          }),
+        );
+        await backend.transaction(async (tx) => {
+          const lock = await lockRecordedGraphWrite(
+            tx,
+            `write-fence-conformance-${generateId()}`,
+          );
+          // No key was ever acquired, so there is nothing to certify: a
+          // caller-serialized mechanism never mints a coordination token.
+          expect(lock.coordination).toBeUndefined();
+        });
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    it("a target with no isolationFactExpression refuses at construction, and an uncertified coordination refuses convergence", async (ctx) => {
+      if (context.getBackend().dialect !== "postgres") {
+        ctx.skip();
+        return;
+      }
+      const fixture = await createConformancePostgresFixture();
+      try {
+        const incompleteFenceSql = {
+          advisoryLockExpression: postgresFenceSql.advisoryLockExpression,
+          lockTables: postgresFenceSql.lockTables,
+        } as unknown as FenceSql;
+
+        // `createSqlBackend` resolves the write-fence plan eagerly at
+        // construction (the same gate that lets both bundled factories
+        // refuse an incomplete `fenceSql` before a caller can reach it), so
+        // this declaration never produces a usable backend to test
+        // `lockRecordedGraphWrite` against — the refusal is synchronous,
+        // right here.
+        expect(() =>
+          createSqlBackend(
+            deriveWriteFenceProfile(
+              fixture.profile,
+              { mechanism: "advisory", drain: "table-lock" },
+              incompleteFenceSql,
+            ),
+          ),
+        ).toThrow(
+          expect.objectContaining({
+            details: expect.objectContaining({
+              code: "WRITE_FENCE_SQL_UNAVAILABLE",
+              member: "isolationFactExpression",
+            }) as unknown,
+          }),
+        );
+
+        // A coordination that never had a real isolation fact read into it
+        // (exactly what the target above could never have produced, since it
+        // cannot even be constructed) fails match-key convergence's own gate
+        // the same way — the fact never reaches the token, so convergence
+        // never trusts it. Any working command port demonstrates the gate;
+        // this reuses the fixture's own default-declared backend rather than
+        // building a third one.
+        const backend = createSqlBackend(fixture.profile);
+        const uncertified = mintGraphCommandCoordination(
+          backend.commands,
+          "write-fence-conformance-uncertified",
+          "unknown",
+        );
+        expect(() => {
+          assertGraphCommandConvergenceIsolation(backend.commands, uncertified);
+        }).toThrow(
+          expect.objectContaining({
+            details: expect.objectContaining({
+              code: "MATCH_KEY_CONVERGENCE_REQUIRES_FRESH_SNAPSHOT",
+            }) as unknown,
+          }),
+        );
+      } finally {
+        await fixture.close();
+      }
+    });
+
+    describe("server-lane concurrency (requires POSTGRES_URL: a single process cannot demonstrate one session blocking another)", () => {
+      it("a keyed advisory acquisition blocks a concurrent acquisition of the same key and then sees its commit, under every advisory-mechanism drain", async (ctx) => {
+        if (
+          context.getBackend().dialect !== "postgres" ||
+          !postgresServerLaneAvailable()
+        ) {
+          ctx.skip();
+          return;
+        }
+        const advisoryDrains: readonly WriteFenceDeclaration["drain"][] = [
+          "table-lock",
+          "quiescent",
+          "none",
+        ];
+        for (const drain of advisoryDrains) {
+          const connectionA = await context.createSerializedBackend();
+          const connectionB = await context.createSerializedBackend();
+          try {
+            const backendA = deriveAdvisoryDrainOverride(
+              connectionA.backend,
+              drain,
+            );
+            const backendB = deriveAdvisoryDrainOverride(
+              connectionB.backend,
+              drain,
+            );
+            const graphId = `write-fence-conformance-${generateId()}`;
+            const nodeId = generateId();
+            const marker = generateId();
+
+            // The two transactions below share ONE key (`graphId`), so if
+            // the advisory lock genuinely excludes a concurrent acquisition
+            // of that key, B cannot even start reading until A commits —
+            // sequential `await`s on two backends could never distinguish
+            // that from B simply running after A finished on its own.
+            // Mutation-proven: deleting the `advisoryLock` call from
+            // `lockIdentityGraph`'s `lock` arm (`src/identity/service-read.ts`)
+            // left `stillBlocked` false, since nothing then stopped B's
+            // transaction from starting immediately.
+            let releaseHolder: (() => void) | undefined;
+            const holdLockOpen = new Promise<void>((resolve) => {
+              releaseHolder = resolve;
+            });
+            let holderFinished = false;
+            const holderTransaction = backendA
+              .transaction(async (tx) => {
+                await lockIdentityGraph(tx, graphId);
+                await tx.execute(
+                  asCompiledRowsSql(sql`
+                    INSERT INTO typegraph_nodes
+                      (graph_id, kind, id, props, created_at, updated_at)
+                    VALUES
+                      ('write-fence-conformance', 'ConformanceProbe', ${nodeId}, ${JSON.stringify({ marker })}::jsonb, now(), now())
+                  `),
+                );
+                await holdLockOpen;
+              })
+              .then(() => {
+                holderFinished = true;
+              });
+
+            // No earlier signal than "the lock is actually held" is
+            // available from the driver, so this waits a fixed interval for
+            // connection A's advisory lock to land before connection B
+            // races it.
+            await delay(100);
+
+            const readerTransaction = backendB.transaction(async (tx) => {
+              await lockIdentityGraph(tx, graphId);
+              const rows = await tx.execute<{ props: { marker: string } }>(
+                asCompiledRowsSql(sql`
+                  SELECT props FROM typegraph_nodes
+                  WHERE graph_id = 'write-fence-conformance' AND id = ${nodeId}
+                `),
+              );
+              return rows[0]?.props.marker;
+            });
+
+            const stillBlocked = await Promise.race([
+              readerTransaction.then(() => false),
+              delay(300).then(() => true),
+            ]);
+            // Snapshot and release before asserting, exactly as the
+            // table-lock test below does: a failing `expect` must never
+            // leave connection A parked on `holdLockOpen` forever.
+            const holderFinishedBeforeRelease = holderFinished;
+            releaseHolder?.();
+            await holderTransaction;
+            const markerSeenByReader = await readerTransaction;
+
+            expect(stillBlocked).toBe(true);
+            expect(holderFinishedBeforeRelease).toBe(false);
+            expect(holderFinished).toBe(true);
+            expect(markerSeenByReader).toBe(marker);
+          } finally {
+            await connectionA.close();
+            await connectionB.close();
+          }
+        }
+      });
+
+      it("a table-lock drain blocks a concurrent row writer until the holder commits", async (ctx) => {
+        if (
+          context.getBackend().dialect !== "postgres" ||
+          !postgresServerLaneAvailable()
+        ) {
+          ctx.skip();
+          return;
+        }
+        const connectionA = await context.createSerializedBackend();
+        const connectionB = await context.createSerializedBackend();
+        try {
+          const backendA = connectionA.backend;
+          const backendB = connectionB.backend;
+          const schema = createSqlSchema();
+          const nodeId = generateId();
+
+          let releaseHolder: (() => void) | undefined;
+          const holdLockOpen = new Promise<void>((resolve) => {
+            releaseHolder = resolve;
+          });
+          let holderFinished = false;
+          const holderTransaction = backendA
+            .transaction(async (tx) => {
+              await lockIdentityEnablementNodes(tx, schema);
+              await holdLockOpen;
+            })
+            .then(() => {
+              holderFinished = true;
+            });
+
+          // No earlier signal than "the lock is actually held" is available
+          // from the driver, so this waits a fixed interval for connection
+          // A's `LOCK TABLE` to land before connection B races it.
+          await delay(100);
+
+          const writerTransaction = backendB.transaction((tx) =>
+            tx.execute(
+              asCompiledRowsSql(sql`
+                INSERT INTO typegraph_nodes
+                  (graph_id, kind, id, props, created_at, updated_at)
+                VALUES
+                  ('write-fence-conformance', 'ConformanceProbe', ${nodeId}, '{}'::jsonb, now(), now())
+              `),
+            ),
+          );
+
+          const stillBlocked = await Promise.race([
+            writerTransaction.then(() => false),
+            delay(300).then(() => true),
+          ]);
+          // Snapshot before releasing: if the drain never actually blocked
+          // (a broken guard), `writerTransaction` already settled above and
+          // holding the lock open any longer serves nothing. Releasing and
+          // awaiting both transactions BEFORE any assertion — rather than
+          // after — means a failing `expect` below never leaves connection
+          // A's transaction parked on `holdLockOpen` forever, which would
+          // otherwise hang this test's `finally` on a connection that can
+          // never close.
+          const holderFinishedBeforeRelease = holderFinished;
+          releaseHolder?.();
+          await holderTransaction;
+          await writerTransaction;
+
+          expect(stillBlocked).toBe(true);
+          expect(holderFinishedBeforeRelease).toBe(false);
+          expect(holderFinished).toBe(true);
+        } finally {
+          await connectionA.close();
+          await connectionB.close();
+        }
+      });
+    });
+  });
+}
