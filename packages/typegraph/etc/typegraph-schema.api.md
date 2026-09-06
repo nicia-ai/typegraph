@@ -39,6 +39,7 @@ type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    writeFence?: WriteFenceDeclaration | undefined;
     pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
@@ -2757,6 +2758,12 @@ type VectorStrategy = Readonly<{
 
 // @public
 export function wrapZodError(error: ZodError, context: ValidationContext): ValidationError;
+
+// @public
+type WriteFenceDeclaration = Readonly<{
+    mechanism: "advisory" | "engine-serialized" | "caller-serialized";
+    drain: "table-lock" | "quiescent" | "none";
+}>;
 
 // (No @packageDocumentation comment for this package)
 

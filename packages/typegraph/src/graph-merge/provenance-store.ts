@@ -455,7 +455,8 @@ async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
       );
       return;
     }
-    case "engine-serialized": {
+    case "engine-serialized":
+    case "caller-serialized": {
       return;
     }
     default: {

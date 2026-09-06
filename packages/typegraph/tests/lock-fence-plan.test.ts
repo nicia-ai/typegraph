@@ -73,12 +73,21 @@ import {
   fts5Strategy,
 } from "../src";
 import {
+  requireWriteFence,
+  resolveWriteFencePlan,
+  writeFenceFromLegacyLocks,
+  type WriteFenceTarget,
+} from "../src/backend/capabilities/write-fence";
+import {
   type ContributionMaterializerDeps,
   createContributionMaterializer,
 } from "../src/backend/drizzle/contribution-materializations";
 import { postgresFenceSql } from "../src/backend/drizzle/postgres-fence-sql";
 import { lockPostgresTrustedImportTables } from "../src/backend/drizzle/trusted-import";
-import type { TransactionBackend } from "../src/backend/types";
+import type {
+  BackendCapabilities,
+  TransactionBackend,
+} from "../src/backend/types";
 import { openProvenanceStore } from "../src/graph-merge";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
@@ -1273,5 +1282,216 @@ describe("T15 — J18 lockPostgresTrustedImportTables", () => {
       "table locks without advisory locks or serialized writers",
     );
     expect(statements).toHaveLength(0);
+  });
+});
+
+/**
+ * T15 — the `writeFence` declaration itself: `writeFenceFromLegacyLocks`'s
+ * mapping, the `WRITE_FENCE_DECLARATION_CONFLICT` refusal, and
+ * `requireWriteFence`'s `drain`-keyed table-lock refusal.
+ *
+ * Every target here is dialect `"postgres"` carrying `postgresFenceSql`, so
+ * an `advisory` mechanism can actually resolve a `lock` plan — the mechanism
+ * under test does not depend on which real dialect supplied the spelling.
+ */
+function writeFenceTestTarget(
+  capabilities: BackendCapabilities,
+): WriteFenceTarget {
+  return { dialect: "postgres", capabilities, fenceSql: postgresFenceSql };
+}
+
+const MINIMAL_EXECUTION_CAPABILITIES: BackendCapabilities = Object.freeze({
+  execution: Object.freeze({
+    interactiveTransactions: true,
+    atomicBatch: "none",
+  }),
+  windowFunctions: true,
+});
+
+/**
+ * A resolved `lock` plan's `sql` field is a fresh `FenceStatements` closure
+ * built by `resolveFenceStatements` on every call, so two plans resolved
+ * from equivalent declarations never carry referentially-equal (or
+ * `toEqual`-comparable — functions have no structural equality) `sql`
+ * objects even when every other field agrees. Comparing "the SAME plan
+ * through either declaration style" means every field but `sql`.
+ */
+function planShapeWithoutSql(plan: unknown): unknown {
+  if (typeof plan !== "object" || plan === null || !("sql" in plan)) {
+    return plan;
+  }
+  const { sql: _sql, ...rest } = plan as Record<string, unknown>;
+  return rest;
+}
+
+describe("T15 — the writeFence declaration", () => {
+  it("declaring both writeFence and pessimisticLocks refuses (WRITE_FENCE_DECLARATION_CONFLICT)", () => {
+    const target = writeFenceTestTarget({
+      ...MINIMAL_EXECUTION_CAPABILITIES,
+      writeFence: { mechanism: "advisory", drain: "table-lock" },
+      pessimisticLocks: ADVISORY_ONLY_CAPABILITIES,
+    });
+    expect(() => resolveWriteFencePlan(target)).toThrow(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "WRITE_FENCE_DECLARATION_CONFLICT",
+        }) as unknown,
+      }),
+    );
+  });
+
+  it("advisory + tableLocks: true maps to {mechanism: advisory, drain: table-lock}, and resolves the SAME plan through either declaration style", () => {
+    const legacy = {
+      advisoryLocks: true,
+      tableLocks: true,
+      serializedWriters: false,
+    };
+    expect(writeFenceFromLegacyLocks(legacy)).toEqual({
+      mechanism: "advisory",
+      drain: "table-lock",
+    });
+    const viaLegacy = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        pessimisticLocks: legacy,
+      }),
+    );
+    const viaWriteFence = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        writeFence: { mechanism: "advisory", drain: "table-lock" },
+      }),
+    );
+    expect(planShapeWithoutSql(viaWriteFence)).toEqual(
+      planShapeWithoutSql(viaLegacy),
+    );
+    expect(viaLegacy).toEqual(
+      expect.objectContaining({
+        kind: "lock",
+        drain: "table-lock",
+        tableLocks: true,
+      }),
+    );
+  });
+
+  it("advisory + tableLocks: false (declared-advisory-only) maps to {mechanism: advisory, drain: none}, and resolves the SAME plan through either declaration style", () => {
+    expect(writeFenceFromLegacyLocks(ADVISORY_ONLY_CAPABILITIES)).toEqual({
+      mechanism: "advisory",
+      drain: "none",
+    });
+    const viaLegacy = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        pessimisticLocks: ADVISORY_ONLY_CAPABILITIES,
+      }),
+    );
+    const viaWriteFence = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        writeFence: { mechanism: "advisory", drain: "none" },
+      }),
+    );
+    expect(planShapeWithoutSql(viaWriteFence)).toEqual(
+      planShapeWithoutSql(viaLegacy),
+    );
+    expect(viaLegacy).toEqual(
+      expect.objectContaining({
+        kind: "lock",
+        drain: "none",
+        tableLocks: false,
+      }),
+    );
+  });
+
+  it("serializedWriters: true (SQLite-shaped) maps to {mechanism: engine-serialized, drain: table-lock}, and resolves the SAME plan through either declaration style", () => {
+    const legacy = {
+      advisoryLocks: false,
+      tableLocks: false,
+      serializedWriters: true,
+    };
+    expect(writeFenceFromLegacyLocks(legacy)).toEqual({
+      mechanism: "engine-serialized",
+      drain: "table-lock",
+    });
+    const viaLegacy = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        pessimisticLocks: legacy,
+      }),
+    );
+    const viaWriteFence = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+      }),
+    );
+    expect(planShapeWithoutSql(viaWriteFence)).toEqual(
+      planShapeWithoutSql(viaLegacy),
+    );
+    expect(viaLegacy).toEqual({ kind: "engine-serialized" });
+  });
+
+  it("all-false (declared-unfenced) maps to undefined; resolveWriteFencePlan falls back to unfenced/declared-none", () => {
+    expect(writeFenceFromLegacyLocks(UNFENCED_CAPABILITIES)).toBeUndefined();
+    expect(
+      resolveWriteFencePlan(
+        writeFenceTestTarget({
+          ...MINIMAL_EXECUTION_CAPABILITIES,
+          pessimisticLocks: UNFENCED_CAPABILITIES,
+        }),
+      ),
+    ).toEqual({ kind: "unfenced", reason: "declared-none" });
+  });
+
+  it('requireWriteFence under {advisory, quiescent} with "table-lock" returns the lock arm with drain quiescent, taking no statement itself', () => {
+    const plan = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        writeFence: { mechanism: "advisory", drain: "quiescent" },
+      }),
+    );
+    const fence = requireWriteFence(plan, "quiescent drain test", "table-lock");
+    expect(fence).toEqual(
+      expect.objectContaining({
+        kind: "lock",
+        drain: "quiescent",
+        tableLocks: false,
+      }),
+    );
+  });
+
+  it('requireWriteFence under {advisory, none} with "table-lock" refuses, naming the drain', () => {
+    const plan = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        writeFence: { mechanism: "advisory", drain: "none" },
+      }),
+    );
+    let caught: unknown;
+    try {
+      requireWriteFence(plan, "none drain test", "table-lock");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "WRITE_FENCE_UNAVAILABLE",
+        }) as unknown,
+      }),
+    );
+    expect((caught as Error).message).toContain('drain: "none"');
+  });
+
+  it('requireWriteFence under {advisory, quiescent} with "advisory-lock" also returns the lock arm (advisory-lock never consults drain)', () => {
+    const plan = resolveWriteFencePlan(
+      writeFenceTestTarget({
+        ...MINIMAL_EXECUTION_CAPABILITIES,
+        writeFence: { mechanism: "advisory", drain: "quiescent" },
+      }),
+    );
+    expect(
+      requireWriteFence(plan, "quiescent advisory-lock test", "advisory-lock"),
+    ).toEqual(expect.objectContaining({ kind: "lock", drain: "quiescent" }));
   });
 });

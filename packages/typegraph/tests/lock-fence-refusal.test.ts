@@ -177,6 +177,35 @@ describe("T16 — (d) undeclared non-factory refuses (a) and (b)", () => {
   });
 });
 
+describe("T16 — (h) the undeclared reason names both declaration styles, and both migration-guide lines are indented", () => {
+  it("history: true", async () => {
+    const logged = await createLoggedPostgresBackend();
+    try {
+      const { pessimisticLocks: _pessimisticLocks, ...undeclared } =
+        logged.backend.capabilities;
+      const target = overlayCapabilities(logged.backend, undeclared);
+      let caught: unknown;
+      try {
+        createStore(plainGraph, target, { history: true });
+      } catch (error) {
+        caught = error;
+      }
+      const message = (caught as Error).message;
+      expect(message).toContain(
+        "`capabilities.writeFence` (or the deprecated `capabilities.pessimisticLocks`) is absent",
+      );
+      // Both declaration lines the migration guide prints must be indented —
+      // not only the first (`writeFence`) line, which would leave
+      // "or, legacy:" and the `pessimisticLocks` line flush against the
+      // margin.
+      expect(message).toContain('\n  writeFence: { mechanism: "advisory"');
+      expect(message).toContain("\n  pessimisticLocks: { advisoryLocks: true");
+    } finally {
+      await logged.close();
+    }
+  });
+});
+
 describe("T16 — (e) the refusal message carries the literal declaration line", () => {
   it('names the exact string, not a substring like "pessimisticLocks"', () => {
     const logged = createLoggedSqliteBackend({

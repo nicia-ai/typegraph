@@ -261,10 +261,13 @@ export async function lockIdentityGraph(
       );
       return;
     }
-    case "engine-serialized": {
-      // No lock is taken because the engine's single writer slot already
-      // serializes writers — see the DEFERRED-frame caveat above, which
-      // `executeIdentityStatement` turns into a typed refusal (#447).
+    case "engine-serialized":
+    case "caller-serialized": {
+      // No lock is taken because the engine's single writer slot (or, under
+      // `caller-serialized`, the deployment's own serialization promise)
+      // already excludes concurrent writers — see the DEFERRED-frame caveat
+      // above, which `executeIdentityStatement` turns into a typed refusal
+      // (#447).
       return;
     }
     default: {
@@ -304,9 +307,11 @@ export async function lockIdentityEnablementNodes(
       );
       return;
     }
-    case "engine-serialized": {
-      // No lock is taken because the engine's single writer slot already
-      // drained every writer before the fence opened.
+    case "engine-serialized":
+    case "caller-serialized": {
+      // No lock is taken because the engine's single writer slot (or, under
+      // `caller-serialized`, the deployment's own serialization promise)
+      // already drained every writer before the fence opened.
       return;
     }
     default: {

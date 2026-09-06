@@ -124,10 +124,11 @@ export async function lockPostgresTrustedImportTables(
       );
       return;
     }
-    case "engine-serialized": {
-      // Two things read this arm as "take no relation lock". The bundled
-      // SQLite import session takes that reading its own way, without ever
-      // calling this function: it is built by
+    case "engine-serialized":
+    case "caller-serialized": {
+      // Two things read `engine-serialized` as "take no relation lock". The
+      // bundled SQLite import session takes that reading its own way,
+      // without ever calling this function: it is built by
       // `createSqliteTrustedImportSession`, which inserts under the writer
       // slot `BEGIN IMMEDIATE` already holds. Any target — SQLite dialect
       // or not — that declares `serializedWriters: true` instead of locks
@@ -135,6 +136,9 @@ export async function lockPostgresTrustedImportTables(
       // taking no relation lock is the deliberate reading of that
       // declaration: the engine already excludes concurrent writers by
       // construction, so this function's own table lock would add nothing.
+      // `caller-serialized` reads the same way: the deployment's own
+      // promise that no other client writes to this database already
+      // excludes the writer this table lock would otherwise hold off.
       return;
     }
     default: {

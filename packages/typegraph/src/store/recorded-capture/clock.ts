@@ -245,10 +245,12 @@ export async function lockRecordedGraphWrite(
     "advisory-lock",
   );
   switch (fence.kind) {
-    case "engine-serialized": {
-      // A writer slot can serialize ordinary row work, but it is not an
-      // advisory acquisition bound to this graph/port. It cannot authorize
-      // the PostgreSQL convergence command.
+    case "engine-serialized":
+    case "caller-serialized": {
+      // A writer slot — or, under `caller-serialized`, the deployment's own
+      // serialization promise — can serialize ordinary row work, but
+      // neither is an advisory acquisition bound to this graph/port. It
+      // cannot authorize the PostgreSQL convergence command.
       return uncapturedGraphWriteLock();
     }
     case "lock": {
@@ -560,6 +562,17 @@ async function lockRecordedClock(
           ON CONFLICT (graph_id) DO UPDATE SET revision = revision
         `,
       );
+      return;
+    }
+    case "caller-serialized": {
+      // Unlike `engine-serialized`, this is never conditional on
+      // `ownsWriteLock`: the seed-UPSERT above exists to take a row-level
+      // write lock SQLite's `BEGIN IMMEDIATE` might not already hold, which
+      // is a proof about that one engine's transaction, not about this
+      // declaration. `caller-serialized` is the deployment's own promise
+      // that no other client writes to this database at all, so there is no
+      // concurrent writer for a seed row to exclude regardless of which
+      // transaction opened this one.
       return;
     }
     default: {

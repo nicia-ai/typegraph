@@ -495,6 +495,7 @@ export type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    writeFence?: WriteFenceDeclaration | undefined;
     pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
@@ -3473,7 +3474,7 @@ export function requireExtras<const D extends CapabilityBundleDefinition, Op ext
 
 // @public
 export function requireWriteFence(plan: WriteFencePlan, operation: string, requires: "advisory-lock" | "table-lock"): Extract<WriteFencePlan, {
-    kind: "lock" | "engine-serialized";
+    kind: "lock" | "engine-serialized" | "caller-serialized";
 }>;
 
 // @public
@@ -4801,21 +4802,41 @@ export type VectorStrategy = Readonly<{
 }>;
 
 // @public
+export type WriteFenceDeclaration = Readonly<{
+    mechanism: "advisory" | "engine-serialized" | "caller-serialized";
+    drain: "table-lock" | "quiescent" | "none";
+}>;
+
+// @public
 export type WriteFencePlan =
 /**
-* Take the keyed/table lock, spelled by `sql` — the target's OWN declared
+* Take the keyed lock, spelled by `sql` — the target's OWN declared
 * spelling: a lock site never hand-writes the statement, it resolves
 * a plan and consumes `sql.<builder>(…)`.
+*
+* `tableLocks` is kept for source compatibility and is derived from
+* `drain`(`=== "table-lock"`); read `drain` instead — it distinguishes a
+* declaration that cannot drain a table-lock site at all (`"none"`) from
+* one that drains it without a statement (`"quiescent"`).
 */
 Readonly<{
     kind: "lock";
     advisoryLocks: true;
     tableLocks: boolean;
+    drain: "table-lock" | "quiescent" | "none";
     sql: FenceStatements;
 }>
 /** No lock needed: the engine serializes writers. */
 | Readonly<{
     kind: "engine-serialized";
+}>
+/**
+* No lock needed: the deployment itself promises no concurrent writer
+* exists — this backend's own process serializes every write unit it
+* issues, and no other client writes to the database while it is open.
+*/
+| Readonly<{
+    kind: "caller-serialized";
 }>
 /** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
 | Readonly<{

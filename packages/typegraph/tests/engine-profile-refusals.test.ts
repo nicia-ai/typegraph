@@ -451,6 +451,84 @@ describe("resolveWriteFencePlan refusals", () => {
     );
     expect(configurationError.suggestion).toContain("postgresFenceSql");
   });
+
+  it("names the declared writeFence, not the legacy pessimisticLocks wording, when the declaration came from capabilities.writeFence directly", () => {
+    let thrown: unknown;
+    try {
+      resolveWriteFencePlan({
+        dialect: "postgres",
+        capabilities: {
+          execution: { interactiveTransactions: true, atomicBatch: "none" },
+          windowFunctions: true,
+          writeFence: { mechanism: "advisory", drain: "table-lock" },
+        },
+        // No `fenceSql` — this target declared `writeFence` directly, so the
+        // refusal must name THAT declaration, not the legacy
+        // `pessimisticLocks.advisoryLocks: true` phrasing the mapped-legacy
+        // arm above still uses.
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ConfigurationError);
+    const configurationError = thrown as ConfigurationError;
+    expect(configurationError.details["code"]).toBe(
+      "WRITE_FENCE_SQL_UNAVAILABLE",
+    );
+    expect(configurationError.message).toContain(
+      'capabilities.writeFence: { mechanism: "advisory", drain: "table-lock" }',
+    );
+    expect(configurationError.message).not.toContain(
+      "pessimisticLocks.advisoryLocks: true",
+    );
+  });
+});
+
+describe("bundled factories accept capabilities.writeFence without colliding with their own pessimisticLocks default", () => {
+  it("buildSqliteEngineProfile + createSqlBackend resolves a declared writeFence instead of throwing WRITE_FENCE_DECLARATION_CONFLICT", () => {
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+    });
+    const profile = buildSqliteEngineProfile(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+      capabilities: {
+        writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+      },
+    });
+
+    // `createSqlBackend` must not throw: the bundled default `pessimisticLocks`
+    // this factory would otherwise inject has to be omitted underneath a
+    // caller-declared `writeFence`, and the construction-time gate above has
+    // to accept `writeFence` alone as a usable declaration.
+    const backend = createSqlBackend(profile);
+
+    expect(resolveWriteFencePlan(backend)).toEqual({
+      kind: "caller-serialized",
+    });
+  });
+
+  it("buildPostgresEngineProfile + createSqlBackend resolves a declared writeFence instead of throwing WRITE_FENCE_DECLARATION_CONFLICT", async () => {
+    const client = await PGlite.create();
+    cleanups.push(() => client.close());
+    const profile = buildPostgresEngineProfile(drizzlePg(client), {
+      vector: false,
+      capabilities: {
+        writeFence: { mechanism: "advisory", drain: "table-lock" },
+      },
+    });
+
+    const backend = createSqlBackend(profile);
+
+    expect(resolveWriteFencePlan(backend)).toEqual(
+      expect.objectContaining({
+        kind: "lock",
+        drain: "table-lock",
+        tableLocks: true,
+      }),
+    );
+  });
 });
 
 describe("assertRecordedCaptureTransactionIsolation refusals", () => {

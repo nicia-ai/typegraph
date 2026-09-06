@@ -16,8 +16,8 @@ import { requireDefined } from "../../../utils/presence";
 import {
   isFirstPartyProfile,
   markFirstPartyFactory,
-  pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
+  writeFenceDeclarationLine,
   type WriteFenceTarget,
 } from "../../capabilities/write-fence";
 import { auditBackendResource } from "../../transaction-resource";
@@ -41,13 +41,14 @@ import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 /**
  * Assembles one `AdapterBackend` from a {@link SqlEngineProfile}.
  *
- * The pessimistic-locks refusal below is what makes the marking
+ * The write-fence-declaration refusal below is what makes the marking
  * `applyEngineMarks` (`./marks`) performs sound for a profile this factory
  * did not write itself, not only for the two bundled ones: a profile whose
- * resolved capabilities omit `pessimisticLocks` is refused outright, because
- * every mark and registration `applyEngineMarks` applies assumes a
- * resolvable write-fence decision, and `resolveWriteFencePlan`'s
- * dialect-derivation fallback is sound only for the two bundled dialects.
+ * resolved capabilities name neither `writeFence` nor the legacy
+ * `pessimisticLocks` is refused outright, because every mark and
+ * registration `applyEngineMarks` applies assumes a resolvable write-fence
+ * decision, and `resolveWriteFencePlan`'s dialect-derivation fallback is
+ * sound only for the two bundled dialects.
  * `applyEngineMarks`'s own doc comment covers its two further gates —
  * `markBundledRootAutocommitEligible` on the profile's `autocommit`
  * declaration, `markSchemaFencedInsertEligible` on the resolved fence plan.
@@ -73,13 +74,17 @@ export function createSqlBackend<TTx>(
     },
   );
 
-  if (capabilities.pessimisticLocks === undefined) {
+  if (
+    capabilities.writeFence === undefined &&
+    capabilities.pessimisticLocks === undefined
+  ) {
     throw new ConfigurationError(
-      "This engine profile declares no usable write fence: " +
-        "capabilities.pessimisticLocks is absent, so createSqlBackend " +
-        "cannot resolve a write-fence decision for it and refuses to mark " +
-        "it as fenced. Add ONE line to the capabilities the profile " +
-        `declares:\n\n  ${pessimisticLockDeclarationLine(profile.dialect)}\n\n` +
+      "This engine profile declares no usable write fence: neither " +
+        "capabilities.writeFence nor the legacy capabilities.pessimisticLocks " +
+        "is present, so createSqlBackend cannot resolve a write-fence " +
+        "decision for it and refuses to mark it as fenced. Add ONE " +
+        "declaration to the capabilities the profile declares:\n\n" +
+        `${writeFenceDeclarationLine(profile.dialect, "  ")}\n\n` +
         "(that is the correct declaration for this profile's dialect).",
       {
         code: "ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION",
@@ -87,7 +92,7 @@ export function createSqlBackend<TTx>(
       },
       {
         suggestion:
-          "Declare capabilities.pessimisticLocks on this profile's declaredCapabilities.",
+          "Declare capabilities.writeFence (or the deprecated capabilities.pessimisticLocks) on this profile's declaredCapabilities.",
       },
     );
   }

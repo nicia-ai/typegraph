@@ -432,7 +432,8 @@ async function lockIdentityDdl(target: IdentityTarget): Promise<void> {
       );
       return;
     }
-    case "engine-serialized": {
+    case "engine-serialized":
+    case "caller-serialized": {
       return;
     }
     default: {

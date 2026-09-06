@@ -1714,9 +1714,12 @@ export function createContributionMaterializer(
         );
         return;
       }
-      case "engine-serialized": {
+      case "engine-serialized":
+      case "caller-serialized": {
         // SQLite needs nothing: `BEGIN IMMEDIATE` already holds the
-        // database's single writer slot for the whole fence.
+        // database's single writer slot for the whole fence. Under
+        // `caller-serialized`, the deployment's own promise plays the same
+        // role.
         return;
       }
       default: {
@@ -1770,10 +1773,13 @@ export function createContributionMaterializer(
         );
         return;
       }
-      case "engine-serialized": {
+      case "engine-serialized":
+      case "caller-serialized": {
         // SQLite has no relation lock and needs none: `BEGIN IMMEDIATE` took
         // the database's single writer slot when the fence opened, so probe,
         // drop and refill already run with every other writer excluded.
+        // `caller-serialized` reads the same way through the deployment's
+        // own promise.
         return;
       }
       default: {

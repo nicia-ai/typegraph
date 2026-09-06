@@ -1,9 +1,10 @@
 /**
- * The `pessimisticLocks` capability: whether this engine can serialize
- * concurrent writers, and how.
+ * The write-fence capability: how this engine excludes concurrent writers,
+ * declared as `capabilities.writeFence` (preferred) or the deprecated
+ * `capabilities.pessimisticLocks`.
  *
- * `resolveWriteFencePlan` is THE one owner of the pessimistic-lock decision
- * every lock site used to re-derive from `dialect` inline. A lock site never
+ * `resolveWriteFencePlan` is THE one owner of the write-fence decision every
+ * lock site used to re-derive from `dialect` inline. A lock site never
  * spells the dialect itself; it resolves a plan and consumes it.
  */
 import { ConfigurationError } from "../../errors";
@@ -116,8 +117,8 @@ function isolationFactStatement(fenceSql: FenceSql): SqlFragment {
  * `isolationFact` from `fenceSql`'s `advisoryLockExpression` /
  * `isolationFactExpression` — the only way to reach those three forms, so a
  * fused embedding and a portable lock site can never spell the lock or the
- * isolation read differently. Called once, by `planFromLockCapabilities`,
- * when a `lock` plan resolves.
+ * isolation read differently. Called once, by
+ * `planFromWriteFenceDeclaration`, when a `lock` plan resolves.
  */
 export function resolveFenceStatements(fenceSql: FenceSql): FenceStatements {
   return {
@@ -149,7 +150,7 @@ export type PessimisticLockCapabilities = Readonly<{
 
 /**
  * Why {@link resolveWriteFencePlan} could not resolve a usable fence — the
- * three states `planFromLockCapabilities`/`resolveWriteFencePlan` can reach
+ * three states `writeFenceFromLegacyLocks`/`resolveWriteFencePlan` can reach
  * an `unfenced` plan from:
  *
  * - `"undeclared"` — `capabilities.pessimisticLocks` is absent on a target
@@ -160,8 +161,9 @@ export type PessimisticLockCapabilities = Readonly<{
  * - `"table-locks-only"` — `pessimisticLocks` declares `{advisoryLocks:
  *   false, tableLocks: true, serializedWriters: false}`. The plan model has
  *   no table-lock-alone arm (see the note next to `planFromLockCapabilities`
- *   below), so this declaration resolves `unfenced` exactly like an absent
- *   or all-false one, even though it is neither.
+ *   below, which handles the legacy shapes `writeFenceFromLegacyLocks`
+ *   declines to map), so this declaration resolves `unfenced` exactly like
+ *   an absent or all-false one, even though it is neither.
  *
  * Every refusal that reaches an `unfenced` plan states the actual reason
  * instead of a message broad enough to cover all three.
@@ -170,33 +172,111 @@ export type UnfencedReason =
   "undeclared" | "declared-none" | "table-locks-only";
 
 /**
+ * How a backend excludes concurrent writers, and how far a caller that took
+ * the lock can drain the resource it protects.
+ *
+ * `mechanism` is the exclusion primitive: `"advisory"` is a keyed
+ * `pg_advisory_xact_lock`-style lock a caller takes explicitly (and needs
+ * `fenceSql` to spell); `"engine-serialized"` is the engine's own single
+ * writer slot (SQLite); `"caller-serialized"` is a promise the DEPLOYMENT
+ * makes rather than the engine or a lock — the backend's own process
+ * serializes every write unit it issues (see the in-process queue this
+ * mechanism requires) AND no other client writes to the same database while
+ * this backend is open. `"row"` (a per-row lock) joins this union in a later
+ * release.
+ *
+ * `drain` is a separate fact: whether a caller that already excluded other
+ * writers can additionally take a relation-wide lock on the resource a
+ * table-lock site protects. `"table-lock"` means yes (a `LOCK TABLE`-style
+ * statement is available and appropriate); `"quiescent"` means the resource
+ * is already exclusive for another reason (e.g. `caller-serialized`'s
+ * in-process queue) so a table-lock site takes NO statement rather than one
+ * it does not need; `"none"` means neither — a table-lock site refuses,
+ * naming this drain.
+ *
+ * `writeFenceFromLegacyLocks` is the one place a legacy `PessimisticLockCapabilities`
+ * declaration is translated into this shape.
+ */
+export type WriteFenceDeclaration = Readonly<{
+  mechanism: "advisory" | "engine-serialized" | "caller-serialized";
+  drain: "table-lock" | "quiescent" | "none";
+}>;
+
+/**
+ * THE one mapping from the legacy `pessimisticLocks` declaration to a
+ * {@link WriteFenceDeclaration}. Every reader of a legacy declaration goes
+ * through this function rather than re-deriving the mapping inline, so the
+ * two declaration styles can never drift apart on what they mean.
+ *
+ * - `advisoryLocks: true` → `{ mechanism: "advisory", drain: tableLocks ?
+ *   "table-lock" : "none" }` — `tableLocks` decides the drain, exactly as it
+ *   always has.
+ * - `serializedWriters: true` → `{ mechanism: "engine-serialized", drain:
+ *   "table-lock" }` — the writer slot excludes writers outright, and a
+ *   table-lock site under it has always taken no statement (reading that as
+ *   "drains").
+ * - Neither (an all-false declaration, or `{ tableLocks: true }` alone —
+ *   the plan model has no table-lock-only arm) → `undefined`. The caller
+ *   falls back to the existing `unfenced` reasons (`"declared-none"` /
+ *   `"table-locks-only"`); construction still succeeds and only a
+ *   fence-requiring site refuses, exactly as today.
+ */
+export function writeFenceFromLegacyLocks(
+  locks: PessimisticLockCapabilities,
+): WriteFenceDeclaration | undefined {
+  if (locks.advisoryLocks) {
+    return {
+      mechanism: "advisory",
+      drain: locks.tableLocks ? "table-lock" : "none",
+    };
+  }
+  if (locks.serializedWriters) {
+    return { mechanism: "engine-serialized", drain: "table-lock" };
+  }
+  return undefined;
+}
+
+/**
  * The decision every lock site consumes, rather than a flag a caller would
  * have to re-derive.
  */
 export type WriteFencePlan =
   /**
-   * Take the keyed/table lock, spelled by `sql` — the target's OWN declared
+   * Take the keyed lock, spelled by `sql` — the target's OWN declared
    * spelling: a lock site never hand-writes the statement, it resolves
    * a plan and consumes `sql.<builder>(…)`.
+   *
+   * `tableLocks` is kept for source compatibility and is derived from
+   * `drain`(`=== "table-lock"`); read `drain` instead — it distinguishes a
+   * declaration that cannot drain a table-lock site at all (`"none"`) from
+   * one that drains it without a statement (`"quiescent"`).
    */
   | Readonly<{
       kind: "lock";
       advisoryLocks: true;
+      /** @deprecated Read `drain` — this is `drain === "table-lock"`. */
       tableLocks: boolean;
+      drain: "table-lock" | "quiescent" | "none";
       sql: FenceStatements;
     }>
   /** No lock needed: the engine serializes writers. */
   | Readonly<{ kind: "engine-serialized" }>
+  /**
+   * No lock needed: the deployment itself promises no concurrent writer
+   * exists — this backend's own process serializes every write unit it
+   * issues, and no other client writes to the database while it is open.
+   */
+  | Readonly<{ kind: "caller-serialized" }>
   /** Neither. Every non-degradable fence refuses. Carries why — see {@link UnfencedReason}. */
   | Readonly<{ kind: "unfenced"; reason: UnfencedReason }>;
 
 /**
  * What `resolveWriteFencePlan` needs: the dialect (for the first-party
  * dialect-derivation arm and for the refusal message), the declared
- * capabilities, and — when `pessimisticLocks.advisoryLocks` is (or derives)
- * `true` — the lock-statement spelling that decision requires.
- * Structural on purpose — see the module-private first-party mark below,
- * which is carried out-of-band rather than as a type member.
+ * capabilities, and — when the resolved declaration's `mechanism` is (or
+ * derives) `"advisory"` — the lock-statement spelling that decision
+ * requires. Structural on purpose — see the module-private first-party mark
+ * below, which is carried out-of-band rather than as a type member.
  */
 export type WriteFenceTarget = Readonly<{
   dialect: SqlDialect;
@@ -375,24 +455,69 @@ export function isFirstPartyProfile(profile: object): boolean {
   return FIRST_PARTY_PROFILES.has(profile);
 }
 
-function deriveFromDialect(dialect: SqlDialect): PessimisticLockCapabilities {
+/**
+ * The write-fence declaration a first-party (bundled-factory) target derives
+ * when its `capabilities` name neither `writeFence` nor the legacy
+ * `pessimisticLocks` — exactly what every lock site used to compute inline
+ * from `dialect` before this capability existed. `writeFenceDeclarationLine`
+ * formats this same derivation as the migration-guide literal a refusal
+ * prints, so the derivation and the printed suggestion can never disagree.
+ */
+function deriveFromDialect(dialect: SqlDialect): WriteFenceDeclaration {
   switch (dialect) {
     case "postgres": {
-      return {
-        advisoryLocks: true,
-        tableLocks: true,
-        serializedWriters: false,
-      };
+      return { mechanism: "advisory", drain: "table-lock" };
     }
     case "sqlite": {
-      return {
-        advisoryLocks: false,
-        tableLocks: false,
-        serializedWriters: true,
-      };
+      return { mechanism: "engine-serialized", drain: "table-lock" };
     }
     default: {
       return dialect satisfies never;
+    }
+  }
+}
+
+/**
+ * Which declaration style {@link planFromWriteFenceDeclaration} resolved its
+ * `WriteFenceDeclaration` from — carried only so
+ * {@link refuseWriteFenceSqlUnavailable} can name the declaration the target
+ * ACTUALLY made, rather than assuming the legacy shape unconditionally.
+ *
+ * - `"writeFence"` — the target declared `capabilities.writeFence` directly.
+ * - `"pessimisticLocks"` — the target declared the legacy
+ *   `capabilities.pessimisticLocks`, mapped through
+ *   {@link writeFenceFromLegacyLocks}.
+ * - `"dialect"` — neither is declared; a first-party factory target's
+ *   `mechanism` came from {@link deriveFromDialect}.
+ */
+type WriteFenceDeclarationSource =
+  "writeFence" | "pessimisticLocks" | "dialect";
+
+/**
+ * Names the declaration {@link refuseWriteFenceSqlUnavailable} blames for
+ * promising a lock this target cannot spell — the phrase every one of its
+ * three provenances (a direct `writeFence`, a mapped legacy
+ * `pessimisticLocks`, or the first-party dialect derivation) fills in
+ * differently, so the refusal never states a declaration the target did not
+ * actually make.
+ */
+function describeResolvedAdvisoryDeclaration(
+  declaration: WriteFenceDeclaration,
+  source: WriteFenceDeclarationSource,
+  dialect: SqlDialect,
+): string {
+  switch (source) {
+    case "writeFence": {
+      return `declares \`capabilities.${formatWriteFenceDeclaration(declaration)}\``;
+    }
+    case "pessimisticLocks": {
+      return "declares `capabilities.pessimisticLocks.advisoryLocks: true`";
+    }
+    case "dialect": {
+      return `resolves an advisory-lock write fence from its \`${dialect}\` dialect`;
+    }
+    default: {
+      return source satisfies never;
     }
   }
 }
@@ -403,15 +528,23 @@ function deriveFromDialect(dialect: SqlDialect): PessimisticLockCapabilities {
  * `unfenced`: the declaration already promised a real lock exists, so the
  * only honest response to a missing spelling is to say so.
  *
- * Both call sites are in this module: `planFromLockCapabilities`, shared by
- * `resolveWriteFencePlan`'s declared and first-party-dialect-derived arms.
+ * The one call site is `planFromWriteFenceDeclaration`, shared by every
+ * `resolveWriteFencePlan` arm that can resolve `mechanism: "advisory"` — a
+ * declared `writeFence`, a mapped legacy `pessimisticLocks`, and the
+ * first-party dialect derivation all resolve through it, and each passes its
+ * own {@link WriteFenceDeclarationSource} so the message names the
+ * declaration the target actually made.
  *
  * @throws {ConfigurationError} always.
  */
-function refuseWriteFenceSqlUnavailable(dialect: SqlDialect): never {
+function refuseWriteFenceSqlUnavailable(
+  dialect: SqlDialect,
+  declaration: WriteFenceDeclaration,
+  source: WriteFenceDeclarationSource,
+): never {
   throw new ConfigurationError(
-    "This backend declares `capabilities.pessimisticLocks.advisoryLocks: " +
-      "true` but supplies no `fenceSql`, so TypeGraph cannot spell the lock " +
+    `This backend ${describeResolvedAdvisoryDeclaration(declaration, source, dialect)} ` +
+      "but supplies no `fenceSql`, so TypeGraph cannot spell the lock " +
       "statement this fence needs to take.",
     { code: "WRITE_FENCE_SQL_UNAVAILABLE", dialect },
     {
@@ -427,12 +560,12 @@ function refuseWriteFenceSqlUnavailable(dialect: SqlDialect): never {
  * THE refusal for a session-fact read (no lock plan involved) whose target
  * supplies no `fenceSql` to spell it with. Distinct from
  * {@link refuseWriteFenceSqlUnavailable}: that refusal fires only under a
- * resolved `lock` plan, so its message correctly says the backend "declares
- * `capabilities.pessimisticLocks.advisoryLocks: true`" — a claim that is
- * simply false for a target with no lock plan in play at all (e.g. one
- * declaring `serializedWriters: true` and no advisory locks). A session-fact
- * read is gated on `dialect` alone, not on a resolved plan, so it needs its
- * own refusal naming what it actually needs.
+ * resolved `lock` plan, so it can name the declaration that actually
+ * resolved to `mechanism: "advisory"` — a claim that makes no sense for a
+ * target with no lock plan in play at all (e.g. one declaring
+ * `serializedWriters: true` and no advisory locks). A session-fact read is
+ * gated on `dialect` alone, not on a resolved plan, so it needs its own
+ * refusal naming what it actually needs.
  *
  * @throws {ConfigurationError} always.
  */
@@ -452,22 +585,55 @@ export function refuseFenceSqlSessionFactUnavailable(
   );
 }
 
+/**
+ * THE one constructor of a {@link WriteFencePlan} from an already-resolved
+ * {@link WriteFenceDeclaration}, regardless of which declaration style
+ * produced it (`capabilities.writeFence` directly, the legacy
+ * `pessimisticLocks` mapped through {@link writeFenceFromLegacyLocks}, or
+ * the first-party dialect derivation). One owner means a `writeFence`
+ * declaration and its legacy equivalent resolve to the identical plan shape.
+ *
+ * `source` names which of those three provenances `declaration` came from —
+ * threaded only to {@link refuseWriteFenceSqlUnavailable}, so a missing
+ * `fenceSql` is blamed on the declaration the target actually made.
+ */
+function planFromWriteFenceDeclaration(
+  target: WriteFenceTarget,
+  declaration: WriteFenceDeclaration,
+  source: WriteFenceDeclarationSource,
+): WriteFencePlan {
+  switch (declaration.mechanism) {
+    case "advisory": {
+      if (target.fenceSql === undefined) {
+        refuseWriteFenceSqlUnavailable(target.dialect, declaration, source);
+      }
+      return {
+        kind: "lock",
+        advisoryLocks: true,
+        tableLocks: declaration.drain === "table-lock",
+        drain: declaration.drain,
+        sql: resolveFenceStatements(target.fenceSql),
+      };
+    }
+    case "engine-serialized": {
+      return { kind: "engine-serialized" };
+    }
+    case "caller-serialized": {
+      return { kind: "caller-serialized" };
+    }
+    default: {
+      return declaration.mechanism satisfies never;
+    }
+  }
+}
+
 function planFromLockCapabilities(
   target: WriteFenceTarget,
   declared: PessimisticLockCapabilities,
 ): WriteFencePlan {
-  if (declared.advisoryLocks) {
-    if (target.fenceSql === undefined) {
-      refuseWriteFenceSqlUnavailable(target.dialect);
-    }
-    return {
-      kind: "lock",
-      advisoryLocks: true,
-      tableLocks: declared.tableLocks,
-      sql: resolveFenceStatements(target.fenceSql),
-    };
-  }
-  if (declared.serializedWriters) return { kind: "engine-serialized" };
+  const mapped = writeFenceFromLegacyLocks(declared);
+  if (mapped !== undefined)
+    return planFromWriteFenceDeclaration(target, mapped, "pessimisticLocks");
   // A declared table-locks-only engine (no advisoryLocks, no
   // serializedWriters) resolves `unfenced` with reason `"table-locks-only"`:
   // every TypeGraph fence needs either the advisory key or the writer slot,
@@ -489,43 +655,100 @@ function planFromLockCapabilities(
 }
 
 /**
- * THE one reader of `capabilities.pessimisticLocks`, and THE one constructor
- * of a {@link WriteFencePlan}.
+ * THE refusal for a target whose `capabilities` name BOTH a `writeFence`
+ * declaration and the legacy `pessimisticLocks` one: exactly one is the
+ * effective declaration, and picking one silently over the other would let
+ * a caller believe both are honored when only one ever is.
+ *
+ * @throws {ConfigurationError} always.
+ */
+function refuseWriteFenceDeclarationConflict(target: WriteFenceTarget): never {
+  throw new ConfigurationError(
+    "This backend's `capabilities` declare both `writeFence` and the " +
+      "legacy `pessimisticLocks`. Exactly one write-fence declaration is " +
+      "allowed — remove whichever one does not describe this backend.",
+    {
+      code: "WRITE_FENCE_DECLARATION_CONFLICT",
+      dialect: target.dialect,
+      writeFence: target.capabilities.writeFence,
+      pessimisticLocks: target.capabilities.pessimisticLocks,
+    },
+    {
+      suggestion:
+        "Declare `capabilities.writeFence` alone (preferred) or `capabilities.pessimisticLocks` alone (deprecated), not both.",
+    },
+  );
+}
+
+/**
+ * THE one reader of `capabilities.writeFence` and the legacy
+ * `capabilities.pessimisticLocks`, and THE one constructor of a
+ * {@link WriteFencePlan}.
  *
  * Resolution order:
  *
- * 1. **Declared** — use the declaration. Every first-party backend declares
- *    `pessimisticLocks` (`SQLITE_CAPABILITIES` / `POSTGRES_CAPABILITIES`),
- *    and a custom backend takes this path by writing one line.
- * 2. **Absent, first-party factory** — derive from `dialect`
- *    (`postgres` → `{advisoryLocks:true,tableLocks:true,serializedWriters:false}`,
- *    `sqlite` → `{advisoryLocks:false,tableLocks:false,serializedWriters:true}`),
- *    which is exactly what every lock site used to compute inline. Both
- *    bundled factories declare `pessimisticLocks` unconditionally, so nothing
- *    in-tree reaches this arm; it is reachable only from tests that build a
- *    backend object bypassing the factories' declared capabilities while
- *    still carrying the first-party mark.
- * 3. **Absent, anything else** — `unfenced`. Conservative: an undeclared
- *    custom backend is by definition uncertified, and inferring lock support
- *    from `dialect` alone is the unsound inference this capability replaces
- *    (a PostgreSQL-wire backend reporting `dialect: "postgres"` need not
- *    honor `pg_advisory_xact_lock`).
+ * 1. **Both declared** — refuse (`WRITE_FENCE_DECLARATION_CONFLICT`): a
+ *    target cannot mean two things at once.
+ * 2. **`writeFence` declared** — resolve it directly through
+ *    {@link planFromWriteFenceDeclaration}.
+ * 3. **Legacy `pessimisticLocks` declared** — map it through
+ *    {@link writeFenceFromLegacyLocks} and resolve exactly as case 2, or
+ *    fall to `unfenced` with the existing reason when the mapping declines
+ *    (`"table-locks-only"` / `"declared-none"`).
+ * 4. **Neither declared, first-party factory** — derive from `dialect`
+ *    ({@link deriveFromDialect}), which is exactly what every lock site used
+ *    to compute inline. Both bundled factories declare `pessimisticLocks`
+ *    unconditionally, so nothing in-tree reaches this arm; it is reachable
+ *    only from tests that build a backend object bypassing the factories'
+ *    declared capabilities while still carrying the first-party mark.
+ * 5. **Neither declared, anything else** — `unfenced`. Conservative: an
+ *    undeclared custom backend is by definition uncertified, and inferring
+ *    lock support from `dialect` alone is the unsound inference this
+ *    capability replaces (a PostgreSQL-wire backend reporting `dialect:
+ *    "postgres"` need not honor `pg_advisory_xact_lock`).
  */
 export function resolveWriteFencePlan(
   target: WriteFenceTarget,
 ): WriteFencePlan {
-  const declared = target.capabilities.pessimisticLocks;
-  if (declared !== undefined) return planFromLockCapabilities(target, declared);
+  const { writeFence, pessimisticLocks } = target.capabilities;
+  if (writeFence !== undefined && pessimisticLocks !== undefined) {
+    refuseWriteFenceDeclarationConflict(target);
+  }
+  if (writeFence !== undefined) {
+    return planFromWriteFenceDeclaration(target, writeFence, "writeFence");
+  }
+  if (pessimisticLocks !== undefined) {
+    return planFromLockCapabilities(target, pessimisticLocks);
+  }
   if (FIRST_PARTY_FACTORY_BACKENDS.has(target)) {
-    return planFromLockCapabilities(target, deriveFromDialect(target.dialect));
+    return planFromWriteFenceDeclaration(
+      target,
+      deriveFromDialect(target.dialect),
+      "dialect",
+    );
   }
   return { kind: "unfenced", reason: "undeclared" };
 }
 
 /**
- * THE one owner of the literal `pessimisticLocks` declaration line a refusal
- * recommends — printed verbatim by both unfenced refusals below, so the
- * migration guide cannot rot into a pointer (ruling OQ-B).
+ * Formats a {@link WriteFenceDeclaration} exactly as a caller would write it
+ * under `capabilities.writeFence`.
+ */
+function formatWriteFenceDeclaration(
+  declaration: WriteFenceDeclaration,
+): string {
+  return `writeFence: { mechanism: "${declaration.mechanism}", drain: "${declaration.drain}" }`;
+}
+
+/**
+ * THE one owner of the literal legacy `pessimisticLocks` declaration line a
+ * refusal recommends.
+ *
+ * Deprecated in favor of {@link writeFenceDeclarationLine}, which prints this
+ * same line alongside the preferred `writeFence` spelling — prefer that in
+ * new code. Not machine-`@deprecated`: it shipped `@public` at 0.56.0 and
+ * stays a genuine, permanently supported alias for a caller that already
+ * reads it directly, not a migration-window shim.
  */
 export function pessimisticLockDeclarationLine(dialect: SqlDialect): string {
   switch (dialect) {
@@ -542,6 +765,36 @@ export function pessimisticLockDeclarationLine(dialect: SqlDialect): string {
 }
 
 /**
+ * THE one owner of the literal declaration line a refusal recommends —
+ * printed verbatim by both unfenced refusals below and by
+ * `createSqlBackend`'s own construction-time gate, so the migration guide
+ * cannot rot into a pointer (ruling OQ-B). Prints the preferred `writeFence`
+ * spelling first, then the legacy `pessimisticLocks` line
+ * ({@link pessimisticLockDeclarationLine}) a reader may still be carrying.
+ *
+ * `indent` is prefixed to every non-empty line of the (multi-line) result,
+ * so a caller embedding this inside an indented suggestion never has to
+ * indent the continuation lines itself — a caller who only interpolates the
+ * first line's prefix leaves the "or, legacy:" line and the legacy
+ * declaration flush against the margin.
+ */
+export function writeFenceDeclarationLine(
+  dialect: SqlDialect,
+  indent = "",
+): string {
+  const lines = [
+    formatWriteFenceDeclaration(deriveFromDialect(dialect)),
+    "",
+    "or, legacy:",
+    "",
+    pessimisticLockDeclarationLine(dialect),
+  ];
+  return lines
+    .map((line) => (line === "" ? line : `${indent}${line}`))
+    .join("\n");
+}
+
+/**
  * THE one owner of the "why `unfenced`" phrase — consumed by both
  * `unfencedRefusalMessage` (the two construction gates, which also print a
  * dialect-keyed fix) and `requireWriteFence`'s `unfenced` arm below, which
@@ -551,7 +804,10 @@ export function pessimisticLockDeclarationLine(dialect: SqlDialect): string {
 function unfencedDeclarationStateDescription(reason: UnfencedReason): string {
   switch (reason) {
     case "undeclared": {
-      return "`capabilities.pessimisticLocks` is absent";
+      return (
+        "`capabilities.writeFence` (or the deprecated " +
+        "`capabilities.pessimisticLocks`) is absent"
+      );
     }
     case "declared-none": {
       return "`capabilities.pessimisticLocks` declares neither advisory/table locks nor serialized writers";
@@ -580,10 +836,10 @@ function unfencedRefusalMessage(
   reason: UnfencedReason,
   resource: string,
 ): string {
-  const declaredLine = pessimisticLockDeclarationLine(dialect);
+  const declaredLine = writeFenceDeclarationLine(dialect, "  ");
   const otherDialect: SqlDialect =
     dialect === "postgres" ? "sqlite" : "postgres";
-  const otherLine = pessimisticLockDeclarationLine(otherDialect);
+  const otherLine = writeFenceDeclarationLine(otherDialect, "  ");
   const dialectDescription =
     dialect === "postgres" ?
       "an engine that honors `pg_advisory_xact_lock` and `LOCK TABLE`"
@@ -597,23 +853,23 @@ function unfencedRefusalMessage(
   if (reason === "table-locks-only") {
     return (
       `This backend's ${declarationState}, and ${resource} cannot run ` +
-      "unfenced. Declare `pessimisticLocks.advisoryLocks: true` for an " +
-      "engine that honors advisory locks:\n\n" +
-      `  ${declaredLine}\n\n` +
-      "or `pessimisticLocks.serializedWriters: true` for a single-writer " +
-      "engine:\n\n" +
-      `  ${otherLine}\n`
+      "unfenced. Declare an advisory-lock mechanism:\n\n" +
+      `${declaredLine}\n\n` +
+      "or a single-writer mechanism:\n\n" +
+      `${otherLine}\n`
     );
   }
 
   return (
     `This backend declares no usable write fence: ${declarationState}, ` +
     `so TypeGraph cannot know whether it fences concurrent writers, and ${resource} ` +
-    "cannot run unfenced. Add ONE line to the capabilities you pass:\n\n" +
-    `  ${declaredLine}\n\n` +
-    `(that is the correct declaration for ${dialectDescription}; use\n` +
-    `\`${otherLine}\` for ${otherDescription}). If the engine honors ` +
-    `neither, this refusal is correct and ${resource} is unavailable on it.`
+    "cannot run unfenced. Add ONE write-fence declaration to the " +
+    "capabilities you pass:\n\n" +
+    `${declaredLine}\n\n` +
+    `(that is the correct declaration for ${dialectDescription}; use\n\n` +
+    `${otherLine}\n\n` +
+    `for ${otherDescription}). If the engine honors neither, this refusal ` +
+    `is correct and ${resource} is unavailable on it.`
   );
 }
 
@@ -632,7 +888,7 @@ export function refuseUnfencedOperationalIdentity(
     { code: "IDENTITY_REQUIRES_WRITE_FENCE", dialect, reason },
     {
       suggestion:
-        "Declare `capabilities.pessimisticLocks` on this backend, or construct the store without `identity`.",
+        "Declare `capabilities.writeFence` (or the deprecated `capabilities.pessimisticLocks`) on this backend, or construct the store without `identity`.",
     },
   );
 }
@@ -657,34 +913,39 @@ export function refuseUnfencedClockAllocation(
     { code: "RECORDED_CLOCK_REQUIRES_WRITE_FENCE", dialect, reason },
     {
       suggestion:
-        "Declare `capabilities.pessimisticLocks` on this backend, or construct the store without `history`/`revisionTracking`.",
+        "Declare `capabilities.writeFence` (or the deprecated `capabilities.pessimisticLocks`) on this backend, or construct the store without `history`/`revisionTracking`.",
     },
   );
 }
 
 /**
  * THE refusal for a fence that cannot degrade: `unfenced` always refuses,
- * and a `lock` plan that lacks the table lock an operation requires refuses
- * too — the declared-advisory-only posture, which T15 exercises as its own
- * matrix row.
+ * and a `lock` plan whose `drain` cannot back the table lock an operation
+ * requires refuses too — the declared-advisory-only posture (`drain:
+ * "none"`), which T15 exercises as its own matrix row.
  *
- * `engine-serialized` satisfies both requirements: the writer slot is the
- * fence, whichever shape of lock the caller would otherwise have taken.
+ * `engine-serialized` and `caller-serialized` satisfy both `requires`
+ * values without consulting `drain`: a writer slot and an in-process,
+ * out-of-band serialization promise are each a stronger exclusion than
+ * either lock shape, so there is nothing for either `requires` to add.
  *
  * @throws {ConfigurationError} under `unfenced`, and under
- * `kind: "lock" && tableLocks === false` when `requires === "table-lock"`.
+ * `kind: "lock" && drain === "none"` when `requires === "table-lock"`.
  */
 export function requireWriteFence(
   plan: WriteFencePlan,
   operation: string,
   requires: "advisory-lock" | "table-lock",
-): Extract<WriteFencePlan, { kind: "lock" | "engine-serialized" }> {
+): Extract<
+  WriteFencePlan,
+  { kind: "lock" | "engine-serialized" | "caller-serialized" }
+> {
   switch (plan.kind) {
     case "lock": {
-      if (requires === "table-lock" && !plan.tableLocks) {
+      if (requires === "table-lock" && plan.drain === "none") {
         throw new ConfigurationError(
-          `${operation} requires a table lock, but this backend's ` +
-            "pessimisticLocks declaration reports tableLocks: false.",
+          `${operation} requires a table lock, but this backend's write-fence ` +
+            'declaration reports drain: "none".',
           {
             code: "WRITE_FENCE_UNAVAILABLE",
             operation,
@@ -693,13 +954,16 @@ export function requireWriteFence(
           },
           {
             suggestion:
-              "Declare `pessimisticLocks.tableLocks: true` on this backend, or avoid this operation.",
+              'Declare `writeFence.drain: "table-lock"` (or, in the deprecated legacy shape, `pessimisticLocks.tableLocks: true`) on this backend, or avoid this operation.',
           },
         );
       }
       return plan;
     }
     case "engine-serialized": {
+      return plan;
+    }
+    case "caller-serialized": {
       return plan;
     }
     case "unfenced": {
@@ -715,8 +979,8 @@ export function requireWriteFence(
         {
           suggestion:
             plan.reason === "table-locks-only" ?
-              "Declare `pessimisticLocks.advisoryLocks: true` on this backend for an engine that honors advisory locks, or `pessimisticLocks.serializedWriters: true` for a single-writer engine."
-            : "Declare `capabilities.pessimisticLocks` on this backend, matching the engine's real locking support.",
+              'Declare `writeFence: { mechanism: "advisory", drain: "table-lock" }` (or, in the deprecated legacy shape, `pessimisticLocks.advisoryLocks: true`) on this backend for an engine that honors advisory locks, or `writeFence: { mechanism: "engine-serialized", drain: "table-lock" }` (or `pessimisticLocks.serializedWriters: true`) for a single-writer engine.'
+            : "Declare `capabilities.writeFence` (or the deprecated `capabilities.pessimisticLocks`) on this backend, matching the engine's real locking support.",
         },
       );
     }

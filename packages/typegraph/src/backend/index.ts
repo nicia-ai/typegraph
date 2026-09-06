@@ -435,6 +435,7 @@ export type {
   VectorSearchFrontierTuning,
   VectorSearchParams,
   VectorSearchResult,
+  WriteFenceDeclaration,
 } from "./types";
 export {
   D1_MAX_BIND_PARAMETERS,

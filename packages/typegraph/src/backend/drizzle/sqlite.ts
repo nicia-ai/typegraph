@@ -1296,9 +1296,26 @@ export function buildSqliteEngineProfile(
     transactionMode,
     maxBindParameters: executionAdapter.profile.maxBindParameters,
   });
+  // A caller who declares `capabilities.writeFence` (and no explicit
+  // `pessimisticLocks` of their own) is replacing the bundled
+  // `pessimisticLocks` default, not layering under it: carrying
+  // `baseCapabilities.pessimisticLocks` through the spread below would
+  // collide the two declarations at `resolveWriteFencePlan` and blame the
+  // caller for a default THIS factory added. Pulled out rather than left in
+  // `...baseCapabilities` so this decision runs explicitly instead of riding
+  // along on a spread the caller's own `pessimisticLocks` override (if any)
+  // still wins over via `...capabilityOverrides` below.
+  const { pessimisticLocks: basePessimisticLocks, ...baseCapabilitiesRest } =
+    baseCapabilities;
+  const declaresWriteFenceWithoutLegacyLocks =
+    capabilityOverrides.writeFence !== undefined &&
+    capabilityOverrides.pessimisticLocks === undefined;
   const declaredCapabilities = sealCapabilityDeclaration(
     normalizeGraphAnalyticsCapabilities({
-      ...baseCapabilities,
+      ...baseCapabilitiesRest,
+      ...(declaresWriteFenceWithoutLegacyLocks ?
+        {}
+      : { pessimisticLocks: basePessimisticLocks }),
       ...capabilityOverrides,
       execution: {
         ...baseCapabilities.execution,

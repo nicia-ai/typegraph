@@ -283,11 +283,13 @@ export type { RecursiveTraversalCapability } from "./capabilities/recursive-trav
 import {
   type FenceSql,
   type PessimisticLockCapabilities,
+  type WriteFenceDeclaration,
 } from "./capabilities/write-fence";
 
 export type {
   FenceSql,
   PessimisticLockCapabilities,
+  WriteFenceDeclaration,
 } from "./capabilities/write-fence";
 
 import { type BackendCatalogProbes } from "./capabilities/catalog";
@@ -413,18 +415,39 @@ export type BackendCapabilities = Readonly<{
    */
   recursiveTraversal?: RecursiveTraversalCapability | undefined;
   /**
+   * How this backend excludes concurrent writers: a keyed advisory lock, a
+   * single writer slot the engine serializes by construction, or a
+   * deployment-level promise that this process serializes its own writes and
+   * no other client writes to the database — see
+   * {@link WriteFenceDeclaration} for the full `mechanism`/`drain` contract.
+   *
+   * Absent means `unfenced` for any backend the first-party factories did
+   * not build (`resolveWriteFencePlan`, `src/backend/capabilities/write-fence.ts`),
+   * unless the deprecated `pessimisticLocks` below is declared instead: an
+   * undeclared custom backend is refused at construction for Operational
+   * Identity and for TypeGraph-owned recorded-clock allocation
+   * (`history` / `revisionTracking`) rather than silently emitting locks the
+   * engine may not honor. Declaring both this and `pessimisticLocks` is a
+   * `ConfigurationError` (`WRITE_FENCE_DECLARATION_CONFLICT`) — exactly one
+   * of the two may describe a backend.
+   */
+  writeFence?: WriteFenceDeclaration | undefined;
+  /**
    * Whether this engine can serialize concurrent writers, and how: keyed
    * advisory locks, relation-level table locks, or a single writer slot that
    * serializes by construction.
    *
-   * Absent means `unfenced` for any backend the first-party factories did
-   * not build (`resolveWriteFencePlan`, `src/backend/capabilities/write-fence.ts`):
-   * an undeclared custom backend is refused at construction for Operational
-   * Identity and for TypeGraph-owned recorded-clock allocation
-   * (`history` / `revisionTracking`) rather than silently emitting locks the
-   * engine may not honor. Every first-party backend declares this member
-   * (`SQLITE_CAPABILITIES`, `POSTGRES_CAPABILITIES`), so the refusal is
-   * reachable only by a backend this library did not build.
+   * Deprecated in favor of {@link BackendCapabilities.writeFence} — declare
+   * that instead on a new backend. Not machine-`@deprecated`: both bundled
+   * factories (`SQLITE_CAPABILITIES`, `POSTGRES_CAPABILITIES`) still declare
+   * this shape, and `resolveWriteFencePlan` maps it onto `writeFence` through
+   * `writeFenceFromLegacyLocks` (`src/backend/capabilities/write-fence.ts`)
+   * rather than treating it as an error, so behavior for an existing backend
+   * is unchanged. Absent means `unfenced` for any backend the first-party
+   * factories did not build: an undeclared custom backend is refused at
+   * construction for Operational Identity and for TypeGraph-owned
+   * recorded-clock allocation (`history` / `revisionTracking`) rather than
+   * silently emitting locks the engine may not honor.
    */
   pessimisticLocks?: PessimisticLockCapabilities | undefined;
   /**

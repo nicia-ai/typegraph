@@ -938,9 +938,20 @@ export function buildPostgresEngineProfile(
       },
     );
   }
+  // A caller who declares `capabilities.writeFence` is replacing the
+  // legacy declaration, not layering under it: injecting the bundled
+  // `pessimisticLocks` default beneath their `writeFence` would collide the
+  // two declarations at `resolveWriteFencePlan` and blame the caller for a
+  // default THIS factory added. Only fall back to the bundled default when
+  // the caller has declared neither shape — and, since `baseCapabilities`
+  // (`POSTGRES_CAPABILITIES`) itself already carries that default, this has
+  // to be dropped from the spread below, not merely skipped as an override.
+  const declaresWriteFence = options.capabilities?.writeFence !== undefined;
+  const { pessimisticLocks: basePessimisticLocks, ...baseCapabilitiesRest } =
+    baseCapabilities;
   const pessimisticLocks =
     requestedPessimisticLocks === undefined ?
-      POSTGRES_CAPABILITIES.pessimisticLocks
+      (declaresWriteFence ? undefined : basePessimisticLocks)
     : {
         advisoryLocks: requestedPessimisticLocks.advisoryLocks,
         tableLocks: requestedPessimisticLocks.tableLocks,
@@ -948,7 +959,7 @@ export function buildPostgresEngineProfile(
       };
   const declaredCapabilities = sealCapabilityDeclaration(
     normalizeGraphAnalyticsCapabilities({
-      ...baseCapabilities,
+      ...baseCapabilitiesRest,
       ...httpOnlyOverrides,
       ...options.capabilities,
       execution: {
@@ -957,7 +968,7 @@ export function buildPostgresEngineProfile(
         ...options.capabilities?.execution,
       },
       ...driverBindParameterOverrides,
-      pessimisticLocks,
+      ...(pessimisticLocks === undefined ? {} : { pessimisticLocks }),
     }),
   );
   // Derived last and not overridable: how far up the contribution health
@@ -1599,10 +1610,13 @@ export function buildPostgresEngineProfile(
         `);
           return;
         }
-        case "engine-serialized": {
+        case "engine-serialized":
+        case "caller-serialized": {
           // The writer slot IS the fence; the commit already runs alone, which
           // is the guarantee `commitSchemaVersion`'s own comment names
-          // ("BEGIN IMMEDIATE on SQLite"). Nothing to take.
+          // ("BEGIN IMMEDIATE on SQLite"). Under `caller-serialized`, the
+          // deployment's own serialization promise plays the same role.
+          // Nothing to take.
           return;
         }
         default: {

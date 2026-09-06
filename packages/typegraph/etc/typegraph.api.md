@@ -216,6 +216,7 @@ export type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    writeFence?: WriteFenceDeclaration | undefined;
     pessimisticLocks?: PessimisticLockCapabilities | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
@@ -8305,6 +8306,12 @@ type WidenBrandedIds<T> = {
         [P in keyof A]: UnbrandParam<A[P]>;
     }) => R : T[K];
 };
+
+// @public
+type WriteFenceDeclaration = Readonly<{
+    mechanism: "advisory" | "engine-serialized" | "caller-serialized";
+    drain: "table-lock" | "quiescent" | "none";
+}>;
 
 // (No @packageDocumentation comment for this package)
 
