@@ -71,7 +71,7 @@ const ALLOWLIST: readonly AllowedSite[] = [
       "`gated` is keyed by `keyof GatableFulltextBackend` — a closed set of method names written in this file, not data.",
   },
   {
-    file: "backend/drizzle/sqlite.ts",
+    file: "backend/serialized-execution-queue.ts",
     line: "const taskMarker: object = {};",
     reason:
       "An identity sentinel compared by reference; no key is ever assigned to it.",

@@ -386,7 +386,6 @@ export type {
   NodePropertyExpectation,
   NodeRow,
   NormalizedColumnKind,
-  PessimisticLockCapabilities,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   QueryExecutionBackend,
@@ -435,6 +434,7 @@ export type {
   VectorSearchFrontierTuning,
   VectorSearchParams,
   VectorSearchResult,
+  WriteFenceDeclaration,
 } from "./types";
 export {
   D1_MAX_BIND_PARAMETERS,

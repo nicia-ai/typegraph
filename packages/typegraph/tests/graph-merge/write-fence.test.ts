@@ -18,11 +18,7 @@ function makeBackend(
         atomicBatch: "none",
         unitOfWork: "interactive",
       },
-      pessimisticLocks: {
-        advisoryLocks: true,
-        tableLocks: true,
-        serializedWriters: false,
-      },
+      writeFence: { mechanism: "advisory", drain: "table-lock" },
     },
     fenceSql: postgresFenceSql,
     lockSchemaVersionForWrite: async () => {

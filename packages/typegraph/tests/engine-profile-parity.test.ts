@@ -13,7 +13,7 @@
  * 1. The backend's own member-key set and its resolved capabilities
  *    (sorted, so key order never causes a spurious diff), plus explicit
  *    assertions on the two capabilities a shared-code refusal keys off
- *    (`pessimisticLocks`, `maxBindParameters`).
+ *    (`writeFence`, `maxBindParameters`).
  * 2. The three trust marks a bundled root — and a `transaction()` handle
  *    opened on it — carry (`isFirstPartyFactory`,
  *    `isSchemaFencedInsertEligible`, `isBundledRootAutocommitEligible`).
@@ -229,10 +229,9 @@ describe("engine-profile parity: member keys, capabilities, marks", () => {
     expect(deepSortKeys(backend.capabilities)).toMatchSnapshot(
       "pglite-root-capabilities",
     );
-    expect(backend.capabilities.pessimisticLocks).toEqual({
-      advisoryLocks: true,
-      tableLocks: true,
-      serializedWriters: false,
+    expect(backend.capabilities.writeFence).toEqual({
+      mechanism: "advisory",
+      drain: "table-lock",
     });
     expect(backend.capabilities.maxBindParameters).toBe(
       PGLITE_MAX_BIND_PARAMETERS,
@@ -255,10 +254,8 @@ describe("engine-profile parity: member keys, capabilities, marks", () => {
     expect(deepSortKeys(backend.capabilities)).toMatchSnapshot(
       "sqlite-root-capabilities",
     );
-    expect(backend.capabilities.pessimisticLocks).toEqual({
-      advisoryLocks: false,
-      tableLocks: false,
-      serializedWriters: true,
+    expect(backend.capabilities.writeFence).toEqual({
+      mechanism: "engine-serialized",
     });
     // better-sqlite3 probes the compiled SQLITE_MAX_VARIABLE_NUMBER at
     // construction; on the version this suite runs against that resolves

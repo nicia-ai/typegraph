@@ -352,11 +352,7 @@ describe("Postgres pg_trgm extension prerequisite", () => {
       fenceSql: undefined,
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: false,
-          serializedWriters: true,
-        },
+        writeFence: { mechanism: "engine-serialized" },
       },
     });
     const backend = createSqlBackend(derivedProfile);

@@ -1,7 +1,7 @@
 /**
  * Three-way merge LAW properties (complements the T12 determinism gate).
  *
- * `merge()` claims Dolt-class deterministic THREE-WAY merge semantics — NOT
+ * `merge()` claims deterministic three-way merge semantics — NOT
  * CRDT semilattice (ACI) convergence. Entity-resolution merge is not
  * associative or idempotent in general (similarity is not transitive), so the
  * honest, checkable law set for an LCA-anchored merge `m(base, branches…)` is:

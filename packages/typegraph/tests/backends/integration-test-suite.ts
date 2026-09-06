@@ -92,6 +92,7 @@ import {
   registerValidityEndClearingIntegrationTests,
   registerValidityLowerBoundIntegrationTests,
   registerWeightedShortestPathExtractionIntegrationTests,
+  registerWriteFenceConformanceIntegrationTests,
 } from "./integration";
 import type {
   InspectableHistoryStore,
@@ -325,5 +326,6 @@ export function createIntegrationTestSuite<
     registerCrossBackendConsistencyTests(context);
     registerDurableEdgeMatchIdentityIntegrationTests(context);
     registerTrustedImportIntegrationTests(context);
+    registerWriteFenceConformanceIntegrationTests(context);
   });
 }

@@ -43,24 +43,21 @@ SQL, capabilities, or behavior changes.
 **Behavior change:** trusted import's PostgreSQL table lock now resolves the same write-fence plan
 every other lock site does, instead of unconditionally taking `LOCK TABLE ... ACCESS EXCLUSIVE`.
 Trusted import now refuses up front, before any statement runs, when a custom PostgreSQL backend's
-`pessimisticLocks` declaration resolves `unfenced` (absent, present but declaring all three of
-`advisoryLocks`/`tableLocks`/`serializedWriters` false, or declaring `{ advisoryLocks: false,
-tableLocks: true, serializedWriters: false }` — table locks alone, which the plan model has no arm
-for and resolves `unfenced` exactly like the other two shapes) or resolves a `lock` plan with
-`tableLocks: false` — this now also catches an advisory-only declaration (`{ advisoryLocks: true,
-tableLocks: false }`), which previously took the table lock anyway. Every refusal that reaches an
-`unfenced` plan now names which of the three shapes it declared, rather than one message broad
-enough to cover all of them. `createPostgresBackend` itself rejects a `pessimisticLocks.
-serializedWriters: true` capability override at construction (`ConfigurationError`, "PostgreSQL
-backend capability overrides cannot claim serialized writers"), so a declaration resolving
-`engine-serialized` is reachable only through a custom `SqlEngineProfile` or a hand-built
-PostgreSQL-dialect backend for an engine that genuinely serializes writers; for one, trusted import
-now takes no relation lock at all, where it previously took `LOCK TABLE ... ACCESS EXCLUSIVE` — the
-declaration states the engine serializes writers, so trusted import's own transaction is fence
-enough on its own. The `WRITE_FENCE_SQL_UNAVAILABLE` code applies only to the narrower case of an
-`advisoryLocks: true` declaration with no `fenceSql` to spell the lock; every other refusal above is
-`WRITE_FENCE_UNAVAILABLE`. Declare both `advisoryLocks: true` and `tableLocks: true` — the bundled
-`createPostgresBackend` default, which also supplies `fenceSql` — to restore the lock.
+`writeFence` declaration resolves `unfenced` (no declaration present) or resolves a `lock` plan
+with `drain: "none"` — this now also catches an advisory-only declaration (`{ mechanism:
+"advisory", drain: "none" }`), which previously took the table lock anyway. Every refusal names
+the drain that could not be satisfied. `createPostgresBackend` itself rejects a `writeFence.
+mechanism: "engine-serialized"` capability override at construction (`ConfigurationError`,
+'PostgreSQL backend capability overrides cannot declare writeFence.mechanism: "engine-serialized"'),
+so a declaration resolving `engine-serialized` is reachable only through a custom
+`SqlEngineProfile` or a hand-built PostgreSQL-dialect backend for an engine that genuinely
+serializes writers; for one, trusted import now takes no relation lock at all, where it previously
+took `LOCK TABLE ... ACCESS EXCLUSIVE` — the declaration states the engine serializes writers, so
+trusted import's own transaction is fence enough on its own. The `WRITE_FENCE_SQL_UNAVAILABLE`
+code applies only to the narrower case of a `mechanism: "advisory"` declaration with no `fenceSql`
+to spell the lock; every other refusal above is `WRITE_FENCE_UNAVAILABLE`. Declare `writeFence: {
+mechanism: "advisory", drain: "table-lock" }` — the bundled `createPostgresBackend` default, which
+also supplies `fenceSql` — to restore the lock.
 
 **Author-facing:** `CommonOperationStrategy` no longer carries `dynamicEdgeConvergence`. That field
 was required, so every external `SqlEngineProfile.strategy` literal now fails to typecheck; delete

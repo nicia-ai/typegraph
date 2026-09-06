@@ -282,12 +282,12 @@ export type { RecursiveTraversalCapability } from "./capabilities/recursive-trav
 
 import {
   type FenceSql,
-  type PessimisticLockCapabilities,
+  type WriteFenceDeclaration,
 } from "./capabilities/write-fence";
 
 export type {
   FenceSql,
-  PessimisticLockCapabilities,
+  WriteFenceDeclaration,
 } from "./capabilities/write-fence";
 
 import { type BackendCatalogProbes } from "./capabilities/catalog";
@@ -413,27 +413,28 @@ export type BackendCapabilities = Readonly<{
    */
   recursiveTraversal?: RecursiveTraversalCapability | undefined;
   /**
-   * Whether this engine can serialize concurrent writers, and how: keyed
-   * advisory locks, relation-level table locks, or a single writer slot that
-   * serializes by construction.
+   * How this backend excludes concurrent writers: a keyed advisory lock, a
+   * single writer slot the engine serializes by construction, or a
+   * deployment-level promise that this process serializes its own writes and
+   * no other client writes to the database — see
+   * {@link WriteFenceDeclaration} for the full `mechanism`/`drain` contract.
    *
    * Absent means `unfenced` for any backend the first-party factories did
    * not build (`resolveWriteFencePlan`, `src/backend/capabilities/write-fence.ts`):
    * an undeclared custom backend is refused at construction for Operational
-   * Identity and for TypeGraph-owned recorded-clock allocation
-   * (`history` / `revisionTracking`) rather than silently emitting locks the
-   * engine may not honor. Every first-party backend declares this member
-   * (`SQLITE_CAPABILITIES`, `POSTGRES_CAPABILITIES`), so the refusal is
-   * reachable only by a backend this library did not build.
+   * Identity and for TypeGraph-owned recorded-clock allocation (`history` /
+   * `revisionTracking`) rather than silently emitting locks the engine may
+   * not honor.
    */
-  pessimisticLocks?: PessimisticLockCapabilities | undefined;
+  writeFence?: WriteFenceDeclaration | undefined;
   /**
    * Who allocates recorded-time revisions. `"typegraph-relations"` (the
    * default, and every first-party backend) means TypeGraph owns a clock row
    * and performs the read/advance/write that `lockRecordedClock` fences —
    * which is undegradable, so an `unfenced` engine is refused at
    * construction. `"engine-native"` means the engine supplies the recorded
-   * axis itself (WS9's ruled BraidDB posture: pinned-handle `AS OF`).
+   * axis itself (an engine that supplies the recorded axis natively via
+   * pinned-handle `AS OF`).
    *
    * TODAY THE ENGINE-NATIVE READ/WRITE PATH DOES NOT EXIST YET (follow-up
    * F8, owned by WS9). The capture path allocates the TypeGraph clock
@@ -2191,8 +2192,8 @@ export type GraphBackend = Readonly<{
    */
   vectorStrategy?: VectorStrategy | undefined;
   /**
-   * The lock-statement spelling this backend's `capabilities.pessimisticLocks`
-   * declaration requires when `advisoryLocks` is `true` — resolved through
+   * The lock-statement spelling this backend's `capabilities.writeFence`
+   * declaration requires when `mechanism` is `"advisory"` — resolved through
    * {@link resolveWriteFencePlan} rather than read directly by a lock site.
    * Absent on a backend that serializes writers instead (SQLite's writer
    * slot needs no lock statement at all) or that declares no usable fence.
@@ -4462,10 +4463,8 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   // better-sqlite3 factory overrides this flag for its bundled build contract.
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: false }),
   recursiveTraversal: Object.freeze({ supported: true }),
-  pessimisticLocks: Object.freeze({
-    advisoryLocks: false,
-    tableLocks: false,
-    serializedWriters: true,
+  writeFence: Object.freeze({
+    mechanism: "engine-serialized",
   }),
 });
 
@@ -4489,9 +4488,8 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
   recursiveTraversal: Object.freeze({ supported: true }),
-  pessimisticLocks: Object.freeze({
-    advisoryLocks: true,
-    tableLocks: true,
-    serializedWriters: false,
+  writeFence: Object.freeze({
+    mechanism: "advisory",
+    drain: "table-lock",
   }),
 });

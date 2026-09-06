@@ -243,7 +243,7 @@ const derivationIdentityGraph = defineGraph({
 // opening recorded-time capture, which on PostgreSQL needs `fenceSql` for an
 // entirely different, dialect-gated reason (its own isolation-level read,
 // `assertRecordedCaptureTransactionIsolation` in `store/recorded-capture/
-// guards.ts`) that a `pessimisticLocks` posture cannot satisfy either way.
+// guards.ts`) that a `writeFence` posture cannot satisfy either way.
 // ============================================================
 
 const PortableFenceProbePerson = defineNode("Person", {
@@ -350,18 +350,14 @@ describe("deriveEngineProfile", () => {
     expect(portableStatementText).toBe(`SELECT ${fusedEmbeddedExpressionText}`);
   });
 
-  it("case 1b: a derived PostgreSQL profile with fenceSql: undefined and pessimisticLocks.serializedWriters has no lockSchemaVersionAndGraphWrite member on the root or a transaction() handle, and a graph-write-lock-needing write still succeeds through the portable path", async () => {
+  it('case 1b: a derived PostgreSQL profile with fenceSql: undefined and writeFence.mechanism: "engine-serialized" has no lockSchemaVersionAndGraphWrite member on the root or a transaction() handle, and a graph-write-lock-needing write still succeeds through the portable path', async () => {
     const { profile: baseProfile } =
       await createRealPostgresProfileWithClient();
     const derivedProfile = deriveEngineProfile(baseProfile, {
       fenceSql: undefined,
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: false,
-          serializedWriters: true,
-        },
+        writeFence: { mechanism: "engine-serialized" },
       },
     });
 
@@ -402,37 +398,31 @@ describe("deriveEngineProfile", () => {
     expect(edge).toBeDefined();
   });
 
-  it("case 2: a derived SQLite profile with an all-false pessimisticLocks declaration refuses the identity lock as unfenced (declared-none)", async () => {
+  it("case 2: a derived SQLite profile with writeFence omitted refuses at createSqlBackend, before any identity lock is reached", () => {
     const baseProfile = createRealSqliteProfile();
+    const { writeFence: _writeFence, ...declaredCapabilitiesWithoutFence } =
+      baseProfile.declaredCapabilities;
     const derivedProfile = deriveEngineProfile(baseProfile, {
-      declaredCapabilities: {
-        ...baseProfile.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: false,
-          serializedWriters: false,
-        },
-      },
+      declaredCapabilities: declaredCapabilitiesWithoutFence,
     });
 
-    const backend = createSqlBackend(derivedProfile);
-
-    // An identity-enabled graph's FIRST schema commit runs the identity
-    // subsystem's own schema-commit preflight (`identitySchemaCommitPreflight`,
-    // `src/identity/schema-transition.ts`), which takes this same per-graph
-    // fence before a single row is ever written — so the refusal fires here,
-    // opening the store, rather than needing a write afterward to reach it.
+    // `writeFence` has no arm that means "no fence" the way the deleted
+    // legacy `pessimisticLocks` all-false shape once did, so the only way
+    // left to reach an unfenced declaration is to omit `writeFence`
+    // entirely — which `createSqlBackend`'s own construction-time gate now
+    // refuses outright, before a backend (and so an identity lock) exists.
     let thrown: unknown;
     try {
-      await createAdapterStoreWithSchema(derivationIdentityGraph, backend);
+      createSqlBackend(derivedProfile);
     } catch (error) {
       thrown = error;
     }
 
     expect(thrown).toBeInstanceOf(ConfigurationError);
     const configurationError = thrown as ConfigurationError;
-    expect(configurationError.details["code"]).toBe("WRITE_FENCE_UNAVAILABLE");
-    expect(configurationError.details["reason"]).toBe("declared-none");
+    expect(configurationError.details["code"]).toBe(
+      "ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION",
+    );
   });
 
   it("case 3: an override outside the derivable set throws ENGINE_PROFILE_OVERRIDE_UNSUPPORTED naming the key", () => {
@@ -478,28 +468,19 @@ describe("deriveEngineProfile", () => {
     const derivedProfile = deriveEngineProfile(baseProfile, {
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: true,
-          serializedWriters: false,
-        },
+        writeFence: { mechanism: "caller-serialized" },
       },
     });
 
     const backend = createSqlBackend(derivedProfile);
 
     const rootPlan = resolveWriteFencePlan(backend);
-    const rootReason =
-      rootPlan.kind === "unfenced" ? rootPlan.reason : undefined;
-    expect(rootPlan.kind).toBe("unfenced");
-    expect(rootReason).toBe("table-locks-only");
-    expect(isSchemaFencedInsertEligible(backend)).toBe(false);
+    expect(rootPlan).toEqual({ kind: "caller-serialized" });
+    expect(isSchemaFencedInsertEligible(backend)).toBe(true);
 
     await backend.transaction((tx) => {
       const txPlan = resolveWriteFencePlan(tx);
-      const txReason = txPlan.kind === "unfenced" ? txPlan.reason : undefined;
-      expect(txPlan.kind).toBe(rootPlan.kind);
-      expect(txReason).toBe(rootReason);
+      expect(txPlan).toEqual(rootPlan);
       expect(isSchemaFencedInsertEligible(tx)).toBe(
         isSchemaFencedInsertEligible(backend),
       );
@@ -507,14 +488,14 @@ describe("deriveEngineProfile", () => {
     });
   });
 
-  it("case 6: fenceSql: undefined alone still refuses at createSqlBackend (WRITE_FENCE_SQL_UNAVAILABLE); paired with a declaredCapabilities override that also stops claiming advisoryLocks it resolves engine-serialized", async () => {
+  it('case 6: fenceSql: undefined alone still refuses at createSqlBackend (WRITE_FENCE_SQL_UNAVAILABLE); paired with a declaredCapabilities override that also stops claiming "advisory" it resolves engine-serialized', async () => {
     const { profile: baseProfile } =
       await createRealPostgresProfileWithClient();
 
     // Half 1: dropping the spelling alone leaves `declaredCapabilities
-    // .pessimisticLocks.advisoryLocks: true` in place (the bundled
-    // PostgreSQL declaration), so `createSqlBackend`'s eager fence-plan
-    // resolution has a lock plan with nothing to spell it with.
+    // .writeFence.mechanism: "advisory"` in place (the bundled PostgreSQL
+    // declaration), so `createSqlBackend`'s eager fence-plan resolution has
+    // a lock plan with nothing to spell it with.
     const droppedFenceSqlOnly = deriveEngineProfile(baseProfile, {
       fenceSql: undefined,
     });
@@ -529,22 +510,18 @@ describe("deriveEngineProfile", () => {
       "WRITE_FENCE_SQL_UNAVAILABLE",
     );
 
-    // Half 2: pairing the dropped spelling with a `pessimisticLocks`
-    // declaration that claims `serializedWriters` instead of
-    // `advisoryLocks` gives `resolveWriteFencePlan` an `engine-serialized`
-    // plan, which needs no `fenceSql` at all — this is what successfully
-    // removes the spelling, not `fenceSql: undefined` on its own.
+    // Half 2: pairing the dropped spelling with a `writeFence` declaration
+    // that claims `"engine-serialized"` instead of `"advisory"` gives
+    // `resolveWriteFencePlan` an `engine-serialized` plan, which needs no
+    // `fenceSql` at all — this is what successfully removes the spelling,
+    // not `fenceSql: undefined` on its own.
     const droppedFenceSqlWithSerializedWriters = deriveEngineProfile(
       baseProfile,
       {
         fenceSql: undefined,
         declaredCapabilities: {
           ...baseProfile.declaredCapabilities,
-          pessimisticLocks: {
-            advisoryLocks: false,
-            tableLocks: false,
-            serializedWriters: true,
-          },
+          writeFence: { mechanism: "engine-serialized" },
         },
       },
     );
@@ -649,18 +626,14 @@ describe("deriveEngineProfile refuses the declaredCapabilities/resourceAudit sub
     expect(configurationError.details["key"]).toBe("resourceAudit.kind");
   });
 
-  it("still allows a declaredCapabilities override that changes only pessimisticLocks, keeping maxBindParameters and execution.interactiveTransactions equal to the base profile's own values", async () => {
+  it("still allows a declaredCapabilities override that changes only writeFence, keeping maxBindParameters and execution.interactiveTransactions equal to the base profile's own values", async () => {
     const { profile: baseProfile } =
       await createRealPostgresProfileWithClient();
 
     const derivedProfile = deriveEngineProfile(baseProfile, {
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: false,
-          serializedWriters: true,
-        },
+        writeFence: { mechanism: "engine-serialized" },
       },
     });
 
@@ -724,7 +697,7 @@ describe("registerFirstPartyProfile freezes the trust-bearing bags a derived pro
     ).toBe(originalInteractiveTransactions);
   });
 
-  it("a derived PostgreSQL profile's shared resourceAudit and declaredCapabilities.pessimisticLocks throw on assignment and leave the base unchanged", async () => {
+  it("a derived PostgreSQL profile's shared resourceAudit and declaredCapabilities.writeFence throw on assignment and leave the base unchanged", async () => {
     const { profile: baseProfile } =
       await createRealPostgresProfileWithClient();
     const derivedProfile = deriveEngineProfile(baseProfile, {
@@ -738,15 +711,14 @@ describe("registerFirstPartyProfile freezes the trust-bearing bags a derived pro
     }).toThrow(TypeError);
     expect(baseProfile.resourceAudit.kind).toBe(originalResourceAuditKind);
 
-    const originalPessimisticLocks =
-      baseProfile.declaredCapabilities.pessimisticLocks;
+    const originalWriteFence = baseProfile.declaredCapabilities.writeFence;
     expect(() => {
       (
-        derivedProfile.declaredCapabilities as { pessimisticLocks: unknown }
-      ).pessimisticLocks = undefined;
+        derivedProfile.declaredCapabilities as { writeFence: unknown }
+      ).writeFence = undefined;
     }).toThrow(TypeError);
-    expect(baseProfile.declaredCapabilities.pessimisticLocks).toBe(
-      originalPessimisticLocks,
+    expect(baseProfile.declaredCapabilities.writeFence).toBe(
+      originalWriteFence,
     );
   });
 

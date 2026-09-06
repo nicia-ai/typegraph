@@ -39,7 +39,7 @@ type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
-    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    writeFence?: WriteFenceDeclaration | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
@@ -1916,13 +1916,6 @@ type OntologyRelation = Readonly<{
 export function parseSerializedSchema(json: string): SerializedSchema;
 
 // @public
-type PessimisticLockCapabilities = Readonly<{
-    advisoryLocks: boolean;
-    tableLocks: boolean;
-    serializedWriters: boolean;
-}>;
-
-// @public
 class Placeholder {
     // (undocumented)
     readonly [SQL_PLACEHOLDER_BRAND]: true;
@@ -2757,6 +2750,16 @@ type VectorStrategy = Readonly<{
 
 // @public
 export function wrapZodError(error: ZodError, context: ValidationContext): ValidationError;
+
+// @public
+type WriteFenceDeclaration = Readonly<{
+    mechanism: "advisory";
+    drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "engine-serialized";
+}> | Readonly<{
+    mechanism: "caller-serialized";
+}>;
 
 // (No @packageDocumentation comment for this package)
 

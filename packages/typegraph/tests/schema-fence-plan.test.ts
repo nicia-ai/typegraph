@@ -16,19 +16,20 @@
  * cannot race itself, so an empty clause is correct at any isolation level —
  * which is the posture SQLite has always run in.
  *
- * `unfenced` is what a Postgres-wire engine with no locking primitive
- * declares (DoltgreSQL, `dolthub/doltgresql#2600`). What it buys is a refusal
- * that names the missing capability, at construction, instead of a silent
- * race.
+ * There is no `unfenced` row here: both consumers read a `fenceTarget`
+ * `createSqlBackend` closes over once at construction, from the SAME
+ * finalized capabilities its own construction-time gate already required to
+ * carry a `writeFence` declaration — so, unlike the call-time-parameter lock
+ * sites `tests/lock-fence-plan.test.ts` covers, no backend this factory
+ * builds can ever reach these two consumers in an unfenced state, and no
+ * overlay applied to the returned backend can change that closure after the
+ * fact. `requireWriteFence`'s own `unfenced` refusal is covered directly
+ * where it IS reachable — the "undeclared non-factory" rows in
+ * `tests/lock-fence-plan.test.ts` — rather than restated here.
  *
  * Asserted on the SQL each site actually emits, never on a boolean, so the
  * test fails for the reason a caller would hit.
  *
- * *Mutation*: make `acquireSchemaWriteFence` ignore the plan and always take
- * the lock → the fenced rows still pass but the refusal row fails (the store
- * builds instead of refusing). *Mutation*: swap either `requireWriteFence`
- * call back to a bare `resolveWriteFencePlan` + `plan.kind === "lock"`
- * ternary → the refusal row fails, naming the fence that silently degraded.
  * *Mutation*: make `schemaFenceInsertLockClause` emit `FOR SHARE`
  * unconditionally → the SQLite degrade row fails. *Mutation*: make any site
  * always skip its lock → the corresponding fenced row fails.
@@ -47,7 +48,6 @@ import {
   createLoggedPostgresBackend,
   createLoggedSqliteBackend,
   type LoggedBackend,
-  UNFENCED_CAPABILITIES,
 } from "./lock-fence-test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -90,8 +90,8 @@ async function measure(
 describe("schema fence — a fenced PostgreSQL backend takes every lock", () => {
   it("emits the advisory lock and FOR UPDATE on commit, FOR SHARE on write", async () => {
     // No capabilities override: POSTGRES_CAPABILITIES declares
-    // `{ advisoryLocks: true, tableLocks: true, serializedWriters: false }`,
-    // which resolves `lock`.
+    // `writeFence: { mechanism: "advisory", drain: "table-lock" }`, which
+    // resolves `lock`.
     const logged = await createLoggedPostgresBackend();
     try {
       const { commit, write } = await measure(logged, "j14-fenced");
@@ -104,66 +104,6 @@ describe("schema fence — a fenced PostgreSQL backend takes every lock", () => 
       );
       expect(fusedInsert.length).toBeGreaterThan(0);
       expect(fusedInsert.every((query) => FOR_SHARE.test(query))).toBe(true);
-    } finally {
-      await logged.close();
-    }
-  });
-});
-
-describe("schema fence — an unfenced PostgreSQL backend is refused, not degraded", () => {
-  it("refuses the schema commit rather than running it without the lock", async () => {
-    const logged = await createLoggedPostgresBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
-    try {
-      logged.reset();
-      const error = await createStoreWithSchema(
-        graphFor("j14-unfenced"),
-        logged.backend,
-      ).catch((error_: unknown) => error_);
-
-      // The refusal names the missing capability rather than surfacing as a
-      // SQL error, and it arrives before any lock statement was attempted.
-      expect(error).toBeInstanceOf(Error);
-      expect((error as { details?: { code?: string } }).details?.code).toBe(
-        "WRITE_FENCE_UNAVAILABLE",
-      );
-      const attempted = logged.statements.map((statement) => statement.query);
-      expect(attempted.filter((query) => ADVISORY_LOCK.test(query))).toEqual(
-        [],
-      );
-      expect(attempted.filter((query) => FOR_UPDATE.test(query))).toEqual([]);
-      expect(attempted.filter((query) => FOR_SHARE.test(query))).toEqual([]);
-    } finally {
-      await logged.close();
-    }
-  });
-
-  it("refuses the managed write fence for the same reason", async () => {
-    // Reached directly, because the store that would call it cannot be built
-    // above. This is the half whose lock the transaction HOLDS across its
-    // writes, so a degraded version would assert a version and then let the
-    // flip it was checking for land before the write.
-    const logged = await createLoggedPostgresBackend({
-      pessimisticLocks: UNFENCED_CAPABILITIES,
-    });
-    try {
-      const error = await requireDefined(logged.backend.transaction)(
-        async (tx) =>
-          requireDefined(tx.lockSchemaVersionForWrite)({
-            graphId: "j15-unfenced",
-            expectedVersion: 1,
-          }),
-      ).catch((error_: unknown) => error_);
-
-      expect(error).toBeInstanceOf(Error);
-      expect((error as { details?: { code?: string } }).details?.code).toBe(
-        "WRITE_FENCE_UNAVAILABLE",
-      );
-      // Emphatically NOT a StaleVersionError: refusing for the missing
-      // capability is the point, and reporting a stale version instead would
-      // be the degraded behavior this test exists to forbid.
-      expect(error).not.toBeInstanceOf(StaleVersionError);
     } finally {
       await logged.close();
     }

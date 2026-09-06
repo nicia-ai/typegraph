@@ -151,6 +151,75 @@ describe("schema + graph write fence", () => {
     }
   });
 
+  // Regression for the fused lock building off `fenceSql`'s mere presence
+  // rather than the resolved plan: this factory's `fenceTarget` carries
+  // `postgresFenceSql` unconditionally (harmless under every OTHER
+  // mechanism, since every portable lock site already reads
+  // `caller-serialized` as no statement), so gating fusion on that presence
+  // alone fused the schema+graph advisory lock back in even though the
+  // declaration says no lock is needed or wanted.
+  it("does not fuse the schema+graph lock when the declared write fence is caller-serialized", async () => {
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        vector: false,
+        capabilities: {
+          writeFence: { mechanism: "caller-serialized" },
+        },
+      });
+
+      await backend.transaction((tx) => {
+        expect(tx.lockSchemaVersionAndGraphWrite).toBeUndefined();
+        return Promise.resolve();
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("takes no advisory lock and no FOR SHARE for a schema-managed write under caller-serialized", async () => {
+    const statements: string[] = [];
+    const client = await PGlite.create();
+    try {
+      await client.exec(generatePostgresDDL().join("\n\n"));
+      const backend = createPostgresBackend(
+        drizzlePglite(client, {
+          logger: {
+            logQuery(query: string): void {
+              statements.push(query);
+            },
+          },
+        }),
+        {
+          vector: false,
+          capabilities: {
+            writeFence: {
+              mechanism: "caller-serialized",
+            },
+          },
+        },
+      );
+      const [store] = await createStoreWithSchema(leaseGraph, backend, {
+        history: true,
+      });
+      statements.splice(0);
+
+      await store.nodes.Person.create({ name: "Quiescent" });
+
+      expect(
+        statements.some((statement) =>
+          /pg_advisory_xact_lock/iu.test(statement),
+        ),
+      ).toBe(false);
+      expect(
+        statements.some((statement) => /for share/iu.test(statement)),
+      ).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   it.each(["node conflict", "missing edge endpoint"] as const)(
     "does not lease an unproven fused fence after a %s",
     async (zeroRowCause) => {

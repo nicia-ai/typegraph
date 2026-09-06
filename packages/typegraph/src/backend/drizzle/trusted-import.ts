@@ -98,8 +98,7 @@ export async function assertTrustedImportDatabaseEmpty(
  * transaction (`transactionWithNative` in the PostgreSQL profile builder), so
  * there is no wider fence above it for an advisory key to nest inside. This
  * is the one write-fence site that takes a table lock with no advisory lock
- * preceding it — see the note in `write-fence.ts` next to
- * `planFromLockCapabilities`.
+ * preceding it.
  *
  * Resolves the write-fence plan through {@link resolveWriteFencePlan}; the
  * `lock` arm takes the relation lock below, spelled by the target's own
@@ -111,9 +110,14 @@ export async function lockPostgresTrustedImportTables(
 ): Promise<void> {
   const executeStatement = requireStatementExecution(backend);
   const plan = resolveWriteFencePlan(backend);
-  const fence = requireWriteFence(plan, "trusted import", "table-lock");
+  const fence = requireWriteFence(plan, "trusted import", "drain");
   switch (fence.kind) {
     case "lock": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means, so this site takes no statement.
+        return;
+      }
       await executeStatement(
         asCompiledStatementSql(
           fence.sql.lockTables(
@@ -124,17 +128,22 @@ export async function lockPostgresTrustedImportTables(
       );
       return;
     }
-    case "engine-serialized": {
-      // Two things read this arm as "take no relation lock". The bundled
-      // SQLite import session takes that reading its own way, without ever
-      // calling this function: it is built by
+    case "engine-serialized":
+    case "caller-serialized": {
+      // Two things read `engine-serialized` as "take no relation lock". The
+      // bundled SQLite import session takes that reading its own way,
+      // without ever calling this function: it is built by
       // `createSqliteTrustedImportSession`, which inserts under the writer
       // slot `BEGIN IMMEDIATE` already holds. Any target — SQLite dialect
-      // or not — that declares `serializedWriters: true` instead of locks
-      // reaches this arm directly through `resolveWriteFencePlan`, and
+      // or not — that declares `writeFence.mechanism: "engine-serialized"`
+      // instead of locks reaches this arm directly through
+      // `resolveWriteFencePlan`, and
       // taking no relation lock is the deliberate reading of that
       // declaration: the engine already excludes concurrent writers by
       // construction, so this function's own table lock would add nothing.
+      // `caller-serialized` reads the same way: the deployment's own
+      // promise that no other client writes to this database already
+      // excludes the writer this table lock would otherwise hold off.
       return;
     }
     default: {

@@ -18,15 +18,22 @@
  * Neither mechanism double-counts the other's statements, since each fires
  * on a disjoint execution path.
  *
- * Also exports a capabilities-overlay Proxy for postures a first-party
- * factory cannot construct directly (a present-but-all-false declaration, a
- * declared-advisory-only declaration).
+ * Also exports a capabilities-overlay Proxy for the one posture a
+ * first-party factory cannot construct directly: an undeclared
+ * (`capabilities.writeFence` absent) target.
  */
-import { PGlite, type QueryOptions } from "@electric-sql/pglite";
+import {
+  type Extensions,
+  PGlite,
+  type QueryOptions,
+} from "@electric-sql/pglite";
 import { vector as pgvectorExtension } from "@electric-sql/pglite-pgvector";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
-import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
+import {
+  drizzle as drizzlePglite,
+  type PgliteDatabase,
+} from "drizzle-orm/pglite";
 
 import {
   generatePostgresMigrationSQL,
@@ -53,52 +60,78 @@ export type LoggedBackend = Readonly<{
   execRaw: (statement: string) => Promise<void>;
 }>;
 
+export type LoggedPgliteClient = Readonly<{
+  client: PGlite;
+  db: PgliteDatabase;
+  statements: LoggedStatement[];
+  close: () => Promise<void>;
+}>;
+
 /**
- * A real PostgreSQL backend (PGlite, in-process, no Docker). Every statement
- * the wrapped client actually sends is captured by patching `client.query`
- * itself — the layer `backend.execute`/`executeStatement` calls into on the
- * fast path — so a lock site's SQL is observed regardless of whether it runs
- * inside a top-level call or inside `schemaWriteTransaction`'s callback.
- * `capabilities` — when supplied — is passed as the factory's own override
- * option, so it flows into every closure the factory builds at construction
- * time (the contribution materializer's `fenceTarget` included), not just
- * the returned backend's own property.
+ * The one PGlite-client-plus-capture primitive: a real, in-process
+ * PostgreSQL-dialect connection (no Docker) with every statement the client
+ * actually sends captured at both layers {@link createLoggedPostgresBackend}'s
+ * own doc comment describes — a driver-level patch of `client.query` plus
+ * drizzle's own `logger`, since a lock site reached inside a transaction
+ * callback bypasses the top-level one.
+ *
+ * `extensions` and `ddl` are the caller's own choice so a vector-enabled
+ * backend fixture and a vector-disabled profile fixture can each seed the
+ * schema that matches their own declared capability, from this one capture
+ * primitive, rather than two independent re-implementations drifting apart.
  */
-export async function createLoggedPostgresBackend(
-  capabilities?: Partial<BackendCapabilities>,
-): Promise<LoggedBackend> {
-  const client = await PGlite.create({
-    extensions: { vector: pgvectorExtension },
-  });
-  await client.exec(generatePostgresMigrationSQL());
+export async function createLoggedPgliteClient(
+  options: Readonly<{ extensions?: Extensions; ddl: string }>,
+): Promise<LoggedPgliteClient> {
+  const client = await PGlite.create(
+    options.extensions === undefined ? {} : { extensions: options.extensions },
+  );
+  await client.exec(options.ddl);
   const statements: LoggedStatement[] = [];
   const originalQuery = client.query.bind(client);
   client.query = (<T>(
     query: string,
     params?: unknown[],
-    options?: QueryOptions,
+    queryOptions?: QueryOptions,
   ) => {
     statements.push({ query, params: params ?? [] });
-    return originalQuery<T>(query, params, options);
+    return originalQuery<T>(query, params, queryOptions);
   }) as typeof client.query;
-  const backend = createPostgresBackend(
-    drizzlePglite(client, {
-      logger: {
-        logQuery(query: string, params: unknown[]): void {
-          statements.push({ query, params });
-        },
+  const db = drizzlePglite(client, {
+    logger: {
+      logQuery(query: string, params: unknown[]): void {
+        statements.push({ query, params });
       },
-    }),
-    {
-      vector: false,
-      ...(capabilities === undefined ? {} : { capabilities }),
     },
-  );
+  });
+  return { client, db, statements, close: () => client.close() };
+}
+
+/**
+ * A real PostgreSQL backend (PGlite, in-process, no Docker), built from
+ * {@link createLoggedPgliteClient} with the pgvector extension installed and
+ * the complete bundled-factory migration SQL applied. `capabilities` — when
+ * supplied — is passed as the factory's own override option, so it flows
+ * into every closure the factory builds at construction time (the
+ * contribution materializer's `fenceTarget` included), not just the
+ * returned backend's own property.
+ */
+export async function createLoggedPostgresBackend(
+  capabilities?: Partial<BackendCapabilities>,
+): Promise<LoggedBackend> {
+  const { client, db, statements, close } = await createLoggedPgliteClient({
+    extensions: { vector: pgvectorExtension },
+    ddl: generatePostgresMigrationSQL(),
+  });
+  const backend = createPostgresBackend(db, {
+    vector: false,
+    ...(capabilities === undefined ? {} : { capabilities }),
+  });
   return {
     backend,
     statements,
     reset: () => statements.splice(0),
-    close: () => client.close(),
+    close,
     execRaw: async (statement: string) => {
       await client.exec(statement);
     },
@@ -161,15 +194,16 @@ export function createLoggedSqliteBackend(
  * A capabilities-overlay `Proxy`: forwards every member of `base` unchanged
  * except `capabilities`.
  *
- * A lock site nested inside `schemaWriteTransaction`'s callback (J5, J6)
- * receives a TRANSACTION-SCOPED object the factory builds from its OWN
- * closed-over `capabilities` constant, not from whatever property this
- * wrapper exposes — so `schemaWriteTransaction` itself is intercepted too,
- * recursively overlaying the `tx` argument the real implementation hands to
- * its callback. A lock site reached through a per-construction closure
- * outside `schemaWriteTransaction` entirely (J7/J8's contribution
- * materializer `fenceTarget`) is NOT reachable through this overlay at
- * all — those two sites test the "undeclared non-factory" posture through
+ * A lock site nested inside `schemaWriteTransaction`'s or `transaction`'s
+ * callback (J5, J6, and any managed write reached through a plain
+ * `backend.transaction(...)`) receives a TRANSACTION-SCOPED object the
+ * factory builds from its OWN closed-over `capabilities` constant, not from
+ * whatever property this wrapper exposes — so both openers are intercepted
+ * too, recursively overlaying the `tx` argument the real implementation
+ * hands to its callback. A lock site reached through a per-construction
+ * closure outside either opener entirely (J7/J8's contribution materializer
+ * `fenceTarget`) is NOT reachable through this overlay at all — those two
+ * sites test the "undeclared non-factory" posture through
  * `createContributionMaterializer` directly instead (see
  * `tests/lock-fence-plan.test.ts`).
  *
@@ -202,37 +236,46 @@ export function overlayCapabilities<T extends object>(
             fn(overlayCapabilities(tx, capabilities)),
           );
       }
+      if (property === "transaction" && typeof value === "function") {
+        const real = value as (
+          fn: (tx: object) => Promise<unknown>,
+          options?: unknown,
+        ) => Promise<unknown>;
+        return (fn: (tx: object) => Promise<unknown>, options?: unknown) =>
+          real(
+            (tx: object) => fn(overlayCapabilities(tx, capabilities)),
+            options,
+          );
+      }
       return value;
     },
   });
 }
 
-export const UNFENCED_CAPABILITIES: NonNullable<
-  BackendCapabilities["pessimisticLocks"]
-> = Object.freeze({
-  advisoryLocks: false,
-  tableLocks: false,
-  serializedWriters: false,
-});
-
+/**
+ * The declared-advisory-only posture: an advisory-lock mechanism with no
+ * drain, so every keyed site (J1, J2, J3, J5, J7) succeeds while every drain
+ * site (J4, J6, J8, J18) refuses naming `drain: "none"`.
+ */
 export const ADVISORY_ONLY_CAPABILITIES: NonNullable<
-  BackendCapabilities["pessimisticLocks"]
+  BackendCapabilities["writeFence"]
 > = Object.freeze({
-  advisoryLocks: true,
-  tableLocks: false,
-  serializedWriters: false,
+  mechanism: "advisory",
+  drain: "none",
 });
 
 /**
- * The declaration the plan model has no arm for: a table lock with neither
- * an advisory lock above it nor a serialized-writer slot beneath it.
- * `resolveWriteFencePlan` resolves this to `unfenced` — see the note next to
- * `planFromLockCapabilities` in `write-fence.ts`.
+ * Overlays `logged`'s backend so `capabilities.writeFence` is absent.
+ * `writeFence` has no mechanism that means "no fence" the way the deleted
+ * legacy `pessimisticLocks` all-false shape once did, so this — an
+ * undeclared, non-first-party target — is the only way left to reach an
+ * `unfenced` plan on an otherwise-real backend.
  */
-export const TABLE_LOCKS_ONLY_CAPABILITIES: NonNullable<
-  BackendCapabilities["pessimisticLocks"]
-> = Object.freeze({
-  advisoryLocks: false,
-  tableLocks: true,
-  serializedWriters: false,
-});
+export function unfencedLoggedBackend(logged: LoggedBackend): LoggedBackend {
+  const { writeFence: _writeFence, ...undeclared } =
+    logged.backend.capabilities;
+  return {
+    ...logged,
+    backend: overlayCapabilities(logged.backend, undeclared),
+  };
+}

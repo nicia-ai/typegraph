@@ -737,23 +737,47 @@ fenced or refused rather than allowed to rely on a stale decision.
 
 #### Write-fence declaration codes
 
-`capabilities.pessimisticLocks` resolves one of three write-fence plans a
-lock site consumes — see
-[Write fence declaration](/backend-setup#write-fence-declaration-pessimisticlocks).
-Three `ConfigurationError` codes name the ways a backend's fence turns out
-not to cover what a write needs:
+`capabilities.writeFence` resolves one of four write-fence plans a lock site
+consumes — see
+[Write fence declaration](/backend-setup#write-fence-declaration-writefence).
+`ConfigurationError` codes name the ways a backend's fence declaration, or
+its resolved plan, turns out not to cover what a write needs:
 
 | `details.code` | Raised when |
 | --- | --- |
+| `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` fails runtime validation: an unrecognized `mechanism` string, an unrecognized `drain` string under `mechanism: "advisory"`, or a `drain` key present on `mechanism: "engine-serialized"` / `"caller-serialized"` (`drain` applies only to `"advisory"`). `details.field` names `"mechanism"` or `"drain"`; for an unrecognized value, `details.accepted` lists the allowed strings. Raised by `resolveWriteFencePlan` before any plan is shaped — an invalid `drain` never falls through to behaving like `"quiescent"`. |
+| `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved declaration's `mechanism` is `"advisory"` but the backend's `fenceSql` is missing the member that `mechanism`/`drain` combination needs to spell (`advisoryLockExpression`, `isolationFactExpression`, or, under `drain: "table-lock"`, `lockTables`) — or, independently of any lock plan, a session isolation-level read (recorded capture's isolation guard) finds no `fenceSql` at all. Raised at backend construction for the lock-plan case; at the point of the read for the session-fact case. |
 | `RECORDED_CLOCK_REQUIRES_WRITE_FENCE` | The store is constructed with `history: true` or `revisionTracking: true` — TypeGraph-owned recorded-clock allocation — against a backend whose write-fence plan resolves `unfenced`. |
-| `WRITE_FENCE_UNAVAILABLE` | A resolved plan cannot satisfy what a specific operation needs: either the plan is `unfenced` outright, or it is a declared-advisory-only `lock` plan (`tableLocks: false`) meeting an operation whose `requires` is `"table-lock"`. `details.operation` names the operation and `details.requires` names which lock kind (`"advisory-lock"` or `"table-lock"`) it needed. |
+| `WRITE_FENCE_UNAVAILABLE` | A resolved plan cannot satisfy what a specific operation needs: either the plan is `unfenced` outright, or it is a `lock` plan whose `drain` is `"none"` meeting an operation whose `requires` is `"drain"`. `details.operation` names the operation and `details.requires` names which kind of exclusion (`"keyed"` or `"drain"`) it needed; a `drain: "none"` refusal also names the drain in the message. `"engine-serialized"` and `"caller-serialized"` satisfy either `requires` value without consulting `drain`. |
 | `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` | The backend declares `recordedTimeOwnership: "engine-native"` and the store is constructed with `history: true` or `revisionTracking: true` — TypeGraph still allocates its own recorded clock for those options, so the engine-native path is refused as an interim measure, independently of the write-fence plan. See [Recorded-time ownership](/backend-setup#recorded-time-ownership-recordedtimeownership). |
+| `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized`. An externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue, so `store.withTransaction(externalTx)` is refused rather than let its writes silently interleave with the queue's own. `details.member` names `"adoptTransaction"`. |
 
-All three refuse at `createStore`, never mid-flush, and the message names the
-exact declaration line to add. `IDENTITY_REQUIRES_WRITE_FENCE` is the fourth
-write-fence-related code — see the Operational Identity guard codes table
-above — but is not in this table because it guards identity construction, not
-recorded-clock allocation.
+`RECORDED_CLOCK_REQUIRES_WRITE_FENCE` and `ENGINE_NATIVE_RECORDED_TIME_NOT_IMPLEMENTED` refuse at
+`createStore`, never mid-flush, and the message names the exact declaration line to add.
+`WRITE_FENCE_UNAVAILABLE` is not a `createStore`-time check: `requireWriteFence` is called from
+every individual lock site (the identity graph lock, the identity-enablement drain, identity DDL,
+trusted import, contribution DDL, recorded-clock allocation, schema-fence sites, graph-merge
+provenance), so it fires wherever one of those runs — inside a live transaction, mid-operation,
+not only at `createStore`. `WRITE_FENCE_SQL_UNAVAILABLE` and `WRITE_FENCE_DECLARATION_INVALID`
+both refuse earlier, at backend construction for a `createSqlBackend`-built backend (or, for the
+session-fact half of `WRITE_FENCE_SQL_UNAVAILABLE`, at the read that needed it), since they are
+about the declaration itself rather than what a specific store option or operation requires of it.
+`CALLER_SERIALIZED_REFUSES_ADOPTION` fires wherever `adoptTransaction` is actually called, which is
+never at `createStore` time. `IDENTITY_REQUIRES_WRITE_FENCE` is another write-fence-related code —
+see the Operational Identity guard codes table above — but is not in this table because it guards
+identity construction, not recorded-clock allocation.
+
+### Caller-serialized queue codes
+
+The in-process queue a `writeFence: { mechanism: "caller-serialized" }` declaration builds
+(`src/backend/serialized-execution-queue.ts`) raises two more `ConfigurationError` codes, both
+naming `details.subject` — the SQLite dialect string for SQLite's own per-connection queue, or
+`"caller-serialized"` for the write-unit queue a `caller-serialized` declaration builds:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `SERIALIZED_QUEUE_REENTRANT_SUBMISSION` | A queued operation was awaited from inside a transaction already running on the same queue — the transaction holds the queue's execution slot until it completes, so the nested operation could never run. Use the transaction-scoped context (`tx.nodes` / `tx.edges` / `tx.backend`) instead of the root store or backend inside a `store.transaction` callback, or move the operation outside the transaction. |
+| `CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT` | The queue's reentrancy detection depends on `node:async_hooks`' `AsyncLocalStorage`, which is unavailable on this runtime (or had not finished loading). A `caller-serialized` write-fence declaration's in-process promise depends on that detection actually working, so every submission is refused rather than run without it. SQLite's own per-connection queue never raises this code: it runs without detection instead of refusing when the context is unavailable. |
 
 These codes are not part of `RECORDED_CAPTURE_GUARD_CODES` — that set is
 closed to the three codes documented under
@@ -839,7 +863,7 @@ Operational Identity lifecycle failures use stable `details.code` values on
 | --- | --- |
 | `IDENTITY_REQUIRES_ATOMIC_BACKEND` | The selected adapter cannot provide the interactive transaction required by identity writes. |
 | `IDENTITY_REQUIRES_STATEMENT_EXECUTION` | The backend cannot execute the raw statements Operational Identity issues internally. |
-| `IDENTITY_REQUIRES_WRITE_FENCE` | Operational Identity was constructed against a backend whose `capabilities.pessimisticLocks` resolves `unfenced` — declare the capability, matching the engine's real locking support. See [Write-fence declaration codes](#write-fence-declaration-codes). |
+| `IDENTITY_REQUIRES_WRITE_FENCE` | Operational Identity was constructed against a backend whose `capabilities.writeFence` resolves `unfenced` — declare the capability, matching the engine's real locking support. See [Write-fence declaration codes](#write-fence-declaration-codes). |
 | `IDENTITY_NOT_ENABLED` | `store.identity`, `tx.identity`, `StoreView.identity`, or an identity-expanded query option was reached on a graph without `identity: { ... }` — normally caught at compile time; this is the runtime guard for a widened or `any`-typed handle. |
 | `IDENTITY_STORAGE_MISSING` | An identity relation disappeared after enablement, or exists without this graph's fill. Restore ledgers, or recreate and rebuild the derived closure, before serving traffic. `details.reason: "unfilled"` marks the second case: the separation relation is present but holds no row for this graph while the ledger holds a live `different` assertion across two distinct identity classes — reopen the Store (the open runs the fill) or run `rebuildIdentityClosure(store)`. A Store handle opened while the relation did not exist keeps failing until it is reopened, which is deliberate: the alternative is a confident "not separated" the moment another graph's upgrade creates the shared relation. |
 | `IDENTITY_UPGRADE_REQUIRES_ATOMIC_DDL` | The backend cannot publish the derived separation relation's upgrade — the `CREATE` and the fill — as one commit, on a graph that owes rows. `details.missingPorts` names what is absent: `schemaWriteTransaction` / `identityTableDdl` on the fenced path, or `executeSchemaDdl` on the schema-commit path. Refused rather than degraded, because a relation created empty and filled afterwards reads as "nothing is separated" in between. Both bundled Drizzle backends implement all three when transactions are enabled, so this is a custom-backend path. |

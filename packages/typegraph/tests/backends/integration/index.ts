@@ -65,3 +65,4 @@ export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";
 export { registerWeightedShortestPathExtractionIntegrationTests } from "./weighted-shortest-path-extraction";
+export { registerWriteFenceConformanceIntegrationTests } from "./write-fence-conformance";

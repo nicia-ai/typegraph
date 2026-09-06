@@ -927,25 +927,25 @@ export function buildPostgresEngineProfile(
         ),
       }
     : {};
-  const requestedPessimisticLocks = options.capabilities?.pessimisticLocks;
-  if (requestedPessimisticLocks?.serializedWriters === true) {
+  // A PostgreSQL pool is never itself an engine with a single writer slot,
+  // so `mechanism: "engine-serialized"` is a false claim about this engine —
+  // the one shape this factory refuses. `"caller-serialized"` is a
+  // different claim — a promise about the DEPLOYMENT, not the engine — and
+  // is accepted: this pool still carries its own `fenceSql` underneath it
+  // (harmless, since every keyed and drain site under `caller-serialized`
+  // already takes no statement), so nothing about this factory's assembly
+  // needs to change to honor it.
+  const requestedWriteFence = options.capabilities?.writeFence;
+  if (requestedWriteFence?.mechanism === "engine-serialized") {
     throw new ConfigurationError(
-      "PostgreSQL backend capability overrides cannot claim serialized writers.",
-      { requestedPessimisticLocks },
+      'PostgreSQL backend capability overrides cannot declare writeFence.mechanism: "engine-serialized".',
+      { requestedWriteFence },
       {
         suggestion:
-          "Keep serializedWriters: false. A PostgreSQL pool requires its advisory-lock fence; use a custom backend only when the underlying engine really provides a single writer slot.",
+          'Declare writeFence.mechanism as "advisory" (this pool\'s own fence) or "caller-serialized" (a deployment-level promise); use a custom backend only when the underlying engine really provides a single writer slot.',
       },
     );
   }
-  const pessimisticLocks =
-    requestedPessimisticLocks === undefined ?
-      POSTGRES_CAPABILITIES.pessimisticLocks
-    : {
-        advisoryLocks: requestedPessimisticLocks.advisoryLocks,
-        tableLocks: requestedPessimisticLocks.tableLocks,
-        serializedWriters: false,
-      };
   const declaredCapabilities = sealCapabilityDeclaration(
     normalizeGraphAnalyticsCapabilities({
       ...baseCapabilities,
@@ -957,7 +957,6 @@ export function buildPostgresEngineProfile(
         ...options.capabilities?.execution,
       },
       ...driverBindParameterOverrides,
-      pessimisticLocks,
     }),
   );
   // Derived last and not overridable: how far up the contribution health
@@ -1548,7 +1547,7 @@ export function buildPostgresEngineProfile(
      * own: it is never taken without the advisory lock above it, so no shipped
      * or plausible engine distinguishes them. An engine that implements
      * `pg_advisory_xact_lock` but not `FOR UPDATE` is where a `rowLocks`
-     * member of `PessimisticLockCapabilities` would earn its place.
+     * member of `WriteFenceDeclaration` would earn its place.
      */
     async function acquireSchemaWriteFence(
       tx: AnyPgTransaction,
@@ -1557,7 +1556,7 @@ export function buildPostgresEngineProfile(
       const plan = requireWriteFence(
         resolveWriteFencePlan(fenceTarget),
         "The PostgreSQL schema-commit fence",
-        "advisory-lock",
+        "keyed",
       );
       switch (plan.kind) {
         case "lock": {
@@ -1599,10 +1598,13 @@ export function buildPostgresEngineProfile(
         `);
           return;
         }
-        case "engine-serialized": {
+        case "engine-serialized":
+        case "caller-serialized": {
           // The writer slot IS the fence; the commit already runs alone, which
           // is the guarantee `commitSchemaVersion`'s own comment names
-          // ("BEGIN IMMEDIATE on SQLite"). Nothing to take.
+          // ("BEGIN IMMEDIATE on SQLite"). Under `caller-serialized`, the
+          // deployment's own serialization promise plays the same role.
+          // Nothing to take.
           return;
         }
         default: {
@@ -2623,11 +2625,22 @@ function createPostgresOperationBackend(
    * no schema-fenced insert program at all", which sends the Store down the
    * unfused fallback path. The fused program is still correct here; it is
    * the lock inside it that is not available.
+   *
+   * The resolved plan is also what gates whether `fenceTarget.fenceSql` is
+   * threaded into `fusion` below (which is what lets the fused
+   * `lockSchemaVersionAndGraphWrite` command build at all): this factory
+   * keeps carrying `fenceSql` regardless of what the declared write fence
+   * resolves to, so gating fusion on `fenceSql`'s mere presence rather than
+   * on this SAME plan would let a resolved `caller-serialized`/`unfenced`
+   * backend still take the advisory lock the declaration says it does not
+   * need — the one decision this module makes, read twice, must read the
+   * same answer both times.
    */
-  const schemaFenceInsertLockClause = ((): SQL => {
-    const plan = resolveWriteFencePlan(fenceTarget);
-    return plan.kind === "lock" ? sql.raw("FOR SHARE") : sql.raw("");
-  })();
+  const schemaFenceFusionPlan = resolveWriteFencePlan(fenceTarget);
+  const schemaFenceInsertLockClause: SQL =
+    schemaFenceFusionPlan.kind === "lock" ?
+      sql.raw("FOR SHARE")
+    : sql.raw("");
 
   const commonOperationMembers = createCommonOperationBackend(
     buildCommonOperationOptions({
@@ -2656,9 +2669,10 @@ function createPostgresOperationBackend(
         atomicProgramsAtTransactionScope: true,
         nodeProjectionInsertFusion: true,
         dynamicEdgeConvergence: true,
-        ...(fenceTarget.fenceSql === undefined ?
-          {}
-        : { fenceSql: fenceTarget.fenceSql }),
+        ...(schemaFenceFusionPlan.kind === "lock" &&
+        fenceTarget.fenceSql !== undefined ?
+          { fenceSql: fenceTarget.fenceSql }
+        : {}),
         async beforeNodeProjectionInsert(params, plan): Promise<void> {
           const vectorSlots = vectorSlotsFromManagedNodeCreatePlan(
             params,
@@ -2908,7 +2922,7 @@ function createPostgresOperationBackend(
     const plan = requireWriteFence(
       resolveWriteFencePlan(fenceTarget),
       "The PostgreSQL schema write fence",
-      "advisory-lock",
+      "keyed",
     );
     const shareLock = plan.kind === "lock" ? sql`FOR SHARE` : sql``;
     const active = await execGet<{ version: number }>(sql`

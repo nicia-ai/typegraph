@@ -131,6 +131,7 @@ function banColumns(modules: readonly string[]): readonly BanColumn[] {
       exempt: [
         "src/backend/derive-backend.ts",
         "src/backend/drizzle/contribution-materializations.ts",
+        "src/backend/drizzle/engine/create-sql-backend.ts",
         "src/backend/drizzle/postgres.ts",
         "src/store/operations/edge-batch-validation.ts",
         "src/store/operations/node-operations.ts",

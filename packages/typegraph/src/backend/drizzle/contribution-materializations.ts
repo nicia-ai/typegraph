@@ -1704,7 +1704,7 @@ export function createContributionMaterializer(
     tx: SchemaWriteTransactionBackend,
   ): Promise<void> {
     const plan = resolveWriteFencePlan(deps.fenceTarget);
-    const fence = requireWriteFence(plan, "contribution DDL", "advisory-lock");
+    const fence = requireWriteFence(plan, "contribution DDL", "keyed");
     switch (fence.kind) {
       case "lock": {
         await tx.execute(
@@ -1714,9 +1714,12 @@ export function createContributionMaterializer(
         );
         return;
       }
-      case "engine-serialized": {
+      case "engine-serialized":
+      case "caller-serialized": {
         // SQLite needs nothing: `BEGIN IMMEDIATE` already holds the
-        // database's single writer slot for the whole fence.
+        // database's single writer slot for the whole fence. Under
+        // `caller-serialized`, the deployment's own promise plays the same
+        // role.
         return;
       }
       default: {
@@ -1759,10 +1762,16 @@ export function createContributionMaterializer(
     const fence = requireWriteFence(
       plan,
       "shared fulltext table lock",
-      "table-lock",
+      "drain",
     );
     switch (fence.kind) {
       case "lock": {
+        if (fence.drain !== "table-lock") {
+          // `drain: "quiescent"`: the declaration already excludes
+          // concurrent writers by some other means, so this site takes no
+          // statement.
+          return;
+        }
         await tx.executeStatement(
           asCompiledStatementSql(
             fence.sql.lockTables([tableName], "access-exclusive"),
@@ -1770,10 +1779,13 @@ export function createContributionMaterializer(
         );
         return;
       }
-      case "engine-serialized": {
+      case "engine-serialized":
+      case "caller-serialized": {
         // SQLite has no relation lock and needs none: `BEGIN IMMEDIATE` took
         // the database's single writer slot when the fence opened, so probe,
         // drop and refill already run with every other writer excluded.
+        // `caller-serialized` reads the same way through the deployment's
+        // own promise.
         return;
       }
       default: {

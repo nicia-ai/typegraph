@@ -26,11 +26,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { isBundledRootAutocommitEligible } from "../src/backend/capabilities/autocommit-single-statement";
 import { requireCatalog } from "../src/backend/capabilities/catalog";
-import { isSchemaFencedInsertEligible } from "../src/backend/capabilities/schema-fenced-insert";
+import {
+  isSchemaFencedInsertEligible,
+  markSchemaFencedInsertEligibleUnderFence,
+} from "../src/backend/capabilities/schema-fenced-insert";
 import {
   isFirstPartyFactory,
-  pessimisticLockDeclarationLine,
   resolveWriteFencePlan,
+  writeFenceDeclarationLine,
 } from "../src/backend/capabilities/write-fence";
 import {
   createSqlBackend,
@@ -74,13 +77,13 @@ async function createRealPostgresProfile(): Promise<
 }
 
 describe("createSqlBackend refusals", () => {
-  it("refuses a profile whose resolved capabilities omit pessimisticLocks", () => {
+  it("refuses a profile whose resolved capabilities omit writeFence", () => {
     const base = createRealSqliteProfile();
     const profile = {
       ...base,
       declaredCapabilities: {
         ...base.declaredCapabilities,
-        pessimisticLocks: undefined,
+        writeFence: undefined,
       },
     };
 
@@ -97,7 +100,7 @@ describe("createSqlBackend refusals", () => {
       "ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION",
     );
     expect(configurationError.message).toContain(
-      pessimisticLockDeclarationLine("sqlite"),
+      writeFenceDeclarationLine("sqlite"),
     );
   });
 
@@ -145,16 +148,15 @@ describe("createSqlBackend refusals", () => {
     expect(isSchemaFencedInsertEligible(backend)).toBe(true);
   });
 
-  it("refuses a profile that declares advisoryLocks: true but supplies no fenceSql", () => {
+  it('refuses a profile that declares writeFence.mechanism: "advisory" but supplies no fenceSql', () => {
     const base = createRealSqliteProfile();
     const profile = {
       ...base,
       declaredCapabilities: {
         ...base.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: true,
-          tableLocks: true,
-          serializedWriters: false,
+        writeFence: {
+          mechanism: "advisory" as const,
+          drain: "table-lock" as const,
         },
       },
     };
@@ -176,54 +178,20 @@ describe("createSqlBackend refusals", () => {
   });
 
   it("marks isSchemaFencedInsertEligible only when the resolved fence plan is not unfenced", () => {
-    const base = createRealSqliteProfile();
-    const profile = {
-      ...base,
-      declaredCapabilities: {
-        ...base.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: false,
-          serializedWriters: false,
-        },
-      },
-    };
-
-    const backend = createSqlBackend(profile);
-
-    expect(isSchemaFencedInsertEligible(backend)).toBe(false);
-    // The refusal above already required a declared value, so this profile
-    // still constructs. A spread copy is a new object and is never
-    // first-party regardless of which field the spread overrode; the
-    // autocommit mark is otherwise unaffected by this gate.
-    expect(isFirstPartyFactory(backend)).toBe(false);
-    expect(isBundledRootAutocommitEligible(backend)).toBe(true);
-  });
-
-  it("resolves the same unfenced plan and schema-fenced-insert eligibility on the root and on a transaction() handle it opens", async () => {
-    const base = createRealSqliteProfile();
-    const profile = {
-      ...base,
-      declaredCapabilities: {
-        ...base.declaredCapabilities,
-        pessimisticLocks: {
-          advisoryLocks: false,
-          tableLocks: false,
-          serializedWriters: false,
-        },
-      },
-    };
-
-    const backend = createSqlBackend(profile);
-
-    expect(resolveWriteFencePlan(backend).kind).toBe("unfenced");
-    expect(isSchemaFencedInsertEligible(backend)).toBe(false);
-
-    await backend.transaction((tx) => {
-      expect(resolveWriteFencePlan(tx).kind).toBe("unfenced");
-      expect(isSchemaFencedInsertEligible(tx)).toBe(false);
-      return Promise.resolve();
+    // `createSqlBackend` itself can never resolve `unfenced` — its own
+    // construction-time gate refuses a profile with no `writeFence` before a
+    // backend exists — so this exercises the mark directly, the same way
+    // `markSchemaFencedInsertEligibleUnderFence`'s one caller
+    // (`createSqlBackend`) would for a hypothetical unfenced resolution.
+    const fenced = {};
+    const unfenced = {};
+    markSchemaFencedInsertEligibleUnderFence(fenced, {
+      kind: "engine-serialized",
     });
+    markSchemaFencedInsertEligibleUnderFence(unfenced, { kind: "unfenced" });
+
+    expect(isSchemaFencedInsertEligible(fenced)).toBe(true);
+    expect(isSchemaFencedInsertEligible(unfenced)).toBe(false);
   });
 
   it("reports isFirstPartyFactory true for both bundled roots, and false for a spread copy of each — including on a transaction() handle each backend opens", async () => {
@@ -420,7 +388,7 @@ describe("finalizeEngineCapabilities", () => {
 });
 
 describe("resolveWriteFencePlan refusals", () => {
-  it("refuses a postgres-dialect target that declares advisoryLocks: true but supplies no fenceSql, naming postgresFenceSql", () => {
+  it('refuses a postgres-dialect target that declares writeFence.mechanism: "advisory" but supplies no fenceSql, naming postgresFenceSql', () => {
     const base = createRealSqliteProfile();
 
     let thrown: unknown;
@@ -429,11 +397,7 @@ describe("resolveWriteFencePlan refusals", () => {
         dialect: "postgres",
         capabilities: {
           ...base.declaredCapabilities,
-          pessimisticLocks: {
-            advisoryLocks: true,
-            tableLocks: true,
-            serializedWriters: false,
-          },
+          writeFence: { mechanism: "advisory", drain: "table-lock" },
         },
         // No `fenceSql` — the exact shape a lock declaration without a
         // spelling refuses, reached this time through `resolveWriteFencePlan`
@@ -450,15 +414,61 @@ describe("resolveWriteFencePlan refusals", () => {
       "WRITE_FENCE_SQL_UNAVAILABLE",
     );
     expect(configurationError.suggestion).toContain("postgresFenceSql");
+    expect(configurationError.message).toContain(
+      'capabilities.writeFence: { mechanism: "advisory", drain: "table-lock" }',
+    );
+  });
+});
+
+describe("bundled factories accept a declared writeFence", () => {
+  it("buildSqliteEngineProfile + createSqlBackend resolves a declared writeFence", () => {
+    const sqlite = new RealDatabase(":memory:");
+    cleanups.push(() => {
+      sqlite.close();
+    });
+    const profile = buildSqliteEngineProfile(drizzleSqlite(sqlite), {
+      executionProfile: { isSync: true },
+      capabilities: {
+        writeFence: { mechanism: "caller-serialized" },
+      },
+    });
+
+    // `createSqlBackend` must not throw: the construction-time gate above
+    // accepts a caller-declared `writeFence` overriding the bundled default.
+    const backend = createSqlBackend(profile);
+
+    expect(resolveWriteFencePlan(backend)).toEqual({
+      kind: "caller-serialized",
+    });
+  });
+
+  it("buildPostgresEngineProfile + createSqlBackend resolves a declared writeFence", async () => {
+    const client = await PGlite.create();
+    cleanups.push(() => client.close());
+    const profile = buildPostgresEngineProfile(drizzlePg(client), {
+      vector: false,
+      capabilities: {
+        writeFence: { mechanism: "advisory", drain: "table-lock" },
+      },
+    });
+
+    const backend = createSqlBackend(profile);
+
+    expect(resolveWriteFencePlan(backend)).toEqual(
+      expect.objectContaining({
+        kind: "lock",
+        drain: "table-lock",
+      }),
+    );
   });
 });
 
 describe("assertRecordedCaptureTransactionIsolation refusals", () => {
   it("refuses a postgres-dialect target with no fenceSql via the session-fact refusal, not the lock refusal", async () => {
-    // This target declares NO `pessimisticLocks` at all — the exact
-    // extensibility case (a custom backend with `serializedWriters: true`
-    // and no advisory locks) the lock-plan refusal's message would
-    // misdescribe by claiming `advisoryLocks: true`.
+    // This target declares no `capabilities` at all — the extensibility
+    // case (a custom backend with an `engine-serialized` mechanism and no
+    // advisory locks) the lock-plan refusal's message would misdescribe by
+    // claiming `mechanism: "advisory"`.
     const target = {
       dialect: "postgres" as const,
       fenceSql: undefined,
@@ -477,7 +487,7 @@ describe("assertRecordedCaptureTransactionIsolation refusals", () => {
     expect(configurationError.details["code"]).toBe(
       "WRITE_FENCE_SQL_UNAVAILABLE",
     );
-    expect(configurationError.message).not.toContain("advisoryLocks: true");
+    expect(configurationError.message).not.toContain('mechanism: "advisory"');
     expect(configurationError.message).toContain("fenceSql");
     expect(configurationError.suggestion).toContain("postgresFenceSql");
   });

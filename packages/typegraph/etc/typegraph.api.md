@@ -216,7 +216,7 @@ export type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
-    pessimisticLocks?: PessimisticLockCapabilities | undefined;
+    writeFence?: WriteFenceDeclaration | undefined;
     recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
@@ -5393,13 +5393,6 @@ export type PersonalizedPageRankSeed<G extends GraphDef> = Readonly<{
     weight?: number;
 }>;
 
-// @public
-type PessimisticLockCapabilities = Readonly<{
-    advisoryLocks: boolean;
-    tableLocks: boolean;
-    serializedWriters: boolean;
-}>;
-
 // @public (undocumented)
 export const pgvectorStrategy: VectorStrategy;
 
@@ -8305,6 +8298,16 @@ type WidenBrandedIds<T> = {
         [P in keyof A]: UnbrandParam<A[P]>;
     }) => R : T[K];
 };
+
+// @public
+type WriteFenceDeclaration = Readonly<{
+    mechanism: "advisory";
+    drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "engine-serialized";
+}> | Readonly<{
+    mechanism: "caller-serialized";
+}>;
 
 // (No @packageDocumentation comment for this package)
 

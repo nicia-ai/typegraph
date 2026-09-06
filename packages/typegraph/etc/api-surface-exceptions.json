@@ -49,5 +49,469 @@
     "kind": "required-member-added",
     "reason": "FenceStatements is what a resolved `lock` WriteFencePlan carries as its `sql` field, derived from FenceSql's two expressions by resolveFenceStatements; no code ever hand-authors one. requireWriteFence accepts WriteFencePlan as a parameter, which this checker treats as an author-facing position for every member mandatory on every variant, including FenceStatements's three derived members, so they are required as a set at that boundary just as FenceSql's own members are.",
     "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "BackendCapabilities",
+    "member": "pessimisticLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "PessimisticLockCapabilities",
+    "member": "serializedWriters",
+    "kind": "member-removed",
+    "reason": "removed in favor of writeFence per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "WriteFencePlan",
+    "member": "advisoryLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of the lock arm's drain field per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "WriteFencePlan",
+    "member": "tableLocks",
+    "kind": "member-removed",
+    "reason": "removed in favor of the lock arm's drain field per the 2026-09-06 clean-API ruling",
+    "issue": "#622"
   }
 ]

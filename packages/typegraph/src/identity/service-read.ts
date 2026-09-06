@@ -251,7 +251,7 @@ export async function lockIdentityGraph(
   graphId: string,
 ): Promise<void> {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(plan, "identity graph lock", "advisory-lock");
+  const fence = requireWriteFence(plan, "identity graph lock", "keyed");
   switch (fence.kind) {
     case "lock": {
       await target.execute(
@@ -261,10 +261,13 @@ export async function lockIdentityGraph(
       );
       return;
     }
-    case "engine-serialized": {
-      // No lock is taken because the engine's single writer slot already
-      // serializes writers — see the DEFERRED-frame caveat above, which
-      // `executeIdentityStatement` turns into a typed refusal (#447).
+    case "engine-serialized":
+    case "caller-serialized": {
+      // No lock is taken because the engine's single writer slot (or, under
+      // `caller-serialized`, the deployment's own serialization promise)
+      // already excludes concurrent writers — see the DEFERRED-frame caveat
+      // above, which `executeIdentityStatement` turns into a typed refusal
+      // (#447).
       return;
     }
     default: {
@@ -276,7 +279,7 @@ export async function lockIdentityGraph(
 /**
  * Drains in-flight legacy node writes before the first identity snapshot.
  * Resolves a {@link resolveWriteFencePlan}; the `lock` arm takes the relation
- * lock (needs `tableLocks`), and the `engine-serialized` arm is the SQLite
+ * lock (needs `drain: "table-lock"`), and the `engine-serialized` arm is the SQLite
  * writer-slot case, which has already drained every writer.
  *
  * `schema.tables.nodes` — the physical name, not `schema.nodesTable` — is
@@ -291,22 +294,27 @@ export async function lockIdentityEnablementNodes(
   schema: SqlSchema,
 ): Promise<void> {
   const plan = resolveWriteFencePlan(target);
-  const fence = requireWriteFence(
-    plan,
-    "identity enablement drain",
-    "table-lock",
-  );
+  const fence = requireWriteFence(plan, "identity enablement drain", "drain");
   switch (fence.kind) {
     case "lock": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means (`requireWriteFence` already refused
+        // `drain: "none"` above), so this site takes no statement rather
+        // than one the resource does not need.
+        return;
+      }
       await executeIdentityStatement(
         target,
         fence.sql.lockTables([schema.tables.nodes], "share"),
       );
       return;
     }
-    case "engine-serialized": {
-      // No lock is taken because the engine's single writer slot already
-      // drained every writer before the fence opened.
+    case "engine-serialized":
+    case "caller-serialized": {
+      // No lock is taken because the engine's single writer slot (or, under
+      // `caller-serialized`, the deployment's own serialization promise)
+      // already drained every writer before the fence opened.
       return;
     }
     default: {

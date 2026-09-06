@@ -50,11 +50,7 @@ import {
 } from "drizzle-orm";
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
-import {
-  BackendDisposedError,
-  CompilerInvariantError,
-  ConfigurationError,
-} from "../../errors";
+import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -91,6 +87,11 @@ import {
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import {
+  createSerializedExecutionQueue,
+  runWithSerializedQueue,
+  type SerializedExecutionQueue,
+} from "../serialized-execution-queue";
 import {
   type AdapterBackend,
   type BackendCapabilities,
@@ -415,11 +416,6 @@ export function computeSqliteBatchChunkSizes(
   };
 }
 
-type SerializedExecutionQueue = Readonly<{
-  dispose: () => void;
-  runExclusive: <T>(task: () => Promise<T>) => Promise<T>;
-}>;
-
 // ============================================================
 // Utilities
 // ============================================================
@@ -430,130 +426,6 @@ const toUniqueRow = createUniqueRowMapper(SQLITE_ROW_MAPPER_CONFIG);
 const toSchemaVersionRow = createSchemaVersionRowMapper(
   SQLITE_ROW_MAPPER_CONFIG,
 );
-
-/** A shared promise that never settles — used to absorb post-dispose work. */
-const PENDING_FOREVER: Promise<never> = new Promise<never>(noop);
-
-function pendingForever<T>(): Promise<T> {
-  return PENDING_FOREVER;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-empty-function
-function noop(): void {}
-
-/**
- * Tracks which serialized queue (if any) the current async execution is
- * running a task for, so a re-entrant submission — a root-backend operation
- * awaited from inside a transaction already occupying the same queue — can be
- * rejected with a typed error instead of deadlocking (the enclosing task holds
- * the queue slot until it completes, so the inner operation can never run).
- *
- * AsyncLocalStorage is loaded lazily and optionally: it is available on Node
- * and on Cloudflare workers with the `nodejs_als` compatibility flag, and a
- * runtime without it simply skips the detection (the queue behaves as before).
- */
-type QueueTaskContext = Readonly<{
-  getStore: () => unknown;
-  run: <T>(store: object, callback: () => T) => T;
-}>;
-
-let queueTaskContext: QueueTaskContext | undefined;
-
-async function loadQueueTaskContext(): Promise<void> {
-  try {
-    const asyncHooks = await import("node:async_hooks");
-    queueTaskContext = new asyncHooks.AsyncLocalStorage<object>();
-  } catch {
-    // AsyncLocalStorage unavailable on this runtime: re-entrant submissions
-    // stay undetected, matching the queue's previous behavior.
-  }
-}
-
-// eslint-disable-next-line unicorn/prefer-top-level-await -- the dual CJS/ESM build cannot use top-level await
-void loadQueueTaskContext();
-
-function rejectReentrantQueueSubmission(): Promise<never> {
-  return Promise.reject(
-    new ConfigurationError(
-      "This operation was awaited from inside a transaction running on the " +
-        "same SQLite backend and would deadlock: the transaction holds the " +
-        "backend's serialized execution slot until it completes, so the " +
-        "operation could never run.",
-      { backend: "sqlite", capability: "concurrentRootAccess" },
-      {
-        suggestion:
-          "Inside a store.transaction callback, use the transaction-scoped " +
-          "context (tx.nodes / tx.edges / tx.backend) instead of the root " +
-          "store or backend, or move the operation outside the transaction.",
-      },
-    ),
-  );
-}
-
-function createSerializedExecutionQueue(): SerializedExecutionQueue {
-  let tail: Promise<unknown> = Promise.resolve();
-  let disposed = false;
-  // Unique per queue: a task running on THIS queue must not submit back to it,
-  // but may freely submit to a different backend's queue.
-  const taskMarker: object = {};
-
-  function isDisposed(): boolean {
-    return disposed;
-  }
-
-  return {
-    dispose() {
-      disposed = true;
-    },
-
-    runExclusive<T>(task: () => Promise<T>): Promise<T> {
-      if (isDisposed()) return Promise.reject(new BackendDisposedError());
-      if (queueTaskContext?.getStore() === taskMarker) {
-        return rejectReentrantQueueSubmission();
-      }
-
-      // When disposed, runTask returns a never-settling promise so that no
-      // rejection propagates through the 7+ async wrappers between this
-      // queue and the store-level caller. A rejection here would become an
-      // unhandled rejection if the caller abandoned the promise during
-      // teardown — and JavaScript offers no way to `.catch()` a rejection
-      // at the bottom of a chain without every async wrapper above it also
-      // creating an independently-unhandled rejected promise.
-      //
-      // The tradeoff: an active caller whose operation was queued before
-      // dispose() will see a permanently-pending promise rather than a
-      // BackendDisposedError. Post-dispose submissions (the check above)
-      // still reject immediately since the caller actively holds that
-      // promise.
-      const runTask = async (): Promise<T> => {
-        if (isDisposed()) return pendingForever<T>();
-        try {
-          const context = queueTaskContext;
-          return context === undefined ?
-              await task()
-            : await context.run(taskMarker, () => task());
-        } catch (error) {
-          if (isDisposed()) return pendingForever<T>();
-          throw error;
-        }
-      };
-      const result = tail.then(runTask, runTask);
-      tail = result.then(
-        () => 0,
-        () => 0,
-      );
-      return result;
-    },
-  };
-}
-
-function runWithSerializedQueue<T>(
-  queue: SerializedExecutionQueue | undefined,
-  task: () => Promise<T>,
-): Promise<T> {
-  if (queue === undefined) return task();
-  return queue.runExclusive(task);
-}
 
 /** Every SQLite "atomic transactions unavailable" refusal shares this shape. */
 function throwSqliteTransactionsDisabled(message: string): never {
@@ -1377,7 +1249,16 @@ export function buildSqliteEngineProfile(
   // neon-http) have no transactions and manage their own concurrency, so they
   // stay unqueued.
   const serializedQueue =
-    transactionMode === "none" ? undefined : createSerializedExecutionQueue();
+    transactionMode === "none" ?
+      undefined
+    : createSerializedExecutionQueue({
+        // Best-effort: undetected reentrancy here degrades to the deadlock
+        // this queue has always risked when AsyncLocalStorage is
+        // unavailable, not a broken correctness promise — SQLite's own
+        // engine-serialized fence never depended on this detection.
+        reentrancy: "detect",
+        subject: "sqlite",
+      });
 
   // Durable fulltext + vector materialization (#135): the dialect-specific
   // marker-table primitives. Orchestration (materialize / assert /

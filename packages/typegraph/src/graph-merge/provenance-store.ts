@@ -428,18 +428,23 @@ type SidecarClaimPort = SidecarInspectionPort &
  * `DEFERRED` transaction, so that premise holds unconditionally.
  *
  * Resolves a {@link resolveWriteFencePlan}: the `lock` arm takes the relation
- * lock below (needs `tableLocks`), and the `engine-serialized` arm is the
- * SQLite writer-slot case this doc already describes.
+ * lock below (needs `drain: "table-lock"`), and the `engine-serialized` arm
+ * is the SQLite writer-slot case this doc already describes.
  */
 async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
   const plan = resolveWriteFencePlan(tx);
   const fence = requireWriteFence(
     plan,
     "graph-merge provenance fence",
-    "table-lock",
+    "drain",
   );
   switch (fence.kind) {
     case "lock": {
+      if (fence.drain !== "table-lock") {
+        // `drain: "quiescent"`: the declaration already excludes concurrent
+        // writers by some other means, so this site takes no statement.
+        return;
+      }
       // Built fresh from `tx.tableNames` — always the live-relation schema,
       // never a recorded-read view — so `schema.tables.nodes/.edges` (the
       // physical names `lockTables` needs) name the same relations
@@ -455,7 +460,8 @@ async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
       );
       return;
     }
-    case "engine-serialized": {
+    case "engine-serialized":
+    case "caller-serialized": {
       return;
     }
     default: {

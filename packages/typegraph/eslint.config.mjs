@@ -331,9 +331,9 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/backend/capabilities/write-fence.ts",
     reason:
-      "The dialect-keyed default lock capabilities the fence planner starts from (deriveFromDialect), plus the refusal and declaration-guidance messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable, pessimisticLockDeclarationLine, unfencedRefusalMessage).",
+      "The dialect-keyed default fence declaration the planner starts from for a first-party target (deriveFromDialect), plus the two refusal messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable).",
     permanent: true,
-    sites: 9,
+    sites: 4,
   },
   {
     file: "src/store/algorithms/iterative-graph-operation.ts",
@@ -1099,7 +1099,11 @@ const LINT_BLOCKS = [
   },
   // The shared engine factory both dialect factories delegate to
   // (`createSqlBackend`) is the sole module that writes a verdict, so it is
-  // the only block exempted from the audit import ban.
+  // exempted from the audit import ban. It also decorates its own
+  // already-built, already-audited backend through the seam — the
+  // in-process write-fence queue a `caller-serialized` declaration resolves
+  // to — so it drops the seam import ban too, the same way
+  // `postgres.ts` does for its own trusted-transaction decoration.
   {
     files: ["src/backend/drizzle/engine/create-sql-backend.ts"],
     rules: {
@@ -1109,7 +1113,6 @@ const LINT_BLOCKS = [
         ...DRIZZLE_ZONE_RESTRICTIONS,
         GLOBAL_SYMBOL_RESTRICTION,
         ...RUNTIME_PORT_RESTRICTIONS,
-        ...BACKEND_SEAM_IMPORT_RESTRICTIONS,
         ...BACKEND_CARRY_RESTRICTIONS,
         ...BACKEND_CONSTRUCTION_RESTRICTIONS,
         ...DIALECT_SEAM_RESTRICTIONS,
