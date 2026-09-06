@@ -79,6 +79,12 @@ type InventoryEntry = Readonly<{
 
 const INVENTORY: readonly InventoryEntry[] = [
   {
+    file: "backend/drizzle/engine/create-sql-backend.ts",
+    line: "return deriveBackend(backend, buildQueuedWriteUnits(backend, queue));",
+    reason:
+      "A caller-serialized root decorates its own write members and transaction openers with the per-backend serialized queue; deriving keeps every mark and proof the assembled root already carries.",
+  },
+  {
     file: "backend/derive-backend.ts",
     line: "return deriveBackend(base, overrides);",
     reason:

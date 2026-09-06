@@ -102,27 +102,34 @@ function buildQueuedWriteUnits<TTx>(
   backend: AdapterBackend<TTx>,
   queue: SerializedExecutionQueue,
 ): ExactBackendOverlay<AdapterBackend<TTx>, Partial<AdapterBackend<TTx>>> {
-  const overlay: Partial<Record<keyof AdapterBackend<TTx>, unknown>> = {};
-  for (const key of QUEUED_ROOT_MEMBER_KEYS) {
-    const member: unknown = Reflect.get(backend, key);
-    if (key === "commands") {
-      overlay[key] = queueCommandPort(member as GraphCommandPort, queue);
-      continue;
-    }
-    if (typeof member !== "function") continue;
-    const original = member as (
-      ...args: readonly unknown[]
-    ) => Promise<unknown>;
-    overlay[key] = (...args: readonly unknown[]) =>
-      runWithSerializedQueue(queue, () => original(...args));
-  }
-  overlay.close = async () => {
+  const queuedEntries = QUEUED_ROOT_MEMBER_KEYS.flatMap(
+    (key): readonly (readonly [keyof AdapterBackend<TTx>, unknown])[] => {
+      const member: unknown = Reflect.get(backend, key);
+      if (key === "commands") {
+        return [[key, queueCommandPort(member as GraphCommandPort, queue)]];
+      }
+      if (typeof member !== "function") return [];
+      const original = member as (
+        ...args: readonly unknown[]
+      ) => Promise<unknown>;
+      return [
+        [
+          key,
+          (...args: readonly unknown[]) =>
+            runWithSerializedQueue(queue, () => original(...args)),
+        ],
+      ];
+    },
+  );
+  const close = async (): Promise<void> => {
     try {
       await backend.close();
     } finally {
       queue.dispose();
     }
   };
+  const overlay: Partial<Record<keyof AdapterBackend<TTx>, unknown>> =
+    Object.fromEntries([...queuedEntries, ["close", close]]);
   // `overlay` was built entirely from `QUEUED_ROOT_MEMBER_KEYS` — a subset of
   // `keyof AdapterBackend<TTx>` derived from the write-member taxonomy plus
   // the two transaction openers — and every value either re-wraps that exact

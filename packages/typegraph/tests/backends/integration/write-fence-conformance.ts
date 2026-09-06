@@ -491,6 +491,9 @@ export function registerWriteFenceConformanceIntegrationTests(
             let holderFinished = false;
             const holderTransaction = backendA
               .transaction(async (tx) => {
+                // The override must reach the transaction handle the lock
+                // site actually resolves, not only the root proxy.
+                expect(resolveWriteFencePlan(tx)).toMatchObject({ drain });
                 await lockIdentityGraph(tx, graphId);
                 await tx.execute(
                   asCompiledRowsSql(sql`

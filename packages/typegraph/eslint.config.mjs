@@ -331,9 +331,9 @@ export const DIALECT_LITERAL_EXEMPTIONS = [
   {
     file: "src/backend/capabilities/write-fence.ts",
     reason:
-      "The dialect-keyed default lock capabilities the fence planner starts from (deriveFromDialect), plus the refusal and declaration-guidance messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable, pessimisticLockDeclarationLine, unfencedRefusalMessage).",
+      "The dialect-keyed default fence declaration the planner starts from for a first-party target (deriveFromDialect), plus the two refusal messages that must name the engine's own lock primitives and isolation spelling (refuseWriteFenceSqlUnavailable, refuseFenceSqlSessionFactUnavailable).",
     permanent: true,
-    sites: 9,
+    sites: 4,
   },
   {
     file: "src/store/algorithms/iterative-graph-operation.ts",

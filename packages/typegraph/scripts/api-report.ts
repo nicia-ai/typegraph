@@ -337,7 +337,7 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * the identical symbol; no entrypoint's debt decreases and no 15th
  * entrypoint moves.
  *
- * `pessimisticLocks` removal (B10 clean-up): `BackendCapabilities.pessimisticLocks`,
+ * `pessimisticLocks` removal: `BackendCapabilities.pessimisticLocks`,
  * `PessimisticLockCapabilities`, `writeFenceFromLegacyLocks`, and
  * `pessimisticLockDeclarationLine` are deleted outright — `writeFence` is
  * now the only write-fence declaration. This is a debt DECREASE, the first
@@ -352,10 +352,9 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
  * export there since the `WriteFencePlan`/`resolveWriteFencePlan` batch
  * above added the `unfenced` arm's `reason` field — is deleted along with
  * that field now that `undeclared` is the only way to reach `unfenced`.
- * `WriteFenceTarget`, exported directly at `./backend`, and
- * `PessimisticLockCapabilities` itself, also exported directly there, both
- * disappear from that entrypoint's public surface too, but neither was
- * forgotten-export debt, so neither moves this count. Delta table (old →
+ * `PessimisticLockCapabilities`, exported directly at `./backend`, also
+ * disappears from that entrypoint's surface, but a direct export is not
+ * forgotten-export debt, so it does not move this count. Delta table (old →
  * new, all −1): `.` 389→388, `./backend` 17→16, `./interchange` 702→701,
  * `./profiler` 704→703, `./schema` 272→271, `./graph-merge` 719→718,
  * `./provenance` 710→709, `./sqlite/local` 706→705, `./postgres/pglite`

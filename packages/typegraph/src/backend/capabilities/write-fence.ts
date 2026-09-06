@@ -663,7 +663,7 @@ export function writeFenceDeclarationLine(
   indent = "",
 ): string {
   const line = formatWriteFenceDeclaration(deriveFromDialect(dialect));
-  return indent === "" ? line : `${indent}${line}`;
+  return `${indent}${line}`;
 }
 
 /**

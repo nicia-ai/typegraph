@@ -1543,7 +1543,7 @@ take a relation-wide lock on the table a drain site protects:
 | --- | --- |
 | `"table-lock"` | Yes — a `LOCK TABLE`-style statement is available and the drain site takes it. |
 | `"quiescent"` | The resource is already exclusive for some other reason (`caller-serialized`'s promise, or an engine's own writer slot), so the drain site takes NO statement — one it does not need rather than one it cannot spell. |
-| `"none"` | Neither. A drain site refuses, naming the drain that could not be satisfied. |
+| `"none"` | Neither — under `mechanism: "advisory"` a drain site refuses, naming the drain. `engine-serialized` and `caller-serialized` satisfy every drain site regardless of this value. |
 
 `resolveWriteFencePlan` resolves one of four plans:
 
@@ -2046,7 +2046,7 @@ TypeGraph choosing separate query semantics per backend:
 | Typed constraint error above READ COMMITTED            | n/a (no such isolation mode)                      | ✗ at `REPEATABLE READ` / `SERIALIZABLE`    | PostgreSQL raises `40001` from the claim's upsert instead of resolving the conflict, so the loser retries a serialization failure rather than reading `UniquenessError` |
 | Claim row lock released before end of transaction      | ✗                                                 | ✗                                          | Held to commit/rollback on both dialects, refusal included — a caller that catches a constraint error blocks other writers of that axis for the rest of its transaction |
 | Recursive traversal (`capabilities.recursiveTraversal`) | ✓                                                 | ✓                                          | Identical on both bundled backends. A third-party backend declaring `{ supported: false, reason }` refuses the five recursion-dependent operations with `ConfigurationError` code `RECURSIVE_TRAVERSAL_UNSUPPORTED`; `weightedShortestPath` degrades to a predecessor walk instead — see above. Unweighted `shortestPath` is unaffected — it never emits a recursive CTE |
-| Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares neither resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
+| Write fence (`capabilities.writeFence`)           | ✓ `engine-serialized` (single writer slot)        | ✓ `lock` (advisory + table locks)          | Identical guarantee, different mechanism. A custom backend that declares no `writeFence` resolves `unfenced` and is refused at construction for Operational Identity or TypeGraph-owned recorded-clock allocation |
 | Recorded-time ownership (`capabilities.recordedTimeOwnership`) | `"typegraph-relations"` (default)          | `"typegraph-relations"` (default)          | Both bundled backends own the clock today. `"engine-native"` is refused at construction as an interim measure whenever it is combined with `history`/`revisionTracking`, on either dialect |
 | Capability bundles (`CAPABILITY_BUNDLES`)               | Identical                                         | Identical                                  | Both bundled backends implement every pilot bundle's core/extra members on both dialects it scopes to. A third-party backend with a port gap refuses (gated core, or a `refuse`-disposition extra) or degrades (a `fallback`-disposition extra) per that bundle's own registry row |
 
