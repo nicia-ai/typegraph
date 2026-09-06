@@ -12,6 +12,7 @@ export const PGLITE_TEST_FILES = [
   "tests/atomic-resolved-update-batch-pglite.test.ts",
   "tests/atomic-transport-conformance.test.ts",
   "tests/base-schema-adoption.test.ts",
+  "tests/caller-serialized-queue.test.ts",
   "tests/capability-bundle-dialect-honesty.test.ts",
   "tests/capability-declaration-validation.test.ts",
   "tests/constraint-claim-inventory.test.ts",

@@ -12,6 +12,7 @@
  * only what genuinely differs between engines.
  */
 import { ConfigurationError } from "../../../errors";
+import { WRITE_MEMBER_KEYS } from "../../../store/operations/write-members";
 import { requireDefined } from "../../../utils/presence";
 import {
   isFirstPartyProfile,
@@ -20,9 +21,16 @@ import {
   writeFenceDeclarationLine,
   type WriteFenceTarget,
 } from "../../capabilities/write-fence";
+import { deriveBackend, type ExactBackendOverlay } from "../../derive-backend";
+import {
+  createSerializedExecutionQueue,
+  runWithSerializedQueue,
+  type SerializedExecutionQueue,
+} from "../../serialized-execution-queue";
 import { auditBackendResource } from "../../transaction-resource";
 import type {
   AdapterBackend,
+  GraphCommandPort,
   SchemaWriteTransactionBackend,
 } from "../../types";
 import { gateFulltextMethods } from "../contribution-materializations";
@@ -37,6 +45,118 @@ import { createIndexMaterializationMembers } from "./members/index-materializati
 import { createKindRemovalMembers } from "./members/kind-removal-members";
 import { createSchemaVersionMembers } from "./members/schema-version-members";
 import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
+
+/**
+ * Every root member a `caller-serialized` write-fence declaration must
+ * serialize through the in-process queue this factory builds for it: the
+ * three WRITE classes of `src/backend/member-classes.ts` — graph-entity
+ * writes, their sidecars, and backend-owned bulk ingestion
+ * (`WRITE_MEMBER_KEYS`, the same set the write pipeline bans outside its
+ * seam) — plus the two transaction openers, `transaction` and
+ * `transactionWithNative`. Read from the taxonomy's own exported constant, so
+ * a write member the taxonomy adds later is queued here automatically,
+ * never from a second, hand-kept list this factory would have to remember to
+ * update.
+ */
+const QUEUED_ROOT_MEMBER_KEYS = [
+  ...WRITE_MEMBER_KEYS,
+  "transaction",
+  "transactionWithNative",
+] as const;
+
+/**
+ * Runs `port.execute` through `queue`, keeping `session` untouched. `commands`
+ * is the one {@link QUEUED_ROOT_MEMBER_KEYS} member that is a port object
+ * rather than a bare function, so {@link buildQueuedWriteUnits} special-cases
+ * it here instead of trying to wrap it the same way as every other member.
+ */
+function queueCommandPort(
+  port: GraphCommandPort,
+  queue: SerializedExecutionQueue,
+): GraphCommandPort {
+  return {
+    session: port.session,
+    execute: (command, context) =>
+      runWithSerializedQueue(queue, () => port.execute(command, context)),
+  };
+}
+
+/**
+ * Builds the overlay {@link buildCallerSerializedBackend} decorates `backend`
+ * with: every member {@link QUEUED_ROOT_MEMBER_KEYS} names, routed through
+ * `queue`, plus `close`, which disposes `queue` after delegating to
+ * `backend`'s own.
+ *
+ * Read with `Reflect.get` rather than static property access, so an OPTIONAL
+ * write member this particular backend does not implement is simply absent
+ * from the overlay instead of wrapping `undefined`. `deriveBackend` then
+ * leaves every member this overlay does not name — every read, the
+ * transaction-handle builders, `adoptTransaction` — resolving to `backend`'s
+ * own, unqueued implementation; a transaction's own body reaches `backend`
+ * directly too (`EngineAssemblyContext.self()`, resolved once in
+ * `createSqlBackend` before this function ever runs), which is what lets
+ * `transaction`'s internal delegation to `transactionWithNative` run without
+ * re-entering this same queue.
+ */
+function buildQueuedWriteUnits<TTx>(
+  backend: AdapterBackend<TTx>,
+  queue: SerializedExecutionQueue,
+): ExactBackendOverlay<AdapterBackend<TTx>, Partial<AdapterBackend<TTx>>> {
+  const overlay: Partial<Record<keyof AdapterBackend<TTx>, unknown>> = {};
+  for (const key of QUEUED_ROOT_MEMBER_KEYS) {
+    const member: unknown = Reflect.get(backend, key);
+    if (key === "commands") {
+      overlay[key] = queueCommandPort(member as GraphCommandPort, queue);
+      continue;
+    }
+    if (typeof member !== "function") continue;
+    const original = member as (
+      ...args: readonly unknown[]
+    ) => Promise<unknown>;
+    overlay[key] = (...args: readonly unknown[]) =>
+      runWithSerializedQueue(queue, () => original(...args));
+  }
+  overlay.close = async () => {
+    try {
+      await backend.close();
+    } finally {
+      queue.dispose();
+    }
+  };
+  // `overlay` was built entirely from `QUEUED_ROOT_MEMBER_KEYS` — a subset of
+  // `keyof AdapterBackend<TTx>` derived from the write-member taxonomy plus
+  // the two transaction openers — and every value either re-wraps that exact
+  // member's own function (same signature, same return type) or narrows
+  // `commands` to the identical `GraphCommandPort` shape. The cast states a
+  // fact the loop above already establishes; it is not a widening.
+  return overlay as unknown as ExactBackendOverlay<
+    AdapterBackend<TTx>,
+    Partial<AdapterBackend<TTx>>
+  >;
+}
+
+/**
+ * The in-process half of a `caller-serialized` write-fence promise: one
+ * queue for the whole backend, and a decorated object whose root write units
+ * — {@link QUEUED_ROOT_MEMBER_KEYS} — run through it one at a time. Called
+ * only when `resolveWriteFencePlan` resolved `kind: "caller-serialized"` for
+ * this backend.
+ *
+ * Exported (like `finalizeEngineCapabilities`, `resolveFenceStatements`, and
+ * this module's other internals tests reach directly) so
+ * `tests/caller-serialized-queue.test.ts` can apply the wrapping to a plain
+ * backend by itself and compare the result against the exact pre-wrap
+ * object, isolated from the closures `createSqlBackend` builds fresh on
+ * every call — the proof `insertNode`, `commands`, etc. is the wrapped
+ * function rather than "a function from a different construction" has no
+ * other way to be meaningful.
+ */
+export function buildCallerSerializedBackend<TTx>(
+  backend: AdapterBackend<TTx>,
+): AdapterBackend<TTx> {
+  const queue = createSerializedExecutionQueue();
+  return deriveBackend(backend, buildQueuedWriteUnits(backend, queue));
+}
 
 /**
  * Assembles one `AdapterBackend` from a {@link SqlEngineProfile}.
@@ -294,9 +414,44 @@ export function createSqlBackend<TTx>(
   // "independent" is a verdict the guards can tell apart from a backend
   // nobody looked at.
   auditBackendResource(backend, profile.resourceAudit);
-  applyEngineMarks(backend, {
+
+  // A `caller-serialized` write-fence declaration promises that this
+  // backend's own process serializes every write unit it issues;
+  // `buildCallerSerializedBackend` is the in-process half of that promise.
+  // Built AFTER the audit above (so `deriveBackend`'s own carry, not a
+  // second write, is what gives the decorated object `backend`'s
+  // resource-audit verdict) and BEFORE `applyEngineMarks` below: two of that
+  // call's marks — `markBundledRootAutocommitEligible` and the atomic-program
+  // registrations — key a `WeakSet`/`WeakMap` by the exact object passed to
+  // it and are NOT among the marks `deriveBackend` carries forward on its
+  // own (only the first-party-factory mark, the schema-fenced-insert mark,
+  // and the resource audit are). Applying the marks to whichever object this
+  // function actually returns, instead of always to the pre-queue `backend`
+  // nothing outside this function can still reach, is what keeps every mark
+  // and registration attached to the backend a caller actually holds.
+  const queuedBackend: AdapterBackend<TTx> =
+    fencePlan.kind === "caller-serialized" ?
+      buildCallerSerializedBackend(backend)
+    : backend;
+
+  // Read off `queuedBackend`, not the `capabilities` local above: a root
+  // atomic SQL/mutation program dispatches its whole multi-statement batch
+  // directly against the connection, bypassing every member
+  // `QUEUED_ROOT_MEMBER_KEYS` wraps — registering root atomic authority on
+  // the queued object would let that raw dispatch run outside the very
+  // queue a `caller-serialized` declaration promises every write goes
+  // through. `deriveBackend` already refuses to carry root (or un-preserved
+  // session) atomic-batch authority across ANY decoration — by construction,
+  // never selectively — so `queuedBackend.capabilities.execution.atomicBatch`
+  // already reads the correct, downgraded value for the object this factory
+  // is about to return; the plain pass-through case (`queuedBackend ===
+  // backend`) reads the identical object `capabilities` names, so this
+  // changes nothing for either bundled backend.
+  const queuedCapabilities = queuedBackend.capabilities;
+
+  applyEngineMarks(queuedBackend, {
     isFirstParty,
-    capabilities,
+    capabilities: queuedCapabilities,
     fencePlan,
     autocommit: profile.autocommit,
     execution: profile.execution,
@@ -313,5 +468,5 @@ export function createSqlBackend<TTx>(
     },
   });
 
-  return backend;
+  return queuedBackend;
 }
