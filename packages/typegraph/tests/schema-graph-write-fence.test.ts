@@ -158,14 +158,14 @@ describe("schema + graph write fence", () => {
   // `caller-serialized` as no statement), so gating fusion on that presence
   // alone fused the schema+graph advisory lock back in even though the
   // declaration says no lock is needed or wanted.
-  it("does not fuse the schema+graph lock when the declared write fence is caller-serialized/quiescent", async () => {
+  it("does not fuse the schema+graph lock when the declared write fence is caller-serialized", async () => {
     const client = await PGlite.create();
     try {
       await client.exec(generatePostgresDDL().join("\n\n"));
       const backend = createPostgresBackend(drizzlePglite(client), {
         vector: false,
         capabilities: {
-          writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+          writeFence: { mechanism: "caller-serialized" },
         },
       });
 
@@ -178,7 +178,7 @@ describe("schema + graph write fence", () => {
     }
   });
 
-  it("takes no advisory lock and no FOR SHARE for a schema-managed write under caller-serialized/quiescent", async () => {
+  it("takes no advisory lock and no FOR SHARE for a schema-managed write under caller-serialized", async () => {
     const statements: string[] = [];
     const client = await PGlite.create();
     try {
@@ -196,7 +196,6 @@ describe("schema + graph write fence", () => {
           capabilities: {
             writeFence: {
               mechanism: "caller-serialized",
-              drain: "quiescent",
             },
           },
         },

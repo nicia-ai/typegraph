@@ -125,7 +125,7 @@ function createRefusingMaterializer(
           unitOfWork: "interactive",
         },
         windowFunctions: true,
-        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+        writeFence: { mechanism: "engine-serialized" },
       },
     },
     fulltextStrategy: options.fulltextStrategy ?? fts5Strategy,

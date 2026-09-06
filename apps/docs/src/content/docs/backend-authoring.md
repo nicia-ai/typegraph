@@ -221,8 +221,9 @@ resolves a write-fence plan eagerly, and a profile whose resolved
 `writeFence.mechanism` is still `"advisory"` with no `fenceSql` refuses
 with `WRITE_FENCE_SQL_UNAVAILABLE`. Pair it with a `declaredCapabilities`
 override that stops claiming `"advisory"` (for example, declaring
-`writeFence: { mechanism: "engine-serialized", drain: "table-lock" }`
-instead) to actually resolve an `engine-serialized` plan that needs no
+`writeFence: { mechanism: "engine-serialized" }`
+instead — no `drain` key: that field applies only to `mechanism: "advisory"`)
+to actually resolve an `engine-serialized` plan that needs no
 lock spelling at all.
 
 ## Refusals you may meet
@@ -231,6 +232,8 @@ lock spelling at all.
 | --- | --- |
 | `ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION` | The profile's resolved capabilities omit `writeFence` — `createSqlBackend` has no write-fence decision to resolve and refuses outright, naming the one capabilities line to add. |
 | `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved capabilities declare `mechanism: "advisory"` but the profile's `fenceSql` is missing the member that mechanism/drain combination needs. |
+| `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` carries an unrecognized `mechanism` or `drain` string, or a `drain` key on a mechanism other than `"advisory"` — `resolveWriteFencePlan` validates the raw value (a plain-JavaScript author is not held to the discriminated-union type) before shaping a plan from it. |
+| `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized` — an externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |

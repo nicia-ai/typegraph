@@ -186,7 +186,6 @@ function createMockMaterializer(
             { mechanism: "advisory" as const, drain: "table-lock" as const }
           : {
               mechanism: "engine-serialized" as const,
-              drain: "table-lock" as const,
             },
       },
     },
@@ -535,7 +534,7 @@ describe("#149 ensureRuntimeContributions is read-only when already materialized
             unitOfWork: "interactive",
           },
           windowFunctions: true,
-          writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+          writeFence: { mechanism: "engine-serialized" },
         },
       },
       fulltextStrategy: fts5Strategy,

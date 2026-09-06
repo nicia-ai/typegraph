@@ -9,7 +9,7 @@
  * `{advisory, table-lock}`; SQLite resolves `engine-serialized`), plus three
  * backends derived from `buildPostgresEngineProfile` through
  * `deriveEngineProfile` with `declaredCapabilities.writeFence` overridden —
- * `{advisory, quiescent}`, `{caller-serialized, quiescent}`, and
+ * `{advisory, quiescent}`, `{caller-serialized}`, and
  * `{advisory, none}`. Every derived case only applies on a PostgreSQL-dialect
  * lane (SQLite and libsql skip it: there is no SQLite equivalent of "a
  * PostgreSQL profile with a different drain").
@@ -112,7 +112,7 @@ function deriveWriteFenceProfile(
 
 function withAdvisoryDrainCapabilities(
   capabilities: BackendCapabilities,
-  drain: WriteFenceDeclaration["drain"],
+  drain: Extract<WriteFenceDeclaration, { mechanism: "advisory" }>["drain"],
 ): BackendCapabilities {
   return {
     ...capabilities,
@@ -142,7 +142,7 @@ function withAdvisoryDrainCapabilities(
  */
 function deriveAdvisoryDrainOverride(
   backend: GraphBackend,
-  drain: WriteFenceDeclaration["drain"],
+  drain: Extract<WriteFenceDeclaration, { mechanism: "advisory" }>["drain"],
 ): GraphBackend {
   return deriveBackend(backend, {
     capabilities: withAdvisoryDrainCapabilities(backend.capabilities, drain),
@@ -253,7 +253,7 @@ export function registerWriteFenceConformanceIntegrationTests(
       }
     });
 
-    it('derived PostgreSQL profile {caller-serialized, quiescent}: resolves "caller-serialized" and the drain site takes no statement', async (ctx) => {
+    it('derived PostgreSQL profile {caller-serialized}: resolves "caller-serialized" and the drain site takes no statement', async (ctx) => {
       if (context.getBackend().dialect !== "postgres") {
         ctx.skip();
         return;
@@ -263,7 +263,6 @@ export function registerWriteFenceConformanceIntegrationTests(
         const backend = createSqlBackend(
           deriveWriteFenceProfile(fixture.profile, {
             mechanism: "caller-serialized",
-            drain: "quiescent",
           }),
         );
         expect(resolveWriteFencePlan(backend)).toEqual({
@@ -327,11 +326,10 @@ export function registerWriteFenceConformanceIntegrationTests(
         ctx.skip();
         return;
       }
-      const advisoryDrains: readonly WriteFenceDeclaration["drain"][] = [
-        "table-lock",
-        "quiescent",
-        "none",
-      ];
+      const advisoryDrains: readonly Extract<
+        WriteFenceDeclaration,
+        { mechanism: "advisory" }
+      >["drain"][] = ["table-lock", "quiescent", "none"];
       for (const drain of advisoryDrains) {
         const fixture = await createConformancePostgresFixture();
         try {
@@ -366,7 +364,6 @@ export function registerWriteFenceConformanceIntegrationTests(
         const backend = createSqlBackend(
           deriveWriteFenceProfile(fixture.profile, {
             mechanism: "caller-serialized",
-            drain: "quiescent",
           }),
         );
         await backend.transaction(async (tx) => {
@@ -454,11 +451,10 @@ export function registerWriteFenceConformanceIntegrationTests(
           ctx.skip();
           return;
         }
-        const advisoryDrains: readonly WriteFenceDeclaration["drain"][] = [
-          "table-lock",
-          "quiescent",
-          "none",
-        ];
+        const advisoryDrains: readonly Extract<
+          WriteFenceDeclaration,
+          { mechanism: "advisory" }
+        >["drain"][] = ["table-lock", "quiescent", "none"];
         for (const drain of advisoryDrains) {
           const connectionA = await context.createSerializedBackend();
           const connectionB = await context.createSerializedBackend();

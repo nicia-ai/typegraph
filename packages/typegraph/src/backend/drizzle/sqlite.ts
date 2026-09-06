@@ -1249,7 +1249,16 @@ export function buildSqliteEngineProfile(
   // neon-http) have no transactions and manage their own concurrency, so they
   // stay unqueued.
   const serializedQueue =
-    transactionMode === "none" ? undefined : createSerializedExecutionQueue();
+    transactionMode === "none" ?
+      undefined
+    : createSerializedExecutionQueue({
+        // Best-effort: undetected reentrancy here degrades to the deadlock
+        // this queue has always risked when AsyncLocalStorage is
+        // unavailable, not a broken correctness promise — SQLite's own
+        // engine-serialized fence never depended on this detection.
+        reentrancy: "detect",
+        subject: "sqlite",
+      });
 
   // Durable fulltext + vector materialization (#135): the dialect-specific
   // marker-table primitives. Orchestration (materialize / assert /

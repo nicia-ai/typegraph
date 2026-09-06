@@ -4,9 +4,10 @@
  * of the promise a `writeFence: { mechanism: "caller-serialized" }`
  * declaration makes — every write unit this backend issues is serialized
  * through one queue, reads are not, a root write submitted from inside a
- * transaction callback is refused rather than deadlocking, and the members
- * wrapped are exactly the write-member taxonomy plus the two transaction
- * openers.
+ * transaction callback is refused rather than deadlocking, adopting an
+ * externally owned transaction is refused outright, and the members wrapped
+ * are exactly the taxonomy's mutation-capable classes plus the two
+ * transaction openers.
  *
  * Both bundled dialects declare a `caller-serialized` write fence here
  * through `capabilities.writeFence` — the SAME override shape
@@ -14,8 +15,12 @@
  * factories accept it — so every case below exercises the real
  * `createSqlBackend` path, not a hand-built fixture.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
+
+import { PGlite } from "@electric-sql/pglite";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
+import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -25,10 +30,20 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
-import { buildCallerSerializedBackend } from "../src/backend/drizzle/engine/create-sql-backend";
+import {
+  buildCallerSerializedBackend,
+  QUEUED_ROOT_MEMBER_KEYS,
+  UNQUEUED_ROOT_MEMBER_REASONS,
+} from "../src/backend/drizzle/engine/create-sql-backend";
 import type { AnySqliteDatabase } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { GRAPH_BACKEND_MEMBER_CLASSES } from "../src/backend/member-classes";
+import { createPostgresBackend } from "../src/backend/postgres";
+import {
+  __restoreQueueTaskContextForTesting,
+  __setQueueTaskContextForTesting,
+  createSerializedExecutionQueue,
+} from "../src/backend/serialized-execution-queue";
 import { type AdapterBackend } from "../src/backend/types";
 import { WRITE_MEMBER_KEYS } from "../src/store/operations/write-members";
 import {
@@ -37,8 +52,8 @@ import {
   type LoggedBackend,
 } from "./lock-fence-test-utils";
 
-const CALLER_SERIALIZED_QUIESCENT = {
-  writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+const CALLER_SERIALIZED_CAPABILITIES = {
+  writeFence: { mechanism: "caller-serialized" },
 } as const;
 
 const QueuePerson = defineNode("Person", {
@@ -75,11 +90,13 @@ const QUEUED_ENGINES: readonly QueuedEngine[] = [
   {
     name: "sqlite",
     build: () =>
-      Promise.resolve(createLoggedSqliteBackend(CALLER_SERIALIZED_QUIESCENT)),
+      Promise.resolve(
+        createLoggedSqliteBackend(CALLER_SERIALIZED_CAPABILITIES),
+      ),
   },
   {
     name: "postgres",
-    build: () => createLoggedPostgresBackend(CALLER_SERIALIZED_QUIESCENT),
+    build: () => createLoggedPostgresBackend(CALLER_SERIALIZED_CAPABILITIES),
   },
 ];
 
@@ -121,16 +138,26 @@ describe.each(QUEUED_ENGINES)(
       expect(alphaThenBravo || bravoThenAlpha).toBe(true);
     });
 
-    it("refuses a root write submitted from inside a transaction callback", async () => {
+    it("refuses a root write submitted from inside a transaction callback, naming the reentrant-submission code and subject", async () => {
       const logged = await build();
       cleanups.push(logged.close);
       const [store] = await createStoreWithSchema(queueGraph, logged.backend);
 
-      await expect(
-        store.transaction(async () => {
+      let caught: unknown;
+      try {
+        await store.transaction(async () => {
           await store.nodes.Person.create({ name: "Reentrant" });
+        });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).details).toEqual(
+        expect.objectContaining({
+          code: "SERIALIZED_QUEUE_REENTRANT_SUBMISSION",
+          subject: "caller-serialized",
         }),
-      ).rejects.toThrow(ConfigurationError);
+      );
 
       // The rejected transaction rolled back cleanly; the queue is not stuck
       // holding a slot the failed submission never released.
@@ -142,6 +169,136 @@ describe.each(QUEUED_ENGINES)(
     });
   },
 );
+
+// ============================================================
+// adoptTransaction is refused outright, not queued and not left unqueued.
+// ============================================================
+
+describe("adoptTransaction is refused under caller-serialized", () => {
+  it("sqlite: refuses with CALLER_SERIALIZED_REFUSES_ADOPTION", () => {
+    const client = new Database(":memory:");
+    try {
+      const backend = createSqliteBackend(drizzleBetterSqlite3(client), {
+        capabilities: CALLER_SERIALIZED_CAPABILITIES,
+      });
+      let caught: unknown;
+      try {
+        backend.adoptTransaction(undefined as unknown as AnySqliteDatabase);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).details).toEqual(
+        expect.objectContaining({
+          code: "CALLER_SERIALIZED_REFUSES_ADOPTION",
+          member: "adoptTransaction",
+        }),
+      );
+    } finally {
+      client.close();
+    }
+  });
+
+  it("postgres (PGlite): refuses with CALLER_SERIALIZED_REFUSES_ADOPTION", async () => {
+    const client = await PGlite.create();
+    try {
+      const backend = createPostgresBackend(drizzlePglite(client), {
+        capabilities: CALLER_SERIALIZED_CAPABILITIES,
+        vector: false,
+      });
+      let caught: unknown;
+      try {
+        backend.adoptTransaction(undefined as never);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).details).toEqual(
+        expect.objectContaining({
+          code: "CALLER_SERIALIZED_REFUSES_ADOPTION",
+          member: "adoptTransaction",
+        }),
+      );
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+// ============================================================
+// Reentrancy detection modes: "detect" (best-effort, SQLite's own queue)
+// vs. "require" (the caller-serialized promise depends on it working).
+// ============================================================
+
+describe("serialized-execution-queue reentrancy modes", () => {
+  afterEach(() => {
+    __restoreQueueTaskContextForTesting();
+  });
+
+  it("require: refuses every submission with CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT when the AsyncLocalStorage context is unavailable", async () => {
+    __setQueueTaskContextForTesting(undefined);
+    const queue = createSerializedExecutionQueue({
+      reentrancy: "require",
+      subject: "test-subject",
+    });
+
+    let caught: unknown;
+    try {
+      await queue.runExclusive(() => Promise.resolve("ok"));
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    expect((caught as ConfigurationError).details).toEqual(
+      expect.objectContaining({
+        code: "CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT",
+        subject: "test-subject",
+      }),
+    );
+  });
+
+  it("detect: runs the task without detection when the AsyncLocalStorage context is unavailable", async () => {
+    __setQueueTaskContextForTesting(undefined);
+    const queue = createSerializedExecutionQueue({
+      reentrancy: "detect",
+      subject: "test-subject",
+    });
+
+    await expect(queue.runExclusive(() => Promise.resolve("ok"))).resolves.toBe(
+      "ok",
+    );
+  });
+
+  it("require: a submission made before the AsyncLocalStorage loader resolves still detects a nested reentrant submission", async () => {
+    const realContext = new AsyncLocalStorage<ReadonlySet<object>>();
+    // The loader "resolves" 20ms after this queue is constructed — the
+    // submission below is made synchronously, well before that.
+    __setQueueTaskContextForTesting(realContext, 20);
+    const queue = createSerializedExecutionQueue({
+      reentrancy: "require",
+      subject: "test-subject",
+    });
+
+    let nestedError: unknown;
+    const outerResult = queue.runExclusive(async () => {
+      try {
+        await queue.runExclusive(() => Promise.resolve("nested"));
+      } catch (error) {
+        nestedError = error;
+      }
+      return "outer-done";
+    });
+
+    await expect(outerResult).resolves.toBe("outer-done");
+    expect(nestedError).toBeInstanceOf(ConfigurationError);
+    expect((nestedError as ConfigurationError).details).toEqual(
+      expect.objectContaining({
+        code: "SERIALIZED_QUEUE_REENTRANT_SUBMISSION",
+        subject: "test-subject",
+      }),
+    );
+  });
+});
 
 // Racing two root writes' internal steps, or a read against a slow root
 // write, through a REAL driver is not a clean proof either way: both
@@ -258,18 +415,12 @@ describe("caller-serialized queue: reads bypass it", () => {
 });
 
 // ============================================================
-// Direct proof that the wrapping covers exactly the write-member taxonomy
-// plus the two transaction openers, and nothing else — isolated from the
-// closures `createSqlBackend` builds fresh on every construction (see
-// `buildCallerSerializedBackend`'s own doc comment for why this needs a
-// single shared base object rather than two independent backends).
+// Direct proof that the wrapping covers exactly QUEUED_ROOT_MEMBER_KEYS,
+// isolated from the closures `createSqlBackend` builds fresh on every
+// construction (see `buildCallerSerializedBackend`'s own doc comment for why
+// this needs a single shared base object rather than two independent
+// backends).
 // ============================================================
-
-const QUEUED_ROOT_MEMBER_KEYS = [
-  ...WRITE_MEMBER_KEYS,
-  "transaction",
-  "transactionWithNative",
-] as const;
 
 function buildPlainSqliteBackend(): Readonly<{
   backend: AdapterBackend<AnySqliteDatabase>;
@@ -287,18 +438,18 @@ function buildPlainSqliteBackend(): Readonly<{
 }
 
 describe("buildCallerSerializedBackend member coverage", () => {
-  it("wraps every taxonomy write member and the two transaction openers, and leaves every read member alone", () => {
+  it("wraps every QUEUED_ROOT_MEMBER_KEYS member this backend implements, replaces adoptTransaction, and leaves every read/identity member alone", () => {
     const { backend: plainBackend, close } = buildPlainSqliteBackend();
     cleanups.push(close);
     const queuedBackend = buildCallerSerializedBackend(plainBackend);
 
     const wrapped: string[] = [];
     const untouched: string[] = [];
-    // Every taxonomy write member this plain SQLite backend actually
-    // implements — an in-memory backend with no vector strategy omits the
-    // OPTIONAL embedding members, exactly as `buildQueuedWriteUnits` itself
-    // skips a member `Reflect.get` reports as absent, so the set this test
-    // expects to see wrapped is the same subset, not the full taxonomy.
+    // Every QUEUED_ROOT_MEMBER_KEYS member this plain SQLite backend
+    // actually implements — an in-memory backend with no vector strategy
+    // omits the OPTIONAL embedding members, exactly as `buildQueuedWriteUnits`
+    // itself skips a member `Reflect.get` reports as absent, so the set this
+    // test expects to see wrapped is that subset, not the full list.
     const implementedKeys = QUEUED_ROOT_MEMBER_KEYS.filter(
       (key) =>
         key === "commands" ||
@@ -321,10 +472,84 @@ describe("buildCallerSerializedBackend member coverage", () => {
     expect(wrapped.toSorted()).toEqual([...implementedKeys].toSorted());
     expect(queuedCommandsExecute).not.toBe(plainCommandsExecute);
 
-    for (const key of GRAPH_BACKEND_MEMBER_CLASSES.read) {
+    // adoptTransaction is REPLACED (with the refusal), not merely absent
+    // from the wrap loop above and left to fall through to the plain
+    // backend's own implementation.
+    expect(queuedBackend.adoptTransaction).not.toBe(
+      plainBackend.adoptTransaction,
+    );
+
+    for (const key of [
+      ...GRAPH_BACKEND_MEMBER_CLASSES.read,
+      ...GRAPH_BACKEND_MEMBER_CLASSES.identity,
+    ]) {
       const plainMember: unknown = Reflect.get(plainBackend, key);
       if (typeof plainMember !== "function") continue;
       expect(Reflect.get(queuedBackend, key)).toBe(plainMember);
     }
+  });
+});
+
+// ============================================================
+// Totality ratchet: every member the taxonomy classifies (plus the two
+// `AdapterBackend`-only members `transactionWithNative`/`adoptTransaction`)
+// falls into EXACTLY ONE of QUEUED_ROOT_MEMBER_KEYS or
+// UNQUEUED_ROOT_MEMBER_REASONS, so a member reclassified into a
+// mutation-capable class, or a brand-new backend member, cannot land
+// unqueued (or double-counted) silently.
+//
+// Mutation check: delete the `close` entry from
+// `UNQUEUED_ROOT_MEMBER_REASONS` in create-sql-backend.ts — `close` then
+// appears in neither bucket and the "every member is covered" assertion
+// below fails, naming `close` as uncovered. Restoring the entry passes
+// again.
+// ============================================================
+
+const ASSEMBLED_ROOT_MEMBER_KEYS: readonly string[] = [
+  ...Object.values(GRAPH_BACKEND_MEMBER_CLASSES).flat(),
+  "transactionWithNative",
+  "adoptTransaction",
+];
+
+describe("caller-serialized queue: total member inventory", () => {
+  it("QUEUED_ROOT_MEMBER_KEYS is exactly the mutation-capable classes and the two transaction openers, matching WRITE_MEMBER_KEYS at minimum", () => {
+    const queuedSet = new Set<string>(QUEUED_ROOT_MEMBER_KEYS);
+    for (const key of WRITE_MEMBER_KEYS) {
+      expect(queuedSet.has(key)).toBe(true);
+    }
+    expect(queuedSet.has("transaction")).toBe(true);
+    expect(queuedSet.has("transactionWithNative")).toBe(true);
+    expect(queuedSet.has("clearGraph")).toBe(true);
+  });
+
+  it("partitions every assembled-root member into queued or a documented unqueued reason, with no member in both", () => {
+    const queuedSet = new Set<string>(QUEUED_ROOT_MEMBER_KEYS);
+    const unqueuedKeys = Object.keys(UNQUEUED_ROOT_MEMBER_REASONS);
+    const unqueuedSet = new Set(unqueuedKeys);
+    const assembledSet = new Set(ASSEMBLED_ROOT_MEMBER_KEYS);
+
+    const overlap = [...queuedSet].filter((key) => unqueuedSet.has(key));
+    expect(overlap).toEqual([]);
+
+    const uncovered = ASSEMBLED_ROOT_MEMBER_KEYS.filter(
+      (key) => !queuedSet.has(key) && !unqueuedSet.has(key),
+    );
+    expect(uncovered).toEqual([]);
+
+    const stray = [...queuedSet, ...unqueuedSet].filter(
+      (key) => !assembledSet.has(key),
+    );
+    expect(stray).toEqual([]);
+
+    for (const reason of Object.values(UNQUEUED_ROOT_MEMBER_REASONS)) {
+      expect(reason.length).toBeGreaterThan(10);
+    }
+  });
+
+  it("adoptTransaction is the one member documented as refused rather than queued or silently unqueued", () => {
+    expect(QUEUED_ROOT_MEMBER_KEYS).not.toContain("adoptTransaction");
+    expect(UNQUEUED_ROOT_MEMBER_REASONS["adoptTransaction"]).toMatch(
+      /refused/i,
+    );
   });
 });

@@ -473,7 +473,6 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   },
   "windowFunctions": true,
   "writeFence": {
-    "drain": "table-lock",
     "mechanism": "engine-serialized",
   },
 }
@@ -657,7 +656,6 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
   },
   "windowFunctions": true,
   "writeFence": {
-    "drain": "table-lock",
     "mechanism": "engine-serialized",
   },
 }

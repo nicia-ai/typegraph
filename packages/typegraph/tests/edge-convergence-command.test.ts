@@ -216,7 +216,7 @@ describe("PostgreSQL edge convergence command", () => {
       expect(() =>
         createPostgresBackend(drizzlePglite(client), {
           capabilities: {
-            writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+            writeFence: { mechanism: "engine-serialized" },
           },
           vector: false,
         }),
@@ -231,13 +231,12 @@ describe("PostgreSQL edge convergence command", () => {
     try {
       const backend = createPostgresBackend(drizzlePglite(client), {
         capabilities: {
-          writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+          writeFence: { mechanism: "caller-serialized" },
         },
         vector: false,
       });
       expect(backend.capabilities.writeFence).toEqual({
         mechanism: "caller-serialized",
-        drain: "quiescent",
       });
     } finally {
       await client.close();

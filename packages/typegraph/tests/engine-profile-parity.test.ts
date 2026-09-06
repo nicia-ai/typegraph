@@ -256,7 +256,6 @@ describe("engine-profile parity: member keys, capabilities, marks", () => {
     );
     expect(backend.capabilities.writeFence).toEqual({
       mechanism: "engine-serialized",
-      drain: "table-lock",
     });
     // better-sqlite3 probes the compiled SQLITE_MAX_VARIABLE_NUMBER at
     // construction; on the version this suite runs against that resolves

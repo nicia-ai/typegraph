@@ -357,7 +357,7 @@ describe("deriveEngineProfile", () => {
       fenceSql: undefined,
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+        writeFence: { mechanism: "engine-serialized" },
       },
     });
 
@@ -468,7 +468,7 @@ describe("deriveEngineProfile", () => {
     const derivedProfile = deriveEngineProfile(baseProfile, {
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+        writeFence: { mechanism: "caller-serialized" },
       },
     });
 
@@ -521,7 +521,7 @@ describe("deriveEngineProfile", () => {
         fenceSql: undefined,
         declaredCapabilities: {
           ...baseProfile.declaredCapabilities,
-          writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+          writeFence: { mechanism: "engine-serialized" },
         },
       },
     );
@@ -633,7 +633,7 @@ describe("deriveEngineProfile refuses the declaredCapabilities/resourceAudit sub
     const derivedProfile = deriveEngineProfile(baseProfile, {
       declaredCapabilities: {
         ...baseProfile.declaredCapabilities,
-        writeFence: { mechanism: "engine-serialized", drain: "table-lock" },
+        writeFence: { mechanism: "engine-serialized" },
       },
     });
 

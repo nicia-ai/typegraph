@@ -4465,7 +4465,6 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   recursiveTraversal: Object.freeze({ supported: true }),
   writeFence: Object.freeze({
     mechanism: "engine-serialized",
-    drain: "table-lock",
   }),
 });
 

@@ -429,7 +429,7 @@ describe("bundled factories accept a declared writeFence", () => {
     const profile = buildSqliteEngineProfile(drizzleSqlite(sqlite), {
       executionProfile: { isSync: true },
       capabilities: {
-        writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+        writeFence: { mechanism: "caller-serialized" },
       },
     });
 

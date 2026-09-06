@@ -144,19 +144,40 @@ export function resolveFenceStatements(fenceSql: FenceSql): FenceStatements {
  * this backend is open. `"row"` (a per-row lock) joins this union in a later
  * release.
  *
- * `drain` is a separate fact: whether a caller that already excluded other
- * writers can additionally take a relation-wide lock on the resource a
- * table-lock site protects. `"table-lock"` means yes (a `LOCK TABLE`-style
- * statement is available and appropriate); `"quiescent"` means the resource
- * is already exclusive for another reason (e.g. `caller-serialized`'s
- * in-process queue) so a table-lock site takes NO statement rather than one
- * it does not need; `"none"` means neither — a table-lock site refuses,
- * naming this drain.
+ * `drain` is a separate fact, and applies ONLY to `mechanism: "advisory"`:
+ * whether a caller that already took the keyed lock can additionally take a
+ * relation-wide lock on the resource a table-lock site protects.
+ * `"table-lock"` means yes (a `LOCK TABLE`-style statement is available and
+ * appropriate); `"quiescent"` means the resource is already exclusive for
+ * another reason (e.g. a `caller-serialized` in-process queue layered
+ * alongside an advisory lock) so a table-lock site takes NO statement rather
+ * than one it does not need; `"none"` means neither — a table-lock site
+ * refuses, naming this drain. `"engine-serialized"` and `"caller-serialized"`
+ * carry no `drain`: an engine's single writer slot and an in-process
+ * serialization promise are each already a stronger exclusion than any
+ * `drain` value could add, so there is nothing for the field to say —
+ * declaring one alongside either mechanism is refused
+ * (`WRITE_FENCE_DECLARATION_INVALID`, `validateWriteFenceDeclaration` below).
  */
-export type WriteFenceDeclaration = Readonly<{
-  mechanism: "advisory" | "engine-serialized" | "caller-serialized";
-  drain: "table-lock" | "quiescent" | "none";
-}>;
+export type WriteFenceDeclaration =
+  | Readonly<{
+      mechanism: "advisory";
+      drain: "table-lock" | "quiescent" | "none";
+    }>
+  | Readonly<{ mechanism: "engine-serialized" }>
+  | Readonly<{ mechanism: "caller-serialized" }>;
+
+/**
+ * The one member of {@link WriteFenceDeclaration} that carries `drain` —
+ * named so a function that only ever runs inside the `mechanism: "advisory"`
+ * arm of a resolved declaration (the fence-SQL refusal below) can say so in
+ * its own parameter type instead of accepting the full union and re-widening
+ * `drain` into "possibly absent".
+ */
+type AdvisoryWriteFenceDeclaration = Extract<
+  WriteFenceDeclaration,
+  { mechanism: "advisory" }
+>;
 
 /**
  * The decision every lock site consumes, rather than a flag a caller would
@@ -383,7 +404,7 @@ function deriveFromDialect(dialect: SqlDialect): WriteFenceDeclaration {
       return { mechanism: "advisory", drain: "table-lock" };
     }
     case "sqlite": {
-      return { mechanism: "engine-serialized", drain: "table-lock" };
+      return { mechanism: "engine-serialized" };
     }
     default: {
       return dialect satisfies never;
@@ -411,7 +432,7 @@ type WriteFenceDeclarationSource = "writeFence" | "dialect";
  * target did not actually make.
  */
 function describeResolvedAdvisoryDeclaration(
-  declaration: WriteFenceDeclaration,
+  declaration: AdvisoryWriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
   dialect: SqlDialect,
 ): string {
@@ -485,7 +506,7 @@ function fenceSqlMemberPurpose(member: keyof FenceSql): string {
  */
 function refuseWriteFenceSqlUnavailable(
   dialect: SqlDialect,
-  declaration: WriteFenceDeclaration,
+  declaration: AdvisoryWriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
   member: keyof FenceSql,
 ): never {
@@ -537,6 +558,95 @@ export function refuseFenceSqlSessionFactUnavailable(
   );
 }
 
+/** {@link validateWriteFenceDeclaration}'s accepted `mechanism` values. */
+const VALID_WRITE_FENCE_MECHANISMS = [
+  "advisory",
+  "engine-serialized",
+  "caller-serialized",
+] as const;
+
+/** {@link validateWriteFenceDeclaration}'s accepted `drain` values. */
+const VALID_WRITE_FENCE_DRAINS = ["table-lock", "quiescent", "none"] as const;
+
+/**
+ * THE refusal for a `WriteFenceDeclaration` field TypeScript's discriminated
+ * union cannot police at runtime — see {@link validateWriteFenceDeclaration}.
+ *
+ * @throws {ConfigurationError} always.
+ */
+function refuseInvalidWriteFenceDeclaration(
+  field: "mechanism" | "drain",
+  value: unknown,
+  accepted: readonly string[],
+): never {
+  throw new ConfigurationError(
+    `capabilities.writeFence.${field} is invalid: ${JSON.stringify(value)}. ` +
+      `Accepted values are ${accepted.map((accepted) => `"${accepted}"`).join(", ")}.`,
+    { code: "WRITE_FENCE_DECLARATION_INVALID", field, value, accepted },
+    {
+      suggestion: `Declare capabilities.writeFence.${field} as one of the accepted values.`,
+    },
+  );
+}
+
+/**
+ * THE one validator of a raw `WriteFenceDeclaration` value, run before
+ * {@link planFromWriteFenceDeclaration} shapes a plan from it.
+ *
+ * TypeScript's discriminated union only holds a caller who goes through the
+ * type checker — a plain-JavaScript backend author, or a value round-tripped
+ * through JSON/config, can supply any string for `mechanism` or `drain`, or
+ * attach a `drain` to a serialized mechanism that accepts none. Every one of
+ * those is refused HERE, before a plan is shaped, for two reasons a
+ * downstream `default` arm cannot provide on its own: an invalid `drain`
+ * must never fall through to behaving like `"quiescent"` (a table-lock site
+ * would then silently take no lock instead of refusing), and an invalid
+ * `mechanism` must never reach a switch's `default` arm, which — unlike this
+ * validator — has no reason to believe the value it was handed is one of the
+ * cases it already exhausted, and `x satisfies never` is a compile-time
+ * assertion only: at runtime it would return the invalid string as though it
+ * were a resolved plan.
+ */
+function validateWriteFenceDeclaration(
+  declaration: WriteFenceDeclaration,
+): void {
+  const mechanism: string = declaration.mechanism;
+  if (
+    !(VALID_WRITE_FENCE_MECHANISMS as readonly string[]).includes(mechanism)
+  ) {
+    refuseInvalidWriteFenceDeclaration(
+      "mechanism",
+      mechanism,
+      VALID_WRITE_FENCE_MECHANISMS,
+    );
+  }
+  if (mechanism === "advisory") {
+    const drain: string = (declaration as AdvisoryWriteFenceDeclaration).drain;
+    if (!(VALID_WRITE_FENCE_DRAINS as readonly string[]).includes(drain)) {
+      refuseInvalidWriteFenceDeclaration(
+        "drain",
+        drain,
+        VALID_WRITE_FENCE_DRAINS,
+      );
+    }
+    return;
+  }
+  if ("drain" in declaration) {
+    throw new ConfigurationError(
+      "capabilities.writeFence.drain applies only to " +
+        `mechanism: "advisory"; "${mechanism}" must not declare a drain.`,
+      {
+        code: "WRITE_FENCE_DECLARATION_INVALID",
+        field: "drain",
+        mechanism,
+      },
+      {
+        suggestion: `Remove drain from this writeFence declaration — mechanism: "${mechanism}" needs none.`,
+      },
+    );
+  }
+}
+
 /**
  * THE one constructor of a {@link WriteFencePlan} from an already-resolved
  * {@link WriteFenceDeclaration}, regardless of which declaration style
@@ -553,6 +663,7 @@ function planFromWriteFenceDeclaration(
   declaration: WriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
 ): WriteFencePlan {
+  validateWriteFenceDeclaration(declaration);
   switch (declaration.mechanism) {
     case "advisory": {
       if (!fenceSqlMemberPresent(target.fenceSql, "advisoryLockExpression")) {
@@ -600,7 +711,17 @@ function planFromWriteFenceDeclaration(
       return { kind: "caller-serialized" };
     }
     default: {
-      return declaration.mechanism satisfies never;
+      // Unreachable for a TypeScript-typed caller (exhaustive above) and for
+      // any runtime value too: `validateWriteFenceDeclaration` already
+      // refused an unrecognized `mechanism` before this switch ran. Refuses
+      // rather than returning `declaration.mechanism satisfies never` —
+      // which, for an actual invalid string reaching here, would hand that
+      // string back as though it were a resolved `WriteFencePlan`.
+      return refuseInvalidWriteFenceDeclaration(
+        "mechanism",
+        (declaration as WriteFenceDeclaration).mechanism,
+        VALID_WRITE_FENCE_MECHANISMS,
+      );
     }
   }
 }
@@ -649,7 +770,24 @@ export function resolveWriteFencePlan(
 function formatWriteFenceDeclaration(
   declaration: WriteFenceDeclaration,
 ): string {
-  return `writeFence: { mechanism: "${declaration.mechanism}", drain: "${declaration.drain}" }`;
+  switch (declaration.mechanism) {
+    case "advisory": {
+      return `writeFence: { mechanism: "advisory", drain: "${declaration.drain}" }`;
+    }
+    case "engine-serialized": {
+      return 'writeFence: { mechanism: "engine-serialized" }';
+    }
+    case "caller-serialized": {
+      return 'writeFence: { mechanism: "caller-serialized" }';
+    }
+    default: {
+      return refuseInvalidWriteFenceDeclaration(
+        "mechanism",
+        (declaration as WriteFenceDeclaration).mechanism,
+        VALID_WRITE_FENCE_MECHANISMS,
+      );
+    }
+  }
 }
 
 /**

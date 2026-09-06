@@ -4792,8 +4792,12 @@ export type VectorStrategy = Readonly<{
 
 // @public
 export type WriteFenceDeclaration = Readonly<{
-    mechanism: "advisory" | "engine-serialized" | "caller-serialized";
+    mechanism: "advisory";
     drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "engine-serialized";
+}> | Readonly<{
+    mechanism: "caller-serialized";
 }>;
 
 // @public

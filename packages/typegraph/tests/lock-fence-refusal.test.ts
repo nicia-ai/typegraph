@@ -224,7 +224,7 @@ describe("T16 — (f) revisionTracking: true alone on unfenced refuses, zero sta
  *
  * Neither gate refuses under `kind !== "unfenced"`, so a `writeFence`
  * declaration using either of the two postures this stage adds —
- * `{advisory, quiescent}` and `{caller-serialized, quiescent}` — must
+ * `{advisory, quiescent}` and `{caller-serialized}` — must
  * construct successfully, exactly like an ordinary fenced declaration.
  */
 describe("T16 — (g) the quiescent drain and the caller-serialized mechanism construct successfully at both gates", () => {
@@ -239,9 +239,9 @@ describe("T16 — (g) the quiescent drain and the caller-serialized mechanism co
     }
   });
 
-  it("identity graph: {caller-serialized, quiescent}", async () => {
+  it("identity graph: {caller-serialized}", async () => {
     const logged = await createLoggedPostgresBackend({
-      writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+      writeFence: { mechanism: "caller-serialized" },
     });
     try {
       expect(() => createStore(identityGraph, logged.backend)).not.toThrow();
@@ -263,9 +263,9 @@ describe("T16 — (g) the quiescent drain and the caller-serialized mechanism co
     }
   });
 
-  it("history: true: {caller-serialized, quiescent}", async () => {
+  it("history: true: {caller-serialized}", async () => {
     const logged = await createLoggedPostgresBackend({
-      writeFence: { mechanism: "caller-serialized", drain: "quiescent" },
+      writeFence: { mechanism: "caller-serialized" },
     });
     try {
       expect(() =>

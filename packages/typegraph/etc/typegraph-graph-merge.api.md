@@ -7255,8 +7255,12 @@ export type WorkingCopyStrategy<G extends GraphDef> = Readonly<{
 
 // @public
 type WriteFenceDeclaration = Readonly<{
-    mechanism: "advisory" | "engine-serialized" | "caller-serialized";
+    mechanism: "advisory";
     drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "engine-serialized";
+}> | Readonly<{
+    mechanism: "caller-serialized";
 }>;
 
 // (No @packageDocumentation comment for this package)

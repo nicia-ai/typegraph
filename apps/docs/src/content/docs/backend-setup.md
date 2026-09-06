@@ -1528,22 +1528,29 @@ const capabilities: Partial<BackendCapabilities> = {
 };
 ```
 
-`mechanism` is how the backend excludes concurrent writers:
+`mechanism` is how the backend excludes concurrent writers. `writeFence` is a discriminated union on
+`mechanism`, and `drain` is a field of the `"advisory"` shape only — `"engine-serialized"` and
+`"caller-serialized"` declarations carry no `drain` key at all:
 
 | `mechanism` | Meaning |
 | --- | --- |
-| `"advisory"` | A keyed `pg_advisory_xact_lock`-style lock a caller takes explicitly. Needs `fenceSql` (below). |
-| `"engine-serialized"` | The engine serializes writers by construction — SQLite's single writer slot. No lock statement, no `fenceSql`. |
-| `"caller-serialized"` | A deployment-level promise, not an engine fact — see below. No lock statement; a `fenceSql` the backend still carries is used only for its isolation-fact read (recorded capture's isolation guard). |
+| `"advisory"` | A keyed `pg_advisory_xact_lock`-style lock a caller takes explicitly. Needs `fenceSql` (below) and a `drain`. |
+| `"engine-serialized"` | The engine serializes writers by construction — SQLite's single writer slot. No lock statement, no `fenceSql`, no `drain`. |
+| `"caller-serialized"` | A deployment-level promise, not an engine fact — see below. No lock statement, no `drain`; a `fenceSql` the backend still carries is used only for its isolation-fact read (recorded capture's isolation guard). |
 
-`drain` is a separate fact: whether a caller that already excluded other writers can additionally
-take a relation-wide lock on the table a drain site protects:
+`drain` (on `mechanism: "advisory"` only) is a separate fact: whether a caller that already excluded
+other writers can additionally take a relation-wide lock on the table a drain site protects:
 
 | `drain` | Meaning |
 | --- | --- |
 | `"table-lock"` | Yes — a `LOCK TABLE`-style statement is available and the drain site takes it. |
-| `"quiescent"` | The resource is already exclusive for some other reason (`caller-serialized`'s promise, or an engine's own writer slot), so the drain site takes NO statement — one it does not need rather than one it cannot spell. |
-| `"none"` | Neither — under `mechanism: "advisory"` a drain site refuses, naming the drain. `engine-serialized` and `caller-serialized` satisfy every drain site regardless of this value. |
+| `"quiescent"` | The resource is already exclusive for some other reason (an advisory lock layered under a deployment's own `caller-serialized` promise, for instance), so the drain site takes NO statement — one it does not need rather than one it cannot spell. |
+| `"none"` | Neither — a drain site refuses, naming the drain. |
+
+`"engine-serialized"` and `"caller-serialized"` satisfy every drain site unconditionally — a writer
+slot and an in-process serialization promise are each already a stronger exclusion than any `drain`
+value could add, so attaching one to either mechanism is refused (see **Runtime validation** below)
+rather than silently ignored.
 
 `resolveWriteFencePlan` resolves one of four plans:
 
@@ -1565,9 +1572,9 @@ alone is the unsound inference this capability replaces.
 The two bundled backends resolve exactly these declarations — copy the one matching your engine:
 
 - PostgreSQL: `writeFence: { mechanism: "advisory", drain: "table-lock" }`
-- SQLite: `writeFence: { mechanism: "engine-serialized", drain: "table-lock" }` (the writer slot
-  already excludes every drain site's writer, so a drain site under it always takes no statement,
-  read the same way `"quiescent"` is)
+- SQLite: `writeFence: { mechanism: "engine-serialized" }` (no `drain`: the writer slot already
+  excludes every drain site's writer, so a drain site under it always takes no statement — the same
+  behavior `drain: "quiescent"` describes for `"advisory"`, without a `drain` field to spell it)
 
 A backend that declares `mechanism: "advisory"` also supplies `fenceSql`: `lockTables` (only needed
 when `drain: "table-lock"`) plus the two composable, no-`SELECT` forms `advisoryLockExpression` /
@@ -1584,6 +1591,18 @@ member the resolved `mechanism`/`drain` combination needs is refused at construc
 code `WRITE_FENCE_SQL_UNAVAILABLE`, naming the missing member; `"engine-serialized"` and
 `"caller-serialized"` need no `fenceSql` to take a lock at all.
 
+#### Runtime validation
+
+TypeScript's discriminated union only holds a caller who goes through the type checker — a plain
+JavaScript backend author, or a value round-tripped through JSON or a config file, can still supply
+an unrecognized `mechanism` string, an unrecognized `drain` string, or a `drain` attached to
+`"engine-serialized"` / `"caller-serialized"`. `resolveWriteFencePlan` validates every declaration —
+whether it came from `capabilities.writeFence` directly or from the first-party dialect fallback —
+before shaping a plan from it, and refuses with `ConfigurationError` details code
+`WRITE_FENCE_DECLARATION_INVALID`, naming the invalid `field` (`"mechanism"` or `"drain"`) and, for
+an unrecognized value, the `accepted` list. An unrecognized `drain` never falls through to behaving
+like `"quiescent"` — it is refused outright, the same as an unrecognized `mechanism`.
+
 #### `caller-serialized`: the promise split into two halves
 
 `caller-serialized` is for a deployment that knows its database has no other concurrent writer, but
@@ -1591,17 +1610,31 @@ whose engine is neither an advisory-lock engine nor a single-writer one — a Po
 with no working `pg_advisory_xact_lock` / `LOCK TABLE`, for example. The promise has two halves,
 and TypeGraph only enforces the first:
 
-- **In process**, TypeGraph enforces it: every write unit issued through a `caller-serialized`
-  backend — collection writes, `store.transaction`, schema commits, identity and contribution
-  maintenance, index materialization, import — runs through one per-backend serialized queue, so
-  two concurrent calls through one pool cannot race each other.
+- **In process**, TypeGraph enforces it: every root member the backend classifies as mutating —
+  collection writes, `store.transaction` / `transactionWithNative`, schema commits, identity and
+  contribution maintenance, index materialization, table/DDL provisioning, `clearGraph`, import,
+  and the raw-SQL members (`execute`, `executeRaw`, `executeStatement`,
+  `executeTemporaryStatement`) that can carry an arbitrary write — runs through one per-backend
+  serialized queue, so two concurrent calls through one pool cannot race each other. A root write
+  awaited from inside a `store.transaction` callback is refused rather than left to deadlock behind
+  the transaction's own queue slot.
 - **Outside the process**, the deployment enforces it: no other client writes to this database
   while this backend is open. TypeGraph cannot see or verify that half; declaring
   `caller-serialized` is asserting it.
 
-`createPostgresBackend` accepts `writeFence: { mechanism: "caller-serialized", drain }` — a claim
-about the deployment — while still refusing `mechanism: "engine-serialized"` outright, because that
-value is a claim about the *engine*, which this factory's own engine does not back.
+Adopting an externally owned transaction (`store.withTransaction(externalTx)`, backed by
+`adoptTransaction`) is refused outright on a `caller-serialized` backend, with `ConfigurationError`
+details code `CALLER_SERIALIZED_REFUSES_ADOPTION`: an adopted transaction's lifetime belongs to the
+caller, not to this backend's write-unit queue, so there is no honest way to hold a queue slot open
+for it — queuing it would block every other queued write until the caller's own transaction ends,
+and leaving it unqueued would let its writes interleave with the queue's own, silently breaking the
+promise `caller-serialized` makes. Open the transaction through this backend's own `transaction()` /
+`transactionWithNative()` instead, or do not declare `caller-serialized` on a backend that needs
+cross-store adoption.
+
+`createPostgresBackend` accepts `writeFence: { mechanism: "caller-serialized" }` — a claim about the
+deployment — while still refusing `mechanism: "engine-serialized"` outright, because that value is
+a claim about the *engine*, which this factory's own engine does not back.
 
 Constructing Operational Identity, or `history: true` / `revisionTracking: true`, against an
 `unfenced` backend is refused immediately at `createStore` — never mid-flush — with
@@ -1659,7 +1692,7 @@ running a fence the engine cannot enforce.
 
 If the deployment instead knows it is the only writer of this database — a pool clamped to one
 connection, or a single-writer topology otherwise enforced outside TypeGraph — declare
-`writeFence: { mechanism: "caller-serialized", drain: "quiescent" }` instead (see above): that is
+`writeFence: { mechanism: "caller-serialized" }` instead (see above): that is
 the honest way to spell a deployment convention. Do not reach for `mechanism: "engine-serialized"`
 for the same purpose — that declaration means the *engine* serializes writers by construction, and
 a deployment convention is not a construction. `createPostgresBackend` refuses that particular

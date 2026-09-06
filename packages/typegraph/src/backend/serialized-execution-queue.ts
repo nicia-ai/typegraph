@@ -18,6 +18,39 @@ export type SerializedExecutionQueue = Readonly<{
   runExclusive: <T>(task: () => Promise<T>) => Promise<T>;
 }>;
 
+/**
+ * How a queue behaves when the AsyncLocalStorage-based reentrancy detection
+ * below is unavailable (or has not finished loading yet):
+ *
+ * - `"detect"` — best-effort. If the context is unavailable, the queue runs
+ *   the task WITHOUT detection, exactly as it always has. SQLite's own
+ *   per-connection queue (`sqlite.ts`) uses this: undetected reentrancy there
+ *   is a quality-of-life deadlock guard, not a correctness promise a caller
+ *   is relying on to hold.
+ * - `"require"` — reentrancy detection IS part of the promise this queue
+ *   makes. A `caller-serialized` write-fence declaration says every write
+ *   unit this backend issues is serialized in-process; a transaction that
+ *   silently deadlocks on a nested root write (because detection happened to
+ *   be unavailable on this runtime, or the loader had not yet resolved on a
+ *   cold start) would falsify that promise instead of merely degrading it.
+ *   Under `"require"`, an unavailable context refuses EVERY submission with
+ *   `CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT` instead of running undetected.
+ */
+export type ReentrancyMode = "detect" | "require";
+
+export type SerializedExecutionQueueOptions = Readonly<{
+  reentrancy: ReentrancyMode;
+  /**
+   * Names this queue in the reentrancy / async-context refusal's message and
+   * structured details — a SQLite dialect string for SQLite's own queue, or
+   * `"caller-serialized"` for the in-process write-unit queue
+   * `createSqlBackend` builds from a `caller-serialized` write-fence
+   * declaration. Replaces a hardcoded `"sqlite"` the refusal used to report
+   * regardless of which queue actually rejected the submission.
+   */
+  subject: string;
+}>;
+
 // eslint-disable-next-line @typescript-eslint/no-empty-function
 function noop(): void {}
 
@@ -48,8 +81,10 @@ function pendingForever<T>(): Promise<T> {
  * of how many other queues are nested inside it.
  *
  * AsyncLocalStorage is loaded lazily and optionally: it is available on Node
- * and on Cloudflare workers with the `nodejs_als` compatibility flag, and a
- * runtime without it simply skips the detection (the queue behaves as before).
+ * and on Cloudflare workers with the `nodejs_als` compatibility flag. Under
+ * `reentrancy: "detect"`, a runtime without it simply skips the detection
+ * (the queue behaves as before); under `"require"`, its absence is refused —
+ * see {@link ReentrancyMode}.
  */
 type QueueTaskContext = Readonly<{
   getStore: () => ReadonlySet<object> | undefined;
@@ -64,21 +99,59 @@ async function loadQueueTaskContext(): Promise<void> {
     queueTaskContext = new asyncHooks.AsyncLocalStorage<ReadonlySet<object>>();
   } catch {
     // AsyncLocalStorage unavailable on this runtime: re-entrant submissions
-    // stay undetected, matching the queue's previous behavior.
+    // stay undetected under `reentrancy: "detect"`, and every submission is
+    // refused under `reentrancy: "require"` — see `runExclusive` below.
   }
 }
 
-// eslint-disable-next-line unicorn/prefer-top-level-await -- the dual CJS/ESM build cannot use top-level await
-void loadQueueTaskContext();
+/**
+ * Resolves once {@link loadQueueTaskContext} has settled — successfully or
+ * not; the function above never throws, so this promise never rejects.
+ * `runExclusive` awaits it before running ANY task body, on both
+ * {@link ReentrancyMode}s: that is what turns "the dynamic import has not
+ * resolved yet" from a silent detection gap into, at worst, one microtask of
+ * latency before the first task of this queue's lifetime ever runs — by the
+ * time a task's own body executes (and could make a nested submission to
+ * this same queue), `queueTaskContext` has already reached its final value.
+ */
+let queueTaskContextReadyPromise: Promise<void> = loadQueueTaskContext();
 
-function rejectReentrantQueueSubmission(): Promise<never> {
+/**
+ * @internal Test seam for `tests/caller-serialized-queue.test.ts`: replaces
+ * the module's cached AsyncLocalStorage context and readiness state with a
+ * caller-controlled value, so a test can simulate a runtime with no
+ * AsyncLocalStorage (`context: undefined`) or a cold start where the loader
+ * has not resolved yet (a `readyDelayMs` the test's own assertions run
+ * within) deterministically, instead of racing the real dynamic
+ * `import("node:async_hooks")`. Not reachable from published entrypoints.
+ */
+export function __setQueueTaskContextForTesting(
+  context: QueueTaskContext | undefined,
+  readyDelayMs = 0,
+): void {
+  queueTaskContext = undefined;
+  queueTaskContextReadyPromise = new Promise((resolve) => {
+    setTimeout(() => {
+      queueTaskContext = context;
+      resolve();
+    }, readyDelayMs);
+  });
+}
+
+/** @internal Restores the real loader after a test uses the seam above. */
+export function __restoreQueueTaskContextForTesting(): void {
+  queueTaskContext = undefined;
+  queueTaskContextReadyPromise = loadQueueTaskContext();
+}
+
+function rejectReentrantQueueSubmission(subject: string): Promise<never> {
   return Promise.reject(
     new ConfigurationError(
       "This operation was awaited from inside a transaction running on the " +
-        "same SQLite backend and would deadlock: the transaction holds the " +
-        "backend's serialized execution slot until it completes, so the " +
-        "operation could never run.",
-      { backend: "sqlite", capability: "concurrentRootAccess" },
+        `same ${subject} backend and would deadlock: the transaction holds ` +
+        "the backend's serialized execution slot until it completes, so " +
+        "the operation could never run.",
+      { code: "SERIALIZED_QUEUE_REENTRANT_SUBMISSION", subject },
       {
         suggestion:
           "Inside a store.transaction callback, use the transaction-scoped " +
@@ -89,7 +162,37 @@ function rejectReentrantQueueSubmission(): Promise<never> {
   );
 }
 
-export function createSerializedExecutionQueue(): SerializedExecutionQueue {
+/**
+ * THE refusal `runExclusive` throws under `reentrancy: "require"` when the
+ * AsyncLocalStorage context this queue's promise depends on never became
+ * available (an unsupported runtime) or had not resolved by the time this
+ * submission's turn came up. Refusing beats running without detection: a
+ * `caller-serialized` in-process promise with no working reentrancy guard is
+ * a promise this queue cannot actually keep.
+ */
+function rejectAsyncContextUnavailable(subject: string): Promise<never> {
+  return Promise.reject(
+    new ConfigurationError(
+      `The ${subject} write-unit queue requires AsyncLocalStorage ` +
+        "(node:async_hooks) to detect a reentrant submission, but it is " +
+        "unavailable on this runtime, so this submission is refused rather " +
+        "than run without the detection this queue's caller-serialized " +
+        "promise depends on.",
+      { code: "CALLER_SERIALIZED_REQUIRES_ASYNC_CONTEXT", subject },
+      {
+        suggestion:
+          "Run on a runtime that supports node:async_hooks' " +
+          "AsyncLocalStorage (Node.js, or Cloudflare Workers with the " +
+          "nodejs_als compatibility flag), or avoid declaring " +
+          '`writeFence.mechanism: "caller-serialized"` on this runtime.',
+      },
+    ),
+  );
+}
+
+export function createSerializedExecutionQueue(
+  options: SerializedExecutionQueueOptions,
+): SerializedExecutionQueue {
   let tail: Promise<unknown> = Promise.resolve();
   let disposed = false;
   // Unique per queue: a task running on THIS queue must not submit back to it,
@@ -107,8 +210,16 @@ export function createSerializedExecutionQueue(): SerializedExecutionQueue {
 
     runExclusive<T>(task: () => Promise<T>): Promise<T> {
       if (isDisposed()) return Promise.reject(new BackendDisposedError());
+      // Synchronous, at call time, deliberately NOT deferred behind
+      // `queueTaskContextReadyPromise`: a submission made from INSIDE a task
+      // this same queue is currently running only ever reaches this point
+      // after `runTask` (below) already awaited that readiness promise for
+      // the ENCLOSING task, so `queueTaskContext` is already resolved by
+      // then. Waiting here too would let two concurrent top-level
+      // submissions race the promise instead of strictly ordering by call
+      // time, which is what keeps the FIFO guarantee below correct.
       if (queueTaskContext?.getStore()?.has(taskMarker) === true) {
-        return rejectReentrantQueueSubmission();
+        return rejectReentrantQueueSubmission(options.subject);
       }
 
       // When disposed, runTask returns a never-settling promise so that no
@@ -127,8 +238,20 @@ export function createSerializedExecutionQueue(): SerializedExecutionQueue {
       const runTask = async (): Promise<T> => {
         if (isDisposed()) return pendingForever<T>();
         try {
+          // Awaited before the context is read (on BOTH reentrancy modes),
+          // so a nested submission made from inside `task()` — whether this
+          // queue was constructed a microtask ago or a minute ago — always
+          // observes `queueTaskContext`'s FINAL value rather than a
+          // still-loading `undefined`. See the module doc above.
+          await queueTaskContextReadyPromise;
+          if (isDisposed()) return await pendingForever<T>();
           const context = queueTaskContext;
-          if (context === undefined) return await task();
+          if (context === undefined) {
+            if (options.reentrancy === "require") {
+              return await rejectAsyncContextUnavailable(options.subject);
+            }
+            return await task();
+          }
           const activeMarkers = new Set(context.getStore());
           activeMarkers.add(taskMarker);
           return await context.run(activeMarkers, () => task());

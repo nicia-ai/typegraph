@@ -22,6 +22,7 @@ import {
   type WriteFenceTarget,
 } from "../../capabilities/write-fence";
 import { deriveBackend, type ExactBackendOverlay } from "../../derive-backend";
+import { GRAPH_BACKEND_MEMBER_CLASSES } from "../../member-classes";
 import {
   createSerializedExecutionQueue,
   runWithSerializedQueue,
@@ -32,6 +33,7 @@ import type {
   AdapterBackend,
   GraphCommandPort,
   SchemaWriteTransactionBackend,
+  TransactionBackend,
 } from "../../types";
 import { gateFulltextMethods } from "../contribution-materializations";
 import { resolveEngineAssembly } from "./assembly";
@@ -47,22 +49,183 @@ import { createSchemaVersionMembers } from "./members/schema-version-members";
 import type { EngineAssemblyContext, SqlEngineProfile } from "./profile";
 
 /**
- * Every root member a `caller-serialized` write-fence declaration must
- * serialize through the in-process queue this factory builds for it: the
- * three WRITE classes of `src/backend/member-classes.ts` — graph-entity
- * writes, their sidecars, and backend-owned bulk ingestion
- * (`WRITE_MEMBER_KEYS`, the same set the write pipeline bans outside its
- * seam) — plus the two transaction openers, `transaction` and
- * `transactionWithNative`. Read from the taxonomy's own exported constant, so
- * a write member the taxonomy adds later is queued here automatically,
- * never from a second, hand-kept list this factory would have to remember to
- * update.
+ * `provisioning`-class members excluded from the caller-serialized queue
+ * because they derive text synchronously without ever executing SQL:
+ * `identityTableDdl` / `recordedTableDdl` return a DDL string array/record
+ * built from table names alone, with no `Promise` in their real signature.
+ * Queuing either through {@link buildQueuedWriteUnits}'s generic
+ * "re-wrap as `(...) => runWithSerializedQueue(...)`" path would silently
+ * turn its synchronous return value into a `Promise`, breaking every
+ * caller that reads the result without awaiting — a change in kind, not
+ * degree, for a member that touches no connection at all.
  */
-const QUEUED_ROOT_MEMBER_KEYS = [
-  ...WRITE_MEMBER_KEYS,
-  "transaction",
-  "transactionWithNative",
+const PROVISIONING_DERIVATION_MEMBER_KEYS = [
+  "identityTableDdl",
+  "recordedTableDdl",
 ] as const;
+
+/**
+ * `provisioning`-class member excluded because it is not itself a callable
+ * write: `catalog` is a bag of read-only introspection probes
+ * (`BackendCatalogProbes`), not a function. `buildQueuedWriteUnits` already
+ * skips any non-function member it reads, so an included `catalog` would be
+ * silently dropped regardless — it is named here so the totality ratchet in
+ * `tests/caller-serialized-queue.test.ts` sees a documented exclusion
+ * instead of an accidental one.
+ */
+const PROVISIONING_PROBE_MEMBER_KEYS = ["catalog"] as const;
+
+/**
+ * `rawSql`-class member excluded for the same reason as the two provisioning
+ * derivations above: `compileSql` turns a `SqlFragment` into
+ * `{ sql, params }` synchronously and never touches a connection. The other
+ * four raw-SQL members — `execute`, `executeRaw`, `executeStatement`,
+ * `executeTemporaryStatement` — all dispatch through the execution
+ * adapter's `execRun`/`execGet` against the live connection and CAN carry a
+ * write, so they stay queued even though the member classification does not
+ * call any of the five a "write".
+ */
+const RAW_SQL_DERIVATION_MEMBER_KEYS = ["compileSql"] as const;
+
+/**
+ * The `lifecycle`-class member excluded from the generic per-member wrap:
+ * `"close"` is handled by {@link buildQueuedWriteUnits}'s own disposal
+ * wrapper below (it must run, and dispose the queue, even with queued work
+ * outstanding), never by routing through the queue itself. The class's other
+ * two members flow through unexcluded: `"transaction"` is queued like any
+ * other lifecycle member (it is also, descriptively, one of the two
+ * transaction openers this factory relies on — see
+ * {@link QUEUED_ROOT_MEMBER_KEYS}'s own doc comment), and `"clearGraph"` —
+ * the class's one genuine destructive write — is queued the same way.
+ */
+const LIFECYCLE_EXCLUDED_MEMBER_KEYS = ["close"] as const;
+
+/**
+ * The one `AdapterBackend`-only member that opens a TypeGraph-managed
+ * transaction — not part of `keyof GraphBackend`, so `member-classes.ts`'s
+ * taxonomy does not (and structurally cannot) name it; `transaction`, the
+ * other opener, reaches {@link QUEUED_ROOT_MEMBER_KEYS} through the
+ * `lifecycle` class instead, and a schema-write transaction opener
+ * (`schemaWriteTransaction`) reaches it through the `schema` class.
+ * `adoptTransaction`, the third `AdapterBackend`-only member, is
+ * deliberately ABSENT from every list here: it is refused outright under
+ * `caller-serialized` rather than queued — see
+ * {@link buildQueuedWriteUnits}'s own `adoptTransaction` override.
+ */
+const TRANSACTION_OPENER_MEMBER_KEYS = ["transactionWithNative"] as const;
+
+/**
+ * Every root member a `caller-serialized` write-fence declaration must
+ * serialize through the in-process queue this factory builds for it: every
+ * member `src/backend/member-classes.ts` classifies in a mutation-capable
+ * class — graph-entity writes, their sidecars, backend-owned bulk
+ * ingestion, derived-data maintenance, schema commits (including the
+ * `schema`-class transaction opener, `schemaWriteTransaction`), DDL and
+ * table provisioning, the raw-SQL members that actually execute something,
+ * and the lifecycle class's one destructive write (`clearGraph`) — plus
+ * `transactionWithNative`, the one `AdapterBackend`-only transaction opener.
+ *
+ * Read from the taxonomy's own exported classes (`GRAPH_BACKEND_MEMBER_CLASSES`),
+ * so a write member a class adds later is queued here automatically, never
+ * from a second, hand-kept list this factory would have to remember to
+ * update; only the four documented exceptions above (two pure derivations,
+ * one probe bag, one raw-SQL compiler) are named individually, each with its
+ * own reason, and `tests/caller-serialized-queue.test.ts` pins that this list
+ * plus those four exceptions is exactly `keyof AdapterBackend` (minus
+ * `adoptTransaction`, refused rather than queued or excluded).
+ *
+ * Why per-member queueing (rather than, say, one lock spanning every call) is
+ * enough: every multi-call write workflow either runs entirely inside one
+ * already-queued opener call (`transaction`, `transactionWithNative`,
+ * `schemaWriteTransaction`) or relies on its own CAS/claim protocol whose
+ * claim writes are themselves individually-queued members of this same set —
+ * there is no third shape of multi-statement write this queue would need to
+ * span.
+ */
+export const QUEUED_ROOT_MEMBER_KEYS = [
+  ...WRITE_MEMBER_KEYS,
+  ...GRAPH_BACKEND_MEMBER_CLASSES.maintenance,
+  ...GRAPH_BACKEND_MEMBER_CLASSES.schema,
+  ...GRAPH_BACKEND_MEMBER_CLASSES.provisioning,
+  ...GRAPH_BACKEND_MEMBER_CLASSES.rawSql,
+  ...GRAPH_BACKEND_MEMBER_CLASSES.lifecycle,
+  ...TRANSACTION_OPENER_MEMBER_KEYS,
+].filter(
+  (key) =>
+    !(
+      [
+        ...PROVISIONING_DERIVATION_MEMBER_KEYS,
+        ...PROVISIONING_PROBE_MEMBER_KEYS,
+        ...RAW_SQL_DERIVATION_MEMBER_KEYS,
+        ...LIFECYCLE_EXCLUDED_MEMBER_KEYS,
+      ] as readonly string[]
+    ).includes(key),
+);
+
+/**
+ * Every `keyof AdapterBackend` member intentionally left OUT of
+ * {@link QUEUED_ROOT_MEMBER_KEYS}, each with the one-line reason it stays
+ * unqueued: every `read` and `identity` member (never writes / a static
+ * description property, not an operation), the two provisioning derivations,
+ * the one provisioning probe bag, the one raw-SQL compiler, `close`
+ * (this file's own disposal wrapper), and `adoptTransaction` (refused
+ * outright rather than queued or silently left alone).
+ *
+ * `tests/caller-serialized-queue.test.ts`'s totality ratchet partitions the
+ * FULL taxonomy plus the two `AdapterBackend`-only members into this
+ * record's keys and {@link QUEUED_ROOT_MEMBER_KEYS}, asserting the two sets
+ * are disjoint and their union is everything `keyof AdapterBackend` names —
+ * so a member a future class reclassifies, or a brand-new member nobody
+ * classifies at all, cannot land unqueued silently: it either appears here
+ * with a reason, in `QUEUED_ROOT_MEMBER_KEYS`, or fails the ratchet.
+ */
+export const UNQUEUED_ROOT_MEMBER_REASONS: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(
+    GRAPH_BACKEND_MEMBER_CLASSES.read.map(
+      (key) => [key, "read: never writes"] as const,
+    ),
+  ),
+  ...Object.fromEntries(
+    GRAPH_BACKEND_MEMBER_CLASSES.identity.map(
+      (key) =>
+        [
+          key,
+          "identity: a static description property, not a callable operation",
+        ] as const,
+    ),
+  ),
+  ...Object.fromEntries(
+    PROVISIONING_DERIVATION_MEMBER_KEYS.map(
+      (key) =>
+        [
+          key,
+          "provisioning derivation: returns DDL text synchronously without executing it",
+        ] as const,
+    ),
+  ),
+  ...Object.fromEntries(
+    PROVISIONING_PROBE_MEMBER_KEYS.map(
+      (key) =>
+        [
+          key,
+          "provisioning probe: a bag of read-only introspection functions, not itself callable",
+        ] as const,
+    ),
+  ),
+  ...Object.fromEntries(
+    RAW_SQL_DERIVATION_MEMBER_KEYS.map(
+      (key) =>
+        [
+          key,
+          "rawSql derivation: compiles SQL text synchronously without executing it",
+        ] as const,
+    ),
+  ),
+  close:
+    "lifecycle: handled by this file's own disposal wrapper, which must run (and dispose the queue) even with queued work outstanding",
+  adoptTransaction:
+    "refused outright under caller-serialized (CALLER_SERIALIZED_REFUSES_ADOPTION) rather than queued or left silently unqueued",
+};
 
 /**
  * Runs `port.execute` through `queue`, keeping `session` untouched. `commands`
@@ -82,21 +245,60 @@ function queueCommandPort(
 }
 
 /**
+ * THE refusal `adoptTransaction` becomes on a `caller-serialized` backend:
+ * an externally-owned transaction's lifetime is the CALLER's, not something
+ * this factory's write-unit queue can hold a slot open for — the caller, not
+ * TypeGraph, decides when it commits, so queuing it would either block every
+ * other queued write until that external transaction ends (defeating the
+ * point of adopting one mid-flight) or — if left unqueued, as it always was
+ * before this fence declaration existed — let its writes interleave with the
+ * queue's own, silently breaking the very promise `caller-serialized`
+ * makes. Refusing outright is the only honest option.
+ */
+function refuseCallerSerializedAdoption<TTx>(
+  // The real signature's one parameter, accepted (and ignored) so this
+  // matches `AdapterBackend<TTx>["adoptTransaction"]` exactly rather than a
+  // zero-arity stand-in the cast below would otherwise have to paper over.
+  _externalTransaction: TTx,
+): TransactionBackend {
+  throw new ConfigurationError(
+    "adoptTransaction is unavailable on a caller-serialized backend: an " +
+      "externally owned transaction's lifetime cannot be held by the " +
+      "backend's write-unit queue, so store.withTransaction(externalTx) is " +
+      "refused rather than silently allowed to interleave with queued " +
+      "root writes.",
+    {
+      code: "CALLER_SERIALIZED_REFUSES_ADOPTION",
+      member: "adoptTransaction" satisfies keyof AdapterBackend<TTx>,
+    },
+    {
+      suggestion:
+        "Open the transaction through this backend's own transaction()/" +
+        "transactionWithNative() instead of adopting an externally opened " +
+        "one, or drop the caller-serialized write-fence declaration if " +
+        "cross-store adoption is required.",
+    },
+  );
+}
+
+/**
  * Builds the overlay {@link buildCallerSerializedBackend} decorates `backend`
  * with: every member {@link QUEUED_ROOT_MEMBER_KEYS} names, routed through
- * `queue`, plus `close`, which disposes `queue` after delegating to
- * `backend`'s own.
+ * `queue`; `close`, which disposes `queue` after delegating to `backend`'s
+ * own; and `adoptTransaction`, replaced outright with
+ * {@link refuseCallerSerializedAdoption} rather than queued or left
+ * unqueued.
  *
  * Read with `Reflect.get` rather than static property access, so an OPTIONAL
  * write member this particular backend does not implement is simply absent
  * from the overlay instead of wrapping `undefined`. `deriveBackend` then
- * leaves every member this overlay does not name — every read, the
- * transaction-handle builders, `adoptTransaction` — resolving to `backend`'s
- * own, unqueued implementation; a transaction's own body reaches `backend`
- * directly too (`EngineAssemblyContext.self()`, resolved once in
- * `createSqlBackend` before this function ever runs), which is what lets
- * `transaction`'s internal delegation to `transactionWithNative` run without
- * re-entering this same queue.
+ * leaves every member this overlay does not name — every read, and the
+ * transaction-handle builders — resolving to `backend`'s own, unqueued
+ * implementation; a transaction's own body reaches `backend` directly too
+ * (`EngineAssemblyContext.self()`, resolved once in `createSqlBackend`
+ * before this function ever runs), which is what lets `transaction`'s
+ * internal delegation to `transactionWithNative` run without re-entering
+ * this same queue.
  */
 function buildQueuedWriteUnits<TTx>(
   backend: AdapterBackend<TTx>,
@@ -129,13 +331,24 @@ function buildQueuedWriteUnits<TTx>(
     }
   };
   const overlay: Partial<Record<keyof AdapterBackend<TTx>, unknown>> =
-    Object.fromEntries([...queuedEntries, ["close", close]]);
+    Object.fromEntries([
+      ...queuedEntries,
+      ["close", close],
+      [
+        "adoptTransaction",
+        (externalTransaction: TTx) =>
+          refuseCallerSerializedAdoption<TTx>(externalTransaction),
+      ],
+    ]);
   // `overlay` was built entirely from `QUEUED_ROOT_MEMBER_KEYS` — a subset of
-  // `keyof AdapterBackend<TTx>` derived from the write-member taxonomy plus
-  // the two transaction openers — and every value either re-wraps that exact
-  // member's own function (same signature, same return type) or narrows
-  // `commands` to the identical `GraphCommandPort` shape. The cast states a
-  // fact the loop above already establishes; it is not a widening.
+  // `keyof AdapterBackend<TTx>` derived from the member-classification's
+  // mutation-capable classes plus the transaction openers — and every value
+  // either re-wraps that exact member's own function (same signature, same
+  // return type), narrows `commands` to the identical `GraphCommandPort`
+  // shape, or (for `close`/`adoptTransaction`) implements the exact member
+  // signature `AdapterBackend<TTx>` declares. The cast states a fact the
+  // loop above and the two named entries already establish; it is not a
+  // widening.
   return overlay as unknown as ExactBackendOverlay<
     AdapterBackend<TTx>,
     Partial<AdapterBackend<TTx>>
@@ -161,7 +374,14 @@ function buildQueuedWriteUnits<TTx>(
 export function buildCallerSerializedBackend<TTx>(
   backend: AdapterBackend<TTx>,
 ): AdapterBackend<TTx> {
-  const queue = createSerializedExecutionQueue();
+  const queue = createSerializedExecutionQueue({
+    // "require": a caller-serialized declaration's in-process promise
+    // depends on this queue's reentrancy detection actually working — an
+    // undetected nested root write would deadlock a transaction rather than
+    // refuse loudly, silently breaking the promise instead of degrading it.
+    reentrancy: "require",
+    subject: "caller-serialized",
+  });
   return deriveBackend(backend, buildQueuedWriteUnits(backend, queue));
 }
 
