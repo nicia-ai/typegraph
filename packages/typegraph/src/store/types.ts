@@ -276,9 +276,11 @@ export type HookContext = Readonly<{
    * `store.transaction(fn, { retry: { attempts } })` call; inside one, a
    * value above 1 marks a replay of the same logical operation after an
    * earlier attempt hit a transaction conflict, so a listener can tell a
-   * retried attempt from a genuinely new operation.
+   * retried attempt from a genuinely new operation. Absent means `1`: a
+   * context built outside the store (a test fixture, a forwarded literal)
+   * need not carry it.
    */
-  attempt: number;
+  attempt?: number;
 }>;
 
 /**
@@ -392,7 +394,10 @@ export type StoreHooks = Readonly<{
   /**
    * Called when an operation fails — including an operation that completed
    * inside a `store.transaction` whose commit then failed and rolled it
-   * back.
+   * back. Must not throw: an exception this hook raises while a
+   * transaction's failure is being reported is discarded, so the failure
+   * being reported — not the hook's exception — is what the caller and any
+   * enclosing retry owner receive.
    */
   onError?: (ctx: HookContext, error: Error) => void;
 }>;

@@ -3099,6 +3099,8 @@ type HookContext = Readonly<{
   operationId: string;
   graphId: string;
   startedAt: Date;
+  /** 1-based attempt inside a retried transaction; absent means 1. */
+  attempt?: number;
 }>;
 
 type QueryHookContext = HookContext &

@@ -3443,7 +3443,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         if (!frame.willRetry(error)) {
           const failure = asError(frame.reportedFailure(error));
           for (const outcome of pending) {
-            this.#hooks.onError?.(outcome.ctx, failure);
+            // A hook that throws while being told about a failure must not
+            // replace that failure: the caller — and, for a nested unit, the
+            // retry owner classifying it — receives the original error.
+            try {
+              this.#hooks.onError?.(outcome.ctx, failure);
+            } catch {
+              // Discarded on purpose; see `StoreHooks.onError`.
+            }
           }
         }
         throw error;

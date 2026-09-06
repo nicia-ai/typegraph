@@ -289,7 +289,7 @@ describe.each(ENGINES)("store.transaction retry (%s)", (engine) => {
       { shape: "40001", failCommits: 1 },
       {
         hooks: {
-          onOperationStart: (ctx) => starts.push(ctx.attempt),
+          onOperationStart: (ctx) => starts.push(ctx.attempt ?? 1),
           onOperationEnd: () => {
             ends += 1;
           },
@@ -436,6 +436,58 @@ describe.each(ENGINES)("store.transaction retry (%s)", (engine) => {
       expect(error).toBe(conflict);
     }
     expect(await store.nodes.Person.count()).toBe(0);
+  });
+
+  it("a throwing onError hook never replaces the failure being reported", async () => {
+    // Without retry the conflict must reach the caller as the conflict, not
+    // as the hook's exception; and a nested unit's failure must reach an
+    // enclosing retry owner intact so it can still be classified and retried.
+    const { injector, store } = await buildFaultyStore(
+      engine,
+      { shape: "40001", failCommits: 1 },
+      {
+        hooks: {
+          onError: () => {
+            throw new Error("hook boom");
+          },
+        },
+      },
+    );
+
+    let caught: unknown;
+    try {
+      await store.transaction(async (tx) => {
+        await tx.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(TransactionConflictError);
+    expect((caught as TransactionConflictError).cause).toBe(
+      injector.lastFault(),
+    );
+
+    // The owner sees the original conflict, so a retried transaction still
+    // succeeds on its second attempt.
+    const { injector: retried, store: retriedStore } = await buildFaultyStore(
+      engine,
+      { shape: "40001", failCommits: 1 },
+      {
+        hooks: {
+          onError: () => {
+            throw new Error("hook boom");
+          },
+        },
+      },
+    );
+    await retriedStore.transaction(
+      async (tx) => {
+        await tx.nodes.Person.create({ name: "Bob" }, { id: "bob" });
+      },
+      { retry: { attempts: 2 } },
+    );
+    expect(retried.commitAttempts()).toBe(2);
+    expect(await retriedStore.nodes.Person.count()).toBe(1);
   });
 
   it("a throwing onOperationEnd hook cannot retry an attempt whose backend transaction already committed", async () => {

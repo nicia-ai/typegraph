@@ -96,6 +96,34 @@ describe("isSerializationFailure", () => {
     expect(isSerializationFailure(outer)).toBe(true);
   });
 
+  it("suppresses the message fallback chain-wide when any link carries a non-conflict SQLSTATE", () => {
+    // A query wrapper whose message quotes a parameter literal such as
+    // "deadlock detected" sits above the driver's own unique violation. The
+    // engine already classified the failure (23505); the wrapper's text is
+    // not evidence, and retrying would turn a unique violation into a
+    // conflict.
+    const wrapper = new Error(
+      "Failed query: insert into notes (body) values ('deadlock detected')",
+      {
+        cause: pgError(
+          "23505",
+          "duplicate key value violates unique constraint",
+        ),
+      },
+    );
+    expect(isSerializationFailure(wrapper)).toBe(false);
+  });
+
+  it("does not let a non-SQLSTATE code suppress the fallback", () => {
+    // ECONNRESET and GRAPH_MERGE_ERROR are not engine verdicts, so they
+    // neither corroborate nor suppress; only a five-character SQLSTATE does.
+    const outer = new Error("merge commit failed", {
+      cause: new Error("deadlock detected"),
+    }) as Error & { code: string };
+    outer.code = "GRAPH_MERGE_ERROR";
+    expect(isSerializationFailure(outer)).toBe(true);
+  });
+
   it("does not treat a bare string as message evidence", () => {
     // A bare string can never carry a `code` of its own, so the SQLSTATE
     // pass can never corroborate it; treating it as message evidence would

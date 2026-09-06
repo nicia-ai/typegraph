@@ -743,11 +743,21 @@ export function isSqliteStaleSnapshotError(error: unknown): boolean {
 const SERIALIZATION_FAILURE_SQL_STATES = ["40001", "40P01"] as const;
 
 /**
+ * The shape of a SQLSTATE: five upper-case alphanumerics. Distinguishes an
+ * engine verdict (`23505`) from a code some other layer minted (a
+ * `TypeGraphError`'s `GRAPH_MERGE_ERROR`, a socket's `ECONNRESET`), which
+ * says nothing about how the engine classified the failure.
+ */
+const SQL_STATE_SHAPE = /^[0-9A-Z]{5}$/;
+
+/**
  * Driver-message fallback for a serialization failure whose SQLSTATE was
  * dropped by a wrapper. Matches the fixed PostgreSQL texts for the two
  * SQLSTATEs above.
  *
- * Consulted per link, not chain-wide: a link is a candidate for the message
+ * Never consulted when any link carries a SQLSTATE other than the two
+ * above: the engine has already classified that failure. Otherwise
+ * consulted per link, not chain-wide: a link is a candidate for the message
  * match only when that same link's own `code` is not a string — a link that
  * carries some other coded failure (a unique violation, say) has already
  * been classified by the engine, so its message is never consulted even
@@ -776,6 +786,7 @@ const SERIALIZATION_FAILURE_MESSAGE_PATTERN =
  */
 export function isSerializationFailure(error: unknown): boolean {
   const uncodedLinks: unknown[] = [];
+  let sawOtherSqlState = false;
   for (const link of errorChain(error)) {
     if (!canReadProperty(link)) {
       uncodedLinks.push(link);
@@ -783,8 +794,17 @@ export function isSerializationFailure(error: unknown): boolean {
     }
     const code: unknown = Reflect.get(link, "code");
     if (isSqlStateIn(code, SERIALIZATION_FAILURE_SQL_STATES)) return true;
-    if (typeof code !== "string") uncodedLinks.push(link);
+    if (typeof code !== "string") {
+      uncodedLinks.push(link);
+    } else if (SQL_STATE_SHAPE.test(code)) {
+      sawOtherSqlState = true;
+    }
   }
+  // The engine already classified this failure as something else: a wrapper
+  // whose message merely quotes conflict text (a parameter literal, a
+  // statement's own error string) must not turn a unique violation into a
+  // retried conflict.
+  if (sawOtherSqlState) return false;
   for (const link of uncodedLinks) {
     if (typeof link === "string") continue;
     const message = messageProperty(link);

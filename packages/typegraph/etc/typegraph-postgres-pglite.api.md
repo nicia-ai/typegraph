@@ -2433,7 +2433,7 @@ type HookContext = Readonly<{
     operationId: string;
     graphId: string;
     startedAt: Date;
-    attempt: number;
+    attempt?: number;
 }>;
 
 // @public (undocumented)
