@@ -159,6 +159,7 @@ describe("deriveBackend over frozen inputs", () => {
     expect(derived.capabilities.execution).toEqual({
       interactiveTransactions: true,
       atomicBatch: "none",
+      unitOfWork: "interactive",
     });
     expect(Reflect.ownKeys(derived)).toEqual(["capabilities", "run"]);
     expect(Object.getOwnPropertyDescriptor(derived, "run")).toMatchObject({

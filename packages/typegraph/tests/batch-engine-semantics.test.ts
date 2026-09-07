@@ -20,6 +20,8 @@ import {
   UniquenessError,
   ValidationError,
 } from "../src";
+import { resolveBatchWriteVerdict } from "../src/backend/capabilities/batch-write-verdict";
+import { deriveBackend, projectBackend } from "../src/backend/derive-backend";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
@@ -157,6 +159,29 @@ describe.each([
           .interactiveTransactions,
       ).toBe(true);
       expect(harness.interactiveBackend.capabilities.execution.unitOfWork).toBe(
+        "interactive",
+      );
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("re-derives unitOfWork when derivation strips the atomic batch, so no derived object is a batch-tier backend without a batch", async () => {
+    const harness = await createHarness(kind);
+    try {
+      const derived = deriveBackend(harness.backend, {});
+      expect(derived.capabilities.execution.atomicBatch).toBe("none");
+      expect(derived.capabilities.execution.unitOfWork).toBe("none");
+      expect(
+        resolveBatchWriteVerdict(derived, { needs: "interactive-callback" }),
+      ).toEqual({ kind: "program" });
+
+      const projected = projectBackend(harness.backend, ["capabilities"]);
+      expect(projected.capabilities.execution.atomicBatch).toBe("none");
+      expect(projected.capabilities.execution.unitOfWork).toBe("none");
+
+      const derivedInteractive = deriveBackend(harness.interactiveBackend, {});
+      expect(derivedInteractive.capabilities.execution.unitOfWork).toBe(
         "interactive",
       );
     } finally {

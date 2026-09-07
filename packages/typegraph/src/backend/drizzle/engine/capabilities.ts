@@ -40,6 +40,7 @@ import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { buildVectorCapabilities } from "../../../query/dialect/vector-strategy";
 import { createAtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
 import { assertBundledCapabilityDeclarations } from "../../capabilities/declarations";
+import { deriveUnitOfWork } from "../../capabilities/execution";
 import type { BackendCapabilities } from "../../types";
 import { contributionRebuildSupported } from "../contribution-materializations";
 import type { SqlExecutionAdapter } from "../execution/types";
@@ -111,10 +112,10 @@ export function finalizeEngineCapabilities(
       // engine that can hold an open callback transaction groups a write
       // that way regardless of whether it also happens to expose an atomic
       // batch primitive.
-      unitOfWork:
-        declared.execution.interactiveTransactions ? "interactive"
-        : atomicBatch === "none" ? "none"
-        : "batch",
+      unitOfWork: deriveUnitOfWork({
+        interactiveTransactions: declared.execution.interactiveTransactions,
+        atomicBatch,
+      }),
     },
     // Absent strategy: omit outright, regardless of what `declared` carried
     // — a value left over from a builder that (wrongly) baked one in, or a
