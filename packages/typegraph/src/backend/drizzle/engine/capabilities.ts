@@ -43,6 +43,7 @@ import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { buildVectorCapabilities } from "../../../query/dialect/vector-strategy";
 import { createAtomicSqlProgramExecutor } from "../../capabilities/atomic-sql-program";
 import { assertBundledCapabilityDeclarations } from "../../capabilities/declarations";
+import { deriveUnitOfWork } from "../../capabilities/execution";
 import type { BackendCapabilities } from "../../types";
 import { contributionRebuildSupported } from "../contribution-materializations";
 import type { SqlExecutionAdapter } from "../execution/types";
@@ -118,21 +119,17 @@ export function finalizeEngineCapabilities(
       atomicBatch,
       // Derived from the facts above, never taken from `declared`: a profile
       // that hand-set this field would drift the moment one of them changed
-      // underneath it. `interactiveTransactions` wins outright over the
-      // atomic-batch fact — an engine that can hold an open callback
-      // transaction groups a write that way regardless of whether it also
-      // happens to expose an atomic batch primitive — but yields to
-      // `writeFenceConflict` when the resolved fence is `row` with
-      // `commit-time`: two acquirers of that fence row both proceed and the
-      // loser's COMMIT fails, so the interactive transaction alone is not
-      // enough and every store-owned unit must be a retried one.
-      unitOfWork:
-        declared.execution.interactiveTransactions ?
-          deps.writeFenceConflict === "commit-time" ?
-            "optimistic-retry"
-          : "interactive"
-        : atomicBatch === "none" ? "none"
-        : "batch",
+      // underneath it. `deriveUnitOfWork` (`../../capabilities/execution`)
+      // is the one owner of this decision; `writeFenceConflict` is the extra
+      // input only the root capability tail can supply — two acquirers of a
+      // `row`/`commit-time` fence both proceed and the loser's COMMIT fails,
+      // so on that fence the interactive transaction alone is not enough and
+      // every store-owned unit must be a retried one.
+      unitOfWork: deriveUnitOfWork({
+        interactiveTransactions: declared.execution.interactiveTransactions,
+        atomicBatch,
+        fenceConflict: deps.writeFenceConflict,
+      }),
     },
     // Absent strategy: omit outright, regardless of what `declared` carried
     // — a value left over from a builder that (wrongly) baked one in, or a

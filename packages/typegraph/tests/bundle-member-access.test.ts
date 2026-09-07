@@ -43,9 +43,9 @@ const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:167#executeStatement",
   "identity/sql-target.ts:101#executeStatement",
   "identity/sql-target.ts:155#executeStatement",
-  "store/recorded-capture/guards.ts:71#executeStatement",
-  "store/recorded-capture/guards.ts:88#executeStatement",
-  "store/recorded-capture/guards.ts:233#executeStatement",
+  "store/recorded-capture/guards.ts:76#executeStatement",
+  "store/recorded-capture/guards.ts:93#executeStatement",
+  "store/recorded-capture/guards.ts:238#executeStatement",
 ] as const;
 
 function rowKey(

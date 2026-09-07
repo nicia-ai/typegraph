@@ -288,15 +288,16 @@ Both Neon drivers work with TypeGraph. They have different tradeoffs:
   are unavailable — TypeGraph auto-detects this driver and sets `capabilities.execution.interactiveTransactions = false`,
   so `store.transaction(...)` refuses rather than pretending to provide rollback. Eligible
   atomic-batch operations remain available when the transport is certified for them.
-  A schema-managed Store may attach for reads, but its first write fails closed because the driver
-  cannot hold the schema-version fence.
+  A schema-managed Store's write fuses its schema fence into the write's own statement when the
+  write fuses, and fails closed otherwise — see
+  [The guard every fused write shares](/limitations#the-guard-every-fused-write-shares) for which
+  writes fuse and the reasons a write that cannot refuses with.
 - **`drizzle-orm/neon-serverless`** uses a WebSocket Pool. Holds a session, supports full transactional
   semantics, but the WebSocket connection lifecycle needs care in serverless / per-request contexts
   (you typically want a fresh Pool per request).
 
-Pick HTTP for stateless reads and explicitly raw, unfenced single writes after a
-transactional migrator has initialized the database. Pick WebSockets for schema
-migrations, schema-managed Store writes, or any atomic multi-statement write.
+Pick HTTP for stateless reads and for the fused schema-managed writes. Pick WebSockets for schema
+migrations, and for any write outside that fused envelope.
 :::
 
 ### node-postgres (pg)
@@ -403,23 +404,45 @@ Edge runtimes expose `WebSocket` globally and need no extra setup.
 
 For stateless edge workloads where you don't need transactional writes. The HTTP
 driver issues one request per query — lowest cold-start cost, no session lifecycle
-to manage. TypeGraph auto-detects this driver and sets `capabilities.execution.interactiveTransactions`
-to `false`. On a raw Store, `store.transaction(...)` refuses rather than silently
-falling through to sequential execution. Eligible plain node batches and
-`cardinality: "many"` edge creates use the authoritative one-statement command
-even on a schema-managed Store; other managed writes fail closed when they
-need an interactive schema or constraint fence.
+to manage. TypeGraph auto-detects this driver and sets
+`capabilities.execution.interactiveTransactions` to `false` and
+`capabilities.execution.unitOfWork` to `"batch"`. On a raw Store,
+`store.transaction(...)` refuses rather than silently falling through to
+sequential execution.
 
-Schema commits are the one exception: `commitSchemaVersion` and
-`setActiveVersion` require atomicity to eliminate the orphan-row crash window
-they exist to fix, so they refuse with a typed `ConfigurationError` on
+A schema-managed or verified Store's first write does not universally fail
+closed here — it depends on whether the write fuses. A singleton node
+create, update, `upsertById`, or delete fuses on a kind with no declared
+unique constraint (a create takes a generated or a caller-supplied id) —
+except a node delete, which fuses even when the kind DOES carry a declared
+unique constraint, because the atomic delete program releases that claim in
+the same statement. A singleton edge create fuses when the kind's
+cardinality is `"many"`, and edge update and delete fuse the same way
+(`EdgeCollection` has no `upsertById`). So do
+`bulkInsert`/`bulkCreate`/`bulkDelete`/`bulkReplaceById`/`bulkUpsertById`,
+and a constrained write inside an atomic program's claim envelope. Each of
+these asserts the active schema version inside the statements neon-http
+submits together, and `transaction(queries)` commits or rejects that
+submission as a whole. A write that cannot fuse either fails closed with
+`BATCH_WRITE_UNSUPPORTED` naming a proven reason (an interactive callback, a
+probe-then-write constraint check, Operational Identity, history, or a
+schema commit), or — for a write that simply doesn't fit the fused shape,
+such as a singleton create, update, or `upsertById` on a uniquely-constrained
+kind, or a supplied-id tombstone resurrection — fails closed with the plain
+`SCHEMA_WRITE_FENCE_UNSUPPORTED` limitation and no named reason. See
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for the shared guard and the full reason table.
+
+Schema commits stay refused regardless: `commitSchemaVersion` and
+`setActiveVersion` require holding one transaction across their
+compare-and-swap read and activating write to eliminate the orphan-row crash
+window they exist to fix, so they refuse with a typed `ConfigurationError` on
 non-transactional backends. Run schema migrations from a process with a
 transactional driver (`drizzle-orm/neon-serverless`, regular `pg`, etc.); the
-edge worker can keep using neon-http for reads. It can also use a raw
-`createStore()` for single writes when the application explicitly accepts that
-those writes are not fenced against schema changes. A managed or verified Store
-can attach for reads, but its first write fails closed because neon-http cannot
-hold the schema fence.
+edge worker can keep using neon-http for reads and for the fused writes
+above. A raw `createStore()` remains available for writes outside that
+envelope when the application explicitly accepts they are not fenced against
+schema changes.
 
 ```bash
 npm install @neondatabase/serverless drizzle-orm
@@ -438,9 +461,9 @@ const store = createStore(graph, backend);
 // backend.capabilities.execution.interactiveTransactions === false (auto-detected)
 ```
 
-Use `neon-http` for reads and explicitly raw, unfenced single upserts. Run
-migrations and schema-managed Store writes through `neon-serverless`, regular
-`pg`, or another transactional driver.
+Use `neon-http` for reads and for the fused schema-managed writes listed
+above. Run schema migrations, and any write outside that envelope, through
+`neon-serverless`, regular `pg`, or another transactional driver.
 
 ### PGlite (Postgres-in-WASM)
 
@@ -1258,12 +1281,31 @@ in directly, and a custom profile has no way to replace it.
 TypeGraph supports Cloudflare D1 for edge deployments, with some limitations.
 
 Cloudflare D1 has no interactive transaction primitive, so it cannot commit
-TypeGraph schema versions or run multi-statement schema-managed Store writes.
-Apply the base DDL with Wrangler / drizzle-kit. Eligible plain node batches
-and `cardinality: "many"` edge creates can still use the bundled
-authoritative one-statement command; other schema-managed writes require a
-transactional backend. Use a raw `createStore()` only when the application
-accepts unfenced writes for the remaining paths:
+TypeGraph schema versions: `commitSchemaVersion` / `setActiveVersion` need to
+hold one transaction across their compare-and-swap read and activating
+write, and D1 has no session to hold it on. Apply the base DDL with Wrangler
+/ drizzle-kit. `capabilities.execution.unitOfWork` reports `"batch"`. A
+singleton node create, update, `upsertById`, or delete fuses on a kind with
+no declared unique constraint (a create takes a generated or a
+caller-supplied id) — except a node delete, which fuses even when the kind
+DOES carry a declared unique constraint, because the atomic delete program
+releases that claim in the same statement. A singleton edge create fuses
+when the kind's cardinality is `"many"`, and edge update and delete fuse the
+same way (`EdgeCollection` has no `upsertById`). So do
+`bulkInsert`/`bulkCreate`/`bulkDelete`/`bulkReplaceById`/`bulkUpsertById`,
+and a constrained write inside an atomic program's claim envelope. Each of
+these asserts the active schema version inside the statements
+`D1Database.batch()` runs together, so these succeed on a schema-managed
+Store. A write that cannot fuse either fails closed with
+`BATCH_WRITE_UNSUPPORTED` naming a proven reason (a probe-then-write
+constraint check, an interactive callback, Operational Identity, history, or
+a schema commit), or — for a write that simply doesn't fit the fused shape,
+such as a singleton create, update, or `upsertById` on a uniquely-constrained
+kind, or a supplied-id tombstone resurrection — fails closed with the plain
+`SCHEMA_WRITE_FENCE_UNSUPPORTED` limitation and no named reason; see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for the full reason table. Use a raw `createStore()` only when the
+application accepts unfenced writes for the remaining paths:
 
 ```typescript
 import { drizzle } from "drizzle-orm/d1";
@@ -1412,12 +1454,27 @@ write fence is `{ mechanism: "row", conflict: "commit-time" }` (see
 `"interactive"` when `interactiveTransactions` is `true` otherwise; else
 `"batch"` when `atomicBatch` is not `"none"` (an HTTP-only driver such as
 `drizzle-orm/neon-http`, which cannot hold an open session but does support a
-native atomic program); else `"none"`. Under `"optimistic-retry"`, every
-store-owned write TypeGraph opens (collection create/update/delete, bulk
-paths, `importGraph`, identity maintenance, contribution rebuild, index
-materialization) replays a real commit-time conflict as a whole unit, up to
-`OPTIMISTIC_RETRY_ATTEMPTS` (3) attempts, and only exhausting that budget (or
-a non-retryable failure) surfaces `TransactionConflictError` to the caller — see
+native atomic program); else `"none"`. Only the root capability derivation
+ever resolves the write-fence plan needed for the `"optimistic-retry"` arm — a
+derived or session-scoped capabilities object (a `store.transaction` session,
+a projected backend) has no way to re-resolve that plan for itself, so it
+downgrades to `"interactive"` instead of assuming the root's tier survived.
+
+Two further internal readers key off the `"batch"` value: the batch-tier
+write verdict (`resolveBatchWriteVerdict`) that produces
+`BATCH_WRITE_UNSUPPORTED` refusals, and the autocommit single-statement
+eligibility gate that decides whether a supplied-id singleton create can
+fuse its schema fence into one statement. Even absent `"optimistic-retry"`,
+`unitOfWork` exists so any caller can tell the execution shapes apart without
+re-deriving the same distinction from `interactiveTransactions` and
+`atomicBatch` separately.
+
+Under `"optimistic-retry"`, every store-owned write TypeGraph opens
+(collection create/update/delete, bulk paths, `importGraph`, identity
+maintenance, contribution rebuild, index materialization) replays a real
+commit-time conflict as a whole unit, up to `OPTIMISTIC_RETRY_ATTEMPTS` (3)
+attempts, and only exhausting that budget (or a non-retryable failure)
+surfaces `TransactionConflictError` to the caller — see
 [Retrying on conflict](/schemas-stores#retrying-on-conflict). A nested write
 running inside an existing transaction (`store.transaction`, an adopted
 transaction) never retries on its own: it cannot restart a transaction it does
@@ -2212,9 +2269,12 @@ Both backends report `execution.interactiveTransactions: true` by default. The e
 specific drivers:
 Cloudflare D1 (SQLite) and `drizzle-orm/neon-http` (Postgres) are non-transactional, so they downgrade to
 `execution.interactiveTransactions: false`. Operations that require atomicity (`commitSchemaVersion`,
-`setActiveVersion`, Operational Identity) throw on those drivers regardless of backend. Schema-managed Store writes also
-fail closed because they
-cannot hold the transaction-scoped schema fence; `store.transaction()` refuses on those roots. Eligible operations
+`setActiveVersion`, Operational Identity) throw on those drivers regardless of backend. A
+schema-managed Store's write that cannot fuse its schema fence into its own statement fails closed
+the same way, because it has no other way to hold the transaction-scoped fence; `store.transaction()`
+refuses on those roots regardless. See
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares) for which
+writes fuse. Eligible operations
 with a certified atomic SQL program remain available independently of this interactive transaction capability.
 :::
 

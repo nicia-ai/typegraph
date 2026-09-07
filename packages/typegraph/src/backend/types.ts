@@ -327,22 +327,37 @@ export type BackendCapabilities = Readonly<{
      * offers neither and a managed write can only run its statements one at
      * a time with no atomicity across them.
      *
-     * Derived, never hand-declared, on every bundled backend —
+     * Derived, never hand-declared, on every bundled backend through
+     * `deriveUnitOfWork` (`backend/capabilities/execution.ts`) —
      * `"optimistic-retry"` when `interactiveTransactions` is true AND the
-     * resolved write-fence plan is `row` with `conflict: "commit-time"`,
-     * else `"interactive"` when `interactiveTransactions` is true, else
-     * `"batch"` when `atomicBatch` is not `"none"`, else `"none"` —
-     * overwriting whatever a profile's own `declaredCapabilities` set.
-     * `src/store/operations/write-transaction.ts`'s retry-routing helpers are
-     * the consumers: every `runWritePlan`/`runHookedWritePlan`/
+     * caller supplied the resolved write-fence plan's `conflict` fact as
+     * `"commit-time"` (only `finalizeEngineCapabilities` does, from the
+     * root profile's own `row`-mechanism plan), else `"interactive"` when
+     * `interactiveTransactions` is true, else `"batch"` when `atomicBatch`
+     * is not `"none"`, else `"none"` — overwriting whatever a profile's own
+     * `declaredCapabilities` set. Optional so a custom `GraphBackend`
+     * implementation, which nothing derives this for, is not forced to
+     * declare it.
+     *
+     * `src/store/operations/write-transaction.ts`'s retry-routing helpers
+     * are the `"optimistic-retry"` consumers: every
+     * `runWritePlan`/`runHookedWritePlan`/
      * `runAutocommitSingleStatementWritePlan` call, `runIdentityMutation`,
      * `rebuildIdentityClosureWithSchemaFence`, `rebuildContribution`, and the
      * index-materialization claim/record calls each wrap their write in
      * `runRetriedUnit` when this reads `"optimistic-retry"` (and, for the
      * transaction-opening ones, the write opens its own transaction rather
-     * than joining an existing one). Optional so a custom `GraphBackend`
-     * implementation, which nothing derives this for, is not forced to
-     * declare it.
+     * than joining an existing one). Two further readers key off the
+     * `"batch"` value: the batch-tier write verdict
+     * (`resolveBatchWriteVerdict` in
+     * `backend/capabilities/batch-write-verdict.ts`) and the autocommit
+     * single-statement eligibility gate (`canFuseSchemaFenceInFirstWrite`).
+     * Absent is treated as anything but `"batch"`: `resolveBatchWriteVerdict`
+     * answers `program` (its "not a batch-tier limitation" verdict) for it,
+     * so a backend that declares neither an interactive transaction nor an
+     * atomic batch still fails closed on a write that needs one — through
+     * that write's own capability check, not through a batch-tier refusal it
+     * never earned.
      */
     unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
   }>;

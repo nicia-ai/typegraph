@@ -79,6 +79,11 @@ import {
   createAtomicSqlProgramExecutor,
 } from "../capabilities/atomic-sql-program";
 import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../capabilities/batch-write-verdict";
+import {
   assertNoLegacyTransactionCapability,
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
@@ -441,11 +446,15 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 );
 
 /** Every SQLite "atomic transactions unavailable" refusal shares this shape. */
-function throwSqliteTransactionsDisabled(message: string): never {
+function throwSqliteTransactionsDisabled(
+  message: string,
+  details?: Readonly<Record<string, unknown>>,
+): never {
   throw new ConfigurationError(message, {
     backend: "sqlite",
     capability: "execution.interactiveTransactions",
     supportsInteractiveTransactions: false,
+    ...details,
   });
 }
 
@@ -1778,11 +1787,16 @@ export function buildSqliteEngineProfile(
       fn: (tx: InternalOperationBackend) => Promise<T>,
     ): Promise<T> {
       if (transactionMode === "none") {
+        const verdict = resolveBatchWriteVerdict(ctx.self(), {
+          needs: "schema-commit",
+        });
         throwSqliteTransactionsDisabled(
           "Schema writes and removal cleanup require atomic transactions, " +
             "but this SQLite backend has transactions disabled. Configure a " +
             "driver that supports transactions (better-sqlite3, libsql, " +
-            "bun:sqlite) to use schema commits.",
+            "bun:sqlite) to use schema commits." +
+            batchRefusalSuffix(verdict),
+          batchRefusalDetails(verdict),
         );
       }
 

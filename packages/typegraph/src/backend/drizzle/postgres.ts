@@ -108,6 +108,11 @@ import {
   registerAtomicSqlProgram,
 } from "../capabilities/atomic-sql-program";
 import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../capabilities/batch-write-verdict";
+import {
   assertNoLegacyTransactionCapability,
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
@@ -1720,15 +1725,20 @@ export function buildPostgresEngineProfile(
       fn: (tx: InternalOperationBackend) => Promise<T>,
     ): Promise<T> {
       if (!capabilities.execution.interactiveTransactions) {
+        const verdict = resolveBatchWriteVerdict(ctx.self(), {
+          needs: "schema-commit",
+        });
         throw new ConfigurationError(
           "Schema writes and removal cleanup require atomic transactions, " +
             "but this Postgres backend does not provide them. The drizzle-orm/neon-http " +
             "driver communicates over HTTP and cannot hold a session across statements; " +
-            "use drizzle-orm/neon-serverless (websocket) for transactional writes.",
+            "use drizzle-orm/neon-serverless (websocket) for transactional writes." +
+            batchRefusalSuffix(verdict),
           {
             backend: "postgres",
             capability: "execution.interactiveTransactions",
             supportsInteractiveTransactions: false,
+            ...batchRefusalDetails(verdict),
           },
         );
       }

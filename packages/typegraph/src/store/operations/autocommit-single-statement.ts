@@ -91,7 +91,14 @@ export function canFuseSchemaFenceInFirstWrite(
         candidate.schemaVersion !== undefined &&
         canUseSchemaFenceAtExecutionBoundary(
           candidate.backend,
-          candidate.idGenerated,
+          // The id-generation gate on root autocommit exists for an
+          // INTERACTIVE root's durability (a caller-supplied id retried
+          // after an ambiguous failure could duplicate-conflict); an atomic
+          // batch program commits its one fused statement as a unit
+          // regardless of which id it carries, so a batch-tier target
+          // clears this gate for a supplied id too.
+          candidate.idGenerated ||
+            candidate.backend.capabilities.execution.unitOfWork === "batch",
         ) &&
         isSchemaFencedInsertEligible(candidate.backend) &&
         !candidate.historyEnabled &&
@@ -155,6 +162,15 @@ export function isAutocommitSingleStatementWrite(
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&
         !candidate.identityEnabled &&
+        // Unlike `canFuseSchemaFenceInFirstWrite`'s root-autocommit test,
+        // this `idGenerated` stays strict for every target, batch-tier
+        // included: the eligibility check below proves only
+        // `insertNodeWithSchemaFence` (the fresh-id INSERT, no duplicate
+        // check), never `insertNodeIfAbsentWithSchemaFence`. A supplied id
+        // needs the if-absent statement's duplicate handling regardless of
+        // unitOfWork, so it takes `runHookedWritePlan`'s route instead,
+        // where `canFuseSchemaFenceInFirstWrite` already selects the
+        // correct statement per id.
         candidate.idGenerated &&
         candidate.kindRegistered &&
         candidate.uniqueConstraintCount === 0 &&

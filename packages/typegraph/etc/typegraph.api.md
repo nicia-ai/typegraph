@@ -7889,7 +7889,7 @@ type UnsafeHistoryStoreBackendMember = "clearGraph" | "commitSchemaVersionWithPr
 
 // @public
 export class UnsupportedBackendCapabilityError extends TypeGraphError {
-    constructor(operation: string, capability: string, details?: Readonly<Record<string, unknown>>, suggestion?: string);
+    constructor(operation: string, capability: string, details?: Readonly<Record<string, unknown>>, suggestion?: string, messageSuffix?: string);
 }
 
 // @public
