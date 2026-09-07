@@ -344,10 +344,13 @@ export function resolveFenceStatements(
  * acquirer's statement blocks until the first commits, exactly like an
  * advisory lock. `"commit-time"` is an optimistic-concurrency engine — both
  * acquirers proceed and the loser's COMMIT fails, so correctness comes from
- * the unit owner retrying it, never from waiting; a `"commit-time"`
- * declaration therefore requires the derived `optimistic-retry` execution
- * tier. Declaring `conflict` on any other mechanism is refused, the same way
- * an out-of-place `drain` is.
+ * the unit owner retrying it, never from waiting; the retry can only run
+ * inside an interactive transaction it replays, so `"commit-time"` requires
+ * `capabilities.execution.interactiveTransactions: true` and is refused on a
+ * backend that declares it `false` — the tier `commit-time` needs would
+ * silently never derive otherwise (`WRITE_FENCE_DECLARATION_INVALID`,
+ * `validateWriteFenceDeclaration` below). Declaring `conflict` on any other
+ * mechanism is refused the same way an out-of-place `drain` is.
  */
 export type WriteFenceDeclaration =
   | Readonly<{
@@ -849,9 +852,20 @@ function refuseInvalidWriteFenceDeclaration(
  * cases it already exhausted, and `x satisfies never` is a compile-time
  * assertion only: at runtime it would return the invalid string as though it
  * were a resolved plan.
+ *
+ * `interactiveTransactions` is the target's OWN `capabilities.execution`
+ * fact (never re-derived here), checked only against `conflict:
+ * "commit-time"`: that value is honored solely by the `optimistic-retry`
+ * execution tier replaying a unit inside an interactive transaction, and
+ * `finalizeEngineCapabilities` derives that tier only when
+ * `interactiveTransactions` is `true` — declaring `"commit-time"` on a
+ * backend that reports `false` would otherwise be accepted here and then
+ * silently dropped downstream (the loser would fail with no retry). An
+ * accepted declaration is applied or refused; it is never ignored.
  */
 function validateWriteFenceDeclaration(
   declaration: WriteFenceDeclaration,
+  interactiveTransactions: boolean,
 ): void {
   const mechanism: string = declaration.mechanism;
   if (
@@ -884,6 +898,26 @@ function validateWriteFenceDeclaration(
           "conflict",
           conflict,
           VALID_WRITE_FENCE_CONFLICTS,
+        );
+      }
+      if (conflict === "commit-time" && !interactiveTransactions) {
+        throw new ConfigurationError(
+          'capabilities.writeFence.conflict: "commit-time" requires ' +
+            "capabilities.execution.interactiveTransactions: true — the " +
+            '"optimistic-retry" execution tier that replays a commit-time ' +
+            "loser only derives on an interactive backend; on a " +
+            "non-interactive one the declaration would be accepted and then " +
+            "silently dropped, leaving the loser's write fail with no retry.",
+          {
+            code: "WRITE_FENCE_DECLARATION_INVALID",
+            field: "conflict",
+            mechanism,
+            conflict,
+          },
+          {
+            suggestion:
+              'Declare capabilities.execution.interactiveTransactions: true, or declare conflict: "wait" instead.',
+          },
         );
       }
       return;
@@ -955,7 +989,10 @@ function planFromWriteFenceDeclaration(
   declaration: WriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
 ): WriteFencePlan {
-  validateWriteFenceDeclaration(declaration);
+  validateWriteFenceDeclaration(
+    declaration,
+    target.capabilities.execution.interactiveTransactions,
+  );
   switch (declaration.mechanism) {
     case "advisory": {
       if (!fenceSqlMemberPresent(target.fenceSql, "advisoryLockExpression")) {

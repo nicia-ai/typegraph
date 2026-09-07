@@ -181,6 +181,38 @@ describe("row-mechanism fence: construction-time refusals", () => {
     );
   });
 
+  it('refuses conflict: "commit-time" on a backend declaring interactiveTransactions: false, since the "optimistic-retry" tier that replays a commit-time loser never derives without one', () => {
+    let caught: unknown;
+    try {
+      resolveWriteFencePlan(
+        writeFenceTestTarget({
+          fenceSql: {},
+          tableNames: { fences: "typegraph_fences" } as never,
+          capabilities: {
+            execution: { interactiveTransactions: false },
+            writeFence: {
+              mechanism: "row",
+              drain: "quiescent",
+              conflict: "commit-time",
+            },
+          } as never,
+        }),
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toEqual(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          code: "WRITE_FENCE_DECLARATION_INVALID",
+          field: "conflict",
+          mechanism: "row",
+          conflict: "commit-time",
+        }) as unknown,
+      }),
+    );
+  });
+
   it('refuses row + drain: "table-lock" with a fenceSql missing lockTables, naming that member', () => {
     let caught: unknown;
     try {

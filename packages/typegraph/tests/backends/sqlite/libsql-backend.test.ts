@@ -22,6 +22,7 @@ import { wrapWithManagedClose } from "../../../src/backend/derive-backend";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import { requireDefined } from "../../../src/utils/presence";
 import { createAdapterTestSuite } from "../adapter-test-suite";
+import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
 const ConcurrencyPerson = defineNode("Person", {
@@ -99,7 +100,8 @@ createIntegrationTestSuite("libsql", async () => {
     // A local-FILE client is the serialized libsql shape (`protocol: "file"`),
     // opened on its own temp file so nothing a provenance test does reaches
     // the suite's own fixture.
-    createSerializedBackend: async () => {
+    createSerializedBackend: async (overrides) => {
+      refuseUnsupportedSerializedBackendCapabilities("libsql", overrides);
       const serializedPath = createTemporaryDbPath();
       const serializedClient = createClient({ url: `file:${serializedPath}` });
       const { backend: serializedBackend } =

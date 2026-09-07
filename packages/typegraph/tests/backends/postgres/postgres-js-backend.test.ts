@@ -204,10 +204,20 @@ describe("PostgreSQL Adapter (postgres-js driver)", () => {
           },
           // The suite's own client runs at `max: 4` and is audited
           // `independent`; `{ max: 1 }` is its serialized shape.
-          createSerializedBackend: () => {
+          // `overrides.capabilities` is forwarded into `createPostgresBackend`
+          // itself — applied at construction, before this connection's
+          // write-fence target and derived `unitOfWork` are resolved — for a
+          // test that needs a real second connection declaring a non-default
+          // write fence.
+          createSerializedBackend: (overrides) => {
             const serializedSql = postgres(TEST_DATABASE_URL, { max: 1 });
             return Promise.resolve({
-              backend: createPostgresBackend(drizzle(serializedSql)),
+              backend: createPostgresBackend(
+                drizzle(serializedSql),
+                overrides?.capabilities === undefined ?
+                  undefined
+                : { capabilities: overrides.capabilities },
+              ),
               close: () => serializedSql.end(),
             });
           },
