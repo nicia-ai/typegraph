@@ -18,6 +18,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "bootstrapTables",
   "capabilities",
   "catalog",
+  "lineage",
   "checkUnique",
   "checkUniqueBatch",
   // The edge cardinality fence. Both members write only the claim relation —

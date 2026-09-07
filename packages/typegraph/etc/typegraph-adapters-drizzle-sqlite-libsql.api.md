@@ -3776,6 +3776,20 @@ type EdgeRow = Readonly<{
 // @public
 type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
+// @public (undocumented)
+const ENGINE_REVISION_BRAND: unique symbol;
+
+// @public
+type EngineRevision = string & Readonly<{
+    [ENGINE_REVISION_BRAND]: "EngineRevision";
+}>;
+
+// @public
+type EntityKey = Readonly<{
+    kind: string;
+    id: string;
+}>;
+
 // @public
 type ExtensionArrayItemType = ExtensionStringProperty | ExtensionNumberProperty | ExtensionBooleanProperty | ExtensionEnumProperty | ExtensionObjectProperty;
 
@@ -4196,6 +4210,7 @@ type GraphBackend = Readonly<{
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
+    lineage?: LineageMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -4607,6 +4622,21 @@ export type LibsqlBackendOptions = Readonly<{
 export type LibsqlBackendResult = Readonly<{
     backend: AdapterBackend<AnySqliteDatabase>;
     db: LibSQLDatabase;
+}>;
+
+// @public
+type LineageDelta = Readonly<{
+    kind: "keys";
+    nodes: readonly EntityKey[];
+    edges: readonly EntityKey[];
+}> | Readonly<{
+    kind: "unbounded";
+}>;
+
+// @public
+type LineageMembers = Readonly<{
+    revision: (this: void) => Promise<EngineRevision>;
+    changesSince: (this: void, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
 }>;
 
 // @public (undocumented)

@@ -26,7 +26,7 @@
  *    the check Mutations D and E exercise — a registry row can drift from
  *    the code it describes, and (1) alone cannot catch that.
  *
- * Non-pilot members (66 of the 81) are REPORT-ONLY: set
+ * Non-pilot members (67 of the 82) are REPORT-ONLY: set
  * `WS5_SWEEP_ALL_MEMBERS=1` when running this suite to print each deferred/
  * reasoned member's registry classification for WS5b's own drop-matrix
  * round — this file does not (and per §7 must not) assert behavior for them.

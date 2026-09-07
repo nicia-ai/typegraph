@@ -291,6 +291,7 @@ export type {
 } from "./capabilities/write-fence";
 
 import { type BackendCatalogProbes } from "./capabilities/catalog";
+import { type LineageMembers } from "./capabilities/lineage";
 
 export type {
   BackendCatalogProbes,
@@ -300,6 +301,12 @@ export type {
   NormalizedColumnKind,
   TableState,
 } from "./capabilities/catalog";
+export type {
+  EngineRevision,
+  EntityKey,
+  LineageDelta,
+  LineageMembers,
+} from "./capabilities/lineage";
 
 /**
  * Backend capabilities that vary by dialect.
@@ -2983,6 +2990,16 @@ export type GraphBackend = Readonly<{
    * migration's column read.
    */
   catalog?: BackendCatalogProbes | undefined;
+
+  /**
+   * The engine's whole-database revision and the per-graph change delta
+   * since an earlier one. Present when an engine can answer both cheaply;
+   * absent on a custom backend, and on a bundled backend whose store has
+   * not enabled the recorded-relations lineage that backs it. Every
+   * consumer falls back to a full comparison when this is absent — see
+   * `requireLineage` in `backend/capabilities/lineage.ts`.
+   */
+  lineage?: LineageMembers | undefined;
 
   // === Contribution Materialization (#135 — durable strategy-owned
   // storage marker, sibling of the index status table) ===

@@ -29,19 +29,19 @@ function bundledMembers(): readonly string[] {
 }
 
 describe("capability bundle totality (T9)", () => {
-  it("15 pilot + 81 unbundled = 96, with no member counted twice", () => {
+  it("15 pilot + 82 unbundled = 97, with no member counted twice", () => {
     const bundled = bundledMembers();
     const bundledSet = new Set(bundled);
     expect(bundled.length).toBe(bundledSet.size);
     expect(bundledSet.size).toBe(15);
 
     const unbundledNames = Object.keys(UNBUNDLED_OPTIONAL_MEMBERS);
-    expect(unbundledNames.length).toBe(81);
+    expect(unbundledNames.length).toBe(82);
 
     const overlap = unbundledNames.filter((name) => bundledSet.has(name));
     expect(overlap).toEqual([]);
 
-    expect(bundledSet.size + unbundledNames.length).toBe(96);
+    expect(bundledSet.size + unbundledNames.length).toBe(97);
   });
 
   it("pairwise bundle member sets are disjoint", () => {
@@ -108,11 +108,11 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("31 reasoned entries sum to 91 accesses; 50 deferred entries sum to 217", () => {
+  it("32 reasoned entries sum to 91 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
-    expect(reasoned.length).toBe(31);
+    expect(reasoned.length).toBe(32);
     expect(deferred.length).toBe(50);
     // B9's scanner corrected two grep-tier undercounts with type-aware
     // evidence: `tableNames` 22->23 (store/store.ts:1001 holds two accesses
@@ -134,7 +134,9 @@ describe("capability bundle totality (T9)", () => {
     // scanner excludes wholesale — so its measured access count is 0 and
     // the floor is unchanged. The forked working-copy strategy then reads
     // the connected backend's `tableNames` to fence them against the base
-    // store's resolved schema — 90 -> 91.
+    // store's resolved schema — 90 -> 91. The lineage capability then added
+    // `lineage`, a reasoned member with the same zero-accesses shape as
+    // `catalog` for the same reason, so the floor stays at 91.
     expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(91);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
