@@ -58,7 +58,7 @@ export async function branch<G extends GraphDef>(
     const id = options?.id ?? asBranchId(generateId());
     const workingCopyStrategy =
       strategy ?? cloneWorkingCopyStrategy<G>(makeBackend);
-    const store = await workingCopyStrategy.create(baseStore);
+    const store = await workingCopyStrategy.create(baseStore, base);
     // Ownership of the working copy's BACKEND transferred here: the strategy
     // closes it only on its own failures, and "only the success path hands the
     // backend to the caller, who then owns its lifecycle" (see

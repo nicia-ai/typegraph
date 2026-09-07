@@ -51,10 +51,12 @@ import { BranchError } from "./errors";
 import type {
   GraphBackend,
   GraphDef,
+  ResolvedSqlTableNames,
   Store,
   StoreOptions,
 } from "./typegraph-internal";
 import {
+  createSqlSchema,
   createStore,
   createStoreWithSchema,
   exportGraph,
@@ -65,6 +67,7 @@ import {
   storeBackend,
   wrapWithManagedClose,
 } from "./typegraph-internal";
+import type { BaseVersion } from "./types";
 
 /**
  * Batch size for the clone's `importGraphStream` pass. Large enough to keep
@@ -75,16 +78,24 @@ const CLONE_IMPORT_BATCH_SIZE = 1000;
 /**
  * How `branch()` materializes a working copy of a base store.
  *
- * `create` receives the live base store and returns a fresh, independently
- * mutable {@link Store} over the SAME graph definition, seeded with the base's
- * current state. Mutating the returned store MUST NOT affect the base.
+ * `create` receives the live base store and the {@link BaseVersion} `branch()`
+ * already stamped off it, and returns a fresh, independently mutable
+ * {@link Store} over the SAME graph definition, seeded with the base's current
+ * state. Mutating the returned store MUST NOT affect the base.
+ *
+ * `base` is a convenience for a strategy that needs to re-validate the
+ * working copy against the exact token the branch records: {@link forkedWorkingCopyStrategy}
+ * fences the fork against it instead of recomputing the base's own version a
+ * second time. A strategy that has no such check (the clone strategy, which
+ * builds its working copy directly from `baseStore` rather than from an
+ * independent copy) can ignore the parameter.
  *
  * The single method is the only extension point: alternative strategies
  * (e.g. a future logical-namespace copy-on-write within one backend) implement
  * the same contract.
  */
 export type WorkingCopyStrategy<G extends GraphDef> = Readonly<{
-  create: (baseStore: Store<G>) => Promise<Store<G>>;
+  create: (baseStore: Store<G>, base: BaseVersion) => Promise<Store<G>>;
 }>;
 
 /**
@@ -175,6 +186,20 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
           {
             // Keep descendants branchable with the same O(1) anchor contract,
             // but do not copy recorded-time history into the disposable fork.
+            //
+            // Deliberately narrower than Store.workingCopyOptions (the full
+            // set a fork inherits, see forkStoreOptions): the clone's backend
+            // is a FRESH, empty database, not a physical copy of the base's,
+            // so a `schema` naming the base's tables would misdirect writes
+            // on an unrelated backend, and an external `recordedRead`
+            // binding would point at a relation the clone never populates.
+            // Hooks, `coalesceUnchangedUpserts`, `autoRefreshStatistics` and
+            // `queryDefaults` carry no such physical assumption, but the
+            // clone strategy is used for host-agnostic P0 branching where the
+            // caller's `makeBackend` factory — not the base's own
+            // configuration — owns the fresh store's behavior; only the
+            // branchability contract (`revisionTracking`) is load-bearing
+            // enough to thread through unconditionally.
             revisionTracking: baseStore.revisionTrackingEnabled,
           },
         );
@@ -263,26 +288,72 @@ export type ForkedWorkingCopyOptions<
    * {@link forkedWorkingCopyStrategy}).
    */
   fork: (baseStore: Store<G>) => Promise<TFork>;
-  /** Opens a backend on the fork `fork` produced. */
+  /**
+   * Opens a backend on the fork `fork` produced. The returned backend's own
+   * table bindings (`backend.tableNames`) MUST agree with the base's
+   * resolved SQL schema (`baseStore.revisionSchema` — the same schema the
+   * fork's store resolves to via {@link forkStoreOptions}). A fork is the
+   * SAME physical database as the base, so this is normally automatic (a
+   * backend factory bound to the base's custom names, if any, opens
+   * correctly on the fork too); `create()` still checks it and refuses with
+   * a {@link BranchError}, closing the backend first, when the two disagree
+   * — a backend bound to the wrong table names reads and writes through
+   * tables the fork's rows were never written to.
+   */
   connect: (fork: TFork) => Promise<GraphBackend>;
 }>;
 
 /**
- * Store options for a forked working copy: the SAME `history` /
- * `revisionTracking` configuration `baseStore` itself reports, read off its
- * own public getters — the same technique {@link cloneWorkingCopyStrategy}
- * uses to obtain `revisionTracking` for its own fresh store. A fork's
- * recorded-time relations are already physically present on the copied
- * database (unlike a clone's, which streamed interchange cannot carry), so
- * `history: true` is threaded through here where the clone strategy
- * deliberately withholds it (see its own fidelity note).
+ * Store options for a forked working copy: the base's WHOLE option set —
+ * hooks, upsert coalescing, the SQL schema, the auto-refresh-statistics
+ * threshold, query defaults, and an externally-bound recorded-read relation,
+ * read once through {@link Store.workingCopyOptions} — plus `history`/
+ * `revisionTracking`, decided the same way {@link cloneWorkingCopyStrategy}
+ * decides `revisionTracking`: read off `baseStore`'s own public getters.
+ *
+ * A fork is the SAME physical database as the base, so every one of those
+ * inherited options is safe to carry over unchanged: custom table names in
+ * `schema` name relations that physically exist in the fork; an external
+ * `recordedRead` binding points at a relation the fork carries too (unlike a
+ * clone's fresh, empty backend, which would need that relation populated
+ * from scratch); hooks and the behavioral flags are pure JavaScript-side
+ * configuration with no dependency on which physical database they run
+ * against. A fork's recorded-time relations are already physically present
+ * on the copied database (unlike a clone's, which streamed interchange
+ * cannot carry), so `history: true` is threaded through here where the clone
+ * strategy deliberately withholds it (see its own fidelity note).
+ *
+ * `recordedRead` is split out before the `history` branch below: `history:
+ * true` and an external `recordedRead` binding are mutually exclusive at
+ * Store construction (the constructor throws `ConfigurationError` for that
+ * combination), so a base with `historyEnabled` never carries one to inherit
+ * — there is nothing to drop, only an invariant to preserve.
  */
 function forkStoreOptions<G extends GraphDef>(
   baseStore: Store<G>,
 ): StoreOptions {
-  return baseStore.historyEnabled ?
-      { history: true }
-    : { revisionTracking: baseStore.revisionTrackingEnabled };
+  const { recordedRead, ...inherited } = baseStore.workingCopyOptions;
+  if (baseStore.historyEnabled) {
+    return { ...inherited, history: true };
+  }
+  return {
+    ...inherited,
+    revisionTracking: baseStore.revisionTrackingEnabled,
+    ...(recordedRead === undefined ? {} : { recordedRead }),
+  };
+}
+
+/**
+ * Whether two resolved table-name sets name the exact same physical tables,
+ * field by field.
+ */
+function resolvedTableNamesEqual(
+  a: ResolvedSqlTableNames,
+  b: ResolvedSqlTableNames,
+): boolean {
+  return (Object.keys(a) as (keyof ResolvedSqlTableNames)[]).every(
+    (key) => a[key] === b[key],
+  );
 }
 
 /**
@@ -300,7 +371,7 @@ function forkStoreOptions<G extends GraphDef>(
  * before the fork, which a clone cannot (streamed interchange never carries
  * recorded history).
  *
- * `create(baseStore)`:
+ * `create(baseStore, base)`:
  *   1. `fork(baseStore)` — the host-level fork call.
  *   2. `connect(fork)` — opens a backend on the fork. A failure here disposes
  *      the fork before rethrowing (mirroring the clone strategy's
@@ -310,13 +381,27 @@ function forkStoreOptions<G extends GraphDef>(
  *      through `wrapWithManagedClose` (a `deriveBackend` overlay, never a
  *      spread), so the caller's single `close()` on the resulting store's
  *      backend releases both the connection and the fork.
- *   4. A fresh `Store` is attached with `createStore` — a zero-DDL attach,
+ *   4. `baseStore.revisionSchema` — the base's own resolved SQL schema getter
+ *      (an explicit `schema` option, or `backend.tableNames` otherwise; never
+ *      re-derived by hand here) — is compared, table by table, against
+ *      `createSqlSchema(connectedBackend.tableNames)`. A fork is the same
+ *      physical database as the base, so a backend bound to different table
+ *      names — typically the defaults, when `connect()` did not reconstruct
+ *      the base's custom bindings — would read and write through tables the
+ *      fork's rows were never written to. A mismatch closes the backend
+ *      (releasing both the connection and the fork) before refusing with a
+ *      {@link BranchError}.
+ *   5. A fresh `Store` is attached with `createStore` — a zero-DDL attach,
  *      since the fork already carries the base's schema and rows — using
  *      {@link forkStoreOptions}.
- *   5. `computeBaseVersion` is compared between the fork's store and the base
- *      store: a fork must be the base, byte for byte, or it is not a fork.
- *      A mismatch closes the backend (releasing both the connection and the
- *      fork, mirroring step 3's composition) before refusing with a
+ *   6. `computeBaseVersion(forkStore)` is compared against `base` — the
+ *      token `branch()` already stamped off the ORIGINAL base store, passed
+ *      in rather than recomputed here: a fork must be the base, byte for
+ *      byte, or it is not a fork, and comparing against the caller's own
+ *      token (instead of a second, independently computed one) means an
+ *      untracked base's content fingerprint is computed exactly once per
+ *      branch. A mismatch closes the backend (releasing both the connection
+ *      and the fork, mirroring step 4's composition) before refusing with a
  *      {@link BranchError}.
  *
  * @param options - `{ fork, connect }` — see {@link ForkedWorkingCopyOptions}.
@@ -326,7 +411,10 @@ export function forkedWorkingCopyStrategy<
   TFork extends ForkHandle,
 >(options: ForkedWorkingCopyOptions<G, TFork>): WorkingCopyStrategy<G> {
   return {
-    create: async (baseStore: Store<G>): Promise<Store<G>> => {
+    create: async (
+      baseStore: Store<G>,
+      base: BaseVersion,
+    ): Promise<Store<G>> => {
       const fork = await options.fork(baseStore);
       let connectedBackend: GraphBackend;
       try {
@@ -343,22 +431,39 @@ export function forkedWorkingCopyStrategy<
         await fork.dispose?.();
       });
       try {
-        const forkStore = createStore(
-          baseStore.graph,
-          backend,
-          forkStoreOptions(baseStore),
-        );
-        const [forkVersion, baseVersion] = await Promise.all([
-          computeBaseVersion(forkStore),
-          computeBaseVersion(baseStore),
-        ]);
-        if (forkVersion !== baseVersion) {
+        const forkOptions = forkStoreOptions(baseStore);
+        // baseStore.revisionSchema is the SAME resolved-schema getter every
+        // other consumer of a store's table names reads (an explicit
+        // `schema` option, or backend.tableNames otherwise) — never a
+        // hand-rolled fallback. Comparing forkOptions.schema directly
+        // against a bare `createSqlSchema()` default would compare DEFAULTS
+        // against the fork's real table names whenever a base's custom
+        // names come only from its backend factory, with no explicit
+        // `schema` option (see tests/custom-table-names.test.ts).
+        const inheritedTables = baseStore.revisionSchema.tables;
+        const connectedTables = createSqlSchema(
+          connectedBackend.tableNames,
+        ).tables;
+        if (!resolvedTableNamesEqual(inheritedTables, connectedTables)) {
+          throw new BranchError(
+            "Fork backend does not bind the base's table names: connect() " +
+              "returned a backend whose own table bindings disagree with " +
+              "the SQL schema this fork inherits from its base. A fork is " +
+              "the SAME physical database as the base, so a backend bound " +
+              "to different (often just the default) table names reads and " +
+              "writes through tables the fork's rows were never written to.",
+            { details: { inheritedTables, connectedTables } },
+          );
+        }
+        const forkStore = createStore(baseStore.graph, backend, forkOptions);
+        const forkVersion = await computeBaseVersion(forkStore);
+        if (forkVersion !== base) {
           throw new BranchError(
             "Fork does not match its base: computeBaseVersion disagrees " +
               "between the forked store and the base store it was forked " +
               "from. A working-copy fork must be byte-for-byte identical to " +
               "its base at the instant it is taken.",
-            { details: { forkVersion, baseVersion } },
+            { details: { forkVersion, baseVersion: base } },
           );
         }
         return forkStore;

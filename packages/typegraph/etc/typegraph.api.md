@@ -6756,6 +6756,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     revisionTrackingEnabled: boolean;
     revisionSchema: SqlSchema;
     recordedReadBound: boolean;
+    workingCopyOptions: WorkingCopyOptions;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
     algorithms: GraphAlgorithms<G>;
@@ -8300,6 +8301,9 @@ type WidenBrandedIds<T> = {
         [P in keyof A]: UnbrandParam<A[P]>;
     }) => R : T[K];
 };
+
+// @public
+export type WorkingCopyOptions = Omit<LiveStoreOptions, "history" | "revisionTracking">;
 
 // @public
 type WriteFenceDeclaration = Readonly<{

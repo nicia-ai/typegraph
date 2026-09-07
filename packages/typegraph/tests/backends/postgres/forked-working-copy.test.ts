@@ -19,10 +19,10 @@
  * class named `SwappablePool` that forwards `query`/`connect`/`end` to a
  * swappable underlying `pg.Pool` is treated exactly like a real one — the
  * `Store`/backend built on top of it never has to be reconstructed. This is
- * the same "suspend hazard" the forked-working-copy design documents for a
- * host that drops sessions on idle-compute suspend: whatever is memoized on a
- * live connection does not survive a suspend, so only the write fence and the
- * lock memo — which re-acquire per transaction — may be relied on across one.
+ * the same hazard as a fork-capable host that suspends idle compute and drops
+ * its sessions: whatever is memoized on a live connection does not survive a
+ * suspend, so only the write fence and the lock memo — which re-acquire per
+ * transaction — may be relied on across one.
  */
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
@@ -115,6 +115,30 @@ function urlForDatabase(baseUrl: string, databaseName: string): string {
   return url.toString();
 }
 
+/** PostgreSQL's maximum unquoted identifier length (`NAMEDATALEN` - 1). */
+const POSTGRES_IDENTIFIER_LIMIT = 63;
+const FORK_SUFFIX = "_fork";
+
+/**
+ * The forked database's name: the STEM truncated to leave room for
+ * `FORK_SUFFIX`, then the suffix appended. Truncating the already-suffixed
+ * string instead (`` `${isolatedDatabase}${FORK_SUFFIX}`.slice(0, LIMIT) ``)
+ * can chop the suffix off entirely and collapse the result onto
+ * `isolatedDatabase` when the stem is within `FORK_SUFFIX.length` of the
+ * limit — the DROP below would then target the suite's own live database.
+ */
+function forkedDatabaseNameFor(isolatedDatabase: string): string {
+  return `${isolatedDatabase.slice(0, POSTGRES_IDENTIFIER_LIMIT - FORK_SUFFIX.length)}${FORK_SUFFIX}`;
+}
+
+it("forkedDatabaseNameFor never collapses onto its stem, even at the identifier limit", () => {
+  const maximalStem = "a".repeat(POSTGRES_IDENTIFIER_LIMIT);
+  const forked = forkedDatabaseNameFor(maximalStem);
+  expect(forked).not.toBe(maximalStem);
+  expect(forked.length).toBeLessThanOrEqual(POSTGRES_IDENTIFIER_LIMIT);
+  expect(forked.endsWith(FORK_SUFFIX)).toBe(true);
+});
+
 describe.runIf(process.env["POSTGRES_URL"])(
   "forkedWorkingCopyStrategy [postgres, CREATE DATABASE ... TEMPLATE]",
   () => {
@@ -122,7 +146,11 @@ describe.runIf(process.env["POSTGRES_URL"])(
       const configuredUrl = process.env["POSTGRES_URL"];
       if (configuredUrl === undefined) throw new Error("unreachable");
       const isolatedDatabase = databaseNameFromUrl(TEST_DATABASE_URL);
-      const forkedDatabase = `${isolatedDatabase}_fork`.slice(0, 63);
+      // `branch()`'s own DROP/CREATE DATABASE ... TEMPLATE calls target this
+      // name — assert it before any DROP runs, not only inside
+      // `forkedDatabaseNameFor`'s own unit test above.
+      const forkedDatabase = forkedDatabaseNameFor(isolatedDatabase);
+      expect(forkedDatabase).not.toBe(isolatedDatabase);
 
       async function withAdmin<T>(fn: (admin: Pool) => Promise<T>): Promise<T> {
         const admin = new Pool({ connectionString: configuredUrl, max: 1 });

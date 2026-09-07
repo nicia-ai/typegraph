@@ -706,6 +706,7 @@ export type {
   UpdateEdgeInput,
   UpdateNodeInput,
   ValidityEndMutation,
+  WorkingCopyOptions,
 } from "./store/types";
 export { compareAndSetAbsent } from "./store/types";
 

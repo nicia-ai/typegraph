@@ -386,6 +386,25 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // exported directly there instead of booked as debt, so a profile author
 // implementing `instantiateStatement` can name the dep's own type; no count
 // changes anywhere.
+//
+// `Store.workingCopyOptions` batch: the new getter's return type,
+// `WorkingCopyOptions` (`Omit<LiveStoreOptions, "history" | "revisionTracking">`),
+// is exported directly at the root (`.`, unaffected) but is new debt
+// everywhere else `Store`'s full member surface renders. Measured, not
+// assumed — the added symbol set is not the same everywhere:
+// - `./sqlite/local` and `./postgres/pglite` (705→706 apiece) gain only
+//   `WorkingCopyOptions` itself: both already directly export `StoreHooks`
+//   and its constituent hook-context types through their own backend
+//   options, so nothing else it reaches needs a forgotten name.
+// - `./graph-merge`, `./interchange`, `./profiler`, and `./provenance`
+//   (718→726, 701→709, 703→711, 709→717 respectively, +8 apiece) gain
+//   `WorkingCopyOptions` plus everything the `Omit` renders inline once
+//   `LiveStoreOptions` is not itself directly exported there:
+//   `LiveStoreOptions`, `BaseStoreOptions`, `StoreHooks`, `HookContext`,
+//   `OperationHookContext`, `QueryHookContext`, and
+//   `BulkOperationHookContext`. Gate: every added symbol at every moved
+//   entrypoint is one of those eight names, no entrypoint's debt decreased,
+//   and no other entrypoint moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 388,
@@ -435,36 +454,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 718,
-    sha256: "b07fd3180190cdbadbcfedf6fd11ddc0562da1ba2ea5d3c4b48fe903c5655363",
+    count: 726,
+    sha256: "f1da24e06c52e543d6800f1fb133e11d1e51d57fae34350374e929cd6a2eafcc",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 701,
-    sha256: "81043bec464594503096ab691a03990c6217ef4285ddd478f0588558e441ac0c",
+    count: 709,
+    sha256: "becc3255cb26ff4e4ad1cdcfc8206cc8089959e6f7eca8a90aa193798537b1d9",
   },
   "./postgres/pglite": {
-    count: 705,
-    sha256: "1298bd09525e1465a1d8483dd2127d5765a77d882a47940542fdcda623d0bcd3",
+    count: 706,
+    sha256: "d50d475ca5b4970bc1efd457a42d8265133435a98f23b5b3baa1cc4a9105062c",
   },
   "./profiler": {
-    count: 703,
-    sha256: "3f48dc86aa37a1ca6de85ac0d82f37a53e83637a867a0412039599a59caf5fd1",
+    count: 711,
+    sha256: "347f130d75145c9c8577ead5911bcd1ceb2ba5d305d7e4c868ae58168e4503a1",
   },
   "./provenance": {
-    count: 709,
-    sha256: "7337e5c316d4ca805fe6822a6c51bddca1ad02ecd91d5353f7c99f228ce5145f",
+    count: 717,
+    sha256: "071dbec959d860ee44eb31f7b412a4ad562c9b05e2669f160748e6f3811e23ba",
   },
   "./schema": {
     count: 271,
     sha256: "a7078b0bb662cbe6f4a1a511cfc1f06971db0cb1e0272a4fa5ea13a8691c56d2",
   },
   "./sqlite/local": {
-    count: 705,
-    sha256: "1298bd09525e1465a1d8483dd2127d5765a77d882a47940542fdcda623d0bcd3",
+    count: 706,
+    sha256: "d50d475ca5b4970bc1efd457a42d8265133435a98f23b5b3baa1cc4a9105062c",
   },
 };
 

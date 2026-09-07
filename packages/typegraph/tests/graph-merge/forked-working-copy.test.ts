@@ -24,7 +24,9 @@ import {
   defineGraph,
   defineNode,
 } from "../../src";
+import { createSqliteTables } from "../../src/backend/drizzle/schema/sqlite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
+import { computeBaseVersion } from "../../src/graph-merge/base-version";
 import { branch } from "../../src/graph-merge/branch";
 import { BranchError } from "../../src/graph-merge/errors";
 import { merge } from "../../src/graph-merge/merge";
@@ -36,6 +38,7 @@ import {
   forkedWorkingCopyStrategy,
   type ForkHandle,
 } from "../../src/graph-merge/working-copy";
+import { createSqlSchema } from "../../src/query/compiler/schema";
 import { getStoreBackend } from "./test-utils";
 
 const Widget = defineNode("Widget", {
@@ -108,17 +111,36 @@ function fileForkStrategy(sourcePath: string, label: string) {
 }
 
 describe("forkedWorkingCopyStrategy", () => {
-  it("forks a file-backed SQLite database by copying its file, and merges a fork write back to the base", async () => {
+  it("forks a file-backed SQLite database by copying its file, merges a fork write back to the base, and releases the fork only when the working copy's composed close runs", async () => {
     const basePath = createTemporaryDbPath("base-roundtrip");
     const { backend: baseBackend } = openFileBackend(basePath);
     const [baseStore] = await createStoreWithSchema(graph, baseBackend);
     const widget = await baseStore.nodes.Widget.create({ name: "Original" });
 
+    // A spy, not `copyDatabaseFile`'s own dispose, so this test observes
+    // exactly when the composed close (connection + fork) releases the fork
+    // file — see the assertions after the merge below.
+    const forkedPath = createTemporaryDbPath("roundtrip-fork");
+    const dispose = vi.fn(async () => {
+      if (existsSync(forkedPath)) unlinkSync(forkedPath);
+    });
+    const strategy = forkedWorkingCopyStrategy<
+      G,
+      ForkHandle & { filePath: string }
+    >({
+      fork: () => {
+        copyFileSync(basePath, forkedPath);
+        return Promise.resolve({ filePath: forkedPath, dispose });
+      },
+      connect: (fork) =>
+        Promise.resolve(openFileBackend(fork.filePath).backend),
+    });
+
     const branchResult = await branch<G>(
       baseStore,
       rejectMakeBackend,
       undefined,
-      fileForkStrategy(basePath, "roundtrip-fork"),
+      strategy,
     );
     expect(isOk(branchResult)).toBe(true);
     const forkBranch = unwrap(branchResult);
@@ -140,7 +162,16 @@ describe("forkedWorkingCopyStrategy", () => {
       "Forked Edit",
     );
 
+    // The fork survives the whole merge — `dispose` releases it only when the
+    // working copy's own `close()` runs, never earlier and never on its own.
+    expect(dispose).not.toHaveBeenCalled();
+    expect(existsSync(forkedPath)).toBe(true);
+
     await getStoreBackend(forkBranch.store).close();
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(existsSync(forkedPath)).toBe(false);
+
     await baseBackend.close();
   });
 
@@ -156,7 +187,9 @@ describe("forkedWorkingCopyStrategy", () => {
       connect: () => Promise.reject(connectFailure),
     });
 
-    await expect(strategy.create(baseStore)).rejects.toBe(connectFailure);
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toBe(connectFailure);
     expect(dispose).toHaveBeenCalledTimes(1);
 
     // The base is untouched and still readable/writable.
@@ -196,9 +229,55 @@ describe("forkedWorkingCopyStrategy", () => {
         Promise.resolve(openFileBackend(fork.filePath).backend),
     });
 
-    await expect(strategy.create(baseStore)).rejects.toBeInstanceOf(
-      BranchError,
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toBeInstanceOf(BranchError);
+    expect(dispose).toHaveBeenCalledTimes(1);
+
+    await baseBackend.close();
+  });
+
+  it("refuses a fork whose physical copy races ahead of the base@V branch() already stamped, even though the base is unchanged by the time the strategy checks it", async () => {
+    const basePath = createTemporaryDbPath("base-race");
+    const { backend: baseBackend } = openFileBackend(basePath);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    // `branch()` stamps `base` off `baseStore` BEFORE calling `fork()` — see
+    // branch.ts. This `fork()` then writes to `baseStore` (simulating the
+    // base advancing while the host prepares the fork) and only copies the
+    // file AFTER that write commits, so the physical fork's content matches
+    // the ADVANCED state, not the state `base` was stamped from. Comparing
+    // against the passed `base` catches this; recomputing `baseStore`'s
+    // version fresh inside the strategy (after the race has already
+    // resolved) would not, since by then base and fork agree.
+    const forkedPath = createTemporaryDbPath("race-fork");
+    const dispose = vi.fn(async () => {
+      if (existsSync(forkedPath)) unlinkSync(forkedPath);
+    });
+    const strategy = forkedWorkingCopyStrategy<
+      G,
+      ForkHandle & { filePath: string }
+    >({
+      fork: async () => {
+        await baseStore.nodes.Widget.create({ name: "Raced In" });
+        copyFileSync(basePath, forkedPath);
+        return { filePath: forkedPath, dispose };
+      },
+      connect: (fork) =>
+        Promise.resolve(openFileBackend(fork.filePath).backend),
+    });
+
+    const branchResult = await branch<G>(
+      baseStore,
+      rejectMakeBackend,
+      undefined,
+      strategy,
     );
+    expect(isOk(branchResult)).toBe(false);
+    if (isOk(branchResult)) throw new Error("unreachable");
+    expect(branchResult.error).toBeInstanceOf(BranchError);
+    expect(branchResult.error.cause).toBeInstanceOf(BranchError);
     expect(dispose).toHaveBeenCalledTimes(1);
 
     await baseBackend.close();
@@ -353,6 +432,244 @@ describe("forkedWorkingCopyStrategy", () => {
 
       await getStoreBackend(forkBranch.store).close();
       await getStoreBackend(cloneBranch.store).close();
+      await baseBackend.close();
+    },
+  );
+
+  it("propagates a hook configured on the base onto the fork: the hook fires for a write on the fork", async () => {
+    const basePath = createTemporaryDbPath("base-hooks");
+    const { backend: baseBackend } = openFileBackend(basePath);
+    const onOperationEnd = vi.fn();
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend, {
+      hooks: { onOperationEnd },
+    });
+    const widget = await baseStore.nodes.Widget.create({ name: "Original" });
+    onOperationEnd.mockClear();
+
+    const forkBranch = unwrap(
+      await branch<G>(
+        baseStore,
+        rejectMakeBackend,
+        { id: asBranchId("hooks-fork") },
+        fileForkStrategy(basePath, "hooks-fork"),
+      ),
+    );
+
+    // The fork was attached with a fresh Store (forkedWorkingCopyStrategy's
+    // own createStore call), so it carries its OWN hooks configuration — the
+    // base's `onOperationEnd` only fires for the fork's write if
+    // Store.workingCopyOptions actually threaded it through.
+    expect(onOperationEnd).not.toHaveBeenCalled();
+    await forkBranch.store.nodes.Widget.update(widget.id, {
+      name: "Fork Edit",
+    });
+    expect(onOperationEnd).toHaveBeenCalledTimes(1);
+
+    await getStoreBackend(forkBranch.store).close();
+    await baseBackend.close();
+  });
+
+  it(
+    "propagates custom table names onto the fork when they come only from " +
+      "the base's backend factory, with no explicit `schema` option " +
+      "(the documented fallback covered by tests/custom-table-names.test.ts)",
+    async () => {
+      const CUSTOM_NAMES = {
+        recordedClock: "app_recorded_clock",
+        revisionOrigins: "app_revision_origins",
+      };
+      const basePath = createTemporaryDbPath("base-backend-only-names");
+      const { backend: baseBackend } = createLocalSqliteBackend({
+        path: basePath,
+        pragmas: false,
+        tables: createSqliteTables(CUSTOM_NAMES),
+      });
+      // No `schema` option: the base relies entirely on its backend's own
+      // `tableNames` to resolve its custom names, exactly like
+      // tests/custom-table-names.test.ts. Comparing forkOptions.schema
+      // (undefined here) against a DEFAULT fallback instead of reading
+      // through Store.revisionSchema would wrongly refuse this fork.
+      const [baseStore] = await createStoreWithSchema(graph, baseBackend, {
+        revisionTracking: true,
+      });
+      const widget = await baseStore.nodes.Widget.create({ name: "Original" });
+      const baseVersion = await computeBaseVersion(baseStore);
+
+      const forkedPath = createTemporaryDbPath("backend-only-names-fork");
+      const strategy = forkedWorkingCopyStrategy<
+        G,
+        ForkHandle & { filePath: string }
+      >({
+        fork: () => {
+          copyFileSync(basePath, forkedPath);
+          return Promise.resolve({
+            filePath: forkedPath,
+            dispose: async () => {
+              if (existsSync(forkedPath)) unlinkSync(forkedPath);
+            },
+          });
+        },
+        connect: (fork) =>
+          Promise.resolve(
+            createLocalSqliteBackend({
+              path: fork.filePath,
+              pragmas: false,
+              tables: createSqliteTables(CUSTOM_NAMES),
+            }).backend,
+          ),
+      });
+
+      const branchResult = await branch<G>(
+        baseStore,
+        rejectMakeBackend,
+        undefined,
+        strategy,
+      );
+      expect(isOk(branchResult)).toBe(true);
+      const forkBranch = unwrap(branchResult);
+      expect(await computeBaseVersion(forkBranch.store)).toBe(baseVersion);
+
+      await forkBranch.store.nodes.Widget.update(widget.id, {
+        name: "Forked Edit",
+      });
+      const mergeResult = await merge<G>(baseStore, [forkBranch], {});
+      expect(isOk(mergeResult)).toBe(true);
+      expect((await baseStore.nodes.Widget.getById(widget.id))?.name).toBe(
+        "Forked Edit",
+      );
+
+      await getStoreBackend(forkBranch.store).close();
+      await baseBackend.close();
+    },
+  );
+
+  it(
+    "propagates the base's explicit SQL schema onto the fork when connect() " +
+      "binds the SAME custom table names the base used",
+    async () => {
+      const CUSTOM_NAMES = {
+        recordedClock: "app_recorded_clock",
+        revisionOrigins: "app_revision_origins",
+      };
+      const basePath = createTemporaryDbPath("base-custom-schema");
+      const { backend: baseBackend } = createLocalSqliteBackend({
+        path: basePath,
+        pragmas: false,
+        tables: createSqliteTables(CUSTOM_NAMES),
+      });
+      const [baseStore] = await createStoreWithSchema(graph, baseBackend, {
+        revisionTracking: true,
+        schema: createSqlSchema(CUSTOM_NAMES),
+      });
+      const widget = await baseStore.nodes.Widget.create({ name: "Original" });
+      const baseVersion = await computeBaseVersion(baseStore);
+
+      const forkedPath = createTemporaryDbPath("custom-schema-fork");
+      // connect() reconstructs the SAME custom table bindings the base
+      // backend used. forkedWorkingCopyStrategy checks this (see
+      // working-copy.ts): a fork is the same physical database as the base,
+      // so a backend bound to different table names would read and write
+      // through tables the fork's rows were never written to.
+      const strategy = forkedWorkingCopyStrategy<
+        G,
+        ForkHandle & { filePath: string }
+      >({
+        fork: () => {
+          copyFileSync(basePath, forkedPath);
+          return Promise.resolve({
+            filePath: forkedPath,
+            dispose: async () => {
+              if (existsSync(forkedPath)) unlinkSync(forkedPath);
+            },
+          });
+        },
+        connect: (fork) =>
+          Promise.resolve(
+            createLocalSqliteBackend({
+              path: fork.filePath,
+              pragmas: false,
+              tables: createSqliteTables(CUSTOM_NAMES),
+            }).backend,
+          ),
+      });
+
+      const branchResult = await branch<G>(
+        baseStore,
+        rejectMakeBackend,
+        undefined,
+        strategy,
+      );
+      expect(isOk(branchResult)).toBe(true);
+      const forkBranch = unwrap(branchResult);
+      expect(await computeBaseVersion(forkBranch.store)).toBe(baseVersion);
+
+      await forkBranch.store.nodes.Widget.update(widget.id, {
+        name: "Forked Edit",
+      });
+      const mergeResult = await merge<G>(baseStore, [forkBranch], {});
+      expect(isOk(mergeResult)).toBe(true);
+      expect((await baseStore.nodes.Widget.getById(widget.id))?.name).toBe(
+        "Forked Edit",
+      );
+
+      await getStoreBackend(forkBranch.store).close();
+      await baseBackend.close();
+    },
+  );
+
+  it(
+    "refuses a fork whose connect() backend does not bind the base's " +
+      "custom SQL schema table names, closing the backend first",
+    async () => {
+      // Only the revision-tracking tables are renamed — the node/edge tables
+      // stay at their default names — so a mismatch here is isolated to
+      // exactly the fields forkStoreOptions inherits through `schema`,
+      // without also depending on node/edge table bindings.
+      const CUSTOM_NAMES = {
+        recordedClock: "app_recorded_clock",
+        revisionOrigins: "app_revision_origins",
+      };
+      const basePath = createTemporaryDbPath("base-schema-mismatch");
+      const { backend: baseBackend } = createLocalSqliteBackend({
+        path: basePath,
+        pragmas: false,
+        tables: createSqliteTables(CUSTOM_NAMES),
+      });
+      const [baseStore] = await createStoreWithSchema(graph, baseBackend, {
+        revisionTracking: true,
+        schema: createSqlSchema(CUSTOM_NAMES),
+      });
+      await baseStore.nodes.Widget.create({ name: "Original" });
+
+      const forkedPath = createTemporaryDbPath("schema-mismatch-fork");
+      const dispose = vi.fn(async () => {
+        if (existsSync(forkedPath)) unlinkSync(forkedPath);
+      });
+      // connect() opens a PLAIN backend on the forked file — default table
+      // bindings, disagreeing with the custom recordedClock/revisionOrigins
+      // names the base's (and therefore the fork's inherited) schema names.
+      const strategy = forkedWorkingCopyStrategy<
+        G,
+        ForkHandle & { filePath: string }
+      >({
+        fork: () => {
+          copyFileSync(basePath, forkedPath);
+          return Promise.resolve({ filePath: forkedPath, dispose });
+        },
+        connect: (fork) =>
+          Promise.resolve(openFileBackend(fork.filePath).backend),
+      });
+
+      await expect(
+        strategy.create(baseStore, await computeBaseVersion(baseStore)),
+      ).rejects.toBeInstanceOf(BranchError);
+      expect(dispose).toHaveBeenCalledTimes(1);
+
+      // The base is untouched and still readable/writable.
+      expect(
+        (await baseStore.nodes.Widget.find()).map((found) => found.name),
+      ).toEqual(["Original"]);
+
       await baseBackend.close();
     },
   );

@@ -1073,7 +1073,9 @@ const fork = unwrap(await branch(base, makeBackend, { id: asBranchId("worker-1")
 
 For a custom isolation mechanism (e.g. a future copy-on-write namespace), pass a
 `WorkingCopyStrategy` as the fourth argument to `branch()` — its single `create`
-method returns an independently-mutable store over the same graph definition.
+method receives the base store and the `BaseVersion` `branch()` already
+stamped off it, and returns an independently-mutable store over the same
+graph definition.
 
 **A branch is a data fork.** `branch()` records the clone's committed schema
 `(version, hash)` at fork time, and the merge refuses (typed, as
@@ -1140,27 +1142,53 @@ backend's `close` is composed with the fork's `dispose` through `deriveBackend`
 connection and the fork. A `connect` failure disposes the fork before
 rethrowing, leaving nothing open and the base untouched.
 
+A fork inherits the base's WHOLE construction option set — hooks, upsert
+coalescing, the SQL schema (custom table names), the auto-refresh-statistics
+threshold, query defaults, and an externally-bound recorded-read relation —
+read once through `Store.workingCopyOptions`, plus `history`/
+`revisionTracking`, matched to the base's own `historyEnabled`/
+`revisionTrackingEnabled`. This is safe precisely because a fork is the SAME
+physical database as the base: a custom `schema` names relations the fork
+carries too, and an external `recordedRead` binding points at one. The clone
+strategy inherits only `revisionTracking` — its fresh backend is a distinct,
+empty database, so a schema naming the base's tables or a `recordedRead`
+binding populated nowhere on the clone would misdirect it.
+
+Because the fork's store reads and writes through the base's table names,
+`connect()`'s backend must bind those SAME names. `create()` compares the
+connected backend's own table bindings against the base's own resolved SQL
+schema (`Store.revisionSchema` — the base's explicit `schema` option, or its
+backend's own `tableNames` otherwise), and refuses with a `BranchError`,
+closing the backend first, when they disagree: a backend bound to different
+(often just the default) table names would read and write through tables the
+fork's rows were never written to.
+
 **A fork preserves what a clone drops, and that is why it is safe to merge.**
-The clone strategy above streams the base through public interchange, which
-loses soft-delete tombstones (the interchange `meta` schema has no `deletedAt`
-field) and regenerates `created_at`/`updated_at` on import — safe only because
-the merge's state diff always compares against the *original* base store, never
-the clone. A fork is never rebuilt through `exportGraphStream`/
-`importGraphStream`, so none of that applies: tombstones, `created_at`/
-`updated_at`, and the `version` column carry over unchanged, and — with
-`history: true` — the fork physically carries the base's recorded relations, so
-`store.asOfRecorded(<an instant before the fork>)` answers from that history. A
-clone-based branch never enables history, so the same call on it refuses
-outright.
+The clone strategy above streams the base through public interchange with
+`includeDeleted: false`, so it omits every soft-deleted row entirely: the
+interchange `meta` schema has no `deletedAt` field, so a tombstoned row would
+otherwise round-trip as LIVE and read as a spurious resurrection on the
+clone's diff. It also regenerates `created_at`/`updated_at` on import — safe
+only because the merge's state diff always compares against the *original*
+base store, never the clone. A fork is never rebuilt through
+`exportGraphStream`/`importGraphStream`, so none of that applies: tombstones,
+`created_at`/`updated_at`, and the `version` column carry over unchanged, and
+— with `history: true` — the fork physically carries the base's recorded
+relations, so `store.asOfRecorded(<an instant before the fork>)` answers from
+that history. A clone-based branch never enables history, so the same call on
+it refuses outright.
 
 Because a fork is expected to be byte-for-byte identical to the base, `create()`
-asserts `computeBaseVersion(forkStore) === computeBaseVersion(baseStore)` right
-after attaching the store — cheap when the base has revision tracking (an O(1)
-anchor compare), an O(graph) content fingerprint otherwise — and refuses with a
-`BranchError` naming both versions when they disagree, closing the backend
-first. A fork taken while the base was mid-write, or a `fork` implementation
-that returns something other than an exact copy, is refused here rather than
-merged against silently.
+asserts `computeBaseVersion(forkStore) === base` right after attaching the
+store, where `base` is the token `branch()` already stamped off the ORIGINAL
+base store before invoking the strategy — cheap when the base has revision
+tracking (an O(1) anchor compare), an O(graph) content fingerprint otherwise,
+and computed exactly once either way. A mismatch closes the backend first and
+refuses with a `BranchError` carrying `forkVersion`/`baseVersion` in
+`error.details`; `branch()` catches it and returns that `BranchError` as the
+`cause` of the outer `BranchError` it resolves with. A fork taken while the
+base was mid-write, or a `fork` implementation that returns something other
+than an exact copy, is refused here rather than merged against silently.
 
 `ingestionBranch()` stays clone-based. Its strategy derives a working-copy
 schema with node uniqueness deferred so an untrusted batch's repeated keys can

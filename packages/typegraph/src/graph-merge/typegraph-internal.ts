@@ -45,7 +45,10 @@ export {
 } from "../ontology/constants";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
 // under a graph id whose schema was never registered.
-export { createSqlSchema } from "../query/compiler/schema";
+export {
+  createSqlSchema,
+  type ResolvedSqlTableNames,
+} from "../query/compiler/schema";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { sortedReplacer } from "../schema/canonical";

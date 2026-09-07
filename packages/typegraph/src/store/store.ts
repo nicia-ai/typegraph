@@ -397,6 +397,7 @@ import {
   type TransactionContext,
   type TransactionOutcome,
   type UnboundLiveStoreOptions,
+  type WorkingCopyOptions,
 } from "./types";
 
 type StoreSchemaMetadata = Readonly<{
@@ -689,6 +690,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
   revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
   recordedReadBound: boolean;
+  workingCopyOptions: WorkingCopyOptions;
   nodes: GraphNodeCollections<G>;
   edges: GraphEdgeCollections<G>;
   algorithms: GraphAlgorithms<G>;
@@ -1754,6 +1756,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   get recordedReadBound(): boolean {
     return this.#recordedReadBinding !== undefined;
+  }
+
+  /**
+   * The behavioral subset of this store's construction options a
+   * working-copy strategy inherits: hooks, upsert coalescing, the SQL
+   * schema, the auto-refresh-statistics threshold, query defaults, and an
+   * externally-bound recorded-read relation. Read off the verbatim options
+   * this store was constructed with (the same field `evolve()` reconstructs
+   * from), never re-derived from private state, so this is the one place a
+   * strategy reaches for them.
+   *
+   * Excludes `history`/`revisionTracking` — those are the working-copy
+   * strategy's own decision, not something to inherit blindly.
+   *
+   * @internal
+   */
+  get workingCopyOptions(): WorkingCopyOptions {
+    const {
+      history: _history,
+      revisionTracking: _revisionTracking,
+      ...rest
+    } = this.#options ?? {};
+    return Object.freeze(rest);
   }
 
   // === Collections ===
