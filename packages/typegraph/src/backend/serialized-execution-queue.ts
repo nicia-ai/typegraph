@@ -12,6 +12,10 @@
  * Drizzle-specific module to get it.
  */
 import { BackendDisposedError, ConfigurationError } from "../errors";
+import {
+  type AsyncContextStore,
+  createAsyncContextLoader,
+} from "./async-context";
 
 export type SerializedExecutionQueue = Readonly<{
   dispose: () => void;
@@ -80,41 +84,16 @@ function pendingForever<T>(): Promise<T> {
  * what keeps every enclosing queue's own reentrancy check correct regardless
  * of how many other queues are nested inside it.
  *
- * AsyncLocalStorage is loaded lazily and optionally: it is available on Node
- * and on Cloudflare workers with the `nodejs_als` compatibility flag. Under
+ * AsyncLocalStorage is loaded lazily and optionally, through the shared
+ * {@link createAsyncContextLoader} — it is available on Node and on
+ * Cloudflare workers with the `nodejs_als` compatibility flag. Under
  * `reentrancy: "detect"`, a runtime without it simply skips the detection
  * (the queue behaves as before); under `"require"`, its absence is refused —
  * see {@link ReentrancyMode}.
  */
-type QueueTaskContext = Readonly<{
-  getStore: () => ReadonlySet<object> | undefined;
-  run: <T>(store: ReadonlySet<object>, callback: () => T) => T;
-}>;
+type QueueTaskContext = AsyncContextStore<ReadonlySet<object>>;
 
-let queueTaskContext: QueueTaskContext | undefined;
-
-async function loadQueueTaskContext(): Promise<void> {
-  try {
-    const asyncHooks = await import("node:async_hooks");
-    queueTaskContext = new asyncHooks.AsyncLocalStorage<ReadonlySet<object>>();
-  } catch {
-    // AsyncLocalStorage unavailable on this runtime: re-entrant submissions
-    // stay undetected under `reentrancy: "detect"`, and every submission is
-    // refused under `reentrancy: "require"` — see `runExclusive` below.
-  }
-}
-
-/**
- * Resolves once {@link loadQueueTaskContext} has settled — successfully or
- * not; the function above never throws, so this promise never rejects.
- * `runExclusive` awaits it before running ANY task body, on both
- * {@link ReentrancyMode}s: that is what turns "the dynamic import has not
- * resolved yet" from a silent detection gap into, at worst, one microtask of
- * latency before the first task of this queue's lifetime ever runs — by the
- * time a task's own body executes (and could make a nested submission to
- * this same queue), `queueTaskContext` has already reached its final value.
- */
-let queueTaskContextReadyPromise: Promise<void> = loadQueueTaskContext();
+const queueTaskContextLoader = createAsyncContextLoader<ReadonlySet<object>>();
 
 /**
  * @internal Test seam for `tests/caller-serialized-queue.test.ts`: replaces
@@ -129,19 +108,12 @@ export function __setQueueTaskContextForTesting(
   context: QueueTaskContext | undefined,
   readyDelayMs = 0,
 ): void {
-  queueTaskContext = undefined;
-  queueTaskContextReadyPromise = new Promise((resolve) => {
-    setTimeout(() => {
-      queueTaskContext = context;
-      resolve();
-    }, readyDelayMs);
-  });
+  queueTaskContextLoader.setForTesting(context, readyDelayMs);
 }
 
 /** @internal Restores the real loader after a test uses the seam above. */
 export function __restoreQueueTaskContextForTesting(): void {
-  queueTaskContext = undefined;
-  queueTaskContextReadyPromise = loadQueueTaskContext();
+  queueTaskContextLoader.restoreForTesting();
 }
 
 function rejectReentrantQueueSubmission(subject: string): Promise<never> {
@@ -211,14 +183,16 @@ export function createSerializedExecutionQueue(
     runExclusive<T>(task: () => Promise<T>): Promise<T> {
       if (isDisposed()) return Promise.reject(new BackendDisposedError());
       // Synchronous, at call time, deliberately NOT deferred behind
-      // `queueTaskContextReadyPromise`: a submission made from INSIDE a task
-      // this same queue is currently running only ever reaches this point
-      // after `runTask` (below) already awaited that readiness promise for
-      // the ENCLOSING task, so `queueTaskContext` is already resolved by
-      // then. Waiting here too would let two concurrent top-level
+      // `queueTaskContextLoader.ready()`: a submission made from INSIDE a
+      // task this same queue is currently running only ever reaches this
+      // point after `runTask` (below) already awaited that readiness promise
+      // for the ENCLOSING task, so the loader's context is already resolved
+      // by then. Waiting here too would let two concurrent top-level
       // submissions race the promise instead of strictly ordering by call
       // time, which is what keeps the FIFO guarantee below correct.
-      if (queueTaskContext?.getStore()?.has(taskMarker) === true) {
+      if (
+        queueTaskContextLoader.current()?.getStore()?.has(taskMarker) === true
+      ) {
         return rejectReentrantQueueSubmission(options.subject);
       }
 
@@ -241,11 +215,11 @@ export function createSerializedExecutionQueue(
           // Awaited before the context is read (on BOTH reentrancy modes),
           // so a nested submission made from inside `task()` — whether this
           // queue was constructed a microtask ago or a minute ago — always
-          // observes `queueTaskContext`'s FINAL value rather than a
-          // still-loading `undefined`. See the module doc above.
-          await queueTaskContextReadyPromise;
+          // observes the loader's FINAL value rather than a still-loading
+          // `undefined`. See the module doc above.
+          await queueTaskContextLoader.ready();
           if (isDisposed()) return await pendingForever<T>();
-          const context = queueTaskContext;
+          const context = queueTaskContextLoader.current();
           if (context === undefined) {
             if (options.reentrancy === "require") {
               return await rejectAsyncContextUnavailable(options.subject);

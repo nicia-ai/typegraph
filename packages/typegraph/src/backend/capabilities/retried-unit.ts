@@ -17,6 +17,10 @@
 import { ConfigurationError, TransactionConflictError } from "../../errors";
 import { delay } from "../../utils/delay";
 import { isSerializationFailure } from "../../utils/sql-errors";
+import {
+  type AsyncContextStore,
+  createAsyncContextLoader,
+} from "../async-context";
 import { type BackendCapabilities } from "../types";
 
 /**
@@ -103,20 +107,52 @@ type RetriedUnitFailureDisposition = Readonly<
 /**
  * An attempt that itself runs a nested unit of work through this same owner —
  * graph-merge's commit sites call `target.transaction(...)`, which is
- * `store.transaction()` run with no `retry` option, so a conflict inside it
- * already comes back wrapped as a one-attempt {@link TransactionConflictError}
- * (see `store.ts#runTransaction`) — reports THAT wrapper as its failure, not
- * the driver error underneath. Classifying the wrapper as-is would still work
- * ({@link isSerializationFailure} walks into its `cause`), but the
- * exhaustion `TransactionConflictError` this loop mints would then wrap the
- * INNER `TransactionConflictError` instead of the driver error it wraps in
- * turn, chaining two conflict errors where the replay contract promises one.
- * Unwrapping first makes the classification, and the eventual `cause`, the
- * same regardless of whether an attempt calls the driver directly or through
- * a nested single-attempt unit.
+ * `store.transaction()` run with no `retry` option — reports a
+ * {@link TransactionConflictError} as its failure, not the driver error
+ * underneath, whenever that inner `runRetriedUnit` call was NOT itself seen
+ * as nested (the async-context detection below is unavailable, or resolved
+ * too late to mark it — see `runRetriedUnit`'s own nesting doc). Classifying
+ * the wrapper as-is would still work ({@link isSerializationFailure} walks
+ * into its `cause`), but the exhaustion `TransactionConflictError` this loop
+ * mints would then wrap the INNER `TransactionConflictError` instead of the
+ * driver error it wraps in turn, chaining two conflict errors where the
+ * replay contract promises one. Unwrapping first makes the classification,
+ * and the eventual `cause`, the same regardless of whether an attempt calls
+ * the driver directly, through a nested unit the async-context detection
+ * caught (which never wraps in the first place), or through one it did not.
  */
 function unwrapNestedConflict(error: unknown): unknown {
   return error instanceof TransactionConflictError ? error.cause : error;
+}
+
+/**
+ * Marks "the current async execution is already inside a `runRetriedUnit`
+ * attempt" so a `runRetriedUnit` call reached from further down the same
+ * call graph — synchronously or through any number of intervening `await`s —
+ * can tell it is NESTED rather than a second, independent owner. A loader
+ * fully separate from {@link file://../serialized-execution-queue.ts}'s own
+ * (a different concern, tracking reentrant queue submissions): the two never
+ * share a context object, so one can never be mistaken for the other.
+ */
+const nestedRetriedUnitContext = createAsyncContextLoader<true>();
+
+/**
+ * @internal Test seam for `tests/transaction-retry.test.ts`: see
+ * {@link createAsyncContextLoader}'s own `setForTesting` doc — the same
+ * seam shape `tests/caller-serialized-queue.test.ts` uses for the queue's
+ * loader, applied to this module's own nesting-detection instance. Not
+ * reachable from published entrypoints.
+ */
+export function __setRetriedUnitAsyncContextForTesting(
+  context: AsyncContextStore<true> | undefined,
+  readyDelayMs = 0,
+): void {
+  nestedRetriedUnitContext.setForTesting(context, readyDelayMs);
+}
+
+/** @internal Restores the real loader after a test uses the seam above. */
+export function __restoreRetriedUnitAsyncContextForTesting(): void {
+  nestedRetriedUnitContext.restoreForTesting();
 }
 
 /**
@@ -269,6 +305,41 @@ export type RetriedUnitAttempt<T> = (frame: RetriedUnitFrame) => Promise<T>;
  * consulted for that exact backend/transaction object — see
  * {@link RetriedUnitOptions}.
  *
+ * ## Nesting is structural, not declared
+ *
+ * A `runRetriedUnit` call reached from inside another one's `attempt` — a
+ * decision-driving read followed by a call into a SEPARATE function that
+ * itself opens its own `runRetriedUnit` around a fenced transaction, e.g.
+ * `rebuildContribution`'s pre-reads followed by `runSchemaWriteTransaction`
+ * — is detected through async context, the same mechanism
+ * `serialized-execution-queue.ts` uses to detect a reentrant submission,
+ * rather than through any parameter the nested call passes. When detected,
+ * the nested call runs `attempt` exactly ONCE, with a `frame` whose `attempt`
+ * is always `1` and whose `willRetry` always returns `false`, and lets
+ * whatever `attempt` throws propagate completely unchanged — no
+ * classification, no `TransactionConflictError` minted here. The reasoning:
+ * the reads that decided what the nested unit would do were taken by the
+ * OUTER attempt, before it ever called in; replaying only the nested part on
+ * its own budget would re-run stale decisions against a database a
+ * concurrent committer may have already changed, while multiplying the
+ * total attempts made (an outer budget of 3 wrapping an inner budget of 3
+ * could attempt the same conflict up to 9 times through two owners). Letting
+ * the nested failure propagate untouched hands it to the outermost owner,
+ * which replays the WHOLE unit — reads included — from the top, so the total
+ * number of attempts made for one logical unit of work is always exactly the
+ * outermost owner's own budget, never a multiple of nested budgets.
+ *
+ * Detection requires the async-context loader to have finished loading, so
+ * `runRetriedUnit` awaits its readiness before ever looking at it (mirroring
+ * the queue's own `await` before its first reentrancy check) — at worst one
+ * microtask of latency before the very first attempt of this process runs.
+ * If the runtime has no `node:async_hooks` `AsyncLocalStorage` at all,
+ * nesting can never be detected: every call, nested or not, runs its own
+ * full, independent retry loop exactly as it did before this detection
+ * existed, and {@link unwrapNestedConflict} is what keeps that degraded
+ * case correctly classified when an inner single-attempt unit's mint
+ * reaches an outer owner unpeeled.
+ *
  * ## The replay contract
  *
  * `attempt` receives a fresh `frame` on every call and MUST satisfy:
@@ -298,6 +369,32 @@ export async function runRetriedUnit<T>(
       { operation: options.operation, attempts: options.attempts },
     );
   }
+  // Awaited before the context is ever read, so a nested call reached a
+  // microtask after this process's very first `runRetriedUnit` call still
+  // observes the loader's FINAL value rather than a still-loading
+  // `undefined` — see the "Nesting is structural" doc section above.
+  await nestedRetriedUnitContext.ready();
+  const context = nestedRetriedUnitContext.current();
+  // Runs `body` marked as "inside a retried unit" for the duration of the
+  // call, so any `runRetriedUnit` reached from further down `body`'s own
+  // call graph — nested or sibling to this one — sees the marker. A no-op
+  // wrapper when the context is unavailable: nesting simply cannot be
+  // detected then, on this call or any further down.
+  const runMarked = <R>(body: () => Promise<R>): Promise<R> =>
+    context === undefined ? body() : context.run(true, body);
+
+  if (context?.getStore() === true) {
+    // Nested: this call's OWN budget is never spent. One call, one frame
+    // pinned to attempt 1, no retry — the failure is the outermost owner's
+    // to classify, retry, or mint on exhaustion.
+    const nestedFrame: RetriedUnitFrame = {
+      attempt: 1,
+      willRetry: () => false,
+      reportedFailure: (error) => error,
+    };
+    return runMarked(() => attempt(nestedFrame));
+  }
+
   for (let attemptNumber = 1; ; attemptNumber += 1) {
     await delay(retryBackoffDelayMs(attemptNumber));
     const classify = createMemoizedFailureClassifier(attemptNumber, options);
@@ -310,7 +407,7 @@ export async function runRetriedUnit<T>(
       },
     };
     try {
-      return await attempt(frame);
+      return await runMarked(() => attempt(frame));
     } catch (error) {
       const disposition = classify(error);
       if (disposition.retry) continue;

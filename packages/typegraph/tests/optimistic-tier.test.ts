@@ -32,7 +32,6 @@ import {
 } from "../src";
 import {
   isOptimisticRetryTier,
-  OPTIMISTIC_RETRY_ATTEMPTS,
   runRetriedUnit,
 } from "../src/backend/capabilities/retried-unit";
 import { generateVectorlessPostgresMigrationSQL } from "../src/backend/drizzle/ddl";
@@ -438,7 +437,7 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     }
   }
 
-  it("rebuildContribution's pre-reads run inside the attempt: exhausting runSchemaWriteTransaction's own retry still redoes them (the marker read fires twice)", async () => {
+  it("rebuildContribution's pre-reads run inside the attempt: a fence-row conflict absorbed by the nested unit still redoes them (the marker read fires twice)", async () => {
     // A hand-built PGlite client and logger, rather than the shared fault
     // injector or `createLoggedPgliteClient`: `rebuildContribution`'s fence
     // opens its transaction through `db.transaction(...)` directly
@@ -452,15 +451,14 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     // `logger` option, the one seam that sees every statement, in or out of
     // a transaction alike.
     //
-    // `runSchemaWriteTransaction` itself now replays a fence-row conflict
-    // under this tier (`src/backend/drizzle/postgres.ts`), so a fault on
-    // only the FIRST fence-row acquisition would be absorbed one layer
-    // down and never reach this outer attempt at all. Faulting every
-    // acquisition through `OPTIMISTIC_RETRY_ATTEMPTS` exhausts that inner
-    // retry first, so the outer attempt still sees exactly one failure to
-    // retry — proving the two layers compose (see the `runRetriedUnit`
-    // JSDoc on `runSchemaWriteTransaction`) rather than one silently
-    // swallowing the other's contract.
+    // `runSchemaWriteTransaction` opens INSIDE `rebuildContribution`'s own
+    // attempt, so `runRetriedUnit` sees it as a NESTED unit: it runs its
+    // fence-row acquisition exactly once and lets a conflict propagate
+    // straight out, rather than retrying it internally on its own budget
+    // (see the "Nesting is structural" section of `runRetriedUnit`'s JSDoc).
+    // Faulting only the FIRST fence-row acquisition therefore reaches this
+    // outer attempt directly, which redoes its own pre-reads on the replay
+    // it takes in response.
     const client = await PGlite.create();
     await client.exec(generateVectorlessPostgresMigrationSQL());
     const statements: string[] = [];
@@ -471,7 +469,7 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
       statements.push(sqlText);
       if (!armed || !WRITE_STATEMENT_PATTERN.test(sqlText)) return;
       statementCalls += 1;
-      if (statementCalls <= OPTIMISTIC_RETRY_ATTEMPTS) {
+      if (statementCalls === 1) {
         faulted = true;
         const error = new Error("injected 40001 fault");
         (error as Error & { code: string }).code = "40001";
@@ -507,13 +505,11 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
           /^\s*select/i.test(statement) &&
           statement.includes(CONTRIBUTION_MARKER_TABLE),
       );
-      // One marker read per OUTER attempt: `runSchemaWriteTransaction`
-      // exhausted its own `OPTIMISTIC_RETRY_ATTEMPTS` retries internally
-      // (every acquisition through that budget was faulted above) before
-      // ever raising to this outer attempt, which then redid its own
-      // pre-reads exactly once more. Had the pre-reads stayed OUTSIDE the
-      // retried closure (read once, before the fenced transaction), this
-      // would read 1 regardless of how many attempts ran at either layer.
+      // One marker read per OUTER attempt: the nested `runSchemaWriteTransaction`
+      // ran once, propagated the fence-row conflict unchanged, and the outer
+      // attempt redid its own pre-reads on its own replay. Had the pre-reads
+      // stayed OUTSIDE the retried closure (read once, before the fenced
+      // transaction), this would read 1 regardless of how many attempts ran.
       expect(markerReads.length).toBe(2);
     } finally {
       await client.close();

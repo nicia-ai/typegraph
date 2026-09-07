@@ -18,7 +18,11 @@ import {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../src/backend/capabilities/resolve";
-import { runRetriedUnit } from "../src/backend/capabilities/retried-unit";
+import {
+  __restoreRetriedUnitAsyncContextForTesting,
+  __setRetriedUnitAsyncContextForTesting,
+  runRetriedUnit,
+} from "../src/backend/capabilities/retried-unit";
 import { ConfigurationError, TransactionConflictError } from "../src/errors";
 import {
   buildEdgeSchemaMap,
@@ -190,6 +194,92 @@ describe("runRetriedUnit", () => {
     // minted TransactionConflictError with the same shape.
     expect(thrown).toBeInstanceOf(TransactionConflictError);
     expect(reportedByAttempt[1]).toBe(thrown);
+  });
+});
+
+describe("runRetriedUnit nesting", () => {
+  afterEach(() => {
+    __restoreRetriedUnitAsyncContextForTesting();
+  });
+
+  it("a runRetriedUnit call nested inside another one runs its own attempt exactly once and lets the outer owner retry", async () => {
+    let outerAttempts = 0;
+    let innerAttempts = 0;
+    const result = await runRetriedUnit(
+      { operation: "outer", attempts: 3 },
+      async () => {
+        outerAttempts += 1;
+        return runRetriedUnit({ operation: "inner", attempts: 3 }, async () => {
+          await Promise.resolve();
+          innerAttempts += 1;
+          if (outerAttempts < 2) throw pgError("40001");
+          return "done";
+        });
+      },
+    );
+    expect(result).toBe("done");
+    expect(outerAttempts).toBe(2);
+    // Exactly one inner call per outer attempt: the nested unit never spends
+    // its own 3-attempt budget, so had it retried on its own instead, this
+    // would read higher than 2 (see the mutation check below).
+    expect(innerAttempts).toBe(2);
+  });
+
+  // Mutation proof for the test above: comment out the
+  // `context?.getStore() === true` nesting check in `runRetriedUnit` (so
+  // every call, nested or not, always runs its own independent loop) and
+  // this assertion fails — `innerAttempts` reads 4, not 2, because the inner
+  // unit exhausts its own 3-attempt budget on the outer's first attempt
+  // before the outer ever gets to retry.
+
+  it("a nested unit's failure reaches the outer owner as the identical error object, never wrapped", async () => {
+    const failure = pgError("40001", "nested failure");
+    let observedByOuter: unknown;
+    await expect(
+      runRetriedUnit({ operation: "outer", attempts: 1 }, async () => {
+        try {
+          return await runRetriedUnit(
+            { operation: "inner", attempts: 3 },
+            async () => {
+              await Promise.resolve();
+              throw failure;
+            },
+          );
+        } catch (error) {
+          observedByOuter = error;
+          throw error;
+        }
+      }),
+    ).rejects.toBeInstanceOf(TransactionConflictError);
+    // The code that called the nested unit sees the exact object the
+    // attempt threw — not a TransactionConflictError the inner call minted
+    // for itself — even though the OUTER owner's own exhaustion still wraps
+    // it once, for its own caller.
+    expect(observedByOuter).toBe(failure);
+  });
+
+  it("with the async-context loader unavailable, nesting is not detected and the inner unit retries on its own budget", async () => {
+    __setRetriedUnitAsyncContextForTesting(undefined);
+    let outerAttempts = 0;
+    let innerAttempts = 0;
+    const result = await runRetriedUnit(
+      { operation: "outer", attempts: 3 },
+      async () => {
+        outerAttempts += 1;
+        return runRetriedUnit({ operation: "inner", attempts: 3 }, async () => {
+          await Promise.resolve();
+          innerAttempts += 1;
+          if (outerAttempts < 2) throw pgError("40001");
+          return "done";
+        });
+      },
+    );
+    expect(result).toBe("done");
+    expect(outerAttempts).toBe(2);
+    // Undetected nesting: the inner unit exhausts its OWN retry budget (3
+    // calls) on the outer's first attempt, mints its own conflict error, and
+    // only THAT propagates to the outer — which then retries once more.
+    expect(innerAttempts).toBe(4);
   });
 });
 
