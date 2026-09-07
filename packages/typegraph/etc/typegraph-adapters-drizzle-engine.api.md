@@ -158,7 +158,7 @@ type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
-        unitOfWork?: "interactive" | "batch" | "none";
+        unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
@@ -8826,6 +8826,7 @@ type SqlExecutionAdapter = Readonly<{
     executeAtomicBatch?: AtomicSqlBatchExecutor;
     prepare?: (sqlText: string) => PreparedSqlStatement;
     runExclusive?: <T>(critical: (connection: SqlExecutionAdapter) => Promise<T>) => Promise<T>;
+    serializationFailure?: (error: unknown) => boolean;
 }>;
 
 // @public

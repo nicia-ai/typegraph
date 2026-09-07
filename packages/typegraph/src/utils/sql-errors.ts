@@ -773,18 +773,81 @@ const SERIALIZATION_FAILURE_MESSAGE_PATTERN =
   /could not serialize access|deadlock detected/i;
 
 /**
+ * Per-backend serialization-failure classifiers a profile registers through
+ * {@link registerSerializationFailureClassifier} — one entry per built
+ * backend object, keyed by identity so a classifier this module never saw
+ * cannot be forged onto an unrelated target.
+ *
+ * A `SqlEngineProfile.execution.serializationFailure` exists for an engine
+ * whose commit-conflict SQLSTATE is not PostgreSQL's `40001`/`40P01`: this
+ * map is what lets {@link isSerializationFailure} consult that engine's own
+ * classifier before falling back to the SQLSTATE/message rules below, while
+ * staying the one predicate every retry owner calls.
+ */
+const SERIALIZATION_FAILURE_CLASSIFIERS = new WeakMap<
+  object,
+  (error: unknown) => boolean
+>();
+
+/**
+ * Registers `classifier` as `target`'s serialization-failure classifier.
+ * `createSqlBackend` is the one caller, on the exact backend object it is
+ * about to return, for a profile that declares
+ * `execution.serializationFailure`.
+ *
+ * @internal
+ */
+export function registerSerializationFailureClassifier(
+  target: object,
+  classifier: (error: unknown) => boolean,
+): void {
+  SERIALIZATION_FAILURE_CLASSIFIERS.set(target, classifier);
+}
+
+/**
+ * Carries a registered classifier from `base` onto `derived` — the same
+ * "carry, never copy" contract every other backend-identity mark follows.
+ * `src/backend/derive-backend.ts` is the only module allowed to call this,
+ * alongside its calls to the other carry functions.
+ *
+ * @internal
+ */
+export function carrySerializationFailureClassifier(
+  derived: object,
+  base: object,
+): void {
+  const classifier = SERIALIZATION_FAILURE_CLASSIFIERS.get(base);
+  if (classifier !== undefined) {
+    SERIALIZATION_FAILURE_CLASSIFIERS.set(derived, classifier);
+  }
+}
+
+/**
  * Whether `error` (or anything in its `.cause` chain) is a PostgreSQL
  * transaction-conflict failure that the documented protocol says to retry by
  * re-running the whole transaction: a serialization failure or a deadlock.
  *
- * Classification prefers the locale-independent SQLSTATE and falls back to
- * the fixed driver message on a per-link basis for links with no `code` of
- * their own (see {@link SERIALIZATION_FAILURE_MESSAGE_PATTERN}). This is the
- * one predicate every retry owner in the codebase consults; a second,
- * inline reimplementation of this decision is a defect even while it agrees
- * with this one, because the two WILL drift.
+ * `target` — when supplied — is consulted FIRST against
+ * {@link SERIALIZATION_FAILURE_CLASSIFIERS}: a profile-declared classifier
+ * for an engine whose commit-conflict shape is not PostgreSQL's own wins
+ * outright, and this function's own SQLSTATE/message rules never run for
+ * that call. Absent a registered classifier for `target` (or with no
+ * `target` at all), classification prefers the locale-independent SQLSTATE
+ * and falls back to the fixed driver message on a per-link basis for links
+ * with no `code` of their own (see
+ * {@link SERIALIZATION_FAILURE_MESSAGE_PATTERN}). This is the one predicate
+ * every retry owner in the codebase consults; a second, inline
+ * reimplementation of this decision is a defect even while it agrees with
+ * this one, because the two WILL drift.
  */
-export function isSerializationFailure(error: unknown): boolean {
+export function isSerializationFailure(
+  error: unknown,
+  target?: object,
+): boolean {
+  if (target !== undefined) {
+    const classifier = SERIALIZATION_FAILURE_CLASSIFIERS.get(target);
+    if (classifier !== undefined) return classifier(error);
+  }
   const uncodedLinks: unknown[] = [];
   let sawOtherSqlState = false;
   for (const link of errorChain(error)) {

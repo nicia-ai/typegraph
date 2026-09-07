@@ -339,6 +339,7 @@ describe("finalizeEngineCapabilities", () => {
       vectorStrategy: undefined,
       fulltextStrategy: undefined,
       fulltextTableName: base.tableNames.fulltext,
+      writeFenceConflict: undefined,
     });
 
     expect(capabilities.fulltext).toBeUndefined();
@@ -355,6 +356,7 @@ describe("finalizeEngineCapabilities", () => {
       vectorStrategy: undefined,
       fulltextStrategy: undefined,
       fulltextTableName: base.tableNames.fulltext,
+      writeFenceConflict: undefined,
     };
 
     const declaredBatch = finalizeEngineCapabilities(
@@ -384,6 +386,44 @@ describe("finalizeEngineCapabilities", () => {
       nonInteractive.execution.atomicBatch === "none" ? "none" : "batch",
     );
     expect(nonInteractive.execution.unitOfWork).not.toBe("interactive");
+  });
+
+  it("derives optimistic-retry only when interactive AND the resolved fence conflict is commit-time", () => {
+    const base = createRealSqliteProfile();
+    const deps = {
+      execution: base.execution,
+      vectorStrategy: undefined,
+      fulltextStrategy: undefined,
+      fulltextTableName: base.tableNames.fulltext,
+    };
+
+    const waitConflict = finalizeEngineCapabilities(base.declaredCapabilities, {
+      ...deps,
+      writeFenceConflict: "wait",
+    });
+    expect(waitConflict.execution.unitOfWork).toBe("interactive");
+
+    const commitTimeConflict = finalizeEngineCapabilities(
+      base.declaredCapabilities,
+      { ...deps, writeFenceConflict: "commit-time" },
+    );
+    expect(commitTimeConflict.execution.unitOfWork).toBe("optimistic-retry");
+
+    const nonInteractiveCommitTime = finalizeEngineCapabilities(
+      {
+        ...base.declaredCapabilities,
+        execution: {
+          ...base.declaredCapabilities.execution,
+          interactiveTransactions: false,
+        },
+      },
+      { ...deps, writeFenceConflict: "commit-time" },
+    );
+    // `commit-time` alone does not derive `optimistic-retry`: the tier
+    // still requires an interactive transaction to replay inside.
+    expect(nonInteractiveCommitTime.execution.unitOfWork).not.toBe(
+      "optimistic-retry",
+    );
   });
 });
 

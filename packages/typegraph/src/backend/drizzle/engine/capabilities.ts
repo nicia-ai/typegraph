@@ -7,8 +7,11 @@
  * (each omitted when its strategy is absent, and each deferring to a value
  * already present on `declared` when its strategy IS present — see below),
  * derive `contributions` from `contributionRebuildSupported`
- * (`../contribution-materializations`), then validate and freeze the result
- * with `assertBundledCapabilityDeclarations`.
+ * (`../contribution-materializations`), derive `execution.unitOfWork` —
+ * `"optimistic-retry"` when interactive AND the caller's resolved
+ * write-fence plan is `row` with `conflict: "commit-time"`, `"interactive"`
+ * when interactive alone, else from `atomicBatch` — then validate and freeze
+ * the result with `assertBundledCapabilityDeclarations`.
  *
  * Everything dialect-specific about capability declaration — HTTP-only
  * driver overrides, the PGlite bind-parameter cap, the pessimistic-lock
@@ -67,6 +70,14 @@ export type FinalizeEngineCapabilitiesDeps = Readonly<{
   fulltextStrategy: FulltextStrategy | undefined;
   /** The profile's physical fulltext table name, the other input `contributionRebuildSupported` needs. */
   fulltextTableName: string;
+  /**
+   * The `conflict` fact off the write-fence plan `createSqlBackend` already
+   * resolved once for this backend, when that plan's `kind` is `"row"`;
+   * `undefined` for every other plan kind. Feeds `execution.unitOfWork`'s
+   * `"optimistic-retry"` derivation below — handed in, never re-resolved
+   * here, so the plan is decided exactly once per backend.
+   */
+  writeFenceConflict: "wait" | "commit-time" | undefined;
 }>;
 
 /**
@@ -105,14 +116,21 @@ export function finalizeEngineCapabilities(
     execution: {
       ...declared.execution,
       atomicBatch,
-      // Derived from the two facts above, never taken from `declared`: a
-      // profile that hand-set this field would drift the moment either fact
-      // changed underneath it. `interactiveTransactions` wins outright — an
-      // engine that can hold an open callback transaction groups a write
-      // that way regardless of whether it also happens to expose an atomic
-      // batch primitive.
+      // Derived from the facts above, never taken from `declared`: a profile
+      // that hand-set this field would drift the moment one of them changed
+      // underneath it. `interactiveTransactions` wins outright over the
+      // atomic-batch fact — an engine that can hold an open callback
+      // transaction groups a write that way regardless of whether it also
+      // happens to expose an atomic batch primitive — but yields to
+      // `writeFenceConflict` when the resolved fence is `row` with
+      // `commit-time`: two acquirers of that fence row both proceed and the
+      // loser's COMMIT fails, so the interactive transaction alone is not
+      // enough and every store-owned unit must be a retried one.
       unitOfWork:
-        declared.execution.interactiveTransactions ? "interactive"
+        declared.execution.interactiveTransactions ?
+          deps.writeFenceConflict === "commit-time" ?
+            "optimistic-retry"
+          : "interactive"
         : atomicBatch === "none" ? "none"
         : "batch",
     },

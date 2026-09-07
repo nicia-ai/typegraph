@@ -71,6 +71,11 @@ import {
   ensureFocusedStatusTable,
   runBucketedMaterialization,
 } from "./materialize-shared";
+import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "./operations/write-transaction";
 
 /**
  * Cross-caller build claim timing (Postgres).
@@ -832,6 +837,34 @@ export async function dropInvalidIndexLeftover(
 }
 
 /**
+ * Runs `run` — ONE write of the claim protocol, either the claim upsert
+ * itself or the success record that follows a build — directly, or as one
+ * retried unit of `backend`'s own optimistic-retry budget when its tier
+ * requires it (`isOptimisticRetryTier`). Unlike a store-owned write plan,
+ * neither call opens its own transaction — the claim and the record are
+ * each already a single, autocommitted statement — so the gate is the tier
+ * alone, with no transaction-mode check: `resolveWriteTransactionMode`
+ * describes a distinction (opened vs. adopted transaction) that does not
+ * apply to a root-level autocommit write.
+ *
+ * The claim loop's OWN wait/retry on a losing claim (below) is unaffected:
+ * that loop keeps polling for a claim already held by another caller, which
+ * is a different condition from this backend's own write conflicting at
+ * commit.
+ */
+function runAsIndexMaterializationUnit<T>(
+  backend: GraphBackend,
+  operation: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  if (!isOptimisticRetryTier(backend)) return run();
+  return runRetriedUnit(
+    { operation, attempts: OPTIMISTIC_RETRY_ATTEMPTS, target: backend },
+    run,
+  );
+}
+
+/**
  * Builds one index under the cross-caller claim protocol.
  *
  * Claim → re-check → build → record → release. Losers retry the claim on
@@ -870,16 +903,21 @@ async function materializeWithClaim(
   const deadline = Date.now() + CLAIM_WAIT_TIMEOUT_MS;
 
   for (;;) {
-    const claimed = await requireDefined(backend.claimIndexMaterialization)({
-      indexName: statusKey,
-      graphId,
-      entity: declaration.entity,
-      kind: declaration.kind,
-      signature,
-      schemaVersion,
-      token,
-      leaseMs: CLAIM_LEASE_MS,
-    });
+    const claimed = await runAsIndexMaterializationUnit(
+      backend,
+      "claimIndexMaterialization",
+      () =>
+        requireDefined(backend.claimIndexMaterialization)({
+          indexName: statusKey,
+          graphId,
+          entity: declaration.entity,
+          kind: declaration.kind,
+          signature,
+          schemaVersion,
+          token,
+          leaseMs: CLAIM_LEASE_MS,
+        }),
+    );
 
     if (!claimed) {
       if (Date.now() >= deadline) {
@@ -931,17 +969,22 @@ async function materializeWithClaim(
       try {
         await run();
         const attemptedAt = nowIso();
-        await recordIndexMaterialization(
-          buildAttempt({
-            declaration,
-            graphId,
-            signature,
-            schemaVersion,
-            materializedAt: attemptedAt,
-            error: undefined,
-            attemptedAt,
-            ...statusOverride,
-          }),
+        await runAsIndexMaterializationUnit(
+          backend,
+          "recordIndexMaterialization",
+          () =>
+            recordIndexMaterialization(
+              buildAttempt({
+                declaration,
+                graphId,
+                signature,
+                schemaVersion,
+                materializedAt: attemptedAt,
+                error: undefined,
+                attemptedAt,
+                ...statusOverride,
+              }),
+            ),
         );
         return entry(declaration, "created");
       } catch (error_) {

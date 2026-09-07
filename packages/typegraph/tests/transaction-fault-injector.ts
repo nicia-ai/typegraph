@@ -33,7 +33,7 @@ import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite3 } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 
-import { type GraphBackend } from "../src";
+import { type BackendCapabilities, type GraphBackend } from "../src";
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
   generateSqliteMigrationSQL,
@@ -83,6 +83,15 @@ export type TransactionFaultOptions = Readonly<{
    * throws before the driver runs it. Omit to never fail a statement.
    */
   failAtStatementCall?: number;
+  /**
+   * A `capabilities` override forwarded verbatim to the bundled factory —
+   * the same option `createLoggedSqliteBackend`/`createLoggedPostgresBackend`
+   * (`lock-fence-test-utils.ts`) accept. Lets a caller derive a `row`-
+   * mechanism, `conflict: "commit-time"` backend (the `"optimistic-retry"`
+   * tier) from either engine while still getting genuine fault injection on
+   * a real driver.
+   */
+  capabilities?: Partial<BackendCapabilities>;
 }>;
 
 export type TransactionFaultInjector = Readonly<{
@@ -139,6 +148,7 @@ export async function createTransactionFaultInjector(
   const { target, close } = await createPatchedTargetBackend(
     engine,
     maybeFailStatement,
+    options.capabilities,
   );
 
   const backend = deriveBackend(target, {
@@ -180,6 +190,7 @@ export async function createTransactionFaultInjector(
 async function createPatchedTargetBackend(
   engine: FaultInjectableEngine,
   onStatement: (sqlText: string) => void,
+  capabilities?: Partial<BackendCapabilities>,
 ): Promise<Readonly<{ target: GraphBackend; close: () => Promise<void> }>> {
   if (engine === "sqlite") {
     const client = new Database(":memory:");
@@ -205,7 +216,9 @@ async function createPatchedTargetBackend(
       return statement;
     }) as typeof client.prepare;
     return {
-      target: createSqliteBackend(drizzleBetterSqlite3(client)),
+      target: createSqliteBackend(drizzleBetterSqlite3(client), {
+        ...(capabilities === undefined ? {} : { capabilities }),
+      }),
       close: () => {
         client.close();
         return Promise.resolve();
@@ -238,7 +251,10 @@ async function createPatchedTargetBackend(
           },
         },
       }),
-      { vector: false },
+      {
+        vector: false,
+        ...(capabilities === undefined ? {} : { capabilities }),
+      },
     ),
     close: () => client.close(),
   };

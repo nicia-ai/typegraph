@@ -318,19 +318,33 @@ export type BackendCapabilities = Readonly<{
     /**
      * How this backend groups a multi-statement write into one unit: an
      * `"interactive"` callback/session transaction that can hold a fenced
-     * conversation across several round trips, a `"batch"` atomic program
-     * with no such transaction, or `"none"` when it offers neither and a
-     * managed write can only run its statements one at a time with no
-     * atomicity across them.
+     * conversation across several round trips; `"optimistic-retry"`, the
+     * same interactive transaction on an engine whose write fence resolves
+     * `mechanism: "row"` with `conflict: "commit-time"` — two acquirers of
+     * one fence row both proceed and the loser's COMMIT fails, so every
+     * store-owned unit of work must be prepared to replay from the top; a
+     * `"batch"` atomic program with no such transaction; or `"none"` when it
+     * offers neither and a managed write can only run its statements one at
+     * a time with no atomicity across them.
      *
      * Derived, never hand-declared, on every bundled backend —
-     * `"interactive"` when `interactiveTransactions` is true, else `"batch"`
-     * when `atomicBatch` is not `"none"`, else `"none"` — overwriting
-     * whatever a profile's own `declaredCapabilities` set. Optional so a
-     * custom `GraphBackend` implementation, which nothing derives this for,
-     * is not forced to declare it; no consumer reads it yet.
+     * `"optimistic-retry"` when `interactiveTransactions` is true AND the
+     * resolved write-fence plan is `row` with `conflict: "commit-time"`,
+     * else `"interactive"` when `interactiveTransactions` is true, else
+     * `"batch"` when `atomicBatch` is not `"none"`, else `"none"` —
+     * overwriting whatever a profile's own `declaredCapabilities` set.
+     * `src/store/operations/write-transaction.ts`'s retry-routing helpers are
+     * the consumers: every `runWritePlan`/`runHookedWritePlan`/
+     * `runAutocommitSingleStatementWritePlan` call, `runIdentityMutation`,
+     * `rebuildIdentityClosureWithSchemaFence`, `rebuildContribution`, and the
+     * index-materialization claim/record calls each wrap their write in
+     * `runRetriedUnit` when this reads `"optimistic-retry"` (and, for the
+     * transaction-opening ones, the write opens its own transaction rather
+     * than joining an existing one). Optional so a custom `GraphBackend`
+     * implementation, which nothing derives this for, is not forced to
+     * declare it.
      */
-    unitOfWork?: "interactive" | "batch" | "none";
+    unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;

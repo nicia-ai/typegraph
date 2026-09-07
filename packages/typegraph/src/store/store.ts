@@ -3447,7 +3447,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }
     };
 
-    const runResult = await runRetriedUnit({ operation, attempts }, runAttempt);
+    const runResult = await runRetriedUnit(
+      { operation, attempts, target: this.#backend },
+      runAttempt,
+    );
     for (const outcome of runResult.pending) {
       if (outcome.type === "bulkOperation") {
         this.#hooks.onBulkOperationEnd?.(outcome.ctx, {

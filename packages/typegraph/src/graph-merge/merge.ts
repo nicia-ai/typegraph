@@ -2186,7 +2186,11 @@ export async function commitPlan<G extends GraphDef>(
   }
   return runMergeCommit(() =>
     runRetriedUnit(
-      { operation: "commitPlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      {
+        operation: "commitPlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
       () =>
         target.transaction(async (tx) => {
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
@@ -3898,7 +3902,11 @@ export async function applyMergePlan<G extends GraphDef>(
       return err(provenanceStore.error);
     }
     const merged = await runRetriedUnit(
-      { operation: "applyMergePlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      {
+        operation: "applyMergePlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
       () =>
         target.transaction(async (tx) => {
           const txBackend = transactionBackend(tx);
@@ -4903,7 +4911,11 @@ async function commitIncrementalPlan<G extends GraphDef>(
   // writes until this plan commits.
   return runMergeCommit(() =>
     runRetriedUnit(
-      { operation: "commitIncrementalPlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      {
+        operation: "commitIncrementalPlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
       () =>
         target.transaction(async (tx) => {
           await lockMergeTargetWrite(transactionBackend(tx), {

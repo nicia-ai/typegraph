@@ -37,6 +37,7 @@ export const PGLITE_TEST_FILES = [
   "tests/node-claim-write-fusion.test.ts",
   "tests/node-fulltext-write-fusion.test.ts",
   "tests/node-vector-write-fusion.test.ts",
+  "tests/optimistic-tier.test.ts",
   "tests/recorded-capture-write-parity.test.ts",
   "tests/row-fence-statements.test.ts",
   "tests/schema-fence-plan.test.ts",
