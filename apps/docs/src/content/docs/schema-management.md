@@ -144,10 +144,17 @@ It throws:
 - `StoreNotInitializedError` if the schema is current but the
   runtime-contribution markers (e.g. fulltext) are missing/stale.
 
-The attach itself can succeed on a non-transactional or custom backend, but the
-first managed write throws `ConfigurationError` with
-`details.code === "SCHEMA_WRITE_FENCE_UNSUPPORTED"` unless the backend can run
-transactions and provides the schema-write fence. Reads remain available.
+The attach itself can succeed on a non-transactional or custom backend. On a
+backend whose `capabilities.execution.unitOfWork` is `"batch"` (Cloudflare
+D1, Neon HTTP), a fused write commonly succeeds — see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for which writes fuse — and a write that cannot fuse throws
+`ConfigurationError` with `details.code === "SCHEMA_WRITE_FENCE_UNSUPPORTED"`,
+or, for a proven need such as an interactive callback or a schema commit, a
+typed error naming `BATCH_WRITE_UNSUPPORTED` under `details.batchRefusal`.
+On any other backend that provides neither an interactive transaction nor
+the schema-write fence, every managed write throws `ConfigurationError` with
+`details.code === "SCHEMA_WRITE_FENCE_UNSUPPORTED"`. Reads remain available.
 
 If you only need the check without building a Store (e.g. a readiness
 probe), call `assertSchemaCurrent(backend, graph)` directly — it returns
@@ -183,8 +190,10 @@ preserve that state:
 Managed writes acquire a transaction-scoped fence and revalidate that version
 before changing graph data. On the official SQLite and PostgreSQL backends this
 prevents a stale Store write from landing across a schema commit. A custom or
-non-transactional backend that cannot provide the fence fails closed on its
-first managed write.
+non-transactional backend fails closed on the first managed write that cannot
+fuse the fence into its own statement — see
+[The guard every fused write shares](/limitations#the-guard-every-fused-write-shares)
+for which writes fuse and which refuse.
 
 `createStore()` and `createAdapterStore()` without `{ reconciled }` are raw,
 unversioned attaches. Their writes—and calls made directly through a backend—do

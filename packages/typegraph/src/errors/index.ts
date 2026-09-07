@@ -1668,9 +1668,15 @@ export class UnsupportedBackendCapabilityError extends TypeGraphError {
     capability: string,
     details: Readonly<Record<string, unknown>> = {},
     suggestion?: string,
+    // Appended to the generated message, never to `suggestion`: every other
+    // capability-refusal gate places its batch-engine explanation
+    // (`batchRefusalSuffix`) in the message, and this constructor's message
+    // is otherwise fixed shape, so a caller with that explanation needs a
+    // seam to reach it rather than smuggling it into the advice sentence.
+    messageSuffix?: string,
   ) {
     super(
-      `${operation} requires backend capability '${capability}'.`,
+      `${operation} requires backend capability '${capability}'.${messageSuffix ?? ""}`,
       "UNSUPPORTED_BACKEND_CAPABILITY",
       {
         details: { operation, capability, ...details },

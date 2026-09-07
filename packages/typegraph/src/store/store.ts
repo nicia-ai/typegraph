@@ -297,6 +297,9 @@ import {
   prepareNodeReplacement,
 } from "./operations";
 import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
   type RetriedUnitAttempt,
   runInWriteTransaction,
   runRetriedUnit,
@@ -1110,13 +1113,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       (!backend.capabilities.execution.interactiveTransactions ||
         !statementExecution.supported)
     ) {
+      const identityVerdict = resolveBatchWriteVerdict(backend, {
+        needs: "identity",
+      });
       throw new ConfigurationError(
-        "Operational Identity requires an atomic transactional backend with statement execution support.",
+        "Operational Identity requires an atomic transactional backend with statement execution support." +
+          batchRefusalSuffix(identityVerdict),
         {
           code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
           interactiveTransactions:
             backend.capabilities.execution.interactiveTransactions,
           statementExecution: statementExecution.supported,
+          ...batchRefusalDetails(identityVerdict),
         },
         {
           suggestion:
@@ -3310,11 +3318,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
     if (!this.#backend.capabilities.execution.interactiveTransactions) {
+      const transactionVerdict = resolveBatchWriteVerdict(this.#backend, {
+        needs: "interactive-callback",
+      });
       throw new UnsupportedBackendCapabilityError(
         operation,
         "execution.interactiveTransactions",
-        { graphId: this.graphId, dialect: this.#backend.dialect },
-        "Use a backend with transaction support, or call ordinary Store write methods when non-atomic work is intentional.",
+        {
+          graphId: this.graphId,
+          dialect: this.#backend.dialect,
+          ...batchRefusalDetails(transactionVerdict),
+        },
+        "Use a backend with transaction support, or call ordinary Store " +
+          "write methods when non-atomic work is intentional.",
+        batchRefusalSuffix(transactionVerdict),
       );
     }
 

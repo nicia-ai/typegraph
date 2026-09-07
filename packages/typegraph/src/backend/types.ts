@@ -328,7 +328,16 @@ export type BackendCapabilities = Readonly<{
      * when `atomicBatch` is not `"none"`, else `"none"` — overwriting
      * whatever a profile's own `declaredCapabilities` set. Optional so a
      * custom `GraphBackend` implementation, which nothing derives this for,
-     * is not forced to declare it; no consumer reads it yet.
+     * is not forced to declare it. Two readers key off the `"batch"` value:
+     * the batch-tier write verdict (`resolveBatchWriteVerdict` in
+     * `backend/capabilities/batch-write-verdict.ts`) and the autocommit
+     * single-statement eligibility gate
+     * (`canFuseSchemaFenceInFirstWrite`). Absent is treated as anything but
+     * `"batch"`: `resolveBatchWriteVerdict` answers `program` (its "not a
+     * batch-tier limitation" verdict) for it, so a backend that declares
+     * neither an interactive transaction nor an atomic batch still fails
+     * closed on a write that needs one — through that write's own capability
+     * check, not through a batch-tier refusal it never earned.
      */
     unitOfWork?: "interactive" | "batch" | "none";
   }>;

@@ -8,6 +8,11 @@ import {
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
+import {
+  batchRefusalDetails,
+  batchRefusalSuffix,
+  resolveBatchWriteVerdict,
+} from "../store/operations/write-transaction";
 import { withRecordedIdentityMutationTarget } from "../store/recorded-capture";
 import { chunk } from "../utils/array";
 import { nowIso } from "../utils/date";
@@ -67,11 +72,27 @@ export type IdentityRebuildContext<G extends GraphDef> = Pick<
   "backend" | "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
 >;
 
+/**
+ * Defense-in-depth: `Store`'s constructor (`store.ts`) already refuses
+ * Operational Identity at construction whenever
+ * `!capabilities.execution.interactiveTransactions`, so no public path
+ * reaches this gate against a batch-tier backend today — identity
+ * maintenance never runs once construction has refused it. It stays here,
+ * re-checked, because {@link rebuildIdentityClosureForContext} and
+ * {@link validateIdentityForContext} are also called by lower-level
+ * preflights that do not go through `Store`'s constructor.
+ */
 function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
   if (!backend.capabilities.execution.interactiveTransactions) {
+    const verdict = resolveBatchWriteVerdict(backend, { needs: "identity" });
     throw new ConfigurationError(
-      "Operational Identity requires atomic transaction support.",
-      { code: "IDENTITY_REQUIRES_ATOMIC_BACKEND", graphId },
+      "Operational Identity requires atomic transaction support." +
+        batchRefusalSuffix(verdict),
+      {
+        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+        graphId,
+        ...batchRefusalDetails(verdict),
+      },
     );
   }
 }
