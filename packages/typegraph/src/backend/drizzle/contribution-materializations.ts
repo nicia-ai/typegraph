@@ -41,6 +41,12 @@ import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
 import { errorChain, isMissingTableError } from "../../utils/sql-errors";
 import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../capabilities/retried-unit";
+import {
+  requireFenceLockTables,
   requireWriteFence,
   resolveWriteFencePlan,
   type WriteFenceTarget,
@@ -1706,10 +1712,11 @@ export function createContributionMaterializer(
     const plan = resolveWriteFencePlan(deps.fenceTarget);
     const fence = requireWriteFence(plan, "contribution DDL", "keyed");
     switch (fence.kind) {
-      case "lock": {
+      case "lock":
+      case "row": {
         await tx.execute(
           asCompiledRowsSql(
-            fence.sql.advisoryLock(CONTRIBUTION_DDL_LOCK_KEY, 0),
+            fence.sql.acquireKeyed(CONTRIBUTION_DDL_LOCK_KEY, 0),
           ),
         );
         return;
@@ -1765,7 +1772,8 @@ export function createContributionMaterializer(
       "drain",
     );
     switch (fence.kind) {
-      case "lock": {
+      case "lock":
+      case "row": {
         if (fence.drain !== "table-lock") {
           // `drain: "quiescent"`: the declaration already excludes
           // concurrent writers by some other means, so this site takes no
@@ -1774,7 +1782,10 @@ export function createContributionMaterializer(
         }
         await tx.executeStatement(
           asCompiledStatementSql(
-            fence.sql.lockTables([tableName], "access-exclusive"),
+            requireFenceLockTables(fence, "lockSharedFulltextTable")(
+              [tableName],
+              "access-exclusive",
+            ),
           ),
         );
         return;
@@ -1860,160 +1871,199 @@ export function createContributionMaterializer(
       });
     }
 
-    // Hashing is async WebCrypto and independent of the fence, so the
-    // signatures the stamps will carry are resolved before the schema
-    // lock is taken rather than while it is held.
-    const stamps = await resolveContributionEntries(graphId, contributions);
-    // The stamp below writes to the marker table; a database that has
-    // never bootstrapped it would fail after the drop had already run.
-    await deps.ensureMarkerTable();
+    // One attempt: resolves `stamps`, this graph's durable `markers`, and
+    // `sharedTableExisted` fresh, then runs the fenced rebuild against them.
+    // All three moved INSIDE this closure (rather than read once, above)
+    // because under the `"optimistic-retry"` tier the whole attempt below
+    // is replayed on a commit-time conflict — a stale read taken before a
+    // rolled-back attempt's retry would drive the second attempt's DDL and
+    // stamps off state a committed writer may have already changed.
+    const attempt = async (): Promise<
+      Readonly<{
+        rebuilt: ContributionRebuildResult;
+        stamps: readonly ResolvedContribution[];
+      }>
+    > => {
+      // Hashing is async WebCrypto and independent of the fence, so the
+      // signatures the stamps will carry are resolved before the schema
+      // lock is taken rather than while it is held.
+      const stamps = await resolveContributionEntries(graphId, contributions);
+      // The stamp below writes to the marker table; a database that has
+      // never bootstrapped it would fail after the drop had already run.
+      await deps.ensureMarkerTable();
 
-    // This graph's durable markers, and whether the shared storage is on
-    // disk at all. Both are read before the fence — the marker read decides
-    // whether a rebuild that may not recreate the storage owes a refusal,
-    // and a catalog probe cannot run inside the fence against a table that
-    // may not exist without aborting the transaction on PostgreSQL.
-    const markers = indexMarkerRows(graphId, await deps.getMarkers(graphId));
-    const sharedTable = deps.fulltextTableName;
-    const sharedTableExisted = await deps.tableExists(sharedTable);
+      // This graph's durable markers, and whether the shared storage is on
+      // disk at all. Both are read before the fence — the marker read decides
+      // whether a rebuild that may not recreate the storage owes a refusal,
+      // and a catalog probe cannot run inside the fence against a table that
+      // may not exist without aborting the transaction on PostgreSQL.
+      const markers = indexMarkerRows(graphId, await deps.getMarkers(graphId));
+      const sharedTable = deps.fulltextTableName;
+      const sharedTableExisted = await deps.tableExists(sharedTable);
 
-    const rebuilt = await fence(graphId, async (tx) => {
-      const record = tx.recordContributionMaterialization;
-      if (record === undefined) {
-        throw new ConfigurationError(
-          "rebuildContribution requires a transaction-scoped backend that " +
-            "can write contribution markers; without it the drop, recreate, " +
-            "and stamp could not commit together.",
-          {
-            backend: dialect,
-            capability: "contributions",
-            operation: "rebuild",
-          },
-        );
-      }
-
-      // Database-scoped, because what follows may be database-global DDL
-      // that the per-graph fence does not serialize at all.
-      await lockContributionDdl(tx);
-
-      // The decision this whole path turns on: `dropDdl` is a `DROP TABLE`
-      // on ONE physical table that holds every graph's fulltext rows, so
-      // running it under a per-graph fence would destroy content belonging
-      // to graphs this process cannot even name — let alone rebuild, since
-      // fulltext content is reconstructed from a graph's own nodes through
-      // its own schema. The teardown is therefore graph-scoped by default
-      // and only escalates to the drop when the drop takes nothing with it.
-      //
-      // Storage that was already absent is never dropped either: there is
-      // nothing to tear down, and a table that appeared between the
-      // pre-fence catalog probe and this lock would belong to whoever
-      // created it. Recreating from `createDdl` and clearing this graph's
-      // rows serves that state without betting on the probe.
-      const unlockedForeignGraphIds =
-        sharedTableExisted ?
-          await readForeignGraphIds(tx, sharedTable, graphId)
-        : [];
-      // Two probes, deliberately. The first is unlocked and cheap, and its
-      // only job is to keep the common case off the relation lock: a
-      // "another graph has rows" verdict can only become MORE true while
-      // this transaction runs, since nothing here deletes another graph's
-      // rows, so acting on it without exclusion is safe. The drop verdict
-      // is the unsafe direction — a writer committing after an unlocked
-      // probe would be destroyed by the drop that probe authorized — so it
-      // is never acted on until it has been re-established while holding
-      // ACCESS EXCLUSIVE. A verdict that flips under the lock loses the
-      // drop and keeps the lock, because PostgreSQL holds locks until
-      // commit: that rebuild then serializes fulltext writers for its
-      // duration, which is the rare and safe direction to be wrong in.
-      const mayRecreate =
-        sharedTableExisted && unlockedForeignGraphIds.length === 0;
-      if (mayRecreate) await lockSharedFulltextTable(tx, sharedTable);
-      const foreignGraphIds =
-        mayRecreate ?
-          await readForeignGraphIds(tx, sharedTable, graphId)
-        : unlockedForeignGraphIds;
-      const recreateStorage = mayRecreate && foreignGraphIds.length === 0;
-
-      if (!recreateStorage) {
-        // `stale` means the physical table is at a shape the current
-        // declaration no longer produces, and the only repair for that is
-        // the drop this rebuild just declined to run. Deleting this graph's
-        // rows and re-stamping instead would publish the current signature
-        // over a shape nothing verified — precisely the blessing the drift
-        // guard exists to prevent. Refuse, before any DDL runs.
-        const staleStamp = stamps.find(
-          ({ key, signature }) =>
-            diagnoseContribution(
-              markers.get(key),
-              signature,
-              sharedTableExisted,
-            ) === "stale",
-        );
-        if (staleStamp !== undefined) {
-          throw new ContributionRebuildUnsupportedError(
-            "shared-storage-in-use",
+      const rebuilt = await fence(graphId, async (tx) => {
+        const record = tx.recordContributionMaterialization;
+        if (record === undefined) {
+          throw new ConfigurationError(
+            "rebuildContribution requires a transaction-scoped backend that " +
+              "can write contribution markers; without it the drop, recreate, " +
+              "and stamp could not commit together.",
             {
-              graphId,
-              contribution: scope,
-              owner: staleStamp.contribution.owner,
-              logicalName: staleStamp.contribution.logicalName,
-              physicalName: staleStamp.contribution.tableName,
-              otherGraphIds: foreignGraphIds,
+              backend: dialect,
+              capability: "contributions",
+              operation: "rebuild",
             },
           );
         }
-      }
 
-      for (const { contribution } of stamps) {
-        if (recreateStorage) {
-          // `dropDdl` is present on every entry — the refusal above
-          // rejected the whole rebuild otherwise.
-          for (const statement of contribution.dropDdl ?? []) {
+        // Database-scoped, because what follows may be database-global DDL
+        // that the per-graph fence does not serialize at all.
+        await lockContributionDdl(tx);
+
+        // The decision this whole path turns on: `dropDdl` is a `DROP TABLE`
+        // on ONE physical table that holds every graph's fulltext rows, so
+        // running it under a per-graph fence would destroy content belonging
+        // to graphs this process cannot even name — let alone rebuild, since
+        // fulltext content is reconstructed from a graph's own nodes through
+        // its own schema. The teardown is therefore graph-scoped by default
+        // and only escalates to the drop when the drop takes nothing with it.
+        //
+        // Storage that was already absent is never dropped either: there is
+        // nothing to tear down, and a table that appeared between the
+        // pre-fence catalog probe and this lock would belong to whoever
+        // created it. Recreating from `createDdl` and clearing this graph's
+        // rows serves that state without betting on the probe.
+        const unlockedForeignGraphIds =
+          sharedTableExisted ?
+            await readForeignGraphIds(tx, sharedTable, graphId)
+          : [];
+        // Two probes, deliberately. The first is unlocked and cheap, and its
+        // only job is to keep the common case off the relation lock: a
+        // "another graph has rows" verdict can only become MORE true while
+        // this transaction runs, since nothing here deletes another graph's
+        // rows, so acting on it without exclusion is safe. The drop verdict
+        // is the unsafe direction — a writer committing after an unlocked
+        // probe would be destroyed by the drop that probe authorized — so it
+        // is never acted on until it has been re-established while holding
+        // ACCESS EXCLUSIVE. A verdict that flips under the lock loses the
+        // drop and keeps the lock, because PostgreSQL holds locks until
+        // commit: that rebuild then serializes fulltext writers for its
+        // duration, which is the rare and safe direction to be wrong in.
+        const mayRecreate =
+          sharedTableExisted && unlockedForeignGraphIds.length === 0;
+        if (mayRecreate) await lockSharedFulltextTable(tx, sharedTable);
+        const foreignGraphIds =
+          mayRecreate ?
+            await readForeignGraphIds(tx, sharedTable, graphId)
+          : unlockedForeignGraphIds;
+        const recreateStorage = mayRecreate && foreignGraphIds.length === 0;
+
+        if (!recreateStorage) {
+          // `stale` means the physical table is at a shape the current
+          // declaration no longer produces, and the only repair for that is
+          // the drop this rebuild just declined to run. Deleting this graph's
+          // rows and re-stamping instead would publish the current signature
+          // over a shape nothing verified — precisely the blessing the drift
+          // guard exists to prevent. Refuse, before any DDL runs.
+          const staleStamp = stamps.find(
+            ({ key, signature }) =>
+              diagnoseContribution(
+                markers.get(key),
+                signature,
+                sharedTableExisted,
+              ) === "stale",
+          );
+          if (staleStamp !== undefined) {
+            throw new ContributionRebuildUnsupportedError(
+              "shared-storage-in-use",
+              {
+                graphId,
+                contribution: scope,
+                owner: staleStamp.contribution.owner,
+                logicalName: staleStamp.contribution.logicalName,
+                physicalName: staleStamp.contribution.tableName,
+                otherGraphIds: foreignGraphIds,
+              },
+            );
+          }
+        }
+
+        for (const { contribution } of stamps) {
+          if (recreateStorage) {
+            // `dropDdl` is present on every entry — the refusal above
+            // rejected the whole rebuild otherwise.
+            for (const statement of contribution.dropDdl ?? []) {
+              await tx.executeSchemaDdl(statement);
+            }
+          }
+          for (const statement of contribution.createDdl) {
             await tx.executeSchemaDdl(statement);
           }
         }
-        for (const statement of contribution.createDdl) {
-          await tx.executeSchemaDdl(statement);
+
+        // Graph-scoped teardown when the storage was kept: the same
+        // `DELETE ... WHERE graph_id` `clearGraph` owns, so the rebuild
+        // removes exactly this graph's index content and nothing else. Only
+        // the table the fulltext rows are keyed by `graph_id` in can be
+        // scoped this way; a strategy that owns further tables keeps them
+        // (they are recreated, never dropped, on this path).
+        if (!recreateStorage) {
+          await tx.executeStatement(
+            asCompiledStatementSql(
+              buildFulltextGraphDelete(sharedTable, graphId),
+            ),
+          );
         }
-      }
 
-      // Graph-scoped teardown when the storage was kept: the same
-      // `DELETE ... WHERE graph_id` `clearGraph` owns, so the rebuild
-      // removes exactly this graph's index content and nothing else. Only
-      // the table the fulltext rows are keyed by `graph_id` in can be
-      // scoped this way; a strategy that owns further tables keeps them
-      // (they are recreated, never dropped, on this path).
-      if (!recreateStorage) {
-        await tx.executeStatement(
-          asCompiledStatementSql(
-            buildFulltextGraphDelete(sharedTable, graphId),
-          ),
-        );
-      }
+        // Refill before stamping, inside the same transaction. The order is
+        // not cosmetic: a stamp that committed ahead of the content would
+        // publish storage the hot-path gate considers healthy and that
+        // answers every query with nothing.
+        const stats = await repopulate(tx);
 
-      // Refill before stamping, inside the same transaction. The order is
-      // not cosmetic: a stamp that committed ahead of the content would
-      // publish storage the hot-path gate considers healthy and that
-      // answers every query with nothing.
-      const stats = await repopulate(tx);
+        const now = nowIso();
+        for (const { contribution, signature } of stamps) {
+          await record({
+            ...identityOf(graphId, contribution),
+            signature,
+            attemptedAt: now,
+            materializedAt: now,
+            error: undefined,
+          });
+        }
+        return {
+          rebuilt: stamps.map(({ contribution }) => contribution.tableName),
+          processed: stats.processed,
+          repopulated: stats.repopulated,
+          skipped: stats.skipped,
+        } satisfies ContributionRebuildResult;
+      });
 
-      const now = nowIso();
-      for (const { contribution, signature } of stamps) {
-        await record({
-          ...identityOf(graphId, contribution),
-          signature,
-          attemptedAt: now,
-          materializedAt: now,
-          error: undefined,
-        });
-      }
-      return {
-        rebuilt: stamps.map(({ contribution }) => contribution.tableName),
-        processed: stats.processed,
-        repopulated: stats.repopulated,
-        skipped: stats.skipped,
-      } satisfies ContributionRebuildResult;
-    });
+      return { rebuilt, stamps };
+    };
+
+    // Retried as one unit under `"optimistic-retry"`: `deps.fenceTarget` is
+    // the only backend reference this closure holds — the real backend
+    // object `write-executor.ts`'s helpers read `capabilities.execution
+    // .unitOfWork` off is not in scope here — and `deps.fenceTarget
+    // .capabilities` is guaranteed the FINALIZED value (`createSqlBackend`
+    // builds it from the capabilities after its own capability tail runs),
+    // so `isOptimisticRetryTier` reads the real, derived tier here exactly
+    // as it does from a full backend. `target: deps.fenceTarget` lets a
+    // profile-declared `serializationFailure` classifier (registered on
+    // this same object by `createSqlBackend`) classify this unit's
+    // conflicts, rather than falling back to the SQLSTATE/message rules.
+    const { rebuilt, stamps } =
+      isOptimisticRetryTier(deps.fenceTarget) ?
+        await runRetriedUnit(
+          {
+            operation: "rebuildContribution",
+            attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+            target: deps.fenceTarget,
+          },
+          attempt,
+        )
+      : await attempt();
 
     // Only after the fence commits: a positive cache entry written for a
     // rebuild that rolled back would bless a shape that is not on disk.

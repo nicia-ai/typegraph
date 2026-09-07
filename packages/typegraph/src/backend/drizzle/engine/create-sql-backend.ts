@@ -14,6 +14,7 @@
 import { ConfigurationError } from "../../../errors";
 import { WRITE_MEMBER_KEYS } from "../../../store/operations/write-members";
 import { requireDefined } from "../../../utils/presence";
+import { registerSerializationFailureClassifier } from "../../../utils/sql-errors";
 import {
   isFirstPartyProfile,
   markFirstPartyFactory,
@@ -410,17 +411,7 @@ export function buildCallerSerializedBackend<TTx>(
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
 ): AdapterBackend<TTx> {
-  const capabilities = finalizeEngineCapabilities(
-    profile.declaredCapabilities,
-    {
-      execution: profile.execution,
-      vectorStrategy: profile.vector,
-      fulltextStrategy: profile.fulltext,
-      fulltextTableName: profile.tableNames.fulltext,
-    },
-  );
-
-  if (capabilities.writeFence === undefined) {
+  if (profile.declaredCapabilities.writeFence === undefined) {
     throw new ConfigurationError(
       "This engine profile declares no usable write fence: " +
         "capabilities.writeFence is absent, so createSqlBackend cannot " +
@@ -439,29 +430,67 @@ export function createSqlBackend<TTx>(
     );
   }
 
-  // Resolved once and reused for both marks below: whether `profile` is the
+  // Resolved once and reused for every mark below: whether `profile` is the
   // exact object one of the two bundled builders returned, not merely an
   // object shaped like one. Only that object was ever registered, so this
   // is `false` for any profile assembled elsewhere — including one built
   // by copying a bundled profile's fields into a plain object literal.
   const isFirstParty = isFirstPartyProfile(profile);
 
+  // The write-fence plan is resolved from the profile's DECLARED
+  // capabilities, before the capability tail below runs: the tail needs
+  // this plan's `conflict` fact (when its mechanism is `row`) to derive
+  // `execution.unitOfWork`'s `"optimistic-retry"` arm, and
+  // `resolveWriteFencePlan` reads only `capabilities.writeFence`, a field
+  // the tail never touches — the declared and the eventual finalized
+  // capabilities agree on it byte for byte, checked non-`undefined` above.
+  // This is the ONE call to `resolveWriteFencePlan` for the whole backend;
+  // `fencePlan` is threaded, never re-resolved, into both the tail below
+  // and the fence target every other member group shares.
+  const declarationFenceTarget: WriteFenceTarget = {
+    dialect: profile.dialect,
+    capabilities: profile.declaredCapabilities,
+    ...(profile.fenceSql === undefined ? {} : { fenceSql: profile.fenceSql }),
+    tableNames: profile.tableNames,
+  };
+  if (isFirstParty) markFirstPartyFactory(declarationFenceTarget);
+  const fencePlan = resolveWriteFencePlan(declarationFenceTarget);
+
+  const capabilities = finalizeEngineCapabilities(
+    profile.declaredCapabilities,
+    {
+      execution: profile.execution,
+      vectorStrategy: profile.vector,
+      fulltextStrategy: profile.fulltext,
+      fulltextTableName: profile.tableNames.fulltext,
+      writeFenceConflict:
+        fencePlan.kind === "row" ? fencePlan.conflict : undefined,
+    },
+  );
+
   // ONE fence target for the whole backend and every transaction-scoped one
   // it builds, marked first-party only under the same gate as the backend
-  // itself: `capabilities` here is the object this factory just finalized,
-  // so a recognized-first-party caller who blanked `writeFence` out of a
-  // profile's declaration still resolves the dialect-derived plan, not
+  // itself: a recognized-first-party caller who blanked `writeFence` out of
+  // a profile's declaration still resolves the dialect-derived plan, not
   // `unfenced`, for the two bundled dialects — while a profile without a
-  // recognized token never reaches that fallback.
+  // recognized token never reaches that fallback. Carries the FINALIZED
+  // `capabilities` (unlike `declarationFenceTarget` above), so a consumer
+  // that reads `fenceTarget.capabilities.execution.unitOfWork` — the
+  // contribution materializer's optimistic-retry gate, which has no other
+  // backend reference to read it from — sees the real, derived tier.
   const fenceTargetBase: WriteFenceTarget = {
     dialect: profile.dialect,
     capabilities,
     ...(profile.fenceSql === undefined ? {} : { fenceSql: profile.fenceSql }),
+    // Read only by a resolved `row` mechanism (`resolveFenceStatements`'s
+    // fences-relation derivation, off `tableNames.fences`); every profile's
+    // `tableNames` resolves `fences` with a default, so this is always the
+    // physical name TypeGraph spells its acquire statement against, bundled
+    // or custom alike — the SAME `tableNames` the returned backend exposes.
+    tableNames: profile.tableNames,
   };
   const fenceTarget: WriteFenceTarget =
     isFirstParty ? markFirstPartyFactory(fenceTargetBase) : fenceTargetBase;
-
-  const fencePlan = resolveWriteFencePlan(fenceTarget);
 
   // Resolved once and reused below for both the operation-backend build and
   // the late-member build — see `./assembly` for what this hides and why a
@@ -526,6 +555,8 @@ export function createSqlBackend<TTx>(
       ...profile.graphTemplateRuntime,
       ensureTable: profile.provisioning.ensureTable,
       execute: operations.execute,
+      fencePlan,
+      fenceTarget,
     });
 
   const baseSchemaMembers = createBaseSchemaMembers({
@@ -636,6 +667,31 @@ export function createSqlBackend<TTx>(
   // "independent" is a verdict the guards can tell apart from a backend
   // nobody looked at.
   auditBackendResource(backend, profile.resourceAudit);
+
+  // Registered on the pre-queue `backend`, before `buildCallerSerializedBackend`
+  // (and every later transaction-scoped `deriveBackend`/`projectBackend` call)
+  // can carry it forward: a profile whose execution adapter declares its own
+  // `serializationFailure` classifier — for an engine whose commit-conflict
+  // shape is not PostgreSQL's `40001`/`40P01` — gives every derived handle of
+  // this backend the SAME classifier `isSerializationFailure` consults, never
+  // a copy resolved independently per handle.
+  //
+  // Also registered on `fenceTarget`: that object is never itself passed
+  // through `deriveBackend`/`projectBackend` (it is built once, above, and
+  // held by reference for the life of this backend), so it would otherwise
+  // never pick up the carried registration. `rebuildContribution`
+  // (`contribution-materializations.ts`) has no other backend reference to
+  // classify against, and `fenceTarget` is exactly the object it holds.
+  if (profile.execution.serializationFailure !== undefined) {
+    registerSerializationFailureClassifier(
+      backend,
+      profile.execution.serializationFailure,
+    );
+    registerSerializationFailureClassifier(
+      fenceTarget,
+      profile.execution.serializationFailure,
+    );
+  }
 
   // A `caller-serialized` write-fence declaration promises that this
   // backend's own process serializes every write unit it issues;

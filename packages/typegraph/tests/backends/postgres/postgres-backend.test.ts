@@ -416,14 +416,23 @@ describe("PostgreSQL Adapter", () => {
           },
           // The suite's own pool is default-sized and therefore audited
           // `independent`. A `max: 1` pool against the same provisioned
-          // database is the serialized shape.
-          createSerializedBackend: () => {
+          // database is the serialized shape. `overrides.capabilities` is
+          // forwarded into `createPostgresBackend` itself — applied at
+          // construction, before this connection's write-fence target and
+          // derived `unitOfWork` are resolved — for a test that needs a
+          // real second connection declaring a non-default write fence.
+          createSerializedBackend: (overrides) => {
             const serializedPool = new Pool({
               connectionString: TEST_DATABASE_URL,
               max: 1,
             });
             return Promise.resolve({
-              backend: createPostgresBackend(drizzle(serializedPool)),
+              backend: createPostgresBackend(
+                drizzle(serializedPool),
+                overrides?.capabilities === undefined ?
+                  undefined
+                : { capabilities: overrides.capabilities },
+              ),
               close: () => serializedPool.end(),
             });
           },
@@ -434,6 +443,10 @@ describe("PostgreSQL Adapter", () => {
           const { backend } = await createLocalPgliteBackend();
           return { backend, cleanup: () => backend.close() };
         },
+        // A default-sized pool against a real, provisioned PostgreSQL
+        // server: two `createSerializedBackend()` handles are genuinely
+        // independent physical connections.
+        serverLaneConcurrency: true,
       },
     );
   });

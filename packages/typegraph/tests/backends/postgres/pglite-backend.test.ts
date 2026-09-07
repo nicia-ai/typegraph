@@ -122,6 +122,7 @@ const CLONE_TABLE_NAMES = {
   kindRemovals: "clone_kind_removals",
   reconciliationMarkers: "clone_reconciliation_markers",
   graphTemplates: "clone_graph_templates",
+  fences: "clone_fences",
 } as const satisfies PostgresTableNames;
 
 /**

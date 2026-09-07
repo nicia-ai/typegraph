@@ -64,7 +64,10 @@ import {
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
 import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
-import { type CompiledRowsSql } from "../../query/sql-intent";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../../query/sql-intent";
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
@@ -89,6 +92,9 @@ import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema
 import {
   markFirstPartyFactory,
   registerFirstPartyProfile,
+  requireWriteFence,
+  resolveWriteFencePlan,
+  type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
@@ -297,6 +303,13 @@ export type SqliteBackendOptions = Readonly<{
 
 const NODE_INSERT_PARAM_COUNT = 9;
 const SCHEMA_FENCE_PARAM_COUNT = 2;
+/**
+ * The keyed namespace a `row`-mechanism schema write fence acquires under —
+ * the identical literal `postgres.ts`'s `acquireSchemaWriteFence` /
+ * `lockActiveSchemaVersion` pair uses, so a `typegraph:schema-commit:<graphId>`
+ * row means the same thing regardless of which dialect wrote it.
+ */
+const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
 // Durable edge rows bind match-identity name and key in addition to the
 // ordinary edge shape. Budget for the widest supported row so native batches
 // never cross the driver's parameter ceiling.
@@ -657,6 +670,14 @@ type CreateSqliteOperationBackendOptions = Readonly<{
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
   /**
+   * The factory's shared write-fence target. `lockSchemaVersionForWrite`
+   * resolves its plan instead of assuming the engine-serialized read is
+   * always correct, so a managed write and a `row`-mechanism schema commit
+   * (`postgres.ts`'s `acquireSchemaWriteFence`/`lockActiveSchemaVersion`
+   * pair, mirrored here) contend on the same fence row.
+   */
+  fenceTarget: WriteFenceTarget;
+  /**
    * The root backend's own `catalog` bag, threaded through so this call
    * exposes the SAME object rather than building a second one from `db` /
    * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
@@ -679,6 +700,8 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   vectorStrategy?: VectorStrategy | undefined;
   /** Shared durable-marker materializer. See {@link CreateSqliteOperationBackendOptions}. */
   contributionMaterializer: ContributionMaterializer;
+  /** Shared write-fence target. See {@link CreateSqliteOperationBackendOptions}. */
+  fenceTarget: WriteFenceTarget;
   /**
    * Whether the transaction handle this call builds should carry
    * `markFirstPartyFactory` — the caller's own resolved standing, never
@@ -704,6 +727,7 @@ function createSqliteOperationBackend(
     vectorStrategy,
     contributionMaterializer,
     transactionScoped,
+    fenceTarget,
     catalog,
   } = options;
 
@@ -953,13 +977,28 @@ function createSqliteOperationBackend(
       };
 
   /**
-   * The write-fence half of a managed write on SQLite: an ordinary read
-   * suffices, unlike Postgres' `FOR SHARE` fence, because SQLite serializes
-   * writers through BEGIN IMMEDIATE — no schema commit can be mid-flight
-   * while this transaction holds the writer slot, and a SQLite read has no
-   * post-wait row recheck that could drop the active row from its own
-   * snapshot. An absent row here therefore always means the graph
+   * The write-fence half of a managed write on SQLite.
+   *
+   * Under this engine's default `mechanism: "engine-serialized"` (and under
+   * `"caller-serialized"`), an ordinary read suffices — unlike Postgres'
+   * `FOR SHARE` fence — because SQLite serializes writers through BEGIN
+   * IMMEDIATE (or the deployment's own promise): no schema commit can be
+   * mid-flight while this transaction holds the writer slot, and a SQLite
+   * read has no post-wait row recheck that could drop the active row from
+   * its own snapshot. An absent row here therefore always means the graph
    * genuinely has no active schema.
+   *
+   * Under a declared `mechanism: "row"` that guarantee does not hold — a row
+   * target has no serialized-writer slot of its own — so this instead takes
+   * the SAME portable fence row `postgres.ts`'s `acquireSchemaWriteFence`/
+   * `lockActiveSchemaVersion` pair takes on both the commit and write sides,
+   * as a preceding statement in this transaction, before the plain read
+   * below. That gives a concurrent schema commit and this write the row to
+   * contend on, exactly as PostgreSQL's `FOR UPDATE`/`FOR SHARE` pair does
+   * under `mechanism: "lock"`. Resolving the plan here — rather than trusting
+   * the engine-serialized comment unconditionally — is what makes a declared
+   * `"row"` mechanism actually apply instead of silently being dropped at
+   * this site.
    */
   async function lockSchemaVersionForWrite(
     params: LockSchemaVersionForWriteParams,
@@ -971,6 +1010,19 @@ function createSqliteOperationBackend(
           code: "SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED",
           graphId: params.graphId,
         },
+      );
+    }
+    const plan = requireWriteFence(
+      resolveWriteFencePlan(fenceTarget),
+      "The SQLite schema write fence",
+      "keyed",
+    );
+    if (plan.kind === "row") {
+      await execRun(
+        toDrizzleSql(
+          plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, params.graphId),
+          "sqlite",
+        ),
       );
     }
     const active = await commonOperationMembers.getActiveSchema(params.graphId);
@@ -1218,6 +1270,7 @@ export function buildSqliteEngineProfile(
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
+    fences: getTableName(tables.fences),
   };
   // refreshStatistics() scopes ANALYZE to these — matching the Postgres
   // backend, which never touches unrelated tables sharing the database.
@@ -1385,6 +1438,7 @@ export function buildSqliteEngineProfile(
       vectorStrategy,
       contributionMaterializer: ctx.contributionMaterializer,
       transactionScoped: false,
+      fenceTarget: ctx.fenceTarget,
       ...(serializedQueue === undefined ? {} : { serializedQueue }),
       // The SAME object exposed as `backend.catalog` (via
       // `provisioning.catalog`), not a second one built from this call's own
@@ -1487,7 +1541,10 @@ export function buildSqliteEngineProfile(
         tables.contributionMaterializations,
       ),
     },
-    instantiateStatement: sqliteInstantiateGraphTemplateStatement,
+    instantiateStatement: (params, execute) =>
+      execute(
+        asCompiledRowsSql(sqliteInstantiateGraphTemplateStatement(params)),
+      ),
     toSchemaVersionRow,
     rowAccess: {
       async insertIgnoringConflict(params) {
@@ -1542,6 +1599,7 @@ export function buildSqliteEngineProfile(
     readVersion: readBaseSchemaVersion,
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
+    fencesTableDdl: generateSqliteCreateTableSQL(tables.fences),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`
@@ -1624,7 +1682,7 @@ export function buildSqliteEngineProfile(
     // re-derived here. Aliased to bare names so every existing
     // capabilities-gated call below reads exactly as it did when this
     // dialect built its own (stale-prone) copy.
-    const { capabilities, fencePlan, isFirstParty } = ctx;
+    const { capabilities, fencePlan, fenceTarget, isFirstParty } = ctx;
 
     /**
      * #140: the `transactionMode: "do-sqlite"` primitive. Cloudflare
@@ -1724,6 +1782,16 @@ export function buildSqliteEngineProfile(
      *
      * Refuses on `transactionMode: "none"`. The orphan-row crash window
      * cannot be eliminated without atomicity.
+     *
+     * Never wrapped in `runRetriedUnit`, unlike PostgreSQL's own
+     * `runSchemaWriteTransaction`: every path above takes SQLite's writer
+     * slot (`BEGIN IMMEDIATE`, or the Durable Object storage transaction)
+     * BEFORE the fence row's own statement ever runs, so a second acquirer
+     * WAITS for the slot rather than racing to a commit-time conflict at
+     * COMMIT. That holds even under a declaration naming `conflict:
+     * "commit-time"` — `capabilities.execution.unitOfWork` could still
+     * derive `"optimistic-retry"` for this backend, but no commit-time
+     * failure the retry would ever catch can occur here to retry.
      */
     function runSchemaWriteTransaction<T>(
       fn: (tx: InternalOperationBackend) => Promise<T>,
@@ -1756,6 +1824,7 @@ export function buildSqliteEngineProfile(
             fulltextStrategy,
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
+            fenceTarget,
             isFirstParty,
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
@@ -1788,6 +1857,7 @@ export function buildSqliteEngineProfile(
             fulltextStrategy,
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
+            fenceTarget,
             isFirstParty,
           });
           return fn(txBackend);
@@ -1812,6 +1882,7 @@ export function buildSqliteEngineProfile(
                 fulltextStrategy,
                 vectorStrategy,
                 contributionMaterializer: ctx.contributionMaterializer,
+                fenceTarget,
                 isFirstParty,
               });
               return fn(txBackend);
@@ -1843,6 +1914,7 @@ export function buildSqliteEngineProfile(
         fulltextStrategy,
         vectorStrategy,
         contributionMaterializer: ctx.contributionMaterializer,
+        fenceTarget,
         isFirstParty: txIsFirstParty,
       });
       return gateFulltext(
@@ -1907,6 +1979,7 @@ export function buildSqliteEngineProfile(
                 fulltextStrategy,
                 vectorStrategy,
                 contributionMaterializer: ctx.contributionMaterializer,
+                fenceTarget,
                 isFirstParty,
               });
               // Read-only multi-statement operations need one snapshot but must not
@@ -2182,6 +2255,7 @@ function createTransactionBackend(
     vectorStrategy: options.vectorStrategy,
     contributionMaterializer: options.contributionMaterializer,
     transactionScoped: true,
+    fenceTarget: options.fenceTarget,
   });
   return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
 }

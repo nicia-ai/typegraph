@@ -42,6 +42,10 @@ import {
   uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
 import {
+  type RetriedUnitAttempt,
+  runRetriedUnit,
+} from "../backend/capabilities/retried-unit";
+import {
   refuseUnfencedClockAllocation,
   refuseUnfencedOperationalIdentity,
   resolveWriteFencePlan,
@@ -300,9 +304,7 @@ import {
   batchRefusalDetails,
   batchRefusalSuffix,
   resolveBatchWriteVerdict,
-  type RetriedUnitAttempt,
   runInWriteTransaction,
-  runRetriedUnit,
   withTransactionSchemaFenceLease,
   withWriteTransactionSession,
   type WriteTransactionContext,
@@ -3464,7 +3466,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       }
     };
 
-    const runResult = await runRetriedUnit({ operation, attempts }, runAttempt);
+    const runResult = await runRetriedUnit(
+      { operation, attempts, target: this.#backend },
+      runAttempt,
+    );
     for (const outcome of runResult.pending) {
       if (outcome.type === "bulkOperation") {
         this.#hooks.onBulkOperationEnd?.(outcome.ctx, {

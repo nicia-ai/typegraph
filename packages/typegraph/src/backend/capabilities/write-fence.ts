@@ -7,6 +7,7 @@
  * spells the dialect itself; it resolves a plan and consumes it.
  */
 import { ConfigurationError } from "../../errors";
+import { type SqlTableNames } from "../../query/compiler/schema";
 import { type SqlDialect } from "../../query/dialect/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { requireDefined } from "../../utils/presence";
@@ -14,18 +15,26 @@ import { type BackendCapabilities } from "../types";
 
 /**
  * The lock-statement spelling a backend supplies alongside its
- * `writeFence` declaration: the two composable, no-`SELECT` expressions a
- * fused statement (a CTE, a data-modifying statement) embeds directly, plus
- * the one relation-lock builder. A backend that declares `writeFence.mechanism:
- * "advisory"` must supply this; one that only serializes writers needs none.
+ * `writeFence` declaration.
+ *
+ * `advisory` needs `advisoryLockExpression` and `isolationFactExpression`
+ * (required by that mechanism's own construction-time check below); `row`
+ * needs neither — TypeGraph spells its acquire statement itself from the
+ * fences relation — but MAY supply `isolationFactExpression` so recorded
+ * capture and match-key convergence can still read the session fact off the
+ * same acquisition (absent, they fail closed on an unknown fact, as they do
+ * today). `lockTables` is needed by either mechanism only when its
+ * declaration's `drain` is `"table-lock"`. Every member therefore stays
+ * optional in the type; {@link planFromWriteFenceDeclaration} is what
+ * refuses construction when the RESOLVED mechanism/drain combination needed
+ * a member this object does not supply.
  *
  * This is deliberately the ONLY spelling a backend author writes.
  * {@link resolveFenceStatements} derives the standalone-statement forms
- * (`advisoryLock`, `advisoryLockWithIsolation`, `isolationFact`) from
- * `advisoryLockExpression` / `isolationFactExpression` — a backend never
- * spells both a statement and the expression it wraps separately, so the
- * fused embedding and the standalone statement can never disagree about
- * what they lock or read.
+ * (`acquireKeyed`, `acquireKeyedWithIsolation`, `isolationFact`) from these
+ * expressions — a backend never spells both a statement and the expression
+ * it wraps separately, so the fused embedding and the standalone statement
+ * can never disagree about what they lock or read.
  *
  * `advisoryLockExpression`'s `key` accepts a `number` for the
  * database-scoped locks that key on a constant second argument (`0`) rather
@@ -35,7 +44,7 @@ import { type BackendCapabilities } from "../types";
  */
 export type FenceSql = Readonly<{
   /** A relation lock, e.g. `LOCK TABLE ... IN ... MODE`. */
-  lockTables: (
+  lockTables?: (
     tables: readonly string[],
     mode: "share" | "share-row-exclusive" | "access-exclusive",
   ) => SqlFragment;
@@ -46,10 +55,11 @@ export type FenceSql = Readonly<{
    * (`postgres-schema-write-fence.ts`) is the one site that needs this: it
    * reaches the schema table, so it cannot be built from a standalone
    * statement. Every other lock site consumes
-   * {@link resolveFenceStatements}'s derived `advisoryLock`, which wraps
-   * this in a standalone `SELECT`.
+   * {@link resolveFenceStatements}'s derived `acquireKeyed`, which wraps
+   * this in a standalone `SELECT`. Absent for a `row`-mechanism target,
+   * which has no lock expression to embed.
    */
-  advisoryLockExpression: (
+  advisoryLockExpression?: (
     namespace: string,
     key: string | number,
   ) => SqlFragment;
@@ -57,76 +67,245 @@ export type FenceSql = Readonly<{
    * The bare session isolation-level read, with no `SELECT`/alias around
    * it — embedded the same way `advisoryLockExpression` is, and wrapped by
    * {@link resolveFenceStatements}'s derived `isolationFact` /
-   * `advisoryLockWithIsolation` for every other site.
+   * `acquireKeyedWithIsolation` for every other site.
    */
-  isolationFactExpression: () => SqlFragment;
+  isolationFactExpression?: () => SqlFragment;
 }>;
 
 /**
- * `FenceSql`'s two author-supplied expressions plus the three
- * standalone-statement forms {@link resolveFenceStatements} derives from
- * them — what a `lock` plan's `sql` field actually carries, and what every
- * ordinary lock site consumes.
+ * `FenceSql`'s author-supplied expressions plus the three
+ * mechanism-neutral standalone-statement forms {@link resolveFenceStatements}
+ * derives from them — what a `lock` or `row` plan's `sql` field actually
+ * carries, and what every ordinary lock site consumes. A site never asks
+ * which mechanism produced its `sql`; it calls `acquireKeyed`,
+ * `acquireKeyedWithIsolation`, or `isolationFact` exactly the same way
+ * either way.
  */
 export type FenceStatements = FenceSql &
   Readonly<{
-    /** A keyed lock scoped to the transaction, e.g. `pg_advisory_xact_lock`. */
-    advisoryLock: (namespace: string, key: string | number) => SqlFragment;
     /**
-     * The same lock plus the session's isolation-level fact, in ONE
-     * statement — the "session facts come from the session that enforces
-     * them" contract: the fact is read on the exact connection the lock
-     * was just taken on.
+     * A keyed exclusion, scoped to the transaction: `pg_advisory_xact_lock`
+     * under `advisory`, an `INSERT ... ON CONFLICT ... DO UPDATE ...
+     * RETURNING` against the fences relation under `row`.
      */
-    advisoryLockWithIsolation: (
+    acquireKeyed: (namespace: string, key: string | number) => SqlFragment;
+    /**
+     * The same acquisition plus the session's isolation-level fact, in ONE
+     * statement — the "session facts come from the session that enforces
+     * them" contract: the fact is read on the exact connection the
+     * acquisition was just taken on. Under `row` with no
+     * `isolationFactExpression` supplied, the acquisition still runs and
+     * returns its generation; the isolation fact is simply absent from the
+     * row, which the consumers already read as "unknown" and fail closed on.
+     */
+    acquireKeyedWithIsolation: (
       namespace: string,
       key: string | number,
     ) => SqlFragment;
-    /** The bare session isolation-level read, with no lock. */
+    /**
+     * The bare session isolation-level read, with no acquisition. Yields no
+     * row when the target supplies no `isolationFactExpression` — the same
+     * "unknown fact" shape a real read produces for a value this fence
+     * cannot classify.
+     */
     isolationFact: () => SqlFragment;
   }>;
 
-function advisoryLockStatement(
-  fenceSql: FenceSql,
+function advisoryAcquireKeyedStatement(
+  advisoryLockExpression: NonNullable<FenceSql["advisoryLockExpression"]>,
   namespace: string,
   key: string | number,
 ): SqlFragment {
-  return sql`SELECT ${fenceSql.advisoryLockExpression(namespace, key)}`;
+  return sql`SELECT ${advisoryLockExpression(namespace, key)}`;
 }
 
-function advisoryLockWithIsolationStatement(
-  fenceSql: FenceSql,
+function advisoryAcquireKeyedWithIsolationStatement(
+  advisoryLockExpression: NonNullable<FenceSql["advisoryLockExpression"]>,
+  isolationFactExpression: NonNullable<FenceSql["isolationFactExpression"]>,
   namespace: string,
   key: string | number,
 ): SqlFragment {
   return sql`
     SELECT
-      ${fenceSql.advisoryLockExpression(namespace, key)},
-      ${fenceSql.isolationFactExpression()} AS transaction_isolation
+      ${advisoryLockExpression(namespace, key)},
+      ${isolationFactExpression()} AS transaction_isolation
   `;
 }
 
-function isolationFactStatement(fenceSql: FenceSql): SqlFragment {
-  return sql`SELECT ${fenceSql.isolationFactExpression()} AS transaction_isolation`;
+/**
+ * The composite key every `row`-mechanism acquisition writes: the existing
+ * advisory namespace and key, joined verbatim, so the lock-order and
+ * namespace-per-position invariants every keyed site already relies on
+ * carry over unchanged to the fences relation.
+ */
+function fenceRowKey(namespace: string, key: string | number): string {
+  return `${namespace}:${key}`;
 }
 
 /**
- * THE one owner of "wrap a fence expression in its standalone statement
- * form": derives `advisoryLock`, `advisoryLockWithIsolation`, and
- * `isolationFact` from `fenceSql`'s `advisoryLockExpression` /
- * `isolationFactExpression` — the only way to reach those three forms, so a
- * fused embedding and a portable lock site can never spell the lock or the
- * isolation read differently. Called once, by
- * `planFromWriteFenceDeclaration`, when a `lock` plan resolves.
+ * The portable acquisition statement every `row`-mechanism keyed site
+ * shares: an UPSERT that always advances the row's own stored generation
+ * (never the literal `1` this statement inserts), so two acquirers of the
+ * same key always observe a strictly increasing sequence regardless of
+ * which one the engine admits first. `isolationFactExpression`, when
+ * supplied, rides the same `RETURNING` clause the generation does, so the
+ * fact is read on the exact statement that took the row.
  */
-export function resolveFenceStatements(fenceSql: FenceSql): FenceStatements {
+function fenceRowAcquireStatement(
+  fencesTable: SqlFragment,
+  namespace: string,
+  key: string | number,
+  isolationFactExpression?: FenceSql["isolationFactExpression"],
+): SqlFragment {
+  const isolationColumn =
+    isolationFactExpression === undefined ?
+      sql``
+    : sql`, ${isolationFactExpression()} AS transaction_isolation`;
+  return sql`
+    INSERT INTO ${fencesTable} (key, generation)
+    VALUES (${fenceRowKey(namespace, key)}, 1)
+    ON CONFLICT (key) DO UPDATE SET generation = ${fencesTable}.generation + 1
+    RETURNING generation${isolationColumn}
+  `;
+}
+
+/**
+ * The bare session isolation-level read shared by both mechanisms: wraps
+ * `isolationFactExpression` in a standalone `SELECT` when the target
+ * supplies one, and otherwise a statement that yields no row — the same
+ * "unknown fact" shape {@link normalizeGraphCommandIsolation}-style readers
+ * already treat a missing column as, so a target with no expression fails
+ * closed exactly as it does today rather than needing a new case.
+ */
+function isolationFactStatement(
+  isolationFactExpression?: FenceSql["isolationFactExpression"],
+): SqlFragment {
+  return isolationFactExpression === undefined ?
+      sql`SELECT NULL AS transaction_isolation WHERE 1 = 0`
+    : sql`SELECT ${isolationFactExpression()} AS transaction_isolation`;
+}
+
+/**
+ * Which derivation {@link resolveFenceStatements} applies — an explicit
+ * discriminant, never inferred from what `fenceSql` happens to contain: the
+ * BUNDLED PostgreSQL factory always supplies the full `postgresFenceSql`
+ * (including `advisoryLockExpression`) as its profile's `fenceSql`
+ * REGARDLESS of which mechanism a derived profile declares (a test deriving
+ * `writeFence.mechanism: "row"` from the bundled factory does not thereby
+ * swap out `fenceSql`), so the SHAPE of `fenceSql` alone cannot say which
+ * mechanism resolved. Defaults to `"advisory"` when omitted: both external
+ * callers of {@link resolveFenceStatements} outside `planFromWriteFenceDeclaration`
+ * (`clock.ts`'s bundled-spelling renderers, `guards.ts`'s dialect-gated
+ * isolation read, gated on `dialect` alone, never on a resolved mechanism)
+ * only ever want the advisory derivation or call `isolationFact()` — which
+ * renders identically under either derivation — so the default costs them
+ * nothing.
+ */
+type FenceStatementsStyle =
+  | Readonly<{ mechanism: "advisory" }>
+  | Readonly<{ mechanism: "row"; fencesTableName?: string | undefined }>;
+
+const ADVISORY_FENCE_STATEMENTS_STYLE: FenceStatementsStyle = {
+  mechanism: "advisory",
+};
+
+/**
+ * THE one owner of "wrap a fence's acquire/isolation expressions in their
+ * standalone statement forms": derives `acquireKeyed`,
+ * `acquireKeyedWithIsolation`, and `isolationFact` — the only way to reach
+ * those three forms, so a fused embedding and a portable lock site can
+ * never spell the lock or the isolation read differently. Called by
+ * `planFromWriteFenceDeclaration` once per resolved `lock` or `row` plan
+ * (passing its own resolved {@link FenceStatementsStyle} explicitly), and
+ * directly by the two callers described on that type for a target's own
+ * standalone statements without resolving a full plan.
+ */
+export function resolveFenceStatements(
+  fenceSql: FenceSql,
+  style: FenceStatementsStyle = ADVISORY_FENCE_STATEMENTS_STYLE,
+): FenceStatements {
+  const { isolationFactExpression } = fenceSql;
+  if (style.mechanism === "advisory") {
+    // Resolved lazily, inside the two acquisition closures below, rather
+    // than eagerly here: `guards.ts`'s session-fact read calls this with the
+    // default (`"advisory"`) style regardless of which mechanism the target
+    // actually declared, wanting only `isolationFact()` — a `row` target
+    // that supplies `isolationFactExpression` but no `advisoryLockExpression`
+    // must still get a rendered fact read from that call, not a `TypeError`
+    // for a member `isolationFact()` never needed. `isolationFact()` itself
+    // never requires either expression: it renders identically to the `row`
+    // derivation's own `isolationFactStatement` call, the "costs them
+    // nothing" default the module doc above promises.
+    function requiredAdvisoryLockExpression(): NonNullable<
+      FenceSql["advisoryLockExpression"]
+    > {
+      return requireDefined(
+        fenceSql.advisoryLockExpression,
+        "resolveFenceStatements: an advisory fenceSql's advisoryLockExpression was validated present above",
+      );
+    }
+    function requiredIsolationFactExpression(): NonNullable<
+      FenceSql["isolationFactExpression"]
+    > {
+      return requireDefined(
+        isolationFactExpression,
+        "resolveFenceStatements: an advisory fenceSql's isolationFactExpression was validated present above",
+      );
+    }
+    return {
+      ...fenceSql,
+      acquireKeyed: (namespace: string, key: string | number) =>
+        advisoryAcquireKeyedStatement(
+          requiredAdvisoryLockExpression(),
+          namespace,
+          key,
+        ),
+      acquireKeyedWithIsolation: (namespace: string, key: string | number) =>
+        advisoryAcquireKeyedWithIsolationStatement(
+          requiredAdvisoryLockExpression(),
+          requiredIsolationFactExpression(),
+          namespace,
+          key,
+        ),
+      isolationFact: () => isolationFactStatement(isolationFactExpression),
+    };
+  }
+  // Resolved lazily, inside the two closures below, rather than eagerly
+  // here: a `row` plan is shaped for EVERY resolved declaration, including
+  // one a purely drain-side site (J4, J6, J18) resolves without ever
+  // calling `acquireKeyed`/`acquireKeyedWithIsolation` — such a site must
+  // not refuse over a fences table name it never needed. The refusal below
+  // therefore fires the first time one of those two is actually CALLED, not
+  // when this function returns — `WriteFenceTarget.tableNames`' own doc
+  // names this same deferral.
+  const { fencesTableName } = style;
+  function requiredFencesTable(): SqlFragment {
+    if (fencesTableName === undefined) {
+      throw new ConfigurationError(
+        "This row-mechanism write fence has no fences table name " +
+          "(`tableNames.fences`), so TypeGraph cannot spell the fence-row " +
+          "acquisition.",
+        { code: "WRITE_FENCE_SQL_UNAVAILABLE" },
+        {
+          suggestion:
+            "Supply `tableNames.fences` on this backend (the bundled SQLite/PostgreSQL backends default it to `typegraph_fences`).",
+        },
+      );
+    }
+    return sql.identifier(fencesTableName);
+  }
   return {
     ...fenceSql,
-    advisoryLock: (namespace: string, key: string | number) =>
-      advisoryLockStatement(fenceSql, namespace, key),
-    advisoryLockWithIsolation: (namespace: string, key: string | number) =>
-      advisoryLockWithIsolationStatement(fenceSql, namespace, key),
-    isolationFact: () => isolationFactStatement(fenceSql),
+    acquireKeyed: (namespace: string, key: string | number) =>
+      fenceRowAcquireStatement(requiredFencesTable(), namespace, key),
+    acquireKeyedWithIsolation: (namespace: string, key: string | number) =>
+      fenceRowAcquireStatement(
+        requiredFencesTable(),
+        namespace,
+        key,
+        isolationFactExpression,
+      ),
+    isolationFact: () => isolationFactStatement(isolationFactExpression),
   };
 }
 
@@ -136,47 +315,66 @@ export function resolveFenceStatements(fenceSql: FenceSql): FenceStatements {
  *
  * `mechanism` is the exclusion primitive: `"advisory"` is a keyed
  * `pg_advisory_xact_lock`-style lock a caller takes explicitly (and needs
- * `fenceSql` to spell); `"engine-serialized"` is the engine's own single
- * writer slot (SQLite); `"caller-serialized"` is a promise the DEPLOYMENT
- * makes rather than the engine or a lock — the backend's own process
- * serializes every write unit it issues (see the in-process queue this
- * mechanism requires) AND no other client writes to the same database while
- * this backend is open. `"row"` (a per-row lock) joins this union in a later
- * release.
+ * `fenceSql` to spell); `"row"` is a keyed exclusion spelled by TypeGraph
+ * itself against a never-dropped relation of fence rows, for an engine with
+ * no advisory-lock primitive; `"engine-serialized"` is the engine's own
+ * single writer slot (SQLite); `"caller-serialized"` is a promise the
+ * DEPLOYMENT makes rather than the engine or a lock — the backend's own
+ * process serializes every write unit it issues (see the in-process queue
+ * this mechanism requires) AND no other client writes to the same database
+ * while this backend is open.
  *
- * `drain` is a separate fact, and applies ONLY to `mechanism: "advisory"`:
- * whether a caller that already took the keyed lock can additionally take a
- * relation-wide lock on the resource a table-lock site protects.
- * `"table-lock"` means yes (a `LOCK TABLE`-style statement is available and
- * appropriate); `"quiescent"` means the resource is already exclusive for
- * another reason (e.g. a `caller-serialized` in-process queue layered
- * alongside an advisory lock) so a table-lock site takes NO statement rather
- * than one it does not need; `"none"` means neither — a table-lock site
- * refuses, naming this drain. `"engine-serialized"` and `"caller-serialized"`
- * carry no `drain`: an engine's single writer slot and an in-process
- * serialization promise are each already a stronger exclusion than any
- * `drain` value could add, so there is nothing for the field to say —
- * declaring one alongside either mechanism is refused
+ * `drain` is a separate fact, and applies ONLY to `mechanism: "advisory"` or
+ * `"row"`: whether a caller that already took the keyed exclusion can
+ * additionally take a relation-wide lock on the resource a table-lock site
+ * protects. `"table-lock"` means yes (a `LOCK TABLE`-style statement is
+ * available and appropriate); `"quiescent"` means the resource is already
+ * exclusive for another reason (e.g. a `caller-serialized` in-process queue
+ * layered alongside an advisory lock) so a table-lock site takes NO
+ * statement rather than one it does not need; `"none"` means neither — a
+ * table-lock site refuses, naming this drain. `"engine-serialized"` and
+ * `"caller-serialized"` carry no `drain`: an engine's single writer slot and
+ * an in-process serialization promise are each already a stronger exclusion
+ * than any `drain` value could add, so there is nothing for the field to say
+ * — declaring one alongside either mechanism is refused
  * (`WRITE_FENCE_DECLARATION_INVALID`, `validateWriteFenceDeclaration` below).
+ *
+ * `conflict` applies ONLY to `mechanism: "row"`: the engine fact for two
+ * writers of one fence row. `"wait"` is a lock-based engine — the second
+ * acquirer's statement blocks until the first commits, exactly like an
+ * advisory lock. `"commit-time"` is an optimistic-concurrency engine — both
+ * acquirers proceed and the loser's COMMIT fails, so correctness comes from
+ * the unit owner retrying it, never from waiting; the retry can only run
+ * inside an interactive transaction it replays, so `"commit-time"` requires
+ * `capabilities.execution.interactiveTransactions: true` and is refused on a
+ * backend that declares it `false` — the tier `commit-time` needs would
+ * silently never derive otherwise (`WRITE_FENCE_DECLARATION_INVALID`,
+ * `validateWriteFenceDeclaration` below). Declaring `conflict` on any other
+ * mechanism is refused the same way an out-of-place `drain` is.
  */
 export type WriteFenceDeclaration =
   | Readonly<{
       mechanism: "advisory";
       drain: "table-lock" | "quiescent" | "none";
     }>
+  | Readonly<{
+      mechanism: "row";
+      drain: "table-lock" | "quiescent" | "none";
+      conflict: "wait" | "commit-time";
+    }>
   | Readonly<{ mechanism: "engine-serialized" }>
   | Readonly<{ mechanism: "caller-serialized" }>;
 
 /**
- * The one member of {@link WriteFenceDeclaration} that carries `drain` —
- * named so a function that only ever runs inside the `mechanism: "advisory"`
- * arm of a resolved declaration (the fence-SQL refusal below) can say so in
- * its own parameter type instead of accepting the full union and re-widening
+ * The two members of {@link WriteFenceDeclaration} that carry `drain` —
+ * named so a function that runs for either a resolved `"advisory"` or
+ * `"row"` declaration (the fence-SQL refusal below) can say so in its own
+ * parameter type instead of accepting the full union and re-widening
  * `drain` into "possibly absent".
  */
-type AdvisoryWriteFenceDeclaration = Extract<
+type DrainCarryingWriteFenceDeclaration = Extract<
   WriteFenceDeclaration,
-  { mechanism: "advisory" }
+  { mechanism: "advisory" | "row" }
 >;
 
 /**
@@ -185,13 +383,27 @@ type AdvisoryWriteFenceDeclaration = Extract<
  */
 export type WriteFencePlan =
   /**
-   * Take the keyed lock, spelled by `sql` — the target's OWN declared
-   * spelling: a lock site never hand-writes the statement, it resolves
-   * a plan and consumes `sql.<builder>(…)`.
+   * Take the keyed advisory lock, spelled by `sql` — the target's OWN
+   * declared spelling: a lock site never hand-writes the statement, it
+   * resolves a plan and consumes `sql.<builder>(…)`.
    */
   | Readonly<{
       kind: "lock";
       drain: "table-lock" | "quiescent" | "none";
+      sql: FenceStatements;
+    }>
+  /**
+   * Take the keyed exclusion against the fences relation, spelled by `sql` —
+   * mechanism-neutral: a keyed site calls the exact same `sql.acquireKeyed`/
+   * `sql.acquireKeyedWithIsolation` a `lock` plan's site calls. `conflict`
+   * is the one fact a `row` site (and the tier deriving `optimistic-retry`)
+   * reads that a `lock` site never needs, because an advisory engine only
+   * ever waits.
+   */
+  | Readonly<{
+      kind: "row";
+      drain: "table-lock" | "quiescent" | "none";
+      conflict: "wait" | "commit-time";
       sql: FenceStatements;
     }>
   /** No lock needed: the engine serializes writers. */
@@ -208,15 +420,36 @@ export type WriteFencePlan =
 /**
  * What `resolveWriteFencePlan` needs: the dialect (for the first-party
  * dialect-derivation arm and for the refusal message), the declared
- * capabilities, and — when the resolved declaration's `mechanism` is (or
- * derives) `"advisory"` — the lock-statement spelling that decision
- * requires. Structural on purpose — see the module-private first-party mark
- * below, which is carried out-of-band rather than as a type member.
+ * capabilities, the lock-statement spelling a resolved `"advisory"` or
+ * `"row"` mechanism requires, and — for `"row"` — the resolved table names
+ * carrying the physical name of the fences relation
+ * `resolveFenceStatements` spells its acquisition against. Structural on
+ * purpose — see the module-private first-party mark below, which is
+ * carried out-of-band rather than as a type member. `GraphBackend`'s own
+ * `tableNames` field already satisfies this structurally, so every lock
+ * site that calls `resolveWriteFencePlan(target)` with the backend itself —
+ * narrowed to whatever `Pick<GraphBackend, ...>` that site declares — reads
+ * the SAME resolved fences table name a `row`-mechanism backend was built
+ * with, with no separate field to keep in sync.
  */
 export type WriteFenceTarget = Readonly<{
   dialect: SqlDialect;
   capabilities: BackendCapabilities;
   fenceSql?: FenceSql | undefined;
+  /**
+   * Read only when the resolved mechanism is `"row"` — specifically
+   * `tableNames.fences`. Typed as the same optional-field `SqlTableNames`
+   * `GraphBackend.tableNames` declares (rather than the fully resolved
+   * `ResolvedSqlTableNames`) so every existing lock site that passes the
+   * backend itself as this target — narrowed to whatever `Pick<GraphBackend,
+   * ...>` that site declares — stays structurally assignable with no
+   * changes; a target whose `tableNames.fences` is genuinely absent refuses
+   * the first time a keyed site actually acquires the fence row instead
+   * (`resolveFenceStatements`'s `requiredFencesTable`, called lazily so a
+   * purely drain-side site that never acquires never refuses over a name it
+   * never needed).
+   */
+  tableNames?: SqlTableNames | undefined;
 }>;
 
 /**
@@ -426,13 +659,17 @@ type WriteFenceDeclarationSource = "writeFence" | "dialect";
 
 /**
  * Names the declaration {@link refuseWriteFenceSqlUnavailable} blames for
- * promising a lock this target cannot spell — the phrase each of its two
- * provenances (a direct `writeFence`, or the first-party dialect derivation)
- * fills in differently, so the refusal never states a declaration the
- * target did not actually make.
+ * promising a keyed exclusion this target cannot spell — the phrase each of
+ * its two provenances (a direct `writeFence`, or the first-party dialect
+ * derivation) fills in differently, so the refusal never states a
+ * declaration the target did not actually make. The first-party dialect
+ * derivation never resolves `mechanism: "row"` (only a bundled factory's
+ * OWN `advisory`/`engine-serialized` split, {@link deriveFromDialect}), so
+ * its phrase always describes an advisory lock; a directly declared `row`
+ * still reads correctly through `formatWriteFenceDeclaration`.
  */
-function describeResolvedAdvisoryDeclaration(
-  declaration: AdvisoryWriteFenceDeclaration,
+function describeResolvedDrainCarryingDeclaration(
+  declaration: DrainCarryingWriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
   dialect: SqlDialect,
 ): string {
@@ -452,12 +689,13 @@ function describeResolvedAdvisoryDeclaration(
 /**
  * Whether `fenceSql` actually supplies `member` as a callable — the runtime
  * check behind {@link refuseWriteFenceSqlUnavailable}'s per-member refusal.
- * `FenceSql`'s type keeps all three members required as a set (a caller
- * constructing one under TypeScript can never omit one), so this only ever
- * catches a `fenceSql` built outside that check — a plain JS backend author,
- * or a test target assembled with a cast — supplying an object that is
- * missing (or has stubbed `undefined` over) the one member a resolved
- * mechanism/drain combination actually needs.
+ * `FenceSql`'s members are each optional on the type (a `row`-mechanism
+ * target genuinely need not supply `advisoryLockExpression`, for one), so
+ * this is the one place that turns "does this resolved mechanism/drain
+ * combination actually have what it needs?" into a yes/no a caller can
+ * refuse on — for BOTH a hand-built `fenceSql` missing a member its
+ * declaration promised, and a mechanism that simply never needed the member
+ * in the first place.
  */
 function fenceSqlMemberPresent(
   fenceSql: FenceSql | undefined,
@@ -489,29 +727,30 @@ function fenceSqlMemberPurpose(member: keyof FenceSql): string {
 }
 
 /**
- * THE refusal for a `lock` decision whose target supplies no spelling — or
- * an incomplete one — to take it with: never defaulted, never silently
- * degraded to `unfenced`. The declaration already promised a real lock
- * exists, so the only honest response to a missing spelling is to say so,
- * naming the exact `fenceSql` member the resolved mechanism/drain
- * combination needed and could not find.
+ * THE refusal for a `lock` or `row` decision whose target supplies no
+ * spelling — or an incomplete one — to take it with: never defaulted, never
+ * silently degraded to `unfenced`. The declaration already promised a real
+ * keyed exclusion exists, so the only honest response to a missing spelling
+ * is to say so, naming the exact `fenceSql` member the resolved
+ * mechanism/drain combination needed and could not find.
  *
  * The one call site is `planFromWriteFenceDeclaration`, shared by every
- * `resolveWriteFencePlan` arm that can resolve `mechanism: "advisory"` — a
- * declared `writeFence` and the first-party dialect derivation both resolve
- * through it, and each passes its own {@link WriteFenceDeclarationSource} so
- * the message names the declaration the target actually made.
+ * `resolveWriteFencePlan` arm that can resolve `mechanism: "advisory"` or
+ * `"row"` — a declared `writeFence` and the first-party dialect derivation
+ * both resolve through it, and each passes its own
+ * {@link WriteFenceDeclarationSource} so the message names the declaration
+ * the target actually made.
  *
  * @throws {ConfigurationError} always.
  */
 function refuseWriteFenceSqlUnavailable(
   dialect: SqlDialect,
-  declaration: AdvisoryWriteFenceDeclaration,
+  declaration: DrainCarryingWriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
   member: keyof FenceSql,
 ): never {
   throw new ConfigurationError(
-    `This backend ${describeResolvedAdvisoryDeclaration(declaration, source, dialect)} ` +
+    `This backend ${describeResolvedDrainCarryingDeclaration(declaration, source, dialect)} ` +
       `but its \`fenceSql\` is missing \`${member}\`, so TypeGraph cannot ` +
       `spell the ${fenceSqlMemberPurpose(member)}.`,
     {
@@ -561,6 +800,7 @@ export function refuseFenceSqlSessionFactUnavailable(
 /** {@link validateWriteFenceDeclaration}'s accepted `mechanism` values. */
 const VALID_WRITE_FENCE_MECHANISMS = [
   "advisory",
+  "row",
   "engine-serialized",
   "caller-serialized",
 ] as const;
@@ -569,13 +809,19 @@ const VALID_WRITE_FENCE_MECHANISMS = [
 const VALID_WRITE_FENCE_DRAINS = ["table-lock", "quiescent", "none"] as const;
 
 /**
+ * {@link validateWriteFenceDeclaration}'s accepted `conflict` values —
+ * `mechanism: "row"` only.
+ */
+const VALID_WRITE_FENCE_CONFLICTS = ["wait", "commit-time"] as const;
+
+/**
  * THE refusal for a `WriteFenceDeclaration` field TypeScript's discriminated
  * union cannot police at runtime — see {@link validateWriteFenceDeclaration}.
  *
  * @throws {ConfigurationError} always.
  */
 function refuseInvalidWriteFenceDeclaration(
-  field: "mechanism" | "drain",
+  field: "mechanism" | "drain" | "conflict",
   value: unknown,
   accepted: readonly string[],
 ): never {
@@ -606,9 +852,20 @@ function refuseInvalidWriteFenceDeclaration(
  * cases it already exhausted, and `x satisfies never` is a compile-time
  * assertion only: at runtime it would return the invalid string as though it
  * were a resolved plan.
+ *
+ * `interactiveTransactions` is the target's OWN `capabilities.execution`
+ * fact (never re-derived here), checked only against `conflict:
+ * "commit-time"`: that value is honored solely by the `optimistic-retry`
+ * execution tier replaying a unit inside an interactive transaction, and
+ * `finalizeEngineCapabilities` derives that tier only when
+ * `interactiveTransactions` is `true` — declaring `"commit-time"` on a
+ * backend that reports `false` would otherwise be accepted here and then
+ * silently dropped downstream (the loser would fail with no retry). An
+ * accepted declaration is applied or refused; it is never ignored.
  */
 function validateWriteFenceDeclaration(
   declaration: WriteFenceDeclaration,
+  interactiveTransactions: boolean,
 ): void {
   const mechanism: string = declaration.mechanism;
   if (
@@ -620,8 +877,9 @@ function validateWriteFenceDeclaration(
       VALID_WRITE_FENCE_MECHANISMS,
     );
   }
-  if (mechanism === "advisory") {
-    const drain: string = (declaration as AdvisoryWriteFenceDeclaration).drain;
+  if (mechanism === "advisory" || mechanism === "row") {
+    const drain: string = (declaration as DrainCarryingWriteFenceDeclaration)
+      .drain;
     if (!(VALID_WRITE_FENCE_DRAINS as readonly string[]).includes(drain)) {
       refuseInvalidWriteFenceDeclaration(
         "drain",
@@ -629,12 +887,66 @@ function validateWriteFenceDeclaration(
         VALID_WRITE_FENCE_DRAINS,
       );
     }
+    if (mechanism === "row") {
+      const conflict: string = (
+        declaration as Extract<WriteFenceDeclaration, { mechanism: "row" }>
+      ).conflict;
+      if (
+        !(VALID_WRITE_FENCE_CONFLICTS as readonly string[]).includes(conflict)
+      ) {
+        refuseInvalidWriteFenceDeclaration(
+          "conflict",
+          conflict,
+          VALID_WRITE_FENCE_CONFLICTS,
+        );
+      }
+      if (conflict === "commit-time" && !interactiveTransactions) {
+        throw new ConfigurationError(
+          'capabilities.writeFence.conflict: "commit-time" requires ' +
+            "capabilities.execution.interactiveTransactions: true — the " +
+            '"optimistic-retry" execution tier that replays a commit-time ' +
+            "loser only derives on an interactive backend; on a " +
+            "non-interactive one the declaration would be accepted and then " +
+            "silently dropped, leaving the loser's write fail with no retry.",
+          {
+            code: "WRITE_FENCE_DECLARATION_INVALID",
+            field: "conflict",
+            mechanism,
+            conflict,
+          },
+          {
+            suggestion:
+              'Declare capabilities.execution.interactiveTransactions: true, or declare conflict: "wait" instead.',
+          },
+        );
+      }
+      return;
+    }
+    // mechanism === "advisory": `conflict` is a `row`-only fact (the engine
+    // behavior of two writers of ONE fence row), which an advisory lock
+    // never has — a caller declaring it here is refused the same way a
+    // stray `drain` on a serialized mechanism is, below.
+    if ("conflict" in declaration) {
+      throw new ConfigurationError(
+        'capabilities.writeFence.conflict applies only to mechanism: "row"; ' +
+          '"advisory" must not declare a conflict.',
+        {
+          code: "WRITE_FENCE_DECLARATION_INVALID",
+          field: "conflict",
+          mechanism,
+        },
+        {
+          suggestion:
+            'Remove conflict from this writeFence declaration — mechanism: "advisory" needs none.',
+        },
+      );
+    }
     return;
   }
   if ("drain" in declaration) {
     throw new ConfigurationError(
       "capabilities.writeFence.drain applies only to " +
-        `mechanism: "advisory"; "${mechanism}" must not declare a drain.`,
+        `mechanism: "advisory" or "row"; "${mechanism}" must not declare a drain.`,
       {
         code: "WRITE_FENCE_DECLARATION_INVALID",
         field: "drain",
@@ -642,6 +954,20 @@ function validateWriteFenceDeclaration(
       },
       {
         suggestion: `Remove drain from this writeFence declaration — mechanism: "${mechanism}" needs none.`,
+      },
+    );
+  }
+  if ("conflict" in declaration) {
+    throw new ConfigurationError(
+      "capabilities.writeFence.conflict applies only to " +
+        `mechanism: "row"; "${mechanism}" must not declare a conflict.`,
+      {
+        code: "WRITE_FENCE_DECLARATION_INVALID",
+        field: "conflict",
+        mechanism,
+      },
+      {
+        suggestion: `Remove conflict from this writeFence declaration — mechanism: "${mechanism}" needs none.`,
       },
     );
   }
@@ -663,7 +989,10 @@ function planFromWriteFenceDeclaration(
   declaration: WriteFenceDeclaration,
   source: WriteFenceDeclarationSource,
 ): WriteFencePlan {
-  validateWriteFenceDeclaration(declaration);
+  validateWriteFenceDeclaration(
+    declaration,
+    target.capabilities.execution.interactiveTransactions,
+  );
   switch (declaration.mechanism) {
     case "advisory": {
       if (!fenceSqlMemberPresent(target.fenceSql, "advisoryLockExpression")) {
@@ -702,6 +1031,35 @@ function planFromWriteFenceDeclaration(
             "resolveWriteFencePlan: fenceSql was validated present above",
           ),
         ),
+      };
+    }
+    case "row": {
+      if (
+        declaration.drain === "table-lock" &&
+        !fenceSqlMemberPresent(target.fenceSql, "lockTables")
+      ) {
+        refuseWriteFenceSqlUnavailable(
+          target.dialect,
+          declaration,
+          source,
+          "lockTables",
+        );
+      }
+      return {
+        kind: "row",
+        drain: declaration.drain,
+        conflict: declaration.conflict,
+        // `target.fenceSql` may be entirely absent for a `row` target that
+        // declares no isolation read and no table-lock drain — `FenceSql`'s
+        // members are all optional, so `{}` is itself a valid (empty) one.
+        // `mechanism: "row"` is passed explicitly, never inferred from
+        // `fenceSql`'s shape: the bundled PostgreSQL factory's `fenceSql` is
+        // the same `postgresFenceSql` object (advisoryLockExpression
+        // included) regardless of which mechanism this declaration names.
+        sql: resolveFenceStatements(target.fenceSql ?? {}, {
+          mechanism: "row",
+          fencesTableName: target.tableNames?.fences,
+        }),
       };
     }
     case "engine-serialized": {
@@ -773,6 +1131,12 @@ function formatWriteFenceDeclaration(
   switch (declaration.mechanism) {
     case "advisory": {
       return `writeFence: { mechanism: "advisory", drain: "${declaration.drain}" }`;
+    }
+    case "row": {
+      return (
+        `writeFence: { mechanism: "row", drain: "${declaration.drain}", ` +
+        `conflict: "${declaration.conflict}" }`
+      );
     }
     case "engine-serialized": {
       return 'writeFence: { mechanism: "engine-serialized" }';
@@ -859,9 +1223,10 @@ export function refuseUnfencedClockAllocation(dialect: SqlDialect): never {
 
 /**
  * THE refusal for a fence that cannot degrade: `unfenced` always refuses,
- * and a `lock` plan whose `drain` cannot back the table lock an operation
- * requires refuses too — the declared-advisory-only posture (`drain:
- * "none"`), which T15 exercises as its own matrix row.
+ * and a `lock` or `row` plan whose `drain` cannot back the table lock an
+ * operation requires refuses too — the declared-advisory-only (or
+ * declared-row-only) posture (`drain: "none"`), which T15 exercises as its
+ * own matrix row.
  *
  * `engine-serialized` and `caller-serialized` satisfy both `requires`
  * values without consulting `drain`: a writer slot and an in-process,
@@ -869,7 +1234,7 @@ export function refuseUnfencedClockAllocation(dialect: SqlDialect): never {
  * either lock shape, so there is nothing for either `requires` to add.
  *
  * @throws {ConfigurationError} under `unfenced`, and under
- * `kind: "lock" && drain === "none"` when `requires === "drain"`.
+ * `(kind: "lock" | "row") && drain === "none"` when `requires === "drain"`.
  */
 export function requireWriteFence(
   plan: WriteFencePlan,
@@ -877,10 +1242,11 @@ export function requireWriteFence(
   requires: "keyed" | "drain",
 ): Extract<
   WriteFencePlan,
-  { kind: "lock" | "engine-serialized" | "caller-serialized" }
+  { kind: "lock" | "row" | "engine-serialized" | "caller-serialized" }
 > {
   switch (plan.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       if (requires === "drain" && plan.drain === "none") {
         throw new ConfigurationError(
           `${operation} requires a table lock, but this backend's write-fence ` +
@@ -928,4 +1294,29 @@ export function requireWriteFence(
       );
     }
   }
+}
+
+/**
+ * THE one accessor for `fence.sql.lockTables` at a drain site — never
+ * re-spelled per site. Call only after checking `fence.drain ===
+ * "table-lock"` (TypeScript cannot narrow a resolved `lock`/`row` fence's
+ * type on that check alone, since `drain` is not `WriteFencePlan`'s
+ * discriminant): `lockTables` is guaranteed present at that point,
+ * regardless of which mechanism resolved — `planFromWriteFenceDeclaration`
+ * already refused construction of a `table-lock` declaration whose target
+ * supplies no `lockTables` ({@link refuseWriteFenceSqlUnavailable}). This
+ * `requireDefined` only turns that already-established runtime guarantee
+ * into the type narrowing TypeScript cannot infer on its own —
+ * `FenceStatements` inherits `lockTables?` from `FenceSql`, since an
+ * `advisory`/`row` target with `drain !== "table-lock"` genuinely need not
+ * supply one.
+ */
+export function requireFenceLockTables(
+  fence: Extract<WriteFencePlan, { kind: "lock" | "row" }>,
+  operation: string,
+): NonNullable<FenceSql["lockTables"]> {
+  return requireDefined(
+    fence.sql.lockTables,
+    `${operation}: lockTables was validated present by the resolved drain: "table-lock" plan`,
+  );
 }

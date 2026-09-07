@@ -557,7 +557,15 @@ export async function runIdentityMutation<G extends GraphDef, T>(
   // recorded binding (the interchange import does) — the wrapped touch never
   // sees those rows, so the sub-operation must mark the write explicitly or
   // the clock stays unmoved and base@V tokens go stale.
-  let touched = false;
+  //
+  // A mutable box, not a bare `let`: `runInWriteTransaction` replays this
+  // whole call's body as one attempt under the `"optimistic-retry"` tier
+  // (a `row`-mechanism write fence with `conflict: "commit-time"`), so a
+  // flag declared OUTSIDE the callback below would carry a failed attempt's
+  // verdict into the next one. Resetting `touchedBox.touched` at the top of
+  // the callback — itself called fresh once per attempt — keeps `didWrite`
+  // reading only the committed (or currently running) attempt's own verdict.
+  const touchedBox = { touched: false };
   return runInWriteTransaction(
     {
       graphId: ctx.graphId,
@@ -568,21 +576,22 @@ export async function runIdentityMutation<G extends GraphDef, T>(
     },
     ctx.backend,
     async (target) => {
+      touchedBox.touched = false;
       await lockIdentityGraph(target, ctx.graphId);
       return withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
         fn(
           rawTarget,
           (graphId, id, afterImage) => {
-            touched = true;
+            touchedBox.touched = true;
             touch(graphId, id, afterImage);
           },
           () => {
-            touched = true;
+            touchedBox.touched = true;
           },
         ),
       );
     },
-    { didWrite: () => touched },
+    { didWrite: () => touchedBox.touched },
   );
 }
 

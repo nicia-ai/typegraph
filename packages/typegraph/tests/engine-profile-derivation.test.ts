@@ -44,6 +44,7 @@ import {
   sql,
   type SqlFragment,
 } from "../src/query/sql-fragment";
+import { requireDefined } from "../src/utils/presence";
 
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => {
@@ -189,7 +190,7 @@ function customLockTables(
  * standalone-statement form; `postgres-schema-write-fence.ts`'s fused
  * statement embeds this bare form directly. The `transaction_isolation`
  * alias `resolveFenceStatements` gives its derived `isolationFact` /
- * `advisoryLockWithIsolation` is a hard contract, not a stylistic choice:
+ * `acquireKeyedWithIsolation` is a hard contract, not a stylistic choice:
  * `assertRecordedCaptureTransactionIsolation` reads the row back by that
  * column name regardless of which `FenceSql` produced it.
  */
@@ -326,10 +327,10 @@ describe("deriveEngineProfile", () => {
     expect(bundledTwoArgumentSpellingStatements).toHaveLength(0);
   });
 
-  it("case 1c: for a derived custom spelling, resolveFenceStatements's portable advisoryLock statement and the fused graph_write_lock CTE's embedded expression render the IDENTICAL expression text — they now cannot differ", () => {
+  it("case 1c: for a derived custom spelling, resolveFenceStatements's portable acquireKeyed statement and the fused graph_write_lock CTE's embedded expression render the IDENTICAL expression text — they now cannot differ", () => {
     // No live connection needed: this isolates the claim case 1 proves
     // end-to-end (both readers of `customFenceSql` agree) down to the exact
-    // mechanism that makes it true. `resolveFenceStatements`'s `advisoryLock`
+    // mechanism that makes it true. `resolveFenceStatements`'s `acquireKeyed`
     // is `SELECT ${fenceSql.advisoryLockExpression(...)}` — it calls the
     // SAME `advisoryLockExpression` function `postgres-schema-write-fence
     // .ts`'s fused CTE embeds directly, so the portable statement and the
@@ -338,12 +339,16 @@ describe("deriveEngineProfile", () => {
     const derivedStatements = resolveFenceStatements(customFenceSql);
     const namespace = "typegraph:identity";
     const key = "graph-1";
+    const advisoryLockExpression = requireDefined(
+      customFenceSql.advisoryLockExpression,
+      "customFenceSql always supplies advisoryLockExpression",
+    );
 
     const portableStatementText = renderPostgres(
-      derivedStatements.advisoryLock(namespace, key),
+      derivedStatements.acquireKeyed(namespace, key),
     ).sql;
     const fusedEmbeddedExpressionText = renderPostgres(
-      customFenceSql.advisoryLockExpression(namespace, key),
+      advisoryLockExpression(namespace, key),
     ).sql;
 
     expect(fusedEmbeddedExpressionText).toMatch(CUSTOM_ADVISORY_LOCK_PATTERN);

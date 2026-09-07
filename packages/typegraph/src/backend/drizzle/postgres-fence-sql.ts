@@ -6,7 +6,7 @@
  * test ratchets those tokens out of the lock-site files, including trusted
  * import's table lock and the PostgreSQL profile's extension-DDL lock, both
  * of which now resolve the same plan every other lock site does and consume
- * `fence.sql.lockTables(...)` / `fence.sql.advisoryLock(...)` instead of
+ * `fence.sql.lockTables(...)` / `fence.sql.acquireKeyed(...)` instead of
  * spelling `LOCK TABLE` / `pg_advisory_xact_lock` themselves — this module is
  * the only one left spelling any of these four tokens.
  *
@@ -18,12 +18,13 @@
  *
  * `postgresFenceSql` supplies only the two composable expressions and
  * `lockTables` — `FenceSql`'s complete member set. The standalone-statement
- * forms every ordinary lock site actually calls (`advisoryLock`,
- * `advisoryLockWithIsolation`, `isolationFact`) are never spelled here: THE
+ * forms every ordinary lock site actually calls (`acquireKeyed`,
+ * `acquireKeyedWithIsolation`, `isolationFact`) are never spelled here: THE
  * one owner of "wrap this expression in a standalone `SELECT`" is
  * `resolveWriteFencePlan`'s `resolveFenceStatements`
  * (`../capabilities/write-fence.ts`), which derives them from this module's
- * two expressions for every resolved `lock` plan, bundled or custom alike.
+ * two expressions for every resolved `lock` or `row` plan, bundled or
+ * custom alike.
  * `./postgres-schema-write-fence.ts` needs `drizzle-orm` to reach the schema
  * table, so it cannot live in this module (which imports none); it instead
  * takes the resolved fence target's own `advisoryLockExpression` /
@@ -35,12 +36,14 @@
  * `advisoryLockSingleExpression` is exported bare, unlike the module's other
  * two expressions: it spells the ONE-argument `pg_advisory_xact_lock(bigint)`
  * form, which occupies a lock space distinct from every namespaced
- * two-argument lock this module builds and is not a `FenceSql` member — the
- * schema-commit fence (`postgres.ts`) and the graph-template instantiation
- * statement (`graph-template-sql.ts`) both import it directly and take it on
+ * two-argument lock this module builds and is not a `FenceSql` member — under
+ * the schema-commit fence's `"lock"` plan arm (`postgres.ts`), it and the
+ * graph-template instantiation statement's advisory-lock variant
+ * (`graph-template-sql.ts`) both import it directly and take it on
  * `hashtext(graphId)`, so they mutually exclude — calling back into this one
  * function is what keeps that guarantee from drifting into two independently
- * spelled lock calls.
+ * spelled lock calls. Under the fence's `"row"` plan arm, neither side takes
+ * this lock: both instead take the same portable fence row.
  */
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { type FenceSql } from "../capabilities/write-fence";

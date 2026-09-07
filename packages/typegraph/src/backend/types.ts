@@ -318,28 +318,61 @@ export type BackendCapabilities = Readonly<{
     /**
      * How this backend groups a multi-statement write into one unit: an
      * `"interactive"` callback/session transaction that can hold a fenced
-     * conversation across several round trips, a `"batch"` atomic program
-     * with no such transaction, or `"none"` when it offers neither and a
-     * managed write can only run its statements one at a time with no
-     * atomicity across them.
+     * conversation across several round trips; `"optimistic-retry"`, the
+     * same interactive transaction on an engine whose write fence resolves
+     * `mechanism: "row"` with `conflict: "commit-time"` — two acquirers of
+     * one fence row both proceed and the loser's COMMIT fails, so every
+     * store-owned unit of work must be prepared to replay from the top; a
+     * `"batch"` atomic program with no such transaction; or `"none"` when it
+     * offers neither and a managed write can only run its statements one at
+     * a time with no atomicity across them.
      *
-     * Derived, never hand-declared, on every bundled backend —
-     * `"interactive"` when `interactiveTransactions` is true, else `"batch"`
-     * when `atomicBatch` is not `"none"`, else `"none"` — overwriting
-     * whatever a profile's own `declaredCapabilities` set. Optional so a
-     * custom `GraphBackend` implementation, which nothing derives this for,
-     * is not forced to declare it. Two readers key off the `"batch"` value:
-     * the batch-tier write verdict (`resolveBatchWriteVerdict` in
+     * Derived, never hand-declared, on every bundled backend through
+     * `deriveUnitOfWork` (`backend/capabilities/execution.ts`) —
+     * `"optimistic-retry"` when `interactiveTransactions` is true AND the
+     * caller supplied the resolved write-fence plan's `conflict` fact as
+     * `"commit-time"`, else `"interactive"` when `interactiveTransactions`
+     * is true, else `"batch"` when `atomicBatch` is not `"none"`, else
+     * `"none"` — overwriting whatever a profile's own `declaredCapabilities`
+     * set. `finalizeEngineCapabilities` is the one place that resolves this
+     * fact fresh, from the root profile's own `row`-mechanism plan; every
+     * later derivation boundary (`downgradeAtomicBatch`,
+     * `scopeAtomicBatchToSession`) carries it forward instead of
+     * re-resolving it, by reading whether its own source object was already
+     * `"optimistic-retry"` — so the tier survives a derived or
+     * session-scoped backend for as long as `interactiveTransactions` stays
+     * `true`. Optional so a custom `GraphBackend` implementation, which
+     * nothing derives this for, is not forced to declare it.
+     *
+     * `src/store/operations/write-transaction.ts`'s retry-routing helpers
+     * are the store-owned `"optimistic-retry"` consumers: every
+     * `runWritePlan`/`runHookedWritePlan`/
+     * `runAutocommitSingleStatementWritePlan` call, `runIdentityMutation`,
+     * `rebuildIdentityClosureWithSchemaFence`, `rebuildContribution`, and the
+     * index-materialization claim/record calls each wrap their write in
+     * `runRetriedUnit` when this reads `"optimistic-retry"` (and, for the
+     * transaction-opening ones, the write opens its own transaction rather
+     * than joining an existing one). Two backend-owned transactions consult
+     * the SAME tier directly, outside the store's write path entirely:
+     * PostgreSQL's graph-template instantiation row branch and
+     * `runSchemaWriteTransaction` (behind `commitSchemaVersion` and its
+     * three siblings), both in `src/backend/drizzle/postgres.ts` — each
+     * acquires the schema-commit fence row in a `db.transaction(...)` it
+     * opens directly, so each wraps that whole transaction in
+     * `runRetriedUnit` itself rather than routing through the store's
+     * helpers. Two further readers key off the
+     * `"batch"` value: the batch-tier write verdict
+     * (`resolveBatchWriteVerdict` in
      * `backend/capabilities/batch-write-verdict.ts`) and the autocommit
-     * single-statement eligibility gate
-     * (`canFuseSchemaFenceInFirstWrite`). Absent is treated as anything but
-     * `"batch"`: `resolveBatchWriteVerdict` answers `program` (its "not a
-     * batch-tier limitation" verdict) for it, so a backend that declares
-     * neither an interactive transaction nor an atomic batch still fails
-     * closed on a write that needs one — through that write's own capability
-     * check, not through a batch-tier refusal it never earned.
+     * single-statement eligibility gate (`canFuseSchemaFenceInFirstWrite`).
+     * Absent is treated as anything but `"batch"`: `resolveBatchWriteVerdict`
+     * answers `program` (its "not a batch-tier limitation" verdict) for it,
+     * so a backend that declares neither an interactive transaction nor an
+     * atomic batch still fails closed on a write that needs one — through
+     * that write's own capability check, not through a batch-tier refusal it
+     * never earned.
      */
-    unitOfWork?: "interactive" | "batch" | "none";
+    unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
   }>;
   /** Whether the backend supports SQL window functions such as ROW_NUMBER() */
   windowFunctions: boolean;

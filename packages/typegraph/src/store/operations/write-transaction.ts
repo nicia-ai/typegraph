@@ -68,6 +68,11 @@ import { statementExecutionMembers } from "../../backend/capabilities/bind";
 import { type STATEMENT_EXECUTION } from "../../backend/capabilities/bundle-registry";
 import { type BundleVerdictOf } from "../../backend/capabilities/resolve";
 import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../../backend/capabilities/retried-unit";
+import {
   isFirstPartyFactory,
   resolveWriteFencePlan,
 } from "../../backend/capabilities/write-fence";
@@ -76,19 +81,11 @@ import {
   runOptionallyInTransaction,
   type TransactionBackend,
 } from "../../backend/types";
-import {
-  ConfigurationError,
-  StaleVersionError,
-  TransactionConflictError,
-} from "../../errors";
+import { ConfigurationError, StaleVersionError } from "../../errors";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
-import { delay } from "../../utils/delay";
-import {
-  isSerializationFailure,
-  isSqliteStaleSnapshotError,
-} from "../../utils/sql-errors";
+import { isSqliteStaleSnapshotError } from "../../utils/sql-errors";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   advanceRevisionClock,
@@ -464,13 +461,38 @@ export type WriteTransactionOptions<T> = Readonly<{
  */
 export type WriteTransactionMode = "opened" | "existing" | "none";
 
-function resolveWriteTransactionMode(
+export function resolveWriteTransactionMode(
   backend: GraphBackend | TransactionBackend,
 ): WriteTransactionMode {
   if (!("transaction" in backend)) return "existing";
   return backend.capabilities.execution.interactiveTransactions ?
       "opened"
     : "none";
+}
+
+/**
+ * Whether a write about to run through `backend` must be wrapped in
+ * {@link runRetriedUnit}: the tier requires it
+ * ({@link isOptimisticRetryTier}) AND this write opens its own transaction
+ * ({@link resolveWriteTransactionMode} reads `"opened"`). A nested unit
+ * running inside an existing transaction (`"existing"`) cannot restart a
+ * transaction it does not own or replay reads made before it, so its
+ * conflict propagates unchanged to the outermost owner instead; a
+ * backend with no transactions at all (`"none"`) has nothing to retry as a
+ * unit either.
+ *
+ * The one predicate every store-owned-unit routing site below consults —
+ * `write-executor.ts`'s three plan runners, `runIdentityMutation`, and
+ * `rebuildIdentityClosureWithSchemaFence` — so the gate cannot drift between
+ * them.
+ */
+export function requiresOptimisticRetryUnit(
+  backend: GraphBackend | TransactionBackend,
+): boolean {
+  return (
+    isOptimisticRetryTier(backend) &&
+    resolveWriteTransactionMode(backend) === "opened"
+  );
 }
 
 /**
@@ -598,6 +620,20 @@ export function constraintFenceRefusal(
  * constraint's probe and the write it guards commit under one per-graph mutual
  * exclusion on every backend. Fenced or refused; never quietly neither.
  * Unconstrained writes on the same backend are unaffected.
+ *
+ * Under the `"optimistic-retry"` tier ({@link requiresOptimisticRetryUnit}),
+ * the WHOLE attempt below — opening the transaction, taking every lock, and
+ * calling `fn` — runs through {@link runRetriedUnit}: `backend`'s `row`-
+ * mechanism write fence lets two acquirers of one fence row both proceed, so
+ * the loser's COMMIT fails and correctness comes from replaying the entire
+ * unit, never from waiting. This is the ONE place that routes every store-
+ * owned unit built on this function — both `write-executor.ts` plan
+ * runners, `runIdentityMutation`, and `rebuildIdentityClosureWithSchemaFence`
+ * — through the retry owner, so none of those callers re-spells the gate or
+ * the wrapping. A nested unit (`transactionMode === "existing"`) never
+ * retries here regardless of the tier: it cannot restart a transaction it
+ * does not own, so its conflict propagates to the outermost owner. Under
+ * `"interactive"` this function's behavior is unchanged: one attempt.
  */
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
@@ -610,7 +646,6 @@ export function runInWriteTransaction<T>(
   options?: WriteTransactionOptions<T>,
 ): Promise<T> {
   const transactionMode = resolveWriteTransactionMode(backend);
-  const ownsWriteLock = transactionMode === "opened";
   const fenceReason = options?.fencesConstraintProbe;
   // Rejected rather than thrown: this function is promise-returning, and a
   // synchronous throw from it would surface differently at a caller that
@@ -620,6 +655,42 @@ export function runInWriteTransaction<T>(
       constraintFenceRefusal(ctx, backend, fenceReason)
     );
   if (refusal !== undefined) return Promise.reject(refusal);
+
+  const attempt = (): Promise<T> =>
+    runInWriteTransactionAttempt(ctx, backend, fn, options, transactionMode);
+
+  if (!requiresOptimisticRetryUnit(backend)) return attempt();
+  return runRetriedUnit(
+    {
+      operation: "runInWriteTransaction",
+      attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+      target: backend,
+    },
+    attempt,
+  );
+}
+
+/**
+ * One attempt of {@link runInWriteTransaction}: everything that function did
+ * as one body before the `"optimistic-retry"` tier existed, unchanged.
+ * Called once directly under `"interactive"`, or once per attempt
+ * {@link runRetriedUnit} makes under `"optimistic-retry"` — every value
+ * below (`held`, `combinedSchemaGraphFence`, `lock`) is built fresh on each
+ * call, so a rolled-back attempt leaves nothing for the next one to read.
+ */
+function runInWriteTransactionAttempt<T>(
+  ctx: WriteTransactionContext,
+  backend: GraphBackend | TransactionBackend,
+  fn: (
+    target: GraphBackend | TransactionBackend,
+    lock: GraphWriteLock,
+    transactionMode: WriteTransactionMode,
+  ) => Promise<T>,
+  options: WriteTransactionOptions<T> | undefined,
+  transactionMode: WriteTransactionMode,
+): Promise<T> {
+  const ownsWriteLock = transactionMode === "opened";
+  const fenceReason = options?.fencesConstraintProbe;
   const needsGraphWriteLock =
     ctx.historyEnabled ||
     ctx.revisionTrackingEnabled ||
@@ -772,243 +843,4 @@ export function runHookedWriteOperation<T>(
     () => runInWriteTransaction(ctx, backend, body, options),
     options?.didWrite,
   );
-}
-
-/**
- * Milliseconds the backoff schedule starts from once it begins growing (from
- * the third attempt on; see {@link retryBackoffDelayMs}). The only backoff
- * for transaction-conflict replay.
- */
-const RETRY_BACKOFF_BASE_MS = 5;
-
-/** Backoff never waits longer than this, no matter how many attempts failed. */
-const RETRY_BACKOFF_CAP_MS = 50;
-
-/**
- * Jitter applied symmetrically around the capped exponential delay, as a
- * fraction of it (0.5 means the delay actually used is anywhere from half to
- * one and a half times the capped value).
- */
-const RETRY_BACKOFF_JITTER_RATIO = 0.5;
-
-/**
- * Delay, in milliseconds, before running `attemptNumber` after the previous
- * attempt failed with a retryable conflict. Attempt 2 (run immediately after
- * attempt 1 fails) waits zero: a single lost race deserves an immediate
- * re-open, not a pause. From attempt 3 on, the delay grows exponentially from
- * {@link RETRY_BACKOFF_BASE_MS}, capped at {@link RETRY_BACKOFF_CAP_MS} and
- * jittered by {@link RETRY_BACKOFF_JITTER_RATIO} so that several transactions
- * retrying the same conflict do not all wake up and collide again together.
- */
-function retryBackoffDelayMs(attemptNumber: number): number {
-  if (attemptNumber <= 2) return 0;
-  const exponential = RETRY_BACKOFF_BASE_MS * 2 ** (attemptNumber - 2);
-  const capped = Math.min(RETRY_BACKOFF_CAP_MS, exponential);
-  const jitterMultiplier =
-    1 + (Math.random() * 2 - 1) * RETRY_BACKOFF_JITTER_RATIO;
-  return capped * jitterMultiplier;
-}
-
-/**
- * How {@link runRetriedUnit} disposes of a failure one attempt raised:
- * whether it will re-run the unit, and — when it will not — the exact value
- * it raises to its own caller. `reported` is `undefined` while `retry` is
- * `true`; it is meaningless there and never read.
- */
-type RetriedUnitFailureDisposition = Readonly<
-  { retry: true; reported?: undefined } | { retry: false; reported: unknown }
->;
-
-/**
- * An attempt that itself runs a nested unit of work through this same owner —
- * graph-merge's commit sites call `target.transaction(...)`, which is
- * `store.transaction()` run with no `retry` option, so a conflict inside it
- * already comes back wrapped as a one-attempt {@link TransactionConflictError}
- * (see `store.ts#runTransaction`) — reports THAT wrapper as its failure, not
- * the driver error underneath. Classifying the wrapper as-is would still work
- * ({@link isSerializationFailure} walks into its `cause`), but the
- * exhaustion `TransactionConflictError` this loop mints would then wrap the
- * INNER `TransactionConflictError` instead of the driver error it wraps in
- * turn, chaining two conflict errors where the replay contract promises one.
- * Unwrapping first makes the classification, and the eventual `cause`, the
- * same regardless of whether an attempt calls the driver directly or through
- * a nested single-attempt unit.
- */
-function unwrapNestedConflict(error: unknown): unknown {
-  return error instanceof TransactionConflictError ? error.cause : error;
-}
-
-/**
- * The one classification a retryable failure gets, called both by the retry
- * loop itself and by {@link RetriedUnitFrame} so an attempt can learn — from
- * the very same decision, not a re-spelled copy of it — how its own failure
- * will be disposed of before the loop ever sees it.
- *
- * A failure {@link isSerializationFailure} does not recognize — after
- * {@link unwrapNestedConflict} — is never retried and is reported as the
- * ORIGINAL `error`, unchanged. A recognized failure retries while attempts
- * remain; once they don't, it is reported as the {@link TransactionConflictError}
- * the loop raises for it, whose `cause` is always the unwrapped failure, so
- * exhaustion is ever only one conflict error deep.
- */
-function classifyRetriedUnitFailure(
-  error: unknown,
-  attemptNumber: number,
-  options: Readonly<{ operation: string; attempts: number }>,
-): RetriedUnitFailureDisposition {
-  const unwrapped = unwrapNestedConflict(error);
-  if (!isSerializationFailure(unwrapped)) {
-    return { retry: false, reported: error };
-  }
-  if (attemptNumber < options.attempts) return { retry: true };
-  return {
-    retry: false,
-    reported: new TransactionConflictError(
-      { operation: options.operation, attempts: options.attempts },
-      { cause: unwrapped },
-    ),
-  };
-}
-
-/**
- * Wraps {@link classifyRetriedUnitFailure} in a one-slot memo keyed by
- * reference identity, so every call this attempt makes with the SAME error
- * object — from `frame.willRetry`/`frame.reportedFailure` inside the
- * attempt's own `catch`, and from the loop's `catch` once that same error
- * propagates out of it — resolves to the exact same disposition. That is
- * what lets an attempt report a value (to a hook, say) that is REFERENCE-
- * EQUAL to what `runRetriedUnit` goes on to raise, without minting the
- * `TransactionConflictError` twice: the attempt always rethrows the raw
- * error unchanged (never the disposition), so the loop's own classification
- * of it is the cache hit, not a second mint.
- */
-function createMemoizedFailureClassifier(
-  attemptNumber: number,
-  options: Readonly<{ operation: string; attempts: number }>,
-): (error: unknown) => RetriedUnitFailureDisposition {
-  let cache:
-    | Readonly<{ error: unknown; disposition: RetriedUnitFailureDisposition }>
-    | undefined;
-  return (error) => {
-    if (cache !== undefined && Object.is(cache.error, error)) {
-      return cache.disposition;
-    }
-    const disposition = classifyRetriedUnitFailure(
-      error,
-      attemptNumber,
-      options,
-    );
-    cache = { error, disposition };
-    return disposition;
-  };
-}
-
-/**
- * The per-attempt handle {@link runRetriedUnit} passes to its `attempt`
- * factory.
- */
-type RetriedUnitFrame = Readonly<{
-  /** 1-based number of this attempt. */
-  attempt: number;
-  /**
-   * Whether `runRetriedUnit` will re-run the unit if this attempt fails with
-   * `error`. An attempt-scoped effect that must not survive a retry (a
-   * buffered hook, say) reads this to decide whether to discard itself
-   * instead of reporting.
-   */
-  willRetry: (error: unknown) => boolean;
-  /**
-   * The exact value `runRetriedUnit` raises to its caller when it does not
-   * retry `error` — the driver error itself when `error` was never
-   * retryable, or the {@link TransactionConflictError} the loop mints on
-   * exhaustion. An attempt that reports its own failure to something other
-   * than its return value (a hook, a log) uses this so that value always
-   * matches what the eventual caller sees, never a second, independently
-   * chosen error.
-   */
-  reportedFailure: (error: unknown) => unknown;
-}>;
-
-/**
- * One attempt of a unit of work run by {@link runRetriedUnit}: given a fresh
- * `frame`, performs the work and resolves with its result, or throws/rejects
- * to signal that the attempt did not commit.
- */
-export type RetriedUnitAttempt<T> = (frame: RetriedUnitFrame) => Promise<T>;
-
-/**
- * Runs `attempt` up to `options.attempts` times, re-running it from the top
- * whenever it fails with a transaction conflict
- * ({@link isSerializationFailure}), and raising a
- * {@link TransactionConflictError} — carrying `options.operation`,
- * `options.attempts`, and the last failure as `cause` — if every attempt is
- * exhausted. A failure `isSerializationFailure` does not recognize propagates
- * unchanged on the attempt that raised it; it is never retried.
- *
- * This is the one retry owner in the codebase: every store-owned unit of work
- * that may be replayed on a transaction conflict runs through this function,
- * never a second, parallel retry loop.
- *
- * When `attempt` itself fails with a `TransactionConflictError` — the shape a
- * nested single-attempt unit reports (e.g. graph-merge's commit sites call
- * `target.transaction(...)`, which is `store.transaction()` run with no
- * `retry` option) — this loop classifies, and on exhaustion wraps, that
- * error's OWN `cause` rather than the wrapper itself
- * ({@link unwrapNestedConflict}). Exhaustion is therefore always exactly one
- * `TransactionConflictError` deep, whose `cause` is the underlying driver
- * error, never a chain of two conflict errors.
- *
- * `options.attempts` must be a positive integer — the budget for a unit that
- * has not tried even once is a configuration mistake, not a valid zero-retry
- * request, so it is refused with {@link ConfigurationError} before `attempt`
- * is ever called.
- *
- * ## The replay contract
- *
- * `attempt` receives a fresh `frame` on every call and MUST satisfy:
- *
- * - **Await all of its work** before resolving or rejecting. A retried
- *   attempt that left a fire-and-forget side effect in flight from a
- *   previous, failed attempt could observe — or duplicate — work the caller
- *   never sees fail.
- * - **Use only the supplied `frame`, and values created fresh inside this
- *   call.** A failed attempt's transaction rolled back, so anything it left
- *   behind in memory (a counter, a buffer, an id set) is state no committed
- *   database agrees with; reading it on the next attempt would let a rolled
- *   back attempt leak into a committed one.
- * - **Perform no effect external to its own transaction.** The whole attempt
- *   re-runs on retry, so anything it does outside that transaction (a network
- *   call, a write to a different store) runs again too.
- * - **Tolerate being run up to `attempts` times.** The caller is supplying a
- *   callback willing to be invoked that many times, not exactly once.
- */
-export async function runRetriedUnit<T>(
-  options: Readonly<{ operation: string; attempts: number }>,
-  attempt: RetriedUnitAttempt<T>,
-): Promise<T> {
-  if (!Number.isInteger(options.attempts) || options.attempts < 1) {
-    throw new ConfigurationError(
-      `runRetriedUnit(${JSON.stringify(options.operation)}): options.attempts must be a positive integer, got ${options.attempts}.`,
-      { operation: options.operation, attempts: options.attempts },
-    );
-  }
-  for (let attemptNumber = 1; ; attemptNumber += 1) {
-    await delay(retryBackoffDelayMs(attemptNumber));
-    const classify = createMemoizedFailureClassifier(attemptNumber, options);
-    const frame: RetriedUnitFrame = {
-      attempt: attemptNumber,
-      willRetry: (error) => classify(error).retry,
-      reportedFailure: (error) => {
-        const disposition = classify(error);
-        return disposition.retry ? error : disposition.reported;
-      },
-    };
-    try {
-      return await attempt(frame);
-    } catch (error) {
-      const disposition = classify(error);
-      if (disposition.retry) continue;
-      throw disposition.reported;
-    }
-  }
 }

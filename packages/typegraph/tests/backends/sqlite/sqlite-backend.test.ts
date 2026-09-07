@@ -49,6 +49,7 @@ import { asCompiledTemporaryStatementSql } from "../../../src/query/sql-intent";
 import { createStore } from "../../../src/store";
 import { createTestBackend, createTestDatabase } from "../../test-utils";
 import { createAdapterTestSuite } from "../adapter-test-suite";
+import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
 import { createIntegrationTestSuite } from "../integration-test-suite";
 
 // ============================================================
@@ -71,11 +72,39 @@ createIntegrationTestSuite("SQLite", () => {
     // better-sqlite3 is one synchronous handle, so the batteries-included
     // factory already yields a serialized backend. It gets its own database so
     // nothing a provenance test does reaches the suite's own fixture.
-    createSerializedBackend: () => {
+    createSerializedBackend: (overrides) => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", overrides);
       const { backend } = createLocalSqliteBackend();
       return Promise.resolve({ backend, close: () => backend.close() });
     },
   };
+});
+
+// ============================================================
+// createSerializedBackend capability-override refusal
+// ============================================================
+
+// One predicate (`refuseUnsupportedSerializedBackendCapabilities`) backs both
+// SQLite lanes' `createSerializedBackend`; this exercises it directly rather
+// than duplicating the assertion per lane the way `write-fence-conformance.ts`
+// duplicates its PostgreSQL-only assertions.
+describe("createSerializedBackend refuses an unsupported capabilities override", () => {
+  it("throws, naming the lane, when overrides.capabilities is supplied to a lane with no construction-time override to apply it to", () => {
+    expect(() => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", {
+        capabilities: { writeFence: { mechanism: "engine-serialized" } },
+      });
+    }).toThrow(/SQLite/);
+  });
+
+  it("does not throw when overrides is omitted or capabilities is absent", () => {
+    expect(() => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", undefined);
+    }).not.toThrow();
+    expect(() => {
+      refuseUnsupportedSerializedBackendCapabilities("SQLite", {});
+    }).not.toThrow();
+  });
 });
 
 // ============================================================

@@ -136,6 +136,18 @@ export function canFuseSchemaFenceInFirstWrite(
  * custom backend implementing the fused members: a custom proxy can introduce
  * arbitrary work around a member call. The private root provenance is the
  * contract that makes direct autocommit safe.
+ *
+ * `runAutocommitSingleStatementWritePlan`, the one caller, never passes a
+ * `schemaFenceInFirstWrite` option through to its row-work — it trusts this
+ * classifier's name literally: the one statement row-work emits IS the
+ * schema fence. That is true only when `isSchemaFencedInsertEligible` also
+ * holds for `candidate.backend`, the same gate `canFuseSchemaFenceInFirstWrite`
+ * reads for the transactional fused write. Without it, a `mechanism: "row"`
+ * bundled root would take this shortcut anyway (nothing else here reads
+ * `writeFence` mechanism), row-work would fall through to its ordinary,
+ * unfenced INSERT (the fused member's in-statement lock clause is empty
+ * under `row`, and this path never calls `lockSchemaVersionForStoreWrite`
+ * either), and the write would complete with no schema-version check at all.
  */
 export function isAutocommitSingleStatementWrite(
   input: AutocommitSingleStatementCandidate,
@@ -146,6 +158,7 @@ export function isAutocommitSingleStatementWrite(
       return (
         candidate.schemaVersion !== undefined &&
         isBundledRootAutocommitEligible(candidate.backend) &&
+        isSchemaFencedInsertEligible(candidate.backend) &&
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&
         !candidate.identityEnabled &&
@@ -179,6 +192,7 @@ export function isAutocommitSingleStatementWrite(
       return (
         candidate.schemaVersion !== undefined &&
         isBundledRootAutocommitEligible(candidate.backend) &&
+        isSchemaFencedInsertEligible(candidate.backend) &&
         !candidate.historyEnabled &&
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&

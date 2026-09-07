@@ -16,13 +16,14 @@
  * `unfenced` at another for the same underlying backend.
  *
  * This is the only module that imports {@link carryBackendResourceAudit},
- * {@link carryFirstPartyFactoryMark}, and
- * {@link carrySchemaFencedInsertEligibility}.
+ * {@link carryFirstPartyFactoryMark}, {@link carrySchemaFencedInsertEligibility},
+ * and {@link carrySerializationFailureClassifier}.
  *
  * Naming convention this module's ratchet depends on: an identifier ending in
  * `Backend` denotes a whole backend object; a members fragment is named
  * `*Members`.
  */
+import { carrySerializationFailureClassifier } from "../utils/sql-errors";
 import { downgradeAtomicBatch } from "./capabilities/execution";
 import { carrySchemaFencedInsertEligibility } from "./capabilities/schema-fenced-insert";
 import { carryFirstPartyFactoryMark } from "./capabilities/write-fence";
@@ -253,6 +254,7 @@ function deriveBackendInternal<
   carryBackendResourceAudit(decoratedBackend, base);
   carryFirstPartyFactoryMark(decoratedBackend, base);
   carrySchemaFencedInsertEligibility(decoratedBackend, base);
+  carrySerializationFailureClassifier(decoratedBackend, base);
   carryDerivedCommandPortMetadata(base, overrides);
   recordBackendDerivation(decoratedBackend, base);
   return decoratedBackend;
@@ -326,6 +328,7 @@ export function projectBackend<
   carryBackendResourceAudit(projection, base);
   carryFirstPartyFactoryMark(projection, base);
   carrySchemaFencedInsertEligibility(projection, base);
+  carrySerializationFailureClassifier(projection, base);
   recordBackendDerivation(projection, base);
   return projection;
 }

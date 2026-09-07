@@ -67,10 +67,14 @@ createIntegrationTestSuite(
     backend: engine.makeBackend(),
     // PGlite is one in-process instance, so a backend over the lane's own
     // engine is already the serialized fixture. Closing stays a no-op because
-    // the engine outlives each test.
-    createSerializedBackend: () =>
+    // the engine outlives each test. `overrides.capabilities` is forwarded
+    // into `makeBackend` itself — applied at construction, before this
+    // backend's write-fence target and derived `unitOfWork` are resolved —
+    // for a test that needs this shared engine to declare a non-default
+    // write fence.
+    createSerializedBackend: (overrides) =>
       Promise.resolve({
-        backend: engine.makeBackend(),
+        backend: engine.makeBackend(overrides?.capabilities),
         close: () => Promise.resolve(),
       }),
   }),
@@ -78,5 +82,10 @@ createIntegrationTestSuite(
     // Branches and review targets need independent transactions. Reuse an
     // engine only after its fixture schema has been dropped at test cleanup.
     createIsolatedBackend: () => isolatedPool.makeFixture(),
+    // One in-process PGlite instance backs every `createSerializedBackend()`
+    // handle: two "connections" can never demonstrate one session blocking
+    // another. Explicit rather than relying on the default so this
+    // registration states its own answer to the question it's known for.
+    serverLaneConcurrency: false,
   },
 );

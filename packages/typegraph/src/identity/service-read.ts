@@ -1,5 +1,6 @@
 import { resolveRecursiveTraversal } from "../backend/capabilities/recursive-traversal";
 import {
+  requireFenceLockTables,
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";
@@ -253,10 +254,11 @@ export async function lockIdentityGraph(
   const plan = resolveWriteFencePlan(target);
   const fence = requireWriteFence(plan, "identity graph lock", "keyed");
   switch (fence.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       await target.execute(
         asCompiledRowsSql(
-          fence.sql.advisoryLock(IDENTITY_ADVISORY_LOCK_NAMESPACE, graphId),
+          fence.sql.acquireKeyed(IDENTITY_ADVISORY_LOCK_NAMESPACE, graphId),
         ),
       );
       return;
@@ -296,7 +298,8 @@ export async function lockIdentityEnablementNodes(
   const plan = resolveWriteFencePlan(target);
   const fence = requireWriteFence(plan, "identity enablement drain", "drain");
   switch (fence.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       if (fence.drain !== "table-lock") {
         // `drain: "quiescent"`: the declaration already excludes concurrent
         // writers by some other means (`requireWriteFence` already refused
@@ -306,7 +309,10 @@ export async function lockIdentityEnablementNodes(
       }
       await executeIdentityStatement(
         target,
-        fence.sql.lockTables([schema.tables.nodes], "share"),
+        requireFenceLockTables(fence, "lockIdentityEnablementNodes")(
+          [schema.tables.nodes],
+          "share",
+        ),
       );
       return;
     }

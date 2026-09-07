@@ -17,9 +17,10 @@ const SQL_SCHEMA_BRAND: unique symbol = typeGraphGlobalSymbol("sql-schema-v1");
  * Table names for TypeGraph SQL schema.
  *
  * Carries every customizable physical-table name the backend exposes,
- * including the secondary tables (`uniques`, `edgeClaims`) that the query compiler
- * itself doesn't reference but `materializeRemovals` and other
- * cleanup paths need to address by name. Backends without a
+ * including the secondary tables (`uniques`, `edgeClaims`, `fences`) that
+ * the query compiler itself doesn't reference but `materializeRemovals` and
+ * other cleanup paths (or, for `fences`, `resolveFenceStatements`'s
+ * `row`-mechanism derivation) need to address by name. Backends without a
  * `uniques` table (custom embeddings-only stores) leave it as the
  * default — the cleanup path is a no-op for kinds with no unique
  * rows.
@@ -51,6 +52,13 @@ export type SqlTableNames = Readonly<{
   uniques: string;
   /** Edge cardinality claim table name (default: "typegraph_edge_claims") */
   edgeClaims?: string | undefined;
+  /**
+   * Write-fence rows table name (default: "typegraph_fences") — the
+   * never-dropped relation a `row`-mechanism write fence acquires a keyed
+   * exclusion against. Part of the base schema on every backend, whether or
+   * not any target ever declares `writeFence.mechanism: "row"`.
+   */
+  fences?: string | undefined;
 }>;
 
 export type ResolvedSqlTableNames = Readonly<{
@@ -76,6 +84,8 @@ export type ResolvedSqlTableNames = Readonly<{
   uniques: string;
   /** Edge cardinality claim table name */
   edgeClaims: string;
+  /** Write-fence rows table name */
+  fences: string;
 }>;
 
 type SqlSchemaFields = Readonly<{
@@ -185,6 +195,7 @@ const DEFAULT_TABLE_NAMES: ResolvedSqlTableNames = {
   fulltext: "typegraph_node_fulltext",
   uniques: "typegraph_node_uniques",
   edgeClaims: "typegraph_edge_claims",
+  fences: "typegraph_fences",
 };
 
 function resolveTableNames(
@@ -210,6 +221,7 @@ function resolveTableNames(
     fulltext: names.fulltext ?? DEFAULT_TABLE_NAMES.fulltext,
     uniques: names.uniques ?? DEFAULT_TABLE_NAMES.uniques,
     edgeClaims: names.edgeClaims ?? DEFAULT_TABLE_NAMES.edgeClaims,
+    fences: names.fences ?? DEFAULT_TABLE_NAMES.fences,
   };
 }
 
@@ -324,6 +336,7 @@ export function createSqlSchema(names: Partial<SqlTableNames> = {}): SqlSchema {
   validateTableName(tables.fulltext, "fulltext");
   validateTableName(tables.uniques, "uniques");
   validateTableName(tables.edgeClaims, "edgeClaims");
+  validateTableName(tables.fences, "fences");
 
   return freezeSqlSchema({
     tables: Object.freeze(tables),

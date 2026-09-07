@@ -5,6 +5,7 @@ import { z } from "zod";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { sqliteInstantiateGraphTemplateStatement } from "../src/backend/drizzle/graph-template-sql";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import type { AdapterBackend } from "../src/backend/types";
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
 import { renderSqlite } from "../src/query/sql-fragment";
@@ -18,6 +19,7 @@ import {
   createAdapterStoreWithSchema,
   createVerifiedAdapterStore,
 } from "../src/store/store";
+import { createLoggedPostgresBackend } from "./lock-fence-test-utils";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -223,5 +225,58 @@ describe("graph templates", () => {
     ).rejects.toMatchObject({
       details: { code: "GRAPH_TEMPLATE_INSTANTIATION_REFUSED" },
     });
+  });
+});
+
+describe("graph templates — row-mechanism PostgreSQL write fence (PGlite)", () => {
+  it("captures the fence-row acquisition before the CTE, and takes no advisory lock", async () => {
+    // Under `mechanism: "row"`, the CTE's `locked` clause is gone (see
+    // `postgresInstantiateGraphTemplateStatement`); the schema-commit fence's
+    // exclusion instead comes from the fences relation, acquired as its own
+    // preceding statement in the same transaction so the two commit or roll
+    // back together.
+    const rowLogged = await createLoggedPostgresBackend({
+      writeFence: { mechanism: "row", drain: "quiescent", conflict: "wait" },
+    });
+    try {
+      // `LoggedBackend.backend` is typed as the plain `GraphBackend` surface
+      // (reusable across dialects), but `createLoggedPostgresBackend`
+      // actually builds it via `createPostgresBackend`, a real
+      // `AdapterBackend`: narrowed here only to reach the reconciled-schema
+      // surface `registerGraphTemplate` needs.
+      const rowBackend = rowLogged.backend as AdapterBackend<unknown>;
+      const [source] = await createAdapterStoreWithSchema(
+        templateGraph,
+        rowBackend,
+      );
+      const template = await registerGraphTemplate(rowLogged.backend, {
+        templateId: "people-v1-row",
+        reconciled: source.reconciledSchema,
+      });
+      rowLogged.reset();
+
+      const result = await instantiateGraphTemplate(rowLogged.backend, {
+        template,
+        graphId: "tenant-row",
+      });
+      expect(result.status).toBe("ready");
+
+      const statements = rowLogged.statements.map(
+        (statement) => statement.query,
+      );
+      const fenceRowIndex = statements.findIndex((query) =>
+        /insert\s+into\s+"typegraph_fences"[\s\S]*on conflict/i.test(query),
+      );
+      const cteIndex = statements.findIndex((query) =>
+        /with\s+template\s+as\s*\(/i.test(query),
+      );
+      expect(fenceRowIndex).toBeGreaterThanOrEqual(0);
+      expect(cteIndex).toBeGreaterThan(fenceRowIndex);
+      expect(
+        statements.some((query) => /pg_advisory_xact_lock/i.test(query)),
+      ).toBe(false);
+    } finally {
+      await rowLogged.close();
+    }
   });
 });

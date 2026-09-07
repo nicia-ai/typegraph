@@ -820,6 +820,17 @@ closed to the three codes documented under
 [Recorded-capture guard codes](#recorded-capture-guard-codes) below, and
 `isRecordedCaptureGuardError` does not recognize any write-fence code.
 
+### Optimistic-retry unit codes
+
+The retry owner every `"optimistic-retry"`-tier unit of work runs through
+(`src/backend/capabilities/retried-unit.ts`) raises one more
+`ConfigurationError` code, naming `details.operation` — the same operation
+name `TransactionConflictError` reports for the same unit:
+
+| `details.code` | Raised when |
+| --- | --- |
+| `OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` | The unit's target is on the `"optimistic-retry"` execution tier (see [Backend Capabilities](/backend-setup#backend-capabilities)), and detecting a unit of work nested inside another one depends on `node:async_hooks`' `AsyncLocalStorage`, which is unavailable on this runtime. Running without that detection would let a nested unit's own independent retry commit against reads an outer attempt took before it ever conflicted, so the unit is refused, before its attempt ever runs, rather than run without it. A target on any other execution tier is unaffected: no nested owner exists there, so this code is never raised for it. |
+
 #### Backend capability declaration codes
 
 Custom backend declarations and capability bundles use stable `details.code` values when the

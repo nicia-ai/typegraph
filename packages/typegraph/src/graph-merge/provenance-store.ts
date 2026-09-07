@@ -155,6 +155,7 @@ import {
   createStoreWithSchema,
   defineInternalGraph,
   defineNode,
+  requireFenceLockTables,
   requireWriteFence,
   resolveWriteFencePlan,
   serializeSchema,
@@ -439,7 +440,8 @@ async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
     "drain",
   );
   switch (fence.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       if (fence.drain !== "table-lock") {
         // `drain: "quiescent"`: the declaration already excludes concurrent
         // writers by some other means, so this site takes no statement.
@@ -452,7 +454,7 @@ async function drainUnfencedRowWriters(tx: SidecarClaimPort): Promise<void> {
       const schema = createSqlSchema(tx.tableNames);
       await tx.executeStatement(
         asCompiledStatementSql(
-          fence.sql.lockTables(
+          requireFenceLockTables(fence, "drainUnfencedRowWriters")(
             [schema.tables.nodes, schema.tables.edges],
             "share-row-exclusive",
           ),

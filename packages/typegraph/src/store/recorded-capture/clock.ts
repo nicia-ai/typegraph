@@ -87,7 +87,7 @@ const postgresFenceStatements = resolveFenceStatements(postgresFenceSql);
  * wait under ordinary concurrent load.
  */
 export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
-  return postgresFenceStatements.advisoryLock(
+  return postgresFenceStatements.acquireKeyed(
     RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
     graphId,
   );
@@ -96,7 +96,7 @@ export function recordedClockAdvisoryLockSql(graphId: string): SqlFragment {
 export function recordedGraphWriteAdvisoryLockSql(
   graphId: string,
 ): SqlFragment {
-  return postgresFenceStatements.advisoryLockWithIsolation(
+  return postgresFenceStatements.acquireKeyedWithIsolation(
     RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
     graphId,
   );
@@ -221,7 +221,7 @@ async function acquireRecordedGraphWriteLock(
     Readonly<{ transaction_isolation: unknown }>
   >(
     asCompiledRowsSql(
-      fenceSql.advisoryLockWithIsolation(
+      fenceSql.acquireKeyedWithIsolation(
         RECORDED_GRAPH_WRITE_ADVISORY_LOCK_NAMESPACE,
         graphId,
       ),
@@ -249,7 +249,8 @@ export async function lockRecordedGraphWrite(
       // cannot authorize the PostgreSQL convergence command.
       return uncapturedGraphWriteLock();
     }
-    case "lock": {
+    case "lock":
+    case "row": {
       break;
     }
     default: {
@@ -530,10 +531,11 @@ async function lockRecordedClock(
   const plan = resolveWriteFencePlan(target);
   const fence = requireWriteFence(plan, "recorded clock allocation", "keyed");
   switch (fence.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       await target.execute(
         asCompiledRowsSql(
-          fence.sql.advisoryLock(
+          fence.sql.acquireKeyed(
             RECORDED_CLOCK_ADVISORY_LOCK_NAMESPACE,
             graphId,
           ),

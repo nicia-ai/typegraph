@@ -214,7 +214,16 @@ function planTransactionOptions<K extends RowWorkKind, T>(
   return { ...options, fencesConstraintProbe: plan.constraintProbe };
 }
 
-/** Runs one managed write under its plan. */
+/**
+ * Runs one managed write under its plan.
+ *
+ * Retrying under the `"optimistic-retry"` tier is `runInWriteTransaction`'s
+ * own concern (`write-transaction.ts`), not re-spelled here: that function
+ * wraps its whole attempt — opening the transaction, taking the locks, and
+ * calling `rowWork` — in `runRetriedUnit` whenever `backend`'s tier requires
+ * it, so a retried attempt re-enters this call from the top with brand-new
+ * everything.
+ */
 export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
   plan: WritePlan<K>,
@@ -233,7 +242,11 @@ export function runWritePlan<K extends RowWorkKind, T>(
 /**
  * Hooked variant: operation hooks WRAP the plan, exactly as
  * `runHookedWriteOperation` wraps the transaction today, so `onOperationEnd`
- * observes a durably committed result.
+ * observes a durably committed result. Because `runInWriteTransaction`'s own
+ * retry wrapping (see `runWritePlan`'s doc comment) is entirely inside this
+ * call, a retry under `"optimistic-retry"` is invisible to
+ * `onOperationStart`/`onOperationEnd`: they fire exactly once for the
+ * operation as a whole, exactly as they do under `"interactive"`.
  */
 export function runHookedWritePlan<K extends RowWorkKind, T>(
   ctx: HookedWritePlanContext,

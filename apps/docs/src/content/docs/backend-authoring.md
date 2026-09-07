@@ -186,7 +186,7 @@ const backend = createSqlBackend(derivedProfile);
 `isolationFactExpression` are the bundled PostgreSQL builders, reused
 because this example leaves them unchanged — a custom `FenceSql` need not
 replace every member. TypeGraph derives the standalone-statement forms
-every lock site actually calls (`advisoryLock`, `advisoryLockWithIsolation`,
+every lock site actually calls (`acquireKeyed`, `acquireKeyedWithIsolation`,
 `isolationFact`) from these two expressions, so `customFenceSql` never
 spells a statement and its expression separately — the two cannot disagree
 about what they lock or read. This is the same `customAdvisoryLockExpression`
@@ -212,6 +212,100 @@ instantiation statement is a different, already-reachable case: it is the
 `instantiateStatement` member of `graphTemplateRuntime`, one of the fields
 this same derivation can override (see the table above).
 
+## Worked example: a portable `row`-mechanism fence
+
+An engine with no advisory-lock primitive at all — a PostgreSQL-wire engine
+with no working `pg_advisory_xact_lock` — declares `mechanism: "row"`
+instead. TypeGraph spells the keyed acquisition itself against the
+never-dropped fences relation, so this derivation needs no
+`advisoryLockExpression` at all — only the declared mechanism and its two
+facts, `drain` and `conflict`:
+
+```typescript
+const derivedProfile = deriveEngineProfile(baseProfile, {
+  declaredCapabilities: {
+    ...baseProfile.declaredCapabilities,
+    writeFence: {
+      mechanism: "row",
+      drain: "quiescent",
+      conflict: "commit-time",
+    },
+  },
+});
+
+const backend = createSqlBackend(derivedProfile);
+```
+
+`conflict` states which of the two ways this engine resolves two writers of
+one fence row: `"wait"` for a lock-based engine (the second acquirer's
+statement blocks, exactly like `"advisory"`); `"commit-time"` for an
+optimistic-concurrency engine, where both acquirers proceed and the loser's
+COMMIT fails. Declaring `"commit-time"` on an interactive backend (as here)
+derives `capabilities.execution.unitOfWork: "optimistic-retry"` — every
+store-owned write this backend opens now replays a real commit-time conflict
+as a whole unit, up to `OPTIMISTIC_RETRY_ATTEMPTS` (3) attempts, rather than
+surfacing the raw driver error on the first one. `drain: "quiescent"` is the
+simplest legal drain when nothing else needs a real table lock; pass
+`fenceSql.lockTables` and declare `drain: "table-lock"` instead when this
+engine has one. A `fenceSql.isolationFactExpression`, if this engine's wire
+protocol supports reading it, rides the SAME acquisition statement — pass
+`postgresFenceSql.isolationFactExpression` (or a custom one) as `fenceSql` to
+keep recorded capture and match-key convergence trusting a real fact instead
+of failing closed on an unknown one.
+
+### Declaring a `serializationFailure` classifier
+
+`isSerializationFailure` (the one predicate every retry owner consults)
+recognizes PostgreSQL's own `40001` / `40P01` SQLSTATEs and their fixed
+driver-message fallback. An engine whose commit-conflict shape is something
+else entirely — a custom error class, a different code — declares
+`execution.serializationFailure` so the SAME predicate recognizes it instead
+of falling through to a raw, unretried failure:
+
+```typescript
+const profile = buildPostgresEngineProfile(db, options);
+const backend = createSqlBackend({
+  ...profile,
+  execution: {
+    ...profile.execution,
+    serializationFailure: (error) =>
+      error instanceof Error && error.message.includes("CONFLICT_ON_COMMIT"),
+  },
+});
+```
+
+This is deliberately NOT a `deriveEngineProfile` override: `execution` is
+captured by `buildOperations` and every transaction handle (see
+[What you cannot override](#what-you-cannot-override) below), so
+`deriveEngineProfile` refuses it like every other field in that table.
+Hand-spreading `execution` this way is safe for reading
+`serializationFailure` itself, because `createSqlBackend` is the only reader
+of `profile.execution.serializationFailure` — it registers the classifier
+against the exact backend object it is about to return, once, at
+construction — while every other `execution` member (`compile`, `execute`,
+`runExclusive`, and so on) rides forward as the SAME function reference the
+base builder closed over, spread unchanged. `createSqlBackend` consults the
+registered classifier for `isSerializationFailure` calls that pass this
+backend (or one of its transactions) as `target`; every store-owned unit
+routed through `runRetriedUnit`, and `store.transaction`'s own retry, already
+does.
+
+That safety is narrow, and it does not extend to the profile object itself.
+`{...profile, execution: {...}}` is a plain object literal — a different
+object from the one `buildPostgresEngineProfile` returned — so
+`isFirstPartyProfile` no longer recognizes it. `createSqlBackend` gates
+every `markFirstPartyFactory` call on that check, so a hand-spread profile
+loses standing to two optimizations, silently and with no functional
+difference to catch in testing: the dialect-derivation write-fence fallback
+(moot here, since the spread profile still carries `writeFence` declared)
+and the lazy schema-fence lease
+(`withTransactionSchemaFenceLease`, `src/store/operations/write-transaction.ts`),
+which falls back to the conservative per-call fence instead. Accept that
+trade for a one-off `serializationFailure` override; a backend meant to keep
+first-party standing declares `serializationFailure` inside the builder
+function that constructs `profile` in the first place, rather than spreading
+the finished object afterward.
+
 ## Removing `fenceSql`
 
 `fenceSql` is the one field a derived profile can clear: pass
@@ -231,8 +325,8 @@ lock spelling at all.
 | Code | When |
 | --- | --- |
 | `ENGINE_PROFILE_REQUIRES_WRITE_FENCE_DECLARATION` | The profile's resolved capabilities omit `writeFence` — `createSqlBackend` has no write-fence decision to resolve and refuses outright, naming the one capabilities line to add. |
-| `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved capabilities declare `mechanism: "advisory"` but the profile's `fenceSql` is missing the member that mechanism/drain combination needs. |
-| `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` carries an unrecognized `mechanism` or `drain` string, or a `drain` key on a mechanism other than `"advisory"` — `resolveWriteFencePlan` validates the raw value (a plain-JavaScript author is not held to the discriminated-union type) before shaping a plan from it. |
+| `WRITE_FENCE_SQL_UNAVAILABLE` | The resolved capabilities declare `mechanism: "advisory"` but the profile's `fenceSql` is missing the member that mechanism/drain combination needs; or `mechanism: "row"` with `drain: "table-lock"` but no `fenceSql.lockTables`. A `"row"` target missing `tableNames.fences` is NOT refused here — it refuses the first time a keyed site actually acquires the fence row. |
+| `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` carries an unrecognized `mechanism`, `drain`, or `conflict` string; a `drain` key on a mechanism other than `"advisory"` / `"row"`; a `conflict` key on anything but `"row"`; or `conflict: "commit-time"` on a target whose own `capabilities.execution.interactiveTransactions` is `false` — that value is honored only by the `"optimistic-retry"` execution tier, which never derives without an interactive transaction to replay inside, so accepting it there would silently drop it rather than apply it. `resolveWriteFencePlan` validates the raw value (a plain-JavaScript author is not held to the discriminated-union type) before shaping a plan from it. |
 | `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized` — an externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |

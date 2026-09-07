@@ -4,15 +4,17 @@
  * Three ratchets, all comment-stripped AST scans over `src/**` (modelled on
  * `tests/recursive-traversal-inventory.test.ts`):
  *
- *  1. `resolveWriteFencePlan` has exactly **16** call sites — the 8 lock
+ *  1. `resolveWriteFencePlan` has exactly **17** call sites — the 8 lock
  *     sites (J1-J8), the 2 construction gates (J9a recorded-clock
  *     ownership, J9b identity), the adopted-transaction writer-slot proof
  *     (J9c), the 3 consumers of the PostgreSQL schema fence (J14
  *     commit-side, J15 writer-side, J16 the writer-side clause folded into
  *     the fused managed-insert programs), the shared SQL engine
- *     factory's own resolution (J17, `createSqlBackend`), and the
- *     trusted-import table lock (J18) — enumerated in both directions,
- *     keyed on `(file, trimmed line)` so line drift cannot rot the pin.
+ *     factory's own resolution (J17, `createSqlBackend`), the
+ *     trusted-import table lock (J18), and SQLite's own schema-commit/
+ *     writer fence resolution (J19, the `row`-mechanism counterpart to
+ *     J14/J15) — enumerated in both directions, keyed on `(file, trimmed
+ *     line)` so line drift cannot rot the pin.
  *
  *     J18 is not one of J1-J8: those eight sites are the ones that used to
  *     spell `dialect === "postgres"` inline before this ratchet, while
@@ -102,7 +104,7 @@ type InventoryEntry = Readonly<{
   reason: string;
 }>;
 
-/** The 11 `resolveWriteFencePlan` call sites (Contract J, I8). */
+/** The 17 `resolveWriteFencePlan` call sites (Contract J, I8). */
 const CALL_SITES: readonly InventoryEntry[] = [
   {
     file: "store/recorded-capture/clock.ts",
@@ -204,10 +206,10 @@ const CALL_SITES: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/engine/create-sql-backend.ts",
-    line: "const fencePlan = resolveWriteFencePlan(fenceTarget);",
+    line: "const fencePlan = resolveWriteFencePlan(declarationFenceTarget);",
     site: "J17",
     reason:
-      "createSqlBackend builds the ONE fence target from a profile's finalized capabilities and resolves the plan once, before any member group is assembled, and gates markSchemaFencedInsertEligible on the result — every dialect profile this factory assembles shares this one resolution.",
+      "createSqlBackend resolves the plan once, from the profile's DECLARED capabilities (before its capability tail runs, since the tail needs this plan's conflict fact to derive optimistic-retry), and gates markSchemaFencedInsertEligible on the result — every dialect profile this factory assembles shares this one resolution.",
   },
   {
     file: "backend/drizzle/trusted-import.ts",
@@ -215,6 +217,13 @@ const CALL_SITES: readonly InventoryEntry[] = [
     site: "J18",
     reason:
       "lockPostgresTrustedImportTables resolves the plan for the trusted-import table lock. The one site that takes a table lock with no advisory lock preceding it — the import owns the whole node and edge relations for its duration and runs inside its own transaction.",
+  },
+  {
+    file: "backend/drizzle/sqlite.ts",
+    line: "resolveWriteFencePlan(fenceTarget),",
+    site: "J19",
+    reason:
+      "lockSchemaVersionForWrite resolves the plan for SQLite's schema-commit/writer fence — the SQLite counterpart to J14/J15's PostgreSQL FOR UPDATE/FOR SHARE pair. Under mechanism: \"row\" the fence row is taken as a preceding statement in the same transaction before the plain schema-version read, giving a concurrent schema commit and this write the row to contend on.",
   },
 ];
 
@@ -377,13 +386,13 @@ function scanSourceTree<T>(
   );
 }
 
-describe("T17 — resolveWriteFencePlan has exactly 16 call sites", () => {
+describe("T17 — resolveWriteFencePlan has exactly 17 call sites", () => {
   const found = scanSourceTree(scanForResolveCalls);
   const diff = diffAgainstInventory(found, CALL_SITES);
 
-  it("has exactly the 16 declared call sites, both directions", () => {
-    expect(found).toHaveLength(16);
-    expect(CALL_SITES).toHaveLength(16);
+  it("has exactly the 17 declared call sites, both directions", () => {
+    expect(found).toHaveLength(17);
+    expect(CALL_SITES).toHaveLength(17);
     const undeclaredReport = diff.undeclared.map(
       (site) => `${site.file}:${String(site.lineNumber)}  ${site.line}`,
     );

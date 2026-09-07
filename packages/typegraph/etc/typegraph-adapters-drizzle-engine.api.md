@@ -158,7 +158,7 @@ type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
-        unitOfWork?: "interactive" | "batch" | "none";
+        unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
@@ -720,6 +720,7 @@ type CreateBaseSchemaMembersDeps = Readonly<{
     readVersion: () => Promise<number | undefined>;
     writeVersion: (version: number) => Promise<number | undefined>;
     ensureGraphTemplatesTable: () => Promise<void>;
+    fencesTableDdl: string;
     ensureEdgeMatchIdentityStorage: () => Promise<void>;
 }>;
 
@@ -751,7 +752,9 @@ type CreateGraphTemplateMembersDeps = Readonly<{
     ensureTable: (ddl: string) => Promise<void>;
     execute: GraphTemplateExecute;
     tableNames: GraphTemplateTableNames;
-    instantiateStatement: (params: InstantiateGraphTemplateSqlParams) => SqlFragment;
+    fencePlan: WriteFencePlan;
+    fenceTarget: WriteFenceTarget;
+    instantiateStatement: (params: InstantiateGraphTemplateSqlParams, execute: GraphTemplateExecute, fencePlan: WriteFencePlan, fenceTarget: WriteFenceTarget) => Promise<readonly Record<string, unknown>[]>;
     toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
     rowAccess: GraphTemplateRowAccess;
     copyContributionMarkers?: (execute: GraphTemplateExecute, params: CopyGraphTemplateContributionMarkersSqlParams) => Promise<void>;
@@ -2935,6 +2938,47 @@ function createPostgresTables(names?: Partial<PostgresTableNames>, options?: Cre
                 columnType: "PgTimestamp";
                 data: Date;
                 driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "pg";
+    }>;
+    readonly fences: drizzle_orm_pg_core.PgTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            key: drizzle_orm_pg_core.PgColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "PgText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+            generation: drizzle_orm_pg_core.PgColumn<{
+                name: "generation";
+                tableName: string;
+                dataType: "number";
+                columnType: "PgBigInt53";
+                data: number;
+                driverParam: string | number;
                 notNull: true;
                 hasDefault: false;
                 isPrimaryKey: false;
@@ -6217,6 +6261,49 @@ function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateS
         };
         dialect: "sqlite";
     }>;
+    readonly fences: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
+        name: string;
+        schema: undefined;
+        columns: {
+            key: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "key";
+                tableName: string;
+                dataType: "string";
+                columnType: "SQLiteText";
+                data: string;
+                driverParam: string;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: [string, ...string[]];
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {
+                length: number | undefined;
+            }>;
+            generation: drizzle_orm_sqlite_core.SQLiteColumn<{
+                name: "generation";
+                tableName: string;
+                dataType: "number";
+                columnType: "SQLiteInteger";
+                data: number;
+                driverParam: number;
+                notNull: true;
+                hasDefault: false;
+                isPrimaryKey: false;
+                isAutoincrement: false;
+                hasRuntimeDefault: false;
+                enumValues: undefined;
+                baseColumn: never;
+                identity: undefined;
+                generated: undefined;
+            }, {}, {}>;
+        };
+        dialect: "sqlite";
+    }>;
     readonly baseSchemaVersions: drizzle_orm_sqlite_core.SQLiteTableWithColumns<{
         name: string;
         schema: undefined;
@@ -7413,9 +7500,16 @@ type ExtensionUniqueWhere = Readonly<{
 
 // @public
 type FenceSql = Readonly<{
-    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
-    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
-    isolationFactExpression: () => SqlFragment;
+    lockTables?: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    advisoryLockExpression?: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression?: () => SqlFragment;
+}>;
+
+// @public
+export type FenceStatements = FenceSql & Readonly<{
+    acquireKeyed: (namespace: string, key: string | number) => SqlFragment;
+    acquireKeyedWithIsolation: (namespace: string, key: string | number) => SqlFragment;
+    isolationFact: () => SqlFragment;
 }>;
 
 // @public
@@ -7821,7 +7915,7 @@ type GraphTemplateRowAccess = Readonly<{
 }>;
 
 // @public
-export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "ensureTable" | "execute">;
+export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "ensureTable" | "execute" | "fencePlan" | "fenceTarget">;
 
 // @public
 type GraphTemplateTableNames = Readonly<{
@@ -8339,6 +8433,7 @@ type PostgresTableNames = Readonly<{
     contributionMaterializations: string;
     kindRemovals: string;
     reconciliationMarkers: string;
+    fences: string;
 }>;
 
 // @public
@@ -8529,6 +8624,7 @@ type ResolvedSqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims: string;
+    fences: string;
 }>;
 
 // @public
@@ -8731,6 +8827,7 @@ type SqlExecutionAdapter = Readonly<{
     executeAtomicBatch?: AtomicSqlBatchExecutor;
     prepare?: (sqlText: string) => PreparedSqlStatement;
     runExclusive?: <T>(critical: (connection: SqlExecutionAdapter) => Promise<T>) => Promise<T>;
+    serializationFailure?: (error: unknown) => boolean;
 }>;
 
 // @public
@@ -8790,6 +8887,7 @@ type SqliteTableNames = Readonly<{
     contributionMaterializations: string;
     kindRemovals: string;
     reconciliationMarkers: string;
+    fences: string;
 }>;
 
 // @public
@@ -8825,6 +8923,7 @@ type SqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
+    fences?: string | undefined;
 }>;
 
 // @public (undocumented)
@@ -9104,9 +9203,56 @@ type WriteFenceDeclaration = Readonly<{
     mechanism: "advisory";
     drain: "table-lock" | "quiescent" | "none";
 }> | Readonly<{
+    mechanism: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
+}> | Readonly<{
     mechanism: "engine-serialized";
 }> | Readonly<{
     mechanism: "caller-serialized";
+}>;
+
+// @public
+export type WriteFencePlan =
+/**
+* Take the keyed advisory lock, spelled by `sql` — the target's OWN
+* declared spelling: a lock site never hand-writes the statement, it
+* resolves a plan and consumes `sql.<builder>(…)`.
+*/
+Readonly<{
+    kind: "lock";
+    drain: "table-lock" | "quiescent" | "none";
+    sql: FenceStatements;
+}>
+/**
+* Take the keyed exclusion against the fences relation, spelled by `sql` —
+* mechanism-neutral: a keyed site calls the exact same `sql.acquireKeyed`/
+* `sql.acquireKeyedWithIsolation` a `lock` plan's site calls. `conflict`
+* is the one fact a `row` site (and the tier deriving `optimistic-retry`)
+* reads that a `lock` site never needs, because an advisory engine only
+* ever waits.
+*/
+| Readonly<{
+    kind: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
+    sql: FenceStatements;
+}>
+/** No lock needed: the engine serializes writers. */
+| Readonly<{
+    kind: "engine-serialized";
+}>
+/**
+* No lock needed: the deployment itself promises no concurrent writer
+* exists — this backend's own process serializes every write unit it
+* issues, and no other client writes to the database while it is open.
+*/
+| Readonly<{
+    kind: "caller-serialized";
+}>
+/** Neither. Every non-degradable fence refuses: `capabilities.writeFence` is absent. */
+| Readonly<{
+    kind: "unfenced";
 }>;
 
 // @public
@@ -9114,6 +9260,7 @@ type WriteFenceTarget = Readonly<{
     dialect: SqlDialect;
     capabilities: BackendCapabilities;
     fenceSql?: FenceSql | undefined;
+    tableNames?: SqlTableNames | undefined;
 }>;
 
 // (No @packageDocumentation comment for this package)

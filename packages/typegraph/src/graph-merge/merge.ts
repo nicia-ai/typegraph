@@ -2186,7 +2186,11 @@ export async function commitPlan<G extends GraphDef>(
   }
   return runMergeCommit(() =>
     runRetriedUnit(
-      { operation: "commitPlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      {
+        operation: "commitPlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
       () =>
         target.transaction(async (tx) => {
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
@@ -2238,7 +2242,7 @@ async function runMergeCommit<Output>(
  * Isolation for the merge commit transaction. SERIALIZABLE closes the window
  * between the in-transaction re-validation reads and COMMIT on multi-writer
  * Postgres (SSI aborts a racing writer with SQLSTATE 40001, which
- * {@link file://../store/operations/write-transaction.ts runRetriedUnit} retries); SQLite and
+ * {@link file://../backend/capabilities/retried-unit.ts runRetriedUnit} retries); SQLite and
  * PGlite serialize writers by construction, and the SQLite backend ignores
  * the option.
  */
@@ -3898,7 +3902,11 @@ export async function applyMergePlan<G extends GraphDef>(
       return err(provenanceStore.error);
     }
     const merged = await runRetriedUnit(
-      { operation: "applyMergePlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      {
+        operation: "applyMergePlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
       () =>
         target.transaction(async (tx) => {
           const txBackend = transactionBackend(tx);
@@ -4903,7 +4911,11 @@ async function commitIncrementalPlan<G extends GraphDef>(
   // writes until this plan commits.
   return runMergeCommit(() =>
     runRetriedUnit(
-      { operation: "commitIncrementalPlan", attempts: MERGE_COMMIT_ATTEMPTS },
+      {
+        operation: "commitIncrementalPlan",
+        attempts: MERGE_COMMIT_ATTEMPTS,
+        target: storeBackend(target),
+      },
       () =>
         target.transaction(async (tx) => {
           await lockMergeTargetWrite(transactionBackend(tx), {

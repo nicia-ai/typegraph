@@ -2,7 +2,11 @@ import { TrustedImportError } from "../../errors";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
 import { resolveStampedValidityLowerBound } from "../../utils/date";
-import { requireWriteFence, resolveWriteFencePlan } from "../capabilities/write-fence";
+import {
+  requireFenceLockTables,
+  requireWriteFence,
+  resolveWriteFencePlan,
+} from "../capabilities/write-fence";
 import type {
   InsertEdgeParams,
   InsertNodeParams,
@@ -112,7 +116,8 @@ export async function lockPostgresTrustedImportTables(
   const plan = resolveWriteFencePlan(backend);
   const fence = requireWriteFence(plan, "trusted import", "drain");
   switch (fence.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       if (fence.drain !== "table-lock") {
         // `drain: "quiescent"`: the declaration already excludes concurrent
         // writers by some other means, so this site takes no statement.
@@ -120,7 +125,7 @@ export async function lockPostgresTrustedImportTables(
       }
       await executeStatement(
         asCompiledStatementSql(
-          fence.sql.lockTables(
+          requireFenceLockTables(fence, "lockPostgresTrustedImportTables")(
             [tableNames.nodes, tableNames.edges],
             "access-exclusive",
           ),

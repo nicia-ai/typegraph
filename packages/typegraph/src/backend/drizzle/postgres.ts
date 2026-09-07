@@ -83,6 +83,7 @@ import {
 import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
 import {
   annIndexScanTypes,
+  asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
 import { requireDefined } from "../../utils/presence";
@@ -116,6 +117,11 @@ import {
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
+import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../capabilities/retried-unit";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
@@ -520,6 +526,20 @@ async function withConcurrentCreateRetry<T>(run: () => Promise<T>): Promise<T> {
 function extensionDdlLockKey(extension: DatabaseExtensionName): string {
   return `typegraph:extension-ddl:${extension}`;
 }
+
+/**
+ * The keyed-exclusion namespace both halves of the schema fence acquire
+ * under `mechanism: "row"` — `acquireSchemaWriteFence` (the commit side) and
+ * `lockActiveSchemaVersion` (the write side) — so a concurrent commit and a
+ * concurrent write contend on the SAME fence row. That serializes them on a
+ * waiting engine (`conflict: "wait"`) and gives the loser a commit-time
+ * conflict on an optimistic one (`conflict: "commit-time"`), matching what
+ * the `FOR UPDATE`/`FOR SHARE` pair already does under `mechanism: "lock"`.
+ * The fused managed-entity insert stays advisory-only under `row` (its own
+ * `schemaFenceInsertLockClause` above never reads this namespace) — only
+ * these two standalone statements take the fence row.
+ */
+const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
 
 /**
  * Normalizes one PostgreSQL declared column type to the family
@@ -1009,6 +1029,7 @@ export function buildPostgresEngineProfile(
     fulltext: tables.fulltextTableName,
     uniques: getTableName(tables.uniques),
     edgeClaims: getTableName(tables.edgeClaims),
+    fences: getTableName(tables.fences),
   };
   // Pre-quote identifiers so refreshStatistics() doesn't rebuild the
   // ANALYZE statements on every call. The recorded and identity relations
@@ -1099,16 +1120,19 @@ export function buildPostgresEngineProfile(
    * objects still race on `pg_extension_name_index`. Two fences answer that,
    * and both are here because they answer different halves of it:
    *
-   *  - the resolved write-fence plan's advisory lock — spelled through
-   *    `fencePlan.sql.advisoryLock`, like every other lock site, rather than
+   *  - the resolved write-fence plan's keyed exclusion — spelled through
+   *    `fencePlan.sql.acquireKeyed`, like every other lock site, rather than
    *    inline — serializes same-key installers inside this process group so
    *    the common case never raises at all (#475). It is keyed on the
    *    extension so installing `vector` does not queue behind `pg_trgm`. This
    *    is the one lock site that DEGRADES instead of refusing: a plan that
-   *    resolves `engine-serialized` or `unfenced` takes no lock and falls
-   *    through to the same retry-only path as the non-interactive branch
-   *    below, because the retry — not the lock — is what makes a concurrent
-   *    install correct;
+   *    resolves `engine-serialized` or `unfenced` takes no lock, and so does
+   *    `row` — a row-mechanism acquisition writes to the fences relation,
+   *    which this call cannot assume exists yet (extension install can run
+   *    before the base schema that creates it), and the retry-only path
+   *    below needs no fences row to be correct — and falls through to the
+   *    same retry-only path as the non-interactive branch below, because the
+   *    retry — not the lock — is what makes a concurrent install correct;
    *  - {@link withConcurrentCreateRetry} clears the 23505 an installer that did
    *    NOT take the lock can still hand us — a peer on an older version, whose
    *    lock key differs, a `capabilities.execution.interactiveTransactions: false`
@@ -1157,7 +1181,7 @@ export function buildPostgresEngineProfile(
       await db.transaction(async (tx) => {
         await tx.execute(
           toDrizzleSql(
-            fencePlan.sql.advisoryLock(extensionDdlLockKey(validated), 0),
+            fencePlan.sql.acquireKeyed(extensionDdlLockKey(validated), 0),
             "postgres",
           ),
         );
@@ -1383,9 +1407,11 @@ export function buildPostgresEngineProfile(
   };
 
   // Deps for `createGraphTemplateMembers`, beyond `ensureTable`
-  // (`provisioning`) and `execute` (the operation layer's own `execute`,
-  // built once `createSqlBackend` has a contribution materializer to hand
-  // `buildOperations`).
+  // (`provisioning`), `execute` (the operation layer's own `execute`, built
+  // once `createSqlBackend` has a contribution materializer to hand
+  // `buildOperations`), and `fencePlan` (the plan `createSqlBackend` resolves
+  // once, before it builds this member group — `instantiateStatement` below
+  // reads it to decide whether the fused CTE's advisory lock is still sound).
   const graphTemplateRuntime: GraphTemplateRuntime = {
     graphTemplatesTableDdl: generatePgCreateTableSQL(tables.graphTemplates),
     tableNames: {
@@ -1395,7 +1421,69 @@ export function buildPostgresEngineProfile(
         tables.contributionMaterializations,
       ),
     },
-    instantiateStatement: postgresInstantiateGraphTemplateStatement,
+    async instantiateStatement(params, execute, fencePlan, fenceTarget) {
+      if (fencePlan.kind !== "row") {
+        return execute<Record<string, unknown>>(
+          asCompiledRowsSql(
+            postgresInstantiateGraphTemplateStatement(params, fencePlan),
+          ),
+        );
+      }
+      // Under `row`, the fused CTE below carries no lock of its own (its
+      // `locked` CTE is gone) — the schema-commit fence's exclusion instead
+      // comes from taking the SAME fence row `acquireSchemaWriteFence`'s row
+      // arm takes, as a preceding statement in an explicit transaction, so
+      // the acquisition and the CTE commit or roll back together the way the
+      // single fused statement always has under `mechanism: "lock"`.
+      if (!declaredCapabilities.execution.interactiveTransactions) {
+        throw new ConfigurationError(
+          "Graph-template instantiation under a row-mechanism write fence " +
+            "requires atomic transactions, but this Postgres backend does " +
+            "not provide them. The drizzle-orm/neon-http driver communicates " +
+            "over HTTP and cannot hold a session across statements; use " +
+            "drizzle-orm/neon-serverless (websocket) instead.",
+          {
+            code: "GRAPH_TEMPLATE_WRITE_FENCE_UNAVAILABLE",
+            backend: "postgres",
+            capability: "execution.interactiveTransactions",
+            supportsInteractiveTransactions: false,
+          },
+        );
+      }
+      // Fresh `tx`/`txAdapter` every call, so a replayed attempt never
+      // reuses a rolled-back attempt's connection state (the attempt-factory
+      // contract `runRetriedUnit` requires of `attempt`).
+      const attempt = (): Promise<readonly Record<string, unknown>[]> =>
+        db.transaction(async (tx) => {
+          const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
+          await txAdapter.execute(
+            fencePlan.sql.acquireKeyed(
+              SCHEMA_COMMIT_FENCE_NAMESPACE,
+              params.graphId,
+            ),
+          );
+          return txAdapter.execute<Record<string, unknown>>(
+            asCompiledRowsSql(
+              postgresInstantiateGraphTemplateStatement(params, fencePlan),
+            ),
+          );
+        });
+      // Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
+      // concurrent instantiations can both acquire the fence row and only one
+      // COMMITs; the other's whole attempt — open, fence-row acquisition, CTE
+      // — replays from the top. Every other resolved plan, including `row`
+      // with `conflict: "wait"`, runs the one attempt above unchanged: a
+      // waiting mechanism excludes the second acquirer instead of failing it.
+      if (!isOptimisticRetryTier(fenceTarget)) return attempt();
+      return runRetriedUnit(
+        {
+          operation: "instantiateGraphTemplate",
+          attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+          target: fenceTarget,
+        },
+        attempt,
+      );
+    },
     toSchemaVersionRow,
     rowAccess: {
       async insertIgnoringConflict(params) {
@@ -1441,6 +1529,7 @@ export function buildPostgresEngineProfile(
     readVersion: readBaseSchemaVersion,
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
+    fencesTableDdl: generatePgCreateTableSQL(tables.fences),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
@@ -1579,9 +1668,13 @@ export function buildPostgresEngineProfile(
           // lock taken INSIDE it. Normalizing this to the two-argument form
           // would merge the spaces and put that independence at the mercy of
           // `hashtext` collisions. `advisoryLockSingleExpression` is the one
-          // owner of this spelling; the graph-template instantiation
-          // statement takes the identical lock on the identical key so the
-          // two mutually exclude.
+          // owner of this spelling; under this same `"lock"` plan kind, the
+          // graph-template instantiation statement takes the identical
+          // advisory lock on the identical key so the two mutually exclude.
+          // Under `"row"` (below), the graph-template statement instead
+          // takes the same fence row this fence's `"row"` arm takes, as a
+          // preceding statement in its own transaction — no advisory lock is
+          // in play on either side.
           await tx.execute(
             toDrizzleSql(
               portableSql`SELECT ${advisoryLockSingleExpression(graphId)}`,
@@ -1601,6 +1694,23 @@ export function buildPostgresEngineProfile(
             AND ${tables.schemaVersions.isActive} = TRUE
           FOR UPDATE
         `);
+          return;
+        }
+        case "row": {
+          // Takes the portable fence row instead of the `pg_advisory_xact_lock`/
+          // `FOR UPDATE` pair `mechanism: "lock"` uses — `lockActiveSchemaVersion`
+          // takes the SAME row on the write side, so a concurrent commit and a
+          // concurrent write contend on it exactly as the advisory pair does.
+          // The fused schema + graph-write command still stays advisory-only
+          // under `row` (`schemaFenceFusionPlan.kind === "lock"`, below): it
+          // reaches the schema table inside one statement it composes itself,
+          // which a standalone fence-row acquisition cannot embed into.
+          await tx.execute(
+            toDrizzleSql(
+              plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, graphId),
+              "postgres",
+            ),
+          );
           return;
         }
         case "engine-serialized":
@@ -1633,6 +1743,24 @@ export function buildPostgresEngineProfile(
      * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
      * eliminated without atomicity, so silent best-effort degradation is
      * worse than a typed error.
+     *
+     * Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
+     * concurrent callers can both acquire the fence row and only one
+     * COMMITs; the other's whole attempt — open, fence-row acquisition,
+     * `fn` — replays through `runRetriedUnit`, `fenceTarget` naming the
+     * object its serialization classifier was registered against. Every
+     * other resolved plan, including `row` with `conflict: "wait"`, runs the
+     * one attempt below unchanged. This is the ONE place that wraps
+     * `runSchemaWriteTransaction`: `commitSchemaVersion`,
+     * `commitSchemaVersionIfKindsEmpty`, `commitSchemaVersionWithPreflight`,
+     * and `setActiveVersion` (`schema-version-members.ts`) all delegate to
+     * this function and inherit the replay with no wrapping of their own. A
+     * caller that itself retries around a call into this function — the
+     * contribution rebuilder re-reads its own pre-fence state on retry, for
+     * one — composes safely: {@link runRetriedUnit}'s `unwrapNestedConflict`
+     * reports THIS function's own exhaustion `TransactionConflictError` by
+     * its unwrapped cause, so an outer retry classifies the underlying
+     * driver conflict exactly as it would a single-attempt nested unit.
      */
     function runSchemaWriteTransaction<T>(
       graphId: string,
@@ -1657,30 +1785,45 @@ export function buildPostgresEngineProfile(
         );
       }
 
-      return db.transaction(async (tx) => {
-        await acquireSchemaWriteFence(tx, graphId);
-        // The fence resolved above is held here, so the schema-write-capable
-        // InternalOperationBackend is used intentionally (see its type).
-        const { backend: txBackend, drainAndClose } = createTransactionBackend({
-          db: tx,
-          adapterOptions,
-          operationStrategy,
-          tableNames,
-          capabilities,
-          fulltextStrategy,
-          vectorStrategy,
-          contributionMaterializer: ctx.contributionMaterializer,
-          iterativeScanProbe,
-          schemaVersionsTable: tables.schemaVersions,
-          fenceTarget,
-          isFirstParty,
+      // Fresh `tx`/`txBackend` every call, so a replayed attempt never reuses
+      // a rolled-back attempt's connection state (the attempt-factory
+      // contract `runRetriedUnit` requires of `attempt`).
+      const attempt = (): Promise<T> =>
+        db.transaction(async (tx) => {
+          await acquireSchemaWriteFence(tx, graphId);
+          // The fence resolved above is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const { backend: txBackend, drainAndClose } =
+            createTransactionBackend({
+              db: tx,
+              adapterOptions,
+              operationStrategy,
+              tableNames,
+              capabilities,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              iterativeScanProbe,
+              schemaVersionsTable: tables.schemaVersions,
+              fenceTarget,
+              isFirstParty,
+            });
+          try {
+            return await fn(txBackend);
+          } finally {
+            await drainAndClose();
+          }
         });
-        try {
-          return await fn(txBackend);
-        } finally {
-          await drainAndClose();
-        }
-      });
+
+      if (!isOptimisticRetryTier(fenceTarget)) return attempt();
+      return runRetriedUnit(
+        {
+          operation: "runSchemaWriteTransaction",
+          attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+          target: fenceTarget,
+        },
+        attempt,
+      );
     }
 
     // Shared by `transaction()` (TypeGraph opens the tx) and
@@ -2925,6 +3068,14 @@ function createPostgresOperationBackend(
    * `engine-serialized` skips the clause instead, and correctly: SQLite's
    * `lockSchemaVersionForWrite` already runs exactly this way, on the
    * strength of the writer slot no concurrent commit can hold.
+   *
+   * Under `mechanism: "row"` the schema-versions row itself carries no
+   * clause — there is no portable `FOR SHARE` to embed — so this instead
+   * takes the SAME fence row `acquireSchemaWriteFence` takes on the commit
+   * side, as its own statement, before the plain read below. That gives a
+   * concurrent commit and a concurrent write the row to contend on, which is
+   * what makes the version this read observes binding through to the writes
+   * that follow, exactly as holding `FOR SHARE` does under `lock`.
    */
   async function lockActiveSchemaVersion(
     graphId: string,
@@ -2934,6 +3085,14 @@ function createPostgresOperationBackend(
       "The PostgreSQL schema write fence",
       "keyed",
     );
+    if (plan.kind === "row") {
+      await execRun(
+        toDrizzleSql(
+          plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, graphId),
+          "postgres",
+        ),
+      );
+    }
     const shareLock = plan.kind === "lock" ? sql`FOR SHARE` : sql``;
     const active = await execGet<{ version: number }>(sql`
       SELECT ${schemaVersionsTable.version} AS version

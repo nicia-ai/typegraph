@@ -8,7 +8,10 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { isSerializationFailure } from "../src/utils/sql-errors";
+import {
+  isSerializationFailure,
+  registerSerializationFailureClassifier,
+} from "../src/utils/sql-errors";
 
 /** A pg-driver-shaped error: `code` carries the SQLSTATE. */
 function pgError(code: string, message = "tx failed"): Error {
@@ -129,5 +132,27 @@ describe("isSerializationFailure", () => {
     // pass can never corroborate it; treating it as message evidence would
     // recognize a class of input the SQLSTATE-first design never covers.
     expect(isSerializationFailure("deadlock detected")).toBe(false);
+  });
+
+  describe("a registered classifier against `target`", () => {
+    it("recognizes a non-standard shape the standard rules would miss", () => {
+      const target = {};
+      registerSerializationFailureClassifier(
+        target,
+        (error) => error instanceof Error && error.message === "TG001",
+      );
+      expect(isSerializationFailure(new Error("TG001"), target)).toBe(true);
+      // The same shape, with no target, is not recognized: the classifier
+      // is scoped to the object it was registered against.
+      expect(isSerializationFailure(new Error("TG001"))).toBe(false);
+    });
+
+    it("adds to the standard rules rather than replacing them: a classifier that declines a real 40001 still yields true", () => {
+      const target = {};
+      // Declines every error unconditionally — including a genuine
+      // SQLSTATE 40001 the standard rules already recognize.
+      registerSerializationFailureClassifier(target, () => false);
+      expect(isSerializationFailure(pgError("40001"), target)).toBe(true);
+    });
   });
 });

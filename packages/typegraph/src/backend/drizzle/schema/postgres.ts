@@ -75,6 +75,7 @@ export type PostgresTableNames = Readonly<{
   contributionMaterializations: string;
   kindRemovals: string;
   reconciliationMarkers: string;
+  fences: string;
 }>;
 
 export type CreatePostgresTablesOptions = Readonly<{
@@ -108,6 +109,7 @@ const DEFAULT_TABLE_NAMES: PostgresTableNames = {
   contributionMaterializations: "typegraph_contribution_materializations",
   kindRemovals: "typegraph_kind_removals",
   reconciliationMarkers: "typegraph_reconciliation_markers",
+  fences: "typegraph_fences",
 };
 
 /**
@@ -442,6 +444,23 @@ export function createPostgresTables(
     ],
   );
 
+  // The write-fence rows relation: one row per keyed exclusion a `row`
+  // mechanism has ever acquired, keyed on `<namespace>:<key>` (the existing
+  // advisory namespaces, verbatim). Never dropped, never row-deleted, never
+  // touched by `clear()` — the same never-dropped posture as
+  // `schema_versions`, `recorded_clock`. `generation` is the acquire
+  // statement's own monotonically increasing counter (see
+  // `resolveFenceStatements`'s `row` derivation); it is not consumed here,
+  // only stored.
+  const fences = pgTable(
+    n.fences,
+    {
+      key: text("key").notNull(),
+      generation: bigint("generation", { mode: "number" }).notNull(),
+    },
+    (t) => [primaryKey({ columns: [t.key] })],
+  );
+
   const baseSchemaVersions = pgTable(
     n.baseSchemaVersions,
     {
@@ -665,6 +684,7 @@ export function createPostgresTables(
     identitySeparation,
     uniques,
     edgeClaims,
+    fences,
     baseSchemaVersions,
     schemaVersions,
     graphTemplates,

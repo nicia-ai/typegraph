@@ -1250,9 +1250,10 @@ copying a bundled profile and adapting its statement, while a derived profile ca
 
 `FenceSql` (see [Write fence declaration](#write-fence-declaration-writefence))
 declares `advisoryLockExpression` and `isolationFactExpression` as the two
-composable, no-`SELECT` forms a backend author supplies; TypeGraph derives
-the standalone-statement counterparts (`advisoryLock`,
-`advisoryLockWithIsolation`, `isolationFact`) from them. A statement that
+composable, no-`SELECT` forms an `advisory`-mechanism backend author
+supplies; TypeGraph derives the standalone-statement counterparts
+(`acquireKeyed`, `acquireKeyedWithIsolation`, `isolationFact`) from them. A
+statement that
 must compose a lock or an isolation read INSIDE a larger query it builds
 itself — a CTE, a data-modifying statement — embeds the bare expression
 directly, rather than running the derived standalone form as its own
@@ -1447,17 +1448,55 @@ declaration is paired with fresh transport and semantic registrations and is
 never inherited by an ordinary derived backend.
 
 `execution.unitOfWork` is derived, never declared by a factory or override:
-`"interactive"` when `interactiveTransactions` is `true`, else `"batch"` when
-`atomicBatch` is not `"none"` (an HTTP-only driver such as `drizzle-orm/neon-http`,
-which cannot hold an open session but does support a native atomic program),
-else `"none"`. Two internal readers key off the `"batch"` value: the
-batch-tier write verdict (`resolveBatchWriteVerdict`) that produces
+`"optimistic-retry"` when `interactiveTransactions` is `true` AND the resolved
+write fence is `{ mechanism: "row", conflict: "commit-time" }` (see
+[Write fence declaration](#write-fence-declaration-writefence) below);
+`"interactive"` when `interactiveTransactions` is `true` otherwise; else
+`"batch"` when `atomicBatch` is not `"none"` (an HTTP-only driver such as
+`drizzle-orm/neon-http`, which cannot hold an open session but does support a
+native atomic program); else `"none"`. Only the root capability derivation
+ever resolves the write-fence plan needed for the `"optimistic-retry"` arm —
+a derived or session-scoped capabilities object (a `store.transaction`
+session, a projected backend) has no way to re-resolve that plan for
+itself, but it carries the root's answer forward instead of losing it: it
+reads whether its own source object was already `"optimistic-retry"` and
+keeps the tier for as long as `interactiveTransactions` stays `true`,
+falling back to `"interactive"` only for a capabilities object whose source
+never carried the tier to begin with.
+
+Two further internal readers key off the `"batch"` value: the batch-tier
+write verdict (`resolveBatchWriteVerdict`) that produces
 `BATCH_WRITE_UNSUPPORTED` refusals, and the autocommit single-statement
 eligibility gate that decides whether a supplied-id singleton create can
-fuse its schema fence into one statement. It also exists so any other
-caller can tell the three execution shapes apart without re-deriving the
-same distinction from `interactiveTransactions` and `atomicBatch`
-separately.
+fuse its schema fence into one statement. Even absent `"optimistic-retry"`,
+`unitOfWork` exists so any caller can tell the execution shapes apart without
+re-deriving the same distinction from `interactiveTransactions` and
+`atomicBatch` separately.
+
+Under `"optimistic-retry"`, every TypeGraph-owned transaction that acquires a
+fence row replays a real commit-time conflict as a whole unit, up to
+`OPTIMISTIC_RETRY_ATTEMPTS` (3) attempts, and only exhausting that budget (or
+a non-retryable failure) surfaces `TransactionConflictError` to the caller —
+see [Retrying on conflict](/schemas-stores#retrying-on-conflict). That covers
+every store-owned write (collection create/update/delete, bulk paths,
+`importGraph`, identity maintenance, contribution rebuild, index
+materialization) as well as the two backend-owned transactions that acquire
+the schema-commit fence row directly, outside the store's own write path:
+graph-template instantiation and a schema commit (`commitSchemaVersion` and
+its three siblings, via `runSchemaWriteTransaction`). A nested write running
+inside an existing transaction (`store.transaction`, an adopted transaction)
+never retries on its own: it cannot restart a transaction it does not own, so
+its conflict propagates unchanged to the outermost store-owned write, or to
+`store.transaction` itself. This tier therefore changes behavior only for a
+transaction that opens its own top-level connection.
+
+An `"optimistic-retry"` backend requires `node:async_hooks`' `AsyncLocalStorage`
+to detect a retried unit nested inside another one; on a runtime where it is
+unavailable, the first retried unit `runRetriedUnit` opens is refused with
+`OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` rather than degrading to independent,
+unsafe per-unit retries, while interactive backends are unaffected and keep
+retrying (`store.transaction`'s own `retry` option) with no async-context
+support at all.
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
@@ -1576,33 +1615,47 @@ const capabilities: Partial<BackendCapabilities> = {
 ```
 
 `mechanism` is how the backend excludes concurrent writers. `writeFence` is a discriminated union on
-`mechanism`, and `drain` is a field of the `"advisory"` shape only — `"engine-serialized"` and
-`"caller-serialized"` declarations carry no `drain` key at all:
+`mechanism`, and `drain` is a field of the `"advisory"` and `"row"` shapes only — `"engine-serialized"`
+and `"caller-serialized"` declarations carry no `drain` key at all:
 
 | `mechanism` | Meaning |
 | --- | --- |
 | `"advisory"` | A keyed `pg_advisory_xact_lock`-style lock a caller takes explicitly. Needs `fenceSql` (below) and a `drain`. |
+| `"row"` | A keyed exclusion spelled by TypeGraph itself against the never-dropped fences relation, for an engine with no advisory-lock primitive. Needs a `drain` and a `conflict` (below); a `fenceSql.isolationFactExpression` is optional (absent means recorded capture and match-key convergence fail closed on an unknown isolation fact, exactly as they do for a target that supplies neither). |
 | `"engine-serialized"` | The engine serializes writers by construction — SQLite's single writer slot. No lock statement, no `fenceSql`, no `drain`. |
 | `"caller-serialized"` | A deployment-level promise, not an engine fact — see below. No lock statement, no `drain`; a `fenceSql` the backend still carries is used only for its isolation-fact read (recorded capture's isolation guard). |
 
-`drain` (on `mechanism: "advisory"` only) is a separate fact: whether a caller that already excluded
-other writers can additionally take a relation-wide lock on the table a drain site protects:
+`drain` (on `mechanism: "advisory"` or `"row"` only) is a separate fact: whether a caller that
+already excluded other writers can additionally take a relation-wide lock on the table a drain site
+protects:
 
 | `drain` | Meaning |
 | --- | --- |
 | `"table-lock"` | Yes — a `LOCK TABLE`-style statement is available and the drain site takes it. |
-| `"quiescent"` | The resource is already exclusive for some other reason (an advisory lock layered under a deployment's own `caller-serialized` promise, for instance), so the drain site takes NO statement — one it does not need rather than one it cannot spell. |
+| `"quiescent"` | The resource is already exclusive for some other reason (an advisory or row lock layered under a deployment's own `caller-serialized` promise, for instance), so the drain site takes NO statement — one it does not need rather than one it cannot spell. |
 | `"none"` | Neither — a drain site refuses, naming the drain. |
+
+`conflict` (on `mechanism: "row"` only) is the engine fact for what happens when two writers
+acquire the SAME fence row:
+
+| `conflict` | Meaning |
+| --- | --- |
+| `"wait"` | A lock-based engine — the second acquirer's statement blocks until the first commits, exactly like an advisory lock. |
+| `"commit-time"` | An optimistic-concurrency engine — both acquirers proceed and the loser's COMMIT fails. Correctness comes from the retry owner replaying the whole unit, never from waiting, so `conflict: "commit-time"` derives the `"optimistic-retry"` execution tier (see [Backend Capabilities](#backend-capabilities) above) and requires it: declaring it on a non-interactive backend is refused the same way an out-of-place `drain` is. |
 
 `"engine-serialized"` and `"caller-serialized"` satisfy every drain site unconditionally — a writer
 slot and an in-process serialization promise are each already a stronger exclusion than any `drain`
 value could add, so attaching one to either mechanism is refused (see **Runtime validation** below)
-rather than silently ignored.
+rather than silently ignored; attaching `conflict` to anything but `"row"` is refused the same way.
 
-`resolveWriteFencePlan` resolves one of four plans:
+`resolveWriteFencePlan` resolves one of five plans:
 
-- `{ kind: "lock", drain, sql }` — take the declared keyed lock (`sql`, the target's own spelling),
-  and, when `drain === "table-lock"`, the table lock a drain site needs.
+- `{ kind: "lock", drain, sql }` — take the declared advisory lock (`sql`, the target's own
+  spelling), and, when `drain === "table-lock"`, the table lock a drain site needs.
+- `{ kind: "row", drain, conflict, sql }` — take the SAME `sql.acquireKeyed` /
+  `sql.acquireKeyedWithIsolation` a `"lock"` plan's site calls, spelled instead against the fences
+  relation; `conflict` is the one fact a `"row"` site (and the execution tier) reads that a
+  `"lock"` site never needs.
 - `{ kind: "engine-serialized" }` — no lock needed; the engine serializes writers by construction.
 - `{ kind: "caller-serialized" }` — no lock needed; the deployment's own promise excludes concurrent
   writers (see below).
@@ -1612,43 +1665,72 @@ rather than silently ignored.
 
 Resolution order: (1) the declared `writeFence` value, if present; (2) absent, AND the backend was
 built by `createSqliteBackend` / `createPostgresBackend` — derived from `dialect`, which is exactly
-what every lock site used to compute inline; (3) absent on anything else — `unfenced`, because an
-undeclared custom backend is by definition uncertified and inferring lock support from `dialect`
-alone is the unsound inference this capability replaces.
+what every lock site used to compute inline (this derivation never resolves `"row"`: it is the two
+bundled dialects' own `"advisory"`/`"engine-serialized"` split); (3) absent on anything else —
+`unfenced`, because an undeclared custom backend is by definition uncertified and inferring lock
+support from `dialect` alone is the unsound inference this capability replaces.
 
 The two bundled backends resolve exactly these declarations — copy the one matching your engine:
 
 - PostgreSQL: `writeFence: { mechanism: "advisory", drain: "table-lock" }`
 - SQLite: `writeFence: { mechanism: "engine-serialized" }` (no `drain`: the writer slot already
   excludes every drain site's writer, so a drain site under it always takes no statement — the same
-  behavior `drain: "quiescent"` describes for `"advisory"`, without a `drain` field to spell it)
+  behavior `drain: "quiescent"` describes for `"advisory"`/`"row"`, without a `drain` field to spell it)
 
 A backend that declares `mechanism: "advisory"` also supplies `fenceSql`: `lockTables` (only needed
 when `drain: "table-lock"`) plus the two composable, no-`SELECT` forms `advisoryLockExpression` /
 `isolationFactExpression` a statement embeds inside a larger query it builds itself (see the
 schema-write-fence discussion above) — the complete `FenceSql` bag. `resolveWriteFencePlan`'s `lock`
-arm derives the standalone-statement forms every ordinary lock site actually calls —
-`advisoryLock`; `advisoryLockWithIsolation` (the lock plus the session's isolation-level fact, read
-in the same statement it locks in); and `isolationFact` — from those two expressions, so a backend
-author never spells both forms separately. The bundled PostgreSQL spelling is exported as
-`postgresFenceSql` from `@nicia-ai/typegraph/adapters/drizzle/postgres` — pass it straight through
-as `fenceSql` when wrapping that backend, or supply a custom `FenceSql` matching a different
-engine's lock syntax. A backend that declares `mechanism: "advisory"` with a `fenceSql` missing a
-member the resolved `mechanism`/`drain` combination needs is refused at construction with details
-code `WRITE_FENCE_SQL_UNAVAILABLE`, naming the missing member; `"engine-serialized"` and
-`"caller-serialized"` need no `fenceSql` to take a lock at all.
+arm derives the standalone-statement forms every ordinary lock site actually calls — `acquireKeyed`;
+`acquireKeyedWithIsolation` (the lock plus the session's isolation-level fact, read in the same
+statement it locks in); and `isolationFact` — from those two expressions, so a backend author never
+spells both forms separately. `mechanism: "row"` needs no `advisoryLockExpression` at all: TypeGraph
+spells its own `acquireKeyed` / `acquireKeyedWithIsolation` against the fences relation (see below),
+and a `fenceSql.isolationFactExpression` — when supplied — rides the SAME acquisition statement, so a
+`"row"` target's isolation fact is read on the exact connection that took the row. The bundled
+PostgreSQL spelling is exported as `postgresFenceSql` from `@nicia-ai/typegraph/adapters/drizzle/postgres`
+— pass it straight through as `fenceSql` when wrapping that backend (under either `"advisory"` or
+`"row"`), or supply a custom `FenceSql` matching a different engine's lock syntax. A backend that
+declares `mechanism: "advisory"` with a `fenceSql` missing a member the resolved `mechanism`/`drain`
+combination needs is refused at construction with details code `WRITE_FENCE_SQL_UNAVAILABLE`, naming
+the missing member; `"row"` is refused the same way only for `drain: "table-lock"` without
+`lockTables` — its acquisition statement needs no author-supplied spelling at all, so a missing
+`tableNames.fences` instead refuses the first time a keyed site actually acquires the row, not at
+construction; `"engine-serialized"` and `"caller-serialized"` need no `fenceSql` to take a lock at
+all.
+
+#### The fences relation
+
+A `"row"`-mechanism backend needs one relation, `typegraph_fences(key TEXT PRIMARY KEY, generation
+BIGINT NOT NULL)` (`INTEGER NOT NULL` on SQLite) — part of TypeGraph's base schema on both bundled
+dialects, so a fresh install already has it and `generateSqliteMigrationSQL` /
+`generatePostgresMigrationSQL` add it to an existing database. It is **never dropped, never cleared
+by `clear()`, and never row-deleted** — the same durability contract `schema_versions` and
+`recorded_clock` carry. Every acquisition is one portable statement TypeGraph spells itself, never
+the profile: `INSERT INTO typegraph_fences (key, generation) VALUES (key, 1) ON CONFLICT (key) DO
+UPDATE SET generation = generation + 1 RETURNING generation`, keyed on `${namespace}:${key}` —
+the SAME advisory namespaces and per-position keys an `"advisory"`-mechanism backend locks on,
+verbatim, so the lock-order contract carries over unchanged to an engine using the fences relation
+instead of `pg_advisory_xact_lock`. A custom backend supplies the relation's physical name through
+`tableNames.fences` (defaulted to `typegraph_fences` by both bundled factories) exactly as it names
+every other TypeGraph-owned table.
 
 #### Runtime validation
 
 TypeScript's discriminated union only holds a caller who goes through the type checker — a plain
 JavaScript backend author, or a value round-tripped through JSON or a config file, can still supply
-an unrecognized `mechanism` string, an unrecognized `drain` string, or a `drain` attached to
-`"engine-serialized"` / `"caller-serialized"`. `resolveWriteFencePlan` validates every declaration —
-whether it came from `capabilities.writeFence` directly or from the first-party dialect fallback —
-before shaping a plan from it, and refuses with `ConfigurationError` details code
-`WRITE_FENCE_DECLARATION_INVALID`, naming the invalid `field` (`"mechanism"` or `"drain"`) and, for
-an unrecognized value, the `accepted` list. An unrecognized `drain` never falls through to behaving
-like `"quiescent"` — it is refused outright, the same as an unrecognized `mechanism`.
+an unrecognized `mechanism` string, an unrecognized `drain` or `conflict` string, a `drain` attached
+to `"engine-serialized"` / `"caller-serialized"`, or a `conflict` attached to anything but `"row"`.
+`resolveWriteFencePlan` validates every declaration — whether it came from `capabilities.writeFence`
+directly or from the first-party dialect fallback — before shaping a plan from it, and refuses with
+`ConfigurationError` details code `WRITE_FENCE_DECLARATION_INVALID`, naming the invalid `field`
+(`"mechanism"`, `"drain"`, or `"conflict"`) and, for an unrecognized value, the `accepted` list. An
+unrecognized `drain` never falls through to behaving like `"quiescent"` — it is refused outright,
+the same as an unrecognized `mechanism`. The same validator refuses `conflict: "commit-time"`
+outright when the target's own `capabilities.execution.interactiveTransactions` is `false`: that
+value is honored only by the `"optimistic-retry"` execution tier, which never derives without an
+interactive transaction to replay inside, so accepting the declaration there would silently drop it
+rather than apply it.
 
 #### `caller-serialized`: the promise split into two halves
 

@@ -97,6 +97,7 @@ import {
 import type {
   InspectableHistoryStore,
   SerializedBackendHandle,
+  SerializedBackendOverrides,
 } from "./integration/test-context";
 
 /**
@@ -114,7 +115,7 @@ type BackendFactoryResult<TNativeTransaction> = Readonly<{
    * shared-connection assertion in the suite into a no-op on exactly the
    * backends whose answer differs. The type checker asks each lane instead.
    */
-  createSerializedBackend: () => Promise<
+  createSerializedBackend: (overrides?: SerializedBackendOverrides) => Promise<
     Readonly<{
       backend: AdapterBackend<TNativeTransaction>;
       close: () => Promise<void>;
@@ -152,6 +153,14 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
    * owns independent storage (for example, in-memory SQLite).
    */
   createIsolatedBackend?: IsolatedBackendFactory<TIsolatedTransaction>;
+  /**
+   * Whether this lane's `createSerializedBackend` hands out genuinely
+   * independent physical connections — see
+   * {@link IntegrationTestContext.serverLaneConcurrency}. Defaults to
+   * `false`; only the two server-PostgreSQL lane registrations set it to
+   * `true`.
+   */
+  serverLaneConcurrency?: boolean;
 }>;
 
 /**
@@ -201,11 +210,13 @@ export function createIntegrationTestSuite<
         if (result.cleanup !== undefined) isolatedCleanups.push(result.cleanup);
         return result.backend as AdapterBackend<unknown>;
       },
-      createSerializedBackend: async (): Promise<SerializedBackendHandle> => {
+      createSerializedBackend: async (
+        overrides?: SerializedBackendOverrides,
+      ): Promise<SerializedBackendHandle> => {
         if (openSerializedBackend === undefined) {
           throw new Error("Integration backend is not initialized.");
         }
-        const handle = await openSerializedBackend();
+        const handle = await openSerializedBackend(overrides);
         // Same erasure `getBackend` performs, for the same reason:
         // `AdapterBackend` is invariant in its native-transaction parameter, and
         // the shared suite is written against every lane at once.
@@ -236,6 +247,7 @@ export function createIntegrationTestSuite<
         );
         return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
+      serverLaneConcurrency: options.serverLaneConcurrency ?? false,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {

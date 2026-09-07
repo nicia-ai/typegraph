@@ -1,4 +1,6 @@
+export { runRetriedUnit } from "../backend/capabilities/retried-unit";
 export {
+  requireFenceLockTables,
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";
@@ -51,10 +53,7 @@ export {
   type OntologyIntrospection,
   type UniqueIntrospection,
 } from "../store/introspect";
-export {
-  forceWriteTransactionRevision,
-  runRetriedUnit,
-} from "../store/operations/write-transaction";
+export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
   forceRecordedGraphRevision,

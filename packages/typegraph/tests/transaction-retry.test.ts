@@ -18,6 +18,11 @@ import {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../src/backend/capabilities/resolve";
+import {
+  __restoreRetriedUnitAsyncContextForTesting,
+  __setRetriedUnitAsyncContextForTesting,
+  runRetriedUnit,
+} from "../src/backend/capabilities/retried-unit";
 import { ConfigurationError, TransactionConflictError } from "../src/errors";
 import {
   buildEdgeSchemaMap,
@@ -32,7 +37,6 @@ import {
 } from "../src/interchange/types";
 import { runWritePlan } from "../src/store/operations/write-executor";
 import { mixedWritePlan } from "../src/store/operations/write-plan";
-import { runRetriedUnit } from "../src/store/operations/write-transaction";
 import { storeBackend, storeRuntime } from "../src/store/runtime-port";
 import {
   createTransactionFaultInjector,
@@ -191,6 +195,176 @@ describe("runRetriedUnit", () => {
     expect(thrown).toBeInstanceOf(TransactionConflictError);
     expect(reportedByAttempt[1]).toBe(thrown);
   });
+});
+
+describe("runRetriedUnit nesting", () => {
+  afterEach(() => {
+    __restoreRetriedUnitAsyncContextForTesting();
+  });
+
+  it("a runRetriedUnit call nested inside another one runs its own attempt exactly once and lets the outer owner retry", async () => {
+    let outerAttempts = 0;
+    let innerAttempts = 0;
+    const result = await runRetriedUnit(
+      { operation: "outer", attempts: 3 },
+      async () => {
+        outerAttempts += 1;
+        return runRetriedUnit({ operation: "inner", attempts: 3 }, async () => {
+          await Promise.resolve();
+          innerAttempts += 1;
+          if (outerAttempts < 2) throw pgError("40001");
+          return "done";
+        });
+      },
+    );
+    expect(result).toBe("done");
+    expect(outerAttempts).toBe(2);
+    // Exactly one inner call per outer attempt: the nested unit never spends
+    // its own 3-attempt budget, so had it retried on its own instead, this
+    // would read higher than 2 (see the mutation check below).
+    expect(innerAttempts).toBe(2);
+  });
+
+  // Mutation proof for the test above: comment out the
+  // `context?.getStore() === true` nesting check in `runRetriedUnit` (so
+  // every call, nested or not, always runs its own independent loop) and
+  // this assertion fails — `innerAttempts` reads 4, not 2, because the inner
+  // unit exhausts its own 3-attempt budget on the outer's first attempt
+  // before the outer ever gets to retry.
+
+  it("a nested unit's failure reaches the outer owner as the identical error object, never wrapped", async () => {
+    const failure = pgError("40001", "nested failure");
+    let observedByOuter: unknown;
+    await expect(
+      runRetriedUnit({ operation: "outer", attempts: 1 }, async () => {
+        try {
+          return await runRetriedUnit(
+            { operation: "inner", attempts: 3 },
+            async () => {
+              await Promise.resolve();
+              throw failure;
+            },
+          );
+        } catch (error) {
+          observedByOuter = error;
+          throw error;
+        }
+      }),
+    ).rejects.toBeInstanceOf(TransactionConflictError);
+    // The code that called the nested unit sees the exact object the
+    // attempt threw — not a TransactionConflictError the inner call minted
+    // for itself — even though the OUTER owner's own exhaustion still wraps
+    // it once, for its own caller.
+    expect(observedByOuter).toBe(failure);
+  });
+
+  /** A bare target object resolving `isOptimisticRetryTier` to `true`. */
+  const OPTIMISTIC_RETRY_TARGET = {
+    capabilities: { execution: { unitOfWork: "optimistic-retry" } },
+  };
+
+  /** A bare target object resolving `isOptimisticRetryTier` to `false`. */
+  const INTERACTIVE_TARGET = {
+    capabilities: { execution: { unitOfWork: "interactive" } },
+  };
+
+  it("with the async-context loader unavailable, an optimistic-retry target refuses before the attempt factory ever runs", async () => {
+    __setRetriedUnitAsyncContextForTesting(undefined);
+    let calls = 0;
+    let caught: unknown;
+    try {
+      await runRetriedUnit(
+        { operation: "outer", attempts: 3, target: OPTIMISTIC_RETRY_TARGET },
+        async () => {
+          await Promise.resolve();
+          calls += 1;
+          return "unreachable";
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigurationError);
+    expect((caught as ConfigurationError).details).toMatchObject({
+      code: "OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT",
+      operation: "outer",
+    });
+    expect(calls).toBe(0);
+  });
+
+  // Mutation proof for the test above: remove the
+  // `context === undefined && targetIsOptimisticRetryTier(...)` refusal in
+  // `runRetriedUnit` (so it always falls through to the retry loop) and this
+  // test fails — `caught` becomes `"unreachable"`'s resolved value instead of
+  // a `ConfigurationError`, and `calls` reads 1, not 0.
+
+  it("with the async-context loader unavailable, an interactive target still retries as before", async () => {
+    __setRetriedUnitAsyncContextForTesting(undefined);
+    let attempts = 0;
+    const result = await runRetriedUnit(
+      { operation: "outer", attempts: 3, target: INTERACTIVE_TARGET },
+      async () => {
+        await Promise.resolve();
+        attempts += 1;
+        if (attempts < 3) throw pgError("40001");
+        return "done";
+      },
+    );
+    expect(result).toBe("done");
+    expect(attempts).toBe(3);
+  });
+
+  it("a nested unit's own conflict-then-succeed never commits an outer attempt's stale read: nesting detection forces the outer to redo it instead", async () => {
+    // Mirrors `rebuildContribution`: the outer attempt takes a decision-
+    // driving read BEFORE calling into a nested unit that opens its own
+    // fenced transaction. `innerAttempts` conflicts on its very first call,
+    // ever, and would succeed on its own immediate retry if it were allowed
+    // to run one — exactly the transient conflict the degraded ("every unit
+    // retries on its own") behavior handled unsafely.
+    let outerAttempts = 0;
+    let outerReadValue = 0;
+    let innerAttempts = 0;
+    const result = await runRetriedUnit(
+      { operation: "outer", attempts: 3, target: OPTIMISTIC_RETRY_TARGET },
+      async () => {
+        outerAttempts += 1;
+        outerReadValue = outerAttempts;
+        const decision = outerReadValue;
+        return runRetriedUnit(
+          {
+            operation: "inner",
+            attempts: 3,
+            target: OPTIMISTIC_RETRY_TARGET,
+          },
+          async () => {
+            await Promise.resolve();
+            innerAttempts += 1;
+            if (innerAttempts === 1) throw pgError("40001");
+            return decision;
+          },
+        );
+      },
+    );
+    // The committed decision is the SECOND read's value: the outer attempt
+    // that eventually committed re-ran its own read after the nested
+    // conflict, rather than the first (stale) attempt's inner unit quietly
+    // succeeding on its own retry against it.
+    expect(result).toBe(2);
+    expect(outerAttempts).toBe(2);
+    // Exactly one inner call per outer attempt (2 outer attempts, 2 inner
+    // calls total): the inner unit's conflict reached the outer owner
+    // instead of being retried away internally.
+    expect(innerAttempts).toBe(2);
+  });
+
+  // Mutation proof for the test above: comment out the
+  // `context?.getStore() === true` nesting check in `runRetriedUnit` (so the
+  // inner call always runs its own independent loop). The inner unit then
+  // retries its own conflict internally, on the OUTER's first, stale
+  // `decision` (1) — it never propagates a failure, so the outer never
+  // retries at all. `result` and `outerReadValue` both read `1`, not `2`, and
+  // `outerAttempts` reads `1`, not `2`: the exact stale-read commit this
+  // detection exists to prevent.
 });
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });

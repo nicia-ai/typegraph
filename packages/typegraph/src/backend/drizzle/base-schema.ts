@@ -20,6 +20,16 @@ export const BASE_SCHEMA_RELEASES = [
         "68363b5bf1c91c5f3e7528ebd255b542a1cd26677a01c7b2271e100e08a1e354",
     },
   },
+  {
+    version: 2,
+    id: "fence-rows",
+    orderedShapeDigests: {
+      postgres:
+        "6ceed53669691b9eb8974d0ef371dd86cab3cb33d187a328b3dd3d905776b024",
+      sqlite:
+        "1b7ef8370ac366e48d1517a5eb98a3d4d6a1c71c2d8e74e77bd78367af0cc042",
+    },
+  },
 ] as const;
 
 function currentBaseSchemaVersion(): number {
@@ -94,8 +104,10 @@ function migrationError(
  *
  * The ordered registry is deliberately separate from per-graph schema
  * versions: a base relation added by a library release must be adopted once
- * per database, regardless of how many graph documents it stores. Each step
- * is stamped only after it succeeds, so a failed upgrade is retried rather
+ * per database, regardless of how many graph documents it stores. Every
+ * not-yet-adopted step runs, in order, publishing the marker after each step
+ * (see `runSteps`) — a step that throws aborts before that step's write, so a
+ * failed upgrade is retried from the last durably stamped version rather
  * than published as current.
  */
 export function createBaseSchemaLifecycle(
@@ -150,6 +162,18 @@ export function createBaseSchemaLifecycle(
     return observedVersion;
   }
 
+  /**
+   * Runs every not-yet-adopted step's `adoptStep` in order, publishing the
+   * marker after each one. A step whose `adoptStep` throws aborts before its
+   * marker write, so a retry re-adopts from the last durably published
+   * version, including the step that threw. Publishing after every step
+   * (rather than once at the end) lets a concurrent adopter's observed
+   * version short-circuit the remaining steps: once `writeVersion` reports a
+   * version another process already published, every later step in this
+   * call is superseded and skipped — a process on an older release must
+   * never keep applying steps against a database a newer release already
+   * brought current.
+   */
   async function runSteps(
     startingVersion: number,
     adoptStep: (step: BaseSchemaStep) => Promise<void>,

@@ -44,7 +44,7 @@ export type MergePlanApplied = Readonly<{ merged: MergedCounts }>;
  * Work composed with merge application in its own protected transaction. Both
  * callbacks may be replayed up to three times on a transaction conflict:
  * await all work, use only the supplied context, perform no external effects.
- * See {@link file://../store/operations/write-transaction.ts runRetriedUnit}
+ * See {@link file://../backend/capabilities/retried-unit.ts runRetriedUnit}
  * for the full replay contract this binds to. Throw/reject to abort;
  * returning a value (including a Result) is refused.
  */

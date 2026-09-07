@@ -13,23 +13,35 @@
  * `rowAccess` dep the same way `kind-removal-members.ts` and
  * `index-materialization-members.ts` do it.
  *
- * `instantiateGraphTemplate` runs one statement, built by the profile's own
- * `instantiateStatement` dep (`graph-template-sql.ts` exports one builder
- * per dialect; each profile hands this group its own). The one genuine
- * difference: PostgreSQL's statement copies the template's contribution
- * markers inside its own CTE, but SQLite cannot put a data-modifying CTE
- * beside the schema INSERT, so its profile runs a second DML statement —
+ * `instantiateGraphTemplate` runs its profile's own `instantiateStatement`
+ * dep (`graph-template-sql.ts` exports one builder per dialect; each profile
+ * hands this group its own), given the resolved `fencePlan`, this group's
+ * `fenceTarget`, and its `execute`. SQLite always runs the one statement its
+ * builder returns through `execute` directly. PostgreSQL does too under
+ * every fence-plan kind except `"row"`, where the fused CTE's advisory lock
+ * no longer excludes against a `row`-mechanism schema-commit fence — there,
+ * the PostgreSQL profile instead opens its own transaction, takes the
+ * identical fence row `acquireSchemaWriteFence` takes as a preceding
+ * statement, and only then runs the CTE with its lock omitted, so the two
+ * statements commit or roll back together; under `conflict: "commit-time"`
+ * (the `"optimistic-retry"` tier) that whole transaction — open, fence-row
+ * acquisition, CTE — replays through `runRetriedUnit` on a commit-time
+ * conflict, `fenceTarget` naming the object its serialization classifier was
+ * registered against. The one other genuine dialect difference:
+ * PostgreSQL's statement copies the template's contribution markers inside
+ * its own CTE, but SQLite cannot put a data-modifying CTE beside the schema
+ * INSERT, so its profile runs a second DML statement —
  * `copyGraphTemplateContributionMarkersStatement` — after the schema row is
  * confirmed. That asymmetry is threaded through as the optional
  * `copyContributionMarkers` dep, present only on the SQLite profile.
  */
 import { ConfigurationError } from "../../../../errors";
-import type { SqlFragment } from "../../../../query/sql-fragment";
-import {
-  asCompiledRowsSql,
-  type CompiledRowsSql,
-} from "../../../../query/sql-intent";
+import { type CompiledRowsSql } from "../../../../query/sql-intent";
 import type { SerializedSchema } from "../../../../schema/types";
+import {
+  type WriteFencePlan,
+  type WriteFenceTarget,
+} from "../../../capabilities/write-fence";
 import type { GraphTemplateRow, SchemaVersionRow } from "../../../types";
 import {
   type CopyGraphTemplateContributionMarkersSqlParams,
@@ -114,15 +126,35 @@ export type CreateGraphTemplateMembersDeps = Readonly<{
   execute: GraphTemplateExecute;
   tableNames: GraphTemplateTableNames;
   /**
-   * Builds this profile's schema-row instantiation statement
-   * (`graph-template-sql.ts` exports one such builder per dialect — the
-   * PostgreSQL profile hands over the one that also copies contribution
-   * markers inside its own CTE, the SQLite profile the bare
-   * `INSERT ... SELECT ... RETURNING`).
+   * The resolved write-fence plan `createSqlBackend` closes over once at
+   * construction — the SAME plan every other lock site reads. Read only by
+   * the PostgreSQL binding, to decide whether its schema-row instantiation
+   * needs a preceding fence-row acquisition; SQLite's binding never
+   * consults it.
+   */
+  fencePlan: WriteFencePlan;
+  /**
+   * The SAME fence target `createSqlBackend` built and registered its
+   * profile-declared serialization classifier against (see
+   * `create-sql-backend.ts`) — read only by the PostgreSQL binding, as the
+   * `target` it hands `runRetriedUnit` when it replays its row-mechanism
+   * instantiation branch under the `"optimistic-retry"` tier. SQLite's
+   * binding never consults it.
+   */
+  fenceTarget: WriteFenceTarget;
+  /**
+   * Runs this profile's schema-row instantiation and returns its raw driver
+   * rows. SQLite's binding runs the bare `INSERT ... SELECT ... RETURNING`
+   * `graph-template-sql.ts` builds through the `execute` dep unchanged. The
+   * PostgreSQL binding does the same under every fence-plan kind except
+   * `"row"` (see the module doc comment for what it does instead there).
    */
   instantiateStatement: (
     params: InstantiateGraphTemplateSqlParams,
-  ) => SqlFragment;
+    execute: GraphTemplateExecute,
+    fencePlan: WriteFencePlan,
+    fenceTarget: WriteFenceTarget,
+  ) => Promise<readonly Record<string, unknown>[]>;
   /** Decodes a raw driver row into a `SchemaVersionRow` — the same mapper `OperationBackendRowMappers.toSchemaVersionRow` is. */
   toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
   rowAccess: GraphTemplateRowAccess;
@@ -177,6 +209,8 @@ export function createGraphTemplateMembers(
     ensureTable,
     execute,
     tableNames,
+    fencePlan,
+    fenceTarget,
     instantiateStatement,
     toSchemaVersionRow,
     rowAccess,
@@ -224,8 +258,11 @@ export function createGraphTemplateMembers(
           templateId: params.templateId,
           templateSchemaHash: params.templateSchemaHash,
         };
-        const rows = await execute<Record<string, unknown>>(
-          asCompiledRowsSql(instantiateStatement(sqlParams)),
+        const rows = await instantiateStatement(
+          sqlParams,
+          execute,
+          fencePlan,
+          fenceTarget,
         );
         const row = rows[0];
         if (row === undefined) return { status: "refused" } as const;

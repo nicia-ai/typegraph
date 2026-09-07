@@ -426,9 +426,10 @@ async function lockIdentityDdl(target: IdentityTarget): Promise<void> {
   const plan = resolveWriteFencePlan(target);
   const fence = requireWriteFence(plan, "identity DDL", "keyed");
   switch (fence.kind) {
-    case "lock": {
+    case "lock":
+    case "row": {
       await target.execute(
-        asCompiledRowsSql(fence.sql.advisoryLock(IDENTITY_DDL_LOCK_KEY, 0)),
+        asCompiledRowsSql(fence.sql.acquireKeyed(IDENTITY_DDL_LOCK_KEY, 0)),
       );
       return;
     }

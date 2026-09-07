@@ -58,6 +58,16 @@ export type SqlExecutionAdapter = Readonly<{
   runExclusive?: <T>(
     critical: (connection: SqlExecutionAdapter) => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Recognizes this engine's own commit-conflict shape when it is not
+   * PostgreSQL's `40001`/`40P01` SQLSTATE (or the fixed message fallback for
+   * a driver that drops the code). `createSqlBackend` registers this
+   * classifier against the exact backend object it returns; `isSerializationFailure`
+   * (`src/utils/sql-errors.ts`) consults it before falling back to its own
+   * SQLSTATE/message rules, so there remains ONE predicate every retry owner
+   * calls, never a second inline check for engines this covers.
+   */
+  serializationFailure?: (error: unknown) => boolean;
 }>;
 
 type SqlCompiler = Readonly<{

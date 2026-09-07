@@ -25,7 +25,7 @@ type BackendCapabilities = Readonly<{
     execution: Readonly<{
         interactiveTransactions: boolean;
         atomicBatch: "none" | "root" | "session";
-        unitOfWork?: "interactive" | "batch" | "none";
+        unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
     clearValidTo?: boolean;
@@ -822,9 +822,9 @@ type ExtensionUniqueWhere = Readonly<{
 
 // @public
 type FenceSql = Readonly<{
-    lockTables: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
-    advisoryLockExpression: (namespace: string, key: string | number) => SqlFragment;
-    isolationFactExpression: () => SqlFragment;
+    lockTables?: (tables: readonly string[], mode: "share" | "share-row-exclusive" | "access-exclusive") => SqlFragment;
+    advisoryLockExpression?: (namespace: string, key: string | number) => SqlFragment;
+    isolationFactExpression?: () => SqlFragment;
 }>;
 
 // @public
@@ -2057,6 +2057,7 @@ type ResolvedSqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims: string;
+    fences: string;
 }>;
 
 // @public
@@ -2369,6 +2370,7 @@ type SqlTableNames = Readonly<{
     fulltext: string;
     uniques: string;
     edgeClaims?: string | undefined;
+    fences?: string | undefined;
 }>;
 
 // @public (undocumented)
@@ -2755,6 +2757,10 @@ export function wrapZodError(error: ZodError, context: ValidationContext): Valid
 type WriteFenceDeclaration = Readonly<{
     mechanism: "advisory";
     drain: "table-lock" | "quiescent" | "none";
+}> | Readonly<{
+    mechanism: "row";
+    drain: "table-lock" | "quiescent" | "none";
+    conflict: "wait" | "commit-time";
 }> | Readonly<{
     mechanism: "engine-serialized";
 }> | Readonly<{
