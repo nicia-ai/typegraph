@@ -37,6 +37,11 @@ import {
   requireCatalog,
 } from "../backend/capabilities/catalog";
 import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../backend/capabilities/retried-unit";
+import {
   type CreateVectorIndexParams,
   type GraphBackend,
   type IndexMaterializationRow,
@@ -71,11 +76,6 @@ import {
   ensureFocusedStatusTable,
   runBucketedMaterialization,
 } from "./materialize-shared";
-import {
-  isOptimisticRetryTier,
-  OPTIMISTIC_RETRY_ATTEMPTS,
-  runRetriedUnit,
-} from "./operations/write-transaction";
 
 /**
  * Cross-caller build claim timing (Postgres).

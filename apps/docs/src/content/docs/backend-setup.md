@@ -1473,18 +1473,22 @@ fuse its schema fence into one statement. Even absent `"optimistic-retry"`,
 re-deriving the same distinction from `interactiveTransactions` and
 `atomicBatch` separately.
 
-Under `"optimistic-retry"`, every store-owned write TypeGraph opens
-(collection create/update/delete, bulk paths, `importGraph`, identity
-maintenance, contribution rebuild, index materialization) replays a real
-commit-time conflict as a whole unit, up to `OPTIMISTIC_RETRY_ATTEMPTS` (3)
-attempts, and only exhausting that budget (or a non-retryable failure)
-surfaces `TransactionConflictError` to the caller — see
-[Retrying on conflict](/schemas-stores#retrying-on-conflict). A nested write
-running inside an existing transaction (`store.transaction`, an adopted
-transaction) never retries on its own: it cannot restart a transaction it does
-not own, so its conflict propagates unchanged to the outermost store-owned
-write, or to `store.transaction` itself. This tier therefore changes behavior
-only for a write that opens its own transaction.
+Under `"optimistic-retry"`, every TypeGraph-owned transaction that acquires a
+fence row replays a real commit-time conflict as a whole unit, up to
+`OPTIMISTIC_RETRY_ATTEMPTS` (3) attempts, and only exhausting that budget (or
+a non-retryable failure) surfaces `TransactionConflictError` to the caller —
+see [Retrying on conflict](/schemas-stores#retrying-on-conflict). That covers
+every store-owned write (collection create/update/delete, bulk paths,
+`importGraph`, identity maintenance, contribution rebuild, index
+materialization) as well as the two backend-owned transactions that acquire
+the schema-commit fence row directly, outside the store's own write path:
+graph-template instantiation and a schema commit (`commitSchemaVersion` and
+its three siblings, via `runSchemaWriteTransaction`). A nested write running
+inside an existing transaction (`store.transaction`, an adopted transaction)
+never retries on its own: it cannot restart a transaction it does not own, so
+its conflict propagates unchanged to the outermost store-owned write, or to
+`store.transaction` itself. This tier therefore changes behavior only for a
+transaction that opens its own top-level connection.
 
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can

@@ -753,7 +753,8 @@ type CreateGraphTemplateMembersDeps = Readonly<{
     execute: GraphTemplateExecute;
     tableNames: GraphTemplateTableNames;
     fencePlan: WriteFencePlan;
-    instantiateStatement: (params: InstantiateGraphTemplateSqlParams, execute: GraphTemplateExecute, fencePlan: WriteFencePlan) => Promise<readonly Record<string, unknown>[]>;
+    fenceTarget: WriteFenceTarget;
+    instantiateStatement: (params: InstantiateGraphTemplateSqlParams, execute: GraphTemplateExecute, fencePlan: WriteFencePlan, fenceTarget: WriteFenceTarget) => Promise<readonly Record<string, unknown>[]>;
     toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
     rowAccess: GraphTemplateRowAccess;
     copyContributionMarkers?: (execute: GraphTemplateExecute, params: CopyGraphTemplateContributionMarkersSqlParams) => Promise<void>;
@@ -7914,7 +7915,7 @@ type GraphTemplateRowAccess = Readonly<{
 }>;
 
 // @public
-export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "ensureTable" | "execute" | "fencePlan">;
+export type GraphTemplateRuntime = Omit<CreateGraphTemplateMembersDeps, "ensureTable" | "execute" | "fencePlan" | "fenceTarget">;
 
 // @public
 type GraphTemplateTableNames = Readonly<{

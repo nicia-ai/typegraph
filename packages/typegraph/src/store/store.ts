@@ -42,6 +42,10 @@ import {
   uniqueSidecarBatchVerdict,
 } from "../backend/capabilities/resolve";
 import {
+  type RetriedUnitAttempt,
+  runRetriedUnit,
+} from "../backend/capabilities/retried-unit";
+import {
   refuseUnfencedClockAllocation,
   refuseUnfencedOperationalIdentity,
   resolveWriteFencePlan,
@@ -300,9 +304,7 @@ import {
   batchRefusalDetails,
   batchRefusalSuffix,
   resolveBatchWriteVerdict,
-  type RetriedUnitAttempt,
   runInWriteTransaction,
-  runRetriedUnit,
   withTransactionSchemaFenceLease,
   withWriteTransactionSession,
   type WriteTransactionContext,

@@ -259,12 +259,13 @@ export type IdentityRuntime = Omit<
  * What a profile supplies `createSqlBackend` to build the graph-template
  * member group, beyond `ensureTable` (from `provisioning`), `execute` (the
  * operation layer's own `execute`, once `createSqlBackend` has built it),
- * and `fencePlan` (the plan `createSqlBackend` resolves once, before it
- * builds this member group). See `members/graph-template-members.ts`.
+ * and `fencePlan`/`fenceTarget` (resolved and built once by `createSqlBackend`
+ * before it builds this member group — the same pair every other member
+ * group shares). See `members/graph-template-members.ts`.
  */
 export type GraphTemplateRuntime = Omit<
   CreateGraphTemplateMembersDeps,
-  "ensureTable" | "execute" | "fencePlan"
+  "ensureTable" | "execute" | "fencePlan" | "fenceTarget"
 >;
 
 /**

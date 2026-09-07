@@ -2242,7 +2242,7 @@ async function runMergeCommit<Output>(
  * Isolation for the merge commit transaction. SERIALIZABLE closes the window
  * between the in-transaction re-validation reads and COMMIT on multi-writer
  * Postgres (SSI aborts a racing writer with SQLSTATE 40001, which
- * {@link file://../store/operations/write-transaction.ts runRetriedUnit} retries); SQLite and
+ * {@link file://../backend/capabilities/retried-unit.ts runRetriedUnit} retries); SQLite and
  * PGlite serialize writers by construction, and the SQLite backend ignores
  * the option.
  */

@@ -1782,6 +1782,16 @@ export function buildSqliteEngineProfile(
      *
      * Refuses on `transactionMode: "none"`. The orphan-row crash window
      * cannot be eliminated without atomicity.
+     *
+     * Never wrapped in `runRetriedUnit`, unlike PostgreSQL's own
+     * `runSchemaWriteTransaction`: every path above takes SQLite's writer
+     * slot (`BEGIN IMMEDIATE`, or the Durable Object storage transaction)
+     * BEFORE the fence row's own statement ever runs, so a second acquirer
+     * WAITS for the slot rather than racing to a commit-time conflict at
+     * COMMIT. That holds even under a declaration naming `conflict:
+     * "commit-time"` — `capabilities.execution.unitOfWork` could still
+     * derive `"optimistic-retry"` for this backend, but no commit-time
+     * failure the retry would ever catch can occur here to retry.
      */
     function runSchemaWriteTransaction<T>(
       fn: (tx: InternalOperationBackend) => Promise<T>,

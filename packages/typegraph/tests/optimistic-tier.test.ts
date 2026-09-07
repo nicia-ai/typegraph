@@ -30,6 +30,11 @@ import {
   searchable,
   TransactionConflictError,
 } from "../src";
+import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../src/backend/capabilities/retried-unit";
 import { generateVectorlessPostgresMigrationSQL } from "../src/backend/drizzle/ddl";
 import type { SqlEngineProfile } from "../src/backend/drizzle/engine";
 import { createSqlBackend } from "../src/backend/drizzle/engine";
@@ -44,10 +49,12 @@ import {
   importGraph,
 } from "../src/interchange";
 import {
-  isOptimisticRetryTier,
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../src/schema/graph-templates";
+import {
   requiresOptimisticRetryUnit,
   resolveWriteTransactionMode,
-  runRetriedUnit,
 } from "../src/store/operations/write-transaction";
 import { requireDefined } from "../src/utils/presence";
 import {
@@ -431,7 +438,7 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     }
   }
 
-  it("rebuildContribution with a first-attempt fault succeeds, and its pre-reads run inside the attempt (the marker read fires twice)", async () => {
+  it("rebuildContribution's pre-reads run inside the attempt: exhausting runSchemaWriteTransaction's own retry still redoes them (the marker read fires twice)", async () => {
     // A hand-built PGlite client and logger, rather than the shared fault
     // injector or `createLoggedPgliteClient`: `rebuildContribution`'s fence
     // opens its transaction through `db.transaction(...)` directly
@@ -444,6 +451,16 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     // the fault trigger and the read count below therefore hook the
     // `logger` option, the one seam that sees every statement, in or out of
     // a transaction alike.
+    //
+    // `runSchemaWriteTransaction` itself now replays a fence-row conflict
+    // under this tier (`src/backend/drizzle/postgres.ts`), so a fault on
+    // only the FIRST fence-row acquisition would be absorbed one layer
+    // down and never reach this outer attempt at all. Faulting every
+    // acquisition through `OPTIMISTIC_RETRY_ATTEMPTS` exhausts that inner
+    // retry first, so the outer attempt still sees exactly one failure to
+    // retry — proving the two layers compose (see the `runRetriedUnit`
+    // JSDoc on `runSchemaWriteTransaction`) rather than one silently
+    // swallowing the other's contract.
     const client = await PGlite.create();
     await client.exec(generateVectorlessPostgresMigrationSQL());
     const statements: string[] = [];
@@ -454,7 +471,7 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
       statements.push(sqlText);
       if (!armed || !WRITE_STATEMENT_PATTERN.test(sqlText)) return;
       statementCalls += 1;
-      if (statementCalls === 1) {
+      if (statementCalls <= OPTIMISTIC_RETRY_ATTEMPTS) {
         faulted = true;
         const error = new Error("injected 40001 fault");
         (error as Error & { code: string }).code = "40001";
@@ -490,9 +507,13 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
           /^\s*select/i.test(statement) &&
           statement.includes(CONTRIBUTION_MARKER_TABLE),
       );
-      // One marker read per attempt: had the pre-reads stayed OUTSIDE the
+      // One marker read per OUTER attempt: `runSchemaWriteTransaction`
+      // exhausted its own `OPTIMISTIC_RETRY_ATTEMPTS` retries internally
+      // (every acquisition through that budget was faulted above) before
+      // ever raising to this outer attempt, which then redid its own
+      // pre-reads exactly once more. Had the pre-reads stayed OUTSIDE the
       // retried closure (read once, before the fenced transaction), this
-      // would read 1 regardless of how many attempts ran.
+      // would read 1 regardless of how many attempts ran at either layer.
       expect(markerReads.length).toBe(2);
     } finally {
       await client.close();
@@ -579,6 +600,139 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     // attempt. Had that write not been routed through the retry owner, it
     // would have thrown out of `materializeWithClaim` uncaught instead of
     // `materializeIndexes` resolving with the failed entry above.
+    expect(injector.lastFault()).toBeDefined();
+  });
+});
+
+/**
+ * `{ row, quiescent, wait }` — the ONE `conflict` value on `mechanism: "row"`
+ * that does NOT derive `"optimistic-retry"` (`deriveUnitOfWork`,
+ * `src/backend/capabilities/execution.ts`, reads `"interactive"` instead): a
+ * waiting mechanism excludes the second acquirer instead of failing it at
+ * commit, so there is nothing here for a retry owner to replay.
+ */
+const ROW_WAIT_WRITE_FENCE = {
+  mechanism: "row",
+  drain: "quiescent",
+  conflict: "wait",
+} as const;
+
+const ROW_WAIT_CAPABILITIES: Partial<BackendCapabilities> = {
+  writeFence: ROW_WAIT_WRITE_FENCE,
+};
+
+/** Matches the fences relation's own INSERT/UPDATE, never an unrelated write. */
+function isFencesTableStatement(sqlText: string): boolean {
+  return sqlText.includes("typegraph_fences");
+}
+
+describe("optimistic-retry tier — backend-owned units (pglite)", () => {
+  const TemplateSourceGraph = defineGraph({
+    id: "optimistic-retry-template-source",
+    nodes: { Person: { type: Person } },
+    edges: {},
+  });
+
+  it("graph-template instantiation whose first attempt's fence-row acquisition is faulted succeeds on attempt 2, with the template's rows committed exactly once", async () => {
+    const injector = await createTransactionFaultInjector("pglite", {
+      shape: "40001",
+      failAtStatementMatching: isFencesTableStatement,
+      capabilities: OPTIMISTIC_RETRY_CAPABILITIES,
+    });
+    injectorsToClose.push(injector);
+    expect(injector.backend.capabilities.execution.unitOfWork).toBe(
+      "optimistic-retry",
+    );
+
+    // Registration runs (and completes) before arming: only the
+    // instantiation below is under test.
+    const [, sourceResult] = await createStoreWithSchema(
+      TemplateSourceGraph,
+      injector.backend,
+    );
+    if (sourceResult.status !== "initialized") {
+      throw new Error(
+        `Expected a freshly initialized schema, got "${sourceResult.status}".`,
+      );
+    }
+    const template = await registerGraphTemplate(injector.backend, {
+      templateId: "optimistic-retry-template",
+      reconciled: {
+        graph: TemplateSourceGraph,
+        version: sourceResult.version,
+        hash: sourceResult.committedRow.schema_hash,
+      },
+    });
+
+    injector.arm();
+    const first = await instantiateGraphTemplate(injector.backend, {
+      template,
+      graphId: "optimistic-retry-tenant",
+    });
+
+    expect(first.status).toBe("ready");
+    expect(first.schema.version).toBe(1);
+    expect(injector.lastFault()).toBeDefined();
+
+    // Re-instantiating the SAME template onto the SAME graph converges on
+    // the identical schema hash rather than erroring or drifting — proof
+    // the retried attempt's schema row and contribution markers committed
+    // exactly once, not partially or twice: a duplicated commit would leave
+    // this second call observing a different version or a content conflict.
+    const second = await instantiateGraphTemplate(injector.backend, {
+      template,
+      graphId: "optimistic-retry-tenant",
+    });
+    expect(second.status).toBe("ready");
+    expect(second.schema.version).toBe(first.schema.version);
+    expect(second.schema.schema_hash).toBe(first.schema.schema_hash);
+  });
+
+  it("commitSchemaVersion's first attempt's fence-row acquisition is faulted and the initial schema commit still succeeds on attempt 2", async () => {
+    const injector = await createTransactionFaultInjector("pglite", {
+      shape: "40001",
+      failAtStatementMatching: isFencesTableStatement,
+      capabilities: OPTIMISTIC_RETRY_CAPABILITIES,
+    });
+    injectorsToClose.push(injector);
+    expect(injector.backend.capabilities.execution.unitOfWork).toBe(
+      "optimistic-retry",
+    );
+
+    // Armed BEFORE the store is built: the initial schema commit
+    // (`commitSchemaVersion`, reached through `createStoreWithSchema`) is
+    // the very first managed write, so it is the one this fault reaches.
+    injector.arm();
+    const [store] = await createStoreWithSchema(
+      OPTIMISTIC_RETRY_GRAPH,
+      injector.backend,
+    );
+
+    expect(injector.lastFault()).toBeDefined();
+    const created = await store.nodes.Person.create({ name: "Alice" });
+    expect(await store.nodes.Person.getById(created.id)).toBeDefined();
+  });
+
+  it("under { row, quiescent, wait } the same fence-row fault is NOT retried: one attempt, the raw conflict propagates", async () => {
+    const injector = await createTransactionFaultInjector("pglite", {
+      shape: "40001",
+      failAtStatementMatching: isFencesTableStatement,
+      capabilities: ROW_WAIT_CAPABILITIES,
+    });
+    injectorsToClose.push(injector);
+    expect(injector.backend.capabilities.execution.unitOfWork).toBe(
+      "interactive",
+    );
+
+    injector.arm();
+    await expect(
+      createStoreWithSchema(OPTIMISTIC_RETRY_GRAPH, injector.backend),
+    ).rejects.toThrow("injected 40001 fault");
+
+    // The fault fired exactly once and was never classified as a retryable
+    // conflict for this tier: had the enrollment above been gated on
+    // anything other than the tier, this would instead have resolved after
+    // a second attempt, the way the `"optimistic-retry"` test above does.
     expect(injector.lastFault()).toBeDefined();
   });
 });

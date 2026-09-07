@@ -18,6 +18,7 @@ import {
   statementExecutionVerdict,
   uniqueSidecarBatchVerdict,
 } from "../src/backend/capabilities/resolve";
+import { runRetriedUnit } from "../src/backend/capabilities/retried-unit";
 import { ConfigurationError, TransactionConflictError } from "../src/errors";
 import {
   buildEdgeSchemaMap,
@@ -32,7 +33,6 @@ import {
 } from "../src/interchange/types";
 import { runWritePlan } from "../src/store/operations/write-executor";
 import { mixedWritePlan } from "../src/store/operations/write-plan";
-import { runRetriedUnit } from "../src/store/operations/write-transaction";
 import { storeBackend, storeRuntime } from "../src/store/runtime-port";
 import {
   createTransactionFaultInjector,

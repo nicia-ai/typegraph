@@ -556,6 +556,7 @@ export function createSqlBackend<TTx>(
       ensureTable: profile.provisioning.ensureTable,
       execute: operations.execute,
       fencePlan,
+      fenceTarget,
     });
 
   const baseSchemaMembers = createBaseSchemaMembers({

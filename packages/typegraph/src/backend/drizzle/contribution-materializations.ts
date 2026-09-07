@@ -38,13 +38,13 @@ import {
   asCompiledStatementSql,
 } from "../../query/sql-intent";
 import { sortedReplacer } from "../../schema/canonical";
+import { sha256Hex } from "../../utils/hash";
+import { errorChain, isMissingTableError } from "../../utils/sql-errors";
 import {
   isOptimisticRetryTier,
   OPTIMISTIC_RETRY_ATTEMPTS,
   runRetriedUnit,
-} from "../../store/operations/write-transaction";
-import { sha256Hex } from "../../utils/hash";
-import { errorChain, isMissingTableError } from "../../utils/sql-errors";
+} from "../capabilities/retried-unit";
 import {
   requireFenceLockTables,
   requireWriteFence,

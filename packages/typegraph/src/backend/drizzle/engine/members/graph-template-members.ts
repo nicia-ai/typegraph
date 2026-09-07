@@ -15,15 +15,19 @@
  *
  * `instantiateGraphTemplate` runs its profile's own `instantiateStatement`
  * dep (`graph-template-sql.ts` exports one builder per dialect; each profile
- * hands this group its own), given the resolved `fencePlan` and this group's
- * `execute`. SQLite always runs the one statement its builder returns
- * through `execute` directly. PostgreSQL does too under every fence-plan
- * kind except `"row"`, where the fused CTE's advisory lock no longer
- * excludes against a `row`-mechanism schema-commit fence — there, the
- * PostgreSQL profile instead opens its own transaction, takes the identical
- * fence row `acquireSchemaWriteFence` takes as a preceding statement, and
- * only then runs the CTE with its lock omitted, so the two statements commit
- * or roll back together. The one other genuine dialect difference:
+ * hands this group its own), given the resolved `fencePlan`, this group's
+ * `fenceTarget`, and its `execute`. SQLite always runs the one statement its
+ * builder returns through `execute` directly. PostgreSQL does too under
+ * every fence-plan kind except `"row"`, where the fused CTE's advisory lock
+ * no longer excludes against a `row`-mechanism schema-commit fence — there,
+ * the PostgreSQL profile instead opens its own transaction, takes the
+ * identical fence row `acquireSchemaWriteFence` takes as a preceding
+ * statement, and only then runs the CTE with its lock omitted, so the two
+ * statements commit or roll back together; under `conflict: "commit-time"`
+ * (the `"optimistic-retry"` tier) that whole transaction — open, fence-row
+ * acquisition, CTE — replays through `runRetriedUnit` on a commit-time
+ * conflict, `fenceTarget` naming the object its serialization classifier was
+ * registered against. The one other genuine dialect difference:
  * PostgreSQL's statement copies the template's contribution markers inside
  * its own CTE, but SQLite cannot put a data-modifying CTE beside the schema
  * INSERT, so its profile runs a second DML statement —
@@ -34,7 +38,10 @@
 import { ConfigurationError } from "../../../../errors";
 import { type CompiledRowsSql } from "../../../../query/sql-intent";
 import type { SerializedSchema } from "../../../../schema/types";
-import { type WriteFencePlan } from "../../../capabilities/write-fence";
+import {
+  type WriteFencePlan,
+  type WriteFenceTarget,
+} from "../../../capabilities/write-fence";
 import type { GraphTemplateRow, SchemaVersionRow } from "../../../types";
 import {
   type CopyGraphTemplateContributionMarkersSqlParams,
@@ -127,6 +134,15 @@ export type CreateGraphTemplateMembersDeps = Readonly<{
    */
   fencePlan: WriteFencePlan;
   /**
+   * The SAME fence target `createSqlBackend` built and registered its
+   * profile-declared serialization classifier against (see
+   * `create-sql-backend.ts`) — read only by the PostgreSQL binding, as the
+   * `target` it hands `runRetriedUnit` when it replays its row-mechanism
+   * instantiation branch under the `"optimistic-retry"` tier. SQLite's
+   * binding never consults it.
+   */
+  fenceTarget: WriteFenceTarget;
+  /**
    * Runs this profile's schema-row instantiation and returns its raw driver
    * rows. SQLite's binding runs the bare `INSERT ... SELECT ... RETURNING`
    * `graph-template-sql.ts` builds through the `execute` dep unchanged. The
@@ -137,6 +153,7 @@ export type CreateGraphTemplateMembersDeps = Readonly<{
     params: InstantiateGraphTemplateSqlParams,
     execute: GraphTemplateExecute,
     fencePlan: WriteFencePlan,
+    fenceTarget: WriteFenceTarget,
   ) => Promise<readonly Record<string, unknown>[]>;
   /** Decodes a raw driver row into a `SchemaVersionRow` — the same mapper `OperationBackendRowMappers.toSchemaVersionRow` is. */
   toSchemaVersionRow: (row: Record<string, unknown>) => SchemaVersionRow;
@@ -193,6 +210,7 @@ export function createGraphTemplateMembers(
     execute,
     tableNames,
     fencePlan,
+    fenceTarget,
     instantiateStatement,
     toSchemaVersionRow,
     rowAccess,
@@ -240,7 +258,12 @@ export function createGraphTemplateMembers(
           templateId: params.templateId,
           templateSchemaHash: params.templateSchemaHash,
         };
-        const rows = await instantiateStatement(sqlParams, execute, fencePlan);
+        const rows = await instantiateStatement(
+          sqlParams,
+          execute,
+          fencePlan,
+          fenceTarget,
+        );
         const row = rows[0];
         if (row === undefined) return { status: "refused" } as const;
         await copyContributionMarkers?.(execute, sqlParams);

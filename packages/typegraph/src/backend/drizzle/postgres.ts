@@ -117,6 +117,11 @@ import {
   sealCapabilityDeclaration,
 } from "../capabilities/declarations";
 import { scopeAtomicBatchToSession } from "../capabilities/execution";
+import {
+  isOptimisticRetryTier,
+  OPTIMISTIC_RETRY_ATTEMPTS,
+  runRetriedUnit,
+} from "../capabilities/retried-unit";
 import { markSchemaFencedInsertEligibleUnderFence } from "../capabilities/schema-fenced-insert";
 import {
   markFirstPartyFactory,
@@ -1416,7 +1421,7 @@ export function buildPostgresEngineProfile(
         tables.contributionMaterializations,
       ),
     },
-    async instantiateStatement(params, execute, fencePlan) {
+    async instantiateStatement(params, execute, fencePlan, fenceTarget) {
       if (fencePlan.kind !== "row") {
         return execute<Record<string, unknown>>(
           asCompiledRowsSql(
@@ -1445,20 +1450,39 @@ export function buildPostgresEngineProfile(
           },
         );
       }
-      return db.transaction(async (tx) => {
-        const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
-        await txAdapter.execute(
-          fencePlan.sql.acquireKeyed(
-            SCHEMA_COMMIT_FENCE_NAMESPACE,
-            params.graphId,
-          ),
-        );
-        return txAdapter.execute<Record<string, unknown>>(
-          asCompiledRowsSql(
-            postgresInstantiateGraphTemplateStatement(params, fencePlan),
-          ),
-        );
-      });
+      // Fresh `tx`/`txAdapter` every call, so a replayed attempt never
+      // reuses a rolled-back attempt's connection state (the attempt-factory
+      // contract `runRetriedUnit` requires of `attempt`).
+      const attempt = (): Promise<readonly Record<string, unknown>[]> =>
+        db.transaction(async (tx) => {
+          const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
+          await txAdapter.execute(
+            fencePlan.sql.acquireKeyed(
+              SCHEMA_COMMIT_FENCE_NAMESPACE,
+              params.graphId,
+            ),
+          );
+          return txAdapter.execute<Record<string, unknown>>(
+            asCompiledRowsSql(
+              postgresInstantiateGraphTemplateStatement(params, fencePlan),
+            ),
+          );
+        });
+      // Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
+      // concurrent instantiations can both acquire the fence row and only one
+      // COMMITs; the other's whole attempt — open, fence-row acquisition, CTE
+      // — replays from the top. Every other resolved plan, including `row`
+      // with `conflict: "wait"`, runs the one attempt above unchanged: a
+      // waiting mechanism excludes the second acquirer instead of failing it.
+      if (!isOptimisticRetryTier(fenceTarget)) return attempt();
+      return runRetriedUnit(
+        {
+          operation: "instantiateGraphTemplate",
+          attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+          target: fenceTarget,
+        },
+        attempt,
+      );
     },
     toSchemaVersionRow,
     rowAccess: {
@@ -1719,6 +1743,24 @@ export function buildPostgresEngineProfile(
      * (`drizzle-orm/neon-http`). The orphan-row crash window cannot be
      * eliminated without atomicity, so silent best-effort degradation is
      * worse than a typed error.
+     *
+     * Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
+     * concurrent callers can both acquire the fence row and only one
+     * COMMITs; the other's whole attempt — open, fence-row acquisition,
+     * `fn` — replays through `runRetriedUnit`, `fenceTarget` naming the
+     * object its serialization classifier was registered against. Every
+     * other resolved plan, including `row` with `conflict: "wait"`, runs the
+     * one attempt below unchanged. This is the ONE place that wraps
+     * `runSchemaWriteTransaction`: `commitSchemaVersion`,
+     * `commitSchemaVersionIfKindsEmpty`, `commitSchemaVersionWithPreflight`,
+     * and `setActiveVersion` (`schema-version-members.ts`) all delegate to
+     * this function and inherit the replay with no wrapping of their own. A
+     * caller that itself retries around a call into this function — the
+     * contribution rebuilder re-reads its own pre-fence state on retry, for
+     * one — composes safely: {@link runRetriedUnit}'s `unwrapNestedConflict`
+     * reports THIS function's own exhaustion `TransactionConflictError` by
+     * its unwrapped cause, so an outer retry classifies the underlying
+     * driver conflict exactly as it would a single-attempt nested unit.
      */
     function runSchemaWriteTransaction<T>(
       graphId: string,
@@ -1743,30 +1785,45 @@ export function buildPostgresEngineProfile(
         );
       }
 
-      return db.transaction(async (tx) => {
-        await acquireSchemaWriteFence(tx, graphId);
-        // The fence resolved above is held here, so the schema-write-capable
-        // InternalOperationBackend is used intentionally (see its type).
-        const { backend: txBackend, drainAndClose } = createTransactionBackend({
-          db: tx,
-          adapterOptions,
-          operationStrategy,
-          tableNames,
-          capabilities,
-          fulltextStrategy,
-          vectorStrategy,
-          contributionMaterializer: ctx.contributionMaterializer,
-          iterativeScanProbe,
-          schemaVersionsTable: tables.schemaVersions,
-          fenceTarget,
-          isFirstParty,
+      // Fresh `tx`/`txBackend` every call, so a replayed attempt never reuses
+      // a rolled-back attempt's connection state (the attempt-factory
+      // contract `runRetriedUnit` requires of `attempt`).
+      const attempt = (): Promise<T> =>
+        db.transaction(async (tx) => {
+          await acquireSchemaWriteFence(tx, graphId);
+          // The fence resolved above is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const { backend: txBackend, drainAndClose } =
+            createTransactionBackend({
+              db: tx,
+              adapterOptions,
+              operationStrategy,
+              tableNames,
+              capabilities,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              iterativeScanProbe,
+              schemaVersionsTable: tables.schemaVersions,
+              fenceTarget,
+              isFirstParty,
+            });
+          try {
+            return await fn(txBackend);
+          } finally {
+            await drainAndClose();
+          }
         });
-        try {
-          return await fn(txBackend);
-        } finally {
-          await drainAndClose();
-        }
-      });
+
+      if (!isOptimisticRetryTier(fenceTarget)) return attempt();
+      return runRetriedUnit(
+        {
+          operation: "runSchemaWriteTransaction",
+          attempts: OPTIMISTIC_RETRY_ATTEMPTS,
+          target: fenceTarget,
+        },
+        attempt,
+      );
     }
 
     // Shared by `transaction()` (TypeGraph opens the tx) and

@@ -345,14 +345,22 @@ export type BackendCapabilities = Readonly<{
      * nothing derives this for, is not forced to declare it.
      *
      * `src/store/operations/write-transaction.ts`'s retry-routing helpers
-     * are the `"optimistic-retry"` consumers: every
+     * are the store-owned `"optimistic-retry"` consumers: every
      * `runWritePlan`/`runHookedWritePlan`/
      * `runAutocommitSingleStatementWritePlan` call, `runIdentityMutation`,
      * `rebuildIdentityClosureWithSchemaFence`, `rebuildContribution`, and the
      * index-materialization claim/record calls each wrap their write in
      * `runRetriedUnit` when this reads `"optimistic-retry"` (and, for the
      * transaction-opening ones, the write opens its own transaction rather
-     * than joining an existing one). Two further readers key off the
+     * than joining an existing one). Two backend-owned transactions consult
+     * the SAME tier directly, outside the store's write path entirely:
+     * PostgreSQL's graph-template instantiation row branch and
+     * `runSchemaWriteTransaction` (behind `commitSchemaVersion` and its
+     * three siblings), both in `src/backend/drizzle/postgres.ts` — each
+     * acquires the schema-commit fence row in a `db.transaction(...)` it
+     * opens directly, so each wraps that whole transaction in
+     * `runRetriedUnit` itself rather than routing through the store's
+     * helpers. Two further readers key off the
      * `"batch"` value: the batch-tier write verdict
      * (`resolveBatchWriteVerdict` in
      * `backend/capabilities/batch-write-verdict.ts`) and the autocommit

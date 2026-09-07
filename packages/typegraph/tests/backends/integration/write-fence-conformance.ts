@@ -67,6 +67,19 @@
  * `mechanism: "row"` has to be declared on the connection from the start,
  * through `createSerializedBackend`'s own `capabilities` option, exactly like
  * `{row, quiescent, wait}` above.
+ *
+ * Two more `{row, quiescent, commit-time}` tests cover the two TypeGraph-
+ * owned transactions that acquire this same schema-commit fence row OUTSIDE
+ * `runInWriteTransaction`: graph-template instantiation's row branch and
+ * `runSchemaWriteTransaction` (behind `commitSchemaVersion` and its three
+ * siblings), both in `src/backend/drizzle/postgres.ts`. Both open their own
+ * `db.transaction(...)` directly, bypassing the `deriveBackend` isolation
+ * override above, so each test instead sets `default_transaction_isolation`
+ * on the connection actually under test through `executeRaw`. Neither
+ * exposes a caller-controlled pause point mid-transaction the way a managed
+ * write does, so contention is constructed deterministically by a holder
+ * that acquires the identical fence row directly (`holdSchemaCommitFenceRow`)
+ * rather than by racing two bare calls and hoping they overlap.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -108,6 +121,10 @@ import {
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import {
+  instantiateGraphTemplate,
+  registerGraphTemplate,
+} from "../../../src/schema/graph-templates";
 import { lockRecordedGraphWrite } from "../../../src/store/recorded-capture";
 import { generateId } from "../../../src/utils/id";
 import { requireDefined } from "../../../src/utils/presence";
@@ -249,6 +266,54 @@ const ROW_QUIESCENT_COMMIT_TIME_WRITE_FENCE: Extract<
   WriteFenceDeclaration,
   { mechanism: "row" }
 > = { mechanism: "row", drain: "quiescent", conflict: "commit-time" };
+
+/**
+ * The keyed-exclusion namespace `acquireSchemaWriteFence` (the schema-commit
+ * side) and graph-template instantiation's row branch (the
+ * `instantiateStatement` dep) both acquire under `mechanism: "row"` —
+ * `src/backend/drizzle/postgres.ts`'s private `SCHEMA_COMMIT_FENCE_NAMESPACE`.
+ * Held here as a literal, the way this file already spells physical table
+ * names (`typegraph_nodes`) directly elsewhere: the two tests below
+ * deliberately acquire the IDENTICAL fence row those two production call
+ * sites acquire, to construct genuine contention on it deterministically
+ * rather than hoping two real calls happen to overlap in time.
+ */
+const SCHEMA_COMMIT_FENCE_NAMESPACE = "typegraph:schema-commit";
+
+/**
+ * Opens a transaction on `backend` that acquires the schema-commit fence row
+ * for `graphId` — the SAME row `acquireSchemaWriteFence` and graph-template
+ * instantiation's row branch acquire — and holds it open until `holdOpen`
+ * resolves.
+ *
+ * Neither `commitSchemaVersion` nor `instantiateGraphTemplate` exposes a
+ * caller-controlled pause point mid-transaction the way a managed node/edge
+ * write does (which the store-owned-create test above pauses through its own
+ * callback, per the module doc comment's assertion-5 paragraph): both are one
+ * opaque call from open to commit. This reproduces their exact acquisition
+ * statement instead, so the two tests below can hold the identical row a
+ * concurrent instantiation or commit would contend on.
+ */
+async function holdSchemaCommitFenceRow(
+  backend: AdapterBackend<unknown>,
+  graphId: string,
+  holdOpen: Promise<void>,
+): Promise<void> {
+  await backend.transaction(async (tx) => {
+    const plan = resolveWriteFencePlan(tx);
+    if (plan.kind !== "row") {
+      throw new Error(
+        `Expected a row-mechanism write fence to hold, got "${plan.kind}".`,
+      );
+    }
+    await tx.execute(
+      asCompiledRowsSql(
+        plan.sql.acquireKeyed(SCHEMA_COMMIT_FENCE_NAMESPACE, graphId),
+      ),
+    );
+    await holdOpen;
+  });
+}
 
 /**
  * Forces every transaction `backend` opens — through either `transaction` or
@@ -1100,6 +1165,215 @@ export function registerWriteFenceConformanceIntegrationTests(
               await storeB.nodes.ConformancePerson.getById(
                 conflictingCreated.id,
               ),
+            ).toBeDefined();
+          } finally {
+            await connectionA.close();
+            await connectionB.close();
+          }
+        });
+
+        it("row/quiescent/commit-time under REPEATABLE READ: a graph-template instantiation blocked on a concurrently held fence row is replayed to success, with no raw serialization failure escaping (assertion 5, graph-template instantiation)", async (ctx) => {
+          if (
+            context.getBackend().dialect !== "postgres" ||
+            !context.serverLaneConcurrency
+          ) {
+            ctx.skip();
+            return;
+          }
+          const connectionA = await context.createSerializedBackend({
+            capabilities: { writeFence: ROW_QUIESCENT_COMMIT_TIME_WRITE_FENCE },
+          });
+          const connectionB = await context.createSerializedBackend({
+            capabilities: { writeFence: ROW_QUIESCENT_COMMIT_TIME_WRITE_FENCE },
+          });
+          try {
+            const backendA = connectionA.backend;
+            const backendB = connectionB.backend;
+            expect(backendB.capabilities.execution.unitOfWork).toBe(
+              "optimistic-retry",
+            );
+            // `instantiateGraphTemplate`'s row branch opens its own
+            // `db.transaction(...)` directly (`src/backend/drizzle/postgres.ts`),
+            // bypassing whatever isolation `backend.transaction(...)` would
+            // otherwise be asked for — so the CONNECTION's own session default
+            // is what has to be REPEATABLE READ for a blocked acquisition to
+            // fail at commit-time rather than quietly proceed once unblocked.
+            await requireDefined(backendB.executeRaw)(
+              "SET default_transaction_isolation = 'repeatable read'",
+              [],
+            );
+
+            const sourceGraph = defineGraph({
+              id: `write-fence-conformance-template-source-${generateId()}`,
+              nodes: {
+                ConformancePerson: { type: ConformanceOptimisticPerson },
+              },
+              edges: {},
+            });
+            const [source] = await createAdapterStoreWithSchema(
+              sourceGraph,
+              backendA,
+            );
+            const template = await registerGraphTemplate(backendA, {
+              templateId: `write-fence-conformance-template-${generateId()}`,
+              reconciled: source.reconciledSchema,
+            });
+            const targetGraphId = `write-fence-conformance-template-target-${generateId()}`;
+
+            let releaseHolder: (() => void) | undefined;
+            const holdLockOpen = new Promise<void>((resolve) => {
+              releaseHolder = resolve;
+            });
+            let holderFinished = false;
+            const holderTransaction = holdSchemaCommitFenceRow(
+              backendA,
+              targetGraphId,
+              holdLockOpen,
+            ).then(() => {
+              holderFinished = true;
+            });
+
+            // No earlier signal than "the fence row is actually held" is
+            // available from the driver, so this waits a fixed interval for
+            // connection A's acquisition to land before connection B races
+            // it — the same convention every concurrency test in this file
+            // follows.
+            await delay(100);
+
+            const conflictingInstantiate = instantiateGraphTemplate(backendB, {
+              template,
+              graphId: targetGraphId,
+            });
+
+            const stillBlocked = await Promise.race([
+              conflictingInstantiate.then(() => false),
+              delay(300).then(() => true),
+            ]);
+            const holderFinishedBeforeRelease = holderFinished;
+            releaseHolder?.();
+            await holderTransaction;
+
+            // B's instantiation was genuinely blocked on A's held fence row,
+            // and once A committed, B's blocked acquisition woke to a real
+            // REPEATABLE READ serialization failure. The only way this
+            // resolves "ready" rather than rejecting with a raw driver error
+            // is that the graph-template row branch retried the whole unit
+            // — open, fence-row acquisition, CTE — and its second attempt,
+            // opened past A's commit, succeeded.
+            const result = await conflictingInstantiate;
+
+            expect(stillBlocked).toBe(true);
+            expect(holderFinishedBeforeRelease).toBe(false);
+            expect(holderFinished).toBe(true);
+            expect(result.status).toBe("ready");
+            expect(result.schema.version).toBe(1);
+
+            // Final-state check: re-instantiating the SAME template onto the
+            // SAME graph converges on the identical schema hash rather than
+            // erroring or drifting — proof the replayed attempt's rows
+            // committed exactly once, not partially or twice.
+            const converged = await instantiateGraphTemplate(backendA, {
+              template,
+              graphId: targetGraphId,
+            });
+            expect(converged.status).toBe("ready");
+            expect(converged.schema.schema_hash).toBe(
+              result.schema.schema_hash,
+            );
+          } finally {
+            await connectionA.close();
+            await connectionB.close();
+          }
+        });
+
+        it("row/quiescent/commit-time under REPEATABLE READ: an initial schema commit blocked on a concurrently held fence row is replayed to success, with no raw serialization failure escaping (assertion 5, initial schema commit)", async (ctx) => {
+          if (
+            context.getBackend().dialect !== "postgres" ||
+            !context.serverLaneConcurrency
+          ) {
+            ctx.skip();
+            return;
+          }
+          const connectionA = await context.createSerializedBackend({
+            capabilities: { writeFence: ROW_QUIESCENT_COMMIT_TIME_WRITE_FENCE },
+          });
+          const connectionB = await context.createSerializedBackend({
+            capabilities: { writeFence: ROW_QUIESCENT_COMMIT_TIME_WRITE_FENCE },
+          });
+          try {
+            const backendA = connectionA.backend;
+            const backendB = connectionB.backend;
+            expect(backendB.capabilities.execution.unitOfWork).toBe(
+              "optimistic-retry",
+            );
+            // `commitSchemaVersion` (behind `createAdapterStoreWithSchema`'s
+            // first open of a fresh graph) delegates to
+            // `runSchemaWriteTransaction`, which opens its own
+            // `db.transaction(...)` directly — see the graph-template test
+            // above for why the CONNECTION's own session default, not a
+            // `backend.transaction(...)` option, is what has to be
+            // REPEATABLE READ here.
+            await requireDefined(backendB.executeRaw)(
+              "SET default_transaction_isolation = 'repeatable read'",
+              [],
+            );
+
+            const graph = defineGraph({
+              id: `write-fence-conformance-initial-commit-${generateId()}`,
+              nodes: {
+                ConformancePerson: { type: ConformanceOptimisticPerson },
+              },
+              edges: {},
+            });
+
+            let releaseHolder: (() => void) | undefined;
+            const holdLockOpen = new Promise<void>((resolve) => {
+              releaseHolder = resolve;
+            });
+            let holderFinished = false;
+            const holderTransaction = holdSchemaCommitFenceRow(
+              backendA,
+              graph.id,
+              holdLockOpen,
+            ).then(() => {
+              holderFinished = true;
+            });
+
+            await delay(100);
+
+            const conflictingCommit = createAdapterStoreWithSchema(
+              graph,
+              backendB,
+            );
+
+            const stillBlocked = await Promise.race([
+              conflictingCommit.then(() => false),
+              delay(300).then(() => true),
+            ]);
+            const holderFinishedBeforeRelease = holderFinished;
+            releaseHolder?.();
+            await holderTransaction;
+
+            // B's initial commit was genuinely blocked on A's held fence
+            // row, and once A committed, B's blocked acquisition woke to a
+            // real REPEATABLE READ serialization failure. The only way this
+            // resolves rather than rejecting with a raw driver error is that
+            // `runSchemaWriteTransaction` retried the whole unit — open,
+            // fence-row acquisition, commit — and its second attempt,
+            // opened past A's commit, succeeded.
+            const [store, result] = await conflictingCommit;
+
+            expect(stillBlocked).toBe(true);
+            expect(holderFinishedBeforeRelease).toBe(false);
+            expect(holderFinished).toBe(true);
+            expect(result.status).toBe("initialized");
+            expect(store.reconciledSchema.version).toBe(1);
+
+            const created = await store.nodes.ConformancePerson.create({
+              name: "Alice",
+            });
+            expect(
+              await store.nodes.ConformancePerson.getById(created.id),
             ).toBeDefined();
           } finally {
             await connectionA.close();
