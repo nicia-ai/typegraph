@@ -67,6 +67,7 @@ import {
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
+  registerLineageConformanceIntegrationTests,
   registerMigrateSchemaKindIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
@@ -300,6 +301,7 @@ export function createIntegrationTestSuite<
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
+    registerLineageConformanceIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);
     registerClaimOwnerIdentityIntegrationTests(context);

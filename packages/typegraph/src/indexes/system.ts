@@ -193,6 +193,16 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
   // `degree()` at a recorded coordinate) would otherwise scan every
   // historical version in the graph. See typegraph#280.
   { table: "recordedNodes", suffix: "id_idx", columns: ["graph_id", "id"] },
+  // `recorded_from`-led lookup: `entity_idx` leads with `kind, id`, so it
+  // cannot serve the lineage capability's changed-since scan
+  // (`store/recorded-capture/lineage.ts`), which filters by `graph_id` and
+  // `recorded_from` alone across every kind. Without this the scan is a
+  // full per-graph table scan of every historical row.
+  {
+    table: "recordedNodes",
+    suffix: "since_idx",
+    columns: ["graph_id", "recorded_from"],
+  },
 
   // ---------------------------------------------------------- recordedEdges
   {
@@ -235,6 +245,14 @@ export const SYSTEM_INDEX_DECLARATIONS: readonly SystemIndexDeclaration[] = [
     table: "recordedEdges",
     suffix: "valid_idx",
     columns: ["graph_id", "valid_from", "valid_to"],
+  },
+  // `recorded_from`-led lookup, same rationale as recordedNodes' since_idx:
+  // the directional indexes above lead with an endpoint, not `recorded_from`
+  // alone, so they cannot serve the lineage capability's changed-since scan.
+  {
+    table: "recordedEdges",
+    suffix: "since_idx",
+    columns: ["graph_id", "recorded_from"],
   },
 ];
 

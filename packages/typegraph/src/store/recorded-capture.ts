@@ -89,6 +89,10 @@ export {
   withRecordedRelationsPrecondition,
 } from "./recorded-capture/guards";
 export {
+  recordedRelationsLineage,
+  resolveLineage,
+} from "./recorded-capture/lineage";
+export {
   RECORDED_EDGE_COLUMNS,
   RECORDED_NODE_COLUMNS,
 } from "./recorded-capture/relations";

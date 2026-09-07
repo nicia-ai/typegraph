@@ -217,7 +217,10 @@ describe("materializeSystemIndexes", () => {
       const [store] = await createStoreWithSchema(graph, backend);
 
       // Simulate a database initialized by an older library version: the
-      // index does not exist and no materialization was ever recorded.
+      // index does not exist and no materialization was ever recorded. A
+      // database initialized before `since_idx` existed adopts it through
+      // this exact same materializeSystemIndexes path as `id_idx`, not a
+      // bootstrap-only DDL a pre-upgrade database never sees.
       db.run(
         renderSqlInline(sql`DROP INDEX "typegraph_nodes_id_idx"`, "sqlite"),
       );
@@ -229,11 +232,29 @@ describe("materializeSystemIndexes", () => {
       );
       db.run(
         renderSqlInline(
-          sql`DELETE FROM "typegraph_index_materializations" WHERE index_name IN ('typegraph_nodes_id_idx', 'typegraph_recorded_edges_from_idx')`,
+          sql`DROP INDEX "typegraph_recorded_nodes_since_idx"`,
+          "sqlite",
+        ),
+      );
+      db.run(
+        renderSqlInline(
+          sql`DROP INDEX "typegraph_recorded_edges_since_idx"`,
+          "sqlite",
+        ),
+      );
+      db.run(
+        renderSqlInline(
+          sql`DELETE FROM "typegraph_index_materializations" WHERE index_name IN ('typegraph_nodes_id_idx', 'typegraph_recorded_edges_from_idx', 'typegraph_recorded_nodes_since_idx', 'typegraph_recorded_edges_since_idx')`,
           "sqlite",
         ),
       );
       expect(await indexNames(backend)).not.toContain("typegraph_nodes_id_idx");
+      expect(await indexNames(backend)).not.toContain(
+        "typegraph_recorded_nodes_since_idx",
+      );
+      expect(await indexNames(backend)).not.toContain(
+        "typegraph_recorded_edges_since_idx",
+      );
 
       const { results } = await store.materializeSystemIndexes();
       expect(results).toHaveLength(SYSTEM_INDEX_DECLARATIONS.length);
@@ -247,6 +268,8 @@ describe("materializeSystemIndexes", () => {
       const adopted = await indexNames(backend);
       expect(adopted).toContain("typegraph_nodes_id_idx");
       expect(adopted).toContain("typegraph_recorded_edges_from_idx");
+      expect(adopted).toContain("typegraph_recorded_nodes_since_idx");
+      expect(adopted).toContain("typegraph_recorded_edges_since_idx");
 
       // Status rows carry the system entity and the relation key.
       const statusRows = await backend.execute<{

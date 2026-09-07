@@ -1,0 +1,298 @@
+/**
+ * The conformance body a `lineage` source must pass, run here against the
+ * store's recorded-relations derivation (`recordedRelationsLineage`).
+ *
+ * Registered into every dialect via `createIntegrationTestSuite`, so it
+ * runs on both bundled dialects without a second copy of these cases.
+ *
+ * Only the "lineage: recorded-relations conformance" describe below is
+ * portable to a future engine-native `lineage` (`backend/capabilities/
+ * lineage.ts`) — it drives every case through `resolveLineage`, which an
+ * engine-backed store would resolve to that engine's own `lineage` member.
+ * The "lineage: pre-capture gap detection" describe is TypeGraph-specific:
+ * it exercises `recordedRelationsLineage` directly and depends on the
+ * TypeGraph-only distinction between `revisionTracking` and `history`, which
+ * has no equivalent for an engine that mints its own revisions — an
+ * engine-native `lineage` has no such gap to detect. An engine profile's own
+ * suite should point at the conformance describe only.
+ */
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import {
+  createStoreWithSchema,
+  defineEdge,
+  defineGraph,
+  defineNode,
+} from "../../../src";
+import {
+  type EngineRevision,
+  type EntityKey,
+  type GraphBackend,
+} from "../../../src/backend/types";
+import {
+  asRecordedInstant,
+  createRecordedInstant,
+  recordedInstantRevision,
+} from "../../../src/core/temporal";
+import {
+  recordedRelationsLineage,
+  resolveLineage,
+} from "../../../src/store/recorded-capture";
+
+const LineagePerson = defineNode("LineagePerson", {
+  schema: z.object({ name: z.string() }),
+});
+const lineageKnows = defineEdge("lineage_knows");
+
+const lineageGraph = defineGraph({
+  id: "lineage_recorded_relations",
+  nodes: { LineagePerson: { type: LineagePerson } },
+  edges: {
+    lineage_knows: {
+      type: lineageKnows,
+      from: [LineagePerson],
+      to: [LineagePerson],
+    },
+  },
+});
+
+const gapGraph = defineGraph({
+  id: "lineage_pre_capture_gap",
+  nodes: { LineagePerson: { type: LineagePerson } },
+  edges: {},
+});
+
+function byId(left: EntityKey, right: EntityKey): number {
+  return (
+    left.id < right.id ? -1
+    : left.id > right.id ? 1
+    : 0
+  );
+}
+
+function sortedKeys(keys: readonly EntityKey[]): readonly EntityKey[] {
+  return [...keys].toSorted((left, right) => byId(left, right));
+}
+
+/**
+ * The one thing this conformance body needs from its caller: a backend to
+ * build a fresh history store against. A real `IntegrationTestContext`
+ * (whose `getStore()` returns a whole `Store`) satisfies this structurally,
+ * as does the minimal object `tests/lineage-recorded-relations.test.ts`
+ * builds directly — and it is small enough that an engine profile outside
+ * this repository can satisfy it without depending on this test suite's
+ * internal `IntegrationTestContext` type.
+ */
+export type LineageConformanceContext = Readonly<{
+  getStore: () => Readonly<{ backend: GraphBackend }>;
+}>;
+
+export function registerLineageConformanceIntegrationTests(
+  context: LineageConformanceContext,
+): void {
+  describe("lineage: recorded-relations conformance", () => {
+    it("reports exactly the node and edge keys touched since an earlier revision", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      const r0 = await lineage.revision();
+      const alice = await store.nodes.LineagePerson.create({ name: "Alice" });
+      const bob = await store.nodes.LineagePerson.create({ name: "Bob" });
+      const edge = await store.edges.lineage_knows.create(alice, bob, {});
+
+      const delta = await lineage.changesSince(r0, store.graphId);
+      if (delta.kind !== "keys") throw new Error("expected a keys delta");
+      expect(sortedKeys(delta.nodes)).toEqual(
+        sortedKeys([
+          { kind: "LineagePerson", id: alice.id },
+          { kind: "LineagePerson", id: bob.id },
+        ]),
+      );
+      expect(delta.edges).toEqual([{ kind: "lineage_knows", id: edge.id }]);
+    });
+
+    it("reports no changes since the current revision", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      await store.nodes.LineagePerson.create({ name: "Carol" });
+      const rNow = await lineage.revision();
+
+      const delta = await lineage.changesSince(rNow, store.graphId);
+      expect(delta).toEqual({ kind: "keys", nodes: [], edges: [] });
+    });
+
+    it("reports a hard-deleted node's key", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      const dave = await store.nodes.LineagePerson.create({ name: "Dave" });
+      const rBeforeDelete = await lineage.revision();
+      await store.nodes.LineagePerson.hardDelete(dave.id);
+
+      const delta = await lineage.changesSince(rBeforeDelete, store.graphId);
+      expect(delta).toEqual({
+        kind: "keys",
+        nodes: [{ kind: "LineagePerson", id: dave.id }],
+        edges: [],
+      });
+    });
+
+    it("reports a resurrected node's key exactly once", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      const erin = await store.nodes.LineagePerson.create({ name: "Erin" });
+      const rBeforeDelete = await lineage.revision();
+      await store.nodes.LineagePerson.delete(erin.id);
+      await store.nodes.LineagePerson.upsertById(erin.id, {
+        name: "Erin restored",
+      });
+
+      const delta = await lineage.changesSince(rBeforeDelete, store.graphId);
+      if (delta.kind !== "keys") throw new Error("expected a keys delta");
+      expect(delta.nodes.filter((key) => key.id === erin.id)).toHaveLength(1);
+    });
+
+    it("reports unbounded for an unknown revision", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      const delta = await lineage.changesSince(
+        "not-a-revision-this-lineage-minted" as EngineRevision,
+        store.graphId,
+      );
+      expect(delta).toEqual({ kind: "unbounded" });
+    });
+
+    it("reports unbounded for a well-formed revision newer than the clock", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      await store.nodes.LineagePerson.create({ name: "Frank" });
+      const currentRevision = await lineage.revision();
+      const futureRevision = createRecordedInstant(
+        recordedInstantRevision(asRecordedInstant(currentRevision)) + 1000,
+        "2099-01-01T00:00:00.000Z",
+      );
+
+      const delta = await lineage.changesSince(
+        futureRevision as unknown as EngineRevision,
+        store.graphId,
+      );
+      expect(delta).toEqual({ kind: "unbounded" });
+    });
+
+    it("refuses changesSince for a graph other than the one it was derived from", async () => {
+      const [store] = await createStoreWithSchema(
+        lineageGraph,
+        context.getStore().backend,
+        { history: true },
+      );
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      const r0 = await lineage.revision();
+      await expect(
+        lineage.changesSince(r0, "some-other-graph"),
+      ).rejects.toThrow(/different graph/);
+    });
+  });
+
+  describe("lineage: pre-capture gap detection", () => {
+    it("reports unbounded for a revision predating capture when the origin row corroborates the gap", async () => {
+      const backend = context.getStore().backend;
+      const [trackingStore] = await createStoreWithSchema(gapGraph, backend, {
+        revisionTracking: true,
+      });
+      await trackingStore.nodes.LineagePerson.create({ name: "Untracked one" });
+      const earlyRevision = await trackingStore.revisionNow();
+      if (earlyRevision === undefined) {
+        throw new Error("expected the clock to have advanced");
+      }
+      await trackingStore.nodes.LineagePerson.create({ name: "Untracked two" });
+      // Mints the durable revision-origin row this graph's clock has never
+      // otherwise needed — the signal `changesSince` corroborates the gap
+      // with (see lineage.ts's module doc).
+      await trackingStore.revisionOriginNow();
+
+      const [historyStore] = await createStoreWithSchema(gapGraph, backend, {
+        history: true,
+      });
+      await historyStore.nodes.LineagePerson.create({ name: "Captured" });
+
+      const lineage = recordedRelationsLineage(historyStore);
+      const delta = await lineage.changesSince(
+        earlyRevision as unknown as EngineRevision,
+        historyStore.graphId,
+      );
+      expect(delta).toEqual({ kind: "unbounded" });
+    });
+
+    it("falls through to the ordinary predicate for the same gap when nothing corroborates it", async () => {
+      const backend = context.getStore().backend;
+      const [trackingStore] = await createStoreWithSchema(gapGraph, backend, {
+        revisionTracking: true,
+      });
+      await trackingStore.nodes.LineagePerson.create({ name: "Untracked one" });
+      const earlyRevision = await trackingStore.revisionNow();
+      if (earlyRevision === undefined) {
+        throw new Error("expected the clock to have advanced");
+      }
+      await trackingStore.nodes.LineagePerson.create({ name: "Untracked two" });
+      // Deliberately never calls revisionOriginNow() — the origin row this
+      // module's gap detection looks for is absent, so the gap is
+      // undetectable and changesSince must fail open rather than guess.
+
+      const [historyStore] = await createStoreWithSchema(gapGraph, backend, {
+        history: true,
+      });
+      const captured = await historyStore.nodes.LineagePerson.create({
+        name: "Captured",
+      });
+
+      const lineage = recordedRelationsLineage(historyStore);
+      const delta = await lineage.changesSince(
+        earlyRevision as unknown as EngineRevision,
+        historyStore.graphId,
+      );
+      if (delta.kind !== "keys") {
+        throw new Error(
+          "expected the undetectable gap to fall through to keys",
+        );
+      }
+      expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: captured.id }]);
+    });
+  });
+}

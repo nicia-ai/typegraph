@@ -4172,8 +4172,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly lineage: {
         readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory), so its access count is measured as zero even though the refusal reads the member.";
-        readonly accesses: 0;
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) is the one live consumer: two reads, both selecting the backend's own `lineage` over the derived one.";
+        readonly accesses: 2;
     };
     readonly claimIndexMaterialization: {
         readonly kind: "deferred";

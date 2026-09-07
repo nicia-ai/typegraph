@@ -953,6 +953,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_since_idx" ON "typegraph_recorded_nodes" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_edges" (
   "history_id" TEXT NOT NULL,
   "graph_id" TEXT NOT NULL,
@@ -996,6 +1000,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_valid_idx" ON "typegraph_recorded_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_since_idx" ON "typegraph_recorded_edges" ("graph_id", "recorded_from");",
   },
   {
     "params": [],
@@ -1707,17 +1715,19 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
     "sql": "
           SELECT c.relname AS name, i.indisvalid AS valid
           FROM pg_class c
           JOIN pg_index i ON i.indexrelid = c.oid
-          WHERE c.relname IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+          WHERE c.relname IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
             AND pg_catalog.pg_table_is_visible(c.oid)
         ",
   },
@@ -1754,13 +1764,15 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
-    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error", "building_since", "claim_token" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error", "building_since", "claim_token" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)",
   },
   {
     "params": [],
@@ -2176,6 +2188,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_since_idx" ON "typegraph_recorded_nodes" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_edges" (
   "history_id" TEXT NOT NULL,
   "graph_id" TEXT NOT NULL,
@@ -2219,6 +2235,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_valid_idx" ON "typegraph_recorded_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_since_idx" ON "typegraph_recorded_edges" ("graph_id", "recorded_from");",
   },
   {
     "params": [],
@@ -2710,17 +2730,19 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
     "sql": "
           SELECT c.relname AS name, i.indisvalid AS valid
           FROM pg_class c
           JOIN pg_index i ON i.indexrelid = c.oid
-          WHERE c.relname IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+          WHERE c.relname IN ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
             AND pg_catalog.pg_table_is_visible(c.oid)
         ",
   },
@@ -2757,13 +2779,15 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
-    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error", "building_since", "claim_token" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)",
+    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error", "building_since", "claim_token" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)",
   },
   {
     "params": [
@@ -3004,6 +3028,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_since_idx" ON "typegraph_recorded_nodes" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_edges" (
   "history_id" TEXT NOT NULL,
   "graph_id" TEXT NOT NULL,
@@ -3047,6 +3075,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_valid_idx" ON "typegraph_recorded_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_since_idx" ON "typegraph_recorded_edges" ("graph_id", "recorded_from");",
   },
   {
     "params": [],
@@ -3705,13 +3737,15 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
-    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   },
   {
     "params": [
@@ -3731,17 +3765,19 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
     "sql": "
           SELECT name
           FROM sqlite_master
           WHERE type = 'index'
-            AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
   },
   {
@@ -4071,6 +4107,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_nodes_since_idx" ON "typegraph_recorded_nodes" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_recorded_edges" (
   "history_id" TEXT NOT NULL,
   "graph_id" TEXT NOT NULL,
@@ -4114,6 +4154,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   {
     "params": [],
     "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_valid_idx" ON "typegraph_recorded_edges" ("graph_id", "valid_from", "valid_to");",
+  },
+  {
+    "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_edges_since_idx" ON "typegraph_recorded_edges" ("graph_id", "recorded_from");",
   },
   {
     "params": [],
@@ -4555,13 +4599,15 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
-    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    "sql": "select "index_name", "graph_id", "entity", "kind", "signature", "schema_version", "materialized_at", "last_attempted_at", "last_error" from "typegraph_index_materializations" where "typegraph_index_materializations"."index_name" in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   },
   {
     "params": [
@@ -4581,17 +4627,19 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       "typegraph_recorded_nodes_open_idx",
       "typegraph_recorded_nodes_valid_idx",
       "typegraph_recorded_nodes_id_idx",
+      "typegraph_recorded_nodes_since_idx",
       "typegraph_recorded_edges_entity_idx",
       "typegraph_recorded_edges_open_idx",
       "typegraph_recorded_edges_from_idx",
       "typegraph_recorded_edges_to_idx",
       "typegraph_recorded_edges_valid_idx",
+      "typegraph_recorded_edges_since_idx",
     ],
     "sql": "
           SELECT name
           FROM sqlite_master
           WHERE type = 'index'
-            AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
   },
   {
