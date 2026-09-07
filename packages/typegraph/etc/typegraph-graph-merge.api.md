@@ -2239,6 +2239,20 @@ type FindNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export type ForkedWorkingCopyOptions<G extends GraphDef, TFork extends ForkHandle> = Readonly<{
+    fork: (baseStore: Store<G>) => Promise<TFork>;
+    connect: (fork: TFork) => Promise<GraphBackend>;
+}>;
+
+// @public
+export function forkedWorkingCopyStrategy<G extends GraphDef, TFork extends ForkHandle>(options: ForkedWorkingCopyOptions<G, TFork>): WorkingCopyStrategy<G>;
+
+// @public
+export type ForkHandle = Readonly<{
+    dispose?: () => Promise<void>;
+}>;
+
+// @public
 type FulltextAccessor = Readonly<{
     matches: (query: string, k?: number, options?: MatchesOptions) => Predicate;
 }>;

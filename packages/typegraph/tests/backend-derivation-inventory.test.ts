@@ -133,6 +133,12 @@ const INVENTORY: readonly InventoryEntry[] = [
       "The batteries-included better-sqlite3 factory owns the handle it opened, so closing the backend must also close it.",
   },
   {
+    file: "graph-merge/working-copy.ts",
+    line: "const backend = wrapWithManagedClose(connectedBackend, async () => {",
+    reason:
+      "A forked working copy owns both the connection `connect()` opened and the host-level fork it opened it on, so closing the working copy's backend must release both — once, however many times close is called.",
+  },
+  {
     file: "store/history-store-backend.ts",
     line: "return Object.freeze(projectBackend(backend, HISTORY_STORE_BACKEND_KEYS));",
     reason:

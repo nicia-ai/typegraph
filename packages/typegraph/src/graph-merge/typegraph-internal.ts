@@ -4,6 +4,7 @@ export {
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";
+export { wrapWithManagedClose } from "../backend/derive-backend";
 export { snapshotExportContention } from "../backend/transaction-resource";
 export type {
   GraphBackend,
@@ -67,8 +68,13 @@ export {
   transactionBackend,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";
-export { createStoreWithSchema } from "../store/store";
-export { type Edge, type Node, type ValidityEndMutation } from "../store/types";
+export { createStore, createStoreWithSchema } from "../store/store";
+export {
+  type Edge,
+  type Node,
+  type StoreOptions,
+  type ValidityEndMutation,
+} from "../store/types";
 export { compareCodePoints } from "../utils/compare";
 export { canonicalizeDatabaseTimestamp } from "../utils/date";
 export { sha256Hex } from "../utils/hash";

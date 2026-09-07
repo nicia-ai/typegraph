@@ -38,11 +38,24 @@
  * Logical-namespace (copy-on-write within one backend, no full data copy) is a
  * future strategy slot — see the `WorkingCopyStrategy` interface — deferred past
  * P0.
+ *
+ * A second bundled strategy, {@link forkedWorkingCopyStrategy}, targets a
+ * fork-capable host instead: the working copy is a database-level fork (a file
+ * copy, a `CREATE DATABASE ... TEMPLATE`, a hosting product's branch call)
+ * rather than a streamed-interchange replay, so none of the fidelity
+ * limitations above apply to it — see its own doc comment.
  */
 
+import { computeBaseVersion } from "./base-version";
 import { BranchError } from "./errors";
-import type { GraphBackend, GraphDef, Store } from "./typegraph-internal";
+import type {
+  GraphBackend,
+  GraphDef,
+  Store,
+  StoreOptions,
+} from "./typegraph-internal";
 import {
+  createStore,
   createStoreWithSchema,
   exportGraph,
   exportGraphStream,
@@ -50,6 +63,7 @@ import {
   importGraphStream,
   snapshotExportContention,
   storeBackend,
+  wrapWithManagedClose,
 } from "./typegraph-internal";
 
 /**
@@ -208,6 +222,147 @@ function cloneWorkingCopyWithGraphStrategy<G extends GraphDef>(
         // The backend was opened above; close it on any failure so its
         // connection / file handle / in-process engine cannot leak. A close
         // failure must not mask the original error.
+        try {
+          await backend.close();
+        } catch {
+          // Intentionally ignored — surface the original branch failure.
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+/**
+ * A host-level handle to a forked database, produced by
+ * {@link ForkedWorkingCopyOptions.fork} and released by its own `dispose`.
+ *
+ * `dispose` is OPTIONAL: some hosts have nothing left to release beyond the
+ * connection `connect` opens on the fork (already composed into the returned
+ * working copy's backend — see {@link forkedWorkingCopyStrategy}), while others
+ * (a temporary file, a database created for this fork alone) need an explicit
+ * teardown.
+ */
+export type ForkHandle = Readonly<{
+  dispose?: () => Promise<void>;
+}>;
+
+/**
+ * Configuration for {@link forkedWorkingCopyStrategy}.
+ */
+export type ForkedWorkingCopyOptions<
+  G extends GraphDef,
+  TFork extends ForkHandle,
+> = Readonly<{
+  /**
+   * Produces a host-level fork of the database `baseStore` is on — the
+   * caller's own fork API call (a file copy, a `CREATE DATABASE ... TEMPLATE`,
+   * a hosting product's branch-database call). The fork MUST be byte-for-byte
+   * identical to the base at the instant it is taken: `create()` asserts this
+   * with `computeBaseVersion` and refuses otherwise (see
+   * {@link forkedWorkingCopyStrategy}).
+   */
+  fork: (baseStore: Store<G>) => Promise<TFork>;
+  /** Opens a backend on the fork `fork` produced. */
+  connect: (fork: TFork) => Promise<GraphBackend>;
+}>;
+
+/**
+ * Store options for a forked working copy: the SAME `history` /
+ * `revisionTracking` configuration `baseStore` itself reports, read off its
+ * own public getters — the same technique {@link cloneWorkingCopyStrategy}
+ * uses to obtain `revisionTracking` for its own fresh store. A fork's
+ * recorded-time relations are already physically present on the copied
+ * database (unlike a clone's, which streamed interchange cannot carry), so
+ * `history: true` is threaded through here where the clone strategy
+ * deliberately withholds it (see its own fidelity note).
+ */
+function forkStoreOptions<G extends GraphDef>(
+  baseStore: Store<G>,
+): StoreOptions {
+  return baseStore.historyEnabled ?
+      { history: true }
+    : { revisionTracking: baseStore.revisionTrackingEnabled };
+}
+
+/**
+ * Working-copy strategy for a fork-capable host: `fork(baseStore)` asks the
+ * host to produce a complete, independent copy of the underlying database —
+ * not a public-interchange replay — and `connect(fork)` opens a backend on
+ * that copy.
+ *
+ * Unlike {@link cloneWorkingCopyStrategy}, the working copy is never built
+ * through `exportGraphStream`/`importGraphStream`, so none of that strategy's
+ * interchange-fidelity limitations apply here: soft-deleted rows keep their
+ * tombstones, `created_at`/`updated_at` and the `version` column carry over
+ * unchanged, and — when the base has `history` enabled — the recorded
+ * relations the fork physically carries answer `asOfRecorded` for instants
+ * before the fork, which a clone cannot (streamed interchange never carries
+ * recorded history).
+ *
+ * `create(baseStore)`:
+ *   1. `fork(baseStore)` — the host-level fork call.
+ *   2. `connect(fork)` — opens a backend on the fork. A failure here disposes
+ *      the fork before rethrowing (mirroring the clone strategy's
+ *      own-failure cleanup); a dispose failure never masks the original
+ *      error.
+ *   3. The connected backend's `close` is composed with the fork's `dispose`
+ *      through `wrapWithManagedClose` (a `deriveBackend` overlay, never a
+ *      spread), so the caller's single `close()` on the resulting store's
+ *      backend releases both the connection and the fork.
+ *   4. A fresh `Store` is attached with `createStore` — a zero-DDL attach,
+ *      since the fork already carries the base's schema and rows — using
+ *      {@link forkStoreOptions}.
+ *   5. `computeBaseVersion` is compared between the fork's store and the base
+ *      store: a fork must be the base, byte for byte, or it is not a fork.
+ *      A mismatch closes the backend (releasing both the connection and the
+ *      fork, mirroring step 3's composition) before refusing with a
+ *      {@link BranchError}.
+ *
+ * @param options - `{ fork, connect }` — see {@link ForkedWorkingCopyOptions}.
+ */
+export function forkedWorkingCopyStrategy<
+  G extends GraphDef,
+  TFork extends ForkHandle,
+>(options: ForkedWorkingCopyOptions<G, TFork>): WorkingCopyStrategy<G> {
+  return {
+    create: async (baseStore: Store<G>): Promise<Store<G>> => {
+      const fork = await options.fork(baseStore);
+      let connectedBackend: GraphBackend;
+      try {
+        connectedBackend = await options.connect(fork);
+      } catch (error) {
+        try {
+          await fork.dispose?.();
+        } catch {
+          // Intentionally ignored — surface the original connect failure.
+        }
+        throw error;
+      }
+      const backend = wrapWithManagedClose(connectedBackend, async () => {
+        await fork.dispose?.();
+      });
+      try {
+        const forkStore = createStore(
+          baseStore.graph,
+          backend,
+          forkStoreOptions(baseStore),
+        );
+        const [forkVersion, baseVersion] = await Promise.all([
+          computeBaseVersion(forkStore),
+          computeBaseVersion(baseStore),
+        ]);
+        if (forkVersion !== baseVersion) {
+          throw new BranchError(
+            "Fork does not match its base: computeBaseVersion disagrees " +
+              "between the forked store and the base store it was forked " +
+              "from. A working-copy fork must be byte-for-byte identical to " +
+              "its base at the instant it is taken.",
+            { details: { forkVersion, baseVersion } },
+          );
+        }
+        return forkStore;
+      } catch (error) {
         try {
           await backend.close();
         } catch {
