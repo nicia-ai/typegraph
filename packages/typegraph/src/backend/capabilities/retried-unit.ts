@@ -107,19 +107,28 @@ type RetriedUnitFailureDisposition = Readonly<
 /**
  * An attempt that itself runs a nested unit of work through this same owner —
  * graph-merge's commit sites call `target.transaction(...)`, which is
- * `store.transaction()` run with no `retry` option — reports a
+ * `store.transaction()` run with no `retry` option, i.e. a single-attempt
+ * (`attempts: 1`) `runRetriedUnit` call of its own — reports a
  * {@link TransactionConflictError} as its failure, not the driver error
- * underneath, whenever that inner `runRetriedUnit` call was NOT itself seen
- * as nested (the async-context detection below is unavailable, or resolved
- * too late to mark it — see `runRetriedUnit`'s own nesting doc). Classifying
- * the wrapper as-is would still work ({@link isSerializationFailure} walks
- * into its `cause`), but the exhaustion `TransactionConflictError` this loop
- * mints would then wrap the INNER `TransactionConflictError` instead of the
- * driver error it wraps in turn, chaining two conflict errors where the
+ * underneath, whenever that inner call is NOT recognized as nested. Detection
+ * requires a working async-context loader (see `runRetriedUnit`'s own doc);
+ * on a runtime where it is unavailable, the inner call cannot tell it is
+ * nested, runs its own top-level loop, and — with a budget of exactly one
+ * attempt — mints the wrapper on that attempt's first failure, since it has
+ * no second attempt to retry into. This is the one remaining shape the
+ * degraded (undetected) path still has to handle: `runRetriedUnit` refuses
+ * outright, before ever reaching this code, when the target itself is on the
+ * `"optimistic-retry"` tier and detection is unavailable — but a merge
+ * target on the plain `"interactive"` tier carries no such refusal, so its
+ * commit sites can still reach an undetected nested single-attempt call.
+ * Classifying the wrapper as-is would still work ({@link isSerializationFailure}
+ * walks into its `cause`), but the exhaustion `TransactionConflictError` this
+ * loop mints would then wrap the INNER `TransactionConflictError` instead of
+ * the driver error it wraps in turn, chaining two conflict errors where the
  * replay contract promises one. Unwrapping first makes the classification,
  * and the eventual `cause`, the same regardless of whether an attempt calls
- * the driver directly, through a nested unit the async-context detection
- * caught (which never wraps in the first place), or through one it did not.
+ * the driver directly, through a nested unit detection caught (which never
+ * wraps in the first place), or through one it did not.
  */
 function unwrapNestedConflict(error: unknown): unknown {
   return error instanceof TransactionConflictError ? error.cause : error;
@@ -243,6 +252,56 @@ export type RetriedUnitOptions = Readonly<{
 }>;
 
 /**
+ * Whether `target` — {@link RetriedUnitOptions.target}, declared as a bare
+ * `object` so this module never needs to import the full `GraphBackend` /
+ * `TransactionBackend` / fence-target union just to carry it — resolves to
+ * the `"optimistic-retry"` tier. Delegates the actual comparison to
+ * {@link isOptimisticRetryTier} (the one place that decision is made) once
+ * the `"capabilities" in target` check has narrowed `target` to the shape
+ * that predicate requires; a `target` with no `capabilities` member at all
+ * (or none supplied) is never on the tier.
+ */
+function targetIsOptimisticRetryTier(target: object | undefined): boolean {
+  return (
+    target !== undefined &&
+    "capabilities" in target &&
+    isOptimisticRetryTier(
+      target as Readonly<{ capabilities: BackendCapabilities }>,
+    )
+  );
+}
+
+/**
+ * THE refusal `runRetriedUnit` throws when `options.target` is on the
+ * `"optimistic-retry"` tier and the async-context loader it needs to detect
+ * nesting is unavailable. See the "Fail closed when nesting cannot be
+ * detected" section of `runRetriedUnit`'s own doc for why this tier alone
+ * cannot degrade to independent per-call retry loops the way every other
+ * tier safely can.
+ */
+function optimisticRetryRequiresAsyncContext(
+  operation: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    `runRetriedUnit(${JSON.stringify(operation)}): this unit's target is on the "optimistic-retry" tier, which requires AsyncLocalStorage ` +
+      "(node:async_hooks) to detect a unit of work nested inside another one, " +
+      "but it is unavailable on this runtime. Running without that detection " +
+      "would let an inner unit's independent retry commit against reads an " +
+      "outer attempt took before it ever conflicted, so this unit is refused " +
+      "rather than run without it.",
+    { code: "OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT", operation },
+    {
+      suggestion:
+        "Run on a runtime that provides node:async_hooks' AsyncLocalStorage " +
+        "(Node.js, or Cloudflare Workers with the nodejs_als compatibility " +
+        'flag), or avoid an "optimistic-retry" write-fence declaration ' +
+        '(writeFence: { mechanism: "row", conflict: "commit-time" }) on ' +
+        "this runtime. Interactive backends are unaffected.",
+    },
+  );
+}
+
+/**
  * The per-attempt handle {@link runRetriedUnit} passes to its `attempt`
  * factory.
  */
@@ -333,12 +392,34 @@ export type RetriedUnitAttempt<T> = (frame: RetriedUnitFrame) => Promise<T>;
  * `runRetriedUnit` awaits its readiness before ever looking at it (mirroring
  * the queue's own `await` before its first reentrancy check) — at worst one
  * microtask of latency before the very first attempt of this process runs.
+ *
+ * ## Fail closed when nesting cannot be detected
+ *
  * If the runtime has no `node:async_hooks` `AsyncLocalStorage` at all,
- * nesting can never be detected: every call, nested or not, runs its own
- * full, independent retry loop exactly as it did before this detection
- * existed, and {@link unwrapNestedConflict} is what keeps that degraded
- * case correctly classified when an inner single-attempt unit's mint
- * reaches an outer owner unpeeled.
+ * nesting can never be detected. Independent nested retries are only ever
+ * unsafe on the `"optimistic-retry"` tier: it is the one tier where a
+ * backend-owned transaction enrolls itself as a nested unit underneath a
+ * store-owned attempt that already took decision-driving reads (exactly
+ * `rebuildContribution`'s pre-reads followed by `runSchemaWriteTransaction`,
+ * above) — an inner unit that conflicts and then independently succeeds on
+ * its own retry would commit against reads the outer attempt never refreshed,
+ * and nothing about that inner success signals the outer attempt to redo
+ * them. So when `options.target` resolves to the `"optimistic-retry"` tier
+ * ({@link isOptimisticRetryTier}) and the async-context loader is
+ * unavailable, `runRetriedUnit` refuses with {@link ConfigurationError} code
+ * `OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` BEFORE `attempt` is ever called —
+ * naming `node:async_hooks`' `AsyncLocalStorage`, or an equivalent async-
+ * context primitive the host runtime provides, as what is missing.
+ *
+ * Under every other tier no nested owner of this kind exists — a backend
+ * whose transactions do not self-enroll has nothing to detect — so this
+ * function behaves exactly as it always has: one full, independent retry
+ * loop per call, needing no async-context support at all. An interactive
+ * backend keeps working unmodified on a runtime with no `AsyncLocalStorage`.
+ * {@link unwrapNestedConflict} is what keeps THAT degraded case (a nested
+ * single-attempt unit — e.g. graph-merge's `target.transaction(...)` commit
+ * sites — going undetected on such a backend) correctly classified when its
+ * mint reaches an outer owner unpeeled.
  *
  * ## The replay contract
  *
@@ -375,6 +456,14 @@ export async function runRetriedUnit<T>(
   // `undefined` — see the "Nesting is structural" doc section above.
   await nestedRetriedUnitContext.ready();
   const context = nestedRetriedUnitContext.current();
+  // Fail closed rather than degrade: only the "optimistic-retry" tier has a
+  // nested owner whose independent retry can commit against stale reads (see
+  // the doc section above), so an unavailable loader is refused for it here,
+  // before `attempt` ever runs, instead of falling through to the
+  // undetected-nesting loop below.
+  if (context === undefined && targetIsOptimisticRetryTier(options.target)) {
+    throw optimisticRetryRequiresAsyncContext(options.operation);
+  }
   // Runs `body` marked as "inside a retried unit" for the duration of the
   // call, so any `runRetriedUnit` reached from further down `body`'s own
   // call graph — nested or sibling to this one — sees the marker. A no-op

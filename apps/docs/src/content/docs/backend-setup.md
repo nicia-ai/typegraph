@@ -1490,6 +1490,14 @@ its conflict propagates unchanged to the outermost store-owned write, or to
 `store.transaction` itself. This tier therefore changes behavior only for a
 transaction that opens its own top-level connection.
 
+An `"optimistic-retry"` backend requires `node:async_hooks`' `AsyncLocalStorage`
+to detect a retried unit nested inside another one; on a runtime where it is
+unavailable, the first retried unit `runRetriedUnit` opens is refused with
+`OPTIMISTIC_RETRY_REQUIRES_ASYNC_CONTEXT` rather than degrading to independent,
+unsafe per-unit retries, while interactive backends are unaffected and keep
+retrying (`store.transaction`'s own `retry` option) with no async-context
+support at all.
+
 `graphAnalytics.supported` describes the backend shape, not mutable PostgreSQL
 session state. A hot standby or a role without the database `TEMP` privilege can
 still reject the working-table transaction that the iterative graph algorithms
