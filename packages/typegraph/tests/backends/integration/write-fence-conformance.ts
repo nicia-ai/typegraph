@@ -26,17 +26,19 @@
  *
  * Two of those need genuinely independent physical connections to mean
  * anything (a single-process engine cannot demonstrate one session blocking
- * another), so they run only when `POSTGRES_URL` is set — the same real
- * PostgreSQL a caller gets from `pnpm test:postgres`. Rather than provision a
- * database of their own (this module is imported by every lane's shared
- * suite at once, so a module-scoped `provisionPostgresTestDatabase` call
- * would race every one of those lanes over the SAME isolated database name),
- * they reuse `context.createSerializedBackend()` twice: two independent
- * connections to the CURRENT lane's own already-migrated database. Every
- * other assertion needs only one live PostgreSQL-dialect connection and runs
- * on an in-process PGlite client, so it exercises every PostgreSQL-dialect
- * lane (the Docker lane, the `postgres-js` lane, and the zero-Docker PGlite
- * lane) without any of them needing `POSTGRES_URL`.
+ * another), so they run only when `context.serverLaneConcurrency` is `true`
+ * — the two server-PostgreSQL lanes registered against a real, provisioned
+ * database (`pnpm test:postgres`), never the in-process PGlite lane. Rather
+ * than provision a database of their own (this module is imported by every
+ * lane's shared suite at once, so a module-scoped
+ * `provisionPostgresTestDatabase` call would race every one of those lanes
+ * over the SAME isolated database name), they reuse
+ * `context.createSerializedBackend()` twice: two independent connections to
+ * the CURRENT lane's own already-migrated database. Every other assertion
+ * needs only one live PostgreSQL-dialect connection and runs on an
+ * in-process PGlite client, so it exercises every PostgreSQL-dialect lane
+ * (the Docker lane, the `postgres-js` lane, and the zero-Docker PGlite lane)
+ * regardless of `serverLaneConcurrency`.
  *
  * `row` (the portable, non-advisory keyed fence) adds two more
  * configurations, both derived the same way. `{row, quiescent, wait}` — the
@@ -51,9 +53,12 @@
  * backend, because both cases only ever exercise a KEYED lock site that reads
  * `resolveWriteFencePlan` off the object it is handed directly.
  * `{row, quiescent, commit-time}` — the fences relation on an
- * optimistic-concurrency engine, so two acquirers of one key both proceed and
- * the loser's COMMIT fails — needs a real engine's actual commit-conflict
- * behavior under `REPEATABLE READ` (real PostgreSQL, not a simulation), so it
+ * optimistic-concurrency engine: at `REPEATABLE READ`, PostgreSQL blocks the
+ * second acquirer of one key on the fence row's lock and, once the holder
+ * commits, raises a serialization failure (SQLSTATE 40001) from that
+ * acquirer's own acquiring statement rather than letting it proceed — this
+ * needs a real engine's actual commit-conflict behavior under
+ * `REPEATABLE READ` (real PostgreSQL, not a simulation), so it
  * runs only on two real server-lane connections, each forced to that
  * isolation by a `deriveBackend` decorator over `transaction`/
  * `transactionWithNative`: this configuration exercises the schema-version
@@ -113,11 +118,6 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
   });
-}
-
-function postgresServerLaneAvailable(): boolean {
-  const configured = process.env["POSTGRES_URL"];
-  return configured !== undefined && configured !== "";
 }
 
 /**
@@ -240,7 +240,10 @@ const ROW_QUIESCENT_WAIT_WRITE_FENCE: Extract<
 /**
  * The one `{row, quiescent, commit-time}` declaration the assertion-5 group
  * below derives its backend from: an optimistic-concurrency fences relation,
- * so two acquirers of one key both proceed and the loser's COMMIT fails.
+ * where PostgreSQL at `REPEATABLE READ` blocks the second acquirer of one
+ * key on the fence row and raises a serialization failure from that
+ * acquirer's own acquiring statement once the holder commits, rather than
+ * letting both proceed — the owner then retries the loser to success.
  */
 const ROW_QUIESCENT_COMMIT_TIME_WRITE_FENCE: Extract<
   WriteFenceDeclaration,
@@ -537,11 +540,11 @@ export function registerWriteFenceConformanceIntegrationTests(
       }
     });
 
-    describe("server-lane concurrency (requires POSTGRES_URL: a single process cannot demonstrate one session blocking another)", () => {
+    describe("server-lane concurrency (requires genuinely independent connections: a single process cannot demonstrate one session blocking another)", () => {
       it("a keyed advisory acquisition blocks a concurrent acquisition of the same key and then sees its commit, under every advisory-mechanism drain", async (ctx) => {
         if (
           context.getBackend().dialect !== "postgres" ||
-          !postgresServerLaneAvailable()
+          !context.serverLaneConcurrency
         ) {
           ctx.skip();
           return;
@@ -643,7 +646,7 @@ export function registerWriteFenceConformanceIntegrationTests(
       it("a table-lock drain blocks a concurrent row writer until the holder commits", async (ctx) => {
         if (
           context.getBackend().dialect !== "postgres" ||
-          !postgresServerLaneAvailable()
+          !context.serverLaneConcurrency
         ) {
           ctx.skip();
           return;
@@ -798,7 +801,7 @@ export function registerWriteFenceConformanceIntegrationTests(
       it('{row, quiescent, wait} on the server lane: resolves "row"/"wait" on a real connection; a read after re-acquiring a key observes the previous holder\'s commit (assertion 2), the drain site under "quiescent" resolves cleanly (assertion 3 — the "no LOCK TABLE statement" proof itself runs above, on PGlite, which supports statement capture), and the session\'s real isolation reaches the coordination token (assertion 4)', async (ctx) => {
         if (
           context.getBackend().dialect !== "postgres" ||
-          !postgresServerLaneAvailable()
+          !context.serverLaneConcurrency
         ) {
           ctx.skip();
           return;
@@ -868,11 +871,11 @@ export function registerWriteFenceConformanceIntegrationTests(
         }
       });
 
-      describe("server-lane concurrency (requires POSTGRES_URL: a single process cannot demonstrate one session blocking another)", () => {
+      describe("server-lane concurrency (requires genuinely independent connections: a single process cannot demonstrate one session blocking another)", () => {
         it("row/quiescent/wait: a keyed row acquisition blocks a concurrent acquisition of the same key and then sees its commit (assertion 1, scoped to waiting mechanisms)", async (ctx) => {
           if (
             context.getBackend().dialect !== "postgres" ||
-            !postgresServerLaneAvailable()
+            !context.serverLaneConcurrency
           ) {
             ctx.skip();
             return;
@@ -966,10 +969,10 @@ export function registerWriteFenceConformanceIntegrationTests(
           }
         });
 
-        it("row/quiescent/commit-time under REPEATABLE READ: two concurrent store-owned creates that acquire the same fence row both proceed, the loser fails at commit with a serialization failure, and the owner retries it to success within budget, with hooks observed exactly once (assertion 5)", async (ctx) => {
+        it("row/quiescent/commit-time under REPEATABLE READ: two concurrent store-owned creates acquire the same fence row, the second blocks and then fails with a serialization failure once the holder commits, and the owner retries it to success within budget, with hooks observed exactly once (assertion 5)", async (ctx) => {
           if (
             context.getBackend().dialect !== "postgres" ||
-            !postgresServerLaneAvailable()
+            !context.serverLaneConcurrency
           ) {
             ctx.skip();
             return;

@@ -153,6 +153,14 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
    * owns independent storage (for example, in-memory SQLite).
    */
   createIsolatedBackend?: IsolatedBackendFactory<TIsolatedTransaction>;
+  /**
+   * Whether this lane's `createSerializedBackend` hands out genuinely
+   * independent physical connections — see
+   * {@link IntegrationTestContext.serverLaneConcurrency}. Defaults to
+   * `false`; only the two server-PostgreSQL lane registrations set it to
+   * `true`.
+   */
+  serverLaneConcurrency?: boolean;
 }>;
 
 /**
@@ -239,6 +247,7 @@ export function createIntegrationTestSuite<
         );
         return createdStore as unknown as InspectableHistoryStore<typeof graph>;
       },
+      serverLaneConcurrency: options.serverLaneConcurrency ?? false,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {

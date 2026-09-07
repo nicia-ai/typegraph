@@ -113,4 +113,20 @@ export type IntegrationTestContext = Readonly<{
     graph: G,
     options?: Omit<HistoryStoreOptions, "history">,
   ) => Promise<InspectableHistoryStore<G>>;
+  /**
+   * Whether this lane's `createSerializedBackend` hands out genuinely
+   * independent physical connections — two callers can each hold one open
+   * at once and block or observe the other's commit. `true` on the two
+   * server-PostgreSQL lanes (a real pool against a real server); `false` on
+   * every in-process lane (PGlite, SQLite, libsql), where a single engine
+   * instance backs every connection the lane opens, so two "connections"
+   * can never demonstrate one session blocking another.
+   *
+   * The one fact `write-fence-conformance.ts`'s server-lane-concurrency
+   * tests gate on, in place of reading `POSTGRES_URL` directly: the tests'
+   * actual requirement is independent connections, not that environment
+   * variable, and a lane's registration is the one place that fact is
+   * actually known.
+   */
+  serverLaneConcurrency: boolean;
 }>;

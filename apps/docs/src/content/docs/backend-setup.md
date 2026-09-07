@@ -1455,10 +1455,14 @@ write fence is `{ mechanism: "row", conflict: "commit-time" }` (see
 `"batch"` when `atomicBatch` is not `"none"` (an HTTP-only driver such as
 `drizzle-orm/neon-http`, which cannot hold an open session but does support a
 native atomic program); else `"none"`. Only the root capability derivation
-ever resolves the write-fence plan needed for the `"optimistic-retry"` arm — a
-derived or session-scoped capabilities object (a `store.transaction` session,
-a projected backend) has no way to re-resolve that plan for itself, so it
-downgrades to `"interactive"` instead of assuming the root's tier survived.
+ever resolves the write-fence plan needed for the `"optimistic-retry"` arm —
+a derived or session-scoped capabilities object (a `store.transaction`
+session, a projected backend) has no way to re-resolve that plan for
+itself, but it carries the root's answer forward instead of losing it: it
+reads whether its own source object was already `"optimistic-retry"` and
+keeps the tier for as long as `interactiveTransactions` stays `true`,
+falling back to `"interactive"` only for a capabilities object whose source
+never carried the tier to begin with.
 
 Two further internal readers key off the `"batch"` value: the batch-tier
 write verdict (`resolveBatchWriteVerdict`) that produces

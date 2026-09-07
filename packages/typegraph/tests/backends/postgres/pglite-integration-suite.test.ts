@@ -82,5 +82,10 @@ createIntegrationTestSuite(
     // Branches and review targets need independent transactions. Reuse an
     // engine only after its fixture schema has been dropped at test cleanup.
     createIsolatedBackend: () => isolatedPool.makeFixture(),
+    // One in-process PGlite instance backs every `createSerializedBackend()`
+    // handle: two "connections" can never demonstrate one session blocking
+    // another. Explicit rather than relying on the default so this
+    // registration states its own answer to the question it's known for.
+    serverLaneConcurrency: false,
   },
 );

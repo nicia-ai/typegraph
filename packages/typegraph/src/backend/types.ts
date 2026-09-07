@@ -331,13 +331,18 @@ export type BackendCapabilities = Readonly<{
      * `deriveUnitOfWork` (`backend/capabilities/execution.ts`) —
      * `"optimistic-retry"` when `interactiveTransactions` is true AND the
      * caller supplied the resolved write-fence plan's `conflict` fact as
-     * `"commit-time"` (only `finalizeEngineCapabilities` does, from the
-     * root profile's own `row`-mechanism plan), else `"interactive"` when
-     * `interactiveTransactions` is true, else `"batch"` when `atomicBatch`
-     * is not `"none"`, else `"none"` — overwriting whatever a profile's own
-     * `declaredCapabilities` set. Optional so a custom `GraphBackend`
-     * implementation, which nothing derives this for, is not forced to
-     * declare it.
+     * `"commit-time"`, else `"interactive"` when `interactiveTransactions`
+     * is true, else `"batch"` when `atomicBatch` is not `"none"`, else
+     * `"none"` — overwriting whatever a profile's own `declaredCapabilities`
+     * set. `finalizeEngineCapabilities` is the one place that resolves this
+     * fact fresh, from the root profile's own `row`-mechanism plan; every
+     * later derivation boundary (`downgradeAtomicBatch`,
+     * `scopeAtomicBatchToSession`) carries it forward instead of
+     * re-resolving it, by reading whether its own source object was already
+     * `"optimistic-retry"` — so the tier survives a derived or
+     * session-scoped backend for as long as `interactiveTransactions` stays
+     * `true`. Optional so a custom `GraphBackend` implementation, which
+     * nothing derives this for, is not forced to declare it.
      *
      * `src/store/operations/write-transaction.ts`'s retry-routing helpers
      * are the `"optimistic-retry"` consumers: every

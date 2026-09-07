@@ -501,7 +501,7 @@ export function isOptimisticRetryTier(
  * ({@link resolveWriteTransactionMode} reads `"opened"`). A nested unit
  * running inside an existing transaction (`"existing"`) cannot restart a
  * transaction it does not own or replay reads made before it, so its
- * conflict propagates unchanged to the outermost owner instead (U8); a
+ * conflict propagates unchanged to the outermost owner instead; a
  * backend with no transactions at all (`"none"`) has nothing to retry as a
  * unit either.
  *
@@ -655,8 +655,8 @@ export function constraintFenceRefusal(
  * runners, `runIdentityMutation`, and `rebuildIdentityClosureWithSchemaFence`
  * — through the retry owner, so none of those callers re-spells the gate or
  * the wrapping. A nested unit (`transactionMode === "existing"`) never
- * retries here regardless of the tier (U8): it cannot restart a transaction
- * it does not own, so its conflict propagates to the outermost owner. Under
+ * retries here regardless of the tier: it cannot restart a transaction it
+ * does not own, so its conflict propagates to the outermost owner. Under
  * `"interactive"` this function's behavior is unchanged: one attempt.
  */
 export function runInWriteTransaction<T>(

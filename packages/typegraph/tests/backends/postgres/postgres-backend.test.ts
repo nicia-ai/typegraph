@@ -443,6 +443,10 @@ describe("PostgreSQL Adapter", () => {
           const { backend } = await createLocalPgliteBackend();
           return { backend, cleanup: () => backend.close() };
         },
+        // A default-sized pool against a real, provisioned PostgreSQL
+        // server: two `createSerializedBackend()` handles are genuinely
+        // independent physical connections.
+        serverLaneConcurrency: true,
       },
     );
   });

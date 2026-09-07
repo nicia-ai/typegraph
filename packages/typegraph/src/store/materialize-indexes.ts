@@ -990,16 +990,21 @@ async function materializeWithClaim(
       } catch (error_) {
         const error =
           error_ instanceof Error ? error_ : new Error(String(error_));
-        await recordIndexMaterialization(
-          buildAttempt({
-            declaration,
-            graphId,
-            signature,
-            schemaVersion,
-            materializedAt: undefined,
-            error,
-            ...statusOverride,
-          }),
+        await runAsIndexMaterializationUnit(
+          backend,
+          "recordIndexMaterialization",
+          () =>
+            recordIndexMaterialization(
+              buildAttempt({
+                declaration,
+                graphId,
+                signature,
+                schemaVersion,
+                materializedAt: undefined,
+                error,
+                ...statusOverride,
+              }),
+            ),
         );
         return entry(declaration, "failed", error);
       }
@@ -1010,10 +1015,15 @@ async function materializeWithClaim(
       // a lease (CLAIM_LEASE_MS) and self-expires, so a missed release is
       // reclaimed by the next materializer; warn and move on.
       try {
-        await requireDefined(backend.releaseIndexMaterializationClaim)({
-          indexName: statusKey,
-          token,
-        });
+        await runAsIndexMaterializationUnit(
+          backend,
+          "releaseIndexMaterializationClaim",
+          () =>
+            requireDefined(backend.releaseIndexMaterializationClaim)({
+              indexName: statusKey,
+              token,
+            }),
+        );
       } catch (releaseError) {
         console.warn(
           `typegraph: failed to release the index materialization claim for ` +

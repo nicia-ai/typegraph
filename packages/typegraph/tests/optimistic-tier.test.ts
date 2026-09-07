@@ -1,5 +1,5 @@
 /**
- * The `"optimistic-retry"` tier (C5-C7): a `row`-mechanism write fence with
+ * The `"optimistic-retry"` tier: a `row`-mechanism write fence with
  * `conflict: "commit-time"` derives `capabilities.execution.unitOfWork:
  * "optimistic-retry"` on an interactive backend, and every store-owned unit
  * built on `runInWriteTransaction` — plus `rebuildContribution` and the
@@ -49,6 +49,7 @@ import {
   resolveWriteTransactionMode,
   runRetriedUnit,
 } from "../src/store/operations/write-transaction";
+import { requireDefined } from "../src/utils/presence";
 import {
   createTransactionFaultInjector,
   type FaultInjectableEngine,
@@ -357,6 +358,15 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     edges: {},
     indexes: [defineNodeIndex(Person, { fields: ["name"] })],
   });
+  // A UNIQUE index declared over data that already violates it: the build's
+  // own `CREATE UNIQUE INDEX` genuinely fails (no fault injection needed),
+  // reaching the failure-path `recordIndexMaterialization` call below.
+  const UNIQUE_INDEX_GRAPH = defineGraph({
+    id: "optimistic-retry-unique-index",
+    nodes: { Person: { type: Person } },
+    edges: {},
+    indexes: [defineNodeIndex(Person, { fields: ["name"], unique: true })],
+  });
   const CONTRIBUTION_MARKER_TABLE = "typegraph_contribution_materializations";
 
   // Builds a fresh PGlite-backed backend whose first write statement after
@@ -527,6 +537,48 @@ describe("optimistic-retry tier — rebuildContribution and the index-materializ
     expect(result.results.every((entry) => entry.status === "created")).toBe(
       true,
     );
+    expect(injector.lastFault()).toBeDefined();
+  });
+
+  it("a first-attempt conflict on the failure-path record is retried", async () => {
+    const injector = await createTransactionFaultInjector("pglite", {
+      shape: "40001",
+      // On this driver stack, one logical write statement is observed
+      // TWICE by this injector before it really executes (once via the
+      // drizzle logger, once via the direct client.query patch right
+      // before the call reaches PGlite) — so counts come in pairs. The
+      // claim upsert is the first pair (1, 2); the build's own
+      // `CREATE UNIQUE INDEX` is DDL, not a counted write statement; the
+      // failure-path `recordIndexMaterialization` call is the next pair
+      // (3, 4). Targeting 4 aborts the record's first attempt before any
+      // real execution.
+      failAtStatementCall: 4,
+      capabilities: OPTIMISTIC_RETRY_CAPABILITIES,
+    });
+    injectorsToClose.push(injector);
+    expect(injector.backend.capabilities.execution.unitOfWork).toBe(
+      "optimistic-retry",
+    );
+    const [store] = await createStoreWithSchema(
+      UNIQUE_INDEX_GRAPH,
+      injector.backend,
+    );
+    // Duplicate `name` values, written before the unique index exists, so
+    // the eventual `CREATE UNIQUE INDEX` fails for real.
+    await store.nodes.Person.create({ name: "duplicate" });
+    await store.nodes.Person.create({ name: "duplicate" });
+
+    injector.arm();
+    const result = await store.materializeIndexes();
+
+    // The build itself genuinely failed (a real unique violation, not the
+    // injected fault) — proving this reached the failure path at all.
+    expect(result.results).toHaveLength(1);
+    expect(requireDefined(result.results[0]).status).toBe("failed");
+    // The injected 40001 landed on the failure-path record's first
+    // attempt. Had that write not been routed through the retry owner, it
+    // would have thrown out of `materializeWithClaim` uncaught instead of
+    // `materializeIndexes` resolving with the failed entry above.
     expect(injector.lastFault()).toBeDefined();
   });
 });

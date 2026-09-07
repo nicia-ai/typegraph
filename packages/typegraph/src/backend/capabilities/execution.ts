@@ -21,9 +21,14 @@ import type {
  * `fenceConflict` is resolved once, in `createSqlBackend`, from the root
  * profile's declared write-fence capability — it is a root-backend fact, not
  * something a derived or session-scoped capabilities object can re-resolve
- * for itself (see `downgradeAtomicBatch` and `scopeAtomicBatchToSession`
- * below). Omitting it here always answers `"interactive"` or `"batch"`/`"none"`,
- * never `"optimistic-retry"`.
+ * for itself. `downgradeAtomicBatch` and `scopeAtomicBatchToSession` below
+ * never have it to hand, but they are not blind to it either: the source
+ * object they derive from already carries the ROOT's answer in its own
+ * `execution.unitOfWork`, so they read `"optimistic-retry"` back off that
+ * field as their `fenceConflict` input rather than rediscovering it.
+ * Omitting `fenceConflict` altogether — a capabilities object with no
+ * established `unitOfWork` yet — always answers `"interactive"` or
+ * `"batch"`/`"none"`, never `"optimistic-retry"`.
  */
 export function deriveUnitOfWork(
   execution: Pick<
@@ -39,7 +44,7 @@ export function deriveUnitOfWork(
        * this; every other caller omits it and so can never derive
        * `"optimistic-retry"`.
        */
-      fenceConflict?: "wait" | "commit-time";
+      fenceConflict?: "wait" | "commit-time" | undefined;
     }>,
 ): NonNullable<BackendExecutionCapabilities["unitOfWork"]> {
   if (execution.interactiveTransactions) {
@@ -57,12 +62,14 @@ export function deriveUnitOfWork(
  *
  * Retry ownership under `"optimistic-retry"` is a root-backend fact: it
  * comes from the write-fence plan `createSqlBackend` resolves once for the
- * profile's own connection, not from anything a derived `BackendCapabilities`
- * carries. `withUnitOfWork` below re-derives through `deriveUnitOfWork` with
- * no `fenceConflict`, so a source that was `"optimistic-retry"` downgrades to
- * `"interactive"` here rather than surviving by accident — a derived object
- * cannot know the conflict the source resolved, so it must not claim the
- * tier that conflict alone justifies.
+ * profile's own connection, not from anything this function computes fresh.
+ * `withUnitOfWork` below carries it forward instead of rediscovering it: it
+ * reads `capabilities.execution.unitOfWork` — the source's own, already
+ * resolved answer — and passes `"commit-time"` through as `fenceConflict`
+ * exactly when that source was `"optimistic-retry"`, so a derived object
+ * built through this function keeps the tier for as long as
+ * `interactiveTransactions` stays `true`, and falls back to `"interactive"`
+ * only where the source never carried the tier to begin with.
  *
  * Derived/projection constructors and transaction factories share this owner
  * so a new backend construction seam cannot accidentally retain execution
@@ -83,7 +90,14 @@ export function downgradeAtomicBatch(
 function withUnitOfWork(
   execution: BackendExecutionCapabilities,
 ): BackendExecutionCapabilities {
-  return { ...execution, unitOfWork: deriveUnitOfWork(execution) };
+  return {
+    ...execution,
+    unitOfWork: deriveUnitOfWork({
+      ...execution,
+      fenceConflict:
+        execution.unitOfWork === "optimistic-retry" ? "commit-time" : undefined,
+    }),
+  };
 }
 
 /**
@@ -95,11 +109,12 @@ function withUnitOfWork(
  * its own exact-resource transport and semantic profile; this declaration
  * alone never authorizes execution.
  *
- * Like `downgradeAtomicBatch` above, `withUnitOfWork` re-derives with no
- * `fenceConflict`: retry ownership under `"optimistic-retry"` is a
+ * Like `downgradeAtomicBatch` above, `withUnitOfWork` carries retry
+ * ownership forward rather than re-resolving it: `"optimistic-retry"` is a
  * root-backend fact this session-scoped capabilities object has no way to
- * re-resolve, so a source that carried it downgrades to `"interactive"`
- * here instead.
+ * re-resolve for itself, but it reads the source's own `unitOfWork` for the
+ * answer and keeps the tier for as long as `interactiveTransactions` stays
+ * `true`.
  */
 export function scopeAtomicBatchToSession(
   capabilities: BackendCapabilities,

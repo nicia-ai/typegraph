@@ -829,16 +829,16 @@ export function carrySerializationFailureClassifier(
  *
  * `target` — when supplied — is consulted FIRST against
  * {@link SERIALIZATION_FAILURE_CLASSIFIERS}: a profile-declared classifier
- * for an engine whose commit-conflict shape is not PostgreSQL's own wins
- * outright, and this function's own SQLSTATE/message rules never run for
- * that call. Absent a registered classifier for `target` (or with no
- * `target` at all), classification prefers the locale-independent SQLSTATE
- * and falls back to the fixed driver message on a per-link basis for links
- * with no `code` of their own (see
- * {@link SERIALIZATION_FAILURE_MESSAGE_PATTERN}). This is the one predicate
- * every retry owner in the codebase consults; a second, inline
- * reimplementation of this decision is a defect even while it agrees with
- * this one, because the two WILL drift.
+ * for an engine whose commit-conflict shape is not PostgreSQL's own ADDS to
+ * the standard rules rather than replacing them — recognizing `error` as a
+ * conflict wins outright, but the classifier declining is not the final
+ * word, and this function's own SQLSTATE/message rules still run for that
+ * call. Classification otherwise prefers the locale-independent SQLSTATE and
+ * falls back to the fixed driver message on a per-link basis for links with
+ * no `code` of their own (see {@link SERIALIZATION_FAILURE_MESSAGE_PATTERN}).
+ * This is the one predicate every retry owner in the codebase consults; a
+ * second, inline reimplementation of this decision is a defect even while it
+ * agrees with this one, because the two WILL drift.
  */
 export function isSerializationFailure(
   error: unknown,
@@ -846,7 +846,7 @@ export function isSerializationFailure(
 ): boolean {
   if (target !== undefined) {
     const classifier = SERIALIZATION_FAILURE_CLASSIFIERS.get(target);
-    if (classifier !== undefined) return classifier(error);
+    if (classifier?.(error)) return true;
   }
   const uncodedLinks: unknown[] = [];
   let sawOtherSqlState = false;
