@@ -129,8 +129,13 @@ async function captureBranchForkState<G extends GraphDef>(
         { version: schemaRow.version, hash: schemaRow.schema_hash }
       );
     const lineage = resolveLineage(store);
+    // The session is the working copy's own root backend — the same object
+    // `resolveLineage(store)` just resolved `lineage` off of, and the only
+    // session available this far outside any transaction.
     const forkRevision =
-      lineage === undefined ? undefined : await lineage.revision();
+      lineage === undefined ? undefined : (
+        await lineage.revision(storeBackend(store))
+      );
     return { schemaAnchor, forkRevision };
   } catch (error) {
     try {

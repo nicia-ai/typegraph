@@ -10,9 +10,23 @@
  * caller to fall back to scanning everything.
  */
 import { ConfigurationError } from "../../errors";
-import { type GraphBackend } from "../types";
+import { type GraphBackend, type TransactionBackend } from "../types";
 
 declare const ENGINE_REVISION_BRAND: unique symbol;
+
+/**
+ * The connection a `revision()`/`changesSince()` read runs on — the
+ * narrowest existing execution-target type a root backend and a
+ * `transaction()` handle both satisfy. Reused rather than invented: it is
+ * the same `Pick<TransactionBackend, "execute" | "executeRaw">` shape the
+ * engine assembly layer already threads as `rawSql`/`rawSqlMembers`
+ * (`backend/drizzle/engine/profile.ts`, `.../operation-layer.ts`) — a
+ * `GraphBackend` is assignable to it for the identical reason those two
+ * members are: `TransactionBackend`'s `execute`/`executeRaw` are themselves
+ * `Pick<GraphBackend, …>` projections, so the two types share the exact same
+ * member signatures.
+ */
+export type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 /**
  * An opaque token identifying the engine's current committed state of the
@@ -52,58 +66,40 @@ export type LineageDelta =
  * loses only the callers that consult it directly, all of which already
  * fall back to a full scan when it is absent — see {@link requireLineage}.
  *
- * Both members MUST be safe to call from inside an open transaction on the
- * SAME backend the `lineage` was read off. This requirement is scoped to a
- * BACKEND-supplied `lineage` (`EngineProvisioning.lineage`) reachable from
- * EITHER the root backend or a `transaction()` handle it builds — the only
- * two sources `assertTargetUnchanged`'s in-transaction re-validation ever
- * reaches. TypeGraph's own `recordedRelationsLineage`
- * (`store/recorded-capture/lineage.ts`) never has to honor it:
- * `resolveLineage` derives that source only for a store constructed with
- * `history: true`, and history always turns TypeGraph's own revision
- * tracking on too, so `computeBaseVersion` picks the per-graph revision
- * anchor over the engine anchor for such a store every time (see the
- * anchor-precedence note in `graph-merge/base-version.ts`) — its
- * `assertTargetUnchanged` call never reaches the engine-anchor branch that
- * invokes `lineage` mid-transaction at all. Every call graph-merge makes
- * into `recordedRelationsLineage` (`lineageDeltaSinceAnchor`,
- * `branchPruneTo`) runs at PLANNING time, strictly outside any commit
- * transaction.
- *
- * `graph-merge`'s engine-anchor re-validation (`assertTargetUnchanged` in
- * `graph-merge/merge.ts`) is the concrete caller this requirement exists
- * for: it PREFERS `lineage` off the pinned transaction handle, but only when
- * that handle's `lineage` is the IDENTICAL object `resolveLineage(target)`
- * resolves off the root — the read the plan itself already anchored
- * against — and FALLS BACK to that root read otherwise (a different or
- * absent transaction-handle `lineage`, including a `lineage` reachable only
- * through a root-only `deriveBackend` overlay that no `transaction()` handle
- * ever carries). Either way, `revision()`/`changesSince()` are invoked from
- * strictly inside that same target's open commit transaction, because no
- * advisory lock pins an engine-anchored store's write path the way a
- * revision-anchored one is pinned — so ANY `lineage` reachable from either
- * the root or a `transaction()` handle of a backend must tolerate that
- * reentry, whether or not it is ever threaded onto a handle at all. An
- * implementation that issues its own transaction, or that assumes exclusive
- * use of a single connection/session, can hang or error under that call
- * pattern — the bundled caller-serialized SQLite backend's own reentrancy
- * guard refuses this exact reentry with a typed `ConfigurationError` rather
- * than hanging (see
- * `tests/graph-merge/base-version-engine-anchor.test.ts`'s real-backend-read
- * case), but a `lineage` MUST NOT rely on running under a backend that
- * happens to detect its own reentrancy: it must instead use a connection
- * independent of the caller's open transaction, or otherwise tolerate being
- * invoked while one is open.
+ * Both members take a {@link LineageSession} as their first argument: the
+ * connection the CALLER'S decision is bound to, not a connection `lineage`
+ * chooses for itself. A caller planning outside any transaction passes the
+ * root backend it holds (`branch()`, `staging.ts`, `base-version.ts`'s
+ * `lineageDeltaSinceAnchor` all do exactly this). A commit-time guard that
+ * already holds an open transaction passes that transaction handle instead
+ * — `graph-merge/merge.ts`'s `assertTargetUnchanged` is the concrete
+ * caller this exists for: it reads `lineage` off the pinned transaction
+ * handle and invokes both members WITH that same handle as the session, so
+ * the read observes the transaction's own snapshot rather than whatever a
+ * separately-held connection happens to see. An implementation MUST run its
+ * read on the session it is given — one that opens its own connection, or
+ * reads through a connection it closed over instead of the argument, is a
+ * defect: it answers from a snapshot the caller never asked for, and inside
+ * an open transaction it also risks colliding with whatever exclusion the
+ * caller's own connection is holding (the bundled caller-serialized SQLite
+ * backend's reentrancy guard refuses exactly this collision with a typed
+ * `ConfigurationError` rather than hanging — see
+ * `tests/graph-merge/base-version-engine-anchor.test.ts`'s
+ * ignores-the-session case). A `session` is always either the backend that
+ * declared this `lineage` or a `transaction()` handle it built, so an
+ * implementation can freely call `session.execute`/`session.executeRaw`
+ * without opening anything of its own.
  */
 export type LineageMembers = Readonly<{
-  /** The engine's current committed revision of the whole database. */
-  revision: (this: void) => Promise<EngineRevision>;
+  /** The engine's current committed revision of the whole database, read on `session`. */
+  revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
   /**
-   * What changed in `graphId` after `revision`, or `{ kind: "unbounded" }`
-   * when the source cannot answer for that revision.
+   * What changed in `graphId` after `revision`, read on `session`, or
+   * `{ kind: "unbounded" }` when the source cannot answer for that revision.
    */
   changesSince: (
     this: void,
+    session: LineageSession,
     revision: EngineRevision,
     graphId: string,
   ) => Promise<LineageDelta>;

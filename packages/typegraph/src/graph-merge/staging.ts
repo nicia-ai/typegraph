@@ -56,7 +56,11 @@ import type {
   LineageDelta,
   Store,
 } from "./typegraph-internal";
-import { resolveLineage, storeRuntime } from "./typegraph-internal";
+import {
+  resolveLineage,
+  storeBackend,
+  storeRuntime,
+} from "./typegraph-internal";
 import type { BranchId, GraphBranch } from "./types";
 
 /** A new fork node tagged with the branch that introduced it. */
@@ -287,8 +291,15 @@ export async function branchPruneTo<G extends GraphDef>(
   const forkLineage = resolveLineage(branch.store);
   if (forkLineage === undefined) return undefined;
   const forkRevision = branch.forkRevision;
+  // The session is the fork's own root backend — the same object
+  // `resolveLineage(branch.store)` just resolved `lineage` off of, and the
+  // only session available this far outside any transaction.
   const forkDelta = await safeLineageDelta(() =>
-    forkLineage.changesSince(forkRevision, branch.store.graphId),
+    forkLineage.changesSince(
+      storeBackend(branch.store),
+      forkRevision,
+      branch.store.graphId,
+    ),
   );
   if (forkDelta?.kind !== "keys") return undefined;
   const baseDelta = await safeLineageDelta(() =>

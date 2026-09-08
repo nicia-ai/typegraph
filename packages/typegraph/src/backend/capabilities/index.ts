@@ -114,6 +114,7 @@ export {
   type EntityKey,
   type LineageDelta,
   type LineageMembers,
+  type LineageSession,
   requireLineage,
 } from "./lineage";
 export {

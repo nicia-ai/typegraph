@@ -376,6 +376,7 @@ export type {
   LineageBackend,
   LineageDelta,
   LineageMembers,
+  LineageSession,
   LiveNodeRow,
   LockSchemaVersionForWriteParams,
   ManagedEdgeCreatePlan,

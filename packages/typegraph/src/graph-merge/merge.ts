@@ -196,6 +196,7 @@ import type {
   JsonValue,
   LineageDelta,
   LineageMembers,
+  LineageSession,
   Node,
   NodeId,
   NodeType,
@@ -2287,16 +2288,20 @@ type EngineAnchorMismatch = Readonly<{
  * engine-wide bump to `graphId` — empty keys mean the bump landed on a
  * different graph and the anchor is still good (returns `undefined`),
  * anything else (including `unbounded`) is a real divergence the caller
- * must refuse.
+ * must refuse. `session` is the caller's own pinned execution target,
+ * forwarded to both `lineage` calls unchanged — see `LineageMembers`' own
+ * doc for why a call site never reads `lineage` on one connection and asks
+ * it to answer for another.
  */
 async function engineAnchorMismatch(
   lineage: LineageMembers,
+  session: LineageSession,
   graphId: string,
   expectedRevision: EngineRevision,
 ): Promise<EngineAnchorMismatch | undefined> {
-  const liveRevision = await lineage.revision();
+  const liveRevision = await lineage.revision(session);
   if (liveRevision === expectedRevision) return undefined;
-  const delta = await lineage.changesSince(expectedRevision, graphId);
+  const delta = await lineage.changesSince(session, expectedRevision, graphId);
   if (
     delta.kind === "keys" &&
     delta.nodes.length === 0 &&
@@ -2433,40 +2438,25 @@ async function assertTargetUnchanged<G extends GraphDef>(
         },
       );
     }
-    // `resolveLineage(target)` — off the root — is the ONE source of the
-    // anchor this plan already minted: `computeBaseVersion` called it before
-    // any transaction opened, and `expectedEngineRevision` above is only
-    // ever comparable against a revision the SAME `lineage` object produced
-    // (two backends never share a comparable revision space — see
-    // `EngineRevision`'s own doc). `txBackend.lineage` is read too, but
-    // trusted only when it IS that identical object: when a profile-supplied
-    // `lineage` is threaded onto every `transaction()` handle the SAME
-    // `EngineProvisioning` builds (`CreateSqliteTransactionBackendOptions`/
-    // its Postgres twin), `txBackend.lineage` and `resolveLineage(target)`
-    // resolve to the same reference every time, so this reduces to reading
-    // the pinned transaction handle. A `lineage` reachable only through a
-    // root-only `deriveBackend` overlay (the sanctioned way to decorate ANY
-    // backend, including one whose author never touched
-    // `EngineProvisioning`) never reaches a `transaction()` handle that way,
-    // so the two objects differ; a DIFFERENT `lineage` threaded only onto
-    // `transaction()` handles (never the root) differs too. Either
-    // divergence means `txBackend.lineage` was never the source the plan
-    // anchored against, so it is never used for the comparison — using it
-    // would risk comparing `expectedEngineRevision` against a revision from
-    // an unrelated space, which is exactly what produced a false
-    // `BaseVersionMismatchError` on an unmodified target before this fix.
-    // `LineageMembers`' members take no session argument, so reading the bag
-    // off `txBackend` was never actually pinning the READ to this
-    // transaction's session either way — it only changes which
-    // implementation answers — so falling back to the identical root read
-    // the plan already relied on costs nothing beyond what
-    // `assertForkPointUnchanged` below already accepts for its own no-lock,
-    // root-backend read. Every `lineage` reachable from either object MUST
-    // therefore tolerate being invoked from inside this open commit
-    // transaction (see `capabilities/lineage.ts`'s doc). `requireLineage`
-    // still refuses with a `ConfigurationError` naming this operation when
-    // NEITHER source supplies `lineage` — a backend whose `lineage`
-    // disappeared entirely between the plan-time read and this commit. The
+    // `requireLineage(txBackend, …)` reads `lineage` off the PINNED
+    // transaction handle, never `resolveLineage(target)` off the root: this
+    // is the one guard in the whole module that runs its lineage read from
+    // strictly INSIDE the target's own open commit transaction (no advisory
+    // lock pins an engine-anchored store's write path the way a
+    // revision-anchored one is pinned above, so this re-validation is the
+    // only thing standing between the plan and a concurrent write). Passing
+    // `txBackend` as the session to both `revision`/`changesSince` below
+    // makes that pinning real: the read runs on the exact connection this
+    // transaction holds, so it observes the transaction's own snapshot
+    // rather than a separate connection's possibly-different view (see
+    // `LineageMembers`' own doc). A backend whose `lineage` is threaded
+    // through `EngineProvisioning` carries it onto every `transaction()`
+    // handle it builds, so this is the ordinary, expected path. A `lineage`
+    // reachable only through a root-only `deriveBackend` overlay never
+    // reaches a `transaction()` handle that way; `requireLineage` then
+    // refuses with a `ConfigurationError` naming this operation rather than
+    // silently falling back to a different connection's read (see the
+    // "vanished source" test in `base-version-engine-anchor.test.ts`). The
     // residual gap this branch leaves is real and plainly bounded: an
     // engine-anchored target detects only the changes `changesSince` reports
     // for THIS graph, read just before commit — it is not backstopped by the
@@ -2476,13 +2466,10 @@ async function assertTargetUnchanged<G extends GraphDef>(
     // content-fingerprint branch below does not share this gap: it
     // recomputes its fingerprint through `txBackend` itself, inside the same
     // transaction whose write set it then collides with.)
-    const planned = resolveLineage(target);
-    const lineage = requireLineage(
-      { lineage: txBackend.lineage === planned ? txBackend.lineage : planned },
-      "assertTargetUnchanged",
-    );
+    const lineage = requireLineage(txBackend, "assertTargetUnchanged");
     const mismatch = await engineAnchorMismatch(
       lineage,
+      txBackend,
       target.graphId,
       expectedEngineRevision,
     );
@@ -2655,8 +2642,12 @@ async function toleratedByEngineAnchor<G extends GraphDef>(
   if (expectedRevision === undefined) return false;
   const lineage = resolveLineage(store);
   if (lineage === undefined) return false;
+  // PLANNING-time call, strictly outside any commit transaction: the root
+  // backend `store` holds is the only session available, and the same
+  // object `resolveLineage(store)` just resolved `lineage` off of.
   const mismatch = await engineAnchorMismatch(
     lineage,
+    storeBackend(store),
     store.graphId,
     expectedRevision,
   );
@@ -5205,6 +5196,7 @@ async function assertForkPointUnchanged<G extends GraphDef>(
     if (lineage !== undefined) {
       const mismatch = await engineAnchorMismatch(
         lineage,
+        storeBackend(precondition.store),
         precondition.store.graphId,
         expectedEngineRevision,
       );

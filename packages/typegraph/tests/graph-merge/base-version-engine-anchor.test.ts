@@ -32,14 +32,15 @@
  * even called.
  *
  * `assertTargetUnchanged` reads `lineage` off the pinned transaction handle
- * only when it is the IDENTICAL object `resolveLineage(target)` resolves
- * off the root, and falls back to that root object otherwise — a separate
- * small suite below (not this scripting) proves both halves: that the two
- * really are identical in the sanctioned `EngineProvisioning`-only wiring
- * this file's own scripting otherwise relies on, that a transaction-only
- * `lineage` which DIFFERS from the root's is never trusted for the
- * comparison, and that the root's is used when the transaction handle
- * carries none at all.
+ * ONLY — never falls back to the root — and passes that same handle as the
+ * `session` argument to both `revision`/`changesSince`, so the read runs on
+ * the exact connection the open commit transaction holds. A separate small
+ * suite below (not this scripting) proves this directly: that
+ * `assertTargetUnchanged`'s calls carry the transaction handle as their
+ * session while `branch()`/`staging.ts`'s planning-time calls carry the
+ * root backend they hold, and that a transaction handle with no `lineage`
+ * of its own refuses the commit rather than silently reading a different
+ * connection's answer.
  */
 import {
   createStoreWithSchema,
@@ -60,6 +61,7 @@ import type {
   GraphBackend,
   LineageDelta,
   LineageMembers,
+  LineageSession,
 } from "../../src/backend/types";
 import { ConfigurationError } from "../../src/errors";
 import {
@@ -80,7 +82,6 @@ import { asBranchId } from "../../src/graph-merge/types";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { getCommittedSchemaVersion, migrateSchema } from "../../src/schema";
-import { resolveLineage } from "../../src/store/recorded-capture/lineage";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, fakeEmbedder } from "./test-utils";
@@ -139,7 +140,7 @@ function initialState(): ScriptedLineageState {
 function scriptedLineage(state: ScriptedLineageState): LineageMembers {
   return {
     revision: () => Promise.resolve(state.revision),
-    changesSince: (since, graphId) =>
+    changesSince: (_session, since, graphId) =>
       Promise.resolve(state.delta(since, graphId)),
   };
 }
@@ -198,21 +199,25 @@ function scriptedLineageBackend(
 
 /**
  * Same as {@link scriptedLineageBackend}, except `revision()`/
- * `changesSince()` each issue a REAL read against the backend — through the
- * ordinary `backend.execute` path a `lineage` with no connection of its own
- * would use — before returning the scripted value. `assertTargetUnchanged`
- * (`merge.ts`) consults `lineage` from strictly INSIDE the target's own
- * open commit transaction, on the pinned transaction handle; on the bundled
- * caller-serialized SQLite backend, this call pattern is exactly what
- * {@link LineageMembers}' own doc comment warns against: the backend's
- * reentrancy guard (`serialized-execution-queue.ts`) detects the read
- * reentering the open transaction's execution slot and refuses it with a
- * typed `ConfigurationError` rather than actually hanging. The test that
- * uses this fixture pins that concrete, fail-loud shape. The closure reads
- * `backend` through a cell filled in right after construction, since the
- * scripted `lineage` must be attached (for the root's own bake) before
- * `createSqlBackend` returns the object the closure needs to call
- * `execute` on.
+ * `changesSince()` each issue a REAL read against the ROOT backend —
+ * ignoring the `session` argument they are actually given, exactly the
+ * defect {@link LineageMembers}' own doc comment warns against — before
+ * returning the scripted value. `assertTargetUnchanged` (`merge.ts`)
+ * consults `lineage` from strictly INSIDE the target's own open commit
+ * transaction and passes the pinned TRANSACTION HANDLE as the session; a
+ * well-behaved implementation would read on that handle and see no
+ * reentrancy at all (see `tests/backends/integration/lineage-conformance.ts`'s
+ * matching positive case). This fixture deliberately does the opposite —
+ * it reads through the ROOT backend it closed over instead — so on the
+ * bundled caller-serialized SQLite backend the read collides with the open
+ * transaction's own execution slot: the reentrancy guard
+ * (`serialized-execution-queue.ts`) detects it and refuses with a typed
+ * `ConfigurationError` rather than actually hanging. The test that uses
+ * this fixture pins that concrete, fail-loud shape for a `lineage` that
+ * ignores its session. The closure reads `backend` through a cell filled in
+ * right after construction, since the scripted `lineage` must be attached
+ * (for the root's own bake) before `createSqlBackend` returns the object
+ * the closure needs to call `execute` on.
  */
 function scriptedLineageBackendWithRealRead(
   state: ScriptedLineageState,
@@ -234,7 +239,7 @@ function scriptedLineageBackendWithRealRead(
       await probe();
       return state.revision;
     },
-    changesSince: async (since, graphId) => {
+    changesSince: async (_session, since, graphId) => {
       await probe();
       return state.delta(since, graphId);
     },
@@ -533,26 +538,29 @@ describe("base@V engine anchor", () => {
     expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
   });
 
-  // Every other case in this suite uses `scriptedLineage`, which never
-  // touches `backend` — so nothing here exercises the hazard
-  // `assertTargetUnchanged`'s own doc comment names: it is the FIRST base@V
-  // call site to consult `lineage` from strictly INSIDE the target's own
-  // open commit transaction (on the target's root backend, since no
-  // advisory lock pins an engine-anchored store's write path). This case
-  // uses `scriptedLineageWithBackendRead`, whose `revision()` issues a real
-  // query THROUGH THE ORDINARY BACKEND PATH — exactly what a `lineage` that
-  // has no connection of its own would do. That query lands on the SAME
-  // caller-serialized SQLite backend the open transaction already holds
-  // the execution slot for, and the backend's own reentrancy guard
-  // (`serialized-execution-queue.ts`'s `rejectReentrantQueueSubmission`,
-  // also exercised by `tests/caller-serialized-queue.test.ts`) detects this
-  // and refuses immediately with a typed `ConfigurationError` — a fast,
-  // diagnosable failure, never the silent hang the naive call pattern would
-  // otherwise risk. This is exactly the failure `LineageMembers`' doc
-  // comment warns a real implementation must avoid by using a connection
-  // independent of the caller's open transaction; this test pins the
-  // CONCRETE, typed shape that failure takes today when a `lineage`
-  // ignores that warning on the bundled SQLite backend.
+  // Every other case in this suite uses `scriptedLineage`, which ignores
+  // whatever `session` it is given — so nothing here exercises the hazard a
+  // `lineage` that IGNORES its session risks. `assertTargetUnchanged` passes
+  // the pinned TRANSACTION HANDLE as the session to a commit-time engine-
+  // anchor check — the FIRST base@V call site to consult `lineage` from
+  // strictly INSIDE the target's own open commit transaction (no advisory
+  // lock pins an engine-anchored store's write path). This case uses
+  // `scriptedLineageBackendWithRealRead`, whose `revision()`/`changesSince()`
+  // ignore that session and instead issue a real query against the ROOT
+  // backend they closed over — exactly the "reads through a connection it
+  // closed over instead of the argument" defect `LineageMembers`' own doc
+  // comment names. That query lands on the SAME caller-serialized SQLite
+  // backend the open transaction already holds the execution slot for, and
+  // the backend's own reentrancy guard (`serialized-execution-queue.ts`'s
+  // `rejectReentrantQueueSubmission`, also exercised by
+  // `tests/caller-serialized-queue.test.ts`) detects this and refuses
+  // immediately with a typed `ConfigurationError` — a fast, diagnosable
+  // failure, never the silent hang the naive call pattern would otherwise
+  // risk. This test pins the CONCRETE, typed shape that failure takes today
+  // when a `lineage` ignores the session it is handed on the bundled SQLite
+  // backend; contrast `tests/backends/integration/lineage-conformance.ts`'s
+  // matching case, where reading on the session it is given lets the SAME
+  // call pattern succeed with no reentrancy at all.
   it("refuses (not hangs) when a lineage's real backend read reenters the open commit transaction", async () => {
     const state = initialState();
     const [baseStore] = await createStoreWithSchema(
@@ -1052,95 +1060,76 @@ describe("base@V engine anchor", () => {
   });
 });
 
-describe("assertTargetUnchanged reads lineage off the pinned transaction handle", () => {
-  it("carries the identical lineage object resolveLineage(target) resolves off the root, when a profile-supplied lineage reaches every transaction() handle", async () => {
-    const state = initialState();
+/** One recorded `LineageMembers` call: which member, and the session it ran on. */
+interface RecordedLineageCall {
+  member: "revision" | "changesSince";
+  session: LineageSession;
+}
 
-    const sqlite = new Database(":memory:");
-    sqlite.exec(generateSqliteMigrationSQL());
-    const db = drizzleSqlite(sqlite);
-    const profile = buildSqliteEngineProfile(db, {
+/**
+ * A `lineage` whose `revision`/`changesSince` record the exact `session`
+ * object each call received into `calls`, then answer from `state` —
+ * the direct evidence for "session facts come from the session that
+ * enforces them": every caller in this suite passes a DIFFERENT session,
+ * and a bag that ignored the argument (reading its own closed-over
+ * connection instead) would be indistinguishable from one by its answers
+ * alone, only by what it recorded.
+ */
+function sessionRecordingLineage(
+  state: ScriptedLineageState,
+  calls: RecordedLineageCall[],
+): LineageMembers {
+  return {
+    revision: (session) => {
+      calls.push({ member: "revision", session });
+      return Promise.resolve(state.revision);
+    },
+    changesSince: (session, since, graphId) => {
+      calls.push({ member: "changesSince", session });
+      return Promise.resolve(state.delta(since, graphId));
+    },
+  };
+}
+
+describe("assertTargetUnchanged reads lineage on its pinned session", () => {
+  it("passes the transaction handle as the session to the commit-time engine-anchor check, and the root backend to branch()/staging's planning-time reads", async () => {
+    // Two independent scripted-lineage backends — one per side of the merge
+    // — each with its OWN call recorder, so the assertions below can tell
+    // "which store's lineage, on which session" apart cleanly.
+    const targetState = initialState();
+    const targetCalls: RecordedLineageCall[] = [];
+    const targetSqlite = new Database(":memory:");
+    targetSqlite.exec(generateSqliteMigrationSQL());
+    const targetProfile = buildSqliteEngineProfile(
+      drizzleSqlite(targetSqlite),
+      {
+        executionProfile: { isSync: true },
+      },
+    );
+    attachLineage(
+      targetProfile.provisioning,
+      sessionRecordingLineage(targetState, targetCalls),
+    );
+    const targetBackend = createSqlBackend(targetProfile);
+
+    const forkState = initialState();
+    const forkCalls: RecordedLineageCall[] = [];
+    const forkSqlite = new Database(":memory:");
+    forkSqlite.exec(generateSqliteMigrationSQL());
+    const forkProfile = buildSqliteEngineProfile(drizzleSqlite(forkSqlite), {
       executionProfile: { isSync: true },
     });
-    // Threaded through `EngineProvisioning.lineage` — the sanctioned wiring
-    // (`tests/lineage-transaction-threading.test.ts` proves the general
-    // threading) — never a root-only `deriveBackend` overlay, so this is the
-    // ONE configuration in which `assertTargetUnchanged`'s
-    // `txBackend.lineage === planned` comparison (`planned` being
-    // `resolveLineage(target)` off the root) can ever be true.
-    attachLineage(profile.provisioning, scriptedLineage(state));
-    const backend = createSqlBackend(profile);
+    attachLineage(
+      forkProfile.provisioning,
+      sessionRecordingLineage(forkState, forkCalls),
+    );
+    const forkBackend = createSqlBackend(forkProfile);
 
     try {
-      const [store] = await createStoreWithSchema(widgetGraph, backend);
-      const planned = resolveLineage(store);
-      expect(planned).toBeDefined();
-
-      let handleLineage: LineageMembers | undefined;
-      await backend.transaction((tx) => {
-        handleLineage = tx.lineage;
-        return Promise.resolve();
-      });
-
-      // Mutation-prove: gut the transaction-construction wiring in
-      // `sqlite.ts`/`postgres.ts` to stop forwarding the root's own
-      // `lineage` bag onto a `transaction()` handle by reference (build a
-      // fresh bag instead), and this identity fails — exactly the
-      // condition under which `assertTargetUnchanged`'s
-      // `txBackend.lineage === planned` branch would silently stop being
-      // reachable, so every engine-anchored merge would fall back to a
-      // second root read on every commit instead of the pinned handle.
-      expect(handleLineage).toBe(planned);
-    } finally {
-      sqlite.close();
-    }
-  });
-
-  it("prefers the root's lineage over a transaction handle's DIFFERENT lineage, so a divergent transaction-only source cannot report a false mismatch", async () => {
-    // Reproduces the configuration a prior fix round got wrong: a
-    // profile-supplied `lineage` threaded through `EngineProvisioning` (so
-    // it reaches every `transaction()` handle, never the root) alongside a
-    // SEPARATE root-only `deriveBackend` overlay `lineage` (the sanctioned
-    // way to decorate ANY backend). `computeBaseVersion` anchors the plan on
-    // the ROOT overlay's revision (`resolveLineage(target)` finds it there
-    // first, since the overlay shadows `.lineage` on the root object). If
-    // the commit-time guard then consulted the transaction handle's
-    // DIFFERENT `lineage` instead, it would compare that anchor against a
-    // revision space the transaction-only source has never heard of and
-    // report an `unbounded` delta — refusing the merge of a target nobody
-    // touched.
-    const rootRevision = "overlay-b" as EngineRevision;
-    function rootLineage(): LineageMembers {
-      return {
-        revision: () => Promise.resolve(rootRevision),
-        changesSince: () =>
-          Promise.resolve({ kind: "keys", nodes: [], edges: [] }),
-      };
-    }
-
-    // Recognizes none of the root's revisions — an engine that tracks its
-    // own, unrelated revision space, exactly like `EngineRevision`'s own doc
-    // says two backends' revisions never compare.
-    function txLineage(): LineageMembers {
-      return {
-        revision: () => Promise.resolve("engine-a" as EngineRevision),
-        changesSince: () => Promise.resolve({ kind: "unbounded" }),
-      };
-    }
-
-    const sqlite = new Database(":memory:");
-    sqlite.exec(generateSqliteMigrationSQL());
-    const db = drizzleSqlite(sqlite);
-    const profile = buildSqliteEngineProfile(db, {
-      executionProfile: { isSync: true },
-    });
-    attachLineage(profile.provisioning, txLineage());
-    const built = createSqlBackend(profile);
-    const backend = deriveBackend(built, { lineage: rootLineage() });
-
-    const forkFixture = createSqliteMergeBackend();
-    try {
-      const [baseStore] = await createStoreWithSchema(widgetGraph, backend);
+      const [baseStore] = await createStoreWithSchema(
+        widgetGraph,
+        targetBackend,
+      );
       await baseStore.nodes.Widget.bulkCreate([
         { id: "base-1", props: { label: "base", group: "g1" } },
       ]);
@@ -1148,47 +1137,99 @@ describe("assertTargetUnchanged reads lineage off the pinned transaction handle"
       const forkBranch = unwrap(
         await branch<WidgetGraph>(
           baseStore,
-          () => Promise.resolve(forkFixture.backend),
+          () => Promise.resolve(forkBackend),
           { id: BRANCH },
         ),
       );
-      await forkBranch.store.nodes.Widget.create({
+      const forkWidget = await forkBranch.store.nodes.Widget.create({
         label: "from fork",
         group: "g1",
       });
+      // The fork's own scripted delta must actually name the row it just
+      // created — a scripted `lineage` is disconnected from the real
+      // database, so nothing updates this automatically the way
+      // `recordedRelationsLineage` would. Left at `initialState()`'s empty
+      // default, `branchPruneTo` would prune the fork side to nothing and
+      // the new row would never reach entity resolution at all.
+      forkState.delta = () => ({
+        kind: "keys",
+        nodes: [{ kind: "Widget", id: forkWidget.id }],
+        edges: [],
+      });
+      // `branch()`'s fork-time capture (`captureBranchForkState`) already
+      // ran above, strictly outside any transaction, on the working copy's
+      // own root backend — the only session available to it.
+      const forkRootBackend = storeBackend(forkBranch.store);
+      expect(forkCalls).toEqual([
+        { member: "revision", session: forkRootBackend },
+      ]);
 
+      const embedder = driftingEmbedder(() => {
+        targetState.revision = "r1" as EngineRevision;
+      });
       const result = await merge<WidgetGraph>(
         baseStore,
         [forkBranch],
-        engineAnchorMergeOptions(fakeEmbedder),
+        engineAnchorMergeOptions(embedder),
+      );
+      expect(isOk(result)).toBe(true);
+      expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
+
+      // `staging.ts`'s `branchPruneTo` also ran at planning time, on that
+      // same fork root backend — never a transaction handle, since the
+      // fork's own store has no open transaction of its own here.
+      expect(forkCalls).toContainEqual({
+        member: "changesSince",
+        session: forkRootBackend,
+      });
+      expect(forkCalls.every((call) => call.session === forkRootBackend)).toBe(
+        true,
       );
 
-      // Mutation-prove by reverting `assertTargetUnchanged`'s engine-anchor
-      // branch to `txBackend.lineage ?? resolveLineage(target)`: the
-      // commit-time read then lands on `txLineage()`, whose `revision()`
-      // ("engine-a") never equals the plan's anchor ("overlay-b"), so
-      // `changesSince("overlay-b", ...)` is consulted on `txLineage()` and
-      // answers `{ kind: "unbounded" }` — an unconditional refusal — and
-      // this assertion fails.
-      expect(isOk(result)).toBe(true);
+      // The commit-time guard's calls (`assertTargetUnchanged`, inside
+      // `commitPlan`'s `target.transaction(...)`) are on a DIFFERENT
+      // session than the target's own root backend — the pinned
+      // transaction handle. MUTATION-PROOF: revert
+      // `assertTargetUnchanged`'s engine-anchor branch to pass
+      // `storeBackend(target)` instead of `txBackend` as the session to
+      // `requireLineage`/`engineAnchorMismatch`, and every entry's
+      // `session` becomes `targetBackend`, failing this assertion.
+      const commitTimeCalls = targetCalls.filter(
+        (call) => call.session !== targetBackend,
+      );
+      expect(commitTimeCalls.map((call) => call.member)).toEqual([
+        "revision",
+        "changesSince",
+      ]);
+      // Every commit-time call ran on the SAME session (one open
+      // transaction), and that session is not the root backend.
+      const [commitSession] = commitTimeCalls;
+      expect(
+        commitTimeCalls.every(
+          (call) => call.session === commitSession?.session,
+        ),
+      ).toBe(true);
     } finally {
-      await forkFixture.cleanup();
-      sqlite.close();
+      targetSqlite.close();
+      forkSqlite.close();
     }
   });
 
-  it("falls back to the root's lineage when the transaction handle carries none (a root-only deriveBackend overlay, never threaded through EngineProvisioning)", async () => {
+  it("throws LINEAGE_UNAVAILABLE at commit when the pinned transaction handle carries no lineage of its own, rather than silently reading a different connection", async () => {
     const state = initialState();
 
     // No `EngineProvisioning.lineage` is attached to this profile — the
     // ONLY `lineage` this backend has is the `deriveBackend` overlay below,
     // applied to the already-constructed root object. A `transaction()`
-    // handle this backend builds never carries it (the same fact the
-    // previous test proves in the other direction), so `assertTargetUnchanged`
-    // reaching the transaction handle alone would find no `lineage` at all
-    // even though `resolveLineage(target)` — the SAME read
-    // `computeBaseVersion` used to anchor the token at plan time — finds one
-    // on the root every time.
+    // handle this backend builds never carries an overlay applied to the
+    // root after construction, so `assertTargetUnchanged` — which reads
+    // `lineage` off the PINNED TRANSACTION HANDLE ONLY, with no fallback to
+    // the root — finds nothing there even though `resolveLineage(target)`
+    // (the SAME read `computeBaseVersion` used to anchor the token at plan
+    // time) finds one on the root every time. This is the "vanished
+    // source" case `requireLineage`'s own refusal exists for: an
+    // engine anchor was minted at plan time, but the session the commit
+    // guard is pinned to no longer supplies the capability that minted it.
     const sqlite = new Database(":memory:");
     sqlite.exec(generateSqliteMigrationSQL());
     const db = drizzleSqlite(sqlite);
@@ -1223,15 +1264,22 @@ describe("assertTargetUnchanged reads lineage off the pinned transaction handle"
         engineAnchorMergeOptions(fakeEmbedder),
       );
 
-      // Mutation-prove by reverting `assertTargetUnchanged` to a bare
-      // `requireLineage(txBackend, "assertTargetUnchanged")` (no fallback to
-      // `resolveLineage(target)`): the transaction handle here has no
-      // `lineage` of its own, so the guard throws `LINEAGE_UNAVAILABLE`
-      // instead of finding this root-only overlay, and BOTH assertions below
-      // fail (an error result whose cause is not this shape, and a widget
-      // list that never gained the fork's row).
-      expect(isOk(result)).toBe(true);
-      expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
+      // Mutation-prove by reverting `assertTargetUnchanged` to
+      // `resolveLineage(target)` (the root read) instead of
+      // `requireLineage(txBackend, …)`: the merge would then succeed
+      // (finding the root-only overlay) and both assertions below fail.
+      expect(isErr(result)).toBe(true);
+      if (isErr(result)) {
+        expect(result.error.cause).toBeInstanceOf(ConfigurationError);
+        expect((result.error.cause as ConfigurationError).details).toEqual(
+          expect.objectContaining({
+            code: "LINEAGE_UNAVAILABLE",
+            operation: "assertTargetUnchanged",
+          }),
+        );
+      }
+      // Nothing committed from the refused attempt.
+      expect(await widgetLabels(baseStore)).toEqual(["base"]);
     } finally {
       await forkFixture.cleanup();
       sqlite.close();

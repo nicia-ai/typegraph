@@ -321,10 +321,14 @@ export async function computeBaseVersion<G extends GraphDef>(
   // compatibility content fingerprint below.
   const lineage = resolveLineage(store);
   if (lineage !== undefined) {
+    // The session is the root backend `store` holds: this runs strictly
+    // outside any transaction, so the root backend is the only session
+    // available, and it is the same object `resolveLineage(store)` just
+    // resolved `lineage` off of.
     const [schemaComponent, activeVersion, revision] = await Promise.all([
       computeSchemaComponent(store),
       readActiveSchemaVersion(storeBackend(store), store.graphId),
-      lineage.revision(),
+      lineage.revision(storeBackend(store)),
     ]);
     // Same schema-half shape as the revision-anchor branch, and for the same
     // reason: nothing here guarantees an engine's revision is blind to a
@@ -579,6 +583,7 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
     );
     if (!originMatch.matches) return undefined;
     return recordedRelationsLineage(baseStore).changesSince(
+      storeBackend(baseStore),
       revisionAnchor as EngineRevision,
       baseStore.graphId,
     );
@@ -587,5 +592,12 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
   if (engineAnchor === undefined) return undefined;
   const lineage = resolveLineage(baseStore);
   if (lineage === undefined) return undefined;
-  return lineage.changesSince(engineAnchor, baseStore.graphId);
+  // PLANNING-time call, strictly outside any commit transaction: the root
+  // backend `baseStore` holds is the only session available, and the same
+  // object `resolveLineage(baseStore)` resolved `lineage` off of.
+  return lineage.changesSince(
+    storeBackend(baseStore),
+    engineAnchor,
+    baseStore.graphId,
+  );
 }

@@ -475,7 +475,7 @@ async function makeForkedPair(
       "resolveLineage(forkStore) was undefined for a store constructed with history: true.",
     );
   }
-  const forkRevision = await forkLineage.revision();
+  const forkRevision = await forkLineage.revision(forkFixture.backend);
   const branch: GraphBranch<PruneGraph> = {
     id: asBranchId("fork"),
     base,

@@ -20,6 +20,7 @@ export type {
   GraphBackend,
   LineageDelta,
   LineageMembers,
+  LineageSession,
   NodeRow,
   TransactionBackend,
   TransactionOptions,

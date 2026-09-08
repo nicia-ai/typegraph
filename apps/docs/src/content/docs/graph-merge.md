@@ -1063,16 +1063,26 @@ schema fence are retried automatically around the complete commit.
 ### Lineage and pruned diffs
 
 A backend may declare a `lineage` capability: an opaque, whole-database
-`revision()` it can report and compare, plus `changesSince(revision,
-graphId)`, which names every node and edge of one graph that changed
-(inserted, updated, deleted, or resurrected) after that revision — or admits
-`{ kind: "unbounded" }` when it cannot bound the answer (an unrecognized
-revision, or history older than what it retains). Neither bundled backend
-implements this itself; when a store has `history: true`, it derives one from
-its own recorded relations instead, and `resolveLineage(store)` is the one
-place that picks between the two — the backend's own `lineage` first, else
-the store's recorded-relations one, else nothing. A `lineage` source is
-consulted only to avoid rework; it never changes what a merge decides.
+`revision(session)` it can report and compare, plus `changesSince(session,
+revision, graphId)`, which names every node and edge of one graph that
+changed (inserted, updated, deleted, or resurrected) after that revision — or
+admits `{ kind: "unbounded" }` when it cannot bound the answer (an
+unrecognized revision, or history older than what it retains). Neither
+bundled backend implements this itself; when a store has `history: true`, it
+derives one from its own recorded relations instead, and `resolveLineage(store)`
+is the one place that picks between the two — the backend's own `lineage`
+first, else the store's recorded-relations one, else nothing. A `lineage`
+source is consulted only to avoid rework; it never changes what a merge
+decides.
+
+`session` is the connection the caller's decision is bound to — a
+session-less bag could never be pinned to anything, so this one always
+carries one. A caller planning outside any transaction (`branch()`'s
+fork-revision capture, the pruning below) passes the root backend it holds;
+a caller re-validating an anchor from inside an open commit transaction
+passes that transaction's own handle, so the read observes the transaction's
+snapshot rather than a separate connection's possibly stale view — see the
+engine anchor's re-validation just below for the concrete case.
 
 **The engine anchor.** When a store has no revision tracking but its backend
 declares `lineage`, `base@V`'s anchor is `engine:<revision>` — the engine's
@@ -1083,10 +1093,21 @@ engine anchor only for a caller that builds one by hand.) Re-validating an
 engine anchor cannot stop at a raw inequality the way a revision anchor does,
 because the engine's revision is whole-database: a commit to a completely
 unrelated graph on the same engine also bumps it. So a mismatch first calls
-`changesSince(anchored, graphId)` — an empty `keys` delta means nothing in
-*this* graph moved and the merge proceeds as unchanged; a non-empty delta, or
-`unbounded`, is a real divergence and raises `BaseVersionMismatchError` with
-`details: { expectedRevision, liveRevision, changedKeys? }`. One known gap:
+`changesSince(session, anchored, graphId)` — an empty `keys` delta means
+nothing in *this* graph moved and the merge proceeds as unchanged; a
+non-empty delta, or `unbounded`, is a real divergence and raises
+`BaseVersionMismatchError` with `details: { expectedRevision, liveRevision,
+changedKeys? }`. This re-validation runs strictly INSIDE the target's own
+open commit transaction (no advisory lock pins an engine-anchored store's
+write path the way a revision-anchored one is pinned), and it passes that
+PINNED TRANSACTION HANDLE as `session` — never the root backend. A `lineage`
+threaded through `EngineProvisioning.lineage` reaches every transaction
+handle a profile builds, so this is the ordinary path; a `lineage` reachable
+only through a `deriveBackend` overlay applied to the already-built root
+object never reaches a transaction handle that way, and this re-validation
+then refuses the commit with a `LINEAGE_UNAVAILABLE` `ConfigurationError`
+rather than silently falling back to a different connection's answer. One
+known gap:
 `changesSince` names only node and edge keys, so a commit that changes
 nothing but a graph's current identity assertions is invisible to an
 engine-anchored guard and is tolerated as unchanged — the content-fingerprint
@@ -1095,8 +1116,10 @@ in), and neither does a revision anchor (any store write advances its shared
 clock).
 
 **Pruning the diff.** `branch()` also records a `forkRevision` on the
-returned `GraphBranch` — the fork's own `lineage.revision()`, read right
-after the working copy is created and before any write reaches it. When
+returned `GraphBranch` — the fork's own `lineage.revision(session)`, read
+right after the working copy is created and before any write reaches it,
+with the working copy's own root backend as the session (this runs strictly
+outside any transaction). When
 staging a branch for merge, its diff against the base is restricted to the
 union of two deltas: what changed on the *fork* since `forkRevision`, and
 what changed on the *base* since the anchor in its own `base@V` — instead of

@@ -118,9 +118,9 @@
 import {
   type EngineRevision,
   type EntityKey,
-  type GraphBackend,
   type LineageDelta,
   type LineageMembers,
+  type LineageSession,
 } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import {
@@ -229,11 +229,11 @@ function parseLineageRevision(revision: EngineRevision): number | undefined {
  * a genuine pre-capture gap, and falsely report `unbounded`.
  */
 async function earliestRecordedFrom(
-  backend: Pick<GraphBackend, "execute">,
+  session: LineageSession,
   schema: SqlSchema,
   graphId: string,
 ): Promise<number | undefined> {
-  const rows = await backend.execute<
+  const rows = await session.execute<
     Readonly<{ earliest: bigint | number | string | null }>
   >(
     asCompiledRowsSql(sql`
@@ -260,12 +260,12 @@ async function earliestRecordedFrom(
  * matches both arms (a resurrection) from being reported twice.
  */
 async function changedEntityKeys(
-  backend: Pick<GraphBackend, "execute">,
+  session: LineageSession,
   table: SqlFragment,
   graphId: string,
   sinceRevision: number,
 ): Promise<readonly EntityKey[]> {
-  const rows = await backend.execute<Readonly<{ kind: string; id: string }>>(
+  const rows = await session.execute<Readonly<{ kind: string; id: string }>>(
     asCompiledRowsSql(sql`
       SELECT DISTINCT kind, id
       FROM ${table}
@@ -285,6 +285,19 @@ async function changedEntityKeys(
  * relations. Callers get this indirectly through {@link resolveLineage};
  * call it directly only to consult the recorded-relations source even when
  * the backend also declares its own `lineage` (e.g. the conformance suite).
+ *
+ * `revision`/`changesSince` run every read on the {@link LineageSession}
+ * they are given, never on a backend this function closed over — the same
+ * "session facts come from the session that enforces them" contract every
+ * `LineageMembers` implementation honors (see that type's own doc). Every
+ * call graph-merge makes into this source (`branch()`'s fork-revision
+ * capture, `staging.ts`'s pruning, `base-version.ts`'s
+ * `lineageDeltaSinceAnchor`) runs at PLANNING time, strictly outside any
+ * commit transaction, and passes the root backend it already holds as the
+ * session — the recorded-relations source never actually reaches a
+ * `transaction()` handle today, but nothing in its implementation depends
+ * on that: it reads correctly on whatever session a future caller hands it,
+ * transaction handle included.
  */
 export function recordedRelationsLineage<G extends GraphDef>(
   store: RecordedLineageStore<G>,
@@ -300,7 +313,6 @@ export function recordedRelationsLineage<G extends GraphDef>(
     );
   }
 
-  const backend = storeBackend(store);
   const schema = store.revisionSchema;
   const graphId = store.graphId;
 
@@ -320,14 +332,15 @@ export function recordedRelationsLineage<G extends GraphDef>(
     );
   }
 
-  async function revision(): Promise<EngineRevision> {
-    const instant = await readRecordedClock(backend, schema, graphId);
+  async function revision(session: LineageSession): Promise<EngineRevision> {
+    const instant = await readRecordedClock(session, schema, graphId);
     return instant === undefined ? GENESIS_REVISION : (
         brandEngineRevision(instant)
       );
   }
 
   async function changesSince(
+    session: LineageSession,
     since: EngineRevision,
     requestedGraphId: string,
   ): Promise<LineageDelta> {
@@ -335,26 +348,26 @@ export function recordedRelationsLineage<G extends GraphDef>(
     const requested = parseLineageRevision(since);
     if (requested === undefined) return UNBOUNDED_DELTA;
 
-    const currentInstant = await readRecordedClock(backend, schema, graphId);
+    const currentInstant = await readRecordedClock(session, schema, graphId);
     const currentRevision =
       currentInstant === undefined ?
         GENESIS_REVISION_NUMBER
       : recordedInstantRevision(currentInstant);
     if (requested > currentRevision) return UNBOUNDED_DELTA;
 
-    const earliestFrom = await earliestRecordedFrom(backend, schema, graphId);
+    const earliestFrom = await earliestRecordedFrom(session, schema, graphId);
     if (earliestFrom !== undefined && requested < earliestFrom - 1) {
       // A tracked commit landed strictly between `requested` and the first
       // captured row, with no recorded row to show for it. Corroborate with
       // the durable revision-origin row before trusting the gap — see the
       // module doc's "what changesSince cannot answer" section.
-      const origin = await readRevisionOrigin(backend, schema, graphId);
+      const origin = await readRevisionOrigin(session, schema, graphId);
       if (origin !== undefined) return UNBOUNDED_DELTA;
     }
 
     const [nodes, edges] = await Promise.all([
-      changedEntityKeys(backend, schema.recordedNodesTable, graphId, requested),
-      changedEntityKeys(backend, schema.recordedEdgesTable, graphId, requested),
+      changedEntityKeys(session, schema.recordedNodesTable, graphId, requested),
+      changedEntityKeys(session, schema.recordedEdgesTable, graphId, requested),
     ]);
     return { kind: "keys", nodes, edges };
   }

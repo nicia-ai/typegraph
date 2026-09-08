@@ -3,23 +3,23 @@
 ---
 
 `GraphBackend` gains an optional `lineage` member (`LineageMembers`): an opaque, whole-database
-`revision()` an engine can report and compare, plus `changesSince(revision, graphId)`, which names
-every node and edge of one graph that changed — inserted, updated, deleted, or resurrected — since
-that revision, or admits `{ kind: "unbounded" }` when it cannot bound the answer. It is a query
-surface only; nothing in it writes a row. `requireLineage` is the typed refusal for a caller that
-needs it and finds it absent, in the same style as `requireCatalog`. `TransactionBackend` gains the
-same optional `lineage` member (through the new `LineageBackend` member type, mirroring
-`CatalogBackend`), so a profile-supplied `lineage` is visible on a `transaction()` handle exactly as
-`catalog` already was, not only on the root backend. `EngineProvisioning` gains a matching optional
-`lineage` field, forwarded onto the backend unchanged; neither bundled Drizzle profile supplies one,
-so a store's own recorded-relations derivation backs the capability instead (below); the `lineage`
-member itself emits no SQL. The recorded relations it derives from are
-already part of the schema regardless of `history`, and a DDL-running boot (`createStoreWithSchema`,
-unless `systemIndexes: "skip"`) now materializes two new system indexes on them, history on or off,
-plus a third structural index on the recorded identity-assertions relation. A caller that opted out
-with `systemIndexes: "skip"` gets the two system indexes on the next explicit
-`store.materializeSystemIndexes()` call instead of at boot — see the parity-snapshot note below for
-exactly what moves.
+`revision(session)` an engine can report and compare, plus `changesSince(session, revision,
+graphId)`, which names every node and edge of one graph that changed — inserted, updated,
+deleted, or resurrected — since that revision, or admits `{ kind: "unbounded" }` when it cannot
+bound the answer. It is a query surface only; nothing in it writes a row. `requireLineage` is the
+typed refusal for a caller that needs it and finds it absent, in the same style as
+`requireCatalog`. `TransactionBackend` gains the same optional `lineage` member (through the new
+`LineageBackend` member type, mirroring `CatalogBackend`), so a profile-supplied `lineage` is
+visible on a `transaction()` handle exactly as `catalog` already was, not only on the root
+backend. `EngineProvisioning` gains a matching optional `lineage` field, forwarded onto the
+backend unchanged; neither bundled Drizzle profile supplies one, so a store's own
+recorded-relations derivation backs the capability instead (below); the `lineage` member itself
+emits no SQL. The recorded relations it derives from are already part of the schema regardless of
+`history`, and a DDL-running boot (`createStoreWithSchema`, unless `systemIndexes: "skip"`) now
+materializes two new system indexes on them, history on or off, plus a third structural index on
+the recorded identity-assertions relation. A caller that opted out with `systemIndexes: "skip"`
+gets the two system indexes on the next explicit `store.materializeSystemIndexes()` call instead
+of at boot — see the parity-snapshot note below for exactly what moves.
 
 `recordedRelationsLineage(store)` derives `lineage` from a store's own recorded relations for any
 store constructed with `history: true`: `revision()` reports the graph's recorded-time clock;
@@ -72,24 +72,36 @@ and edge keys, so a commit touching only a graph's current identity assertions i
 engine-anchored guard and tolerated as unchanged — the content-fingerprint and revision-anchor forms
 do not share this gap.
 
-`GraphBranch` gains an optional `forkRevision`, the fork's own `lineage.revision()` captured by
-`branch()` right after the working copy is created. `diffAgainstBase` takes an optional `pruneTo`
-lineage delta: when present, each node/edge kind is read by id set instead of a full keyset
-enumeration, restricted to the union of what changed on the fork since `forkRevision` and on the
-base since its own `base@V` anchor. A key absent from both deltas cannot have moved since the fork
-point, so pruning cannot miss a change — it only narrows how much is read. Pruning applies only when
-both sides can supply a bounded delta; a hand-built branch, a store with no `lineage`, an `unbounded`
-answer on either side, or either side's `changesSince` REJECTING falls back to the full diff exactly
-as before. Pruning is a pure optimization: it never changes what a merge decides, only how much of
+`GraphBranch` gains an optional `forkRevision`, the fork's own `lineage.revision(session)`
+captured by `branch()` right after the working copy is created, with the working copy's own root
+backend as the session. `diffAgainstBase` takes an optional `pruneTo` lineage delta: when
+present, each node/edge kind is read by id set instead of a full keyset enumeration, restricted
+to the union of what changed on the fork since `forkRevision` and on the base since its own
+`base@V` anchor. A key absent from both deltas cannot have moved since the fork point, so pruning
+cannot miss a change — it only narrows how much is read. Pruning applies only when both sides can
+supply a bounded delta; a hand-built branch, a store with no `lineage`, an `unbounded` answer on
+either side, or either side's `changesSince` REJECTING falls back to the full diff exactly as
+before. Pruning is a pure optimization: it never changes what a merge decides, only how much of
 the store it reads to decide it.
+
+`LineageMembers`' `revision`/`changesSince` each take a **session** as their first argument — the
+narrowest existing execution-target type a root backend and a `transaction()` handle both satisfy
+(`LineageSession`, `Pick<TransactionBackend, "execute" | "executeRaw">`). An implementation MUST
+run its read on the session it is given, never on a connection it closed over instead:
+`assertTargetUnchanged` (`graph-merge/merge.ts`) is the concrete caller this exists for — it
+reads `lineage` off the pinned transaction handle and passes that SAME handle as the session, so
+the read observes the transaction's own snapshot. `requireLineage` now refuses with a
+`ConfigurationError` (`LINEAGE_UNAVAILABLE`) when the transaction handle carries no `lineage` of
+its own, with no fallback to the root backend's `lineage`; a `lineage` a custom backend wants
+honored at commit time must be threaded through `EngineProvisioning.lineage` so it reaches every
+`transaction()` handle, not attached only to the root object after construction. This is not
+listed under Breaking below: `lineage` shipped on this same unreleased branch, so its signature
+has never been part of a published release.
 
 ## Breaking
 
-- `BaseSchemaRuntime` (and the `CreateBaseSchemaMembersDeps` it is derived from) requires its
-  `sinceIndexDdl` field to carry three `CREATE INDEX IF NOT EXISTS` statements instead of two —
-  `readonly [string, string, string]`, in `(recordedNodes, recordedEdges,
-  recordedIdentityAssertions)` order — built from a dialect's own physical table names via
-  `sinceIndexAdoptionDdl` (`src/indexes/system.ts`), which now also takes a
-  `recordedIdentityAssertions` table name. A custom `SqlEngineProfile` that builds its own
-  `baseSchemaRuntime` must pass the widened tuple; there is no longer a separate
-  `identityAssertionsSinceIndexDdl` field to supply.
+- `BaseSchemaRuntime` (and the `CreateBaseSchemaMembersDeps` it is derived from) gains a newly
+  required `sinceIndexDdl` field: `readonly [string, string, string]`, three `CREATE INDEX IF NOT
+  EXISTS` statements in `(recordedNodes, recordedEdges, recordedIdentityAssertions)` order, built
+  from a dialect's own physical table names via `sinceIndexAdoptionDdl` (`src/indexes/system.ts`).
+  A custom `SqlEngineProfile` that builds its own `baseSchemaRuntime` must supply this field.

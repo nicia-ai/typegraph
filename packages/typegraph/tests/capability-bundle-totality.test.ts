@@ -137,14 +137,17 @@ describe("capability bundle totality (T9)", () => {
     // store's resolved schema — 90 -> 91. The lineage capability then added
     // `lineage`, a reasoned member with two live accesses (`resolveLineage`'s
     // two reads of the backend's own `lineage`, in
-    // `store/recorded-capture/lineage.ts`) — 91 -> 93. Reading the engine
-    // anchor's lineage on the pinned session then added two more:
-    // `assertTargetUnchanged` (`graph-merge/merge.ts`) resolves
-    // `resolveLineage(target)` once and reads the transaction handle's own
-    // `lineage` twice on one line — once to compare it against that
-    // resolution by identity, once as the value used when identical —
-    // falling back to the resolved value itself otherwise — 93 -> 95.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(95);
+    // `store/recorded-capture/lineage.ts`) — 91 -> 93. A prior fix round
+    // briefly grew this to 95 by re-deriving `resolveLineage(target)`'s
+    // resolution and comparing it against the transaction handle's own
+    // `lineage` by identity inside `assertTargetUnchanged` — a dead read
+    // (`LineageMembers` took no session argument, so the comparison never
+    // actually pinned anything to the transaction). Giving `revision`/
+    // `changesSince` a real `session` parameter made that comparison
+    // unnecessary: `assertTargetUnchanged` now reaches `lineage` through
+    // `requireLineage(txBackend, …)`, which reads `.lineage` inside
+    // `backend/capabilities/`, outside the scanner's scope — back to 93.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(93);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });

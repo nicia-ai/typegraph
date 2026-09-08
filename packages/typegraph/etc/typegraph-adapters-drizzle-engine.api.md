@@ -8280,9 +8280,12 @@ type LineageDelta = Readonly<{
 
 // @public
 type LineageMembers = Readonly<{
-    revision: (this: void) => Promise<EngineRevision>;
-    changesSince: (this: void, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
+    revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
+    changesSince: (this: void, session: LineageSession, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
 }>;
+
+// @public
+type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public (undocumented)
 type LockSchemaVersionForWriteParams = Readonly<{

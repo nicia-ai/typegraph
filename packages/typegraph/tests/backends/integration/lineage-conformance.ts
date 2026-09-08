@@ -108,20 +108,19 @@ export function registerLineageConformanceIntegrationTests(
 ): void {
   describe("lineage: recorded-relations conformance", () => {
     it("reports exactly the node and edge keys touched since an earlier revision", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
-      const r0 = await lineage.revision();
+      const r0 = await lineage.revision(backend);
       const alice = await store.nodes.LineagePerson.create({ name: "Alice" });
       const bob = await store.nodes.LineagePerson.create({ name: "Bob" });
       const edge = await store.edges.lineage_knows.create(alice, bob, {});
 
-      const delta = await lineage.changesSince(r0, store.graphId);
+      const delta = await lineage.changesSince(backend, r0, store.graphId);
       if (delta.kind !== "keys") throw new Error("expected a keys delta");
       expect(sortedKeys(delta.nodes)).toEqual(
         sortedKeys([
@@ -133,35 +132,37 @@ export function registerLineageConformanceIntegrationTests(
     });
 
     it("reports no changes since the current revision", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
       await store.nodes.LineagePerson.create({ name: "Carol" });
-      const rNow = await lineage.revision();
+      const rNow = await lineage.revision(backend);
 
-      const delta = await lineage.changesSince(rNow, store.graphId);
+      const delta = await lineage.changesSince(backend, rNow, store.graphId);
       expect(delta).toEqual({ kind: "keys", nodes: [], edges: [] });
     });
 
     it("reports a hard-deleted node's key", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
       const dave = await store.nodes.LineagePerson.create({ name: "Dave" });
-      const rBeforeDelete = await lineage.revision();
+      const rBeforeDelete = await lineage.revision(backend);
       await store.nodes.LineagePerson.hardDelete(dave.id);
 
-      const delta = await lineage.changesSince(rBeforeDelete, store.graphId);
+      const delta = await lineage.changesSince(
+        backend,
+        rBeforeDelete,
+        store.graphId,
+      );
       expect(delta).toEqual({
         kind: "keys",
         nodes: [{ kind: "LineagePerson", id: dave.id }],
@@ -170,36 +171,39 @@ export function registerLineageConformanceIntegrationTests(
     });
 
     it("reports a resurrected node's key exactly once", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
       const erin = await store.nodes.LineagePerson.create({ name: "Erin" });
-      const rBeforeDelete = await lineage.revision();
+      const rBeforeDelete = await lineage.revision(backend);
       await store.nodes.LineagePerson.delete(erin.id);
       await store.nodes.LineagePerson.upsertById(erin.id, {
         name: "Erin restored",
       });
 
-      const delta = await lineage.changesSince(rBeforeDelete, store.graphId);
+      const delta = await lineage.changesSince(
+        backend,
+        rBeforeDelete,
+        store.graphId,
+      );
       if (delta.kind !== "keys") throw new Error("expected a keys delta");
       expect(delta.nodes.filter((key) => key.id === erin.id)).toHaveLength(1);
     });
 
     it("reports unbounded for an unknown revision", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
       const delta = await lineage.changesSince(
+        backend,
         "not-a-revision-this-lineage-minted" as EngineRevision,
         store.graphId,
       );
@@ -207,22 +211,22 @@ export function registerLineageConformanceIntegrationTests(
     });
 
     it("reports unbounded for a well-formed revision newer than the clock", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
       await store.nodes.LineagePerson.create({ name: "Frank" });
-      const currentRevision = await lineage.revision();
+      const currentRevision = await lineage.revision(backend);
       const futureRevision = createRecordedInstant(
         recordedInstantRevision(asRecordedInstant(currentRevision)) + 1000,
         "2099-01-01T00:00:00.000Z",
       );
 
       const delta = await lineage.changesSince(
+        backend,
         futureRevision as unknown as EngineRevision,
         store.graphId,
       );
@@ -230,18 +234,44 @@ export function registerLineageConformanceIntegrationTests(
     });
 
     it("refuses changesSince for a graph other than the one it was derived from", async () => {
-      const [store] = await createStoreWithSchema(
-        lineageGraph,
-        context.getStore().backend,
-        { history: true },
-      );
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
       const lineage = resolveLineage(store);
       if (lineage === undefined) throw new Error("expected a resolved lineage");
 
-      const r0 = await lineage.revision();
+      const r0 = await lineage.revision(backend);
       await expect(
-        lineage.changesSince(r0, "some-other-graph"),
+        lineage.changesSince(backend, r0, "some-other-graph"),
       ).rejects.toThrow(/different graph/);
+    });
+
+    it("calls changesSince from inside store.transaction with the transaction handle as the session, and the caller-serialized reentrancy guard does not fire", async () => {
+      const backend = context.getStore().backend;
+      const [store] = await createStoreWithSchema(lineageGraph, backend, {
+        history: true,
+      });
+      const lineage = resolveLineage(store);
+      if (lineage === undefined) throw new Error("expected a resolved lineage");
+
+      const r0 = await lineage.revision(backend);
+      const alice = await store.nodes.LineagePerson.create({ name: "Alice" });
+
+      // The transaction handle IS the session passed to both members here —
+      // exactly the shape `assertTargetUnchanged` (`graph-merge/merge.ts`)
+      // uses at commit time. Reading on the handle it is given, rather than
+      // on a separately-held connection, is what lets this run from inside
+      // an open transaction on the bundled caller-serialized SQLite backend
+      // without colliding with its own reentrancy guard (contrast
+      // `tests/graph-merge/base-version-engine-anchor.test.ts`'s
+      // ignores-the-session case, which deliberately reads through a
+      // different connection and DOES collide).
+      const delta = await backend.transaction(async (tx) => {
+        return lineage.changesSince(tx, r0, store.graphId);
+      });
+      if (delta.kind !== "keys") throw new Error("expected a keys delta");
+      expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: alice.id }]);
     });
   });
 
@@ -269,6 +299,7 @@ export function registerLineageConformanceIntegrationTests(
 
       const lineage = recordedRelationsLineage(historyStore);
       const delta = await lineage.changesSince(
+        backend,
         earlyRevision as unknown as EngineRevision,
         historyStore.graphId,
       );
@@ -299,6 +330,7 @@ export function registerLineageConformanceIntegrationTests(
 
       const lineage = recordedRelationsLineage(historyStore);
       const delta = await lineage.changesSince(
+        backend,
         earlyRevision as unknown as EngineRevision,
         historyStore.graphId,
       );
@@ -353,6 +385,7 @@ export function registerLineageConformanceIntegrationTests(
 
       const lineage = recordedRelationsLineage(historyStore);
       const delta = await lineage.changesSince(
+        backend,
         boundaryRevision as unknown as EngineRevision,
         historyStore.graphId,
       );

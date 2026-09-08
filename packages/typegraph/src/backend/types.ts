@@ -306,6 +306,7 @@ export type {
   EntityKey,
   LineageDelta,
   LineageMembers,
+  LineageSession,
 } from "./capabilities/lineage";
 
 /**

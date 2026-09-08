@@ -825,11 +825,20 @@ export type UnbundledOptionalMember =
  * added `fenceSql` with two accesses; the catalog-introspection bag then
  * added `catalog`, a reasoned member with zero measured accesses — its own
  * absence refusal lives in this directory, which the live scanner excludes
- * wholesale; the lineage capability then added `lineage`, a reasoned member
- * with four live accesses (`resolveLineage`'s two reads of the backend's own
- * member, plus `assertTargetUnchanged`'s two reads of the pinned transaction
- * handle's own member — once to compare it against `resolveLineage(target)`
- * by identity, once as the value used when that identity holds) — 90 → 94),
+ * wholesale; the forked working-copy strategy then reads the connected
+ * backend's `tableNames` to fence them against the base store's resolved
+ * schema — 90 → 91; the lineage capability then added `lineage`, a
+ * reasoned member with two live accesses (`resolveLineage`'s two reads of
+ * the backend's own member) — 91 → 93. A later fix briefly grew this to 95
+ * by re-deriving `resolveLineage(target)`'s resolution and comparing it
+ * against the transaction handle's own `lineage` by identity inside
+ * `assertTargetUnchanged` — a dead read, since `LineageMembers` took no
+ * session argument and the comparison never actually pinned anything to
+ * the transaction. Giving `revision`/`changesSince` a real `session`
+ * parameter made that comparison unnecessary — `assertTargetUnchanged` now
+ * reaches `lineage` through `requireLineage(txBackend, …)`, a call the
+ * live scanner does not see (it reads `.lineage` inside
+ * `backend/capabilities/`, outside the scanned scope) — back to 93,
  * 15 + 82 = 97 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
@@ -1046,8 +1055,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
   lineage: {
     kind: "reasoned",
     reason:
-      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. `assertTargetUnchanged` (graph-merge/merge.ts) resolves `resolveLineage(target)` once as `planned`, then reads the pinned transaction handle's own `lineage` twice on one line — once to compare it against `planned` by identity, once as the value used when that identity holds — falling back to `planned` itself when it does not: two more reads, both on the transaction handle.",
-    accesses: 4,
+      "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.",
+    accesses: 2,
   },
   claimIndexMaterialization: {
     kind: "deferred",

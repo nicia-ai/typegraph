@@ -331,31 +331,30 @@ bundled backend derives its `lineage` from its own recorded relations when
 [Lineage and pruned diffs](/graph-merge#lineage-and-pruned-diffs)). An engine
 whose storage layer already tracks a whole-database revision and can answer
 "what changed in this graph since revision R" more cheaply than a full scan
-supplies `lineage` directly. Every OUT-OF-TRANSACTION caller that consults it
-— `branch()`'s fork-revision capture, and `staging.ts`'s pruned-diff delta
-among them — picks it up automatically through `resolveLineage`, ahead of the
-recorded-relations fallback. The engine-anchored `base@V` guard's
+supplies `lineage` directly.
+
+Both `revision` and `changesSince` take a **session** as their first
+argument — the connection the caller's decision is bound to, never one your
+implementation picks for itself. A caller planning outside any transaction
+(`branch()`'s fork-revision capture, `staging.ts`'s pruned-diff delta) passes
+the root backend it holds. The engine-anchored `base@V` guard's
 IN-TRANSACTION re-validation (`assertTargetUnchanged` in `graph-merge/
-merge.ts`) reads `lineage` off the PINNED TRANSACTION HANDLE only when that
-handle's `lineage` IS the identical object `resolveLineage(target)` resolves
-off the root — the read the plan already relied on to choose the engine
-anchor in the first place. A profile-supplied `lineage` reaches every
-`transaction()` handle the same `EngineProvisioning` builds (the
-`provisioning` row above), so in that configuration the two ARE the same
-object and the guard is, in effect, reading the pinned session. A `lineage`
-attached only to the root object — for example through a `deriveBackend`
-overlay applied after construction, rather than through
-`EngineProvisioning.lineage` — never reaches the transaction handle that way,
-so the two differ, and the guard falls back to the root read instead: two
-different `lineage` objects can never be compared against each other (a
-revision from one is meaningless to the other — see `EngineRevision`'s own
-doc), so the object the plan actually anchored against is the only one this
-comparison may ever use. `requireLineage` still refuses when NEITHER the
-transaction handle nor the root supplies `lineage` — see `LINEAGE_UNAVAILABLE`
-below. Because the guard may end up reading the root object from strictly
-inside the commit transaction, ANY `lineage` reachable from either the root
-or a `transaction()` handle — not only one actually threaded onto a handle —
-must tolerate that reentry.
+merge.ts`) is the concrete caller a session-less bag could never serve
+correctly: it reads `lineage` off the PINNED TRANSACTION HANDLE and calls
+both members WITH that same handle as the session, so the read observes the
+transaction's own snapshot rather than a separate connection's possibly
+stale view. `requireLineage` refuses with `LINEAGE_UNAVAILABLE` (below) when
+the transaction handle carries no `lineage` of its own — there is no
+fallback to the root: a `lineage` reachable only through a `deriveBackend`
+overlay applied to the already-built root object never reaches a
+`transaction()` handle that way, so a profile that wants its `lineage`
+honored at commit time must thread it through `EngineProvisioning.lineage`,
+which reaches every `transaction()` handle the same way `catalog` does.
+Implement `revision`/`changesSince` by running the query ON the `session`
+argument (`session.execute`/`session.executeRaw`) — never on a connection
+you closed over instead. A `session` is always either the backend that
+declared this `lineage` or a `transaction()` handle it built, so nothing
+about implementing this member requires opening a connection of your own.
 
 `revision()` must return a token comparable only by equality against another
 revision the SAME `lineage` produced — never parsed, ordered, or compared
@@ -370,10 +369,7 @@ mismatch through `changesSince` before refusing. `changesSince` must cover
 every way a row can change — insert, update, delete, and resurrection after a
 delete — deduplicated, and must answer `{ kind: "unbounded" }` rather than
 guess whenever it cannot bound the delta for a given revision (an unrecognized
-token, or history older than what it retains). Both members must tolerate
-being called from inside an open transaction on the same backend they were
-read off; see the `LineageMembers` doc comment for the concrete reentrancy
-case graph-merge depends on.
+token, or history older than what it retains).
 
 Test a new `lineage` against `tests/backends/integration/lineage-conformance.ts`'s
 `registerLineageConformanceIntegrationTests` (registered per-dialect through
@@ -398,7 +394,7 @@ should run against the conformance describe only and skip the other.
 | `WRITE_FENCE_DECLARATION_INVALID` | The declared `writeFence` carries an unrecognized `mechanism`, `drain`, or `conflict` string; a `drain` key on a mechanism other than `"advisory"` / `"row"`; a `conflict` key on anything but `"row"`; or `conflict: "commit-time"` on a target whose own `capabilities.execution.interactiveTransactions` is `false` — that value is honored only by the `"optimistic-retry"` execution tier, which never derives without an interactive transaction to replay inside, so accepting it there would silently drop it rather than apply it. `resolveWriteFencePlan` validates the raw value (a plain-JavaScript author is not held to the discriminated-union type) before shaping a plan from it. |
 | `CALLER_SERIALIZED_REFUSES_ADOPTION` | `adoptTransaction` was called on a backend whose resolved write-fence plan is `caller-serialized` — an externally owned transaction's lifetime cannot be held by the backend's in-process write-unit queue. |
 | `CATALOG_UNAVAILABLE` | A store path that needs the backend's catalog probes (index materialization, the recorded-time schema check, the recorded-time migration's column read) finds `catalog` absent — a profile whose `provisioning.catalog` is unset builds a backend with no `catalog` member at all. |
-| `LINEAGE_UNAVAILABLE` | A caller reached `requireLineage` and found `lineage` absent everywhere it looked. Every OUT-OF-TRANSACTION graph-merge caller consults `lineage` through `resolveLineage`, which already falls back to the recorded-relations lineage or to a full comparison rather than hitting this refusal; `assertTargetUnchanged`'s in-transaction re-validation reads the transaction handle's `lineage` only when it matches the root's and falls back to the root's otherwise (see "Supplying `lineage`" above), so this fires only when the root's own `lineage` — the one the plan already anchored against — has disappeared by commit time, a profile whose `lineage` construction is unstable across calls, not a race TypeGraph's own write path can produce. |
+| `LINEAGE_UNAVAILABLE` | A caller reached `requireLineage` and found `lineage` absent on the backend it asked. Every OUT-OF-TRANSACTION graph-merge caller consults `lineage` through `resolveLineage`, which already falls back to the recorded-relations lineage or to a full comparison rather than hitting this refusal. `assertTargetUnchanged`'s in-transaction re-validation reads the transaction handle's `lineage` ONLY — no fallback to the root — so this fires whenever a `lineage` that anchored the plan (found on the root at plan time) is not ALSO threaded onto the transaction handle that commits it; see "Supplying `lineage`" above for how to thread it correctly. |
 | `ENGINE_PROFILE_OVERRIDE_UNSUPPORTED` | `deriveEngineProfile`'s `overrides` names a key outside the derivable set, or one of the three adapter-backed sub-fields with a changed value (see [the carve-out](#the-adapter-backed-carve-out)). |
 | `ENGINE_ASSEMBLY_UNRECOGNIZED` | The profile's `assembly` is not a value `assembleEngine` produced — a profile built by hand rather than obtained from a bundled builder (optionally adapted with `deriveEngineProfile`). |
 
