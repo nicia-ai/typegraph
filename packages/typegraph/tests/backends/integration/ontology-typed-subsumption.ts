@@ -14,6 +14,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  searchable,
   subClassOf,
 } from "../../../src";
 import { ConfigurationError } from "../../../src/errors";
@@ -86,6 +87,28 @@ const narrowerGraph = defineGraph({
   ],
 });
 
+// Fulltext fixture: a distinct graph so its `searchable()` field doesn't
+// have to be threaded through `subsumptionGraph`'s other, non-search cases.
+const SearchMedia = defineNode("TsSearchMedia", {
+  schema: z.object({ title: searchable({ language: "english" }) }),
+});
+const SearchPodcast = defineNode("TsSearchPodcast", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    rssUrl: z.string(),
+  }),
+});
+
+const searchGraph = defineGraph({
+  id: "typed_subsumption_search_integration",
+  nodes: {
+    TsSearchMedia: { type: SearchMedia },
+    TsSearchPodcast: { type: SearchPodcast },
+  },
+  edges: {},
+  ontology: [subClassOf(SearchPodcast, SearchMedia)],
+});
+
 export function registerOntologyTypedSubsumptionIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -114,6 +137,102 @@ export function registerOntologyTypedSubsumptionIntegrationTests(
         .select((ctx) => ctx.m)
         .execute();
       expect(exact.map((row) => row.kind)).toEqual(["TsMedia"]);
+    });
+
+    // Mutation-checked: flipping the store's default
+    // `queryDefaults.includeSubClasses` from `true` to `false` drops the
+    // `TsPodcast` row and fails this assertion on BOTH engines; restored.
+    it("returns identical row ordering under an explicit orderBy on both engines", async () => {
+      const store = await context.createStore(subsumptionGraph);
+      await store.nodes.TsMedia.create({ title: "bravo" });
+      await store.nodes.TsPodcast.create({
+        title: "alpha",
+        rssUrl: "https://x",
+      });
+      await store.nodes.TsMedia.create({ title: "charlie" });
+
+      const rows = await store
+        .query()
+        .from("TsMedia", "m")
+        .orderBy("m", "title", "asc")
+        .select((ctx) => ctx.m)
+        .execute();
+
+      expect(rows.map((row) => row.title)).toEqual([
+        "alpha",
+        "bravo",
+        "charlie",
+      ]);
+    });
+
+    // NOT mutation-checked on the "exact" half: `backend.fulltextSearch({
+    // nodeKind, ... })` already scopes the physical search to the exact
+    // kind regardless of what the candidate subquery's `from()` widens to
+    // (src/store/search.ts's module docblock), so dropping its
+    // `{ includeSubClasses: false }` pin leaves that assertion green on
+    // BOTH engines — same defense-in-depth shape the SQLite-only pin in
+    // tests/polymorphic-default.test.ts documents. This is cross-backend
+    // PARITY coverage (AGENTS.md "Backend parity" §2: the candidate
+    // subquery composes with FTS5 on SQLite and tsvector on PostgreSQL, so
+    // only running the case on both engines can prove they agree), not an
+    // independent load-bearing guard.
+    it("fulltext search's candidate subquery stays exact-kind by default and expands with includeSubClasses, on both engines", async (ctx) => {
+      const store = await context.createStore(searchGraph);
+      if (store.backend.capabilities.fulltext?.supported !== true) {
+        ctx.skip();
+      }
+
+      await store.nodes.TsSearchMedia.create({
+        title: "unique_ts_fulltext_marker media",
+      });
+      await store.nodes.TsSearchPodcast.create({
+        title: "unique_ts_fulltext_marker podcast",
+        rssUrl: "https://x",
+      });
+
+      const exact = await store.search.fulltext("TsSearchMedia", {
+        query: "unique_ts_fulltext_marker",
+        limit: 10,
+      });
+      expect(exact.map((result) => result.node.kind)).toEqual([
+        "TsSearchMedia",
+      ]);
+
+      const expanded = await store.search.fulltext("TsSearchMedia", {
+        query: "unique_ts_fulltext_marker",
+        limit: 10,
+        includeSubClasses: true,
+      });
+      expect(expanded.map((result) => result.node.kind).toSorted()).toEqual([
+        "TsSearchMedia",
+        "TsSearchPodcast",
+      ]);
+    });
+
+    // NOT mutation-checked: the outer `WHERE nodes.kind = <kind>` in
+    // `executeNodeSetUpdate` re-filters the candidate set to `TsMedia`
+    // regardless of what this root's `fromDynamic` pin (node-collection.ts)
+    // widens to — same defense-in-depth shape the SQLite-only pin in
+    // tests/polymorphic-default.test.ts documents. Cross-backend PARITY
+    // coverage: the outer fence's SQL differs by dialect, so only running
+    // the case on both engines proves neither one's fence lets a
+    // `TsPodcast` row through.
+    it("updateWhere on the parent kind leaves subtype rows untouched, on both engines", async () => {
+      const store = await context.createStore(subsumptionGraph);
+      await store.nodes.TsMedia.create({ title: "before" });
+      const podcast = await store.nodes.TsPodcast.create({
+        title: "before",
+        rssUrl: "https://x",
+      });
+
+      const result = await store.nodes.TsMedia.updateWhere({
+        all: true,
+        patch: { title: "after" },
+      });
+
+      expect(result.affectedCount).toBe(1);
+      const stillPodcast = await store.nodes.TsPodcast.getById(podcast.id);
+      expect(stillPodcast?.title).toBe("before");
     });
   });
 
