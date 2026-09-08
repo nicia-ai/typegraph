@@ -201,8 +201,8 @@ const ancestors = await store
   .from("Concept", "c")
   .whereNode("c", (n) => n.id.eq(leafConceptId))
   .traverse("broader", "e")
-  .to("Concept", "ancestor")
   .recursive()
+  .to("Concept", "ancestor")
   .select((ctx) => ctx.ancestor)
   .execute();
 ```
