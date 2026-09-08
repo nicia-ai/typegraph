@@ -1150,13 +1150,17 @@ const worker = unwrap(
     strategy,
   ),
 );
+
+// ... write on worker.store, plan and apply the merge ...
+
+await worker.close();
 ```
 
 `TFork` must extend `ForkHandle` (`{ dispose?: () => Promise<void> }`).
 `create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
 backend's `close` is composed with the fork's `dispose` through `deriveBackend`
-(never a spread), so the working copy's single `close()` releases both the
-connection and the fork. A `connect` failure disposes the fork before
+(never a spread), so `worker.close()` — the branch's public release call —
+releases both the connection and the fork. A `connect` failure disposes the fork before
 rethrowing, leaving nothing open and the base untouched.
 
 A fork inherits the base's WHOLE construction option set — hooks, upsert

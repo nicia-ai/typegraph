@@ -44,7 +44,6 @@ import {
   forkedWorkingCopyStrategy,
   type ForkHandle,
 } from "../../../src/graph-merge/working-copy";
-import { storeBackend } from "../../../src/store/runtime-port";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -243,7 +242,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
       const afterCommit = await baseStore.nodes.Widget.getById(widget.id);
       expect(afterCommit?.name).toBe("Forked Edit");
 
-      await storeBackend(forkBranch.store).close();
+      await forkBranch.close();
       await swappablePool.current.end();
     });
   },
