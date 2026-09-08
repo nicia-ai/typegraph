@@ -59,6 +59,7 @@ import type {
   NODE_WRITE_NAMES,
   RECORDED_POINT_READ_NAMES,
 } from "./collection-surface";
+import type { NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type {
   EdgeCollectionLookup,
   RequiredEdgeCollectionLookup,
@@ -2173,6 +2174,24 @@ type TransactionRuntime = Readonly<{
     id: string,
     fn: () => Promise<T>,
   ) => Promise<T>;
+  /**
+   * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
+   * this SAME transaction's node-operation context — the buffered hook
+   * runner and attempt number `#buildTransactionContext` already built for
+   * `nodes`/`edges` on this context, not a freshly-minted immediate-hook
+   * context. `StoreRuntime.deleteNodeWithPolicy` builds exactly such a fresh
+   * context and is correct only OUTSIDE a `store.transaction` callback; a
+   * caller invoking that Store-scoped variant from inside one (as
+   * `graph-merge`'s merge apply once did) would report `onOperationEnd` for a
+   * delete the instant it runs, even when the transaction it is part of
+   * later rolls back. A caller already inside a `store.transaction` callback
+   * — today, merge apply — reaches this transaction-scoped variant instead,
+   * via {@link file://./runtime-port.ts transactionDeleteNodeWithPolicy}.
+   */
+  deleteNodeWithPolicy: (
+    work: Readonly<{ kind: string; id: string }>,
+    policy?: NodeDeletePolicy,
+  ) => Promise<void>;
 }>;
 
 /**

@@ -475,6 +475,19 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // (two names move from forgotten to real exports); every OTHER entrypoint is
 // unaffected, since none of them re-exports either name and both remain
 // forgotten there exactly as the paragraph above describes.
+//
+// Transaction-scoped policy delete (EC1-R1-01 fix): `TransactionRuntime` and
+// `StoreRuntime` both gain a `deleteNodeWithPolicy` member typed over
+// `NodeDeletePolicy` (`store/operations/node-write-pipeline.ts`) so merge
+// apply's node delete can bind to the SAME transaction's buffered hook
+// runner and attempt instead of a freshly-built Store-scoped context. This
+// is exactly the B8 `[STORE_RUNTIME]`-reachable set (`.`, `./graph-merge`,
+// `./interchange`, `./profiler`, `./provenance`, `./sqlite/local`,
+// `./postgres/pglite`), each +1 for `NodeDeletePolicy`: `.` 388→389,
+// `./graph-merge` 730→731, `./interchange` 713→714, `./postgres/pglite`
+// 710→711, `./profiler` 715→716, `./provenance` 721→722, `./sqlite/local`
+// 710→711. No other entrypoint renders `TransactionRuntime`/`StoreRuntime`,
+// so no other entrypoint moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 389,

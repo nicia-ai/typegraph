@@ -1,11 +1,19 @@
 /**
  * Merge apply's node deletion no longer goes through the public collection
  * facade (`nodeCollection(...).delete(id)`); it routes through the internal
- * runtime port `deleteNodeWithPolicy` instead, passing
- * `{ enforceDeleteBehavior: true, cascadeComposition: false }`. This proves
- * the switch is behavior-preserving where it must be: enforcement stays ON,
- * so a target node's own `restrict` edge still aborts the merge exactly as
- * it did through the old facade call — and zero rows change on that refusal.
+ * runtime port `transactionDeleteNodeWithPolicy` instead, passing
+ * `{ enforceDeleteBehavior: true }`. Two dimensions of that switch each get
+ * their own test:
+ *
+ * - ENFORCEMENT: a target node's own `restrict` edge still aborts the merge
+ *   exactly as it did through the old facade call, and zero rows change on
+ *   that refusal.
+ * - ROUTING: the delete is bound to the SAME transaction merge apply is
+ *   already running in — its buffered hook runner and attempt — not a
+ *   freshly-built context off the outer Store. A delete inside a merge that
+ *   later rolls back must never report `onOperationEnd`; a context built
+ *   fresh from the outer Store fires that hook the instant the delete runs,
+ *   before the enclosing transaction's outcome is known.
  */
 import type { GraphBackend } from "@nicia-ai/typegraph";
 import {
@@ -25,6 +33,7 @@ import { backendMatrix } from "./test-utils";
 
 const Whole = defineNode("Whole", { schema: z.object({}) });
 const Part = defineNode("Part", { schema: z.object({}) });
+const Other = defineNode("Other", { schema: z.object({}) });
 const holds = defineEdge("holds", { schema: z.object({}) });
 
 const graph = defineGraph({
@@ -32,6 +41,7 @@ const graph = defineGraph({
   nodes: {
     Whole: { type: Whole, onDelete: "restrict" },
     Part: { type: Part },
+    Other: { type: Other },
   },
   edges: {
     holds: { type: holds, from: [Whole], to: [Part] },
@@ -115,6 +125,71 @@ describe.each(backendMatrix())(
       await expect(target.nodes.Part.getById(part.id)).resolves.toBeDefined();
       const survivingEdges = await target.edges.holds.findFrom(whole);
       expect(survivingEdges).toHaveLength(1);
+    });
+
+    it("does not report a hook success for a delete the rolled-back merge never committed", async () => {
+      cleanups = [];
+      // `onError`'s context is the generic `HookContext` (it also fires for
+      // query and bulk-operation failures, neither of which has a single
+      // node kind/id) so it carries no `kind`/`id` at the type level; capture
+      // the label from the fully-typed `onOperationStart` context and
+      // correlate by `operationId`, the field both contexts DO share.
+      const operationLabels = new Map<string, string>();
+      const endedIds: string[] = [];
+      const erroredIds: string[] = [];
+      const [target] = await createStoreWithSchema(graph, await makeBackend(), {
+        hooks: {
+          onOperationStart: (ctx) =>
+            operationLabels.set(ctx.operationId, `${ctx.kind}:${ctx.id}`),
+          onOperationEnd: (ctx) => endedIds.push(`${ctx.kind}:${ctx.id}`),
+          onError: (ctx) => {
+            const label = operationLabels.get(ctx.operationId);
+            if (label !== undefined) erroredIds.push(label);
+          },
+        },
+      });
+
+      const whole = requireDefined(
+        (await target.nodes.Whole.bulkCreate([{ id: "w1", props: {} }]))[0],
+      );
+      const part = requireDefined(
+        (await target.nodes.Part.bulkCreate([{ id: "p1", props: {} }]))[0],
+      );
+      await target.edges.holds.create(whole, part, {});
+      const other = requireDefined(
+        (await target.nodes.Other.bulkCreate([{ id: "o1", props: {} }]))[0],
+      );
+
+      operationLabels.clear();
+      endedIds.length = 0;
+      erroredIds.length = 0;
+
+      // The plan deletes Other FIRST (unrestricted — it would succeed on its
+      // own) and Whole SECOND (blocked by its live `holds` edge to Part). Map
+      // iteration order is insertion order, so applyNodeRows runs Other's
+      // delete before Whole's, inside the same merge transaction; Whole's
+      // RestrictedDeleteError then rolls the whole transaction back.
+      const plan: MergePlan<G> = {
+        ...emptyPlan(),
+        nodeDeletions: new Map([
+          [mergeKey("Other", "o1"), "Other"],
+          [mergeKey("Whole", "w1"), "Whole"],
+        ]),
+      };
+
+      await expect(commitPlan(target, plan)).rejects.toThrow(
+        /RESTRICTED_DELETE|connected edge/i,
+      );
+
+      // Other's delete ran and would have committed had the transaction
+      // succeeded — routed through the Store's OWN immediate-hook context
+      // (the pre-fix bug) it reports `onOperationEnd` right there, before the
+      // rollback. Routed through this transaction's own buffered hook runner
+      // (the fix), a rolled-back attempt's outcomes are discarded and
+      // reported as `onError` instead, once the failure is final.
+      expect(endedIds).not.toContain("Other:o1");
+      expect(erroredIds).toContain("Other:o1");
+      await expect(target.nodes.Other.getById(other.id)).resolves.toBeDefined();
     });
   },
 );

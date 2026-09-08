@@ -137,9 +137,19 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * detachment, and sidecar cleanup all fire exactly as they do for
    * `store.nodes[kind].delete(id)`. The public collection `delete(id)` takes
    * no options by design (a merge-only flag does not belong on it, the
-   * `bulkInsert` precedent), so a caller that needs a non-default policy —
-   * today, merge apply — reaches this internal port instead. The caller
-   * supplies a transaction-bound backend.
+   * `bulkInsert` precedent), so a caller that needs a non-default policy
+   * reaches an internal port instead.
+   *
+   * This Store-scoped variant builds its OWN operation context — an
+   * immediate (unbuffered) hook runner and `attempt: 1` — so it is correct
+   * only for a caller managing its own transaction directly against the raw
+   * backend (`backend.transaction(...)`), outside any `store.transaction`
+   * callback: nothing here is aware of a `store.transaction` in progress, so
+   * a caller invoking this INSIDE one would report `onOperationEnd` for the
+   * delete immediately, even if that outer transaction later rolls back. A
+   * caller already inside a `store.transaction` callback — today, merge
+   * apply — MUST use {@link transactionDeleteNodeWithPolicy} instead, which
+   * reaches that transaction's own buffered hook runner and attempt.
    */
   deleteNodeWithPolicy: (
     target: TransactionBackend,
@@ -386,6 +396,7 @@ type TransactionRuntimePort = Readonly<{
   [TRANSACTION_RUNTIME]?: Readonly<{
     backend: TransactionBackend;
     runNodeOperationHooks: TransactionNodeOperationHookRunner;
+    deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy;
   }>;
 }>;
 
@@ -395,6 +406,11 @@ type TransactionNodeOperationHookRunner = <T>(
   id: string,
   fn: () => Promise<T>,
 ) => Promise<T>;
+
+type TransactionDeleteNodeWithPolicy = (
+  work: Readonly<{ kind: string; id: string }>,
+  policy?: NodeDeletePolicy,
+) => Promise<void>;
 
 /** Returns the full backend for privileged transaction-bound internals. */
 export function transactionBackend(
@@ -420,4 +436,32 @@ export function transactionNodeOperationHookRunner(
     );
   }
   return runtime.runNodeOperationHooks;
+}
+
+/**
+ * Soft-deletes one node under an explicit {@link NodeDeletePolicy} through
+ * THIS transaction's own node-operation context — the buffered hook runner
+ * and attempt number `#buildTransactionContext` already built for this
+ * transaction's `nodes`/`edges`, not a freshly-minted immediate-hook context
+ * scoped to the outer Store. Reaching the outer Store's own hook runner from
+ * inside a caller-opened transaction would report `onOperationEnd` for a
+ * delete the instant it runs even when the enclosing transaction later rolls
+ * back, which is why this delete-behavior-carrying escape hatch is
+ * transaction-scoped rather than Store-scoped: the public collection
+ * `delete(id)` takes no options by design (a merge-only flag does not belong
+ * on it, the `bulkInsert` precedent), so a caller that needs a non-default
+ * policy — today, merge apply — reaches this internal port instead.
+ */
+export function transactionDeleteNodeWithPolicy(
+  transaction: TransactionRuntimePort,
+  work: Readonly<{ kind: string; id: string }>,
+  policy?: NodeDeletePolicy,
+): Promise<void> {
+  const runtime = transaction[TRANSACTION_RUNTIME];
+  if (runtime === undefined) {
+    throw new TypeError(
+      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
+    );
+  }
+  return runtime.deleteNodeWithPolicy(work, policy);
 }
