@@ -86,9 +86,14 @@ primary and sidecar writes when a later statement fails. An authoritative comman
 whose database statement returns the decision it made. It can provide a safe
 transactionless create/found path only when the backend has a durable arbiter.
 
-Operational Identity, single-edge claim/cardinality enforcement, and any
-undeclared dynamic `matchOn` convergence that may write still require an
-interactive transaction and fail closed on a backend that cannot provide one.
+Operational Identity, single-edge claim/cardinality enforcement, edge
+acyclicity (`acyclic: true`), and any undeclared dynamic `matchOn`
+convergence that may write still require an interactive transaction and
+fail closed on a backend that cannot provide one. No fused write program
+applies acyclicity — the axis has no database key that could back a claim
+inside a fused statement — so an `acyclic: true` edge kind always declines
+the fused single-row and bulk-create fast paths and takes the complete
+portable probe-then-insert path instead, whatever else is eligible for it.
 Outside the native durable-convergence envelope, an all-live
 `ifExists: "return"` endpoint batch is read-only and can return from its
 set-oriented root read without a transaction. Inside the native envelope, the

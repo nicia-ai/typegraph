@@ -17,7 +17,7 @@ TypeGraph's power comes from its type system. Define your schema once with Zod, 
   - [Node Operations](#node-operations)
 - [Edges](#edges) — Relationships between nodes
   - [Defining Edge Types](#defining-edge-types) (domain/range constraints)
-  - [Edge Constraints](#edge-constraints) (cardinality)
+  - [Edge Constraints](#edge-constraints) (cardinality, acyclicity)
   - [Edge Operations](#edge-operations)
 - [Graph Definition](#graph-definition) — Combining nodes, edges, and ontology
 - [Delete Behaviors](#delete-behaviors) — Restrict, cascade, disconnect
@@ -484,6 +484,63 @@ reacquires every applicable reservation, on both axes.
 `CardinalityErrorDetails` names which endpoint's population was overrun via
 `direction: "source" | "target"`, alongside `toKind` / `toId` for the target
 endpoint (`fromKind` / `fromId` keep their existing meaning).
+
+#### Acyclicity
+
+Declaring `acyclic: true` makes an edge kind's live relation a DAG (directed
+acyclic graph): no write can create a path from an edge's `to` endpoint back
+to its `from` endpoint, and a self-loop is a cycle of length one.
+
+```typescript
+const graph = defineGraph({
+  edges: {
+    dependsOn: {
+      type: dependsOn,
+      from: [Task],
+      to: [Task],
+      cardinality: "many",
+      acyclic: true,
+    },
+  },
+});
+
+await store.edges.dependsOn.create(a, b, {}); // OK
+await store.edges.dependsOn.create(b, c, {}); // OK
+await store.edges.dependsOn.create(c, a, {}); // Throws EdgeAcyclicityError
+```
+
+`acyclic` is orthogonal to `cardinality`: `cardinality: "many", acyclic: true`
+(a dependency graph, where any number of edges may point at or from a task) is
+the common case. Every write path that can put an edge into the relation
+enforces it: `create`, `bulkCreate`, `getOrCreateByEndpoints`, resurrecting a
+soft-deleted edge, validating import, and merge apply after canonicalization.
+
+**Population.** Every non-deleted edge counts, regardless of its validity
+window. Soft-deleting an edge frees the relation — `a -> b` then `b -> a` is
+accepted once the first edge is deleted. Ending an edge's validity window does
+**not** free it: `a -> b` with its window closed still blocks `b -> a`. This
+is the one place the two temporal axes disagree: acyclicity is a claim about
+the relation's *shape*, not about an instant, so a future-dated edge could
+otherwise close a cycle no write ever probed.
+
+**The check is exhaustive**, not a bounded traversal: it is a set-semantics
+recursive reachability query with no depth bound, so a cycle of any length is
+found — the query builder's `MAX_EXPLICIT_RECURSIVE_DEPTH` does not apply
+here. An engine that cuts the search short (a statement timeout, a resource
+limit) raises `EdgeAcyclicityIndeterminateError` rather than reporting "no
+cycle".
+
+**Concurrency.** The check and the write it guards commit under the same
+per-graph write fence edge cardinality uses, so two concurrent writers of
+`a -> b` and `b -> a` serialize and exactly one commits. A backend with no
+transactions refuses the write (`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`) rather
+than enforcing the rule only when nothing races.
+
+Use `store.verifyConstraintFences()` to find edges already on a cycle (the
+`edgeAcyclicity` family), and see [Errors](/errors) for
+`EdgeAcyclicityError` / `EdgeAcyclicityIndeterminateError` and
+[Limitations](/limitations) for what a transactionless backend and a fused
+write program cannot do with an acyclic edge kind.
 
 ### Edge Operations
 

@@ -669,6 +669,38 @@ inverseOf(cites, citedBy);
 
 This lets you query efficiently in either direction without duplicating edges.
 
+### Enforce an Instance-Level Taxonomy with `acyclic: true`
+
+`subClassOf` is a **type-level** relation between kinds; it says nothing
+about instances of one concept kind pointing at each other (a category tree,
+a concept hierarchy). For that, declare the edge itself `acyclic: true` and
+traverse it with `.recursive()`:
+
+```typescript
+const Concept = defineNode("Concept", { schema: z.object({ name: z.string() }) });
+const broaderEdge = defineEdge("broader", { schema: z.object({}) });
+
+const graph = defineGraph({
+  nodes: { Concept: { type: Concept } },
+  edges: {
+    broader: {
+      type: broaderEdge,
+      from: [Concept],
+      to: [Concept],
+      acyclic: true,
+    },
+  },
+});
+
+// A concept can never (transitively) be broader than itself.
+await store.query(Concept).from(root).recursive("broader", { maxHops: 20 });
+```
+
+This is not expressible as an OWL 2 DL axiom — OWL has no acyclicity
+constraint on a property — but it matches SHACL-SPARQL's cycle shape
+(`$this ex:broader+ $this`) exactly, enforced transactionally rather than
+left to a query the caller must remember to run.
+
 ## API Reference
 
 ### Ontology Functions

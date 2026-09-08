@@ -507,6 +507,50 @@ try {
 `targetCardinality` one. `fromKind` / `fromId` / `toKind` / `toId` always
 name both endpoints, regardless of direction.
 
+### `EdgeAcyclicityError`
+
+Thrown when a write would give a declared `acyclic: true` edge relation a
+cycle.
+
+```typescript
+// If dependsOn declares acyclic: true:
+await store.edges.dependsOn.create(taskA, taskB, {});
+
+try {
+  await store.edges.dependsOn.create(taskB, taskA, {});
+} catch (error) {
+  if (error instanceof EdgeAcyclicityError) {
+    console.log(error.category); // "constraint"
+    console.log(error.details);
+    // { relation: "dependsOn", edgeKind: "dependsOn", edgeId: "<new-edge-id>",
+    //   fromKind: "Task", fromId: "<taskB-id>", toKind: "Task", toId: "<taskA-id>",
+    //   selfLoop: false }
+  }
+}
+```
+
+Carries no witness path — reconstructing one requires path tracking, which
+the underlying set-semantics reachability check gives up in exchange for
+terminating without a depth bound. Run `store.verifyConstraintFences()` to
+list every edge already on a cycle in the relation, or a `.recursive()`
+traversal from the endpoints for a human to inspect.
+
+### `EdgeAcyclicityIndeterminateError`
+
+Thrown when the engine cuts an acyclicity search short — a statement
+timeout, a resource limit — before it can prove or refute a cycle. An
+incomplete search is never reported as "no cycle".
+
+```typescript
+console.log(error.details);
+// { relation: "dependsOn", operation: "edges.create", graphId: "..." }
+```
+
+The suggestion names the two ways out: raise the statement budget for the
+operation, or drop `acyclic: true` from the edge and enforce it in
+application code. Retrying is not suggested — a relation too large for the
+budget will not shrink.
+
 ### `UniquenessError`
 
 Thrown when a uniqueness constraint is violated.
@@ -723,6 +767,7 @@ cannot fence constrained writes" is unusable advice while "your
 
 | `details.constraint` | The write it describes |
 | --- | --- |
+| `edgeAcyclicity` | Creating, bulk-creating, or resurrecting an edge whose kind declares `acyclic: true`. No claim row backs this axis — a cycle spans a whole reachable subgraph, not a tuple — so it is fenced by the per-graph lock alone. |
 | `edgeCardinality` | Creating or resurrecting an edge whose `cardinality` (`one`, `unique`, `oneActive`) or `targetCardinality` (`one`, `oneActive`) constrains it, on either endpoint. |
 | `edgeMatchKeyConvergence` | Endpoint convergence that requires the portable transaction-scoped path: an undeclared dynamic `matchOn`, constrained cardinality, update or temporal options, derived/custom backends, or schema-aware resurrection of a tombstoned winner. A schema-declared durable `matchIdentity` removes this fence from eligible live single-item and bulk create/found paths. |
 | `nodeDisjointness` | Creating a node under a kind that participates in a `disjointWith` axiom. Probed only where a node comes into existence, so deletes and in-place updates are not refused. |
@@ -1502,6 +1547,8 @@ try {
 | `ENDPOINT_ERROR` | `EndpointError` | constraint | Invalid edge endpoint types |
 | `ENDPOINT_PAIR_ERROR` | `EndpointPairError` | constraint | Undeclared source/target combination |
 | `CARDINALITY_ERROR` | `CardinalityError` | constraint | Cardinality constraint violated |
+| `EDGE_ACYCLICITY_ERROR` | `EdgeAcyclicityError` | constraint | A write would give a declared-acyclic edge relation a cycle |
+| `EDGE_ACYCLICITY_INDETERMINATE` | `EdgeAcyclicityIndeterminateError` | system | The engine cut an acyclicity search short before it could prove or refute a cycle |
 | `UNIQUENESS_VIOLATION` | `UniquenessError` | constraint | Uniqueness constraint violated |
 | `EDGE_MATCH_IDENTITY_CONFLICT` | `EdgeMatchIdentityConflictError` | constraint | A direct edge write collided with its declared endpoint/property identity |
 | `NODE_NOT_FOUND` | `NodeNotFoundError` | user | Referenced node doesn't exist |

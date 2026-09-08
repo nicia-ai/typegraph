@@ -466,6 +466,14 @@ compiled query relies on. They are declared once (`SYSTEM_INDEX_DECLARATIONS`, e
 inspection), and both dialects' schemas derive from that single list, so SQLite and PostgreSQL
 always carry the same set.
 
+The `acyclic: true` reachability probe (item D.2) is one of the paths these
+system indexes cover: its recursive term seeks `(graph_id, from_kind,
+from_id, kind)`, filters `deleted_at IS NULL`, and projects `to_kind,
+to_id` — every one of those columns is in `typegraph_edges_from_idx`, in
+that leading order, so the walk is a covering index scan on SQLite and an
+index-only scan on PostgreSQL once the visibility map is warm. No
+additional index is needed to declare an edge `acyclic: true`.
+
 You normally never manage them: fresh databases get them at bootstrap, and
 `createStoreWithSchema()` brings an already-initialized database up to the running library
 version's set on boot (with `CREATE INDEX CONCURRENTLY` on PostgreSQL). Deployments that boot

@@ -354,7 +354,13 @@ does not promise that apply will succeed: new rows may introduce constraint
 conflicts, and any write between revalidation and apply causes
 `StaleMergePlanError`. A failed application commits no partial candidate node,
 edge, or identity writes. Revalidate again after a stale refusal; require reapproval if
-the result changes.
+the result changes. This includes an `acyclic: true` edge kind: canonicalization
+and repointing can close a cycle out of edges that were individually fine in
+every branch, and apply refuses in that case with `MergeConstraintConflictError`
+wrapping the underlying `EdgeAcyclicityError` — the same generic
+declared-constraint translation cardinality, disjointness, and uniqueness
+conflicts already take. No merge-specific acyclicity code exists: apply writes
+every edge through the store's own collection API, which already enforces it.
 
 `policy.id` identifies your policy implementation; `policy.context` explicitly
 records every opaque dependency that can change its decision. Include callback

@@ -171,12 +171,13 @@ classifies these by what they do to your data, not just to the schema
 document, and runs a data check inside the schema-commit transaction before
 publishing the new version:
 
-| Meta-edge                                    | Added                                             | Removed                                           |
+| Meta-edge / property                          | Added                                             | Removed                                           |
 | --------------------------------------------- | -------------------------------------------------- | -------------------------------------------------- |
 | `disjointWith`                                | Warning — checked against live nodes               | Safe                                                |
 | `subClassOf`, `equivalentTo`, `sameAs`        | Warning — checked against live nodes               | Warning — checked against live edges               |
 | `inverseOf`, `implies`                        | Breaking                                            | Breaking                                            |
 | `broader`, `narrower`, `partOf`, `hasPart`, `relatedTo`, `differentFrom` | Safe | Safe |
+| an edge's `acyclic: true`                     | Warning — checked against live edges for an existing cycle | Safe |
 
 - **Adding `disjointWith`** is checked against every live node: if two nodes
   already share an id under kinds the new relation makes mutually exclusive
@@ -199,6 +200,13 @@ publishing the new version:
   the Operational Identity `sameIdAcrossKinds` flip gets.
 - A relation whose `from` or `to` names a kind **this same commit removes**
   is always safe with no check — `Store.removeKinds()` is unaffected.
+- **Declaring `acyclic: true`** on an edge kind that already carries live
+  rows is checked against the whole relation: if any live edge's `to`
+  endpoint already reaches its `from` endpoint, the commit refuses with the
+  offending edge ids in `details.violations` (family `edgeAcyclicity`).
+  Dropping `acyclic: true` never invalidates anything and stays safe. A
+  brand-new edge kind's `acyclic: true` is vacuously safe — there is no
+  prior data it could violate.
 
 A refused tightening throws `MigrationError`:
 
