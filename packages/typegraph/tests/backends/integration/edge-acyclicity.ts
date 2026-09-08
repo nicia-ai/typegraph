@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { EdgeAcyclicityError } from "../../../src";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../../../src/query/compiler/recursive";
 import { edgeWriteNeedsConstraintFence } from "../../../src/store/constraints";
+import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
@@ -283,9 +284,7 @@ export function registerEdgeAcyclicityIntegrationTests(
         {
           family: "edgeAcyclicity",
           relation: "dependsOn",
-          edgeIds: [forward.id, backward.id].toSorted((left, right) =>
-            left.localeCompare(right),
-          ),
+          edgeIds: [forward.id, backward.id].toSorted(compareStrings),
         },
       ]);
     });

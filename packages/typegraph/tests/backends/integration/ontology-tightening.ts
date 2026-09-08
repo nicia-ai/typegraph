@@ -37,6 +37,7 @@ import {
   DISJOINT_CONSTRAINT_NAME,
   disjointnessClaimAxis,
 } from "../../../src/store/claims/axis";
+import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { matchingObject } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
@@ -258,9 +259,7 @@ export function registerOntologyTighteningIntegrationTests(
         {
           family: "edgeAcyclicity",
           relation: "dependsOn",
-          edgeIds: [forward.id, backward.id].toSorted((left, right) =>
-            left.localeCompare(right),
-          ),
+          edgeIds: [forward.id, backward.id].toSorted(compareStrings),
         },
       ]);
       expect(await activeVersion(context, id)).toBe(1);
