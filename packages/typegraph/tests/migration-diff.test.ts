@@ -1167,6 +1167,9 @@ describe("computeSchemaDiff", () => {
       });
 
       expect(shapeOf(equivalentToDiff)).toEqual(shapeOf(subClassOfDiff));
+      // Both are tightenings: they widen a subsumption component, so the
+      // classifier marks them `warning` and attaches the data probes a
+      // commit must run (see ontology-change.ts).
       expect(shapeOf(equivalentToDiff)).toEqual({
         hasChanges: true,
         hasBreakingChanges: false,
@@ -1174,7 +1177,7 @@ describe("computeSchemaDiff", () => {
         entityCount: 1,
         type: "added",
         entity: "relation",
-        severity: "safe",
+        severity: "warning",
       });
     });
 

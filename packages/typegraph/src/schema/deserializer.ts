@@ -149,7 +149,7 @@ export function deserializeSchema(
  * cannot be interpreted two different ways by two call sites.
  */
 export function buildRegistryFromSerializedSchema(
-  schema: Pick<SerializedSchema, "ontology" | "edges" | "identity">,
+  schema: Pick<SerializedSchema, "ontology" | "nodes" | "edges" | "identity">,
 ): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
   const nodeKinds = new Map<string, NodeType>();
