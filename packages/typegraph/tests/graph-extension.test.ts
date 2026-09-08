@@ -1559,6 +1559,55 @@ describe("document format versioning", () => {
     );
   });
 
+  it("accepts cardinality and targetCardinality in STRICT mode (issue #610)", () => {
+    const result = validateGraphExtension(
+      {
+        nodes: {
+          Person: { properties: { name: { type: "string" } } },
+        },
+        edges: {
+          knows: {
+            from: ["Person"],
+            to: ["Person"],
+            properties: {},
+            cardinality: "one",
+            targetCardinality: "oneActive",
+          },
+        },
+      },
+      { strict: true },
+    );
+    expect(result.success).toBe(true);
+  });
+  // MUTATION CHECK (verified): remove `"cardinality"` and
+  // `"targetCardinality"` from `EDGE_BODY_KEYS`
+  // (`src/graph-extension/validation.ts`). This test fails — strict mode
+  // rejects both keys as unknown.
+
+  it("refuses an unknown targetCardinality value with the document-shape error", () => {
+    const result = validateGraphExtension({
+      nodes: {
+        Person: { properties: { name: { type: "string" } } },
+      },
+      edges: {
+        knows: {
+          from: ["Person"],
+          to: ["Person"],
+          properties: {},
+          targetCardinality: "atMostFive",
+        },
+      },
+    });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("expected failure");
+    expect(result.error.issues).toContainEqual(
+      expect.objectContaining({
+        path: "/edges/knows/targetCardinality",
+        code: "INVALID_DOCUMENT_SHAPE",
+      }),
+    );
+  });
+
   it("accepts unknown edge-level keys in loose mode (forward-compat)", () => {
     const result = validateGraphExtension({
       nodes: {

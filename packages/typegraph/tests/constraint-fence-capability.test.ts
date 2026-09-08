@@ -164,6 +164,34 @@ const disjointOnlyGraph = defineGraph({
   ontology: [disjointWith(Wraith, Phantom)],
 });
 
+/**
+ * A graph whose ONLY declared hazard is a TARGET-side edge cardinality axis
+ * (issue #610): no unique constraint, no disjointness, and no source-side
+ * `cardinality` either — isolating the hazard `edgeWriteNeedsConstraintFence`
+ * must catch through {@link edgeCardinalityAxisReferences} rather than a
+ * `cardinality !== "many"` check that a target-only declaration would slip
+ * past.
+ */
+const TargetOnlyPerson = defineNode("TargetOnlyPerson", {
+  schema: z.object({ name: z.string() }),
+});
+const targetOnlyAssigned = defineEdge("targetOnlyAssigned", {
+  schema: z.object({}),
+});
+
+const targetCardinalityOnlyGraph = defineGraph({
+  id: "constraint_fence_capability_target_cardinality_only",
+  nodes: { TargetOnlyPerson: { type: TargetOnlyPerson } },
+  edges: {
+    targetOnlyAssigned: {
+      type: targetOnlyAssigned,
+      from: [TargetOnlyPerson],
+      to: [TargetOnlyPerson],
+      targetCardinality: "one",
+    },
+  },
+});
+
 const IMPORT_OPTIONS: ImportOptions = {
   onConflict: "error",
   refreshStatistics: false,
@@ -356,6 +384,55 @@ describe("constrained writes on a backend that cannot fence them", () => {
     ).toEqual({ total: 0 });
     expect(liveClaimOwners()).toEqual([]);
   });
+
+  it("refuses an import into a graph whose only hazard is a target-cardinality claim", async () => {
+    // Acceptance criterion 5 (issue #610): a `targetCardinality`-only edge
+    // kind owes the same pre-write claim fence a source-`cardinality` kind
+    // does, up front, before the first row — even though nothing here
+    // declares a unique constraint, a disjoint partner, or a source-side
+    // `cardinality`.
+    const store = createStore(targetCardinalityOnlyGraph, backend);
+    for (const statement of generateSqliteDDL()) {
+      try {
+        sqlite.exec(statement);
+      } catch {
+        // The tables already exist from the shared fixture; the graph id is
+        // what separates the two graphs' rows.
+      }
+    }
+
+    await expect(
+      importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external", description: "fence capability" },
+          nodes: [
+            {
+              kind: "TargetOnlyPerson",
+              id: "target-only-a",
+              properties: { name: "A" },
+            },
+          ],
+          edges: [],
+        },
+        IMPORT_OPTIONS,
+      ),
+    ).rejects.toThrow(expectFenceRefusal("edgeCardinality"));
+
+    // Refused before the first row, so nothing landed and no reservation leaked.
+    expect(
+      sqlite.prepare("SELECT count(*) AS total FROM typegraph_nodes").get(),
+    ).toEqual({ total: 0 });
+    expect(liveClaimOwners()).toEqual([]);
+  });
+  // MUTATION CHECK (verified): in `edgeWriteNeedsConstraintFence`
+  // (`src/store/constraints.ts`), replace
+  // `edgeCardinalityAxisReferences(declarations).length === 0` with
+  // `(declarations.cardinality ?? "many") === "many"` (the pre-D.1 source-only
+  // shape). `targetCardinality: "one"` is then invisible to the fold, the
+  // import proceeds unrefused, and this case fails.
 
   it("refuses getOrCreateByEndpoints, whose convergence no key backs", async () => {
     const store = createStore(graph, backend);
