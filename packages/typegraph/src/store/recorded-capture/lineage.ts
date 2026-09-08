@@ -184,6 +184,7 @@ import { readRecordedClock, readRevisionOrigin } from "./clock";
 export type RecordedLineageStore<G extends GraphDef = GraphDef> = Readonly<{
   graphId: string;
   historyEnabled: boolean;
+  revisionTrackingEnabled: boolean;
   revisionSchema: SqlSchema;
   [STORE_RUNTIME]?: StoreRuntime<G>;
 }>;
@@ -464,6 +465,26 @@ export function recordedRelationsLineage<G extends GraphDef>(
   }
 
   return Object.freeze({ revision, changesSince });
+}
+
+/**
+ * Whether this store's base token is namespaced by the graph's durable
+ * revision origin — true for the revision anchor (tracking on) and for the
+ * engine anchor (tracking off, a backend `lineage` present), false only for
+ * the content-fingerprint fallback. The one spelling `Store.clear()` uses
+ * to decide whether there is an origin to rotate, so it cannot drift from
+ * the anchor precedence `computeBaseVersion` applies: a store that mints an
+ * origin-namespaced anchor is exactly a store whose `clear()` must rotate
+ * that origin. A backend whose `lineage` is present but which cannot
+ * bootstrap the origins relation mints no anchor at all (`computeBaseVersion`
+ * refuses), so it has nothing to rotate either.
+ */
+export function mintsOriginNamespacedAnchor<G extends GraphDef>(
+  store: RecordedLineageStore<G>,
+  originsSupported: boolean,
+): boolean {
+  if (store.revisionTrackingEnabled) return true;
+  return resolveLineage(store) !== undefined && originsSupported;
 }
 
 /**

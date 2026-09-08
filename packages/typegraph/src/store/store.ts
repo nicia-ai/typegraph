@@ -319,11 +319,11 @@ import {
   ensureRevisionOrigin,
   ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
+  mintsOriginNamespacedAnchor,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
   resetRevisionOrigin,
-  resolveLineage,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
@@ -4065,33 +4065,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    */
   async clear(): Promise<void> {
     // Both origin-namespaced `base@V` anchor forms — the TypeGraph revision
-    // anchor and the engine anchor (`base-version.ts`'s module doc) — share
-    // one `typegraph_revision_origins` row per graph, so any store able to
-    // mint EITHER form must rotate it here. `#revisionTrackingEnabled`
-    // covers the first; `resolveLineage(this) !== undefined` covers the
-    // second — with tracking off, `resolveLineage` can only ever answer
-    // with the backend's OWN `lineage` (a capturing store's
-    // recorded-relations lineage is unreachable here, since capture also
-    // turns tracking on — see `resolveLineage`'s own doc), so this is
-    // exactly the engine-anchored case. Gating the rotation on
-    // `#revisionTrackingEnabled` alone left an engine-anchored store's
-    // origin untouched by `clear()`, so a branch forked before the clear
-    // could still satisfy the base-version precondition once the graph was
-    // repopulated to report the same engine revision — the same epoch leak
-    // this rotation exists to close, just reachable through the other
-    // anchor form.
-    const mintsAnchorOrigin =
-      this.#revisionTrackingEnabled || resolveLineage(this) !== undefined;
+    // anchor and the engine anchor — share one `typegraph_revision_origins`
+    // row per graph, so any store able to mint either form must rotate it
+    // here; `mintsOriginNamespacedAnchor` is the one spelling of that
+    // decision (it follows `computeBaseVersion`'s anchor precedence). Gating
+    // on `#revisionTrackingEnabled` alone left an engine-anchored store's
+    // origin untouched, so a branch forked before the clear could satisfy
+    // the base-version precondition again once the graph was repopulated to
+    // the same engine revision.
+    const mintsAnchorOrigin = mintsOriginNamespacedAnchor(
+      this,
+      this.#recordedRevisionOrigins.supported,
+    );
     if (mintsAnchorOrigin) {
       // `ensureRevisionOriginsTable` is schema DDL, never projected onto an
       // open `transaction()` handle (unlike ordinary row writes) — it must
       // run on the ROOT backend, before `doClear` opens its transaction, so
       // the row-only `resetRevisionOrigin` below can rely on the table
       // already existing inside it. Idempotent (`CREATE TABLE IF NOT
-      // EXISTS`). On every bundled backend the table is already part of the
-      // full base-schema DDL a fresh backend installs at construction (see
-      // `tests/store-clear.test.ts`'s own note), so this call is a proven
-      // no-op there; it exists for a backend whose
+      // EXISTS`, issued once per backend object). On every bundled backend
+      // the table is already part of the full base-schema DDL a fresh
+      // backend installs at construction, so the statement is idempotent and
+      // never provisions anything new there; it exists for a backend whose
       // `ensureRevisionOriginsTable` provisions the relation lazily instead.
       await ensureRevisionOriginsRelation(
         this.#baseBackend,

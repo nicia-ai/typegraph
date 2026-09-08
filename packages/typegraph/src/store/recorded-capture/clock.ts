@@ -426,10 +426,22 @@ export async function ensureRevisionOriginsRelation(
       },
     );
   }
+  if (ENSURED_ORIGINS_RELATIONS.has(target)) return;
   const { ensureRevisionOriginsTable: ensureTable } =
     recordedRevisionOriginsMembers(target, verdict);
   await ensureTable();
+  ENSURED_ORIGINS_RELATIONS.add(target);
 }
+
+/**
+ * Backends whose origins relation this process has already ensured. The
+ * relation is DDL (`CREATE TABLE IF NOT EXISTS`) and a table never goes
+ * away once created, so ensuring it once per backend object is enough; the
+ * origin ROW is read fresh on every call because `Store.clear()` rotates
+ * it, and that freshness is what callers of {@link ensureRevisionOrigin}
+ * pay for — not a DDL round trip per mint.
+ */
+const ENSURED_ORIGINS_RELATIONS = new WeakSet<object>();
 
 /**
  * Returns a graph's durable revision-origin nonce, creating it exactly once.

@@ -5,11 +5,24 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../src";
-import { deriveBackend } from "../src/backend/derive-backend";
-import type { GraphBackend } from "../src/backend/types";
+import {
+  deriveBackend,
+  projectBackendWithout,
+} from "../src/backend/derive-backend";
+import type {
+  EngineRevision,
+  GraphBackend,
+  LineageMembers,
+} from "../src/backend/types";
+import {
+  computeBaseVersion,
+  engineAnchorOf,
+  hasRevisionAnchor,
+} from "../src/graph-merge/base-version";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { type CompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
+import { mintsOriginNamespacedAnchor } from "../src/store/recorded-capture/lineage";
 import { createTestBackend } from "./test-utils";
 
 function dropTableSql(tableName: string): string {
@@ -258,8 +271,8 @@ describe("store.clear() rotates the durable revision origin", () => {
 
     const originAfterClear = await store.revisionOriginNow();
     // Mutation-proof: commenting out `clear()`'s `resetRevisionOrigin` call
-    // (`store.ts`) makes this equality hold instead, reproducing the P1
-    // finding — a pre-clear branch's revision anchor would silently match
+    // (`store.ts`) makes this equality hold instead — a pre-clear branch's
+    // revision anchor would silently match
     // again once the graph is repopulated to the same revision count.
     expect(originAfterClear).not.toBe(originBeforeClear);
   });
@@ -300,5 +313,51 @@ describe("store.clear() rotates the durable revision origin", () => {
     await expect(store.revisionOriginNow()).resolves.toEqual(
       expect.any(String),
     );
+  });
+});
+
+function scriptedLineage(): LineageMembers {
+  return {
+    revision: () => Promise.resolve("r1" as EngineRevision),
+    changesSince: () => Promise.resolve({ kind: "unbounded" as const }),
+  };
+}
+
+describe("store.clear() and the anchor-origin predicate", () => {
+  it("mintsOriginNamespacedAnchor agrees with the form of the token computeBaseVersion mints", async () => {
+    const tracked = createStore(graph, createTestBackend(), {
+      revisionTracking: true,
+    });
+    const engineAnchored = createStore(
+      graph,
+      deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
+    );
+    const fingerprinted = createStore(graph, createTestBackend());
+    for (const store of [tracked, engineAnchored, fingerprinted]) {
+      const token = await computeBaseVersion(store);
+      const originNamespaced =
+        hasRevisionAnchor(token) || engineAnchorOf(token) !== undefined;
+      expect(mintsOriginNamespacedAnchor(store, true)).toBe(originNamespaced);
+    }
+    expect(mintsOriginNamespacedAnchor(fingerprinted, true)).toBe(false);
+  });
+
+  it("clears a store whose backend declares lineage but cannot bootstrap revision origins", async () => {
+    // Such a store mints no engine anchor at all (computeBaseVersion refuses
+    // it), so there is no origin to rotate and clear() must not refuse
+    // either — it did once the rotation was gated on lineage alone.
+    const backend = projectBackendWithout(
+      deriveBackend(createTestBackend(), { lineage: scriptedLineage() }),
+      ["ensureRevisionOriginsTable"],
+    ) as unknown as GraphBackend;
+    const store = createStore(graph, backend);
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    await expect(store.clear()).resolves.toBeUndefined();
+    const remaining = await store.nodes.Person.find();
+    expect(remaining).toHaveLength(0);
   });
 });

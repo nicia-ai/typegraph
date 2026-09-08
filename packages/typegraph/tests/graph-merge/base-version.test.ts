@@ -8,6 +8,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { deriveBackend } from "../../src/backend/derive-backend";
 import {
   computeBaseVersion,
   computeContentComponent,
@@ -19,6 +20,7 @@ import { merge } from "../../src/graph-merge/merge";
 import { isOk, unwrap } from "../../src/graph-merge/result";
 import type { IdentityTransferAssertion } from "../../src/graph-merge/typegraph-internal";
 import { sha256Hex } from "../../src/utils/hash";
+import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, createSqliteMergeBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -241,5 +243,33 @@ describe("computeBaseVersion mints the revision origin fresh, never from a per-S
     expect(
       (await storeB.nodes.Person.find()).map((node) => node.name).sort(),
     ).toEqual(["Bob again", "From fork"]);
+  });
+
+  it("reads the origin row fresh on every mint but ensures the origins relation only once per backend", async () => {
+    let relationEnsures = 0;
+    const base = makeBackend();
+    const ensureOriginsTable = requireDefined(
+      base.ensureRevisionOriginsTable,
+      "the bundled SQLite backend bootstraps revision origins",
+    );
+    const backend = deriveBackend(base, {
+      ensureRevisionOriginsTable: async () => {
+        relationEnsures += 1;
+        await ensureOriginsTable();
+      },
+    });
+    const store = createStore(plainGraph, backend, { revisionTracking: true });
+    await store.nodes.Person.create({ name: "Alice" });
+
+    const first = await computeBaseVersion(store);
+    const second = await computeBaseVersion(store);
+    const third = await computeBaseVersion(store);
+
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+    // Freshness costs one row read per mint; the DDL round trip is paid at
+    // most once for this backend object. Mutation-proof: dropping the
+    // ensured-relations memo in `clock.ts` makes this count 3.
+    expect(relationEnsures).toBeLessThanOrEqual(1);
   });
 });
