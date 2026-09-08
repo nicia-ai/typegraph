@@ -18,8 +18,7 @@ import {
   withRecordedCoordinate,
 } from "../core/temporal";
 import { IdentityReplayError, ValidationError } from "../errors";
-import { sql } from "../query/sql-fragment";
-import { asCompiledRowsSql } from "../query/sql-intent";
+import { nowIso } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import {
   loadHistoricalClasses,
@@ -35,7 +34,7 @@ import {
   type IdentityTransitionCause,
   type IdentityTransitionRow,
   readIdentityTransitions,
-  readTransitionRetention,
+  readTransitionRetentionDetails,
   transitionClassRef,
   transitionPriorClassRef,
 } from "./transition-log";
@@ -150,51 +149,27 @@ async function walkClassLineage<G extends GraphDef>(
   }
 }
 
-type RawRevisionAtRow = Readonly<{ recorded_at: unknown }>;
-
 /**
- * Resolves the wall-time component of a past recorded revision — the
- * counterpart `createRecordedInstant` needs for a revision this graph's own
- * transition rows do not happen to name. Every recorded revision was
- * allocated by some flush that wrote to one of the four recorded relations
- * sharing that revision's commit, so exactly one of them names it.
+ * The reconstruction coordinate's valid-time instant.
+ *
+ * The RECORDED (revision) filter alone already selects the exact row IMAGE
+ * that was current as of `revision` — `recorded_from <= revision <
+ * recorded_to` — so the remaining valid-time check only has to tell open
+ * (`valid_to IS NULL`, always visible) from closed rows apart. A closed row's
+ * `valid_to` is always assigned in the SAME commit as the row's own
+ * `recorded_from` (retract/detach/window-end stamp both together), so any
+ * instant at or after "now" is at or after every real `valid_to` ever
+ * written — the row reads as closed at exactly the revisions it is, whichever
+ * wall clock is used to ask. No historical relation retains a genuine
+ * per-revision wall clock to look one up instead (only
+ * `typegraph_identity_transitions` and the single-row
+ * `typegraph_recorded_clock` carry `recorded_at` at all), so "now" is not an
+ * approximation here — it is the one instant guaranteed to postdate every
+ * `valid_to` this graph has ever written, for any graph with no
+ * future-scheduled validity window (identity carries no such concept).
  */
-async function resolveRecordedAtForRevision<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
-  revision: number,
-): Promise<string> {
-  const rows = await ctx.backend.execute<RawRevisionAtRow>(
-    asCompiledRowsSql(sql`
-      SELECT recorded_at FROM ${ctx.schema.recordedNodesTable}
-        WHERE graph_id = ${ctx.graphId} AND recorded_from = ${revision}
-      UNION ALL
-      SELECT recorded_at FROM ${ctx.schema.recordedEdgesTable}
-        WHERE graph_id = ${ctx.graphId} AND recorded_from = ${revision}
-      UNION ALL
-      SELECT recorded_at FROM ${ctx.schema.recordedIdentityAssertionsTable}
-        WHERE graph_id = ${ctx.graphId} AND recorded_from = ${revision}
-      UNION ALL
-      SELECT recorded_at FROM ${ctx.schema.identityTransitionsTable}
-        WHERE graph_id = ${ctx.graphId} AND recorded_revision = ${revision}
-      LIMIT 1
-    `),
-  );
-  const row = rows[0];
-  if (row === undefined) {
-    throw new ValidationError(
-      `No recorded commit was found at revision ${String(revision)} for graph ${ctx.graphId}.`,
-      {
-        issues: [
-          {
-            path: "revision",
-            message:
-              "Expected a revision allocated by a prior recorded commit.",
-          },
-        ],
-      },
-    );
-  }
-  return String(row.recorded_at);
+function reconstructionInstant(): string {
+  return nowIso();
 }
 
 /** Reconstructs the visible class membership of `seed` at recorded revision `revision`, or `[]` for revision 0 (nothing recorded yet). */
@@ -204,8 +179,10 @@ async function reconstructAt<G extends GraphDef>(
   revision: number,
 ): Promise<readonly IdentityNodeReference<G>[]> {
   if (revision <= 0) return [];
-  const recordedAt = await resolveRecordedAtForRevision(ctx, revision);
-  const recordedInstant = createRecordedInstant(revision, recordedAt);
+  const recordedInstant = createRecordedInstant(
+    revision,
+    reconstructionInstant(),
+  );
   const validCoordinate = resolveReadCoordinate(
     "asOf",
     recordedInstantWallTime(recordedInstant),
@@ -360,11 +337,12 @@ export async function identityReplay<G extends GraphDef>(
   const rows = await walkClassLineage(ctx, seed, fromRevision, toRevision);
   assertBoundaryLimit(rows, limit);
 
-  const watermark = await readTransitionRetention(
+  const retention = await readTransitionRetentionDetails(
     ctx.backend,
     ctx.schema,
     ctx.graphId,
   );
+  const watermark = retention.prunedBeforeRevision;
   // "Entirely below the watermark" is a property of the REQUESTED range, not
   // of what came back: only a range bounded on both ends (`toRecorded` given)
   // can lie wholly in pruned territory — an open-ended range always reaches
@@ -372,10 +350,7 @@ export async function identityReplay<G extends GraphDef>(
   if (watermark > 0 && toRevision !== undefined && toRevision < watermark) {
     throw identityReplayHistoryTruncatedError(
       options?.fromRecorded ?? requireDefined(options?.toRecorded),
-      createRecordedInstant(
-        watermark,
-        await resolveRecordedAtForRevision(ctx, watermark),
-      ),
+      createRecordedInstant(watermark, retention.prunedAt),
     );
   }
 
@@ -401,10 +376,7 @@ export async function identityReplay<G extends GraphDef>(
   const requestedFromRevision = fromRevision ?? 0;
   const truncatedBefore =
     watermark > requestedFromRevision ?
-      createRecordedInstant(
-        watermark,
-        await resolveRecordedAtForRevision(ctx, watermark),
-      )
+      createRecordedInstant(watermark, retention.prunedAt)
     : undefined;
 
   return {

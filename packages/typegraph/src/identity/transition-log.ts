@@ -359,23 +359,46 @@ export async function readIdentityTransitions(
   return rows.map((row) => normalizeIdentityTransitionRow(row));
 }
 
-type RawRetentionRow = Readonly<{ pruned_before_revision: unknown }>;
-
 /** Reads a graph's transition-retention watermark; `0` when nothing has been pruned. */
 export async function readTransitionRetention(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,
 ): Promise<number> {
-  const rows = await target.execute<RawRetentionRow>(
+  const details = await readTransitionRetentionDetails(target, schema, graphId);
+  return details.prunedBeforeRevision;
+}
+
+type RawRetentionDetailsRow = Readonly<{
+  pruned_before_revision: unknown;
+  pruned_at: unknown;
+}>;
+
+/**
+ * The retention watermark AND the wall time the prune that set it ran at —
+ * the latter is the prune operation's own instant, not the original commit
+ * time of the pruned revision (which pruning destroys), but is the only
+ * wall-time evidence retained once that history is gone. Used only to name a
+ * `truncatedBefore` / `IDENTITY_REPLAY_HISTORY_TRUNCATED` boundary.
+ */
+export async function readTransitionRetentionDetails(
+  target: IdentityTarget,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<Readonly<{ prunedBeforeRevision: number; prunedAt: string }>> {
+  const rows = await target.execute<RawRetentionDetailsRow>(
     asCompiledRowsSql(sql`
-      SELECT pruned_before_revision
+      SELECT pruned_before_revision, pruned_at
       FROM ${schema.identityTransitionRetentionTable}
       WHERE graph_id = ${graphId}
     `),
   );
   const row = rows[0];
-  return row === undefined ? 0 : toRevisionNumber(row.pruned_before_revision);
+  if (row === undefined) return { prunedBeforeRevision: 0, prunedAt: nowIso() };
+  return {
+    prunedBeforeRevision: toRevisionNumber(row.pruned_before_revision),
+    prunedAt: asRowString(row.pruned_at, "pruned_at"),
+  };
 }
 
 /** The `IdentityReplayError` a store without `history: true` raises for every replay-family operation. */
