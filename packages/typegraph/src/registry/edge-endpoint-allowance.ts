@@ -9,8 +9,8 @@
  */
 import type { EdgeEndpointAllowance } from "../backend/types";
 import { compareStrings } from "../utils/compare";
+import type { EdgeKindFacts } from "./edge-kind-facts";
 import type { KindRegistry } from "./kind-registry";
-import type { EdgeEndpointKinds } from "./validate-implies";
 
 /**
  * `endpoints.pairs` is the source when present (it already resolves a
@@ -25,7 +25,7 @@ import type { EdgeEndpointKinds } from "./validate-implies";
  */
 export function expandEdgeEndpointAllowance(
   edgeKind: string,
-  endpoints: EdgeEndpointKinds,
+  endpoints: EdgeKindFacts,
   registry: KindRegistry,
 ): EdgeEndpointAllowance {
   const declaredPairs: readonly (readonly [string, string])[] =

@@ -18,8 +18,8 @@ import {
 } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { buildValidatedKindRegistry } from "./build-validated";
+import { type EdgeKindFacts } from "./edge-kind-facts";
 import type { KindRegistry } from "./kind-registry";
-import { type EdgeEndpointKinds } from "./validate-implies";
 
 const EMPTY_NAMED_ONTOLOGY: readonly NamedOntologyRelation[] = [];
 
@@ -65,8 +65,12 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
               relation.from
             : relation.from.kind,
           to: typeof relation.to === "string" ? relation.to : relation.to.kind,
+          ...(relation.via === undefined ? {} : { via: relation.via }),
+          ...(relation.partSide === undefined ?
+            {}
+          : { partSide: relation.partSide }),
         })),
-    edgeEndpoints: buildGraphEdgeEndpointKinds(graph.edges),
+    edgeFacts: buildGraphEdgeEndpointKinds(graph.edges),
     ...(graph.identity === undefined ? {} : { identity: graph.identity }),
   });
 }
@@ -87,13 +91,15 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
  */
 export function buildGraphEdgeEndpointKinds(
   edges: Record<string, EdgeRegistration>,
-): ReadonlyMap<string, EdgeEndpointKinds> {
-  const result = new Map<string, EdgeEndpointKinds>();
+): ReadonlyMap<string, EdgeKindFacts> {
+  const result = new Map<string, EdgeKindFacts>();
   for (const [kind, registration] of Object.entries(edges)) {
     result.set(kind, {
       from: registration.from.map((node) => node.kind),
       to: projectTargetKinds(registration.to),
       pairs: getEdgeEndpointPairs(registration.from, registration.to),
+      cardinality: registration.cardinality ?? "many",
+      targetCardinality: registration.targetCardinality ?? "many",
     });
   }
   return result;

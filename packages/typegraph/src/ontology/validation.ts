@@ -1,3 +1,4 @@
+import { type CompositionPartSide } from "../registry/composition-relation";
 import {
   computeDisjointExpansionClosures,
   computeEquivalenceClasses,
@@ -21,6 +22,10 @@ export type NamedOntologyRelation = Readonly<{
   metaEdge: string;
   from: string;
   to: string;
+  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
+  via?: string;
+  /** R5's orientation. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
 }>;
 
 type OntologyValidationIssueCode =
@@ -29,7 +34,10 @@ type OntologyValidationIssueCode =
   | "ONTOLOGY_DISJOINT_CONFLICT"
   | "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS"
   | "ONTOLOGY_EQUIVALENCE_INVALID_CLASS"
-  | "DUPLICATE_ONTOLOGY_RELATION";
+  | "DUPLICATE_ONTOLOGY_RELATION"
+  | "ONTOLOGY_COMPOSITION_VIA_REQUIRED"
+  | "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN"
+  | "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN";
 
 export type OntologyValidationIssue = Readonly<{
   relationIndex?: number;
@@ -122,7 +130,26 @@ export function validateOntologyRelations(
   detectDisjointExpansionConflicts(ontology, issues);
   detectMultipleInversePartners(ontology, issues);
   detectInvalidEquivalenceClasses(ontology, kinds, issues);
+  validateCompositionShape(ontology, issues);
   return issues;
+}
+
+/**
+ * A reflexive `partOf`/`hasPart` pair naming its realizing edge is a
+ * meaningful declaration ("a Section may be part of another Section"): its
+ * soundness is an instance-level property (the union acyclicity check, item
+ * E-b), not a kind-level one. A same-kind pair with no `via` is still refused
+ * below by `ONTOLOGY_COMPOSITION_VIA_REQUIRED`, so this only widens the
+ * self-loop exemption for a relation that is otherwise well-formed.
+ */
+function isReflexiveCompositionAllowed(
+  relation: NamedOntologyRelation,
+): boolean {
+  return (
+    (relation.metaEdge === META_EDGE_PART_OF ||
+      relation.metaEdge === META_EDGE_HAS_PART) &&
+    relation.via !== undefined
+  );
 }
 
 function validateSelfLoopsAndDuplicates(
@@ -132,7 +159,10 @@ function validateSelfLoopsAndDuplicates(
   const seenKeys = new Set<string>();
   for (const [index, relation] of ontology.entries()) {
     if (relation.from === relation.to) {
-      if (STRICTLY_HIERARCHICAL.has(relation.metaEdge)) {
+      if (
+        STRICTLY_HIERARCHICAL.has(relation.metaEdge) &&
+        !isReflexiveCompositionAllowed(relation)
+      ) {
         issues.push({
           relationIndex: index,
           message: `Hierarchical meta-edge "${relation.metaEdge}" cannot be a self-loop ("${relation.from}" → "${relation.to}").`,
@@ -376,4 +406,57 @@ function recordInversePartner(
     code: "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
     details: { edgeKind, existingPartner, conflictingPartner: partnerKind },
   });
+}
+
+/**
+ * The two composition shape checks that need nothing but the relation
+ * itself, run for every ontology relation regardless of meta-edge: `via` is
+ * required exactly on `partOf`/`hasPart` and forbidden everywhere else, and
+ * `partSide` is meaningful only alongside `via`.
+ *
+ * This is what delivers R3: a persisted `partOf`/`hasPart` relation missing
+ * `via` is refused on load, through the same `validateOntologyRelations`
+ * path the compile-time builder and the extension builder already share.
+ * The registration-dependent checks (orientation, cardinality, exactness,
+ * population) run later, in `buildCompositionRelation`
+ * (`src/registry/composition-relation.ts`), once a `KindRegistry` exists.
+ */
+function validateCompositionShape(
+  ontology: readonly NamedOntologyRelation[],
+  issues: OntologyValidationIssue[],
+): void {
+  for (const [index, relation] of ontology.entries()) {
+    const isComposition =
+      relation.metaEdge === META_EDGE_PART_OF ||
+      relation.metaEdge === META_EDGE_HAS_PART;
+
+    if (isComposition) {
+      if (relation.via === undefined) {
+        issues.push({
+          relationIndex: index,
+          message: `${relation.metaEdge}(${relation.from}, ${relation.to}) is missing the required \`via\` edge kind.`,
+          code: "ONTOLOGY_COMPOSITION_VIA_REQUIRED",
+          details: { ...relation },
+        });
+      }
+      continue;
+    }
+
+    if (relation.via !== undefined) {
+      issues.push({
+        relationIndex: index,
+        message: `Meta-edge "${relation.metaEdge}" cannot carry a \`via\` edge kind; only partOf/hasPart may.`,
+        code: "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN",
+        details: { metaEdge: relation.metaEdge, via: relation.via },
+      });
+    }
+    if (relation.partSide !== undefined) {
+      issues.push({
+        relationIndex: index,
+        message: `Meta-edge "${relation.metaEdge}" cannot carry a \`partSide\`; only partOf/hasPart may.`,
+        code: "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
+        details: { metaEdge: relation.metaEdge, partSide: relation.partSide },
+      });
+    }
+  }
 }

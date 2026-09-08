@@ -24,8 +24,6 @@ import {
   broader,
   disjointWith,
   equivalentTo,
-  hasPart,
-  partOf,
   relatedTo,
   subClassOf,
 } from "../../src/ontology/core-meta-edges";
@@ -384,7 +382,13 @@ const graphDefArb = fc
       nodeTypes.length >= 2 ?
         fc
           .array(
-            fc.integer({ min: 0, max: 5 }).chain((relationType) => {
+            // `partOf`/`hasPart` are deliberately not generated here: they
+            // now require a `via` edge kind whose registration (existence,
+            // endpoint compatibility, a constraining cardinality) this
+            // generic relation-shape fuzzer has no way to guarantee.
+            // Composition's own structural and registration-dependent rules
+            // are covered by `tests/ontology-composition-declaration.test.ts`.
+            fc.integer({ min: 0, max: 3 }).chain((relationType) => {
               // Pick two distinct nodes
               return fc
                 .record({
@@ -407,12 +411,6 @@ const graphDefArb = fc
                     }
                     case 3: {
                       return relatedTo(from, to);
-                    }
-                    case 4: {
-                      return partOf(from, to);
-                    }
-                    case 5: {
-                      return hasPart(from, to);
                     }
                     default: {
                       return equivalentTo(from, to);

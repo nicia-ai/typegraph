@@ -492,5 +492,7 @@ function compileOntologyRelation(
     metaEdge,
     from: fromNode ?? relation.from,
     to: toNode ?? relation.to,
+    ...(relation.via === undefined ? {} : { via: relation.via }),
+    ...(relation.partSide === undefined ? {} : { partSide: relation.partSide }),
   };
 }

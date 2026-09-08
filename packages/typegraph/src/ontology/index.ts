@@ -1,6 +1,7 @@
 // Core meta-edges and relation factories
 export {
   broader,
+  type CompositionOptions,
   core,
   // eslint-disable-next-line @typescript-eslint/no-deprecated -- compatibility re-export until the next major
   differentFrom,
@@ -52,3 +53,6 @@ export {
   type MetaEdgeProperties,
   type OntologyRelation,
 } from "./types";
+
+// R5's orientation, for `CompositionOptions.partSide`.
+export type { CompositionPartSide } from "../registry/composition-relation";

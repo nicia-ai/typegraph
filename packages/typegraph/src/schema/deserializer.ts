@@ -8,8 +8,8 @@
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { buildValidatedKindRegistry } from "../registry/build-validated";
+import { type EdgeKindFacts } from "../registry/edge-kind-facts";
 import type { KindRegistry } from "../registry/kind-registry";
-import { type EdgeEndpointKinds } from "../registry/validate-implies";
 import { hasOwnKey } from "../utils/object";
 import {
   type SerializedClosures,
@@ -162,9 +162,13 @@ export function buildRegistryFromSerializedSchema(
         metaEdge: relation.metaEdge,
         from: relation.from,
         to: relation.to,
+        ...(relation.via === undefined ? {} : { via: relation.via }),
+        ...(relation.partSide === undefined ?
+          {}
+        : { partSide: relation.partSide }),
       }),
     ),
-    edgeEndpoints: buildSerializedEdgeEndpointKinds(schema.edges),
+    edgeFacts: buildSerializedEdgeEndpointKinds(schema.edges),
     // The registry above is built with EMPTY node/edge kind maps (no Zod
     // schemas survive serialization), so the equivalence-class check needs
     // its own classifier built from the document's own `nodes`/`edges`
@@ -181,16 +185,18 @@ export function buildRegistryFromSerializedSchema(
 
 /**
  * Maps each edge kind's serialized definition to its domain/range kind
- * names, for `validateImpliesEndpointCompatibility` and for
- * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`).
- * A `Map` (rather than the plain `schema.edges` object) so a lookup for an
- * edge kind literally named "toString" or another `Object.prototype` member
- * can't resolve to an inherited member instead of `undefined`.
+ * names and cardinalities, for `validateImpliesEndpointCompatibility`, for
+ * `expandEdgeEndpointAllowance` (`src/registry/edge-endpoint-allowance.ts`),
+ * and for `buildCompositionRelation`
+ * (`src/registry/composition-relation.ts`). A `Map` (rather than the plain
+ * `schema.edges` object) so a lookup for an edge kind literally named
+ * "toString" or another `Object.prototype` member can't resolve to an
+ * inherited member instead of `undefined`.
  */
 export function buildSerializedEdgeEndpointKinds(
   edges: Record<string, SerializedEdgeDef>,
-): ReadonlyMap<string, EdgeEndpointKinds> {
-  const result = new Map<string, EdgeEndpointKinds>();
+): ReadonlyMap<string, EdgeKindFacts> {
+  const result = new Map<string, EdgeKindFacts>();
   for (const [kind, def] of Object.entries(edges)) {
     const pairs: { from: string; to: string }[] = [];
     if (def.targetKindsBySource === undefined) {
@@ -212,6 +218,8 @@ export function buildSerializedEdgeEndpointKinds(
       from: def.fromKinds,
       to: def.toKinds,
       pairs,
+      cardinality: def.cardinality,
+      targetCardinality: def.targetCardinality,
     });
   }
   return result;

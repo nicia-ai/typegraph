@@ -1,19 +1,19 @@
 import { ConfigurationError } from "../errors";
 import { META_EDGE_INVERSE_OF } from "../ontology/constants";
 import { type NamedOntologyRelation } from "../ontology/validation";
+import { type EdgeKindFacts } from "./edge-kind-facts";
 import { type KindRegistry } from "./kind-registry";
-import { type EdgeEndpointKinds } from "./validate-implies";
 
 /** Validates the endpoint reversal required by every registered inverse pair. */
 export function validateInverseEndpointCompatibility(
   ontology: readonly NamedOntologyRelation[],
-  edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>,
+  edgeFacts: ReadonlyMap<string, EdgeKindFacts>,
   registry: KindRegistry,
 ): void {
   for (const relation of ontology) {
     if (relation.metaEdge !== META_EDGE_INVERSE_OF) continue;
-    const left = edgeEndpoints.get(relation.from);
-    const right = edgeEndpoints.get(relation.to);
+    const left = edgeFacts.get(relation.from);
+    const right = edgeFacts.get(relation.to);
     if (left === undefined || right === undefined) continue;
 
     assertInverseSideCompatible(

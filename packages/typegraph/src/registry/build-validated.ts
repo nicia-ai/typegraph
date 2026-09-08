@@ -7,15 +7,15 @@ import {
   validateOntologyRelations,
 } from "../ontology/validation";
 import { requireDefined } from "../utils/presence";
+import { buildCompositionRelation } from "./composition-relation";
+import { type EdgeKindFacts } from "./edge-kind-facts";
 import {
   computeClosuresFromNamedOntology,
   createEmptyClosures,
   KindRegistry,
+  type RegistryClosures,
 } from "./kind-registry";
-import {
-  type EdgeEndpointKinds,
-  validateImpliesEndpointCompatibility,
-} from "./validate-implies";
+import { validateImpliesEndpointCompatibility } from "./validate-implies";
 import { validateInverseEndpointCompatibility } from "./validate-inverse";
 
 export function buildValidatedKindRegistry(
@@ -23,7 +23,7 @@ export function buildValidatedKindRegistry(
     nodeKinds: ReadonlyMap<string, NodeType>;
     edgeKinds: ReadonlyMap<string, AnyEdgeType>;
     ontology: readonly NamedOntologyRelation[];
-    edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>;
+    edgeFacts: ReadonlyMap<string, EdgeKindFacts>;
     identity?: GraphIdentityConfig;
     /**
      * How to tell a registered node kind from a registered edge kind, for the
@@ -48,7 +48,7 @@ export function buildValidatedKindRegistry(
       createEmptyClosures(),
       input.identity,
     );
-    validateImpliesEndpointCompatibility(input.edgeEndpoints, registry);
+    validateImpliesEndpointCompatibility(input.edgeFacts, registry);
     return registry;
   }
 
@@ -69,17 +69,66 @@ export function buildValidatedKindRegistry(
   }
 
   const closures = computeClosuresFromNamedOntology(input.ontology);
-  const registry = new KindRegistry(
+  return buildRegistryWithComposition(input, closures);
+}
+
+/**
+ * Builds the registry composition needs two passes require: `KindRegistry`
+ * supplies `isAssignableToAny` (subclass-closure based, unaffected by
+ * composition), so `buildCompositionRelation` needs a registry to run
+ * against before its own result can be attached to one. The first registry
+ * is validation-only and discarded; the second, identical but for its
+ * `composition` field, is what every caller gets back.
+ */
+function buildRegistryWithComposition(
+  input: Readonly<{
+    nodeKinds: ReadonlyMap<string, NodeType>;
+    edgeKinds: ReadonlyMap<string, AnyEdgeType>;
+    ontology: readonly NamedOntologyRelation[];
+    edgeFacts: ReadonlyMap<string, EdgeKindFacts>;
+    identity?: GraphIdentityConfig;
+  }>,
+  closures: RegistryClosures,
+): KindRegistry {
+  const registryForValidation = new KindRegistry(
     input.nodeKinds,
     input.edgeKinds,
     closures,
     input.identity,
   );
-  validateImpliesEndpointCompatibility(input.edgeEndpoints, registry);
+  validateImpliesEndpointCompatibility(input.edgeFacts, registryForValidation);
   validateInverseEndpointCompatibility(
     input.ontology,
-    input.edgeEndpoints,
-    registry,
+    input.edgeFacts,
+    registryForValidation,
   );
-  return registry;
+
+  const { relation: composition, issues: compositionIssues } =
+    buildCompositionRelation(
+      input.ontology,
+      input.edgeFacts,
+      registryForValidation,
+    );
+  if (compositionIssues.length > 0) {
+    const firstIssue = requireDefined(compositionIssues[0]);
+    throw new ConfigurationError(
+      `Composition ontology is incoherent: ${firstIssue.message}`,
+      {
+        code: firstIssue.code,
+        issues: compositionIssues,
+      },
+      {
+        suggestion:
+          "Correct the partOf/hasPart declarations before constructing or loading the graph registry.",
+      },
+    );
+  }
+
+  return new KindRegistry(
+    input.nodeKinds,
+    input.edgeKinds,
+    closures,
+    input.identity,
+    composition,
+  );
 }

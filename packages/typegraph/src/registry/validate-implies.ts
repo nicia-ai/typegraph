@@ -13,14 +13,8 @@
  */
 import { ConfigurationError } from "../errors/index";
 import { META_EDGE_IMPLIES } from "../ontology/constants";
+import { type EdgeKindFacts } from "./edge-kind-facts";
 import { type KindRegistry } from "./kind-registry";
-
-/** An edge kind's declared domain (`from`) and range (`to`) kind names and allowed pairs. */
-export type EdgeEndpointKinds = Readonly<{
-  from: readonly string[];
-  to: readonly string[];
-  pairs?: readonly Readonly<{ from: string; to: string }>[];
-}>;
 
 /**
  * Rejects implications whose implying edge can never be endpoint-compatible
@@ -44,15 +38,15 @@ export type EdgeEndpointKinds = Readonly<{
  * stored rows, and so can never fold anything into a traversal.
  */
 export function validateImpliesEndpointCompatibility(
-  edgeEndpoints: ReadonlyMap<string, EdgeEndpointKinds>,
+  edgeFacts: ReadonlyMap<string, EdgeKindFacts>,
   registry: KindRegistry,
 ): void {
-  for (const [impliedEdgeKind, impliedEndpoints] of edgeEndpoints) {
+  for (const [impliedEdgeKind, impliedEndpoints] of edgeFacts) {
     for (const implyingEdgeKind of registry.expandImplyingEdges(
       impliedEdgeKind,
     )) {
       if (implyingEdgeKind === impliedEdgeKind) continue;
-      const implyingEndpoints = edgeEndpoints.get(implyingEdgeKind);
+      const implyingEndpoints = edgeFacts.get(implyingEdgeKind);
       if (!implyingEndpoints) continue;
 
       assertEndpointCompatible(

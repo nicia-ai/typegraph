@@ -330,6 +330,8 @@ export type {
 // ============================================================
 
 export type {
+  CompositionOptions,
+  CompositionPartSide,
   InferenceType,
   MetaEdge,
   MetaEdgeProperties,

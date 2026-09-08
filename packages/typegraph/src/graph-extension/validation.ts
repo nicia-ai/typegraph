@@ -199,7 +199,10 @@ const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "metaEdge",
   "from",
   "to",
+  "via",
+  "partSide",
 ]);
+const COMPOSITION_PART_SIDE_VALUES = ["from", "to"] as const;
 const UNIQUE_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "name",
   "fields",
@@ -825,7 +828,39 @@ function validateOntologySection(
       continue;
     }
 
-    result.push({ metaEdge: metaEdge as MetaEdgeName, from, to });
+    const via = entry["via"];
+    if (via !== undefined && (typeof via !== "string" || via.length === 0)) {
+      issues.push({
+        path: `${path}/via`,
+        message:
+          "Ontology relation `via` must be a non-empty string when present.",
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    const partSide = entry["partSide"];
+    if (
+      partSide !== undefined &&
+      !(COMPOSITION_PART_SIDE_VALUES as readonly unknown[]).includes(partSide)
+    ) {
+      issues.push({
+        path: `${path}/partSide`,
+        message: `Ontology relation \`partSide\` must be one of ${COMPOSITION_PART_SIDE_VALUES.join(", ")} when present.`,
+        code: "INVALID_DOCUMENT_SHAPE",
+      });
+      continue;
+    }
+
+    result.push({
+      metaEdge: metaEdge as MetaEdgeName,
+      from,
+      to,
+      ...(via === undefined ? {} : { via }),
+      ...(partSide === undefined ?
+        {}
+      : { partSide: partSide as "from" | "to" }),
+    });
   }
   return result;
 }

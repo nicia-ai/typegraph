@@ -601,6 +601,11 @@ function serializeOntologyRelation(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    // Emitted only when present so a schema with no composition relations
+    // hashes byte-identically to one serialized before `via`/`partSide`
+    // existed.
+    ...(relation.via === undefined ? {} : { via: relation.via }),
+    ...(relation.partSide === undefined ? {} : { partSide: relation.partSide }),
   };
 }
 

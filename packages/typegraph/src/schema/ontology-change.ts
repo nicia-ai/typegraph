@@ -81,6 +81,7 @@ import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
+import { encodeTupleKey } from "../utils/tuple-key";
 import {
   buildRegistryFromSerializedSchema,
   buildSerializedEdgeEndpointKinds,
@@ -160,15 +161,38 @@ export type OntologySnapshot = Pick<
 // Relation keying
 // ============================================================
 
+/** Presentational label for `OntologyChange.name`. Not used as a lookup key. */
 function relationKey(relation: SerializedOntologyRelation): string {
   return `${relation.metaEdge}:${relation.from}:${relation.to}`;
+}
+
+/**
+ * Injective lookup key for the before/after relation maps below.
+ *
+ * A delimiter join (`${metaEdge}:${from}:${to}`) collides for a kind name
+ * containing the delimiter, and a `via` change (composition's realizing
+ * edge) must diff as remove + add rather than disappearing as a no-op, so
+ * both `via` and `partSide` are folded into the key alongside the three
+ * original fields, through the same injective tuple encoding the claim keys
+ * use for exactly this reason (`src/utils/tuple-key.ts`).
+ */
+function relationMapKey(relation: SerializedOntologyRelation): string {
+  return encodeTupleKey([
+    relation.metaEdge,
+    relation.from,
+    relation.to,
+    relation.via ?? "",
+    relation.partSide ?? "",
+  ]);
 }
 
 function keyedRelations(
   relations: readonly SerializedOntologyRelation[],
 ): ReadonlyMap<string, SerializedOntologyRelation> {
   const result = new Map<string, SerializedOntologyRelation>();
-  for (const relation of relations) result.set(relationKey(relation), relation);
+  for (const relation of relations) {
+    result.set(relationMapKey(relation), relation);
+  }
   return result;
 }
 
