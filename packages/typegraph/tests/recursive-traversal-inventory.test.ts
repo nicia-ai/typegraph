@@ -1,7 +1,7 @@
 /**
  * THE INVENTORY RATCHET for `WITH RECURSIVE` emission in `src/**` (I1).
  *
- * The invariant it enforces: **exactly six `WITH RECURSIVE` emission sites
+ * The invariant it enforces: **exactly seven `WITH RECURSIVE` emission sites
  * exist in `src/**`, in both directions** — a site in the tree with no
  * matching entry fails, and an entry matching no site in the tree fails —
  * **and exactly one `assumeRecursiveTraversalSupported` call site exists**,
@@ -154,9 +154,10 @@ type InventoryEntry = Readonly<{
 }>;
 
 /**
- * The six `WITH RECURSIVE` emission sites, measured on this branch (§2 of
+ * The seven `WITH RECURSIVE` emission sites, measured on this branch (§2 of
  * the batch spec, reproduced from `grep -rn "WITH RECURSIVE" src
- * --include=*.ts`).
+ * --include=*.ts`) — site G (item D.2's acyclicity probe) added after that
+ * batch.
  */
 const EMISSION_SITES: readonly InventoryEntry[] = [
   {
@@ -200,6 +201,13 @@ const EMISSION_SITES: readonly InventoryEntry[] = [
     site: "F",
     reason:
       "loadIdentityWindowLedger reconstructs the identity component ledger across a mutation's window.",
+  },
+  {
+    file: "store/recursive-cte.ts",
+    line: "return sql`WITH RECURSIVE ${seedCte}, ${ancestry} ${limited}`;",
+    site: "G",
+    reason:
+      "buildEdgeAcyclicityProbe (item D.2) runs the exhaustive, set-semantics reachability walk an `acyclic: true` edge kind's write path and audit both probe.",
   },
 ];
 
@@ -575,8 +583,9 @@ describe("recursion inventory ratchet", () => {
     // M-9, reproduced in miniature: the round-1 formulation counted FILES
     // holding the phrase with a comment-blind scan and compared that count
     // to 6. On this tree `grep -rl "WITH RECURSIVE" src --include=*.ts | wc
-    // -l` is 8 for exactly 6 real emission sites (EMISSION_SITES.length),
-    // because two files hold the phrase only in a doc comment. This
+    // -l` is 8 for exactly 7 real emission sites (EMISSION_SITES.length),
+    // because two files hold the phrase only in a doc comment (site G lives
+    // in `store/recursive-cte.ts`, already one of the eight). This
     // fixture reproduces the shape in miniature: at least four comment
     // lines a raw, line-oriented scan cannot distinguish from code, and
     // zero real sites once the parser strips comments out.
