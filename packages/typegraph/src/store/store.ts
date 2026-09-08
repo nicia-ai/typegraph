@@ -209,7 +209,7 @@ import {
   commitNewSchemaVersionIfKindsEmpty,
   commitNewSchemaVersionWithPreflight,
   composeSchemaCommitPreflight,
-  ensureSchema as ensureSchemaImpl,
+  ensureSchemaInternal as ensureSchemaImpl,
   getSchemaChanges,
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,

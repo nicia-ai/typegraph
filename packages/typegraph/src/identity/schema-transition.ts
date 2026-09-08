@@ -751,6 +751,12 @@ async function provisionDerivedRelationsInCommit(
  *
  * No closure rebuild: without a profile there is no closure contract to
  * restore, and the enablement preflight rebuilds it from scratch anyway.
+ *
+ * No transition note either, deliberately: §2.3 names this function a
+ * `schema-transition` emitter alongside `identitySchemaCommitPreflight`, but a
+ * profile-less graph has no materialized class for a dropped kind's members to
+ * leave — deleting their assertions changes no class membership, so there is
+ * nothing here for a note to describe.
  */
 export function identityKindCascadePreflight(
   ctx: Readonly<{ graphId: string; schema: SqlSchema }>,

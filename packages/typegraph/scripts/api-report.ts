@@ -548,10 +548,25 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `./graph-merge` (726→728), `./provenance` (717→719), `./sqlite/local`
 // (706→708), `./postgres/pglite` (706→708) — +2 apiece, `IdentityServiceContext`
 // and `PlainNodeRef` exactly. The `identityTransitions`/`identityTransitionRetention`
-// string fields and `SchemaManagerOptions.historyEnabled` boolean introduce
-// no new symbol names, so they move no entrypoint's debt on their own. Gate:
-// every moved entrypoint's delta is exactly +2, both added names are
-// `IdentityServiceContext`/`PlainNodeRef`, and no other entrypoint moved.
+// string fields introduce no new symbol names, so they move no entrypoint's
+// debt on their own. Gate: every moved entrypoint's delta is exactly +2,
+// both added names are `IdentityServiceContext`/`PlainNodeRef`, and no other
+// entrypoint moved.
+//
+// This is internal-convenience debt, not a user-facing requirement (G1R3-05):
+// `identityContext()`'s two consumers, replay and prune, are plain functions
+// over `IdentityServiceContext<G>`. PR-3, which brings `store.identity.replay`
+// / `transitionsOf` to the public surface, is expected to either narrow
+// `identityContext()`'s declared return to the exported slice those consumers
+// need, or export `IdentityServiceContext`/`PlainNodeRef` deliberately — either
+// way retiring these seven +2 entries, so this batch reads as staged rather
+// than permanent.
+//
+// `ensureSchema`'s `historyEnabled` extra moved off the public
+// `SchemaManagerOptions` (G1R3-04) onto an unexported `EnsureSchemaInternalOptions`
+// that only `ensureSchemaInternal` (imported directly by `store.ts`, never
+// re-exported) accepts, so it renders at no entrypoint at all — no ledger
+// entry to update for that change.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 407,

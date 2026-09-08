@@ -348,18 +348,55 @@ export type SchemaManagerOptions = Readonly<{
    * substituted or suppressed.
    */
   schema?: SqlSchema;
-  /**
-   * Mirrors the Store's own `history: true` option. Threaded through so a
-   * schema commit that runs BEFORE any Store exists to wrap the backend —
-   * every commit `prepareStoreWithSchema` drives, first enablement included —
-   * can still bind its identity preflight's ledger touches and transition-log
-   * notes to a capture session, exactly as `store.evolve()`'s own
-   * already-wrapped `this.#backend` does. Never set for the standalone
-   * `initializeSchema` / `migrateSchema` entry points called outside a Store
-   * — there, the identity preflight's writes are correctly current-only.
-   */
-  historyEnabled?: boolean;
 }>;
+
+/**
+ * Extends {@link ensureSchema}'s public options with the pre-fetched loader
+ * snapshot `createStoreWithSchema` passes through — an established public
+ * capability of the standalone entry point (see the field's own doc), so it
+ * stays on the type every `ensureSchema` caller sees.
+ */
+type EnsureSchemaPreloadedOptions = Readonly<{
+  /**
+   * Pre-fetched active row + parsed stored schema. When the loader
+   * (`createStoreWithSchema`) has already paid for `getActiveSchema`
+   * and `parseSerializedSchema` to peek at `extension`, it
+   * passes the results through here so `ensureSchema` doesn't repeat
+   * the round trip + Zod walk on every Store boot.
+   */
+  preloaded?: Readonly<{
+    activeRow: SchemaVersionRow | undefined;
+    storedSchema: SerializedSchema | undefined;
+  }>;
+}>;
+
+/**
+ * Internal-only extra `ensureSchema` needs from store construction but must
+ * never accept from a caller of the public entry point: this bag exists
+ * precisely so `historyEnabled` cannot reach `ensureSchema` through
+ * `SchemaManagerOptions`, the type its standalone (`initializeSchema` /
+ * `migrateSchema` / public `ensureSchema`) callers see. Only
+ * {@link ensureSchemaInternal} — imported directly by `store.ts`, never
+ * re-exported from the package's public entry points — accepts it.
+ */
+type EnsureSchemaInternalOptions = EnsureSchemaPreloadedOptions &
+  Readonly<{
+    /**
+     * Mirrors the Store's own `history: true` option. Threaded through so a
+     * schema commit that runs BEFORE any Store exists to wrap the backend —
+     * every commit `prepareStoreWithSchema` drives, first enablement included —
+     * can still bind its identity preflight's ledger touches and transition-log
+     * notes to a capture session, exactly as `store.evolve()`'s own
+     * already-wrapped `this.#backend` does. Never set for the standalone
+     * `initializeSchema` / `migrateSchema` / public `ensureSchema` entry points
+     * called outside a Store — there, the identity preflight's writes are
+     * correctly current-only. Kept off `SchemaManagerOptions` (rather than
+     * merely documented "never set") so a caller of the public entry point
+     * cannot set it at all: TypeScript's excess-property check rejects it on an
+     * object literal, and `ensureSchema` below does not forward it.
+     */
+    historyEnabled?: boolean;
+  }>;
 
 // ============================================================
 // Schema Manager
@@ -383,19 +420,22 @@ export type SchemaManagerOptions = Readonly<{
 export async function ensureSchema<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
-  options?: SchemaManagerOptions & {
-    /**
-     * Pre-fetched active row + parsed stored schema. When the loader
-     * (`createStoreWithSchema`) has already paid for `getActiveSchema`
-     * and `parseSerializedSchema` to peek at `extension`, it
-     * passes the results through here so `ensureSchema` doesn't repeat
-     * the round trip + Zod walk on every Store boot.
-     */
-    preloaded?: Readonly<{
-      activeRow: SchemaVersionRow | undefined;
-      storedSchema: SerializedSchema | undefined;
-    }>;
-  },
+  options?: SchemaManagerOptions & EnsureSchemaPreloadedOptions,
+): Promise<SchemaValidationResult> {
+  return ensureSchemaInternal(backend, graph, options);
+}
+
+/**
+ * The real implementation behind {@link ensureSchema}, additionally taking
+ * {@link EnsureSchemaInternalOptions} — the store-construction-only extras a
+ * caller of the public entry point must never be able to set. Exported for
+ * `store.ts` to import directly (as `ensureSchemaImpl`); not part of any
+ * public entry point.
+ */
+export async function ensureSchemaInternal<G extends GraphDef>(
+  backend: GraphBackend,
+  graph: G,
+  options?: SchemaManagerOptions & EnsureSchemaInternalOptions,
 ): Promise<SchemaValidationResult> {
   const autoMigrate = options?.autoMigrate ?? true;
   const throwOnBreaking = options?.throwOnBreaking ?? true;
@@ -935,7 +975,7 @@ type InitializeSchemaImplOptions = InitializeSchemaOptions &
   Readonly<{
     /** The caller already completed the deployment-wide adoption gate. */
     baseSchemaPrepared: boolean;
-    /** See {@link SchemaManagerOptions.historyEnabled}. Default `false`. */
+    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. Default `false`. */
     historyEnabled?: boolean;
   }>;
 
@@ -1424,7 +1464,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     enablement: boolean;
     schema?: SqlSchema;
     droppedNodeKinds?: readonly string[];
-    /** See {@link SchemaManagerOptions.historyEnabled}. Default `false`. */
+    /** See {@link EnsureSchemaInternalOptions.historyEnabled}. Default `false`. */
     historyEnabled?: boolean;
   }>,
 ): Promise<

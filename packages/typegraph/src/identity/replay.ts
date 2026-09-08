@@ -46,7 +46,7 @@ import {
 } from "./types";
 
 /** Default and maximum boundary counts a single `replay` call returns. */
-export const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
+const IDENTITY_REPLAY_DEFAULT_LIMIT = 200;
 export const IDENTITY_REPLAY_MAX_LIMIT = 2000;
 
 export type IdentityTransition<G extends GraphDef> = Readonly<{
@@ -60,7 +60,7 @@ export type IdentityTransition<G extends GraphDef> = Readonly<{
   decision?: IdentityDecisionProvenance | undefined;
 }>;
 
-export type IdentityReplayStep<G extends GraphDef> = Readonly<{
+type IdentityReplayStep<G extends GraphDef> = Readonly<{
   transition: IdentityTransition<G>;
   before: readonly IdentityNodeReference<G>[];
   after: readonly IdentityNodeReference<G>[];

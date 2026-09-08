@@ -19,7 +19,7 @@ import { parseRecordedInstant } from "../core/temporal";
 import { ConfigurationError, IdentityReplayError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
-import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import { asCompiledRowsSql } from "../query/sql-intent";
 import { storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
 import { chunk } from "../utils/array";
@@ -31,6 +31,7 @@ import { runIdentityMutation } from "./service-facade";
 import { refKey } from "./service-read";
 import { type IdentityServiceContext } from "./service-types";
 import {
+  executeIdentityStatement,
   identityChunkSize,
   type IdentityTarget,
   MAX_REFERENCE_CHUNK_SIZE,
@@ -456,7 +457,7 @@ export async function readIdentityTransitions(
 }
 
 /** Reads a graph's transition-retention watermark; `0` when nothing has been pruned. */
-export async function readTransitionRetention(
+async function readTransitionRetention(
   target: IdentityTarget,
   schema: SqlSchema,
   graphId: string,
@@ -493,7 +494,14 @@ export async function readTransitionRetentionDetails(
   if (row === undefined) return { prunedBeforeRevision: 0, prunedAt: nowIso() };
   return {
     prunedBeforeRevision: toRevisionNumber(row.pruned_before_revision),
-    prunedAt: asRowString(row.pruned_at, "pruned_at"),
+    // `pruned_at` is `timestamp(..., { withTimezone: true }).notNull()` on
+    // PostgreSQL (schema/postgres.ts), the exact column shape
+    // `normalizeIdentityTransitionRow` above decodes `recorded_at`/`valid_at`
+    // through `toCanonicalIdentityTimestamp` for — node-postgres returns a JS
+    // `Date`, and a text-returning driver returns a non-ISO string that must
+    // still be canonicalized. `asRowString` would throw on the former and
+    // pass the latter through uncanonicalized.
+    prunedAt: toCanonicalIdentityTimestamp(row.pruned_at),
   };
 }
 
@@ -551,11 +559,9 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
         RETURNING transition_id
       `),
     );
-    await requireDefined(
-      rawTarget.executeStatement,
-      "pruneIdentityTransitions requires a statement-capable transaction target.",
-    )(
-      asCompiledStatementSql(sql`
+    await executeIdentityStatement(
+      rawTarget,
+      sql`
         INSERT INTO ${ctx.schema.identityTransitionRetentionTable} (
           graph_id, pruned_before_revision, pruned_at
         ) VALUES (${ctx.graphId}, ${resolvedWatermark}, ${nowIso()})
@@ -563,7 +569,7 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
         SET pruned_before_revision = excluded.pruned_before_revision,
             pruned_at = excluded.pruned_at
         WHERE ${ctx.schema.identityTransitionRetentionTable}.pruned_before_revision < excluded.pruned_before_revision
-      `),
+      `,
     );
     return { pruned: deleted.length, prunedBeforeRevision: resolvedWatermark };
   });
