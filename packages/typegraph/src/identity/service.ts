@@ -26,6 +26,7 @@ export {
   combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
   detachIdentityForNode,
+  fillLiveSingletons,
   foldIdentityForCreatedNodes,
   hasAssertionsTouchingKinds,
   liveNodeKindsSharingIds,

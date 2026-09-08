@@ -26,6 +26,7 @@ import { separationRebuildRequired } from "./separation";
 import {
   combineSnapshotMembers,
   deleteAssertionsTouchingKinds,
+  fillLiveSingletons,
   hasAssertionsTouchingKinds,
   type IdentityRebuildContext,
   lockIdentityEnablementNodes,
@@ -620,16 +621,16 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
         )
       : [];
     await rebuildIdentityClosureForContext({ ...ctx, backend: target });
-    const after = await snapshotIdentityClosureClasses(
+    const afterRows = await snapshotIdentityClosureClasses(
       target,
       ctx.schema,
       ctx.graphId,
     );
-    const transitions = diffClosureTransitions(
-      combineSnapshotMembers(before, after),
-      before,
-      after,
+    const affected = combineSnapshotMembers(before, afterRows);
+    const after = fillLiveSingletons(afterRows, affected, (kind) =>
+      ctx.registry.nodeKinds.has(kind),
     );
+    const transitions = diffClosureTransitions(affected, before, after);
     if (transitions.length > 0) {
       await withRecordedIdentityMutationTarget(
         target,

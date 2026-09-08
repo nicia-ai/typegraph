@@ -13,15 +13,18 @@ import {
   asNodeId,
   createAdapterStoreWithSchema,
   defineGraph,
+  defineGraphExtension,
   defineNode,
   type GraphDef,
 } from "../src";
+import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import { type IdentityServiceContext } from "../src/identity/service-types";
 import {
   pruneIdentityTransitionsForContext,
   readIdentityTransitions,
 } from "../src/identity/transition-log";
 import { storeRuntime } from "../src/store/runtime-port";
+import { generateId } from "../src/utils/id";
 import { createTestBackend } from "./test-utils";
 
 const Person = defineNode("Person", {
@@ -201,5 +204,116 @@ describe("identity transition log", () => {
     expect(pruneResult.pruned).toBe(before.length);
     const afterPrune = await readTransitions(ctx);
     expect(afterPrune.length).toBe(0);
+  });
+
+  it("notes a window-end transition when a class member's validity window is narrowed", async () => {
+    // Fold-based class, not an explicit assertion: an assertion's own valid-time
+    // window would have to end BEFORE the node's proposed validTo, or
+    // requireNodeValidityEndCompatible refuses the write outright (correctly —
+    // that refusal is the guard this note site sits behind). Same-id folding
+    // carries no assertion window to conflict with.
+    const Org = defineNode("Org", { schema: z.object({ name: z.string() }) });
+    const foldGraph = defineGraph({
+      id: "identity_transition_log_window_end",
+      nodes: { Person: { type: Person }, Org: { type: Org } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      foldGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "shared" });
+    await store.nodes.Org.create({ name: "A Org" }, { id: "shared" });
+    const farFuture = new Date(Date.now() + 1_000_000_000).toISOString();
+    await store.nodes.Person.update(
+      asNodeId("shared"),
+      {},
+      { validTo: farFuture },
+    );
+    const ctx = storeRuntime(store).identityContext();
+    const rows = await readTransitions(ctx, [
+      { kind: "Person", id: "shared" },
+      { kind: "Org", id: "shared" },
+    ]);
+    const windowEndRows = rows.filter((row) => row.cause === "window-end");
+    expect(windowEndRows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("notes a kind-drop transition when Store.removeKinds() cascades a folded class", async () => {
+    const extensionGraph = defineGraph({
+      id: "identity_transition_log_kind_drop",
+      nodes: { Person: { type: Person } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const [store] = await createAdapterStoreWithSchema(
+      extensionGraph,
+      createTestBackend(),
+      { history: true },
+    );
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: { Tag: { properties: { label: { type: "string" } } } },
+      }),
+    );
+    const person = await evolved.nodes.Person.create({ name: "Alice" });
+    const tag = await evolved.getNodeCollectionOrThrow("Tag").create({
+      label: "author",
+    });
+    await evolved.identity.assertSame(person, tag);
+
+    const removed = await evolved.removeKinds(["Tag"]);
+    const ctx = storeRuntime(removed).identityContext();
+    const rows = await readIdentityTransitions(
+      ctx.backend,
+      ctx.schema,
+      ctx.graphId,
+      {
+        classRefs: [
+          { kind: "Person", id: person.id },
+          { kind: "Tag", id: tag.id },
+        ],
+        limit: 200,
+      },
+    );
+    const kindDropRows = rows.filter((row) => row.cause === "kind-drop");
+    expect(kindDropRows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("notes a reconcile transition, carrying decision provenance, for a governed apply", async () => {
+    const [store] = await createAdapterStoreWithSchema(
+      graph,
+      createTestBackend(),
+      { history: true },
+    );
+    await store.nodes.Person.create({ name: "A" }, { id: "a" });
+    await store.nodes.Person.create({ name: "B" }, { id: "b" });
+    const ctx = storeRuntime(store).identityContext();
+    const assertionId = generateId();
+    const now = new Date().toISOString();
+    await applyIdentityChangesForContext(
+      ctx,
+      [],
+      [
+        {
+          id: assertionId,
+          relation: "same",
+          a: { kind: "Person", id: "a" },
+          b: { kind: "Person", id: "b" },
+          validFrom: now,
+        },
+      ],
+      { policy: "test:reconcile", mergePlanDigest: "digest-abc" },
+    );
+    const rows = await readTransitions(ctx);
+    const reconcileRows = rows.filter((row) => row.cause === "reconcile");
+    expect(reconcileRows.length).toBeGreaterThanOrEqual(1);
+    expect(reconcileRows[0]?.assertion_ids).toEqual([assertionId]);
+    expect(reconcileRows[0]?.decision).toEqual({
+      policy: "test:reconcile",
+      mergePlanDigest: "digest-abc",
+    });
   });
 });

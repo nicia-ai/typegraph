@@ -671,6 +671,32 @@ export function combineSnapshotMembers(
 }
 
 /**
+ * `snapshotIdentityClosureClasses` reads the closure TABLE, which — unlike
+ * `buildComponents`' UnionFind — carries no row for a singleton, so it cannot
+ * tell "this member is alive but now a class of one" apart from "this member
+ * no longer exists". `diffClosureTransitions` treats absence as the latter
+ * (a hard-deleted or kind-dropped member, whose departure another surviving
+ * member's record explains) and would otherwise silently skip a LIVE
+ * singleton's own genuine membership change. This fills every `affected`
+ * member missing from `snapshot` with its own trivial `[member]` class when
+ * `isRegistered` says its kind still exists, leaving a truly dead member
+ * absent (unchanged behavior).
+ */
+export function fillLiveSingletons(
+  snapshot: ReadonlyMap<string, readonly PlainNodeRef[]>,
+  affected: readonly PlainNodeRef[],
+  isRegistered: (kind: string) => boolean,
+): ReadonlyMap<string, readonly PlainNodeRef[]> {
+  const filled = new Map(snapshot);
+  for (const member of affected) {
+    const key = refKey(member);
+    if (filled.has(key)) continue;
+    if (isRegistered(member.kind)) filled.set(key, [member]);
+  }
+  return filled;
+}
+
+/**
  * Cascades removed node kinds through the assertion ledger.
  *
  * `repairClosure: false` is for a graph whose identity profile is absent while
@@ -709,16 +735,16 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
         identityActiveKinds(ctx.registry),
         ctx.sameIdAcrossKinds,
       );
-      const after = await snapshotIdentityClosureClasses(
+      const afterRows = await snapshotIdentityClosureClasses(
         target,
         ctx.schema,
         ctx.graphId,
       );
-      const transitions = diffClosureTransitions(
-        combineSnapshotMembers(before, after),
-        before,
-        after,
+      const affected = combineSnapshotMembers(before, afterRows);
+      const after = fillLiveSingletons(afterRows, affected, (kind) =>
+        ctx.registry.nodeKinds.has(kind),
       );
+      const transitions = diffClosureTransitions(affected, before, after);
       noteClassTransitions(ctx.graphId, noteTransition, transitions, {
         cause: "kind-drop",
         assertionIds: removedAssertionIds,
@@ -808,7 +834,10 @@ export async function foldIdentityForCreatedNodes(
         rawTarget,
         ctx.schema,
         ctx.graphId,
-        { classRefs: references, limit: IDENTITY_TRANSITION_LINEAGE_PROBE_LIMIT },
+        {
+          classRefs: references,
+          limit: IDENTITY_TRANSITION_LINEAGE_PROBE_LIMIT,
+        },
       );
       const hadPriorClass = priorHistory.some(
         (row) => row.cause === "detach" || row.cause === "kind-drop",
