@@ -1354,12 +1354,18 @@ function generateSummary(
 // ============================================================
 
 /**
- * Checks if a schema change is backwards compatible.
+ * Checks if a schema change is backwards compatible: exactly "no `breaking`
+ * change" (`!diff.hasBreakingChanges`) — nodes or edges removed, required
+ * properties added, existing properties removed, and a `breaking` ontology
+ * change (`inverseOf`/`implies` added or removed, or Operational Identity's
+ * `sameIdAcrossKinds` flip) all count.
  *
- * A change is backwards compatible if:
- * - No nodes or edges were removed
- * - No required properties were added
- * - No existing properties were removed
+ * "Backwards compatible" does NOT mean "will commit unconditionally": a
+ * `warning`-severity ontology change (see `ChangeSeverity`'s docblock)
+ * passes this check and then owes a commit-time data probe that can still
+ * refuse it with `MigrationError` `reason: "ontology-tightening-violated"`.
+ * See docs/schema-evolution.md's "Ontology tightenings are checked against
+ * your data" section.
  */
 export function isBackwardsCompatible(diff: SchemaDiff): boolean {
   return !diff.hasBreakingChanges;
@@ -1369,7 +1375,13 @@ export function isBackwardsCompatible(diff: SchemaDiff): boolean {
  * How a proposed graph relates to the committed schema.
  *
  * - `identical` — a semantic no-op; committing it changes nothing.
- * - `additive` — changes exist and are all backwards compatible.
+ * - `additive` — changes exist and are all backwards compatible
+ *   (`isBackwardsCompatible`). This is a pre-flight classification, not a
+ *   commit guarantee: an `additive` diff that carries a `warning`-severity
+ *   ontology change (see `ChangeSeverity`) is still subject to the
+ *   commit-time data probe and can be refused with `MigrationError`
+ *   `reason: "ontology-tightening-violated"` if existing rows violate the
+ *   tightened ontology.
  * - `incompatible` — at least one breaking change; needs a deliberate
  *   migration decision.
  */
