@@ -131,6 +131,18 @@ export type AcyclicityProbeContext = Readonly<{
 }>;
 
 /**
+ * What the audit reader needs — `AcyclicityProbeContext` minus `lock` (no
+ * write to fence) and `graph` (the relations to probe are passed
+ * explicitly, so a caller working from a SERIALIZED schema document rather
+ * than a runtime `GraphDef` — the schema-tightening preflight — need not
+ * fabricate one just to satisfy this type).
+ */
+export type AcyclicityAuditContext = Omit<
+  AcyclicityProbeContext,
+  "lock" | "graph"
+>;
+
+/**
  * Runs one acyclicity probe statement and returns the `origin_key`s the
  * database reports as reaching their own `from` — empty when the seed's rows
  * are all fine. Shared by the write-path assertion and the audit reader, so
@@ -140,7 +152,7 @@ export type AcyclicityProbeContext = Readonly<{
  *   short.
  */
 async function runAcyclicityProbe(
-  ctx: Omit<AcyclicityProbeContext, "lock">,
+  ctx: AcyclicityAuditContext,
   relation: AcyclicEdgeRelation,
   seed: AcyclicityProbeSeed,
 ): Promise<readonly string[]> {
@@ -235,7 +247,10 @@ export async function assertEdgeRelationsAcyclic(
   ctx: AcyclicityProbeContext,
   proposed: readonly ProposedRelationEdge[],
 ): Promise<void> {
-  const relevant: Readonly<{ relation: AcyclicEdgeRelation; edge: ProposedRelationEdge }>[] = [];
+  const relevant: Readonly<{
+    relation: AcyclicEdgeRelation;
+    edge: ProposedRelationEdge;
+  }>[] = [];
   for (const edge of proposed) {
     const relation = acyclicRelationForEdgeKind(ctx.graph, edge.edgeKind);
     if (relation === undefined) continue;
@@ -289,15 +304,15 @@ export async function assertEdgeRelationsAcyclic(
 /**
  * The audit reader: every live edge of `relations` whose `to` endpoint
  * reaches its `from` endpoint. Shared verbatim with `verifyConstraintFences`
- * (`src/store/claims/verify.ts`) and with item A's `acyclic`-added tightening
- * probe (`src/schema/ontology-tightening-preflight.ts`), so there is exactly
- * one implementation of "is there a cycle".
+ * (`src/store/claims/verify.ts`) and with the `acyclic`-added schema-tightening
+ * probe (`src/schema/tightening-preflight.ts`), so there is exactly one
+ * implementation of "is there a cycle".
  *
  * Takes no `lock`: this is a read-only diagnostic, never gating a live write
  * against a concurrent race, so it runs no isolation-freshness check.
  */
 export async function readEdgeAcyclicityViolations(
-  ctx: Omit<AcyclicityProbeContext, "lock">,
+  ctx: AcyclicityAuditContext,
   relations: readonly AcyclicEdgeRelation[],
 ): Promise<readonly EdgeAcyclicityViolation[]> {
   const violations: EdgeAcyclicityViolation[] = [];

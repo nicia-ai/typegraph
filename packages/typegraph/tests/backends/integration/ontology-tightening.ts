@@ -147,6 +147,25 @@ function withoutCommitWithPreflight(
 }
 
 /** v1 = `subClassOf(Company, Organization)`; v2 additionally declares `disjointWith(Person, Organization)`. */
+const Task = defineNode("Task", { schema: z.object({}) });
+const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
+
+/** Item D.2's tightening: `acyclic` absent, then declared `true`. */
+function acyclicTighteningGraph(id: string, withAcyclic: boolean) {
+  return defineGraph({
+    id,
+    nodes: { Task: { type: Task } },
+    edges: {
+      dependsOn: {
+        type: dependsOn,
+        from: [Task],
+        to: [Task],
+        ...(withAcyclic ? { acyclic: true } : {}),
+      },
+    },
+  });
+}
+
 function probeGraph(id: string, withDisjoint: boolean) {
   return defineGraph({
     id,
@@ -210,6 +229,67 @@ export function registerOntologyTighteningIntegrationTests(
     // today's `main` (the commit migrates instead of refusing) and fails
     // again when the classifier's `disjointWith`-added row is flipped to
     // "safe".
+
+    it("refuses declaring acyclic: true on an edge kind whose live rows already carry a cycle (item D.2)", async () => {
+      const id = "ontology_tightening_acyclic_probe";
+      const store = await context.createStore(
+        acyclicTighteningGraph(id, false),
+      );
+      const a = await store.nodes.Task.create({});
+      const b = await store.nodes.Task.create({});
+      // Legal under v1: `dependsOn` declares no `acyclic` yet, so the store
+      // enforces nothing about the relation's shape.
+      const forward = await store.edges.dependsOn.create(a, b);
+      const backward = await store.edges.dependsOn.create(b, a);
+
+      const error = await createAdapterStoreWithSchema(
+        acyclicTighteningGraph(id, true),
+        context.getBackend(),
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(MigrationError);
+      const details = (error as MigrationError).details;
+      if (details.reason !== "ontology-tightening-violated") {
+        throw new Error(
+          `expected ontology-tightening-violated, got ${details.reason}`,
+        );
+      }
+      expect(details.violations).toEqual([
+        {
+          family: "edgeAcyclicity",
+          relation: "dependsOn",
+          edgeIds: [forward.id, backward.id].toSorted((left, right) =>
+            left.localeCompare(right),
+          ),
+        },
+      ]);
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK (lane-D2-load-bearing.md): classifying the `acyclic`
+    // addition `safe` instead of `warning` (dropping its `probes` entry in
+    // `edgeAcyclicityAddedDelta`'s caller) makes the commit migrate instead
+    // of refusing — the §2.1 defect this workstream exists to close,
+    // reproduced for the acyclicity axis.
+
+    it("still migrates cleanly when the newly-acyclic edge kind's data has no cycle", async () => {
+      const id = "ontology_tightening_acyclic_clean";
+      const store = await context.createStore(
+        acyclicTighteningGraph(id, false),
+      );
+      const a = await store.nodes.Task.create({});
+      const b = await store.nodes.Task.create({});
+      await store.edges.dependsOn.create(a, b);
+
+      const [migrated] = await createAdapterStoreWithSchema(
+        acyclicTighteningGraph(id, true),
+        context.getBackend(),
+      );
+
+      expect(await activeVersion(context, id)).toBe(2);
+      await expect(migrated.edges.dependsOn.create(b, a)).rejects.toMatchObject(
+        { name: "EdgeAcyclicityError" },
+      );
+    });
 
     it("excludes an unrelated safe change from a refused tightening's details.changes", async () => {
       const id = "ontology_tightening_details_changes_filtered";

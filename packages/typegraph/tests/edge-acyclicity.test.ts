@@ -210,7 +210,6 @@ describe("recursiveTraversal: { supported: false } refuses both the write and th
       readEdgeAcyclicityViolations(
         {
           graphId: graph.id,
-          graph,
           schema: createSqlSchema(backend.tableNames),
           dialect: getDialect(backend.dialect),
           target: backend,

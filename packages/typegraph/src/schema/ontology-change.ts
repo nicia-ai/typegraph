@@ -128,15 +128,30 @@ export type OntologyDataProbe =
       kind: "edgeEndpointAssignability";
       /** Edge kinds whose admitted concrete endpoint pairs SHRANK, with what still remains. */
       allowances: readonly EdgeEndpointAllowance[];
+    }>
+  | Readonly<{
+      kind: "edgeAcyclicity";
+      /**
+       * Edge kinds whose `acyclic` flag turned on this commit (present on
+       * both sides of the diff — a brand-new kind is vacuously safe, per
+       * `edgeAcyclicityDelta`).
+       */
+      edgeKinds: readonly string[];
     }>;
 
 /**
  * A change to the ontology. Moved here from `migration.ts`, which
  * re-exports it so the public path (`src/schema/index.ts`) is unchanged.
+ *
+ * `entity: "edgeRegistration"` is item D.2's addition: `acyclic` is an
+ * edge-registration property, not an ontology meta-edge/relation, but it
+ * shares this classifier and the tightening-probe machinery rather than
+ * forking a second implementation of "what does a schema change do to
+ * existing data".
  */
 export type OntologyChange = Readonly<{
   type: ChangeType;
-  entity: "metaEdge" | "relation";
+  entity: "metaEdge" | "relation" | "edgeRegistration";
   name: string;
   severity: ChangeSeverity;
   details: string;
@@ -399,11 +414,58 @@ function edgeEndpointAssignabilityDelta(
   );
 }
 
+/**
+ * Edge kinds present on both sides whose `acyclic` flag went from
+ * absent/`false` to `true` this commit — item D.2's tightening. A brand-new
+ * edge kind (absent from `before`) is excluded: there is no prior data it
+ * could have violated, so classifying it would pay for a probe against an
+ * empty population every time a schema author declares `acyclic: true` on a
+ * kind for the first time.
+ */
+function edgeAcyclicityAddedDelta(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+): readonly string[] {
+  const edgeKinds: string[] = [];
+  for (const edgeKind of Object.keys(after.edges)) {
+    if (!hasOwnKey(before.edges, edgeKind)) continue;
+    const wasAcyclic = before.edges[edgeKind]?.acyclic === true;
+    const isAcyclic = after.edges[edgeKind]?.acyclic === true;
+    if (!wasAcyclic && isAcyclic) edgeKinds.push(edgeKind);
+  }
+  return edgeKinds.toSorted(compareStrings);
+}
+
+/**
+ * Edge kinds present on both sides whose `acyclic` flag went from `true` to
+ * absent/`false` this commit — always `safe`, no probe: dropping the axiom
+ * can invalidate nothing already true of the data.
+ */
+function edgeAcyclicityRemovedDelta(
+  before: OntologySnapshot,
+  after: OntologySnapshot,
+): readonly string[] {
+  const edgeKinds: string[] = [];
+  for (const edgeKind of Object.keys(before.edges)) {
+    if (!hasOwnKey(after.edges, edgeKind)) continue;
+    const wasAcyclic = before.edges[edgeKind]?.acyclic === true;
+    const isAcyclic = after.edges[edgeKind]?.acyclic === true;
+    if (wasAcyclic && !isAcyclic) edgeKinds.push(edgeKind);
+  }
+  return edgeKinds.toSorted(compareStrings);
+}
+
 // ============================================================
 // Severity table
 // ============================================================
 
-type ProbeKind = OntologyDataProbe["kind"];
+/**
+ * The probe kinds a META-EDGE/RELATION change can carry. Excludes
+ * `edgeAcyclicity`: that probe belongs to an `entity: "edgeRegistration"`
+ * change, classified in a separate arm of `classifyOntologyChanges` that
+ * never calls {@link buildProbe} — see `edgeAcyclicityAddedDelta`.
+ */
+type ProbeKind = Exclude<OntologyDataProbe["kind"], "edgeAcyclicity">;
 
 type RelationSeverity = Readonly<{
   severity: ChangeSeverity;
@@ -586,6 +648,31 @@ export function classifyOntologyChanges(
     }
   }
 
+  // Edge-registration `acyclic`, item D.2. Independent of whether any
+  // ontology relation changed — an edge kind's acyclicity axiom shares no
+  // relation with `disjointWith` / `subClassOf` / `equivalentTo`, so this
+  // never needs a `KindRegistry` and runs unconditionally, before the
+  // relation-change early return below.
+  for (const edgeKind of edgeAcyclicityAddedDelta(before, after)) {
+    changes.push({
+      type: "modified",
+      entity: "edgeRegistration",
+      name: edgeKind,
+      severity: "warning",
+      details: `Edge "${edgeKind}" declared acyclic: true`,
+      probes: [{ kind: "edgeAcyclicity", edgeKinds: [edgeKind] }],
+    });
+  }
+  for (const edgeKind of edgeAcyclicityRemovedDelta(before, after)) {
+    changes.push({
+      type: "modified",
+      entity: "edgeRegistration",
+      name: edgeKind,
+      severity: "safe",
+      details: `Edge "${edgeKind}" dropped acyclic: true`,
+    });
+  }
+
   const beforeRelations = keyedRelations(before.ontology.relations);
   const afterRelations = keyedRelations(after.ontology.relations);
   const removedRelations = [...beforeRelations.entries()]
@@ -675,6 +762,7 @@ export function ontologyTighteningProbes(
   const pairs = new Map<string, readonly [string, string]>();
   const groups = new Map<string, UniquenessComponentProbeGroup>();
   const allowances = new Map<string, EdgeEndpointAllowance>();
+  const acyclicEdgeKinds = new Set<string>();
 
   for (const change of changes) {
     for (const probe of change.probes ?? []) {
@@ -691,6 +779,11 @@ export function ontologyTighteningProbes(
           for (const allowance of probe.allowances) {
             allowances.set(allowance.edgeKind, allowance);
           }
+          break;
+        }
+        case "edgeAcyclicity": {
+          for (const edgeKind of probe.edgeKinds)
+            acyclicEdgeKinds.add(edgeKind);
           break;
         }
       }
@@ -720,6 +813,12 @@ export function ontologyTighteningProbes(
       allowances: [...allowances.values()].toSorted((left, right) =>
         compareStrings(left.edgeKind, right.edgeKind),
       ),
+    });
+  }
+  if (acyclicEdgeKinds.size > 0) {
+    result.push({
+      kind: "edgeAcyclicity",
+      edgeKinds: [...acyclicEdgeKinds].toSorted(compareStrings),
     });
   }
   return result;

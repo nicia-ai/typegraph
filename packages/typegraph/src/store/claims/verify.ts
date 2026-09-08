@@ -382,12 +382,8 @@ function compareConstraintFenceViolations(
   if (leftHasTarget) return -1;
   if (rightHasTarget) return 1;
 
-  const leftUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(
-    left.family,
-  );
-  const rightUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(
-    right.family,
-  );
+  const leftUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(left.family);
+  const rightUntargetedRank = UNTARGETED_FAMILY_ORDER.indexOf(right.family);
   if (leftUntargetedRank !== rightUntargetedRank) {
     return leftUntargetedRank - rightUntargetedRank;
   }
@@ -561,7 +557,6 @@ export async function verifyConstraintFences(
   const acyclicity = await readEdgeAcyclicityViolations(
     {
       graphId: context.graphId,
-      graph: context.graph,
       schema: createSqlSchema(context.backend.tableNames),
       dialect: getDialect(context.backend.dialect),
       target: context.backend,
