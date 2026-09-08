@@ -1454,6 +1454,9 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+type CompositionPartSide = "from" | "to";
+
+// @public
 class ConfigurationError extends TypeGraphError {
     constructor(message: string, details?: Record<string, unknown>, options?: {
         cause?: unknown;
@@ -2196,6 +2199,8 @@ export type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
+    via?: string;
+    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -3656,6 +3661,8 @@ export type SerializedOntologyRelation = Readonly<{
     metaEdge: string;
     from: string;
     to: string;
+    via?: string;
+    partSide?: CompositionPartSide;
 }>;
 
 // @public

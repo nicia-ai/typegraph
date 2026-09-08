@@ -48,7 +48,8 @@ import { createExampleBackend } from "./_helpers";
 const SCHEMA_ORG_PERSON_IRI = "https://schema.org/Person";
 const DEEP_LEARNING_NAME = "Deep Learning";
 const ATTENTION_PAPER_TITLE = "Attention Is All You Need";
-const SEQ2SEQ_PAPER_TITLE = "Sequence to Sequence Learning with Neural Networks";
+const SEQ2SEQ_PAPER_TITLE =
+  "Sequence to Sequence Learning with Neural Networks";
 
 // ============================================================
 // Part 1: Node and Edge Kinds
@@ -151,7 +152,11 @@ function prerequisiteOf(
   prerequisite: NodeType,
   dependent: NodeType,
 ): OntologyRelation {
-  return { metaEdge: prerequisiteOfMetaEdge, from: prerequisite, to: dependent };
+  return {
+    metaEdge: prerequisiteOfMetaEdge,
+    from: prerequisite,
+    to: dependent,
+  };
 }
 
 function supersedes(
@@ -213,7 +218,15 @@ const graph = defineGraph({
       ],
     },
     affiliatedWith: { type: affiliatedWith, from: [Author], to: [Institution] },
-    belongsTo: { type: belongsTo, from: [Department], to: [Institution] },
+    // `cardinality: "one"` — each Department belongs to exactly one
+    // Institution — is what makes `belongsTo` eligible to realize the
+    // `partOf` composition below.
+    belongsTo: {
+      type: belongsTo,
+      from: [Department],
+      to: [Institution],
+      cardinality: "one",
+    },
   },
   ontology: [
     // === Subsumption (is-a) ===
@@ -243,7 +256,11 @@ const graph = defineGraph({
     // Institution — `subClassOf(Department, Institution)` would wrongly
     // claim every Department IS an Institution. Model is-a with
     // subClassOf and part-of with partOf; hasPart is derived as its inverse.
-    partOf(Department, Institution),
+    // `via: belongsTo` names the edge whose live rows realize the
+    // composition; `belongsTo`'s `cardinality: "one"` is the whole-side
+    // fence that makes "one Institution per Department" an enforced
+    // invariant, not just a modeling convention.
+    partOf(Department, Institution, { via: belongsTo }),
 
     // === Edge semantics ===
     inverseOf(cites, citedBy),
@@ -286,7 +303,10 @@ function relatesVia(
     .filter((relation) => relation.metaEdge.name === customMetaEdge.name)
     .map(
       (relation) =>
-        [endpointKindName(relation.from), endpointKindName(relation.to)] as const,
+        [
+          endpointKindName(relation.from),
+          endpointKindName(relation.to),
+        ] as const,
     );
 
   if (!customMetaEdge.properties.transitive) {
@@ -501,7 +521,9 @@ export async function main() {
       .select((ctx) => ({ title: ctx.cited["title"] }))
       .execute();
     for (const row of impliedCites) {
-      console.log(`  With expand "implying": cites "${String(row.title)}" (via buildsOn)`);
+      console.log(
+        `  With expand "implying": cites "${String(row.title)}" (via buildsOn)`,
+      );
     }
 
     // Inverse + implication combined: nothing ever wrote a citedBy edge,

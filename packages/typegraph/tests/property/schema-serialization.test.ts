@@ -384,7 +384,13 @@ const graphDefArb = fc
       nodeTypes.length >= 2 ?
         fc
           .array(
-            fc.integer({ min: 0, max: 5 }).chain((relationType) => {
+            // `partOf`/`hasPart` are deliberately not generated here: they
+            // now require a `via` edge kind whose registration (existence,
+            // endpoint compatibility, a constraining cardinality) this
+            // generic relation-shape fuzzer has no way to guarantee.
+            // Composition's own structural and registration-dependent rules
+            // are covered by `tests/ontology-composition-declaration.test.ts`.
+            fc.integer({ min: 0, max: 3 }).chain((relationType) => {
               // Pick two distinct nodes
               return fc
                 .record({
@@ -407,12 +413,6 @@ const graphDefArb = fc
                     }
                     case 3: {
                       return relatedTo(from, to);
-                    }
-                    case 4: {
-                      return partOf(from, to);
-                    }
-                    case 5: {
-                      return hasPart(from, to);
                     }
                     default: {
                       return equivalentTo(from, to);
@@ -1419,5 +1419,139 @@ describe("Schema Serialization Properties", () => {
         { numRuns: 30 },
       );
     });
+  });
+});
+
+/**
+ * A focused round-trip property over a fixed composition shape (E-a-9).
+ *
+ * `partOf`/`hasPart` are deliberately excluded from the generic
+ * `ontologyArb` above (see its comment): a fuzzed `via` edge cannot be
+ * guaranteed endpoint-compatible or cardinality-constrained enough to
+ * build. This property fuzzes what two always-valid composition shapes can
+ * safely vary — the node/edge kind names, the declaration form (`partOf`
+ * vs. the mirrored `hasPart`), and the whole-side population:
+ *
+ *  - a cross-kind pair, where orientation is unambiguous and `partSide` is
+ *    INFERRED (never present on the wire) — this is what exercises `via`
+ *    surviving the round trip;
+ *  - a reflexive (R5) pair, where the edge admits both orientations and
+ *    `partSide` is REQUIRED and DECLARED — this is what exercises
+ *    `partSide` itself, the one field that cannot be re-derived on load
+ *    (E-a-4). A property that only ever generated the unambiguous shape
+ *    would never put a `partSide` on the wire to lose.
+ */
+describe("composition relation round-trip (E-a-9)", () => {
+  it("serializes and deserializes a fuzzed cross-kind partOf/hasPart pair's via and inferred orientation", () => {
+    fc.assert(
+      fc.property(
+        identifierArb,
+        identifierArb,
+        edgeIdentifierArb,
+        fc.constantFrom<"one" | "oneActive">("one", "oneActive"),
+        fc.boolean(),
+        versionArb,
+        (
+          partKindName,
+          wholeKindName,
+          edgeKindName,
+          population,
+          declareAsHasPart,
+          version,
+        ) => {
+          fc.pre(partKindName !== wholeKindName);
+
+          const Part = defineNode(partKindName, { schema: z.object({}) });
+          const Whole = defineNode(wholeKindName, { schema: z.object({}) });
+          const viaEdge = defineEdge(edgeKindName, { schema: z.object({}) });
+
+          const graph = defineGraph({
+            id: "composition-roundtrip-property",
+            nodes: {
+              [partKindName]: { type: Part },
+              [wholeKindName]: { type: Whole },
+            },
+            edges: {
+              [edgeKindName]: {
+                type: viaEdge,
+                from: [Part],
+                to: [Whole],
+                cardinality: population,
+              },
+            },
+            ontology: [
+              declareAsHasPart ?
+                hasPart(Whole, Part, { via: viaEdge })
+              : partOf(Part, Whole, { via: viaEdge }),
+            ],
+          });
+
+          const serialized = serializeSchema(graph, version);
+          const registry = deserializeSchema(serialized).buildRegistry();
+
+          expect(registry.compositionPartSide(edgeKindName)).toBe("from");
+          expect(registry.compositionRelation().pairs).toEqual([
+            {
+              partKind: partKindName,
+              wholeKind: wholeKindName,
+              viaEdgeKind: edgeKindName,
+              partSide: "from",
+              population,
+            },
+          ]);
+        },
+      ),
+      { numRuns: 25 },
+    );
+  });
+
+  it("serializes and deserializes a fuzzed reflexive pair's declared partSide", () => {
+    fc.assert(
+      fc.property(
+        identifierArb,
+        edgeIdentifierArb,
+        fc.constantFrom<"one" | "oneActive">("one", "oneActive"),
+        fc.constantFrom<"from" | "to">("from", "to"),
+        versionArb,
+        (kindName, edgeKindName, population, partSide, version) => {
+          const Kind = defineNode(kindName, { schema: z.object({}) });
+          const viaEdge = defineEdge(edgeKindName, { schema: z.object({}) });
+
+          const graph = defineGraph({
+            id: "composition-roundtrip-reflexive-property",
+            nodes: { [kindName]: { type: Kind } },
+            edges: {
+              [edgeKindName]: {
+                type: viaEdge,
+                from: [Kind],
+                to: [Kind],
+                // Set on both sides: the whole-side fence reads
+                // `cardinality` when `partSide` is "from" and
+                // `targetCardinality` when it is "to", and this property
+                // fuzzes `partSide` itself.
+                cardinality: population,
+                targetCardinality: population,
+              },
+            },
+            ontology: [partOf(Kind, Kind, { via: viaEdge, partSide })],
+          });
+
+          const serialized = serializeSchema(graph, version);
+          const registry = deserializeSchema(serialized).buildRegistry();
+
+          expect(registry.compositionPartSide(edgeKindName)).toBe(partSide);
+          expect(registry.compositionRelation().pairs).toEqual([
+            {
+              partKind: kindName,
+              wholeKind: kindName,
+              viaEdgeKind: edgeKindName,
+              partSide,
+              population,
+            },
+          ]);
+        },
+      ),
+      { numRuns: 25 },
+    );
   });
 });

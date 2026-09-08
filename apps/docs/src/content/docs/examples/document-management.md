@@ -22,8 +22,6 @@ import {
   embedding,
   searchable,
   subClassOf,
-  partOf,
-  hasPart,
 } from "@nicia-ai/typegraph";
 
 // Base content type (abstract)
@@ -118,7 +116,13 @@ const graph = defineGraph({
     Permission: { type: Permission },
   },
   edges: {
-    contains: { type: contains, from: [Folder], to: [Folder, Document] },
+    contains: {
+      type: contains,
+      from: [Folder],
+      to: [Folder, Document],
+      // A Folder or Document belongs to exactly one parent Folder.
+      targetCardinality: "one",
+    },
     relatedTo: { type: relatedTo, from: [Document], to: [Document] },
     hasPermission: { type: hasPermission, from: [User], to: [Content] },
     createdBy: { type: createdBy, from: [Content], to: [User] },
@@ -128,9 +132,17 @@ const graph = defineGraph({
     subClassOf(Folder, Content),
     subClassOf(Document, Content),
 
-    // Compositional relationships
-    partOf(Document, Folder),
-    hasPart(Folder, Document),
+    // `contains` is deliberately NOT declared as a `partOf`/`hasPart`
+    // composition relation. Composition means single ownership plus
+    // cascade-delete: deleting the whole deletes every part. A folder tree
+    // is the opposite case — folders and documents are shared/re-homeable
+    // containment, so deleting a Folder should move its children up to the
+    // deleted folder's parent, not delete them. `targetCardinality: "one"`
+    // above already gives "at most one parent folder"; that single-parent
+    // constraint is all this relationship needs. Reach for `partOf` only
+    // when a part's lifecycle is genuinely bound to its whole (a document's
+    // sections dying with the document, not a folder's contents surviving
+    // the folder).
   ],
 });
 ```

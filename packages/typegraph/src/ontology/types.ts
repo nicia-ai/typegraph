@@ -1,4 +1,5 @@
 import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type CompositionPartSide } from "../registry/composition-relation";
 
 // ============================================================
 // Brand Key
@@ -75,6 +76,10 @@ export type OntologyRelation = Readonly<{
   metaEdge: MetaEdge;
   from: NodeType | AnyEdgeType | string; // string for external IRIs
   to: NodeType | AnyEdgeType | string;
+  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
+  via?: string;
+  /** R5's orientation. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
 }>;
 
 // ============================================================

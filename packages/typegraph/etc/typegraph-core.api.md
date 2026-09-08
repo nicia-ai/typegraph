@@ -50,6 +50,9 @@ export type Collation = "binary" | "caseInsensitive";
 export function compareRecordedInstants(left: RecordedInstant, right: RecordedInstant): -1 | 0 | 1;
 
 // @public
+type CompositionPartSide = "from" | "to";
+
+// @public
 export function createExternalRef<T extends string>(table: T): (id: string) => ExternalRefValue<T>;
 
 // @public (undocumented)
@@ -315,6 +318,8 @@ type ExtensionOntologyRelation = Readonly<{
     metaEdge: MetaEdgeName;
     from: string;
     to: string;
+    via?: string;
+    partSide?: CompositionPartSide;
 }>;
 
 // @public
@@ -679,6 +684,8 @@ type OntologyRelation = Readonly<{
     metaEdge: MetaEdge;
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
+    via?: string;
+    partSide?: CompositionPartSide;
 }>;
 
 // @public

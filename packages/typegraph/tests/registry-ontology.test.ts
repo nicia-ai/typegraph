@@ -17,6 +17,7 @@ import { z } from "zod";
 
 import {
   broader,
+  defineEdge,
   defineGraph,
   defineNode,
   disjointWith,
@@ -229,6 +230,8 @@ describe("partOf/hasPart - Composition", () => {
   const Engine = defineNode("Engine", { schema: emptySchema });
   const Car = defineNode("Car", { schema: emptySchema });
   const Vehicle = defineNode("Vehicle", { schema: emptySchema });
+  const installedIn = defineEdge("installedIn", { schema: emptySchema });
+  const partOfVehicle = defineEdge("partOfVehicle", { schema: emptySchema });
 
   const graph = defineGraph({
     id: "composition_test",
@@ -237,8 +240,24 @@ describe("partOf/hasPart - Composition", () => {
       Car: { type: Car },
       Vehicle: { type: Vehicle },
     },
-    edges: {},
-    ontology: [partOf(Engine, Car), partOf(Car, Vehicle)],
+    edges: {
+      installedIn: {
+        type: installedIn,
+        from: [Engine],
+        to: [Car],
+        cardinality: "one",
+      },
+      partOfVehicle: {
+        type: partOfVehicle,
+        from: [Car],
+        to: [Vehicle],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      partOf(Engine, Car, { via: installedIn }),
+      partOf(Car, Vehicle, { via: partOfVehicle }),
+    ],
   });
 
   const registry = buildKindRegistry(graph);
@@ -267,6 +286,7 @@ describe("partOf/hasPart - Composition", () => {
 describe("hasPart - Inverse of partOf", () => {
   const Wheel = defineNode("Wheel", { schema: emptySchema });
   const Bicycle = defineNode("Bicycle", { schema: emptySchema });
+  const hasWheel = defineEdge("hasWheel", { schema: emptySchema });
 
   const graph = defineGraph({
     id: "haspart_test",
@@ -274,8 +294,15 @@ describe("hasPart - Inverse of partOf", () => {
       Wheel: { type: Wheel },
       Bicycle: { type: Bicycle },
     },
-    edges: {},
-    ontology: [hasPart(Bicycle, Wheel)],
+    edges: {
+      hasWheel: {
+        type: hasWheel,
+        from: [Bicycle],
+        to: [Wheel],
+        targetCardinality: "one",
+      },
+    },
+    ontology: [hasPart(Bicycle, Wheel, { via: hasWheel })],
   });
 
   const registry = buildKindRegistry(graph);

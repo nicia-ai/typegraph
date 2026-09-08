@@ -36,6 +36,7 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
@@ -601,6 +602,7 @@ function serializeOntologyRelation(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
+    ...compositionRelationFields(relation),
   };
 }
 
