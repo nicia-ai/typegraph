@@ -449,12 +449,36 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   (alongside the schema-reads block), so a consumer of
 //   `"@nicia-ai/typegraph"` alone can name every field of a narrowed
 //   `ConstraintFenceViolation` or `MigrationErrorDetails` without a subpath
-//   import. Its debt therefore stays at the pre-batch baseline (388), not
-//   388→392. Gate: every added symbol at every OTHER moved entrypoint is one
-//   of the four names above (never `OntologyChange` itself, which is
-//   pre-existing debt everywhere including `.`), `.` is the one entrypoint
-//   this batch leaves unchanged, no OTHER entrypoint's debt decreased, and
-//   exactly 13 entrypoints moved.
+//   import. IN THIS BATCH's OWN commit, its debt therefore stayed at the
+//   pre-batch baseline (388), not 388→392 — item D.2 below moves `.` on top
+//   of that baseline instead. Gate (item A's own commit): every added symbol
+//   at every OTHER moved entrypoint is one of the four names above (never
+//   `OntologyChange` itself, which is pre-existing debt everywhere including
+//   `.`), `.` is the one entrypoint this batch leaves unchanged, no OTHER
+//   entrypoint's debt decreased, and exactly 13 entrypoints moved in this
+//   commit (a later batch, item D.2, moves more — see below).
+//
+// Edge acyclicity batch (roadmap §3.D.2, item D.2): the store's
+// `assertEdgeRelationsAcyclic` / `readEdgeAcyclicityViolations` add a fifth
+// `ConstraintFenceViolation` member (`src/store/claims/verify.ts`),
+// `EdgeAcyclicityViolation` (`src/store/acyclicity.ts`) — internal, exported
+// by name at NO entrypoint, unlike item A's `EdgeEndpointAllowance` /
+// `MisassignedEdgeEndpointRow`. A consumer narrowing `ConstraintFenceViolation`
+// to `{ family: "edgeAcyclicity" }` can therefore never import its shape by
+// name from any subpath, including `.` itself. Measured, not assumed: every
+// one of item A's SEVEN `ConstraintFenceViolation`-reaching entrypoints gains
+// exactly this one name, +1 apiece, on top of item A's own baseline —
+// `.` (388→389), `./graph-merge` (730→731), `./interchange` (713→714),
+// `./postgres/pglite` (710→711), `./profiler` (715→716), `./provenance`
+// (721→722), and `./sqlite/local` (710→711). No other entrypoint moves:
+// `./schema`, the six `./adapters/drizzle/*` sub-entrypoints, `./backend`,
+// `./core`, `./graph-extension`, `./adapters/drizzle/indexes`, and
+// `./indexes` never reach `ConstraintFenceViolation` at all. Gate: every
+// moved entrypoint gains exactly one name (`EdgeAcyclicityViolation`), `.`
+// is no longer exempt the way it was in item A (a batch CAN move it — the
+// exemption was about item A's four names specifically, not a standing
+// invariant), no entrypoint's debt decreased, and exactly 7 entrypoints
+// moved in THIS commit.
 //
 // Target-side edge cardinality (issue #610): every entrypoint that reaches
 // `GraphBackend`, `ManagedEdgeCreatePlan`, `CardinalityErrorDetails`,
