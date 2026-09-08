@@ -32,13 +32,9 @@ portable validating import checks each row as it writes and rolls it back
 per-row on a cycle, taking the per-graph write fence per chunk only when the
 graph declares an acyclic edge kind. Fused/atomic native write programs
 report `unsupported` for acyclic kinds and fall back to the portable fenced
-path. `ConstraintFenceViolation` is now a three-member union whose `target`
+path. `ConstraintFenceViolation` is now a four-member union whose `target`
 is present only on the claim-backed families, so consumers must narrow on
-`family` before reading it. `AcyclicEdgeRelation` members carry
-`{edgeKind, reversed}`, an oriented shape reserved for a future relation that
-folds more than one edge kind into a single acyclic population; every
-relation produced by a standalone `acyclic: true` registration today is
-`reversed: false`.
+`family` before reading it.
 
 ### Breaking changes
 
