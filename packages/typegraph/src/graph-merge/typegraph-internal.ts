@@ -69,6 +69,7 @@ export {
   storeQueryBackend,
   storeRuntime,
   transactionBackend,
+  type TransactionDeleteNodeWithPolicy,
   transactionDeleteNodeWithPolicy,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";

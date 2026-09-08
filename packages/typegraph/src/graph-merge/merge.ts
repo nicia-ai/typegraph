@@ -193,6 +193,7 @@ import type {
   NodeType,
   Store,
   TransactionBackend,
+  TransactionDeleteNodeWithPolicy,
   TransactionOptions,
   UniqueIntrospection,
   ValidityEndMutation,
@@ -201,7 +202,6 @@ import {
   advanceRevisionClock,
   forceRecordedGraphRevision,
   forceWriteTransactionRevision,
-  type NodeDeletePolicy,
   readRecordedClock,
   readRevisionOrigin,
   runRetriedUnit,
@@ -1896,20 +1896,14 @@ type MechanicalEdgeWrite = Readonly<{
   item: EdgeUpsert;
 }>;
 
-/**
- * A node delete bound to the SAME transaction merge apply is already running
- * in — see {@link transactionDeleteNodeWithPolicy}. Threaded down from
- * `commitPlan`'s and `mergeIncremental`'s own `target.transaction(tx => ...)`
- * callbacks (the only places `tx` itself, not just `transactionBackend(tx)`,
- * is in scope) rather than re-derived from `target`: the outer Store's own
- * hook runner reports a delete's `onOperationEnd` the instant it runs, so
- * building a fresh context from `target` here would report success for a
- * delete inside a merge that later rolls back.
- */
-type NodeDeleteWithPolicy = (
-  work: Readonly<{ kind: string; id: string }>,
-  policy?: NodeDeletePolicy,
-) => Promise<void>;
+// `TransactionDeleteNodeWithPolicy` (imported from `./typegraph-internal`) is
+// threaded down from `commitPlan`'s and `mergeIncremental`'s own
+// `target.transaction(tx => ...)` callbacks (the only places `tx` itself, not
+// just `transactionBackend(tx)`, is in scope) rather than re-derived from
+// `target`: the outer Store's own hook runner reports a delete's
+// `onOperationEnd` the instant it runs, so building a fresh context from
+// `target` here would report success for a delete inside a merge that later
+// rolls back. See {@link transactionDeleteNodeWithPolicy}.
 
 async function applyNodeRows<G extends GraphDef>(
   target: Store<G>,
@@ -1917,7 +1911,7 @@ async function applyNodeRows<G extends GraphDef>(
   nodesApi: TxNodes,
   deletions: readonly MergePlanEntityRef[],
   upserts: readonly MechanicalNodeWrite[],
-  deleteNodeWithPolicy: NodeDeleteWithPolicy,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
 ): Promise<number> {
   const afterImages = new Map<MergeKey, Readonly<Record<string, unknown>>>();
   const upsertsByKind = new Map<string, MechanicalNodeWrite[]>();
@@ -1971,14 +1965,17 @@ async function applyNodeRows<G extends GraphDef>(
         // collection facade: the facade's `delete(id)` takes no options by
         // design, and merge apply needs to state a policy — enforcement
         // stays on, so a part's own `restrict` edge still aborts the merge.
-        // No `cascadeComposition` is stated here: the cascade this field
-        // will suppress does not exist yet (see `NodeDeletePolicy`), and
-        // this delete is bound to THIS transaction's own hook-runner and
-        // attempt via `deleteNodeWithPolicy`, not a fresh context built from
-        // the outer `target` Store — see `NodeDeleteWithPolicy`.
+        // `cascadeComposition: false` is stated now even though the cascade
+        // it suppresses does not exist yet (see `NodeDeletePolicy`): the
+        // plan's own `nodeDeletions` already enumerate every part a
+        // composition delete would otherwise cascade to, so merge apply must
+        // never let a future cascade double-delete them. This delete is
+        // bound to THIS transaction's own hook-runner and attempt via
+        // `deleteNodeWithPolicy`, not a fresh context built from the outer
+        // `target` Store — see `TransactionDeleteNodeWithPolicy`.
         await deleteNodeWithPolicy(
           { kind: deletion.kind, id: deletion.id },
-          { enforceDeleteBehavior: true },
+          { enforceDeleteBehavior: true, cascadeComposition: false },
         );
       }
       const committed = new Set<MergeKey>();
@@ -2048,7 +2045,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   edgesApi: TxEdges,
   target: Store<G>,
   txBackend: TransactionBackend,
-  deleteNodeWithPolicy: NodeDeleteWithPolicy,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
 ): Promise<MergedCounts> {
   const nodeDeletions = [...plan.nodeDeletions].map(([identity, kind]) => ({
     kind,
@@ -2398,7 +2395,6 @@ type NodeCollectionLike = Readonly<{
     data: Record<string, unknown>,
     options?: Readonly<{ validFrom?: string | null }> & ValidityEndMutation,
   ) => Promise<unknown>;
-  delete: (id: string) => Promise<void>;
 }>;
 
 /** The edge-collection surface the commit uses (runtime, kind-string keyed). */
@@ -3789,7 +3785,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   edgesApi: TxEdges,
   txBackend: TransactionBackend,
   artifact: MergePlanArtifactV1,
-  deleteNodeWithPolicy: NodeDeleteWithPolicy,
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
 ): Promise<MergedCounts> {
   const committedNodes = await applyNodeRows(
     target,
