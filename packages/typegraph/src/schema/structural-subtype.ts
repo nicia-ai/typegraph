@@ -170,6 +170,110 @@ export function isStructuralSubtype(
 }
 
 // ============================================================
+// C.1 ↔ C.2 agreement projection
+// ============================================================
+
+/**
+ * Exactly the JSON Schema keywords TypeScript's structural assignability
+ * over `z.infer` can see: the shape (`type`, `properties`, `required`,
+ * `items`, `prefixItems`, `anyOf`, `oneOf`, `additionalProperties`) and
+ * literal value sets (`const`, `enum`) — both of which round-trip through a
+ * Zod schema's inferred TYPE. Every value-level constraint this predicate
+ * also compares (`minLength`/`maxLength`, `pattern`, `format`,
+ * `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`, `multipleOf`,
+ * `minItems`/`maxItems`) narrows a value at RUNTIME without narrowing its
+ * static TYPE — `z.string()` and `z.string().min(3)` share the type
+ * `string` — so C.1's compile-time check is blind to them.
+ */
+const TYPE_VISIBLE_KEYWORDS: ReadonlySet<string> = new Set([
+  "type",
+  "const",
+  "enum",
+  "properties",
+  "required",
+  "items",
+  "prefixItems",
+  "anyOf",
+  "oneOf",
+  "additionalProperties",
+]);
+
+function projectTypeVisibleValue(key: string, value: unknown): unknown {
+  switch (key) {
+    case "properties": {
+      const projected = createDataKeyedBag<JsonSchema>();
+      for (const [propertyName, propertySchema] of Object.entries(
+        value as Record<string, JsonSchema>,
+      )) {
+        projected[propertyName] = projectTypeVisible(propertySchema);
+      }
+      return projected;
+    }
+    case "items": {
+      return projectTypeVisible(value as JsonSchema);
+    }
+    case "prefixItems":
+    case "anyOf":
+    case "oneOf": {
+      return (value as readonly JsonSchema[]).map((member) =>
+        projectTypeVisible(member),
+      );
+    }
+    case "additionalProperties": {
+      return typeof value === "boolean" ? value : (
+          projectTypeVisible(value as JsonSchema)
+        );
+    }
+    default: {
+      return value;
+    }
+  }
+}
+
+/**
+ * `schema`, recursively reduced to only {@link TYPE_VISIBLE_KEYWORDS} — the
+ * fragment of a JSON Schema that TypeScript's structural assignability over
+ * `z.infer` can actually see. Feeds {@link isTypeLevelSubtype}.
+ */
+export function projectTypeVisible(schema: JsonSchema): JsonSchema {
+  const projected = createDataKeyedBag<unknown>();
+  for (const [key, value] of Object.entries(schema)) {
+    if (!TYPE_VISIBLE_KEYWORDS.has(key)) continue;
+    projected[key] = projectTypeVisibleValue(key, value);
+  }
+  return projected;
+}
+
+/**
+ * The RUNTIME prediction of what `subClassOf(child, parent)` / C.1's
+ * conditional-type check resolves to: `isStructuralSubtype` applied to each
+ * side's {@link projectTypeVisible} projection, rather than the full schema.
+ *
+ * One comparison engine (`isStructuralSubtype`), one projection
+ * (`projectTypeVisible`) — this is not a second walk of the schema, only a
+ * narrower view fed into the same predicate C.2 uses.
+ *
+ * `isStructuralSubtype(c, p).verdict === "subtype"` implies
+ * `isTypeLevelSubtype(c, p).verdict === "subtype"` — a hierarchy C.2 accepts
+ * always compiles under C.1
+ * (`tests/property/typed-subsumption-agreement.test.ts`). The converse does
+ * NOT hold: TypeScript cannot see a value-level constraint, so
+ * `isTypeLevelSubtype` accepts pairs `isStructuralSubtype` refuses (a bare
+ * `z.string()` child under a `z.string().min(3)` parent erases to identical
+ * types but is not a runtime subtype) — this is "C.1 is a filter, C.2 is the
+ * authority" (roadmap §1.3), not a defect in either predicate.
+ */
+export function isTypeLevelSubtype(
+  child: JsonSchema,
+  parent: JsonSchema,
+): StructuralSubtypeResult {
+  return isStructuralSubtype(
+    projectTypeVisible(child),
+    projectTypeVisible(parent),
+  );
+}
+
+// ============================================================
 // Named constants
 // ============================================================
 

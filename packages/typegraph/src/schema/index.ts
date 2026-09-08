@@ -100,6 +100,8 @@ export {
 
 export {
   isStructuralSubtype,
+  isTypeLevelSubtype,
+  projectTypeVisible,
   type StructuralIncomparableReason,
   type StructuralSubtypeReason,
   type StructuralSubtypeResult,
