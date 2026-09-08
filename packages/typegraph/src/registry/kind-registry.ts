@@ -28,6 +28,7 @@ import {
   type CompositionPartSide,
   type CompositionRelation,
   EMPTY_COMPOSITION_RELATION,
+  normalizePartWhole,
 } from "./composition-relation";
 
 const DISJOINT_PAIR_SEPARATOR = "|";
@@ -445,7 +446,12 @@ export class KindRegistry {
     return this.#composition.partSideByEdgeKind.get(edgeKind);
   }
 
-  /** The declared composition pair between this exact part and whole kind, if any. */
+  /**
+   * The declared composition pair between this exact part and whole kind, if
+   * any. Two realizing edges may hold the same (part, whole) pair (E-a-2);
+   * when they do, this returns the code-point-first `viaEdgeKind` (the sort
+   * order `CompositionRelation.pairs` already carries), not "all of them".
+   */
   getCompositionEdge(
     partKind: string,
     wholeKind: string,
@@ -744,13 +750,10 @@ function collectOntologyRelations(
         disjoint.push([fromName, toName]);
         break;
       }
-      case META_EDGE_PART_OF: {
-        partOf.push([fromName, toName]);
-        break;
-      }
+      case META_EDGE_PART_OF:
       case META_EDGE_HAS_PART: {
-        // hasPart is inverse of partOf
-        partOf.push([toName, fromName]);
+        const { partKind, wholeKind } = normalizePartWhole(relation);
+        partOf.push([partKind, wholeKind]);
         break;
       }
       case META_EDGE_INVERSE_OF: {

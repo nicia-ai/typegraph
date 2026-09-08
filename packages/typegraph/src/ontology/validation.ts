@@ -1,9 +1,13 @@
-import { type CompositionPartSide } from "../registry/composition-relation";
+import {
+  type CompositionPartSide,
+  isCompositionMetaEdge,
+} from "../registry/composition-relation";
 import {
   computeDisjointExpansionClosures,
   computeEquivalenceClasses,
   expandDisjointSide,
 } from "../registry/kind-registry";
+import { encodeTupleKey } from "../utils/tuple-key";
 import { computeTransitiveClosure } from "./closures";
 import {
   META_EDGE_BROADER,
@@ -145,11 +149,7 @@ export function validateOntologyRelations(
 function isReflexiveCompositionAllowed(
   relation: NamedOntologyRelation,
 ): boolean {
-  return (
-    (relation.metaEdge === META_EDGE_PART_OF ||
-      relation.metaEdge === META_EDGE_HAS_PART) &&
-    relation.via !== undefined
-  );
+  return isCompositionMetaEdge(relation.metaEdge) && relation.via !== undefined;
 }
 
 function validateSelfLoopsAndDuplicates(
@@ -182,7 +182,17 @@ function validateSelfLoopsAndDuplicates(
       }
     }
 
-    const key = `${relation.metaEdge}::${relation.from}->${relation.to}`;
+    // `via`/`partSide` join the key so two realizing edges can hold the
+    // same (part, whole) pair — the heterogeneous-edge shape
+    // `compositionEdgeKindsUnder` exists to serve — without colliding as
+    // duplicates.
+    const key = encodeTupleKey([
+      relation.metaEdge,
+      relation.from,
+      relation.to,
+      relation.via ?? "",
+      relation.partSide ?? "",
+    ]);
     if (seenKeys.has(key)) {
       issues.push({
         relationIndex: index,
@@ -426,11 +436,7 @@ function validateCompositionShape(
   issues: OntologyValidationIssue[],
 ): void {
   for (const [index, relation] of ontology.entries()) {
-    const isComposition =
-      relation.metaEdge === META_EDGE_PART_OF ||
-      relation.metaEdge === META_EDGE_HAS_PART;
-
-    if (isComposition) {
+    if (isCompositionMetaEdge(relation.metaEdge)) {
       if (relation.via === undefined) {
         issues.push({
           relationIndex: index,
