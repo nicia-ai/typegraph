@@ -22,8 +22,13 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
-import { ConfigurationError, KindNotFoundError } from "../../errors";
+import {
+  ConfigurationError,
+  KindNotFoundError,
+  UnsupportedPredicateError,
+} from "../../errors";
 import { type PolymorphicNodeType } from "../../ontology/types";
+import { compositionTraversalDirection } from "../../registry/composition-relation";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -737,6 +742,17 @@ export class QueryBuilder<
    * data that may span more than one node kind with different schemas, not a
    * single kind the graph's static type can name.
    *
+   * Deviation from the design ruling (composition-contract-design.md Q1,
+   * plan-E-d §5.1): the ruling calls for the alias to be typed when the
+   * closure resolves to a single kind. This implementation always returns
+   * `DynamicNodeType` — the conservative side, matching `wholes()` and never
+   * misrepresenting a multi-kind closure — because typing the single-kind
+   * case requires a conditional return type keyed on a set computed inside
+   * this method's body (`targetKinds.size === 1`), which the generic
+   * signature above cannot see before the call resolves. Recorded here
+   * rather than implemented silently; a future pass can add the
+   * single-kind-typed overload without changing this one's behavior.
+   *
    * Refuses rather than silently returning zero rows: an alias whose kind
    * declares no composition parts throws `ConfigurationError` with code
    * `COMPOSITION_NO_PARTS_DECLARED`.
@@ -883,29 +899,37 @@ export class QueryBuilder<
       );
     }
 
+    // The registry's `*KindsUnder`/`*KindsOver` readers return only the
+    // literal kinds a `partOf`/`hasPart` declaration named (Ed-a-r2-1's
+    // subclass-assignable rule applies to which PAIR matches, not to which
+    // concrete kinds the pair's declared endpoint admits at read time).
+    // Edge-endpoint validation accepts any subclass of a declared endpoint
+    // (`isAssignableToAny`), so a live row's actual kind can be an
+    // undeclared subclass of a declared target kind — expand through the
+    // same subclass closure `to(kind, alias, { includeSubClasses: true })`
+    // applies, or a real row is silently dropped from the result instead of
+    // refused or returned (Ed-02).
     const targetKinds = new Set<string>();
     for (const kind of sourceKinds) {
       for (const targetKind of targetKindsUnder(kind)) {
-        targetKinds.add(targetKind);
+        for (const concreteKind of registry.expandSubClasses(targetKind)) {
+          targetKinds.add(concreteKind);
+        }
       }
     }
 
-    // §1.7 orientation table: `parts()` reaches a `part -> whole` edge
-    // ("from") reversed and a `whole -> part` edge ("to") forward; `wholes()`
-    // flips both.
-    const forwardDirection: TraversalDirection =
-      relation === "parts" ? "in" : "out";
-    const reversedDirection: TraversalDirection =
-      relation === "parts" ? "out" : "in";
-
-    const forwardEdgeKinds: string[] = [];
-    const reversedEdgeKinds: string[] = [];
+    // §1.7 orientation table, derived through the one shared mapping
+    // (`compositionTraversalDirection`) `subgraph({ composition: true })`
+    // also uses, so the two navigators cannot drift on which way an edge is
+    // walked (Ed-01): a `part -> whole` edge ("from") reaches its parts
+    // reversed ("in") and its wholes forward ("out"); a `whole -> part`
+    // edge ("to") is the mirror.
+    const outEdgeKinds: string[] = [];
+    const inEdgeKinds: string[] = [];
     for (const edgeKind of edgeKinds) {
-      if (registry.compositionPartSide(edgeKind) === "from") {
-        forwardEdgeKinds.push(edgeKind);
-      } else {
-        reversedEdgeKinds.push(edgeKind);
-      }
+      const partSide = registry.compositionPartSide(edgeKind) ?? "from";
+      const direction = compositionTraversalDirection(partSide, relation);
+      (direction === "out" ? outEdgeKinds : inEdgeKinds).push(edgeKind);
     }
 
     // Uniform orientation (either set empty) needs no `inverseEdgeKinds` —
@@ -917,12 +941,24 @@ export class QueryBuilder<
       readonly string[],
       readonly string[],
     ] =
-      forwardEdgeKinds.length > 0 ?
-        [forwardDirection, forwardEdgeKinds, reversedEdgeKinds]
-      : [reversedDirection, reversedEdgeKinds, []];
+      outEdgeKinds.length > 0 ?
+        ["out", outEdgeKinds, inEdgeKinds]
+      : ["in", inEdgeKinds, []];
 
     const edgeAlias = `${nodeAlias}_edge`;
     validateSqlIdentifier(edgeAlias);
+
+    // The derived edge alias is not caller-chosen the way `.traverse()`'s
+    // is, so a collision is invisible to the caller until it silently
+    // merges two different edge types under one alias (Ed-11) — refuse
+    // rather than let `whereEdge(edgeAlias, ...)` later target an
+    // ambiguous traversal.
+    if (this.#getEdgeKindNamesForAlias(edgeAlias) !== undefined) {
+      throw new ConfigurationError(
+        `.${relation}("${nodeAlias}") would derive the edge alias "${edgeAlias}", which this query already uses for another traversal. Choose a different alias for .${relation}("${nodeAlias}") or for the conflicting traversal.`,
+        { alias: edgeAlias, relation, nodeAlias },
+      );
+    }
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -971,6 +1007,28 @@ export class QueryBuilder<
     // dropped by the optimization.
     const wantsRecursiveOutput =
       options?.depth !== undefined || options?.path !== undefined;
+    const willRecurse = !(options?.maxHops === 1 && !wantsRecursiveOutput);
+
+    // A recursing `parts()`/`wholes()` compiles to a variable-length
+    // traversal, and the compiler supports only one of those per query
+    // (`runRecursiveTraversalSelectionPass`). Refuse here, naming the step
+    // and the `maxHops: 1` escape hatch, rather than letting the query build
+    // successfully and fail deep in the compiler with a message that names
+    // neither (Ed-05).
+    if (willRecurse && this.#state.traversals.length > 0) {
+      throw new UnsupportedPredicateError(
+        `.${relation}("${nodeAlias}") recurses by default and compiles to a variable-length traversal, but this query already has ${this.#state.traversals.length} traversal(s) before it. A query may contain only one recursive traversal.`,
+        {
+          relation,
+          alias: nodeAlias,
+          existingTraversalCount: this.#state.traversals.length,
+        },
+        {
+          suggestion: `Pass { maxHops: 1 } to .${relation}("${nodeAlias}", ...) to compile it as a direct (non-recursive) traversal, or split this into separate queries.`,
+        },
+      );
+    }
+
     return (options?.maxHops === 1 && !wantsRecursiveOutput ?
       traversalBuilder.toKindSet(targetKindList, nodeAlias)
     : traversalBuilder

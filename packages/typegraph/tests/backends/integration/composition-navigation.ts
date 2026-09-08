@@ -30,7 +30,9 @@ import {
   defineGraph,
   defineNode,
   hasPart,
+  type NodeRef,
   partOf,
+  subClassOf,
 } from "../../../src";
 import { matchingObject } from "../../test-utils";
 import {
@@ -59,6 +61,10 @@ const CnParagraph = defineNode("CnParagraph", {
 const CnSection = defineNode("CnSection", {
   schema: z.object({ title: z.string() }),
 });
+/** An undeclared subclass of `CnEpisode` for the composition relation — no `partOf`/`hasPart` names it directly. */
+const CnBonusEpisode = defineNode("CnBonusEpisode", {
+  schema: z.object({ title: z.string() }),
+});
 
 const cnEpisodeOf = defineEdge("cnEpisodeOf", { schema: z.object({}) });
 const cnSegmentOf = defineEdge("cnSegmentOf", { schema: z.object({}) });
@@ -80,6 +86,7 @@ const compositionNavigationGraph = defineGraph({
     CnChapter: { type: CnChapter },
     CnParagraph: { type: CnParagraph },
     CnSection: { type: CnSection },
+    CnBonusEpisode: { type: CnBonusEpisode },
   },
   edges: {
     cnEpisodeOf: {
@@ -119,6 +126,7 @@ const compositionNavigationGraph = defineGraph({
     hasPart(CnBook, CnChapter, { via: cnBookHasChapter }),
     partOf(CnParagraph, CnChapter, { via: cnParagraphOf }),
     partOf(CnSection, CnSection, { via: cnParentSection, partSide: "from" }),
+    subClassOf(CnBonusEpisode, CnEpisode),
   ],
 });
 
@@ -199,6 +207,41 @@ export function registerCompositionNavigationIntegrationTests(
       );
     });
 
+    it("parts() includes an undeclared subclass of a declared part kind", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { podcast } = await seedCompositionFixtures(store);
+      const bonusEpisode = await store.nodes.CnBonusEpisode.create({
+        title: "Bonus Episode",
+      });
+      // `cnEpisodeOf.create` is typed against the edge's DECLARED `from`
+      // kind (CnEpisode); the cast crosses only the compile-time gap — the
+      // ontology's `subClassOf(CnBonusEpisode, CnEpisode)` makes the
+      // resulting row a legitimate one at runtime, accepted by
+      // edge-endpoint validation via `isAssignableToAny`, exactly as the
+      // finding describes.
+      await store.edges.cnEpisodeOf.create(
+        bonusEpisode as unknown as NodeRef<typeof CnEpisode>,
+        podcast,
+        {},
+      );
+
+      // MUTATION CHECK: reverting the subclass-expansion fix (using the bare
+      // declared kind list from `compositionPartKindsUnder` instead of
+      // expanding each declared kind through `registry.expandSubClasses`)
+      // makes CnBonusEpisode disappear from this result even though the
+      // edge row exists and passed endpoint validation — verified and
+      // reverted.
+      const rows = await store
+        .query()
+        .from("CnPodcast", "p")
+        .whereNode("p", (p) => p.id.eq(podcast.id))
+        .parts("x")
+        .select((ctx) => ctx.x)
+        .execute();
+
+      expect(rows.map((row) => row.kind)).toContain("CnBonusEpisode");
+    });
+
     it("parts() unions mixed orientation across levels (hasPart then partOf)", async () => {
       const store = await context.createStore(compositionNavigationGraph);
       const { book } = await seedCompositionFixtures(store);
@@ -255,9 +298,13 @@ export function registerCompositionNavigationIntegrationTests(
         new Set([sectionChild.id, sectionGrandchild.id]),
       );
 
-      // MUTATION CHECK: dropping the `maxHops: 1` clamp (always recursing to
-      // full depth) makes this assertion fail by including the grandchild —
-      // verified and reverted.
+      // MUTATION CHECK: the `maxHops === 1` clamp and the `{ maxHops:
+      // options.maxHops }` forwarding onto `.recursive(...)` are two
+      // separate mechanisms that happen to agree here — dropping the clamp
+      // ALONE still passes, because `.recursive({ maxHops: 1 })` bounds
+      // depth to 1 on its own. Only mutating BOTH together makes this
+      // assertion fail — verified and reverted. The `maxHops: 2` case below
+      // is the one only the forwarding mechanism guards.
       const directRows = await store
         .query()
         .from("CnSection", "s")
@@ -266,6 +313,109 @@ export function registerCompositionNavigationIntegrationTests(
         .select((ctx) => ctx.x)
         .execute();
       expect(directRows.map((row) => row.id)).toEqual([sectionChild.id]);
+
+      // A great-grandchild, added only here so the unbounded assertion
+      // above (which expects exactly {child, grandchild}) is unaffected.
+      const sectionGreatGrandchild = await store.nodes.CnSection.create({
+        title: "Great-grandchild Section",
+      });
+      await store.edges.cnParentSection.create(
+        sectionGreatGrandchild,
+        sectionGrandchild,
+        {},
+      );
+
+      // MUTATION CHECK: dropping the `{ maxHops: options.maxHops }`
+      // forwarding (so the recursive traversal always runs unbounded
+      // regardless of the option) makes this include the great-grandchild —
+      // verified and reverted. Unlike the `maxHops: 1` case above, the
+      // `maxHops === 1` clamp cannot substitute for this: it does not fire
+      // for `maxHops: 2`.
+      const twoHopRows = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(sectionRoot.id))
+        .parts("x", { maxHops: 2 })
+        .select((ctx) => ctx.x)
+        .execute();
+      expect(new Set(twoHopRows.map((row) => row.id))).toEqual(
+        new Set([sectionChild.id, sectionGrandchild.id]),
+      );
+    });
+
+    it("parts() exposes depth and path when requested", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { sectionRoot, sectionChild, sectionGrandchild } =
+        await seedCompositionFixtures(store);
+
+      const rows = await store
+        .query()
+        .from("CnSection", "s")
+        .whereNode("s", (s) => s.id.eq(sectionRoot.id))
+        .parts("x", { depth: "d", path: "p" })
+        .select((ctx) => ({ id: ctx.x.id, depth: ctx.d, path: ctx.p }))
+        .execute();
+
+      const byId = new Map(rows.map((row) => [row.id, row]));
+      expect(byId.get(sectionChild.id)?.depth).toBe(1);
+      expect(byId.get(sectionChild.id)?.path).toEqual([
+        sectionRoot.id,
+        sectionChild.id,
+      ]);
+      expect(byId.get(sectionGrandchild.id)?.depth).toBe(2);
+      expect(byId.get(sectionGrandchild.id)?.path).toEqual([
+        sectionRoot.id,
+        sectionChild.id,
+        sectionGrandchild.id,
+      ]);
+    });
+
+    it("a recursing parts() refuses when the query already has another traversal", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      await seedCompositionFixtures(store);
+
+      // MUTATION CHECK: removing the `willRecurse && traversals.length > 0`
+      // guard lets this query build; it then fails deep in the compiler
+      // (`runRecursiveTraversalSelectionPass`) with a generic message that
+      // names neither `parts()` nor the `maxHops: 1` workaround — verified
+      // and reverted.
+      expect(() =>
+        store
+          .query()
+          .from("CnSection", "s")
+          .traverse("cnParentSection", "s_edge", { direction: "in" })
+          .to("CnSection", "y")
+          .parts("x", { from: "s" }),
+      ).toThrow(expect.objectContaining({ code: "UNSUPPORTED_PREDICATE" }));
+
+      // The identical call with `maxHops: 1` compiles fine: it does not
+      // recurse, so the one-recursive-traversal limitation never applies.
+      expect(() =>
+        store
+          .query()
+          .from("CnSection", "s")
+          .traverse("cnParentSection", "s_edge", { direction: "in" })
+          .to("CnSection", "y")
+          .parts("x", { from: "s", maxHops: 1 }),
+      ).not.toThrow();
+    });
+
+    it("parts() refuses when the derived edge alias collides with an existing traversal", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      await seedCompositionFixtures(store);
+
+      // MUTATION CHECK: removing the `#getEdgeKindNamesForAlias` collision
+      // guard lets this build; `x_edge` then silently merges into
+      // `dynamicEdgeAliases` for two different edge types instead of
+      // refusing — verified and reverted.
+      expect(() =>
+        store
+          .query()
+          .from("CnPodcast", "p")
+          .traverse("cnEpisodeOf", "x_edge", { direction: "in" })
+          .to("CnEpisode", "y")
+          .parts("x", { from: "p", maxHops: 1 }),
+      ).toThrow(expect.objectContaining({ code: "CONFIGURATION_ERROR" }));
     });
 
     it("parts() on a kind declaring no composition parts refuses", async () => {
@@ -307,6 +457,30 @@ export function registerCompositionNavigationIntegrationTests(
       expect(result.root?.kind).toBe("CnPodcast");
       expect(new Set(result.nodes.keys())).toEqual(
         new Set([podcast.id, episode1.id, episode2.id, segment1.id]),
+      );
+    });
+
+    it("subgraph({ composition: true }) rooted mid-tree closes only toward parts, never ancestors or siblings", async () => {
+      const store = await context.createStore(compositionNavigationGraph);
+      const { sectionRoot, sectionChild, sectionGrandchild } =
+        await seedCompositionFixtures(store);
+      const sectionSibling = await store.nodes.CnSection.create({
+        title: "Sibling Section",
+      });
+      await store.edges.cnParentSection.create(sectionSibling, sectionRoot, {});
+
+      // MUTATION CHECK: reverting the oriented-closure fix (walking
+      // `compositionEdgeKinds` as a flat `direction: "both"` instead of the
+      // per-edge-kind direction `compositionTraversalDirection` derives)
+      // makes this include `sectionRoot` and `sectionSibling` alongside the
+      // expected two nodes — verified and reverted.
+      const result = await store.subgraph(sectionChild.id, {
+        edges: [],
+        composition: true,
+      });
+
+      expect(new Set(result.nodes.keys())).toEqual(
+        new Set([sectionChild.id, sectionGrandchild.id]),
       );
     });
 

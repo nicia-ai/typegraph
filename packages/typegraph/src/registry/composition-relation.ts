@@ -173,6 +173,31 @@ export function inferCompositionPartSide(
   return { partSide: inferred };
 }
 
+/**
+ * THE side->direction mapping for composition navigation: which way a
+ * realizing edge kind must be walked to move toward its `"parts"` (or
+ * `"wholes"`) end, given which endpoint carries the part.
+ *
+ * A `part -> whole` edge (`partSide: "from"`) reaches its parts by walking
+ * "in" (reversed) and its wholes by walking "out" (its own direction); a
+ * `whole -> part` edge (`partSide: "to"`, the `has_*` convention) is the
+ * mirror. Every composition navigator — the query builder's `parts()`/
+ * `wholes()` and `subgraph({ composition: true })`'s parts closure — derives
+ * its traversal direction through this one function so the two paths cannot
+ * drift on which way an edge is walked (see the composition-navigation
+ * lane's Ed-01 finding: `subgraph` once re-derived this as a flat
+ * direction: "both", which climbs to ancestors and re-descends into
+ * siblings instead of reaching only the descendants).
+ */
+export function compositionTraversalDirection(
+  partSide: CompositionPartSide,
+  towards: "parts" | "wholes",
+): "out" | "in" {
+  const directionTowardParts: "out" | "in" = partSide === "from" ? "in" : "out";
+  if (towards === "parts") return directionTowardParts;
+  return directionTowardParts === "in" ? "out" : "in";
+}
+
 // ============================================================
 // The builder / validator
 // ============================================================
