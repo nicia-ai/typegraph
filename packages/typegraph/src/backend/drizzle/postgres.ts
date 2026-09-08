@@ -186,6 +186,7 @@ import {
 import {
   edgeMatchIdentityPairCheckName,
   edgeMatchIdentityUniqueIndexName,
+  generatePgCreateIndexSQL,
   generatePgCreateTableSQL,
   generatePostgresDDL,
   generatePostgresEdgeMatchIdentityUpgradeDDL,
@@ -1534,6 +1535,13 @@ export function buildPostgresEngineProfile(
     writeVersion: writeBaseSchemaVersion,
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl: generatePgCreateTableSQL(tables.fences),
+    identityTransitionsTableDdl: [
+      generatePgCreateTableSQL(tables.identityTransitions),
+      ...generatePgCreateIndexSQL(tables.identityTransitions),
+    ],
+    identityTransitionRetentionTableDdl: generatePgCreateTableSQL(
+      tables.identityTransitionRetention,
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /
