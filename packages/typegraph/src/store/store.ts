@@ -213,7 +213,6 @@ import {
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
-  ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
   parseSerializedSchema,
   requiresMigration as requiresMigrationImpl,
   type SchemaManagerOptions,
@@ -4421,7 +4420,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 this.graphId,
                 classification,
               ),
-            schemaTighteningPreflight,
+            schemaTighteningPreflight?.run,
             identityCandidate === undefined ? undefined : (
               (target: SchemaCommitPreflightBackend) =>
                 identityCandidate.identitySchemaPreflight(
@@ -4435,7 +4434,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             identityCandidate === undefined &&
               schemaTighteningPreflight !== undefined
           ) ?
-            ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+            schemaTighteningPreflight.capabilityError
           : undefined,
         );
     // Provision per-field vector tables + durable markers for any embedding

@@ -250,6 +250,20 @@ against the live population before the version is published:
   independently for each; either violation refuses the whole commit, and the
   thrown error reports every newly-constrained axis, not just the first one
   found.
+- A commit that declares a constrained `cardinality` or `targetCardinality`
+  on a **brand-new edge kind** owes this exact same check: a stored schema
+  with no entry for the kind reads as `many` on both axes, so any constrained
+  value the new kind declares differs from that default and is probed like
+  any other tightening. This is intentional — an edge kind can be re-added
+  after removal, with live rows already under it — but it means a purely
+  additive schema change (adding a kind) can still require the atomic
+  preflight primitive described below.
+
+Like an ontology tightening, this check needs the backend's atomic
+preflight-commit primitive (`commitSchemaVersionWithPreflight`); a backend
+that implements only `commitSchemaVersion` throws `ConfigurationError` code
+`EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` — see
+[Schema-tightening and constraint-fence audit guard codes](/errors#schema-tightening-and-constraint-fence-audit-guard-codes).
 
 A refused tightening throws `MigrationError` with
 `details.reason === "edge-cardinality-tightening-violated"`:

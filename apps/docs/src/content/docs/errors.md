@@ -1206,15 +1206,17 @@ try {
 }
 ```
 
-#### Ontology tightening and constraint-fence audit guard codes
+#### Schema-tightening and constraint-fence audit guard codes
 
-Committing an ontology tightening uses stable `ConfigurationError` detail
-codes when the backend cannot run the required data check atomically:
+Committing a schema tightening — ontology or edge cardinality — uses stable
+`ConfigurationError` detail codes when the backend cannot run the required
+data check atomically:
 
 | `details.code` | Meaning |
 | --- | --- |
 | `ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the ontology-tightening data check atomically with the schema-version compare-and-swap. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
-| `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` | The backend does not implement `readConstraintFenceViolations` at all, so neither `store.verifyConstraintFences()` nor an ontology-tightening preflight can run. |
+| `EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND` | The backend cannot commit the edge-cardinality-tightening data check atomically with the schema-version compare-and-swap. Any commit that newly declares a constrained `cardinality` or `targetCardinality` on an edge kind — including declaring one on a brand-new kind — owes this same atomic check. Run the migration through a backend built by `createSqliteBackend` or `createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`. |
+| `CONSTRAINT_FENCE_AUDIT_UNSUPPORTED` | The backend does not implement `readConstraintFenceViolations` at all, so neither `store.verifyConstraintFences()` nor a schema-tightening preflight can run. |
 | `CONSTRAINT_FENCE_AUDIT_FAMILY_UNSUPPORTED` | The backend ran the audit but did not answer the `edgeEndpointAssignability` family it was asked for (`misassignedEdgeEndpointRows` was left `undefined`). An empty report there would be indistinguishable from a clean database, so the audit refuses rather than reporting one. |
 
 ### `BaseSchemaMigrationError`

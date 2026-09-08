@@ -2,6 +2,7 @@
  * Schema serialization, hashing, introspection and diffing for
  * `targetCardinality` (issue #610, §6).
  */
+import { sql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -11,15 +12,17 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import {
   computeSchemaDiff,
   computeSchemaHash,
   deserializeSchema,
+  type SerializedSchema,
   serializeSchema,
 } from "../src/schema";
-import { parseSerializedSchema } from "../src/schema/manager";
+import { ensureSchema, parseSerializedSchema } from "../src/schema/manager";
 import { requireDefined } from "../src/utils/presence";
-import { createTestBackend } from "./test-utils";
+import { createTestBackend, createTestDatabase } from "./test-utils";
 
 const Person = defineNode("SchemaTcPerson", { schema: z.object({}) });
 const knows = defineEdge("schemaTcKnows", { schema: z.object({}) });
@@ -158,4 +161,65 @@ describe("targetCardinality diffing", () => {
   // MUTATION CHECK (verified): remove the `targetCardinality` sibling block
   // from `diffEdgeDef` (`src/schema/migration.ts`). The first test above
   // fails (`change` is `undefined`).
+});
+
+describe("targetCardinality and ensureSchema's hash short-circuit", () => {
+  // Because `serializeEdgeDef` writes `targetCardinality` unconditionally
+  // (see the test above), a schema document stored before this release never
+  // matches the current hash again, even though loading it back parses the
+  // absent key as "many" via the same zod default — a semantically EMPTY
+  // change. `ensureSchema` must still report `"unchanged"` for a graph that
+  // never touches `targetCardinality`, and — this is the part the changeset
+  // must not overstate as free — it does so by falling through the full
+  // serialize + diff walk and returning early on `!diff.hasChanges`, never
+  // rewriting the stored (pre-D.1) hash to the current one. That means this
+  // exact walk repeats on every future boot of the same graph, forever.
+  it("reports unchanged, and leaves the stored hash untouched, for a document missing the key", async () => {
+    const db = createTestDatabase();
+    const backend = createSqliteBackend(db);
+    const graph = buildGraph(); // targetCardinality left undeclared ("many")
+
+    const currentDocument = serializeSchema(graph, 1) as Record<
+      string,
+      unknown
+    >;
+    const edges = currentDocument["edges"] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    delete requireDefined(edges["schemaTcKnows"])["targetCardinality"];
+    // Cast through `unknown`: this object is deliberately missing the
+    // required `targetCardinality` field, exactly as a pre-D.1 stored
+    // document is — `computeSchemaHash` hashes whatever shape it is handed
+    // and a real caller only ever gets here via `parseSerializedSchema`'s own
+    // loose-record path, not this compile-time type.
+    const preD1Hash = await computeSchemaHash(
+      currentDocument as unknown as SerializedSchema,
+    );
+
+    db.run(sql`
+      INSERT INTO typegraph_schema_versions
+        (graph_id, version, schema_hash, schema_doc, created_at, is_active)
+      VALUES (
+        ${graph.id}, 1, ${preD1Hash},
+        ${JSON.stringify(currentDocument)},
+        '2026-01-01T00:00:00.000Z', 1
+      )
+    `);
+
+    const result = await ensureSchema(backend, graph);
+    expect(result.status).toBe("unchanged");
+
+    const rows = db.all(sql`
+      SELECT schema_hash FROM typegraph_schema_versions
+      WHERE graph_id = ${graph.id} AND version = 1
+    `) as readonly Readonly<{ schema_hash: string }>[];
+    expect(requireDefined(rows[0]).schema_hash).toBe(preD1Hash);
+  });
+  // MUTATION CHECK (verified): with `targetCardinalityZod`'s `.default("many")`
+  // (`src/schema/types.ts`) temporarily removed, the stripped document's
+  // parsed `targetCardinality` reads `undefined` instead of `"many"`, the diff
+  // against the current graph's `"many"` is no longer empty, and this test
+  // fails with `result.status` reading `"migrated"` (or throwing, depending
+  // on `throwOnBreaking`) instead of `"unchanged"`.
 });

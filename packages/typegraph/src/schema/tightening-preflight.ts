@@ -36,6 +36,55 @@ import {
   ontologyTighteningProbes,
 } from "./ontology-change";
 
+/**
+ * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
+ * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
+ * for a tightening-only commit would misdirect an operator on a graph with
+ * identity disabled, so `prepareSchemaTighteningPreflight` hands back the
+ * SPECIFIC bag its own decision earned, rather than a caller re-deriving
+ * which half (ontology or edge-cardinality) is actually why the atomic
+ * primitive is needed.
+ */
+export type AtomicPreflightCapabilityError = Readonly<{
+  code: string;
+  message: string;
+  suggestion?: string;
+}>;
+
+/**
+ * Thrown when an ontology tightening needs the atomic preflight-commit
+ * primitive and the backend does not implement it.
+ */
+const ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically validate an ontology tightening against existing data as part of a schema transition.",
+    suggestion:
+      "Run this migration through a backend built by `createSqliteBackend` or " +
+      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+  };
+
+/**
+ * Thrown when an edge-cardinality tightening (a commit that newly declares a
+ * constrained `cardinality` or `targetCardinality` on an edge kind, INCLUDING
+ * a brand-new kind — see {@link newlyConstrainedEdgeAxes}) needs the atomic
+ * preflight-commit primitive and the backend does not implement it. Kept
+ * distinct from {@link ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR}
+ * so the refusal names the axis a caller actually declared, rather than
+ * blaming "ontology" for a commit that touched no disjointness, uniqueness,
+ * or endpoint-assignability axiom at all.
+ */
+const EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically validate a newly-constrained edge cardinality against existing data as part of a schema transition.",
+    suggestion:
+      "Run this migration through a backend built by `createSqliteBackend` or " +
+      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+  };
+
 export type SchemaTighteningPreflightParams = Readonly<{
   graphId: string;
   fromVersion: number;
@@ -148,9 +197,30 @@ function buildEdgeCardinalityTighteningViolatedError(
 }
 
 /**
+ * The data preflight a schema tightening owes, alongside the capability
+ * error a caller refuses with when its backend cannot commit that preflight
+ * atomically.
+ */
+export type SchemaTighteningPreflight = Readonly<{
+  run: (target: SchemaCommitPreflightBackend) => Promise<void>;
+  /**
+   * {@link EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR}
+   * when this commit newly constrains an edge cardinality — on either axis,
+   * including a brand-new kind — {@link
+   * ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR} otherwise. Decided
+   * HERE, from the same `newlyConstrainedAxes` fold `run` above closes over,
+   * so a caller names the axis this exact preflight is about instead of
+   * re-deriving which half applies (and risking a refusal that blames
+   * "ontology" for a commit that touched no disjointness, uniqueness, or
+   * endpoint-assignability axiom at all).
+   */
+  capabilityError: AtomicPreflightCapabilityError;
+}>;
+
+/**
  * The data preflight a schema tightening owes, or `undefined` when the
  * proposal tightens nothing on either the ontology or the edge-cardinality
- * axis. Runs INSIDE the schema-commit transaction.
+ * axis. Its `run` step executes INSIDE the schema-commit transaction.
  *
  * Takes NO advisory lock. Under the PREVIOUS schema the tightening's kinds
  * are not yet disjoint (or their uniqueness components have not yet merged,
@@ -167,7 +237,7 @@ function buildEdgeCardinalityTighteningViolatedError(
  * When BOTH halves have violations, the edge-cardinality refusal wins: it is
  * the more specific diagnosis, and the two reasons are mutually exclusive
  * gates on the same commit (fixing one leaves the other still refusing on
- * retry).
+ * retry). The same preference governs `capabilityError`.
  *
  * @throws ConfigurationError if either `params.before` or `params.after`
  *   cannot be interpreted as a coherent ontology and `params.changes` was
@@ -175,7 +245,7 @@ function buildEdgeCardinalityTighteningViolatedError(
  */
 export function prepareSchemaTighteningPreflight(
   params: SchemaTighteningPreflightParams,
-): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
+): SchemaTighteningPreflight | undefined {
   const changes =
     params.changes ?? classifyOntologyChanges(params.before, params.after);
   const probes = ontologyTighteningProbes(changes);
@@ -197,7 +267,7 @@ export function prepareSchemaTighteningPreflight(
     uniquenessAxisGroupFor(group.constraintName, group.coveredKinds),
   );
 
-  return async (target: SchemaCommitPreflightBackend): Promise<void> => {
+  const run = async (target: SchemaCommitPreflightBackend): Promise<void> => {
     const violations = await auditConstraintFences(target, {
       declarations: {
         graphId: params.graphId,
@@ -228,5 +298,13 @@ export function prepareSchemaTighteningPreflight(
       );
     }
     throw buildOntologyTighteningViolatedError(params, changes, violations);
+  };
+
+  return {
+    run,
+    capabilityError:
+      newlyConstrainedAxes.length > 0 ?
+        EDGE_CARDINALITY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+      : ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
   };
 }

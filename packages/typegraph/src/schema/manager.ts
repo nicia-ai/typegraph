@@ -62,7 +62,10 @@ import {
   serializeSchema,
   serializeSchemaPreservingUnknownFields,
 } from "./serializer";
-import { prepareSchemaTighteningPreflight } from "./tightening-preflight";
+import {
+  type AtomicPreflightCapabilityError,
+  prepareSchemaTighteningPreflight,
+} from "./tightening-preflight";
 import { type SerializedSchema, serializedSchemaZod } from "./types";
 
 /**
@@ -483,7 +486,7 @@ export async function ensureSchema<G extends GraphDef>(
         changes: diff.ontology,
       });
       const preflight = composeSchemaCommitPreflight([
-        schemaTighteningPreflight,
+        schemaTighteningPreflight?.run,
         identityPreflight,
       ]);
       const committedRow =
@@ -500,8 +503,11 @@ export async function ensureSchema<G extends GraphDef>(
             activeSchema.version,
             preflight,
             storedSchema,
-            identityPreflight === undefined ?
-              ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+            (
+              identityPreflight === undefined &&
+                schemaTighteningPreflight !== undefined
+            ) ?
+              schemaTighteningPreflight.capabilityError
             : undefined,
           );
       await options?.onAfterMigrate?.(hookContext);
@@ -766,36 +772,16 @@ function schemaNotInitializedError(
 /**
  * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
  * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
- * for an ontology-only tightening would misdirect an operator on a graph
- * with identity disabled, so the primitive takes this bag rather than
- * hardcoding one message.
+ * for a tightening-only commit would misdirect an operator on a graph with
+ * identity disabled, so the primitive takes this bag rather than hardcoding
+ * one message. The tightening-specific bags live in `./tightening-preflight`,
+ * beside the decision that picks between them.
  */
-export type AtomicPreflightCapabilityError = Readonly<{
-  code: string;
-  message: string;
-  suggestion?: string;
-}>;
-
 const IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
   {
     code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
     message:
       "This backend cannot atomically commit identity data with a schema transition.",
-  };
-
-/**
- * Thrown when an ontology tightening (see `./ontology-tightening-preflight`)
- * needs the atomic preflight-commit primitive and the backend does not
- * implement it.
- */
-export const ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
-  {
-    code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
-    message:
-      "This backend cannot atomically validate an ontology tightening against existing data as part of a schema transition.",
-    suggestion:
-      "Run this migration through a backend built by `createSqliteBackend` or " +
-      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
   };
 
 /**
@@ -1247,7 +1233,7 @@ export async function migrateSchema<G extends GraphDef>(
               guardedDrops,
             ),
           edgeMatchIdentityPreflight,
-          schemaTighteningPreflight,
+          schemaTighteningPreflight?.run,
           identityPreflight,
         ]),
         storedSchema,
@@ -1255,7 +1241,7 @@ export async function migrateSchema<G extends GraphDef>(
           identityPreflight === undefined &&
             schemaTighteningPreflight !== undefined
         ) ?
-          ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+          schemaTighteningPreflight.capabilityError
         : undefined,
       );
   return committed.version;
