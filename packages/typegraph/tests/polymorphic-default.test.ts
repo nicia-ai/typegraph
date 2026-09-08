@@ -5,14 +5,32 @@
  * (a supertype query is polymorphic unless narrowed). Seven internal call
  * sites are pinned to `false` so they stay exact-kind under the new
  * default: `store.search()`'s candidate subquery, and five collection
- * paths (`find({where})`, `updateWhere` x2, `compareAndSet`,
- * `updateWhere`'s `exists` related-kind traversal). This file proves each
- * pin with a test that would fail if the pin were dropped.
+ * paths (`find({where})`, `updateWhere` x2 (its own root, plus the `exists`
+ * leg's root), `compareAndSet`, and `updateWhere`'s `exists` RELATED-kind
+ * traversal).
+ *
+ * Two shapes of pin, told apart honestly (C13-R1-01) rather than claimed
+ * uniformly load-bearing:
+ *
+ * - `find({ where })` and the `exists` leg's RELATED-kind `toDynamic` pin
+ *   ARE genuinely load-bearing: dropping either changes a real result set,
+ *   and the tests below fail without them (mutation-checked).
+ * - The other five pins — `search()`'s candidate subquery, `compareAndSet`'s
+ *   root, `updateWhere`'s own root, and the `exists` leg's OWN root
+ *   `fromDynamic` — are DEFENSE IN DEPTH with no observable effect today.
+ *   Each candidate id they widen still passes through an outer exact-kind
+ *   fence one layer down (`WHERE nodes.kind = <collection's kind>` in
+ *   `buildUpdateNodeSet`, or `nodeKind: kind` on the `backend.fulltextSearch`
+ *   call), so a subclass id the pin would have let through is filtered out
+ *   there regardless. Kept as an explicit second layer against a future
+ *   change to that outer fence, not because today's tests can observe them
+ *   failing — dropping any of the five leaves every test in this file
+ *   green.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, subClassOf } from "../src";
+import { defineEdge, defineGraph, defineNode, subClassOf } from "../src";
 import { searchable } from "../src/core/searchable";
 import { createStoreWithSchema } from "../src/store/store";
 import { requireDefined } from "../src/utils/presence";
@@ -102,7 +120,12 @@ describe("Q3 — from()/to() default to includeSubClasses: true", () => {
   });
 });
 
-describe("Q3 pin — store.search() candidate subquery stays exact-kind", () => {
+describe("Q3 pin — store.search() candidate subquery stays exact-kind (defense in depth)", () => {
+  // NOT mutation-checked: `backend.fulltextSearch({ nodeKind: kind, ... })`
+  // already scopes the physical search to the exact kind regardless of what
+  // the candidate subquery's `from()` widens to, so dropping the
+  // `{ includeSubClasses: false }` pin at src/store/search.ts leaves this
+  // test green. See the module docblock above.
   it("a fulltext search with no includeSubClasses does not return subclass rows", async () => {
     const SearchableMedia = defineNode("SearchMedia", {
       schema: z.object({ title: searchable({ language: "english" }) }),
@@ -186,6 +209,11 @@ describe("Q3 pin — store.search() candidate subquery stays exact-kind", () => 
 });
 
 describe("Q3 pin — collection APIs stay exact-kind", () => {
+  // Load-bearing: `nodes.Media.find()`'s no-`where` branch goes straight to
+  // the exact-kind backend find path, and this pin is what keeps
+  // `find({ where })` returning the identical row set. Mutation-checked:
+  // dropping `{ includeSubClasses: false }` at node-collection.ts's `find`
+  // makes `findWhere` also return the `Podcast` row, failing this test.
   it("nodes.Media.find({ where }) and find() return the same row set", async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(
@@ -206,6 +234,11 @@ describe("Q3 pin — collection APIs stay exact-kind", () => {
     expect(findAll).toHaveLength(1);
   });
 
+  // NOT mutation-checked: `executeNodeSetUpdate`'s outer
+  // `WHERE nodes.kind = params.kind` re-filters the candidate ids to
+  // `Media` regardless of what the `updateWhere` root's `fromDynamic` pin
+  // widens to, so dropping it at node-collection.ts leaves this test green.
+  // Defense in depth (see the module docblock above).
   it("nodes.Media.updateWhere({ all: true }) touches zero Podcast rows", async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(
@@ -228,6 +261,10 @@ describe("Q3 pin — collection APIs stay exact-kind", () => {
     expect(requireDefined(stillPodcast).title).toBe("before");
   });
 
+  // NOT mutation-checked: same outer-fence reason as updateWhere above —
+  // `compareAndSet`'s root `fromDynamic` pin widens the CANDIDATE set, but
+  // the final UPDATE still filters `nodes.kind = "Media"`, which a Podcast
+  // row never matches. Defense in depth (see the module docblock above).
   it("nodes.Media.compareAndSet(podcastId, ...) returns false — exact-kind", async () => {
     const backend = createTestBackend();
     const store = await createInitializedStore(
@@ -245,6 +282,58 @@ describe("Q3 pin — collection APIs stay exact-kind", () => {
     });
 
     expect(applied).toBe(false);
+  });
+});
+
+describe("Q3 pin — updateWhere()'s exists-leg RELATED-kind toDynamic (load-bearing)", () => {
+  // Unlike the root-kind pins above, this one is NOT behind the outer
+  // `WHERE nodes.kind = params.kind` fence: the related node's kind gates
+  // whether the `exists` predicate is satisfied at all, and only the
+  // ROOT node's id is projected as a candidate. Dropping
+  // `{ includeSubClasses: false }` on the `exists` leg's `toDynamic(relation.relatedKind, ...)`
+  // (node-collection.ts) genuinely changes the result: an `exists` check
+  // against `Tag` would then also be satisfied by a `SpecialTag`-only
+  // related row. Mutation-checked.
+  it("an exists check against a parent kind is not satisfied by a subclass-only related row", async () => {
+    const Item = defineNode("PDItem", {
+      schema: z.object({ title: z.string() }),
+    });
+    const Tag = defineNode("PDTag", { schema: z.object({ name: z.string() }) });
+    const SpecialTag = defineNode("PDSpecialTag", {
+      schema: z.object({ name: z.string(), extra: z.string() }),
+    });
+    const tagged = defineEdge("pdTagged", { schema: z.object({}) });
+    const graph = defineGraph({
+      id: "q3_exists_related_kind_pin",
+      nodes: {
+        PDItem: { type: Item },
+        PDTag: { type: Tag },
+        PDSpecialTag: { type: SpecialTag },
+      },
+      edges: {
+        pdTagged: { type: tagged, from: [Item], to: [Tag, SpecialTag] },
+      },
+      ontology: [subClassOf(SpecialTag, Tag)],
+    });
+    const backend = createTestBackend();
+    const store = await createInitializedStore(graph, backend);
+    const item = await store.nodes.PDItem.create({ title: "before" });
+    const specialTag = await store.nodes.PDSpecialTag.create({
+      name: "s",
+      extra: "x",
+    });
+    await store.edges.pdTagged.create(item, specialTag, {});
+
+    const result = await store.nodes.PDItem.updateWhere({
+      exists: [
+        { edgeKind: "pdTagged", direction: "out", relatedKind: "PDTag" },
+      ],
+      patch: { title: "after" },
+    });
+
+    expect(result.affectedCount).toBe(0);
+    const stillItem = await store.nodes.PDItem.getById(item.id);
+    expect(requireDefined(stillItem).title).toBe("before");
   });
 });
 
