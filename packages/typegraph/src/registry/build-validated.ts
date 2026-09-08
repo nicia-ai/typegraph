@@ -13,6 +13,7 @@ import {
 } from "../ontology/validation";
 import { type JsonSchema } from "../schema/types";
 import { requireDefined } from "../utils/presence";
+import { encodeTupleKey } from "../utils/tuple-key";
 import { buildCompositionRelation } from "./composition-relation";
 import { type EdgeKindFacts } from "./edge-kind-facts";
 import {
@@ -59,15 +60,15 @@ function declaredSubsumptionPairs(
   for (const relation of ontology) {
     switch (relation.metaEdge) {
       case META_EDGE_SUB_CLASS_OF: {
-        pairs.add(`${relation.from}\u0000${relation.to}`);
+        pairs.add(encodeTupleKey([relation.from, relation.to]));
         break;
       }
       case META_EDGE_EQUIVALENT_TO:
       case META_EDGE_SAME_AS: {
         // Equivalence is inherently bidirectional — both directions are a
         // DECLARED relation, never a transitive-only consequence.
-        pairs.add(`${relation.from}\u0000${relation.to}`);
-        pairs.add(`${relation.to}\u0000${relation.from}`);
+        pairs.add(encodeTupleKey([relation.from, relation.to]));
+        pairs.add(encodeTupleKey([relation.to, relation.from]));
         break;
       }
       default: {
@@ -120,7 +121,7 @@ function assertStructuralSubsumption(
     registry,
     (a, b) => registry.equivalenceSets.get(a)?.has(b) ?? false,
     nodePropertySchemas,
-    (first, second) => declaredPairs.has(`${first}\u0000${second}`),
+    (first, second) => declaredPairs.has(encodeTupleKey([first, second])),
   );
   if (violations.length === 0) return;
 

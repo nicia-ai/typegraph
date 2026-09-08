@@ -13,6 +13,7 @@ import {
   type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
+import { ConfigurationError } from "../../src/errors";
 import { defineGraphExtension } from "../../src/graph-extension";
 import { mergeGraphExtension } from "../../src/graph-extension/merge";
 import {
@@ -1404,17 +1405,41 @@ describe("Schema Serialization Properties", () => {
   });
 
   describe("registry building", () => {
-    it("buildRegistry produces valid KindRegistry", () => {
+    it("buildRegistry produces a valid KindRegistry, or refuses a fuzzed structural mismatch by name (C.2)", () => {
       fc.assert(
         fc.property(graphDefArb, versionArb, (graph, version) => {
           const serialized = serializeSchema(graph, version);
           const deserialized = deserializeSchema(serialized);
 
-          // Should not throw
-          const registry = deserialized.buildRegistry();
+          // `graphDefArb` picks a fuzzed `subClassOf`/`equivalentTo` pair
+          // with no regard for schema compatibility, so a genuinely
+          // incompatible pair is a REACHABLE, correct outcome here (C.2)
+          // — the property is that buildRegistry() only ever fails with
+          // this one typed, well-formed refusal, never an unrelated crash.
+          const ALLOWED_STRUCTURAL_REFUSAL_CODES = new Set([
+            "ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE",
+            "ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE",
+            "ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE",
+            "ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE",
+          ]);
 
-          // Registry should exist
-          expect(registry).toBeDefined();
+          function buildRegistryOrAllowedRefusalCode(): unknown {
+            try {
+              return deserialized.buildRegistry();
+            } catch (error) {
+              if (
+                error instanceof ConfigurationError &&
+                ALLOWED_STRUCTURAL_REFUSAL_CODES.has(
+                  error.details["code"] as string,
+                )
+              ) {
+                return error.details["code"];
+              }
+              throw error;
+            }
+          }
+
+          expect(buildRegistryOrAllowedRefusalCode()).toBeDefined();
         }),
         { numRuns: 30 },
       );
