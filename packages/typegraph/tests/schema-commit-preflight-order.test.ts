@@ -1,20 +1,28 @@
 /**
- * The load-bearing test for "ontology before the identity closure rebuild".
+ * Guards that `composeSchemaCommitPreflight` — the one place the
+ * schema-commit preflight step order is spelled — iterates its steps in the
+ * canonical order: structural gates, then `edgeMatchIdentityPreflight`, then
+ * the ontology-tightening preflight, then the identity preflight. This test
+ * observes the COMPOSER's own FIFO iteration through four recording steps;
+ * it says nothing about what order any real call site passes those steps
+ * in, because it builds its own step array rather than importing one.
  *
- * `composeSchemaCommitPreflight` is the one place the schema-commit preflight
- * step order is spelled: structural gates, then `edgeMatchIdentityPreflight`,
- * then the ontology-tightening preflight, then the identity preflight. An
- * integration test that only observes "the commit rolled back" cannot tell
- * the two orders apart, because both roll back — this test observes the
- * order directly through four recording steps.
- *
- * `tests/identity.test.ts` ("rejects contradictory existing groups before
- * committing enablement", "revalidates identity for ontology-only schema
- * migrations") independently confirms the SAME order end-to-end: a
- * commit that is both an ontology-tightening violation AND an identity
- * contradiction surfaces `MigrationError` `"ontology-tightening-violated"`,
- * not `ConfigurationError` `"IDENTITY_SCHEMA_CONTRADICTION"` — which is
- * only possible if the ontology preflight runs first.
+ * The load-bearing guard for "ontology before the identity closure rebuild"
+ * at each real call site lives in `tests/identity.test.ts`, end-to-end, one
+ * case per path that can owe both preflights: `ensureSchema`'s auto-migrate
+ * branch ("rejects contradictory existing groups before committing
+ * enablement", "revalidates identity for ontology-only schema migrations"),
+ * `migrateSchema` ("refuses the same tightening driven through
+ * migrateSchema directly, before the identity closure rebuild"), and
+ * `Store.evolve` ("refuses the same tightening driven through
+ * Store.evolve(), before the identity closure rebuild"). Each constructs a
+ * commit that is simultaneously an ontology-tightening violation AND an
+ * identity contradiction and asserts it surfaces `MigrationError`
+ * `"ontology-tightening-violated"`, not `ConfigurationError`
+ * `"IDENTITY_SCHEMA_CONTRADICTION"` — reachable only if that call site's OWN
+ * composed array orders the ontology preflight first. A call-site reorder
+ * on any one of the three paths leaves this file green and fails only its
+ * own case in `identity.test.ts`.
  */
 import { describe, expect, it } from "vitest";
 

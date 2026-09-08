@@ -32,6 +32,7 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../src/query/sql-intent";
+import { migrateSchema } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import {
   createInitializedStore,
@@ -533,6 +534,75 @@ describe("Operational Identity", () => {
     const activeSchema = await backend.getActiveSchema(graph.id);
     expect(activeSchema?.version).toBe(1);
   });
+
+  it("refuses the same tightening driven through migrateSchema directly, before the identity closure rebuild", async () => {
+    const backend = createTestBackend();
+    const [disabledStore] = await createStoreWithSchema(
+      disabledMigrationGraph,
+      backend,
+    );
+    await disabledStore.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+    await disabledStore.nodes.Author.create({ penName: "A." }, { id: "alice" });
+    const contradictory = defineGraph({
+      id: graph.id,
+      nodes: graph.nodes,
+      edges: graph.edges,
+      ontology: [disjointWith(Person, Author)],
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+
+    // Same shape as the two `ensureSchema` cases above, but driven through
+    // `migrateSchema()` directly — the documented escape hatch composes its
+    // own preflight array (`src/schema/manager.ts`) rather than reusing
+    // `ensureSchema`'s, so a call-site reorder there is invisible to those
+    // two tests. This is the ordering guard `ensureSchema`'s pair cannot
+    // provide for this path.
+    await expect(
+      migrateSchema(backend, contradictory, 1),
+    ).rejects.toMatchObject({
+      name: "MigrationError",
+      details: matchingObject({ reason: "ontology-tightening-violated" }),
+    });
+    const activeSchema = await backend.getActiveSchema(graph.id);
+    expect(activeSchema?.version).toBe(1);
+  });
+  // MUTATION CHECK (lane-A-load-bearing.md): swapping `ontologyPreflight`
+  // and `identityPreflight` in `migrateSchema`'s composed preflight array
+  // (`src/schema/manager.ts`) makes this test fail — the identity closure
+  // rebuild runs first, throws `IDENTITY_SCHEMA_CONTRADICTION` (or succeeds
+  // outright), and `ontology-tightening-violated` never surfaces.
+
+  it("refuses the same tightening driven through Store.evolve(), before the identity closure rebuild", async () => {
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+    await store.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+    await store.nodes.Author.create({ penName: "A." }, { id: "alice" });
+
+    // `graph` already runs `sameIdAcrossKinds: "fold"`, so the two `alice`
+    // rows above are already one identity class before this evolve. Adding
+    // `disjointWith(Person, Author)` is simultaneously a live-data
+    // `nodeDisjointness` violation (item A's probe) and something the
+    // identity closure rebuild would also refuse — proving `Store.evolve`'s
+    // OWN composed callback (`src/store/store.ts`), not just `ensureSchema`'s,
+    // orders the ontology probe before the identity rebuild.
+    await expect(
+      store.evolve(
+        defineGraphExtension({
+          ontology: [
+            { metaEdge: "disjointWith", from: "Person", to: "Author" },
+          ],
+        }),
+      ),
+    ).rejects.toMatchObject({
+      name: "MigrationError",
+      details: matchingObject({ reason: "ontology-tightening-violated" }),
+    });
+    const activeSchema = await backend.getActiveSchema(graph.id);
+    expect(activeSchema?.version).toBe(1);
+  });
+  // MUTATION CHECK (lane-A-load-bearing.md): swapping `ontologyPreflight`
+  // and `identityCandidate`'s step in `Store.evolve`'s composed preflight
+  // array (`src/store/store.ts`) makes this test fail the same way.
 
   it("cascades extension-kind identity truth during removeKinds", async () => {
     const extensionGraph = defineGraph({
