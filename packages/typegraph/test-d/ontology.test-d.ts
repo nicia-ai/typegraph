@@ -1,4 +1,4 @@
-import { expectError, expectType } from "tsd";
+import { expectAssignable, expectError, expectType } from "tsd";
 import { z } from "zod";
 
 import {
@@ -25,7 +25,10 @@ const employedBy = defineEdge("employedBy", {
 });
 
 // Two node kinds — the unwidened, pre-D1 usage still typechecks.
-expectType<OntologyRelation>(equivalentTo(Person, Individual));
+// C.1 narrows the return type to a TypedOntologyRelation (still assignable
+// to OntologyRelation, never identical to it), so this is an assignability
+// check, not an exact-type one.
+expectAssignable<OntologyRelation>(equivalentTo(Person, Individual));
 
 // A node kind mapped to an external IRI — the right parameter has always
 // accepted a bare string.
@@ -47,10 +50,11 @@ expectError(equivalentTo(worksAt, employedBy));
 // needs the edge-to-IRI shape on it.
 expectError(sameAs(worksAt, "https://schema.org/worksFor"));
 
-// `sameAs`'s existing NodeType-only shape still typechecks.
-expectType<OntologyRelation>(sameAs(Person, Individual));
+// `sameAs`'s existing NodeType-only shape still typechecks. Same C.1
+// narrowing as equivalentTo above -- assignable, not identical.
+expectAssignable<OntologyRelation>(sameAs(Person, Individual));
 
 declare const anyEdge: AnyEdgeType;
 declare const anyNode: NodeType;
 expectType<OntologyRelation>(equivalentTo(anyEdge, "https://example.com/x"));
-expectType<OntologyRelation>(equivalentTo(anyNode, anyNode));
+expectAssignable<OntologyRelation>(equivalentTo(anyNode, anyNode));
