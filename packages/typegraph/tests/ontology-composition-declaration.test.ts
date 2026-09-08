@@ -25,6 +25,11 @@ import { z } from "zod";
 import { defineEdge, defineGraph, defineNode, hasPart, partOf } from "../src";
 import { validateOntologyRelations } from "../src/ontology/validation";
 import { buildKindRegistry } from "../src/registry";
+import {
+  type CompositionIssueCode,
+  inferCompositionPartSide,
+} from "../src/registry/composition-relation";
+import { type EdgeKindFacts } from "../src/registry/edge-kind-facts";
 import { matchingObject } from "./test-utils";
 
 const emptySchema = z.object({});
@@ -455,5 +460,110 @@ describe("a valid multi-relation composition declaration", () => {
       "episodeOf",
       "segmentOf",
     ]);
+  });
+});
+
+// ============================================================
+// inferCompositionPartSide — direct unit tests
+// ============================================================
+
+describe("inferCompositionPartSide", () => {
+  // No ontology relations declared, so `isAssignableTo` degrades to plain
+  // equality (no subClassOf closure) — exactly what these facts need.
+  const registry = buildKindRegistry(
+    defineGraph({
+      id: "infer-composition-part-side-fixture",
+      nodes: {},
+      edges: {},
+      ontology: [],
+    }),
+  );
+
+  const forwardOnlyFacts: EdgeKindFacts = {
+    from: ["Part"],
+    to: ["Whole"],
+    cardinality: "one",
+    targetCardinality: "many",
+  };
+
+  const ambiguousFacts: EdgeKindFacts = {
+    from: ["Section"],
+    to: ["Section"],
+    cardinality: "one",
+    targetCardinality: "one",
+  };
+
+  it("returns `from` when only the forward orientation is endpoint-compatible", () => {
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Part", wholeKind: "Whole" },
+        forwardOnlyFacts,
+        registry,
+      ),
+    ).toEqual({ partSide: "from" });
+  });
+
+  it("returns `to` when only the reverse orientation is endpoint-compatible", () => {
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Whole", wholeKind: "Part" },
+        forwardOnlyFacts,
+        registry,
+      ),
+    ).toEqual({ partSide: "to" });
+  });
+
+  it("rejects a pair neither orientation admits", () => {
+    const code: CompositionIssueCode = "ONTOLOGY_COMPOSITION_VIA_ENDPOINTS";
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Other", wholeKind: "Different" },
+        forwardOnlyFacts,
+        registry,
+      ),
+    ).toEqual({ code });
+  });
+
+  it("requires a declared partSide when both orientations are endpoint-compatible", () => {
+    const code: CompositionIssueCode =
+      "ONTOLOGY_COMPOSITION_PART_SIDE_REQUIRED";
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Section", wholeKind: "Section" },
+        ambiguousFacts,
+        registry,
+      ),
+    ).toEqual({ code });
+  });
+
+  it("accepts a declared partSide when both orientations are endpoint-compatible", () => {
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Section", wholeKind: "Section", declared: "to" },
+        ambiguousFacts,
+        registry,
+      ),
+    ).toEqual({ partSide: "to" });
+  });
+
+  it("rejects a declared partSide contradicting the only valid orientation", () => {
+    const code: CompositionIssueCode = "ONTOLOGY_COMPOSITION_PART_SIDE_INVALID";
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Part", wholeKind: "Whole", declared: "to" },
+        forwardOnlyFacts,
+        registry,
+      ),
+    ).toEqual({ code });
+  });
+
+  it("accepts a declared partSide agreeing with the only valid orientation (redundant)", () => {
+    expect(
+      inferCompositionPartSide(
+        { partKind: "Part", wholeKind: "Whole", declared: "from" },
+        forwardOnlyFacts,
+        registry,
+      ),
+    ).toEqual({ partSide: "from" });
   });
 });
