@@ -176,11 +176,41 @@ describe("forkedWorkingCopyStrategy", () => {
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(existsSync(forkedPath)).toBe(false);
 
-    // Idempotent: a second close is a no-op, not a second teardown attempt
-    // (mirrors IngestionBranch.close's own idempotency, inherited from the
-    // composed backend's close()).
+    // Idempotent: a second close is a no-op, not a second teardown attempt.
     await forkBranch.close();
     expect(dispose).toHaveBeenCalledTimes(1);
+
+    await baseBackend.close();
+  });
+
+  it("coalesces every branch close onto one backend release, even when the backend's own close is not idempotent and the calls are concurrent", async () => {
+    const { backend: baseBackend } = createLocalSqliteBackend();
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    // The clone strategy hands makeBackend's backend to the branch bare (a
+    // fork's composed close is already managed), and the GraphBackend
+    // contract does not promise an idempotent close — so this backend
+    // tolerates exactly one, and the branch handle must not rely on more.
+    let releases = 0;
+    const makeBackend = () => {
+      const { backend } = createLocalSqliteBackend();
+      return Promise.resolve(
+        deriveBackend(backend, {
+          close: async () => {
+            releases += 1;
+            if (releases > 1) throw new Error("closed twice");
+            await backend.close();
+          },
+        }),
+      );
+    };
+    const cloneBranch = unwrap(await branch<G>(baseStore, makeBackend));
+
+    await Promise.all([cloneBranch.close(), cloneBranch.close()]);
+    await cloneBranch.close();
+
+    expect(releases).toBe(1);
 
     await baseBackend.close();
   });
@@ -744,6 +774,42 @@ describe("forkedWorkingCopyStrategy", () => {
       // an empty overlay.
       connect: () =>
         Promise.resolve(deriveBackend(getStoreBackend(baseStore), {})),
+    });
+
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toBeInstanceOf(BranchError);
+    expect(dispose).toHaveBeenCalledTimes(1);
+
+    expect(
+      (await baseStore.nodes.Widget.find()).map((found) => found.name),
+    ).toEqual(["Original"]);
+
+    sqlite.close();
+  });
+
+  it("refuses a fork whose connect() returns the ROOT backend the base's own backend was derived from (reverse-derivation arm)", async () => {
+    const sqlite = new Database(":memory:");
+    // Declared "independent" so the shared-resource arm cannot mask a broken
+    // reverse-lineage check, exactly as the forward-derivation test above.
+    const rootBackend = createSqliteBackend(drizzle(sqlite), {
+      executionProfile: { isSync: true },
+      serializedResource: { mode: "independent" },
+    });
+    // The BASE store sits on a decorator over the root; connect() hands back
+    // the root itself. Object identity differs and the root is not derived
+    // from the base, so only the base-derived-from-connected direction of
+    // isBackendDerivedFrom catches this.
+    const [baseStore] = await createStoreWithSchema(
+      graph,
+      deriveBackend(rootBackend, {}),
+    );
+    await baseStore.nodes.Widget.create({ name: "Original" });
+
+    const dispose = vi.fn(() => Promise.resolve());
+    const strategy = forkedWorkingCopyStrategy<G, ForkHandle>({
+      fork: () => Promise.resolve({ dispose }),
+      connect: () => Promise.resolve(rootBackend),
     });
 
     await expect(

@@ -422,6 +422,24 @@ function forkAliasesBase<G extends GraphDef>(
 }
 
 /**
+ * The branch handle's `close`: releases the working copy's backend exactly
+ * once, however many times and however concurrently it is called. The
+ * `GraphBackend` contract does not require an idempotent `close`, so the
+ * handle coalesces every call onto the first one's promise rather than
+ * relying on the backend (a forked working copy's composed close, or a
+ * caller-built backend from `MakeBackend`) tolerating a second release.
+ */
+export function coalescedWorkingCopyClose<G extends GraphDef>(
+  store: Store<G>,
+): () => Promise<void> {
+  let closing: Promise<void> | undefined;
+  return () => {
+    closing ??= storeBackend(store).close();
+    return closing;
+  };
+}
+
+/**
  * Working-copy strategy for a fork-capable host: `fork(baseStore)` asks the
  * host to produce a complete, independent copy of the underlying database —
  * not a public-interchange replay — and `connect(fork)` opens a backend on

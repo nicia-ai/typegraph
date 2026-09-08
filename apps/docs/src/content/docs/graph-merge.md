@@ -1215,9 +1215,12 @@ fork, so a `fork` that is not a true physical copy breaks them regardless of
 what the content fingerprint agrees on. A mismatch closes the backend first
 and refuses with a `BranchError` carrying `forkVersion`/`baseVersion` in
 `error.details`; `branch()` catches it and returns that `BranchError` as the
-`cause` of the outer `BranchError` it resolves with. A fork taken while the
-base was mid-write, or a `fork` implementation that returns something other
-than an exact copy, is refused here rather than merged against silently.
+`cause` of the outer `BranchError` it resolves with. Only a base-token
+mismatch is refused here — a fork taken while the base was mid-write, or a
+`fork` that returns a different graph; divergence confined to the physical
+state the token omits (tombstones, timestamps, row versions, recorded
+history) passes the fence, and keeping that state faithful remains the fork
+mechanism's contract.
 
 `create()` also refuses BEFORE ever attaching a store when `connect()`'s
 backend aliases the base's own backend: the same backend object, one derived
