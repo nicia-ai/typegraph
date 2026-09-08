@@ -51,6 +51,24 @@ export type LineageDelta =
  * The backend's lineage surface. Optional: a custom backend that omits it
  * loses only the callers that consult it directly, all of which already
  * fall back to a full scan when it is absent — see {@link requireLineage}.
+ *
+ * Both members MUST be safe to call from inside an open transaction on the
+ * SAME backend the `lineage` was read off. `graph-merge`'s engine-anchor
+ * re-validation (`assertTargetUnchanged` in `graph-merge/merge.ts`) is the
+ * concrete caller: it resolves `lineage` off the target's own root backend
+ * and then invokes `revision()`/`changesSince()` from strictly inside that
+ * same target's open commit transaction, because no advisory lock pins an
+ * engine-anchored store's write path the way a revision-anchored one is
+ * pinned. An implementation that issues its own transaction, or that
+ * assumes exclusive use of a single connection/session, can hang or error
+ * under that call pattern — the bundled caller-serialized SQLite backend's
+ * own reentrancy guard refuses this exact reentry with a typed
+ * `ConfigurationError` rather than hanging (see
+ * `tests/graph-merge/base-version-engine-anchor.test.ts`'s real-backend-read
+ * case), but a `lineage` MUST NOT rely on running under a backend that
+ * happens to detect its own reentrancy: it must instead use a connection
+ * independent of the caller's open transaction, or otherwise tolerate being
+ * invoked while one is open.
  */
 export type LineageMembers = Readonly<{
   /** The engine's current committed revision of the whole database. */

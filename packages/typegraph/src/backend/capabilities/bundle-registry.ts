@@ -826,8 +826,8 @@ export type UnbundledOptionalMember =
  * added `catalog`, a reasoned member with zero measured accesses — its own
  * absence refusal lives in this directory, which the live scanner excludes
  * wholesale; the lineage capability then added `lineage`, a reasoned member
- * with the same zero-accesses shape as `catalog` for the same reason), 15 +
- * 82 = 97 members total.
+ * with two live accesses (`resolveLineage`'s two reads of the backend's own
+ * member) — 90 → 92), 15 + 82 = 97 members total.
  */
 export const UNBUNDLED_OPTIONAL_MEMBERS = {
   adoptBaseSchema: {

@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("32 reasoned entries sum to 91 accesses; 50 deferred entries sum to 217", () => {
+  it("32 reasoned entries sum to 93 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -135,9 +135,10 @@ describe("capability bundle totality (T9)", () => {
     // the floor is unchanged. The forked working-copy strategy then reads
     // the connected backend's `tableNames` to fence them against the base
     // store's resolved schema — 90 -> 91. The lineage capability then added
-    // `lineage`, a reasoned member with the same zero-accesses shape as
-    // `catalog` for the same reason, so the floor stays at 91.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(91);
+    // `lineage`, a reasoned member with two live accesses (`resolveLineage`'s
+    // two reads of the backend's own `lineage`, in
+    // `store/recorded-capture/lineage.ts`) — 91 -> 93.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(93);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });

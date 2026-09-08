@@ -13,7 +13,10 @@ export {
   snapshotExportContention,
 } from "../backend/transaction-resource";
 export type {
+  EngineRevision,
   GraphBackend,
+  LineageDelta,
+  LineageMembers,
   NodeRow,
   TransactionBackend,
   TransactionOptions,
@@ -69,6 +72,7 @@ export {
   forceRecordedGraphRevision,
   readRecordedClock,
   readRevisionOrigin,
+  resolveLineage,
 } from "../store/recorded-capture";
 export {
   storeBackend,

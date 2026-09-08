@@ -12,21 +12,50 @@
  *      This is content-addressed (the public `computeSchemaHash` deliberately
  *      excludes the version number and `generatedAt`, so it is stable across
  *      re-saves of the same schema).
- *   2. A **revision anchor** when the Store has `revisionTracking` (or
- *      `history`) enabled — a durable random per-graph origin plus the
- *      monotonic revision clock. This is O(1) to read and changes after every
- *      successful Store write; the origin prevents independent stores with
- *      coincident timestamps from sharing an anchor.
- *      Stores without tracking retain the compatibility fallback: a
- *      **content fingerprint**, a SHA-256 digest (truncated to a fixed-width
- *      hex string) of every LIVE node and edge over the base store (`id`,
- *      `updated_at`, the bitemporal `valid_from`/`valid_to`, and canonicalized
- *      `props`; edges also carry their endpoint ids), sorted by id, so two stores
- *      with identical live content fingerprint identically regardless of row
- *      enumeration order or insertion order. Props AND validity are folded in so
- *      the token changes on a content or validity edit even when `updated_at` ties
- *      at millisecond granularity. Hashing keeps the token fixed-width instead of
- *      growing linearly with store size.
+ *   2. An anchor, chosen by ONE precedence every caller of
+ *      {@link computeBaseVersion} shares:
+ *      a. A **revision anchor** when the Store has `revisionTracking` (or
+ *         `history`) enabled — a durable random per-graph origin plus the
+ *         monotonic revision clock. This is O(1) to read and changes after
+ *         every successful Store write; the origin prevents independent
+ *         stores with coincident timestamps from sharing an anchor.
+ *      b. Otherwise, an **engine anchor** when `resolveLineage(store)` yields
+ *         a `lineage` (necessarily the BACKEND's own — a store with no
+ *         revision tracking never captures history, so the recorded-relations
+ *         lineage is unreachable here; see `store/recorded-capture/lineage.ts`).
+ *         The anchor is the engine's opaque whole-database revision,
+ *         O(1) to read the same way. It is engine-wide rather than
+ *         per-graph, which is why re-validating it (see
+ *         `graph-merge/merge.ts`'s `assertTargetUnchanged` and
+ *         `assertForkPointUnchanged`) cannot stop at a raw inequality: a
+ *         revision bump from a commit to an UNRELATED graph on the same
+ *         engine must not fail this graph's merge, so a mismatch is only
+ *         a real divergence once `lineage.changesSince` confirms this
+ *         graph's own rows moved. `LineageDelta` names only node and edge
+ *         keys, not identity assertions: an engine-anchored store that
+ *         changes ONLY its current identity assertions between plan and
+ *         commit — no node or edge row touched — mints an empty delta and
+ *         is tolerated as unchanged. The content-fingerprint fallback below
+ *         does not share this gap (its fingerprint folds identity
+ *         assertions in directly), and revision-anchored stores do not
+ *         either (any Store write, identity-only included, advances the
+ *         shared revision clock the anchor reads). Closing it would mean
+ *         teaching `LineageDelta` a THIRD dimension, or re-checking
+ *         identity assertions on the side the way `assertTargetUnchanged`
+ *         already re-checks the schema half — neither is done today.
+ *      c. Otherwise, the compatibility fallback: a **content fingerprint**, a
+ *         SHA-256 digest (truncated to a fixed-width hex string) of every
+ *         LIVE node and edge over the base store (`id`, `updated_at`, the
+ *         bitemporal `valid_from`/`valid_to`, and canonicalized `props`;
+ *         edges also carry their endpoint ids), sorted by id, so two stores
+ *         with identical live content fingerprint identically regardless of
+ *         row enumeration order or insertion order. Props AND validity are
+ *         folded in so the token changes on a content or validity edit even
+ *         when `updated_at` ties at millisecond granularity. Current
+ *         identity assertions are folded in too (see
+ *         `computeContentComponent`), which is exactly what the engine
+ *         anchor above does not do. Hashing keeps the token fixed-width
+ *         instead of growing linearly with store size.
  *
  * The token MUST be computed off the ORIGINAL base store, never off a clone:
  * `exportGraph`/`importGraph` regenerate `created_at`/`updated_at`, so a clone's
@@ -43,6 +72,7 @@ import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
 import type {
+  EngineRevision,
   GraphBackend,
   GraphDef,
   IdentityTransferAssertion,
@@ -50,7 +80,11 @@ import type {
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
-import { storeBackend, storeRuntime } from "./typegraph-internal";
+import {
+  resolveLineage,
+  storeBackend,
+  storeRuntime,
+} from "./typegraph-internal";
 import { computeSchemaHash, serializeSchema } from "./typegraph-internal";
 import type { BaseVersion } from "./types";
 import { asBaseVersion } from "./types";
@@ -69,6 +103,14 @@ const REVISION_COMPONENT_SEPARATOR = ":";
 const INITIAL_REVISION = "initial";
 
 /**
+ * Marks the engine-anchor component form — see the module doc's anchor
+ * precedence. Distinct from {@link REVISION_COMPONENT_PREFIX}: a token never
+ * carries both, and {@link hasRevisionAnchor} stays true only for the
+ * TypeGraph-owned form.
+ */
+const ENGINE_COMPONENT_PREFIX = "engine:";
+
+/**
  * Falls back to schema version `1` when the backend has not recorded an active
  * schema version. `serializeSchema` only uses the version for the serialized
  * doc; the hash deliberately excludes it, so the exact value never affects the
@@ -80,9 +122,16 @@ const FALLBACK_SCHEMA_VERSION = 1;
  * Reads the active schema version from the backend, defaulting when absent. The
  * value is informational for `serializeSchema`; `computeSchemaHash` excludes the
  * version, so this never destabilizes the token.
+ *
+ * Exported so a caller re-validating the schema half of an already-computed
+ * token — `merge.ts`'s `assertTargetUnchanged`, which needs a FRESH read
+ * through the pinned transaction backend rather than `computeSchemaComponent`'s
+ * root-backend read — shares this one reader instead of re-spelling the
+ * `getActiveSchema` fallback. Takes the narrow read surface both a
+ * `GraphBackend` and a `TransactionBackend` satisfy.
  */
-async function readActiveSchemaVersion(
-  backend: GraphBackend,
+export async function readActiveSchemaVersion(
+  backend: Pick<GraphBackend, "getActiveSchema">,
   graphId: string,
 ): Promise<number> {
   const active = await backend.getActiveSchema(graphId);
@@ -261,6 +310,32 @@ export async function computeBaseVersion<G extends GraphDef>(
       `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${revisionComponent(origin, revision)}`,
     );
   }
+  // Tracking is off, so `resolveLineage` can only ever answer with the
+  // BACKEND's own `lineage` (the recorded-relations lineage requires
+  // `historyEnabled`, which implies tracking — see the module doc's anchor
+  // precedence). A store with no lineage at all falls through to the
+  // compatibility content fingerprint below.
+  const lineage = resolveLineage(store);
+  if (lineage !== undefined) {
+    const [schemaComponent, activeVersion, revision] = await Promise.all([
+      computeSchemaComponent(store),
+      readActiveSchemaVersion(storeBackend(store), store.graphId),
+      lineage.revision(),
+    ]);
+    // Same schema-half shape as the revision-anchor branch, and for the same
+    // reason: nothing here guarantees an engine's revision is blind to a
+    // schema-only round-trip, so the active version stays folded in.
+    //
+    // Unlike the content-fingerprint fallback below, this anchor carries no
+    // identity-assertion signal at all: `LineageDelta` names only node and
+    // edge keys (see the module doc's precedence entry b), so a commit that
+    // changes only the graph's current identity assertions is invisible to
+    // `lineage.changesSince` and the engine-anchor re-validation guards in
+    // `graph-merge/merge.ts` tolerate it as unchanged.
+    return asBaseVersion(
+      `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${engineComponent(revision)}`,
+    );
+  }
   const [schemaComponent, contentComponent] = await Promise.all([
     computeSchemaComponent(store),
     computeStoreContentComponent(store),
@@ -299,9 +374,29 @@ function revisionComponent(
   return `${REVISION_COMPONENT_PREFIX}${origin}${REVISION_COMPONENT_SEPARATOR}${revision ?? INITIAL_REVISION}`;
 }
 
+function engineComponent(revision: EngineRevision): string {
+  return `${ENGINE_COMPONENT_PREFIX}${revision}`;
+}
+
 /** True when a base token uses the O(1) durable revision-anchor component. */
 export function hasRevisionAnchor(version: BaseVersion): boolean {
   return contentComponentOf(version).startsWith(REVISION_COMPONENT_PREFIX);
+}
+
+/**
+ * Extracts the engine revision from an engine-anchored base token, or
+ * `undefined` for any other anchor form. The ONE parser for this component,
+ * paired with {@link engineComponent}: `graph-merge/merge.ts`'s
+ * `assertTargetUnchanged` and `assertForkPointUnchanged` both call this
+ * rather than re-spelling the `"engine:"` prefix.
+ */
+export function engineAnchorOf(
+  version: BaseVersion,
+): EngineRevision | undefined {
+  const component = contentComponentOf(version);
+  return component.startsWith(ENGINE_COMPONENT_PREFIX) ?
+      (component.slice(ENGINE_COMPONENT_PREFIX.length) as EngineRevision)
+    : undefined;
 }
 
 /**
@@ -352,4 +447,45 @@ export function contentComponentOf(version: BaseVersion): string {
   return separatorIndex === -1 ? version : (
       (version as string).slice(separatorIndex + 1)
     );
+}
+
+/**
+ * Extracts the schema-hash component (including the schema-version tag when
+ * present) from a `base@V` token — the substring BEFORE the separator, the
+ * complement of {@link contentComponentOf}. A caller that must tell a schema
+ * change from an anchor-only change — `assertForkPointUnchanged`'s
+ * empty-delta acceptance for an engine anchor — compares this independently
+ * of the full token rather than assuming a whole-token mismatch is always a
+ * real divergence.
+ */
+export function schemaComponentOf(version: BaseVersion): string {
+  const separatorIndex = (version as string).indexOf(TOKEN_SEPARATOR);
+  return separatorIndex === -1 ? "" : (
+      (version as string).slice(0, separatorIndex)
+    );
+}
+
+/**
+ * Extracts the monotonic active schema version baked into a revision- or
+ * engine-anchored token's schema half, or `undefined` for a legacy
+ * content-fallback token (which carries no {@link SCHEMA_VERSION_TAG} at
+ * all — its content fingerprint covers a schema round-trip's mutated rows
+ * directly, see the module doc). The document hash never contains `#s`
+ * (hex digits only), so the tag position is unambiguous.
+ *
+ * Pairs with {@link readActiveSchemaVersion}: a caller re-validating the
+ * schema half of an already-computed engine-anchored token — `merge.ts`'s
+ * `assertTargetUnchanged`, which has no whole-token recomputation to lean
+ * on the way `assertForkPointUnchanged` does — compares this parsed value
+ * against a fresh `readActiveSchemaVersion` read instead of re-deriving the
+ * split.
+ */
+export function schemaActiveVersionOf(
+  version: BaseVersion,
+): number | undefined {
+  const component = schemaComponentOf(version);
+  const tagIndex = component.indexOf(SCHEMA_VERSION_TAG);
+  if (tagIndex === -1) return undefined;
+  const parsed = Number(component.slice(tagIndex + SCHEMA_VERSION_TAG.length));
+  return Number.isFinite(parsed) ? parsed : undefined;
 }

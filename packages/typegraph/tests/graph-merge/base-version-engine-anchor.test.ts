@@ -1,0 +1,890 @@
+/**
+ * The engine-anchor form of `base@V`: when a store has no TypeGraph revision
+ * tracking but its backend answers the optional `lineage` capability,
+ * `computeBaseVersion` anchors on the engine's own revision instead of the
+ * O(graph) content fingerprint. Every base@V call site applies the SAME
+ * tolerance for an engine-wide bump that lands on an UNRELATED graph: the
+ * outer plan-time precondition (`validateBaseVersions`/
+ * `validateForkPointVersions`) and the in-transaction re-validation
+ * (`assertTargetUnchanged`/`assertForkPointUnchanged`) all consult
+ * `changesSince` on a raw mismatch, and empty keys mean the bump is not a
+ * real divergence; non-empty keys or an `unbounded` delta still refuse with
+ * `BaseVersionMismatchError`, as does any schema drift underneath the
+ * anchor (the engine revision alone cannot vouch for the schema).
+ *
+ * No bundled backend implements `lineage` yet, so this suite overlays a
+ * scripted one (a mutable revision plus a scripted delta) over SQLite via a
+ * bare `deriveBackend` — no `transaction` override, and no other
+ * decoration: every guard under test resolves `lineage` off the store's own
+ * root backend, which `deriveBackend`'s overlay reaches directly. Revision
+ * drift is injected deterministically through the `embedder` callback,
+ * invoked during planning, strictly after the outer `base@V` precondition
+ * and strictly before the commit transaction — exactly the technique
+ * `tests/graph-merge/commit-revalidation.test.ts` uses to land a concurrent
+ * write in that same window — or, for the outer precondition's own
+ * tolerance, by mutating the scripted state directly before `merge()` is
+ * even called.
+ */
+import {
+  createStoreWithSchema,
+  defineGraph,
+  defineNode,
+} from "@nicia-ai/typegraph";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { z } from "zod";
+
+import { deriveBackend } from "../../src/backend/derive-backend";
+import type {
+  EngineRevision,
+  GraphBackend,
+  LineageDelta,
+  LineageMembers,
+} from "../../src/backend/types";
+import { ConfigurationError } from "../../src/errors";
+import {
+  computeBaseVersion,
+  engineAnchorOf,
+  hasRevisionAnchor,
+} from "../../src/graph-merge/base-version";
+import { branch } from "../../src/graph-merge/branch";
+import { BaseVersionMismatchError } from "../../src/graph-merge/errors";
+import {
+  merge,
+  mergeIncremental,
+  planMergeIncremental,
+} from "../../src/graph-merge/merge";
+import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
+import type { Embedder, MergeOptions } from "../../src/graph-merge/types";
+import { asBranchId } from "../../src/graph-merge/types";
+import { sql } from "../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../src/query/sql-intent";
+import { getCommittedSchemaVersion, migrateSchema } from "../../src/schema";
+import { storeBackend } from "../../src/store/runtime-port";
+import { requireDefined } from "../../src/utils/presence";
+import { createSqliteMergeBackend, fakeEmbedder } from "./test-utils";
+
+const Widget = defineNode("Widget", {
+  schema: z.object({ label: z.string(), group: z.string() }),
+});
+
+const widgetGraph = defineGraph({
+  id: "engine-anchor-widget",
+  nodes: { Widget: { type: Widget } },
+  edges: {},
+});
+type WidgetGraph = typeof widgetGraph;
+
+const BRANCH = asBranchId("engine-anchor-branch");
+
+/**
+ * `Widget.similarity` runs `hybrid` (so the embedder always fires, unlike
+ * `fulltext`), blocked into one shared group so the base and branch widgets
+ * are always compared. The threshold sits well above what the fake
+ * character-frequency embedder gives two unrelated labels, so nothing
+ * actually clusters — this suite's guard is orthogonal to entity
+ * resolution, exactly like `commit-revalidation.test.ts`'s.
+ */
+function engineAnchorMergeOptions(
+  embedder: Embedder,
+): MergeOptions<WidgetGraph> {
+  return {
+    resolve: {
+      Widget: {
+        block: (node) => (node as unknown as { group: string }).group,
+        similarity: { kind: "hybrid", fields: ["label"] },
+        threshold: 0.95,
+      },
+    },
+    embedder,
+    onPropertyConflict: "flag",
+    branchOrder: [BRANCH],
+  };
+}
+
+/** Mutable state a test configures and the scripted `lineage` reads live. */
+interface ScriptedLineageState {
+  revision: EngineRevision;
+  delta: (since: EngineRevision, graphId: string) => LineageDelta;
+}
+
+function initialState(): ScriptedLineageState {
+  return {
+    revision: "r0" as EngineRevision,
+    delta: () => ({ kind: "keys", nodes: [], edges: [] }),
+  };
+}
+
+function scriptedLineage(state: ScriptedLineageState): LineageMembers {
+  return {
+    revision: () => Promise.resolve(state.revision),
+    changesSince: (since, graphId) =>
+      Promise.resolve(state.delta(since, graphId)),
+  };
+}
+
+/**
+ * Overlays a scripted `lineage` onto `backend` — a bare `deriveBackend`
+ * overlay, present on the root object only. This is a SUPPORTED
+ * configuration: every base@V call site under test (the outer
+ * `validateBaseVersions`/`validateForkPointVersions` preconditions and the
+ * in-transaction `assertTargetUnchanged`/`assertForkPointUnchanged`
+ * re-validation) resolves `lineage` off a store's own root backend rather
+ * than requiring it on a transaction-scoped handle a decoration overlay
+ * cannot reach — see `merge.ts`'s `assertTargetUnchanged` for why.
+ */
+function withScriptedLineage(
+  backend: GraphBackend,
+  state: ScriptedLineageState,
+): GraphBackend {
+  return deriveBackend(backend, { lineage: scriptedLineage(state) });
+}
+
+/**
+ * A scripted `lineage` whose `revision()` and `changesSince()` each issue a
+ * REAL read against `backend` — through the ordinary `backend.execute` path
+ * a `lineage` with no connection of its own would use — before returning
+ * the scripted value, unlike {@link scriptedLineage}, which never touches
+ * `backend` at all. `assertTargetUnchanged` (`merge.ts`) is the first
+ * base@V call site that consults `lineage` from strictly INSIDE the
+ * target's own open commit transaction, on the target's root backend
+ * rather than the pinned transaction handle (see that function's doc
+ * comment on why). On the bundled caller-serialized SQLite backend, this
+ * call pattern is exactly what {@link LineageMembers}' own doc comment
+ * warns against: the backend's reentrancy guard
+ * (`serialized-execution-queue.ts`) detects the read reentering the open
+ * transaction's execution slot and refuses it with a typed
+ * `ConfigurationError` rather than actually hanging. The test that uses
+ * this fixture pins that concrete, fail-loud shape.
+ */
+function scriptedLineageWithBackendRead(
+  backend: GraphBackend,
+  state: ScriptedLineageState,
+): LineageMembers {
+  async function probe(): Promise<void> {
+    await backend.execute(asCompiledRowsSql(sql`SELECT 1 AS probe`));
+  }
+  return {
+    revision: async () => {
+      await probe();
+      return state.revision;
+    },
+    changesSince: async (since, graphId) => {
+      await probe();
+      return state.delta(since, graphId);
+    },
+  };
+}
+
+function withScriptedLineageBackendRead(
+  backend: GraphBackend,
+  state: ScriptedLineageState,
+): GraphBackend {
+  return deriveBackend(backend, {
+    lineage: scriptedLineageWithBackendRead(backend, state),
+  });
+}
+
+/**
+ * Wraps an embedder so its FIRST invocation also runs `bump` — the
+ * deterministic stand-in for an unrelated engine-wide commit (or, in the
+ * schema-drift tests, a schema migration) landing in the plan→commit
+ * window. This drift has no Widget row of its own to write, so `bump` acts
+ * on the scripted lineage's state or the backend directly rather than the
+ * target store's own collections. `bump` may itself be async (a schema
+ * migration is), so its result is always awaited.
+ */
+function driftingEmbedder(bump: () => void | Promise<void>): Embedder {
+  let injected = false;
+  return async (texts) => {
+    if (!injected) {
+      injected = true;
+      await bump();
+    }
+    return fakeEmbedder(texts);
+  };
+}
+
+/** Live `label`s of every Widget in the store, sorted. */
+async function widgetLabels(
+  store: Awaited<ReturnType<typeof createStoreWithSchema<WidgetGraph>>>[0],
+): Promise<readonly string[]> {
+  return (await store.nodes.Widget.find())
+    .map((widget) => (widget as unknown as { label: string }).label)
+    .sort();
+}
+
+describe("base@V engine anchor", () => {
+  let cleanups: (() => Promise<void>)[];
+
+  beforeEach(() => {
+    cleanups = [];
+  });
+
+  afterEach(async () => {
+    for (const cleanup of cleanups) {
+      await cleanup();
+    }
+  });
+
+  function makeBackend(state: ScriptedLineageState): GraphBackend {
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    return withScriptedLineage(fixture.backend, state);
+  }
+
+  function makeBackendWithRealRead(state: ScriptedLineageState): GraphBackend {
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    return withScriptedLineageBackendRead(fixture.backend, state);
+  }
+
+  function makePlainBackend(): Promise<GraphBackend> {
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    return Promise.resolve(fixture.backend);
+  }
+
+  it("anchors the token on the engine revision when tracking is off and the backend has lineage", async () => {
+    const state = initialState();
+    const [store] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+
+    const token = await computeBaseVersion(store);
+
+    expect(hasRevisionAnchor(token)).toBe(false);
+    expect(engineAnchorOf(token)).toBe("r0");
+  });
+
+  it("keeps the TypeGraph revision anchor when tracking is on, even though the backend has lineage", async () => {
+    const state = initialState();
+    const [store] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+      { revisionTracking: true },
+    );
+
+    const token = await computeBaseVersion(store);
+
+    expect(hasRevisionAnchor(token)).toBe(true);
+    expect(engineAnchorOf(token)).toBeUndefined();
+  });
+
+  it("merges through an engine-wide revision bump that names no row of this graph", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    expect(forkBranch.base).toContain("\0engine:r0");
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+    });
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    expect(isOk(result)).toBe(true);
+    expect(state.revision).toBe("r1");
+    expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
+  });
+
+  it("refuses the merge when the bumped revision's delta names a row of this graph", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+      state.delta = () => ({
+        kind: "keys",
+        nodes: [{ kind: "Widget", id: "base-1" }],
+        edges: [],
+      });
+    });
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+      expect(result.error.details).toMatchObject({
+        expectedRevision: "r0",
+        liveRevision: "r1",
+        changedKeys: {
+          kind: "keys",
+          nodes: [{ kind: "Widget", id: "base-1" }],
+        },
+      });
+    }
+    // Nothing committed from the stale plan.
+    expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+
+  it("refuses the merge when changesSince cannot bound the delta", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+      state.delta = () => ({ kind: "unbounded" });
+    });
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+      expect(result.error.details).toMatchObject({
+        expectedRevision: "r0",
+        liveRevision: "r1",
+      });
+      expect(result.error.details["changedKeys"]).toBeUndefined();
+    }
+    expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+
+  it("commits normally when the revision does not move (control)", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    expect(isOk(result)).toBe(true);
+    expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
+  });
+
+  // Every other case in this suite uses `scriptedLineage`, which never
+  // touches `backend` — so nothing here exercises the hazard
+  // `assertTargetUnchanged`'s own doc comment names: it is the FIRST base@V
+  // call site to consult `lineage` from strictly INSIDE the target's own
+  // open commit transaction (on the target's root backend, since no
+  // advisory lock pins an engine-anchored store's write path). This case
+  // uses `scriptedLineageWithBackendRead`, whose `revision()` issues a real
+  // query THROUGH THE ORDINARY BACKEND PATH — exactly what a `lineage` that
+  // has no connection of its own would do. That query lands on the SAME
+  // caller-serialized SQLite backend the open transaction already holds
+  // the execution slot for, and the backend's own reentrancy guard
+  // (`serialized-execution-queue.ts`'s `rejectReentrantQueueSubmission`,
+  // also exercised by `tests/caller-serialized-queue.test.ts`) detects this
+  // and refuses immediately with a typed `ConfigurationError` — a fast,
+  // diagnosable failure, never the silent hang the naive call pattern would
+  // otherwise risk. This is exactly the failure `LineageMembers`' doc
+  // comment warns a real implementation must avoid by using a connection
+  // independent of the caller's open transaction; this test pins the
+  // CONCRETE, typed shape that failure takes today when a `lineage`
+  // ignores that warning on the bundled SQLite backend.
+  it("refuses (not hangs) when a lineage's real backend read reenters the open commit transaction", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackendWithRealRead(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+    });
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error.cause).toBeInstanceOf(ConfigurationError);
+      expect((result.error.cause as ConfigurationError).details).toEqual(
+        expect.objectContaining({
+          code: "SERIALIZED_QUEUE_REENTRANT_SUBMISSION",
+        }),
+      );
+    }
+    // Nothing committed from the aborted attempt.
+    expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+
+  // `assertForkPointUnchanged` mirrors `assertTargetUnchanged`'s engine-anchor
+  // tolerance for `mergeIncremental()`'s fork point. Fork point and target are
+  // separate backends here (as `tests/graph-merge/incremental-toctou.test.ts`
+  // also keeps them) — `assertForkPointUnchanged` reads the fork point's OWN
+  // root backend, and a same-backend fork point/target would deadlock this
+  // read against the commit transaction's serialized execution slot, exactly
+  // the hazard that function's own doc comment says the two-backend split
+  // avoids. Both start empty and identical, so the ordinary "target advanced
+  // independently" diff is empty and the guard under test is isolated.
+  it("mergeIncremental() tolerates an engine-wide revision bump at the fork point with an empty delta", async () => {
+    const state = initialState();
+    const [forkPoint] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    const [target] = await createStoreWithSchema(
+      widgetGraph,
+      await makePlainBackend(),
+    );
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+    });
+    const result = await mergeIncremental<WidgetGraph>({
+      forkPoint,
+      target,
+      branches: [forkBranch],
+      options: {
+        ...engineAnchorMergeOptions(embedder),
+        onBasePropertyConflict: "flag",
+      },
+    });
+
+    expect(isOk(result)).toBe(true);
+    expect(state.revision).toBe("r1");
+    expect(await widgetLabels(target)).toEqual(["from fork"]);
+  });
+
+  it("mergeIncremental() refuses when the fork point's bumped revision names a changed row", async () => {
+    const state = initialState();
+    const [forkPoint] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    const [target] = await createStoreWithSchema(
+      widgetGraph,
+      await makePlainBackend(),
+    );
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+      state.delta = () => ({
+        kind: "keys",
+        nodes: [{ kind: "Widget", id: "elsewhere" }],
+        edges: [],
+      });
+    });
+    const result = await mergeIncremental<WidgetGraph>({
+      forkPoint,
+      target,
+      branches: [forkBranch],
+      options: {
+        ...engineAnchorMergeOptions(embedder),
+        onBasePropertyConflict: "flag",
+      },
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+    expect(await widgetLabels(target)).toEqual([]);
+  });
+
+  // The tests above all inject the engine-wide bump DURING planning (via the
+  // embedder), which only exercises the IN-TRANSACTION guards
+  // (`assertTargetUnchanged`/`assertForkPointUnchanged`). The outer
+  // plan-time preconditions (`validateBaseVersions`/
+  // `validateForkPointVersions`) run BEFORE planning starts and compare the
+  // branch's captured token against a FRESH `computeBaseVersion` read right
+  // there — so a bump that lands before `merge()`/`mergeIncremental()` is
+  // even called must be tolerated by that comparison directly, not by
+  // reaching the commit transaction at all.
+  it("merge() tolerates an engine-wide revision bump that happened before merge() was even called", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    // The bump (and the empty delta it leaves behind) is already in place
+    // before merge() is called — validateBaseVersions's own precondition,
+    // not just assertTargetUnchanged, must tolerate it.
+    state.revision = "r1" as EngineRevision;
+
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    expect(isOk(result)).toBe(true);
+    expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
+  });
+
+  it("refuses merge() when a pre-call engine-wide bump's delta names a row of this graph", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    state.revision = "r1" as EngineRevision;
+    state.delta = () => ({
+      kind: "keys",
+      nodes: [{ kind: "Widget", id: "base-1" }],
+      edges: [],
+    });
+
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+    expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+
+  it("mergeIncremental() tolerates an engine-wide revision bump at the fork point that happened before the call", async () => {
+    const state = initialState();
+    const [forkPoint] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    const [target] = await createStoreWithSchema(
+      widgetGraph,
+      await makePlainBackend(),
+    );
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    state.revision = "r1" as EngineRevision;
+
+    const result = await mergeIncremental<WidgetGraph>({
+      forkPoint,
+      target,
+      branches: [forkBranch],
+      options: {
+        ...engineAnchorMergeOptions(fakeEmbedder),
+        onBasePropertyConflict: "flag",
+      },
+    });
+
+    expect(isOk(result)).toBe(true);
+    expect(await widgetLabels(target)).toEqual(["from fork"]);
+  });
+
+  // `planMergeIncremental()`'s durable `MergePlanArtifact` records each
+  // branch's anchor alongside the fork point's — and a branch tolerated here
+  // by `toleratedByEngineAnchor` (an engine-wide bump that named none of
+  // this graph's rows) captured its OWN `base` token before the bump, so it
+  // no longer textually equals the fork point's current token. A stored
+  // review built on this plan (`candidate-review.ts`'s `validateReview`,
+  // reached through `planCandidateWriteSetReview`/
+  // `revalidateCandidateWriteSetReview`, which always plan with
+  // `forkPoint === target`) compares `anchors.branches[0].baseVersion` to
+  // `anchors.forkPoint.baseVersion` for exact equality and throws
+  // `MergeReviewError("incompatible-plan")` on any difference — so the
+  // recorded branch anchor MUST be normalized to the live fork version
+  // whenever tolerance accepted a mismatch, or a plan `mergeIncremental()`
+  // itself would go on to accept becomes unreviewable. Mutation-proven:
+  // recording the raw `branch.base` instead of `forkVersion` in the
+  // anchors' `branches` map made this test fail (the two anchors differed);
+  // restoring the normalization made it pass again.
+  //
+  // `planMergeIncremental()` is a PUBLIC durable plan, so
+  // `assertPublicPlanCapability` requires the TARGET to carry TypeGraph
+  // revision tracking — which forecloses an engine anchor on the target
+  // itself (precedence picks the revision anchor whenever tracking is on).
+  // The fork point is a SEPARATE store from the target in the general
+  // `planMergeIncremental` API (only `planCandidateWriteSet` collapses
+  // them), and only the fork point's own `revisionTrackingEnabled` decides
+  // ITS anchor form — so this case gives the fork point the scripted
+  // engine-anchored backend and the target an ordinary revision-tracked
+  // one, the combination that keeps the scenario reachable.
+  it("planMergeIncremental() normalizes a tolerated branch anchor to the fork point's live token", async () => {
+    const state = initialState();
+    const [forkPoint] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await forkPoint.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+    const [target] = await createStoreWithSchema(
+      widgetGraph,
+      await makePlainBackend(),
+      { revisionTracking: true },
+    );
+    await target.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
+    );
+    expect(forkBranch.base).toContain("\0engine:r0");
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    // An unrelated engine-wide bump lands after the fork but before
+    // planning — no row of THIS graph moves, so the outer precondition
+    // tolerates the branch's now-stale-looking `base` token.
+    state.revision = "r1" as EngineRevision;
+
+    const planned = await planMergeIncremental<WidgetGraph>({
+      forkPoint,
+      target,
+      branches: [forkBranch],
+      options: {
+        ...engineAnchorMergeOptions(fakeEmbedder),
+        onBasePropertyConflict: "flag",
+      },
+    });
+
+    expect(isOk(planned)).toBe(true);
+    if (isOk(planned)) {
+      const anchors = planned.data.anchors;
+      expect(anchors.kind).toBe("incremental");
+      if (anchors.kind === "incremental") {
+        expect(anchors.forkPoint.baseVersion).toContain("\0engine:r1");
+        expect(anchors.branches).toEqual([
+          { branchId: BRANCH, baseVersion: anchors.forkPoint.baseVersion },
+        ]);
+      }
+    }
+  });
+
+  // Reproduces the finding this guard closes: deleting the schema-half
+  // comparison in `assertForkPointUnchanged` (comparing raw
+  // `liveVersion !== precondition.version` alone, without also requiring
+  // `schemaComponentOf(liveVersion) === schemaComponentOf(precondition.version)`
+  // before consulting `changesSince`) leaves this test green, because the
+  // engine revision here never moves at all — `engineAnchorMismatch`'s
+  // equal-revision fast path would accept the plan outright. Mutation-proven:
+  // reverting the schema check made this test fail with `isOk(result) ===
+  // true` and a committed "from fork" row; restoring it (re-adding the
+  // `schemaComponentOf` comparison) made it pass again.
+  //
+  // The migration runs inside the `embedder` callback so it lands strictly
+  // between `validateForkPointVersions`'s own plan-time precondition
+  // (computed from the fork point BEFORE this call) and the commit
+  // transaction where `assertForkPointUnchanged` runs — migrating the fork
+  // point before calling `mergeIncremental()` at all would let the OUTER
+  // precondition refuse first, leaving `assertForkPointUnchanged`'s own
+  // schema check untested.
+  it("mergeIncremental() refuses when the fork point's schema version changes even with an unmoved engine revision", async () => {
+    const state = initialState();
+    const [forkPoint] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    const [target] = await createStoreWithSchema(
+      widgetGraph,
+      await makePlainBackend(),
+    );
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    // Re-committing the IDENTICAL graph definition bumps the fork point's
+    // active schema version (monotonic) while leaving the document hash —
+    // and every Widget row — untouched, so `changesSince` for this graph
+    // stays empty and the engine revision never moves.
+    const embedder = driftingEmbedder(async () => {
+      const forkPointBackend = storeBackend(forkPoint);
+      await migrateSchema(
+        forkPointBackend,
+        widgetGraph,
+        requireDefined(
+          await getCommittedSchemaVersion(forkPointBackend, widgetGraph.id),
+        ),
+      );
+    });
+
+    const result = await mergeIncremental<WidgetGraph>({
+      forkPoint,
+      target,
+      branches: [forkBranch],
+      options: {
+        ...engineAnchorMergeOptions(embedder),
+        onBasePropertyConflict: "flag",
+      },
+    });
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+    expect(await widgetLabels(target)).toEqual([]);
+  });
+
+  // Reproduces the finding this guard closes: without the fresh
+  // `readActiveSchemaVersion` re-check in `assertTargetUnchanged`'s engine
+  // branch, a schema commit racing the plan→commit window is invisible to
+  // `engineAnchorMismatch` (the revision never moves, so its fast path
+  // accepts) — the merge would wrongly commit a plan resolved against a
+  // schema that no longer matches the live target. Mutation-proven:
+  // removing the active-version comparison made this test fail with
+  // `isOk(result) === true` and a committed "from fork" row; restoring the
+  // check made it pass again.
+  it("refuses the merge when the target's schema version changes before the commit transaction, even though the revision does not move", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const embedder = driftingEmbedder(async () => {
+      const backend = storeBackend(baseStore);
+      await migrateSchema(
+        backend,
+        widgetGraph,
+        requireDefined(
+          await getCommittedSchemaVersion(backend, widgetGraph.id),
+        ),
+      );
+    });
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+    // Nothing committed from the schema-stale plan.
+    expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+});
