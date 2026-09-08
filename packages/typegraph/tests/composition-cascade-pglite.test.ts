@@ -82,3 +82,70 @@ describe("composition whole delete is statically ineligible for the fused atomic
     }
   });
 });
+
+// ============================================================
+// A composition PART, not a whole: `compositionEdgeKindsUnder` alone does
+// not disqualify it (it declares no parts of its own), so only the
+// `compositionEdgeKindsOver` half of the guard keeps it off the fused path.
+// ============================================================
+
+const restrictedPartGraph = defineGraph({
+  id: "composition-cascade-pglite-restricted-part-fused-ineligible",
+  nodes: {
+    Podcast: { type: Podcast },
+    // `restrict`, and declares no composition parts of its own: only a
+    // `compositionEdgeKindsOver` (part-side) check keeps this off the fused
+    // `deleteNodes` command.
+    Episode: { type: Episode, onDelete: "restrict" },
+  },
+  edges: {
+    episodeOf: {
+      type: episodeOf,
+      from: [Episode],
+      to: [Podcast],
+      cardinality: "one",
+    },
+  },
+  ontology: [partOf(Episode, Podcast, { via: episodeOf })],
+});
+
+describe("a composition PART declared onDelete: 'restrict' is statically ineligible for the fused atomic path", () => {
+  it("never dispatches the fused deleteNodes command, and does not restrict deleting the part out of its whole", async () => {
+    const local = await createLocalPgliteBackend({ vector: false });
+    const backend = createPostgresBackend(local.db, { vector: false });
+    try {
+      const [store] = await createStoreWithSchema(restrictedPartGraph, backend);
+      const podcast = await store.nodes.Podcast.create({});
+      const episode = await store.nodes.Episode.create({});
+      await store.edges.episodeOf.create(episode, podcast, {});
+
+      const dispatched: string[] = [];
+      await withAtomicMutationProgramDispatchObserver(
+        backend,
+        (variant) => dispatched.push(variant),
+        () =>
+          store[STORE_RUNTIME].deleteNodeWithPolicy(backend, {
+            kind: "Episode",
+            id: episode.id,
+          }),
+      );
+
+      // MUTATION: drop `compositionEdgeKindsOver` from
+      // `resolveAtomicNodeDeleteBatchExecutor`'s guard (leaving only
+      // `compositionEdgeKindsUnder`) and `deleteNodes` appears here — the
+      // fused command's read-free refusal diagnosis then counts the
+      // composition edge as a live restrict obstacle and this delete throws
+      // `RestrictedDeleteError` instead of succeeding.
+      expect(dispatched).not.toContain("deleteNodes");
+      await expect(
+        store.nodes.Episode.getById(episode.id),
+      ).resolves.toBeUndefined();
+      // The whole is untouched: deleting a part directly must not touch it.
+      await expect(
+        store.nodes.Podcast.getById(podcast.id),
+      ).resolves.toBeDefined();
+    } finally {
+      await local.backend.close();
+    }
+  });
+});

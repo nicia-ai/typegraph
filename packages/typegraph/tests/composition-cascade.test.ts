@@ -12,10 +12,14 @@
  *  - INTEGRATION tests through the real Store API: `store.nodes.Podcast.delete`
  *    etc. against a Podcast -> Episode -> Segment composition graph (the exact
  *    fixture `ontology-composition-declaration.test.ts` uses for the registry
- *    layer), proving the cascade end to end.
+ *    layer), proving the cascade end to end. A second fixture (Album
+ *    -[hasTrack]-> Track -[noteOf]<- Note) covers the `hasPart` /
+ *    `partSide: "to"` orientation and a closure that mixes both
+ *    orientations in one walk.
  *
- * MUTATION CHECKS recorded in the lane's load-bearing note
- * (`lane-Ec2-load-bearing.md`).
+ * MUTATION CHECKS are recorded inline, next to the assertion each one
+ * guards, as an `// MUTATION:` comment naming the exact change and which
+ * assertion it flips.
  */
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -28,6 +32,7 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  hasPart,
   partOf,
 } from "../src";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
@@ -277,6 +282,57 @@ describe("planCompositionCascade", () => {
 });
 
 // ============================================================
+// Unit test: the heterogeneous set read's OWN temporal disposition
+//
+// `readWholeSideEdges` falls back to `findEdgesConnectedTo` whenever the set
+// read returns zero rows — a childless round on a set-read-capable backend
+// is therefore never PROOF the set read itself handles an ended row
+// correctly; it could be silently rerouting to the (separately correct)
+// fallback every time. This asserts the set read ALONE, bypassing that
+// fallback entirely, so a future regression narrowing it to only
+// open-ended rows cannot hide behind the reroute.
+// ============================================================
+
+describe("findEdgesByHeterogeneousEndpointSet — the set read's own temporal disposition", () => {
+  it("returns an ended-but-undeleted composition edge with excludeDeleted alone (no temporalMode)", async () => {
+    const graph = buildPodcastGraph("cascade-set-read-ended-row");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "p" });
+    const episode = await store.nodes.Episode.create({ title: "e" });
+    const edge = await store.edges.episodeOf.create(episode, podcast, {});
+    await store.edges.episodeOf.update(
+      edge.id,
+      {},
+      { validTo: new Date().toISOString() },
+    );
+
+    const setRead = backend.findEdgesByHeterogeneousEndpointSet;
+    if (setRead === undefined) {
+      throw new Error(
+        "createTestBackend() is expected to license findEdgesByHeterogeneousEndpointSet",
+      );
+    }
+    // MUTATION: add `temporalMode: "current"` (or any validTo-filtering
+    // condition) to `buildTemporalConditions`'s unconditional branch and
+    // this row disappears — `compositionEdgeCounts`, not the read, is
+    // supposed to be the only place `population: "one"` vs `"oneActive"`
+    // is decided.
+    const rows = await setRead({
+      graphId: graph.id,
+      side: "to",
+      endpoints: [{ kind: "Podcast", id: podcast.id }],
+      edgeKinds: ["episodeOf"],
+      excludeDeleted: true,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(edge.id);
+    expect(rows[0]?.valid_to).toBeDefined();
+  });
+});
+
+// ============================================================
 // Integration tests through the real Store API
 // ============================================================
 
@@ -360,6 +416,125 @@ describe("composition cascade — delete", () => {
     ]);
     expect(countsAfter).toEqual(countsBefore);
     expect(countsAfter.every((row) => row !== undefined)).toBe(true);
+  });
+
+  it("does not restrict deleting a PART directly out of its whole, even when the part itself declares onDelete: 'restrict'", async () => {
+    // A dedicated fixture: unlike `buildPodcastGraph` (which declares
+    // Episode `disconnect` specifically to keep this restrict question out
+    // of its other tests), Episode here declares `restrict` — its ONLY
+    // connected edge is the composition edge up to its whole.
+    const RestrictEpisode = defineNode("RestrictEpisode", {
+      schema: emptySchema,
+    });
+    const RestrictPodcast = defineNode("RestrictPodcast", {
+      schema: emptySchema,
+    });
+    const restrictEpisodeOf = defineEdge("restrictEpisodeOf", {
+      schema: emptySchema,
+    });
+    const graph = defineGraph({
+      id: "cascade-restrict-part-direct-delete",
+      nodes: {
+        RestrictPodcast: { type: RestrictPodcast },
+        RestrictEpisode: { type: RestrictEpisode, onDelete: "restrict" },
+      },
+      edges: {
+        restrictEpisodeOf: {
+          type: restrictEpisodeOf,
+          from: [RestrictEpisode],
+          to: [RestrictPodcast],
+          cardinality: "one",
+        },
+      },
+      ontology: [
+        partOf(RestrictEpisode, RestrictPodcast, { via: restrictEpisodeOf }),
+      ],
+    });
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.RestrictPodcast.create({});
+    const episode = await store.nodes.RestrictEpisode.create({});
+    await store.edges.restrictEpisodeOf.create(episode, podcast, {});
+
+    // MUTATION: drop the `!ctx.registry.isCompositionEdge(edge.kind)` filter
+    // from `enforceNodeDeleteBehavior`'s restrict arm and this throws
+    // `RestrictedDeleteError` instead of succeeding — the ruling is that a
+    // part may always be deleted out of its whole.
+    await store.nodes.RestrictEpisode.delete(episode.id);
+
+    await expect(
+      store.nodes.RestrictEpisode.getById(episode.id),
+    ).resolves.toBeUndefined();
+    // The whole is untouched: deleting a part directly must not touch it.
+    await expect(
+      store.nodes.RestrictPodcast.getById(podcast.id),
+    ).resolves.toBeDefined();
+  });
+
+  it("cascades a restricting intermediate whole's OWN parts, then does not restrict on its OWN composition edge into its whole", async () => {
+    // Episode here is BOTH a whole (of Segment, via segmentOf) and a part
+    // (of Podcast, via episodeOf) — and, unlike `buildPodcastGraph`,
+    // declares `onDelete: "restrict"` on itself: the exact "intermediate
+    // whole that is itself a part" shape.
+    const graph = defineGraph({
+      id: "cascade-restrict-intermediate-whole",
+      nodes: {
+        Podcast: { type: Podcast },
+        Episode: { type: Episode, onDelete: "restrict" },
+        Segment: { type: Segment },
+      },
+      edges: {
+        episodeOf: {
+          type: episodeOf,
+          from: [Episode],
+          to: [Podcast],
+          cardinality: "one",
+        },
+        segmentOf: {
+          type: segmentOf,
+          from: [Segment],
+          to: [Episode],
+          cardinality: "oneActive",
+        },
+      },
+      ontology: [
+        partOf(Episode, Podcast, { via: episodeOf }),
+        partOf(Segment, Episode, { via: segmentOf }),
+      ],
+    });
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const podcast = await store.nodes.Podcast.create({ title: "p" });
+    const episode = await store.nodes.Episode.create({ title: "e" });
+    const segment = await store.nodes.Segment.create({});
+    await store.edges.episodeOf.create(episode, podcast, {});
+    const segmentOfEdge = await store.edges.segmentOf.create(
+      segment,
+      episode,
+      {},
+    );
+
+    // MUTATION: same as above — drop the composition-edge exclusion from
+    // the restrict arm and this throws `RestrictedDeleteError` on the
+    // upward `episodeOf` edge, even though the Segment cascade below it
+    // already ran cleanly.
+    await store.nodes.Episode.delete(episode.id);
+
+    await expect(
+      store.nodes.Episode.getById(episode.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.nodes.Segment.getById(segment.id),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.edges.segmentOf.getById(segmentOfEdge.id),
+    ).resolves.toBeUndefined();
+    // The outer whole is untouched.
+    await expect(
+      store.nodes.Podcast.getById(podcast.id),
+    ).resolves.toBeDefined();
   });
 
   it("cascades three levels of REFLEXIVE composition, terminated by the visited set", async () => {
@@ -552,6 +727,158 @@ describe("composition cascade — delete", () => {
     await expect(
       store.nodes.Episode.getById(episode.id),
     ).resolves.toBeUndefined();
+  });
+});
+
+// ============================================================
+// Fixture: Album -[hasTrack]-> Track -[noteOf]<- Note
+//
+// Every fixture above declares `partOf`, whose realizing edge always runs
+// PART -> WHOLE, so `compositionPartSide` infers `"from"` in every case —
+// R5's "via may run in either orientation" half is exercised by nothing.
+// This fixture uses `hasPart`, whose realizing edge runs WHOLE -> PART, to
+// infer `partSide: "to"` instead, and nests a `partOf`-oriented (`"from"`)
+// grandchild under it so the closure walk crosses BOTH orientations in one
+// cascade.
+// ============================================================
+
+const Album = defineNode("Album", {
+  schema: z.object({ title: z.string().default("untitled") }),
+});
+const Track = defineNode("Track", { schema: emptySchema });
+const Note = defineNode("Note", { schema: emptySchema });
+
+const hasTrack = defineEdge("hasTrack", { schema: emptySchema });
+const noteOf = defineEdge("noteOf", { schema: emptySchema });
+
+function buildAlbumGraph(
+  id: string,
+  trackTargetCardinality: "one" | "oneActive",
+) {
+  return defineGraph({
+    id,
+    nodes: {
+      Album: { type: Album },
+      Track: { type: Track, onDelete: "disconnect" },
+      Note: { type: Note },
+    },
+    edges: {
+      hasTrack: {
+        type: hasTrack,
+        from: [Album],
+        to: [Track],
+        targetCardinality: trackTargetCardinality,
+      },
+      noteOf: { type: noteOf, from: [Note], to: [Track], cardinality: "one" },
+    },
+    ontology: [
+      // WHOLE -> PART: infers `partSide: "to"` (Track is the edge's `to`).
+      hasPart(Album, Track, { via: hasTrack }),
+      // PART -> WHOLE: infers `partSide: "from"` (Note is the edge's `from`).
+      partOf(Note, Track, { via: noteOf }),
+    ],
+  });
+}
+
+describe("composition cascade — to-oriented (hasPart) and mixed-orientation closures", () => {
+  it("cascades a to-oriented (hasPart) whole to its part", async () => {
+    const graph = buildAlbumGraph("cascade-haspart-one-level", "one");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const album = await store.nodes.Album.create({ title: "Debut" });
+    const track = await store.nodes.Track.create({});
+    const hasTrackEdge = await store.edges.hasTrack.create(album, track, {});
+
+    await store.nodes.Album.delete(album.id);
+
+    await expect(store.nodes.Album.getById(album.id)).resolves.toBeUndefined();
+    // MUTATION: in `planCompositionCascade`, make the `partSide === "to"`
+    // resolution read `row.from_kind`/`row.from_id` instead of
+    // `row.to_kind`/`row.to_id` (breaking only the to-oriented arm) and this
+    // assertion flips — Track survives because the cascade resolves the
+    // WHOLE, not the part, as the member to delete.
+    await expect(store.nodes.Track.getById(track.id)).resolves.toBeUndefined();
+    await expect(
+      store.edges.hasTrack.getById(hasTrackEdge.id),
+    ).resolves.toBeUndefined();
+  });
+
+  it("cascades a MIXED-orientation closure: a to-oriented whole with a from-oriented grandchild", async () => {
+    const graph = buildAlbumGraph("cascade-haspart-mixed-orientation", "one");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const album = await store.nodes.Album.create({ title: "Debut" });
+    const track = await store.nodes.Track.create({});
+    const note = await store.nodes.Note.create({});
+    await store.edges.hasTrack.create(album, track, {});
+    await store.edges.noteOf.create(note, track, {});
+
+    await store.nodes.Album.delete(album.id);
+
+    await expect(store.nodes.Album.getById(album.id)).resolves.toBeUndefined();
+    await expect(store.nodes.Track.getById(track.id)).resolves.toBeUndefined();
+    // The grandchild, reached through the SECOND (from-oriented) level of
+    // the same walk, is cascaded too.
+    await expect(store.nodes.Note.getById(note.id)).resolves.toBeUndefined();
+  });
+
+  it("targetCardinality 'oneActive': reparenting a to-oriented part frees it from its FORMER whole's cascade", async () => {
+    const graph = buildAlbumGraph(
+      "cascade-haspart-onactive-reparent",
+      "oneActive",
+    );
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const albumA = await store.nodes.Album.create({ title: "A" });
+    const albumB = await store.nodes.Album.create({ title: "B" });
+    const track = await store.nodes.Track.create({});
+    const oldEdge = await store.edges.hasTrack.create(albumA, track, {});
+    // Reparent: end the old window, then attach to the new album. `oneActive`
+    // frees the slot the instant the window ends, so the second create is
+    // not a target-cardinality conflict.
+    await store.edges.hasTrack.update(
+      oldEdge.id,
+      {},
+      { validTo: new Date().toISOString() },
+    );
+    await store.edges.hasTrack.create(albumB, track, {});
+
+    await store.nodes.Album.delete(albumA.id);
+
+    // Track survived: the ended edge no longer counts under `oneActive`.
+    await expect(store.nodes.Track.getById(track.id)).resolves.toBeDefined();
+  });
+
+  it("targetCardinality 'one': an ended-but-undeleted to-oriented edge still counts against its whole's cascade", async () => {
+    const graph = buildAlbumGraph("cascade-haspart-one-no-reparent", "one");
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(graph, backend);
+
+    const albumA = await store.nodes.Album.create({ title: "A" });
+    const albumB = await store.nodes.Album.create({ title: "B" });
+    const track = await store.nodes.Track.create({});
+    const oldEdge = await store.edges.hasTrack.create(albumA, track, {});
+    await store.edges.hasTrack.update(
+      oldEdge.id,
+      {},
+      { validTo: new Date().toISOString() },
+    );
+
+    // `one` never frees the slot on an ended window — a second live edge
+    // targeting the same Track is still a cardinality conflict, proving a
+    // `one` composition edge cannot be reparented behind its whole's back
+    // without deleting the row outright.
+    await expect(
+      store.edges.hasTrack.create(albumB, track, {}),
+    ).rejects.toThrow(matchingObject({ name: "CardinalityError" }));
+
+    // Deleting the FORMER whole still cascades Track away: the ended row
+    // counts unconditionally under `targetCardinality: "one"`.
+    await store.nodes.Album.delete(albumA.id);
+    await expect(store.nodes.Track.getById(track.id)).resolves.toBeUndefined();
   });
 });
 
