@@ -11,12 +11,23 @@ import { z } from "zod";
 
 import {
   asNodeId,
+  ConfigurationError,
   createAdapterStoreWithSchema,
+  createStoreWithSchema,
   defineGraph,
   defineGraphExtension,
   defineNode,
   type GraphDef,
 } from "../src";
+import {
+  batchPointReadVerdict,
+  statementExecutionVerdict,
+} from "../src/backend/capabilities/resolve";
+import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
+import {
+  type RecordedInstant,
+  recordedInstantRevision,
+} from "../src/core/temporal";
 import { applyIdentityChangesForContext } from "../src/identity/service-interchange-write";
 import { type IdentityServiceContext } from "../src/identity/service-types";
 import {
@@ -24,6 +35,12 @@ import {
   pruneIdentityTransitionsForContext,
   readIdentityTransitions,
 } from "../src/identity/transition-log";
+import { createSqlSchema } from "../src/query/compiler/schema";
+import {
+  createRecordedTransactionScope,
+  runRecordedTransactionSavepoint,
+  withRecordedIdentityMutationTarget,
+} from "../src/store/recorded-capture";
 import { storeRuntime } from "../src/store/runtime-port";
 import { generateId } from "../src/utils/id";
 import { createTestBackend } from "./test-utils";
@@ -44,6 +61,15 @@ const PERSON_CLASS_REFS = [
   { kind: "Person", id: "b" },
   { kind: "Person", id: "c" },
 ];
+
+function requireRecordedNow(
+  recordedNow: RecordedInstant | undefined,
+): RecordedInstant {
+  if (recordedNow === undefined) {
+    throw new Error("expected a recorded instant");
+  }
+  return recordedNow;
+}
 
 function readTransitions<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
@@ -156,6 +182,124 @@ describe("identity transition log", () => {
     expect(detachRows.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("checkpoints and restores buffered identity-transition notes exactly like every other touch", async () => {
+    // §2.5: `noteIdentityTransition` "buffers alongside `touched`, is included
+    // in `checkpoint()` / `restore()` exactly as `touched` is". The only
+    // shipped rollback seam over a capture session is
+    // `runRecordedTransactionSavepoint` (used today by the archival import's
+    // per-edge retry, which never touches identity) — so this drives it
+    // directly, through `createRecordedTransactionScope` (both exported for
+    // exactly this kind of capture-session test; see
+    // `recorded-capture-write-parity.test.ts`), to prove a note taken inside
+    // a savepoint that rolls back never reaches the flushed table, while one
+    // taken inside a savepoint that releases does.
+    const backend = createTestBackend();
+    const statementExecution = statementExecutionVerdict(backend);
+    expect(statementExecution.supported).toBe(true);
+    if (!statementExecution.supported) return;
+    const schema = createSqlSchema(backend.tableNames);
+    const graphId = "identity_transition_log_checkpoint";
+    const rolledBackDraft = {
+      cause: "fold",
+      classRef: { kind: "Person", id: "rolled-back" },
+      assertionIds: [],
+      validAt: new Date().toISOString(),
+    } as const;
+    const releasedDraft = {
+      cause: "fold",
+      classRef: { kind: "Person", id: "released" },
+      assertionIds: [],
+      validAt: new Date().toISOString(),
+    } as const;
+
+    await backend.transaction(async (target) => {
+      const scope = createRecordedTransactionScope(
+        target,
+        batchPointReadVerdict(backend),
+        schema,
+      );
+      await runRecordedTransactionSavepoint(
+        scope.backend,
+        statementExecution,
+        "typegraph_identity_transition_checkpoint_test",
+        async () => {
+          await withRecordedIdentityMutationTarget(
+            scope.backend,
+            (_rawTarget, _touch, noteTransition) => {
+              noteTransition(graphId, rolledBackDraft);
+              return Promise.resolve();
+            },
+          );
+          return {
+            action: "rollback",
+            value: undefined,
+            cause: new Error("expected test rollback"),
+          };
+        },
+      );
+      await withRecordedIdentityMutationTarget(
+        scope.backend,
+        (_rawTarget, _touch, noteTransition) => {
+          noteTransition(graphId, releasedDraft);
+          return Promise.resolve();
+        },
+      );
+      await scope.flush();
+    });
+
+    const rows = await readIdentityTransitions(backend, schema, graphId, {
+      classRefs: [rolledBackDraft.classRef, releasedDraft.classRef],
+      limit: 200,
+    });
+    expect(rows.map((row) => row.class_id)).toEqual(["released"]);
+  });
+
+  it("throws the sealed-session ConfigurationError for a note taken after flush", async () => {
+    // §2.5: `noteIdentityTransition` "throws the same already-sealed
+    // `ConfigurationError` after `flush`" — `noteIdentityTransition`
+    // (`RecordedCaptureSession`) carries its own copy of that check (with
+    // `{ entity: "identity-transition", graphId }` details), but
+    // `withRecordedIdentityMutationTarget` calls `session.assertOpen()`
+    // BEFORE handing the caller its `noteTransition` callback, so a
+    // synchronous note-after-flush attempt through the shipped seam observes
+    // that generic sealed error first — the SAME error class and message the
+    // design promises, whichever of the two checks actually fires.
+    const backend = createTestBackend();
+    const statementExecution = statementExecutionVerdict(backend);
+    expect(statementExecution.supported).toBe(true);
+    if (!statementExecution.supported) return;
+    const schema = createSqlSchema(backend.tableNames);
+    const graphId = "identity_transition_log_sealed";
+
+    await backend.transaction(async (target) => {
+      const scope = createRecordedTransactionScope(
+        target,
+        batchPointReadVerdict(backend),
+        schema,
+      );
+      await scope.flush();
+      let caught: unknown;
+      try {
+        await withRecordedIdentityMutationTarget(
+          scope.backend,
+          (_rawTarget, _touch, noteTransition) => {
+            noteTransition(graphId, {
+              cause: "fold",
+              classRef: { kind: "Person", id: "too-late" },
+              assertionIds: [],
+              validAt: new Date().toISOString(),
+            });
+            return Promise.resolve();
+          },
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ConfigurationError);
+      expect((caught as ConfigurationError).message).toMatch(/sealed/i);
+    });
+  });
+
   it("writes zero transition rows with history: false", async () => {
     const [store] = await createAdapterStoreWithSchema(
       graph,
@@ -173,7 +317,7 @@ describe("identity transition log", () => {
     expect(rows.length).toBe(0);
   });
 
-  it("a rebuild writes no transition; a prune writes none and advances the watermark", async () => {
+  it("a rebuild writes no transition and advances no revision; a prune writes none and ALSO advances no revision", async () => {
     const [store] = await createAdapterStoreWithSchema(
       graph,
       createTestBackend(),
@@ -187,24 +331,53 @@ describe("identity transition log", () => {
     );
     const ctx = storeRuntime(store).identityContext();
     const before = await readTransitions(ctx);
+    const beforeRebuildRevision = recordedInstantRevision(
+      requireRecordedNow(await store.recordedNow()),
+    );
     await storeRuntime(store).rebuildIdentityClosure();
     const afterRebuild = await readTransitions(ctx);
     expect(afterRebuild.length).toBe(before.length);
+    // A rebuild follows the SAME non-advancing contract as a prune: it
+    // recomputes derived state from unchanged truth and never advances the
+    // content revision — pinned here in the same direction pruning is pinned
+    // below, so a regression that starts advancing EITHER one fails loudly.
+    expect(
+      recordedInstantRevision(requireRecordedNow(await store.recordedNow())),
+    ).toBe(beforeRebuildRevision);
 
     // beforeRecorded prunes rows strictly BEFORE that revision, so the
     // watermark must be advanced past the assert's own commit — one more
     // write, then read the new high-water mark.
     await store.nodes.Person.create({ name: "C" }, { id: "c" });
-    const recordedNow = await store.recordedNow();
-    if (recordedNow === undefined) {
-      throw new Error("expected a recorded instant");
-    }
+    const recordedNow = requireRecordedNow(await store.recordedNow());
+    const revisionBeforePrune = recordedInstantRevision(recordedNow);
     const pruneResult = await pruneIdentityTransitionsForContext(ctx, {
       beforeRecorded: recordedNow,
     });
     expect(pruneResult.pruned).toBe(before.length);
     const afterPrune = await readTransitions(ctx);
     expect(afterPrune.length).toBe(0);
+
+    // The Lead's BINDING ruling (the design note's top-of-file "Lead
+    // rulings", which supersedes §3.5's original draft text further down the
+    // SAME document): "a prune does NOT advance the content revision (same
+    // as rebuildIdentityClosure)." Pinned in the SAME direction as the
+    // rebuild above — a prune that started advancing the revision would fail
+    // here, exactly as a rebuild that started would fail above.
+    const revisionAfterPrune = recordedInstantRevision(
+      requireRecordedNow(await store.recordedNow()),
+    );
+    expect(revisionAfterPrune).toBe(revisionBeforePrune);
+
+    // The OTHER direction of the pin: an ORDINARY write, unlike either
+    // maintenance operation, unambiguously DOES advance the revision — proof
+    // this assertion methodology can actually detect an advance, so the two
+    // "no advance" checks above are not vacuously trivial.
+    await store.nodes.Person.create({ name: "D" }, { id: "d" });
+    const revisionAfterOrdinaryWrite = recordedInstantRevision(
+      requireRecordedNow(await store.recordedNow()),
+    );
+    expect(revisionAfterOrdinaryWrite).toBeGreaterThan(revisionAfterPrune);
   });
 
   it("pruneIdentityTransitions(store, options) — the Store-based public shape — prunes through the same path", async () => {
@@ -307,6 +480,86 @@ describe("identity transition log", () => {
     );
     const kindDropRows = rows.filter((row) => row.cause === "kind-drop");
     expect(kindDropRows.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // eslint-disable-next-line vitest/no-disabled-tests -- tracked gap, see the comment below; NOT a stand-in for coverage.
+  it.skip("notes a schema-transition cause when first enablement folds a pre-existing same-id pair", async () => {
+    // §2.3: `schema-transition` is `identitySchemaCommitPreflight`'s cause
+    // whenever the closure changed and NO node kind was dropped —
+    // distinguishing it from `kind-drop`, the other cause the same preflight
+    // can emit. First enablement on a database that already holds a same-id
+    // pair across kinds is the simplest reachable case: the enablement
+    // rebuild folds Person/shared and Author/shared into one class with
+    // nothing dropped.
+    //
+    // SKIPPED, not deleted: this reproduces a real, separately-confirmed
+    // defect outside PR-1's fix list. `prepareStoreWithSchema`
+    // (src/store/store.ts) runs the FIRST schema commit — including a first
+    // enablement — through `ensureSchemaWithIdentityPrecedence` against the
+    // RAW constructor-argument `backend`, before `StoreImplementation`'s own
+    // constructor wraps it with `createRecordedBackend` (history capture).
+    // `identitySchemaCommitPreflight`'s `withRecordedIdentityMutationTarget`
+    // therefore finds no capture binding on that first commit and silently
+    // drops every note it takes — confirmed by instrumenting
+    // `withRecordedIdentityMutationTarget`: it logs UNBOUND twice during this
+    // exact scenario, even with `{ history: true }` passed to BOTH opens.
+    // `store.evolve()` (what the shipped `kind-drop` test above uses) does
+    // not have this problem — it commits through `this.#backend`, the
+    // store's own already-wrapped reference — which is why that cause has
+    // working coverage and this one does not. Un-skip once the construction
+    // order is fixed so the enablement preflight commits through a bound
+    // capture session.
+    const GRAPH_ID = "identity_transition_log_schema_transition";
+    const Author = defineNode("Author", {
+      schema: z.object({ penName: z.string() }),
+    });
+    const disabledGraph = defineGraph({
+      id: GRAPH_ID,
+      nodes: { Person: { type: Person }, Author: { type: Author } },
+      edges: {},
+    });
+    const enabledGraph = defineGraph({
+      id: GRAPH_ID,
+      nodes: { Person: { type: Person }, Author: { type: Author } },
+      edges: {},
+      identity: { sameIdAcrossKinds: "fold" },
+    });
+    const { backend } = createLocalSqliteBackend();
+    try {
+      const [disabledStore] = await createStoreWithSchema(
+        disabledGraph,
+        backend,
+        { history: true },
+      );
+      await disabledStore.nodes.Person.create(
+        { name: "Alice" },
+        { id: "shared" },
+      );
+      await disabledStore.nodes.Author.create(
+        { penName: "A." },
+        { id: "shared" },
+      );
+
+      const [enabledStore] = await createStoreWithSchema(
+        enabledGraph,
+        backend,
+        { history: true },
+      );
+      const ctx = storeRuntime(enabledStore).identityContext();
+      const rows = await readTransitions(ctx, [
+        { kind: "Person", id: "shared" },
+        { kind: "Author", id: "shared" },
+      ]);
+      const schemaTransitionRows = rows.filter(
+        (row) => row.cause === "schema-transition",
+      );
+      expect(schemaTransitionRows.length).toBeGreaterThanOrEqual(1);
+      // The other droppedNodeKinds branch of the SAME site must not have
+      // fired instead.
+      expect(rows.some((row) => row.cause === "kind-drop")).toBe(false);
+    } finally {
+      await backend.close();
+    }
   });
 
   it("notes a reconcile transition, carrying decision provenance, for a governed apply", async () => {

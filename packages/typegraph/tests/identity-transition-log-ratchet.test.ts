@@ -1,0 +1,215 @@
+/**
+ * The Lead ruling's condition on the identity transition log's "no-log
+ * line": *a ratchet test asserts no code path reads membership from
+ * `typegraph_identity_transitions`.*
+ *
+ * §2.1 of the design note states the invariant directly: "a transition row
+ * carries no membership... every membership answer in the replay API is
+ * produced by calling `historicalIdentityReconstructionCtes`". That is
+ * enforced by construction inside `src/identity/replay.ts` (see its own
+ * top-of-file docblock), but nothing previously stopped a FUTURE writer
+ * elsewhere in `src/**` from reaching into the relation directly — through
+ * `SqlSchema.identityTransitionsTable`, a Drizzle table object's
+ * `identityTransitions` field, or the raw `"typegraph_identity_transitions"`
+ * string — and deriving a membership answer from it. This file is that
+ * stop: it scans every `.ts` file under `src/` for a reference to the
+ * relation and fails on any file outside `MODULE_ALLOWLIST`, in both
+ * directions (an allowlisted file whose reference disappeared is stale and
+ * must be removed, so the list stays an honest map of the tree rather than
+ * a rubber stamp).
+ *
+ * The allowlist is MODULE-level (a file may reference the relation more than
+ * once — write plumbing, an index, a doc comment — for one already-reviewed
+ * reason), matching how the ruling itself is phrased ("no CODE PATH reads
+ * membership"): a module either legitimately touches the physical relation
+ * (as a writer, a reader, a DDL/schema declaration, or the whole-graph
+ * `clear()` sweep) or it does not.
+ *
+ * *Mutation*: add a `readIdentityTransitions(...)`-shaped call — or any
+ * bare reference to `identityTransitionsTable` / `tables.identityTransitions`
+ * / the raw table name — to a module not on `MODULE_ALLOWLIST` (for example,
+ * reintroduce the fold-vs-restore probe this PR removed from
+ * `service-maintenance.ts`, see G1-04) → the "undeclared" assertion fails,
+ * naming the file. *Mutation*: remove the ONE writer (`flush.ts`) from the
+ * allowlist while its INSERT still stands → also fails "undeclared" (the
+ * file is unnamed but the reference still exists). *Mutation*: delete an
+ * allowlisted file's only reference (e.g. rewrite `clear.ts` to skip the
+ * relation) while its entry survives → the "stale" assertion fails, naming
+ * the entry.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+const SOURCE_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../src",
+);
+
+/**
+ * Matches the SqlSchema field (`identityTransitionsTable`) and the bare
+ * table-name identifier (`identityTransitions`, as in
+ * `tables.identityTransitions` or the `DEFAULT_TABLE_NAMES` key) — but NOT
+ * `identityTransitionsOf` (the replay-facing function, which never touches
+ * the relation directly; it calls `readIdentityTransitions`) and NOT
+ * `identityTransitionRetentionTable` / `identityTransitionRetention` (the
+ * SEPARATE, singular-"Transition" retention-watermark relation, which is
+ * out of this ratchet's scope). The raw string literal
+ * `"typegraph_identity_transitions"` is not scanned for separately: every
+ * site that carries it today does so as this identifier's value, on the
+ * same line.
+ */
+const TRANSITION_LOG_REFERENCE = /\bidentityTransitions(Table)?\b/;
+
+type AllowedModule = Readonly<{
+  /** Path relative to `packages/typegraph/src`. */
+  file: string;
+  /** Why this module legitimately references the relation. Mandatory. */
+  reason: string;
+}>;
+
+const MODULE_ALLOWLIST: readonly AllowedModule[] = [
+  {
+    file: "identity/transition-log.ts",
+    reason:
+      "The relation's one owner: the row shape, the encoder, readIdentityTransitions (SELECT — boundaries and explanations only, never membership), and pruneIdentityTransitionsForContext (DELETE, retention).",
+  },
+  {
+    file: "store/recorded-capture/flush.ts",
+    reason:
+      "The ONE writer: flushIdentityTransitions INSERTs the buffered notes against the recorded commit the same flush allocates for every other recorded relation.",
+  },
+  {
+    file: "backend/drizzle/operations/clear.ts",
+    reason:
+      "store.clear()'s whole-graph sweep DELETEs every row for the graph, exactly as it does for every other graph-scoped relation — not a membership read.",
+  },
+  {
+    file: "query/compiler/schema.ts",
+    reason:
+      "SqlSchema / SqlTableNames declare the `identityTransitionsTable` fragment and the `identityTransitions` default table name — structural schema wiring, not a read.",
+  },
+  {
+    file: "backend/drizzle/schema/sqlite.ts",
+    reason:
+      "SqliteTableNames / DEFAULT_TABLE_NAMES name the relation for DDL generation.",
+  },
+  {
+    file: "backend/drizzle/schema/postgres.ts",
+    reason:
+      "The Drizzle `pgTable` definition (columns, PK, the three indexes from §2.2) and the default table name.",
+  },
+  {
+    file: "backend/drizzle/sqlite.ts",
+    reason:
+      "Resolves the configured/default table name into the SQLite backend's `SqlTableNames`, mirroring every other relation.",
+  },
+  {
+    file: "backend/drizzle/postgres.ts",
+    reason:
+      "Resolves the configured/default table name into the PostgreSQL backend's `SqlTableNames`, mirroring every other relation.",
+  },
+];
+
+type FoundSite = Readonly<{ file: string; lineNumber: number; line: string }>;
+
+function collectTypeScriptFiles(directory: string): readonly string[] {
+  const found: string[] = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      found.push(...collectTypeScriptFiles(full));
+    } else if (entry.name.endsWith(".ts")) {
+      found.push(full);
+    }
+  }
+  return found;
+}
+
+function scanForTransitionLogReferences(): readonly FoundSite[] {
+  const sites: FoundSite[] = [];
+  for (const file of collectTypeScriptFiles(SOURCE_ROOT)) {
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    for (const [index, line] of lines.entries()) {
+      if (!TRANSITION_LOG_REFERENCE.test(line)) continue;
+      sites.push({
+        file: path.relative(SOURCE_ROOT, file).replaceAll(path.sep, "/"),
+        lineNumber: index + 1,
+        line: line.trim(),
+      });
+    }
+  }
+  return sites;
+}
+
+describe("identity transition log module ratchet", () => {
+  const sites = scanForTransitionLogReferences();
+  const filesWithReferences = new Set(sites.map((site) => site.file));
+  const allowedFiles = new Set(MODULE_ALLOWLIST.map((entry) => entry.file));
+
+  it("references the relation only from an allowlisted module", () => {
+    const undeclared = [...filesWithReferences].filter(
+      (file) => !allowedFiles.has(file),
+    );
+    if (undeclared.length > 0) {
+      const reported = undeclared.flatMap((file) =>
+        sites
+          .filter((site) => site.file === file)
+          .map((site) => `${site.file}:${site.lineNumber}  ${site.line}`),
+      );
+      throw new Error(
+        `A module outside MODULE_ALLOWLIST references the identity transition log:\n\n${reported.join("\n")}\n\n` +
+          `Membership must never be derived from typegraph_identity_transitions — every membership answer comes from historicalIdentityReconstructionCtes (see src/identity/replay.ts). ` +
+          `If this reference does not read membership (a writer, a DDL/schema declaration, or a whole-graph clear/prune sweep), add it to MODULE_ALLOWLIST in this file with a one-line reason.`,
+      );
+    }
+    expect(undeclared).toEqual([]);
+  });
+
+  it("has no stale allowlist entry", () => {
+    const stale = MODULE_ALLOWLIST.filter(
+      (entry) => !filesWithReferences.has(entry.file),
+    );
+    if (stale.length > 0) {
+      throw new Error(
+        `These allowlist entries no longer reference the identity transition log — the code moved or was removed. Delete them:\n\n${stale.map((entry) => entry.file).join("\n")}`,
+      );
+    }
+    expect(stale).toEqual([]);
+  });
+
+  it("requires a reason on every allowlist entry", () => {
+    const missing = MODULE_ALLOWLIST.filter(
+      (entry) => entry.reason.trim().length < 20,
+    );
+    expect(missing.map((entry) => entry.file)).toEqual([]);
+  });
+
+  it("does not flag identityTransitionsOf, the retention relation, or a Set named `live`", () => {
+    // The scanner is itself load-bearing: it must distinguish the
+    // replay-facing function name and the SEPARATE retention relation from a
+    // genuine reference to typegraph_identity_transitions.
+    expect(
+      TRANSITION_LOG_REFERENCE.test("identityTransitionsOf(ctx, ref)"),
+    ).toBe(false);
+    expect(
+      TRANSITION_LOG_REFERENCE.test(
+        "await pruneIdentityTransitionsForContext(ctx, options)",
+      ),
+    ).toBe(false);
+    expect(
+      TRANSITION_LOG_REFERENCE.test(
+        "identityTransitionRetentionTable: SqlFragment;",
+      ),
+    ).toBe(false);
+    // ...and it DOES catch the shapes it exists to catch.
+    expect(
+      TRANSITION_LOG_REFERENCE.test("ctx.schema.identityTransitionsTable"),
+    ).toBe(true);
+    expect(TRANSITION_LOG_REFERENCE.test("tables.identityTransitions")).toBe(
+      true,
+    );
+  });
+});
