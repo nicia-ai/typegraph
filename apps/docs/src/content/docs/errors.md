@@ -1142,6 +1142,20 @@ new identity keys without choosing how conflicts converge. Export the affected e
 hard-delete them, apply the schema migration, then reimport them so TypeGraph
 materializes and arbitrates the new durable keys.
 
+```typescript
+try {
+  const [store] = await createStoreWithSchema(graph, backend);
+} catch (error) {
+  if (error instanceof MigrationError) {
+    console.log(error.category); // "system"
+    console.log(error.details);
+    // { graphId: "my-graph", fromVersion: 3, toVersion: 4, reason: "Removed required field 'email' from Person" }
+    console.log(error.suggestion);
+    // "Review the breaking changes and perform manual migration if needed..."
+  }
+}
+```
+
 The `details.reason` value `"ontology-tightening-violated"` means an ontology
 change — adding `disjointWith`, `subClassOf`, `equivalentTo`, or `sameAs`, or
 removing `subClassOf`, `equivalentTo`, or `sameAs` — is false against rows
@@ -1161,20 +1175,6 @@ try {
   if (error instanceof MigrationError && error.details.reason === "ontology-tightening-violated") {
     console.log(error.details.violations);
     // [{ family: "nodeDisjointness", target: {...}, owners: [...] }, ...]
-  }
-}
-```
-
-```typescript
-try {
-  const [store] = await createStoreWithSchema(graph, backend);
-} catch (error) {
-  if (error instanceof MigrationError) {
-    console.log(error.category); // "system"
-    console.log(error.details);
-    // { graphId: "my-graph", fromVersion: 3, toVersion: 4, reason: "Removed required field 'email' from Person" }
-    console.log(error.suggestion);
-    // "Review the breaking changes and perform manual migration if needed..."
   }
 }
 ```
