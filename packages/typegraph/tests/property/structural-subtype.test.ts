@@ -22,8 +22,8 @@ function objectSchemaArb(): fc.Arbitrary<JsonSchema> {
 }
 
 function objectSchemaWithRequiredPropertyArb(): fc.Arbitrary<JsonSchema> {
-  return comparableSchemaArb.filter(
-    (schema) => isObjectSchema(schema) && (schema.required?.length ?? 0) > 0,
+  return objectSchemaArb().filter(
+    (schema) => (schema.required?.length ?? 0) > 0,
   );
 }
 

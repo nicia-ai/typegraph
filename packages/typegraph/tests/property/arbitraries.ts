@@ -8,6 +8,7 @@ import fc from "fast-check";
 
 import { isObjectSchema } from "../../src/schema/migration";
 import { type JsonSchema } from "../../src/schema/types";
+import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
 // String Arbitraries
@@ -344,24 +345,16 @@ function tightenNestedPropertyArb(
   const names = Object.keys(parentProps);
   if (names.length === 0) return undefined;
   return fc.constantFrom(...names).chain((name) =>
-    tightenArb(requireOwnProperty(parentProps, name)).map(
-      (tightenedProperty) => ({
-        ...parent,
-        properties: { ...parentProps, [name]: tightenedProperty },
-      }),
-    ),
+    tightenArb(
+      requireDefined(
+        parentProps[name],
+        `Expected property "${name}" to be present.`,
+      ),
+    ).map((tightenedProperty) => ({
+      ...parent,
+      properties: { ...parentProps, [name]: tightenedProperty },
+    })),
   );
-}
-
-function requireOwnProperty(
-  properties: Readonly<Record<string, JsonSchema>>,
-  name: string,
-): JsonSchema {
-  const value = properties[name];
-  if (value === undefined) {
-    throw new TypeError(`Expected property "${name}" to be present.`);
-  }
-  return value;
 }
 
 /**
