@@ -95,7 +95,7 @@ export function deserializeSchema(
     version: schema.version,
     generatedAt: schema.generatedAt,
 
-    // Own-key reads, for the same reason {@link buildEdgeEndpointKinds} below
+    // Own-key reads, for the same reason {@link buildSerializedEdgeKindFacts} below
     // uses a `Map`: `schema` is parsed out of a stored JSON document and the
     // caller supplies the name, so a raw read hands back an `Object.prototype`
     // member typed as a definition for any name no kind is registered under.
@@ -168,7 +168,7 @@ export function buildRegistryFromSerializedSchema(
         : { partSide: relation.partSide }),
       }),
     ),
-    edgeFacts: buildSerializedEdgeEndpointKinds(schema.edges),
+    edgeFacts: buildSerializedEdgeKindFacts(schema.edges),
     // The registry above is built with EMPTY node/edge kind maps (no Zod
     // schemas survive serialization), so the equivalence-class check needs
     // its own classifier built from the document's own `nodes`/`edges`
@@ -193,7 +193,7 @@ export function buildRegistryFromSerializedSchema(
  * "toString" or another `Object.prototype` member can't resolve to an
  * inherited member instead of `undefined`.
  */
-export function buildSerializedEdgeEndpointKinds(
+export function buildSerializedEdgeKindFacts(
   edges: Record<string, SerializedEdgeDef>,
 ): ReadonlyMap<string, EdgeKindFacts> {
   const result = new Map<string, EdgeKindFacts>();

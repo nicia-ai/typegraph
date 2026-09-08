@@ -39,7 +39,7 @@ import type {
 import { subClassComponent } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
-import { buildGraphEdgeEndpointKinds } from "../../registry/builders";
+import { buildGraphEdgeKindFacts } from "../../registry/builders";
 import { expandEdgeEndpointAllowance } from "../../registry/edge-endpoint-allowance";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { groupBy } from "../../utils/array";
@@ -378,7 +378,7 @@ function fenceDeclarations(
         edgeKind,
       })),
   );
-  const edgeEndpointKinds = buildGraphEdgeEndpointKinds(graph.edges);
+  const edgeEndpointKinds = buildGraphEdgeKindFacts(graph.edges);
   const edgeEndpointAllowances = [...edgeEndpointKinds.entries()]
     .map(([edgeKind, endpoints]) =>
       expandEdgeEndpointAllowance(edgeKind, endpoints, registry),

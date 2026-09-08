@@ -84,7 +84,7 @@ import { hasOwnKey } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
 import {
   buildRegistryFromSerializedSchema,
-  buildSerializedEdgeEndpointKinds,
+  buildSerializedEdgeKindFacts,
 } from "./deserializer";
 import { type ChangeSeverity, type ChangeType } from "./migration";
 import {
@@ -364,8 +364,8 @@ function edgeEndpointAssignabilityDelta(
   beforeRegistry: KindRegistry,
   afterRegistry: KindRegistry,
 ): readonly EdgeEndpointAllowance[] {
-  const beforeEndpoints = buildSerializedEdgeEndpointKinds(before.edges);
-  const afterEndpoints = buildSerializedEdgeEndpointKinds(after.edges);
+  const beforeEndpoints = buildSerializedEdgeKindFacts(before.edges);
+  const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
 
   const allowances: EdgeEndpointAllowance[] = [];
   for (const edgeKind of Object.keys(after.edges)) {

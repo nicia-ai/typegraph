@@ -22,7 +22,14 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, hasPart, partOf } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  hasPart,
+  partOf,
+  subClassOf,
+} from "../src";
 import { validateOntologyRelations } from "../src/ontology/validation";
 import { buildKindRegistry } from "../src/registry";
 import {
@@ -315,11 +322,12 @@ describe("composition registration checks (buildKindRegistry)", () => {
     // `link`'s source-dependent target map admits (A -> B) and (C -> D). The
     // first declaration is only forward-compatible (A -> B); the second is
     // only reverse-compatible (whole C -> part D), so `link` ends up
-    // realizing composition in two different orientations. There is no
-    // dedicated check for this: recording the second declaration's pair
-    // under the wrong global orientation is exactly what composition-
-    // exactness (the general "every admitted pair is declared" check) also
-    // catches, because the corrupted pair can no longer cover (A, B).
+    // realizing composition in two different orientations. The dedicated
+    // orientation-conflict check in `buildCompositionRelation`
+    // (`existingPartSide !== partSide`) refuses this directly, rather than
+    // relying on composition-exactness (the general "every admitted pair is
+    // declared" check) to notice the coverage gap the corrupted pair would
+    // otherwise leave.
     const A = defineNode("A", { schema: emptySchema });
     const B = defineNode("B", { schema: emptySchema });
     const C = defineNode("C", { schema: emptySchema });
@@ -522,6 +530,106 @@ describe("a valid multi-relation composition declaration", () => {
   });
 });
 
+// ============================================================
+// Subclass-aware composition readers (E-a-r2-1)
+// ============================================================
+//
+// `compositionPopulation` resolves a concrete kind against a declared pair's
+// partKind through `isAssignableTo`; every other reader must agree, or a
+// declared pair above a base kind is invisible to concrete subclasses that
+// really do participate in it (edge endpoint validation already accepts them
+// through `isAssignableToAny`).
+
+describe("composition readers resolve subclasses of a declared part kind", () => {
+  const Base = defineNode("Base", { schema: emptySchema });
+  const Sub = defineNode("Sub", { schema: emptySchema });
+  const Whole = defineNode("Whole", { schema: emptySchema });
+  const partOfWhole = defineEdge("partOfWhole", { schema: emptySchema });
+
+  const graph = defineGraph({
+    id: "composition-subclass-part-side",
+    nodes: { Base: { type: Base }, Sub: { type: Sub }, Whole: { type: Whole } },
+    edges: {
+      partOfWhole: {
+        type: partOfWhole,
+        from: [Base],
+        to: [Whole],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      subClassOf(Sub, Base),
+      partOf(Base, Whole, { via: partOfWhole }),
+    ],
+  });
+  const registry = buildKindRegistry(graph);
+
+  it("compositionPopulation already resolves the subclass", () => {
+    expect(registry.compositionPopulation("Sub")).toBe("one");
+  });
+
+  it("getCompositionEdge resolves the subclass part kind", () => {
+    expect(registry.getCompositionEdge("Sub", "Whole")).toEqual(
+      matchingObject({ viaEdgeKind: "partOfWhole", population: "one" }),
+    );
+  });
+
+  it("compositionEdgeKindsOver resolves the subclass part kind", () => {
+    expect(registry.compositionEdgeKindsOver("Sub")).toEqual(["partOfWhole"]);
+  });
+
+  it("compositionWholeKindsOver resolves the subclass part kind", () => {
+    expect(registry.compositionWholeKindsOver("Sub")).toEqual(["Whole"]);
+  });
+});
+
+describe("composition readers resolve subclasses of a declared whole kind", () => {
+  const Part = defineNode("Part", { schema: emptySchema });
+  const BaseWhole = defineNode("BaseWhole", { schema: emptySchema });
+  const SubWhole = defineNode("SubWhole", { schema: emptySchema });
+  const partOfBaseWhole = defineEdge("partOfBaseWhole", {
+    schema: emptySchema,
+  });
+
+  const graph = defineGraph({
+    id: "composition-subclass-whole-side",
+    nodes: {
+      Part: { type: Part },
+      BaseWhole: { type: BaseWhole },
+      SubWhole: { type: SubWhole },
+    },
+    edges: {
+      partOfBaseWhole: {
+        type: partOfBaseWhole,
+        from: [Part],
+        to: [BaseWhole],
+        cardinality: "one",
+      },
+    },
+    ontology: [
+      subClassOf(SubWhole, BaseWhole),
+      partOf(Part, BaseWhole, { via: partOfBaseWhole }),
+    ],
+  });
+  const registry = buildKindRegistry(graph);
+
+  it("getCompositionEdge resolves the subclass whole kind", () => {
+    expect(registry.getCompositionEdge("Part", "SubWhole")).toEqual(
+      matchingObject({ viaEdgeKind: "partOfBaseWhole", population: "one" }),
+    );
+  });
+
+  it("compositionEdgeKindsUnder resolves the subclass whole kind", () => {
+    expect(registry.compositionEdgeKindsUnder("SubWhole")).toEqual([
+      "partOfBaseWhole",
+    ]);
+  });
+
+  it("compositionPartKindsUnder resolves the subclass whole kind", () => {
+    expect(registry.compositionPartKindsUnder("SubWhole")).toEqual(["Part"]);
+  });
+});
+
 describe("the mirrored partOf + hasPart idiom (E-a-3)", () => {
   // apps/docs/src/content/docs/ontology.md teaches declaring both directions
   // of the same realizing edge: `partOf(Chapter, Book, { via })` and
@@ -631,6 +739,7 @@ describe("inferCompositionPartSide", () => {
   const forwardOnlyFacts: EdgeKindFacts = {
     from: ["Part"],
     to: ["Whole"],
+    pairs: [{ from: "Part", to: "Whole" }],
     cardinality: "one",
     targetCardinality: "many",
   };
@@ -638,6 +747,7 @@ describe("inferCompositionPartSide", () => {
   const ambiguousFacts: EdgeKindFacts = {
     from: ["Section"],
     to: ["Section"],
+    pairs: [{ from: "Section", to: "Section" }],
     cardinality: "one",
     targetCardinality: "one",
   };

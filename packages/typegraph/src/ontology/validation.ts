@@ -1,6 +1,7 @@
 import {
   type CompositionPartSide,
   isCompositionMetaEdge,
+  normalizePartWhole,
 } from "../registry/composition-relation";
 import {
   computeDisjointExpansionClosures,
@@ -78,6 +79,13 @@ const STRICTLY_HIERARCHICAL: ReadonlySet<string> = new Set([
   META_EDGE_HAS_PART,
 ]);
 
+// `partOf`/`hasPart` are deliberately absent here: which endpoint is the
+// part is `normalizePartWhole`'s decision (`../registry/composition-relation`),
+// not a second copy of it. `buildHierarchicalGroups` below routes composition
+// relations through that one owner and consults this table only for the
+// non-composition narrower/broader flip, which really is a different
+// decision (a generic "narrower canonicalizes to broader" convention, not
+// "which side is the part").
 const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
   string,
   Readonly<{ canonical: MetaEdgeName; flip: boolean }>
@@ -85,8 +93,6 @@ const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
   [META_EDGE_SUB_CLASS_OF, { canonical: META_EDGE_SUB_CLASS_OF, flip: false }],
   [META_EDGE_BROADER, { canonical: META_EDGE_BROADER, flip: false }],
   [META_EDGE_NARROWER, { canonical: META_EDGE_BROADER, flip: true }],
-  [META_EDGE_PART_OF, { canonical: META_EDGE_PART_OF, flip: false }],
-  [META_EDGE_HAS_PART, { canonical: META_EDGE_PART_OF, flip: true }],
 ]);
 
 type NormalizedHierarchicalEdge = Readonly<{
@@ -211,16 +217,27 @@ function buildHierarchicalGroups(
 ): Map<MetaEdgeName, NormalizedHierarchicalEdge[]> {
   const groups = new Map<MetaEdgeName, NormalizedHierarchicalEdge[]>();
   for (const [index, relation] of ontology.entries()) {
-    const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
-    if (normalization === undefined) continue;
     // Self-loops are reported elsewhere; skip them for cycle detection.
     if (relation.from === relation.to) continue;
 
-    const from = normalization.flip ? relation.to : relation.from;
-    const to = normalization.flip ? relation.from : relation.to;
-    const edges = groups.get(normalization.canonical) ?? [];
+    let canonical: MetaEdgeName;
+    let from: string;
+    let to: string;
+    if (isCompositionMetaEdge(relation.metaEdge)) {
+      const { partKind, wholeKind } = normalizePartWhole(relation);
+      canonical = META_EDGE_PART_OF;
+      from = partKind;
+      to = wholeKind;
+    } else {
+      const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
+      if (normalization === undefined) continue;
+      canonical = normalization.canonical;
+      from = normalization.flip ? relation.to : relation.from;
+      to = normalization.flip ? relation.from : relation.to;
+    }
+    const edges = groups.get(canonical) ?? [];
     edges.push({ from, to, originalIndex: index });
-    groups.set(normalization.canonical, edges);
+    groups.set(canonical, edges);
   }
   return groups;
 }

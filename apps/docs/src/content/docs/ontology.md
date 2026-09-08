@@ -305,9 +305,12 @@ const parentSection = defineEdge("parentSection");
 partOf(Section, Section, { via: parentSection, partSide: "from" });
 ```
 
-**Changing this on a populated graph**: adding or removing `partOf`/`hasPart`
-is always safe and auto-migrates unconditionally (composition constraints do
-not yet exist to make otherwise).
+**Changing this on a populated graph**: the schema change itself auto-migrates
+unconditionally either way — declaring or dropping `partOf`/`hasPart` does not
+walk existing rows. Once composition's one-whole-per-part constraint is
+enforced, adding a `partOf` to an already-populated graph can surface parts
+that already have more than one live whole; removing one only ever loosens a
+constraint, so it stays safe regardless.
 
 ### Edge Relationships
 

@@ -447,17 +447,43 @@ export class KindRegistry {
   }
 
   /**
-   * The declared composition pair between this exact part and whole kind, if
-   * any. Two realizing edges may hold the same (part, whole) pair (E-a-2);
-   * when they do, this returns the code-point-first `viaEdgeKind` (the sort
-   * order `CompositionRelation.pairs` already carries), not "all of them".
+   * Every literal kind name a declared composition pair names as either
+   * endpoint, restricted to the ones `concreteKind` is assignable to. This is
+   * the one place a concrete node kind — which may be an undeclared subclass
+   * of the kind a `partOf`/`hasPart` was written against — is resolved onto
+   * the composition relation's declared vocabulary; every reader below routes
+   * through it so a subclass is never visible to one reader and invisible to
+   * another (E-a-r2-1). Edge-endpoint validation already accepts such a
+   * subclass through `isAssignableToAny`, so these rows really do exist.
+   */
+  private compositionDeclaredKindsAssignableFrom(
+    concreteKind: string,
+  ): readonly string[] {
+    const declaredKinds = new Set<string>();
+    for (const pair of this.#composition.pairs) {
+      declaredKinds.add(pair.partKind);
+      declaredKinds.add(pair.wholeKind);
+    }
+    return [...declaredKinds].filter((declaredKind) =>
+      this.isAssignableTo(concreteKind, declaredKind),
+    );
+  }
+
+  /**
+   * The declared composition pair between this part and whole kind, if any —
+   * either may be a subclass of the kind the pair was declared against. Two
+   * realizing edges may hold the same (part, whole) pair (E-a-2); when they
+   * do, this returns the code-point-first `viaEdgeKind` (the sort order
+   * `CompositionRelation.pairs` already carries), not "all of them".
    */
   getCompositionEdge(
     partKind: string,
     wholeKind: string,
   ): CompositionPair | undefined {
     return this.#composition.pairs.find(
-      (pair) => pair.partKind === partKind && pair.wholeKind === wholeKind,
+      (pair) =>
+        this.isAssignableTo(partKind, pair.partKind) &&
+        this.isAssignableTo(wholeKind, pair.wholeKind),
     );
   }
 
@@ -468,12 +494,19 @@ export class KindRegistry {
 
   /**
    * The realizing edge kinds reachable under `wholeKind`: pairs whose whole
-   * is `wholeKind` itself, or any kind transitively part of it. This is what
-   * lets cascade and `parts()` cross heterogeneous edge kinds without the
-   * caller spelling the path.
+   * is `wholeKind` (or a kind `wholeKind` is a subclass of) itself, or any
+   * kind transitively part of one of those. This is what lets cascade and
+   * `parts()` cross heterogeneous edge kinds without the caller spelling the
+   * path.
    */
   compositionEdgeKindsUnder(wholeKind: string): readonly string[] {
-    const wholeKinds = new Set([wholeKind, ...this.getParts(wholeKind)]);
+    const wholeKinds = new Set([wholeKind]);
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      wholeKind,
+    )) {
+      wholeKinds.add(declaredKind);
+      for (const part of this.getParts(declaredKind)) wholeKinds.add(part);
+    }
     const edgeKinds = new Set<string>();
     for (const pair of this.#composition.pairs) {
       if (wholeKinds.has(pair.wholeKind)) edgeKinds.add(pair.viaEdgeKind);
@@ -485,7 +518,13 @@ export class KindRegistry {
 
   /** The wholes mirror of {@link compositionEdgeKindsUnder}. */
   compositionEdgeKindsOver(partKind: string): readonly string[] {
-    const partKinds = new Set([partKind, ...this.getWholes(partKind)]);
+    const partKinds = new Set([partKind]);
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      partKind,
+    )) {
+      partKinds.add(declaredKind);
+      for (const whole of this.getWholes(declaredKind)) partKinds.add(whole);
+    }
     const edgeKinds = new Set<string>();
     for (const pair of this.#composition.pairs) {
       if (partKinds.has(pair.partKind)) edgeKinds.add(pair.viaEdgeKind);
@@ -497,12 +536,24 @@ export class KindRegistry {
 
   /** Every part kind transitively under `wholeKind`, across every composition relation. */
   compositionPartKindsUnder(wholeKind: string): readonly string[] {
-    return this.getParts(wholeKind);
+    const parts = new Set<string>();
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      wholeKind,
+    )) {
+      for (const part of this.getParts(declaredKind)) parts.add(part);
+    }
+    return [...parts].toSorted((left, right) => compareStrings(left, right));
   }
 
   /** Every whole kind transitively over `partKind`, across every composition relation. */
   compositionWholeKindsOver(partKind: string): readonly string[] {
-    return this.getWholes(partKind);
+    const wholes = new Set<string>();
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      partKind,
+    )) {
+      for (const whole of this.getWholes(declaredKind)) wholes.add(whole);
+    }
+    return [...wholes].toSorted((left, right) => compareStrings(left, right));
   }
 
   /**
@@ -515,10 +566,7 @@ export class KindRegistry {
     concretePartKind: string,
   ): "one" | "oneActive" | undefined {
     for (const pair of this.#composition.pairs) {
-      if (
-        concretePartKind === pair.partKind ||
-        this.isAssignableTo(concretePartKind, pair.partKind)
-      ) {
+      if (this.isAssignableTo(concretePartKind, pair.partKind)) {
         return pair.population;
       }
     }

@@ -84,9 +84,15 @@ export type CompositionIssue = Readonly<{
 /**
  * Whether the realizing edge admits an instance whose `from` endpoint is
  * (assignable to) `fromCandidate` and whose `to` endpoint is (assignable to)
- * `toCandidate`, honoring the edge's source-dependent target map (`pairs`)
- * when it declares one. The same `isAssignableToAny` owner endpoint
- * validation already uses, so this can never drift from it.
+ * `toCandidate`, against `EdgeKindFacts.pairs` — the edge's admitted
+ * `(from, to)` pairs, already resolved (source-dependent target map or plain
+ * Cartesian product) by the one site that builds it. `pairs` is typed
+ * optional only because `EdgeKindFacts` is shared with older, pre-pairs
+ * consumers; composition's two construction sites
+ * (`buildGraphEdgeKindFacts`, the deserializer's) always populate it, so
+ * a missing one here is a builder defect, not a shape this function should
+ * quietly re-derive a Cartesian product for (a second, driftable spelling of
+ * the same value).
  */
 function edgeAdmitsPair(
   fromCandidate: string,
@@ -94,16 +100,13 @@ function edgeAdmitsPair(
   facts: EdgeKindFacts,
   registry: KindRegistry,
 ): boolean {
-  if (facts.pairs !== undefined) {
-    return facts.pairs.some(
-      (pair) =>
-        registry.isAssignableTo(fromCandidate, pair.from) &&
-        registry.isAssignableTo(toCandidate, pair.to),
-    );
-  }
-  return (
-    registry.isAssignableToAny(fromCandidate, facts.from) &&
-    registry.isAssignableToAny(toCandidate, facts.to)
+  return requireDefined(
+    facts.pairs,
+    "EdgeKindFacts.pairs must be populated for composition validation",
+  ).some(
+    (pair) =>
+      registry.isAssignableTo(fromCandidate, pair.from) &&
+      registry.isAssignableTo(toCandidate, pair.to),
   );
 }
 
@@ -187,20 +190,6 @@ export function normalizePartWhole(
   return relation.metaEdge === META_EDGE_PART_OF ?
       { partKind: relation.from, wholeKind: relation.to }
     : { partKind: relation.to, wholeKind: relation.from };
-}
-
-/** Every `(from, to)` pair the edge admits: `pairs` when declared, else the Cartesian product. */
-function admittedEdgePairs(
-  facts: EdgeKindFacts,
-): readonly Readonly<{ from: string; to: string }>[] {
-  if (facts.pairs !== undefined) return facts.pairs;
-  const pairs: Readonly<{ from: string; to: string }>[] = [];
-  for (const from of facts.from) {
-    for (const to of facts.to) {
-      pairs.push({ from, to });
-    }
-  }
-  return pairs;
 }
 
 /** The subset of {@link CompositionIssueCode} `inferCompositionPartSide` can return. */
@@ -403,7 +392,10 @@ export function buildCompositionRelation(
       representativeByEdgeKind.get(edgeKind),
       `Composition edge "${edgeKind}" has an orientation with no declaring relation.`,
     );
-    for (const { from, to } of admittedEdgePairs(facts)) {
+    for (const { from, to } of requireDefined(
+      facts.pairs,
+      "EdgeKindFacts.pairs must be populated for composition validation",
+    )) {
       if (!declaredTuples.has(encodeTupleKey([from, to]))) {
         issues.push({
           code: "ONTOLOGY_COMPOSITION_VIA_MIXED",

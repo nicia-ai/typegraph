@@ -25,7 +25,7 @@ import { type KindRegistry } from "./kind-registry";
  * `registry.expandImplyingEdges(C)` reports as (transitively) implying `C` is
  * validated directly against `C`. This is what keeps the gate sound through an
  * unregistered intermediate — given `A implies B implies C` with `B` absent
- * from `edgeEndpoints`, neither direct hop is individually checkable, yet the
+ * from `edgeFacts`, neither direct hop is individually checkable, yet the
  * precomputed closure still folds `A` into a traversal of `C`, so `A` must be
  * validated against `C` regardless of `B`.
  *
@@ -34,47 +34,47 @@ import { type KindRegistry } from "./kind-registry";
  * descendant) — to at least one kind the implied edge allows on that same
  * side, and every allowed endpoint pair of the implying edge is assignable to
  * an allowed endpoint pair of the implied edge. An implying edge kind absent
- * from `edgeEndpoints` is skipped: it is unregistered on this graph, has no
+ * from `edgeFacts` is skipped: it is unregistered on this graph, has no
  * stored rows, and so can never fold anything into a traversal.
  */
 export function validateImpliesEndpointCompatibility(
   edgeFacts: ReadonlyMap<string, EdgeKindFacts>,
   registry: KindRegistry,
 ): void {
-  for (const [impliedEdgeKind, impliedEndpoints] of edgeFacts) {
+  for (const [impliedEdgeKind, impliedFacts] of edgeFacts) {
     for (const implyingEdgeKind of registry.expandImplyingEdges(
       impliedEdgeKind,
     )) {
       if (implyingEdgeKind === impliedEdgeKind) continue;
-      const implyingEndpoints = edgeFacts.get(implyingEdgeKind);
-      if (!implyingEndpoints) continue;
+      const implyingFacts = edgeFacts.get(implyingEdgeKind);
+      if (!implyingFacts) continue;
 
       assertEndpointCompatible(
         "from",
         implyingEdgeKind,
-        implyingEndpoints.from,
+        implyingFacts.from,
         impliedEdgeKind,
-        impliedEndpoints.from,
+        impliedFacts.from,
         registry,
       );
       assertEndpointCompatible(
         "to",
         implyingEdgeKind,
-        implyingEndpoints.to,
+        implyingFacts.to,
         impliedEdgeKind,
-        impliedEndpoints.to,
+        impliedFacts.to,
         registry,
       );
 
       if (
-        implyingEndpoints.pairs !== undefined &&
-        impliedEndpoints.pairs !== undefined
+        implyingFacts.pairs !== undefined &&
+        impliedFacts.pairs !== undefined
       ) {
         assertPairsCompatible(
           implyingEdgeKind,
-          implyingEndpoints.pairs,
+          implyingFacts.pairs,
           impliedEdgeKind,
-          impliedEndpoints.pairs,
+          impliedFacts.pairs,
           registry,
         );
       }

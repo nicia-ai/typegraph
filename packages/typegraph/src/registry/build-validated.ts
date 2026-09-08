@@ -73,12 +73,12 @@ export function buildValidatedKindRegistry(
 }
 
 /**
- * Builds the registry composition needs two passes require: `KindRegistry`
- * supplies `isAssignableToAny` (subclass-closure based, unaffected by
- * composition), so `buildCompositionRelation` needs a registry to run
- * against before its own result can be attached to one. The first registry
- * is validation-only and discarded; the second, identical but for its
- * `composition` field, is what every caller gets back.
+ * Building the registry composition attaches to takes two passes:
+ * `KindRegistry` supplies `isAssignableToAny` (subclass-closure based,
+ * unaffected by composition), so `buildCompositionRelation` needs a registry
+ * to run against before its own result can be attached to one. The first
+ * registry is validation-only and discarded; the second, identical but for
+ * its `composition` field, is what every caller gets back.
  */
 function buildRegistryWithComposition(
   input: Readonly<{

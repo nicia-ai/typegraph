@@ -22,7 +22,6 @@ import {
   embedding,
   searchable,
   subClassOf,
-  partOf,
 } from "@nicia-ai/typegraph";
 
 // Base content type (abstract)
@@ -133,12 +132,17 @@ const graph = defineGraph({
     subClassOf(Folder, Content),
     subClassOf(Document, Content),
 
-    // Compositional relationships, both realized by `contains`. Every pair
-    // the edge admits must be declared, including the reflexive
-    // Folder-in-Folder case — and because that pair's orientation is
-    // ambiguous (both endpoints are Folder), `partSide` must be declared.
-    partOf(Folder, Folder, { via: contains, partSide: "to" }),
-    partOf(Document, Folder, { via: contains }),
+    // `contains` is deliberately NOT declared as a `partOf`/`hasPart`
+    // composition relation. Composition means single ownership plus
+    // cascade-delete: deleting the whole deletes every part. A folder tree
+    // is the opposite case — folders and documents are shared/re-homeable
+    // containment, so deleting a Folder should move its children up to the
+    // deleted folder's parent, not delete them. `targetCardinality: "one"`
+    // above already gives "at most one parent folder"; that single-parent
+    // constraint is all this relationship needs. Reach for `partOf` only
+    // when a part's lifecycle is genuinely bound to its whole (a document's
+    // sections dying with the document, not a folder's contents surviving
+    // the folder).
   ],
 });
 ```

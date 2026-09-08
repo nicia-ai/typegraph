@@ -13,7 +13,7 @@ import type { EdgeKindFacts } from "./edge-kind-facts";
 import type { KindRegistry } from "./kind-registry";
 
 /**
- * `endpoints.pairs` is the source when present (it already resolves a
+ * `facts.pairs` is the source when present (it already resolves a
  * source-dependent target map); otherwise the Cartesian `from × to`. Each
  * side is expanded with `registry.expandSubClasses`, which is the same
  * expansion `registry.isAssignableTo` answers with — a kind is assignable to
@@ -25,15 +25,13 @@ import type { KindRegistry } from "./kind-registry";
  */
 export function expandEdgeEndpointAllowance(
   edgeKind: string,
-  endpoints: EdgeKindFacts,
+  facts: EdgeKindFacts,
   registry: KindRegistry,
 ): EdgeEndpointAllowance {
   const declaredPairs: readonly (readonly [string, string])[] =
-    endpoints.pairs === undefined ?
-      endpoints.from.flatMap((from) =>
-        endpoints.to.map((to) => [from, to] as const),
-      )
-    : endpoints.pairs.map((pair) => [pair.from, pair.to] as const);
+    facts.pairs === undefined ?
+      facts.from.flatMap((from) => facts.to.map((to) => [from, to] as const))
+    : facts.pairs.map((pair) => [pair.from, pair.to] as const);
 
   const seen = new Set<string>();
   const allowedPairs: (readonly [string, string])[] = [];
