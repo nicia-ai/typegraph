@@ -167,6 +167,22 @@ function relationKey(relation: SerializedOntologyRelation): string {
 }
 
 /**
+ * Human-readable description of a relation for `OntologyChange.details`,
+ * naming `via` (and `partSide`, when present) so a composition relation
+ * re-pointed at a different realizing edge reads as a distinct change
+ * instead of two identical-looking "removed"/"added" entries (E-a-8).
+ */
+function relationDescription(relation: SerializedOntologyRelation): string {
+  const base = `${relation.metaEdge}(${relation.from}, ${relation.to})`;
+  const viaClause = relation.via === undefined ? "" : ` via "${relation.via}"`;
+  const partSideClause =
+    relation.partSide === undefined ?
+      ""
+    : ` (partSide: "${relation.partSide}")`;
+  return `${base}${viaClause}${partSideClause}`;
+}
+
+/**
  * Injective lookup key for the before/after relation maps below.
  *
  * A delimiter join (`${metaEdge}:${from}:${to}`) collides for a kind name
@@ -508,7 +524,7 @@ function classifyRelation(
       entity: "relation",
       name,
       severity: "safe",
-      details: `Relation ${relation.metaEdge}(${relation.from}, ${relation.to}) was ${verb} alongside a removed kind`,
+      details: `Relation ${relationDescription(relation)} was ${verb} alongside a removed kind`,
     };
   }
 
@@ -523,7 +539,7 @@ function classifyRelation(
     entity: "relation",
     name,
     severity,
-    details: `Relation ${relation.metaEdge}(${relation.from}, ${relation.to}) was ${verb}`,
+    details: `Relation ${relationDescription(relation)} was ${verb}`,
     ...(probes.length > 0 ? { probes } : {}),
   };
 }
