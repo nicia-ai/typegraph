@@ -165,6 +165,21 @@ type SubsumptionAffected<G extends GraphDef, K extends string> =
  * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
  * brand, so a row may come back as a narrower concrete kind whenever the
  * axis can expand at all.
+ *
+ * **Documented limitation: a `subClassOf` (or registered-kind
+ * `equivalentTo`/`sameAs`) added at runtime through `store.evolve()` is
+ * invisible to this type.** `evolve()` merges the extension into the LIVE
+ * registry but returns `Store<G>` with the compile-time `G` unchanged, so
+ * `SubsumptionAffected<G, K>` still evaluates against the graph as it was
+ * declared, not as it now runs. A kind that only becomes polymorphic
+ * through a runtime extension therefore keeps its narrow, exact-kind alias
+ * type here — `from(kind, alias)` types the row as the single compile-time
+ * kind even though it may come back as the extension's subclass at
+ * runtime, which would let a subtype id round-trip through
+ * `store.nodes.<K>.update()` typechecked and silently match nothing. Use
+ * `fromDynamic()` (always `PolymorphicNodeType`-typed, §1.4 of the typed-
+ * subsumption plan) or `{ includeSubClasses: false }` for a kind a runtime
+ * extension subclasses.
  */
 export type AliasNodeType<G extends GraphDef, K extends string> =
   SubsumptionAffected<G, K> extends true ?

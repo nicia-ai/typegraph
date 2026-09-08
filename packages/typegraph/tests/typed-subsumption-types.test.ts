@@ -18,6 +18,7 @@ import {
   defineNode,
   equivalentTo,
   sameAs,
+  type Store,
   subClassOf,
 } from "../src";
 import type {
@@ -80,6 +81,21 @@ describe("C.1 — subClassOf structural contract", () => {
 
     // @ts-expect-error - Person lacks Employee's required employeeId field
     subClassOf(Person, Employee);
+  });
+
+  it("compiles for an empty-schema parent (C13-R1-10: the 4bf9b4f9 false-positive fix has no regression pin)", () => {
+    // A parent with an EMPTY schema (`z.object({})`) has `keyof {} = never`,
+    // which is the exact inference trap `SubClassOfCheck`'s docblock
+    // documents (`src/ontology/types.ts`): the intersection-parameter form
+    // (`parent: P & SubClassOfCheck<C, P>`) is what keeps this compiling.
+    const EmptySchemaParent = defineNode("EmptySchemaParent", {
+      schema: z.object({}),
+    });
+    const AnyChild = defineNode("AnyChildOfEmptyParent", {
+      schema: z.object({ note: z.string() }),
+    });
+    const relation = subClassOf(AnyChild, EmptySchemaParent);
+    expect(relation.to).toBe(EmptySchemaParent);
   });
 
   it("accepts a child narrowing a parent enum to a literal", () => {
@@ -213,6 +229,30 @@ describe("Q3/C.1.4 — alias typing under the polymorphic axis", () => {
     expect(query).toBeDefined();
     type Row = Awaited<ReturnType<typeof query.execute>>[number];
     expectTypeOf<Row["kind"]>().toEqualTypeOf<"MediaAliasTest">();
+  });
+
+  it("refuses passing a polymorphic alias's row.id to the exact-kind collection's update()", () => {
+    // A polymorphic-affected alias's `id` is widened so an exact `NodeId`
+    // is assignable TO it but not FROM it (§1.4 of the typed-subsumption
+    // plan) — the row may be a subclass, so `store.nodes.<K>.update(row.id)`
+    // must not typecheck against the exact collection.
+    const query = createQueryBuilder<typeof affectedGraph>(
+      affectedGraph.id,
+      affectedRegistry,
+    )
+      .from("MediaAliasTest", "m")
+      .select((ctx) => ctx.m);
+    type Row = Awaited<ReturnType<typeof query.execute>>[number];
+
+    // Type-checked only — never called, so nothing here runs at test time.
+    function assertRowIdRejectedByExactUpdate(): void {
+      const store = undefined as unknown as Store<typeof affectedGraph>;
+      const row = undefined as unknown as Row;
+      // @ts-expect-error - row.id is widened (may be a PodcastAliasTest id); Media's update() requires an exact NodeId<MediaAliasTest>
+      void store.nodes.MediaAliasTest.update(row.id, { title: "x" });
+    }
+    void assertRowIdRejectedByExactUpdate;
+    expect(query).toBeDefined();
   });
 
   it("refuses includeSubClasses + includeNarrower together, at compile time and at runtime", () => {

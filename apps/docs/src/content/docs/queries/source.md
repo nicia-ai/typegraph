@@ -102,6 +102,17 @@ By default (`includeSubClasses` absent, or explicitly `true`):
   own properties — are statically accessible; a subclass-only field needs
   `fromDynamic()` or a cast, the same way a graph-extension kind's field does
 
+**Limitation — `evolve()`-declared subsumption isn't visible to the alias
+type.** The `kind`/`NodeId` widening above is computed from your
+compile-time graph definition. A `subClassOf` an [extension](/graph-extensions)
+adds at `store.evolve(...)` time changes what the LIVE registry accepts and
+returns, but `evolve()` still returns `Store<G>` with the same compile-time
+`G` — so `from("Media", "m")` keeps typing `m` as exact `Media` even though a
+row may now come back as the extension's `Podcast` subclass. Passing that
+row's `id` to `store.nodes.Media.update(...)` would then typecheck and
+silently match nothing. Use `fromDynamic()` (always polymorphically typed) or
+`{ includeSubClasses: false }` for a kind a runtime extension subclasses.
+
 Pass `{ includeSubClasses: false }` to narrow one alias back to the exact
 kind, or set `queryDefaults.includeSubClasses: false` on `createStore(...)` to
 restore the exact-kind behavior everywhere. `search()` and the collection
@@ -114,7 +125,7 @@ default and stay exact-kind.
 — no schema contract is claimed, so the alias type stays untyped (`NodeAlias`,
 no static property access). Use it for a small, fixed vocabulary known at
 schema-authoring time; for a vocabulary that grows at runtime, prefer an
-instance-level concept kind with an `acyclic` `broader` **edge** traversed
+instance-level concept kind with a `broader` **edge** traversed
 with `.recursive()` (see [Ontology](/ontology)).
 
 ```typescript
