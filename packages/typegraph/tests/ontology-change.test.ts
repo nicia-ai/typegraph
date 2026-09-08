@@ -508,6 +508,42 @@ describe("classifyOntologyChanges", () => {
         { edgeKind: "worksFor", allowedPairs: [["Person", "Organization"]] },
       ]);
     });
+
+    it("detects a same-size endpoint swap, not just a shrink in pair count", () => {
+      // `subClassOf(Company, Organization)` swapped for `subClassOf(Shop,
+      // Organization)` in one commit: the allowed-pair COUNT for `worksFor`
+      // is unchanged (one subclass pair either way), but `(Person, Company)`
+      // is no longer admitted. A count-based "did this shrink?" predicate
+      // (`isProperSubset`, which additionally requires the after list to be
+      // strictly SHORTER) misses this entirely.
+      const worksFor = edgeDef("worksFor", ["Person"], ["Organization"]);
+      const before = snapshot({}, { worksFor }, [
+        relation("subClassOf", "Company", "Organization"),
+      ]);
+      const after = snapshot({}, { worksFor }, [
+        relation("subClassOf", "Shop", "Organization"),
+      ]);
+
+      const changes = classifyOntologyChanges(before, after);
+      const removed = relationChangeOf(changes, "removed");
+      const probe = probeOfKind(removed.probes, "edgeEndpointAssignability");
+
+      expect(probe.allowances).toEqual([
+        {
+          edgeKind: "worksFor",
+          allowedPairs: [
+            ["Person", "Organization"],
+            ["Person", "Shop"],
+          ],
+        },
+      ]);
+    });
+    // MUTATION CHECK (verified): restoring
+    // `isProperSubset(afterPairKeys, beforePairKeys)` in place of
+    // `lostAnyMember(beforePairKeys, afterPairKeys)`
+    // (`edgeEndpointAssignabilityDelta`, `src/schema/ontology-change.ts`)
+    // makes `removed.probes` undefined (equal-length before/after pair
+    // lists never count as a proper subset) and this assertion fails.
   });
 
   describe("an incoherent ontology", () => {

@@ -2,11 +2,29 @@
  * Ontology change classification: what an ontology diff means for EXISTING
  * DATA, not just for the schema document.
  *
- * Pure — no backend, no I/O, never throws for a reason of its own (a
+ * Pure — no backend, no I/O, never throws for a reason of its own: a
  * genuinely incoherent stored or proposed ontology propagates the
- * `ConfigurationError` `buildRegistryFromSerializedSchema` already throws at
- * store open for exactly that document; this module does not add a second,
- * quieter answer to "can this ontology be interpreted at all").
+ * `ConfigurationError` `buildRegistryFromSerializedSchema` throws, rather
+ * than this module adding a second, quieter answer to "can this ontology be
+ * interpreted at all".
+ *
+ * That refusal is NOT already reached elsewhere for the BEFORE (stored)
+ * side. `buildKindRegistry` already validates the AFTER side wherever a
+ * commit path builds it from the code-level `GraphDef` (`ensureSchema`,
+ * `migrateSchema`, `initializeSchema`), but nothing validated the STORED
+ * document's registry before this module existed — `deserializeSchema`'s
+ * `buildRegistry` accessor is a lazy thunk no `src` caller invoked. A schema
+ * persisted under an older, laxer validator and never re-opened through a
+ * relation-touching diff can therefore hold an ontology today's hardening
+ * would reject, and this module is the first thing that tries to build a
+ * `KindRegistry` from it. KNOWN LIMITATION: this can wedge the very
+ * fix-forward migration meant to repair it — removing the offending
+ * relation is a relation change, so `classifyOntologyChanges` still builds
+ * the BEFORE registry and still throws before it ever gets to classify the
+ * removal as the fix. There is no workaround inside this module; the
+ * document must be repaired through a path that does not diff relations
+ * (e.g. a direct schema-row edit) before a relation-touching commit reaches
+ * this code again.
  *
  * The severity table below is the ontology half of `computeSchemaDiff`.
  * Three meta-edges can change what data a commit invalidates:
@@ -191,6 +209,23 @@ function isProperSubset(
 }
 
 /**
+ * Whether `after` no longer admits something `before` did. Deliberately NOT
+ * `isProperSubset(after, before)`: a proper subset additionally requires
+ * `after` to be strictly SHORTER than `before`, which a same-size swap (one
+ * allowed pair removed, a different one added in the same commit — e.g.
+ * `subClassOf(Company, Organization)` replaced by `subClassOf(Shop,
+ * Organization)` on an edge kind `from [Person] to [Organization]`) never
+ * satisfies even though it genuinely drops an admitted pair.
+ */
+function lostAnyMember(
+  before: readonly string[],
+  after: readonly string[],
+): boolean {
+  const afterValues = new Set(after);
+  return before.some((value) => !afterValues.has(value));
+}
+
+/**
  * Disjoint kind pairs the AFTER registry declares that the BEFORE registry
  * did not — after propagation through subsumption and equivalence, so a
  * `subClassOf` addition that propagates an existing `disjointWith` down to a
@@ -228,6 +263,14 @@ function nodeDisjointnessDelta(
  * `equivalentTo` / `sameAs` do not (yet) enter `getSubClassComponent`, so an
  * equivalence addition never grows a component here — see the module
  * docblock for why that is a known, documented no-op rather than a bug.
+ *
+ * Uses `isProperSubset`, not `lostAnyMember` (contrast
+ * `edgeEndpointAssignabilityDelta`): this loop checks every AFTER node kind
+ * against its OWN before/after component, not one diff-wide set. A merge
+ * always grows the component of every kind newly folded into it — there is
+ * no same-size "swap" case here the way there is for a single edge kind's
+ * endpoint pairs, so a strict size increase is the correct and sufficient
+ * test.
  */
 function nodeUniquenessComponentGroups(
   before: OntologySnapshot,
@@ -307,7 +350,7 @@ function edgeEndpointAssignabilityDelta(
     const afterPairKeys = afterAllowed.allowedPairs.map(
       ([from, to]) => `${from}\0${to}`,
     );
-    if (isProperSubset(afterPairKeys, beforePairKeys)) {
+    if (lostAnyMember(beforePairKeys, afterPairKeys)) {
       allowances.push(afterAllowed);
     }
   }
@@ -466,10 +509,11 @@ function classifyRelation(
  * data probes a commit of a tightening change owes.
  *
  * @throws ConfigurationError when `buildRegistryFromSerializedSchema` cannot
- *   interpret `before` or `after` — the same refusal a store open already
- *   throws for an incoherent persisted document. Only reached when the diff
- *   contains at least one relation change; a diff that adds or removes no
- *   relation never needs a registry and so can never throw for this reason.
+ *   interpret `before` or `after`. Only reached when the diff contains at
+ *   least one relation change; a diff that adds or removes no relation never
+ *   needs a registry and so can never throw for this reason. See the module
+ *   docblock for why the BEFORE side of this throw is new behavior, not an
+ *   existing store-open refusal, and for the fix-forward wedge it implies.
  */
 export function classifyOntologyChanges(
   before: OntologySnapshot,
