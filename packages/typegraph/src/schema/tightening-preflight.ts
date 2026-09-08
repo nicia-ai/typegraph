@@ -117,7 +117,8 @@ type GroupedProbes = Readonly<{
   endpoints?:
     | Extract<OntologyDataProbe, { kind: "edgeEndpointAssignability" }>
     | undefined;
-  acyclicity?: Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
+  acyclicity?:
+    Extract<OntologyDataProbe, { kind: "edgeAcyclicity" }> | undefined;
 }>;
 
 function groupProbesByKind(
@@ -311,8 +312,9 @@ export function prepareSchemaTighteningPreflight(
     // edge kinds THIS commit newly declares `acyclic: true` on — the same
     // delta-scoping discipline as every family above.
     const acyclicityViolations =
-      grouped.acyclicity === undefined ? [] : (
-        await readEdgeAcyclicityViolations(
+      grouped.acyclicity === undefined ?
+        []
+      : await readEdgeAcyclicityViolations(
           {
             graphId: params.graphId,
             schema: createSqlSchema(target.tableNames),
@@ -323,8 +325,7 @@ export function prepareSchemaTighteningPreflight(
           grouped.acyclicity.edgeKinds.map((edgeKind) =>
             standaloneAcyclicRelation(edgeKind),
           ),
-        )
-      );
+        );
 
     const violations = [...claimBackedViolations, ...acyclicityViolations];
     if (violations.length === 0) return;
