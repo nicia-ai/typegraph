@@ -33,6 +33,7 @@ import {
 } from "../indexes/types";
 import { type InferenceType } from "../ontology/types";
 import { type JsonPointer } from "../query/json-pointer";
+import { type CompositionPartSide } from "../registry/composition-relation";
 
 // ============================================================
 // Enum Zod Schemas
@@ -341,11 +342,15 @@ const runtimeEdgeDocumentZod = z
   })
   .loose();
 
+const compositionPartSideZod = z.enum(["from", "to"]);
+
 const runtimeOntologyRelationZod = z
   .object({
     metaEdge: z.string(),
     from: z.string(),
     to: z.string(),
+    via: z.string().optional(),
+    partSide: compositionPartSideZod.optional(),
   })
   .loose();
 
@@ -456,6 +461,10 @@ export type SerializedOntologyRelation = Readonly<{
   metaEdge: string; // Meta-edge name
   from: string; // Node kind name or external IRI
   to: string; // Node kind name or external IRI
+  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
+  via?: string;
+  /** R5's orientation. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
 }>;
 
 // ============================================================
@@ -682,6 +691,8 @@ export const serializedSchemaZod = z
               metaEdge: z.string(),
               from: z.string(),
               to: z.string(),
+              via: z.string().optional(),
+              partSide: compositionPartSideZod.optional(),
             })
             .loose(),
         ),

@@ -151,13 +151,21 @@ describe("ontology truth and hardening", () => {
   });
 
   it("allows a kind to be part of a disjoint kind", () => {
+    const belongsToOrg = defineEdge("belongsToOrg", { schema: emptySchema });
     const graph = defineGraph({
       id: "part-of-disjoint-kind",
       nodes: { Person: { type: Person }, Organization: { type: Organization } },
-      edges: {},
+      edges: {
+        belongsToOrg: {
+          type: belongsToOrg,
+          from: [Person],
+          to: [Organization],
+          cardinality: "one",
+        },
+      },
       ontology: [
         disjointWith(Person, Organization),
-        partOf(Person, Organization),
+        partOf(Person, Organization, { via: belongsToOrg }),
       ],
     });
 

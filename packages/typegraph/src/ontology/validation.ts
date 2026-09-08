@@ -1,8 +1,14 @@
 import {
+  type CompositionPartSide,
+  isCompositionMetaEdge,
+  normalizePartWhole,
+} from "../registry/composition-relation";
+import {
   computeDisjointExpansionClosures,
   computeEquivalenceClasses,
   expandDisjointSide,
 } from "../registry/kind-registry";
+import { encodeTupleKey } from "../utils/tuple-key";
 import { computeTransitiveClosure } from "./closures";
 import {
   META_EDGE_BROADER,
@@ -21,6 +27,10 @@ export type NamedOntologyRelation = Readonly<{
   metaEdge: string;
   from: string;
   to: string;
+  /** The realizing edge kind name. Required for `partOf`/`hasPart`, absent otherwise. */
+  via?: string;
+  /** R5's orientation. Meaningful only alongside `via`. */
+  partSide?: CompositionPartSide;
 }>;
 
 type OntologyValidationIssueCode =
@@ -29,7 +39,10 @@ type OntologyValidationIssueCode =
   | "ONTOLOGY_DISJOINT_CONFLICT"
   | "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS"
   | "ONTOLOGY_EQUIVALENCE_INVALID_CLASS"
-  | "DUPLICATE_ONTOLOGY_RELATION";
+  | "DUPLICATE_ONTOLOGY_RELATION"
+  | "ONTOLOGY_COMPOSITION_VIA_REQUIRED"
+  | "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN"
+  | "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN";
 
 export type OntologyValidationIssue = Readonly<{
   relationIndex?: number;
@@ -66,6 +79,13 @@ const STRICTLY_HIERARCHICAL: ReadonlySet<string> = new Set([
   META_EDGE_HAS_PART,
 ]);
 
+// `partOf`/`hasPart` are deliberately absent here: which endpoint is the
+// part is `normalizePartWhole`'s decision (`../registry/composition-relation`),
+// not a second copy of it. `buildHierarchicalGroups` below routes composition
+// relations through that one owner and consults this table only for the
+// non-composition narrower/broader flip, which really is a different
+// decision (a generic "narrower canonicalizes to broader" convention, not
+// "which side is the part").
 const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
   string,
   Readonly<{ canonical: MetaEdgeName; flip: boolean }>
@@ -73,8 +93,6 @@ const HIERARCHICAL_NORMALIZATION: ReadonlyMap<
   [META_EDGE_SUB_CLASS_OF, { canonical: META_EDGE_SUB_CLASS_OF, flip: false }],
   [META_EDGE_BROADER, { canonical: META_EDGE_BROADER, flip: false }],
   [META_EDGE_NARROWER, { canonical: META_EDGE_BROADER, flip: true }],
-  [META_EDGE_PART_OF, { canonical: META_EDGE_PART_OF, flip: false }],
-  [META_EDGE_HAS_PART, { canonical: META_EDGE_PART_OF, flip: true }],
 ]);
 
 type NormalizedHierarchicalEdge = Readonly<{
@@ -122,7 +140,22 @@ export function validateOntologyRelations(
   detectDisjointExpansionConflicts(ontology, issues);
   detectMultipleInversePartners(ontology, issues);
   detectInvalidEquivalenceClasses(ontology, kinds, issues);
+  validateCompositionShape(ontology, issues);
   return issues;
+}
+
+/**
+ * A reflexive `partOf`/`hasPart` pair naming its realizing edge is a
+ * meaningful declaration ("a Section may be part of another Section"): its
+ * soundness is an instance-level property (the union acyclicity check, item
+ * E-b), not a kind-level one. A same-kind pair with no `via` is still refused
+ * below by `ONTOLOGY_COMPOSITION_VIA_REQUIRED`, so this only widens the
+ * self-loop exemption for a relation that is otherwise well-formed.
+ */
+function isReflexiveCompositionAllowed(
+  relation: NamedOntologyRelation,
+): boolean {
+  return isCompositionMetaEdge(relation.metaEdge) && relation.via !== undefined;
 }
 
 function validateSelfLoopsAndDuplicates(
@@ -132,7 +165,10 @@ function validateSelfLoopsAndDuplicates(
   const seenKeys = new Set<string>();
   for (const [index, relation] of ontology.entries()) {
     if (relation.from === relation.to) {
-      if (STRICTLY_HIERARCHICAL.has(relation.metaEdge)) {
+      if (
+        STRICTLY_HIERARCHICAL.has(relation.metaEdge) &&
+        !isReflexiveCompositionAllowed(relation)
+      ) {
         issues.push({
           relationIndex: index,
           message: `Hierarchical meta-edge "${relation.metaEdge}" cannot be a self-loop ("${relation.from}" → "${relation.to}").`,
@@ -152,7 +188,17 @@ function validateSelfLoopsAndDuplicates(
       }
     }
 
-    const key = `${relation.metaEdge}::${relation.from}->${relation.to}`;
+    // `via`/`partSide` join the key so two realizing edges can hold the
+    // same (part, whole) pair — the heterogeneous-edge shape
+    // `compositionEdgeKindsUnder` exists to serve — without colliding as
+    // duplicates.
+    const key = encodeTupleKey([
+      relation.metaEdge,
+      relation.from,
+      relation.to,
+      relation.via ?? "",
+      relation.partSide ?? "",
+    ]);
     if (seenKeys.has(key)) {
       issues.push({
         relationIndex: index,
@@ -171,16 +217,27 @@ function buildHierarchicalGroups(
 ): Map<MetaEdgeName, NormalizedHierarchicalEdge[]> {
   const groups = new Map<MetaEdgeName, NormalizedHierarchicalEdge[]>();
   for (const [index, relation] of ontology.entries()) {
-    const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
-    if (normalization === undefined) continue;
     // Self-loops are reported elsewhere; skip them for cycle detection.
     if (relation.from === relation.to) continue;
 
-    const from = normalization.flip ? relation.to : relation.from;
-    const to = normalization.flip ? relation.from : relation.to;
-    const edges = groups.get(normalization.canonical) ?? [];
+    let canonical: MetaEdgeName;
+    let from: string;
+    let to: string;
+    if (isCompositionMetaEdge(relation.metaEdge)) {
+      const { partKind, wholeKind } = normalizePartWhole(relation);
+      canonical = META_EDGE_PART_OF;
+      from = partKind;
+      to = wholeKind;
+    } else {
+      const normalization = HIERARCHICAL_NORMALIZATION.get(relation.metaEdge);
+      if (normalization === undefined) continue;
+      canonical = normalization.canonical;
+      from = normalization.flip ? relation.to : relation.from;
+      to = normalization.flip ? relation.from : relation.to;
+    }
+    const edges = groups.get(canonical) ?? [];
     edges.push({ from, to, originalIndex: index });
-    groups.set(normalization.canonical, edges);
+    groups.set(canonical, edges);
   }
   return groups;
 }
@@ -376,4 +433,53 @@ function recordInversePartner(
     code: "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
     details: { edgeKind, existingPartner, conflictingPartner: partnerKind },
   });
+}
+
+/**
+ * The two composition shape checks that need nothing but the relation
+ * itself, run for every ontology relation regardless of meta-edge: `via` is
+ * required exactly on `partOf`/`hasPart` and forbidden everywhere else, and
+ * `partSide` is meaningful only alongside `via`.
+ *
+ * This is what delivers R3: a persisted `partOf`/`hasPart` relation missing
+ * `via` is refused on load, through the same `validateOntologyRelations`
+ * path the compile-time builder and the extension builder already share.
+ * The registration-dependent checks (orientation, cardinality, exactness,
+ * population) run later, in `buildCompositionRelation`
+ * (`src/registry/composition-relation.ts`), once a `KindRegistry` exists.
+ */
+function validateCompositionShape(
+  ontology: readonly NamedOntologyRelation[],
+  issues: OntologyValidationIssue[],
+): void {
+  for (const [index, relation] of ontology.entries()) {
+    if (isCompositionMetaEdge(relation.metaEdge)) {
+      if (relation.via === undefined) {
+        issues.push({
+          relationIndex: index,
+          message: `${relation.metaEdge}(${relation.from}, ${relation.to}) is missing the required \`via\` edge kind.`,
+          code: "ONTOLOGY_COMPOSITION_VIA_REQUIRED",
+          details: { ...relation },
+        });
+      }
+      continue;
+    }
+
+    if (relation.via !== undefined) {
+      issues.push({
+        relationIndex: index,
+        message: `Meta-edge "${relation.metaEdge}" cannot carry a \`via\` edge kind; only partOf/hasPart may.`,
+        code: "ONTOLOGY_COMPOSITION_VIA_FORBIDDEN",
+        details: { metaEdge: relation.metaEdge, via: relation.via },
+      });
+    }
+    if (relation.partSide !== undefined) {
+      issues.push({
+        relationIndex: index,
+        message: `Meta-edge "${relation.metaEdge}" cannot carry a \`partSide\`; only partOf/hasPart may.`,
+        code: "ONTOLOGY_COMPOSITION_PART_SIDE_FORBIDDEN",
+        details: { metaEdge: relation.metaEdge, partSide: relation.partSide },
+      });
+    }
+  }
 }

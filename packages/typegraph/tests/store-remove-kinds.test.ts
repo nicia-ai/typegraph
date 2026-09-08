@@ -18,7 +18,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode, KindNotFoundError } from "../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  KindNotFoundError,
+  partOf,
+} from "../src";
 import type { GraphBackend } from "../src/backend/types";
 import type { GraphDef } from "../src/core/define-graph";
 import { RECORDED_MAX_REVISION } from "../src/core/temporal";
@@ -107,6 +113,16 @@ const Person = defineNode("Person", {
 const baseGraph = defineGraph({
   id: "remove_kinds_test",
   nodes: { Person: { type: Person } },
+  edges: {},
+});
+
+const Section = defineNode("Section", {
+  schema: z.object({ title: z.string() }),
+});
+
+const sectionGraph = defineGraph({
+  id: "remove_kinds_composition_test",
+  nodes: { Section: { type: Section } },
   edges: {},
 });
 
@@ -240,6 +256,98 @@ describe("Store.removeKinds — schema commit", () => {
         (entry) => entry.from === "NamedTag" || entry.to === "NamedTag",
       ),
     ).toBeUndefined();
+  });
+
+  it("cascade-removes an ontology relation whose `via` edge is removed (E-a-r2-2)", async () => {
+    // Section is compile-time; parentSection and the partOf relation naming
+    // it as `via` are both added at runtime through evolve(). Removing the
+    // edge alone must not leave the relation behind with a dangling `via` —
+    // planRemovals only ever filtered ontology on from/to, so the relation
+    // survived unchanged and the next schema commit died in the registry
+    // layer with ONTOLOGY_COMPOSITION_VIA_UNKNOWN instead.
+    const backend = createTestBackend();
+    const [store] = await createStoreWithSchema(sectionGraph, backend);
+    const evolved = await store.evolve(
+      defineGraphExtension({
+        nodes: {},
+        edges: {
+          parentSection: {
+            from: ["Section"],
+            to: ["Section"],
+            cardinality: "one",
+            properties: {},
+          },
+        },
+        ontology: [
+          {
+            metaEdge: "partOf",
+            from: "Section",
+            to: "Section",
+            via: "parentSection",
+            partSide: "from",
+          },
+        ],
+      }),
+    );
+
+    const removed = await evolved.removeKinds(["parentSection"]);
+
+    expect(removed.registry.hasEdgeType("parentSection")).toBe(false);
+    const ontology = removed.introspect().ontology;
+    expect(
+      ontology.find((entry) => entry.via === "parentSection"),
+    ).toBeUndefined();
+  });
+
+  it("rejects removing a graph-extension edge referenced by a compile-time composition relation's `via` (E-a-r2-2)", () => {
+    // A compile-time `partOf` can name an edge kind as `via` before that
+    // edge kind is ever registered — the edge is only added later, as a
+    // graph-extension edge, by `store.evolve()`. `planRemovals` must treat
+    // that `via` reference exactly like a compile-time edge endpoint:
+    // removing the graph-extension edge out from under it would resurrect
+    // the orphaned reference on the next deploy.
+    const Section = defineNode("Section", {
+      schema: z.object({ title: z.string() }),
+    });
+    const parentSection = defineEdge("parentSection", {
+      schema: z.object({}),
+    });
+    const seedGraph = defineGraph({
+      id: "remove_kinds_via_referent_test",
+      nodes: { Section: { type: Section } },
+      edges: {},
+      ontology: [
+        partOf(Section, Section, { via: parentSection, partSide: "from" }),
+      ],
+    });
+
+    const syntheticGraph = {
+      ...seedGraph,
+      extension: {
+        version: 1,
+        edges: {
+          parentSection: {
+            from: ["Section"],
+            to: ["Section"],
+            cardinality: "one" as const,
+            properties: {},
+          },
+        },
+      },
+    } as unknown as typeof seedGraph;
+
+    let caught: unknown;
+    try {
+      planRemovals(syntheticGraph, ["parentSection"]);
+    } catch (error) {
+      caught = error;
+    }
+    if (!(caught instanceof KindHasReferentsError)) {
+      throw new Error("expected KindHasReferentsError");
+    }
+    expect(caught.referents).toEqual([
+      { type: "compile-time-ontology", name: "partOf(Section, Section)" },
+    ]);
   });
 
   it("rejects removing a graph-extension kind referenced by a compile-time edge", () => {

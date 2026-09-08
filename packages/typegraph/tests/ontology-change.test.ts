@@ -90,8 +90,9 @@ function relation(
   metaEdge: string,
   from: string,
   to: string,
+  via?: string,
 ): SerializedOntologyRelation {
-  return { metaEdge, from, to };
+  return { metaEdge, from, to, ...(via === undefined ? {} : { via }) };
 }
 
 function relationChangeOf(
@@ -129,6 +130,20 @@ const EDGES_FOR_INVERSE_OF: Record<string, SerializedEdgeDef> = {
   edgeB: edgeDef("edgeB", ["Y"], ["X"]),
 };
 
+/**
+ * `partOf`/`hasPart` require a registered `via` edge whose whole-side
+ * cardinality is `"one"`/`"oneActive"`. `edgeA` (X -> Y) is the only pair
+ * declared against it, so it also satisfies composition-exactness for
+ * whichever orientation the relation under test infers.
+ */
+const EDGES_FOR_COMPOSITION: Record<string, SerializedEdgeDef> = {
+  edgeA: {
+    ...edgeDef("edgeA", ["X"], ["Y"]),
+    cardinality: "one",
+    targetCardinality: "one",
+  },
+};
+
 // ============================================================
 // The severity matrix (§1.3)
 // ============================================================
@@ -138,6 +153,7 @@ type MatrixRow = Readonly<{
   direction: "added" | "removed";
   from: string;
   to: string;
+  via?: string;
   edges?: Record<string, SerializedEdgeDef>;
   expectedSeverity: "safe" | "warning" | "breaking";
   expectedProbeKinds: readonly OntologyDataProbe["kind"][];
@@ -279,32 +295,40 @@ const MATRIX: readonly MatrixRow[] = [
   {
     metaEdge: "partOf",
     direction: "added",
-    from: "A",
-    to: "B",
+    from: "X",
+    to: "Y",
+    via: "edgeA",
+    edges: EDGES_FOR_COMPOSITION,
     expectedSeverity: "safe",
     expectedProbeKinds: [],
   },
   {
     metaEdge: "partOf",
     direction: "removed",
-    from: "A",
-    to: "B",
+    from: "X",
+    to: "Y",
+    via: "edgeA",
+    edges: EDGES_FOR_COMPOSITION,
     expectedSeverity: "safe",
     expectedProbeKinds: [],
   },
   {
     metaEdge: "hasPart",
     direction: "added",
-    from: "A",
-    to: "B",
+    from: "X",
+    to: "Y",
+    via: "edgeA",
+    edges: EDGES_FOR_COMPOSITION,
     expectedSeverity: "safe",
     expectedProbeKinds: [],
   },
   {
     metaEdge: "hasPart",
     direction: "removed",
-    from: "A",
-    to: "B",
+    from: "X",
+    to: "Y",
+    via: "edgeA",
+    edges: EDGES_FOR_COMPOSITION,
     expectedSeverity: "safe",
     expectedProbeKinds: [],
   },
@@ -362,7 +386,12 @@ describe("classifyOntologyChanges", () => {
   describe("the severity table", () => {
     it.each(MATRIX)("$metaEdge $direction -> $expectedSeverity", (row) => {
       const edges = row.edges ?? {};
-      const relationUnderTest = relation(row.metaEdge, row.from, row.to);
+      const relationUnderTest = relation(
+        row.metaEdge,
+        row.from,
+        row.to,
+        row.via,
+      );
       const before = snapshot(
         {},
         edges,

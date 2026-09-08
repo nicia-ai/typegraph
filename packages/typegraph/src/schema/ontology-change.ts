@@ -81,9 +81,10 @@ import { expandEdgeEndpointAllowance } from "../registry/edge-endpoint-allowance
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareStrings } from "../utils/compare";
 import { hasOwnKey } from "../utils/object";
+import { encodeTupleKey } from "../utils/tuple-key";
 import {
   buildRegistryFromSerializedSchema,
-  buildSerializedEdgeEndpointKinds,
+  buildSerializedEdgeKindFacts,
 } from "./deserializer";
 import { type ChangeSeverity, type ChangeType } from "./migration";
 import {
@@ -160,15 +161,54 @@ export type OntologySnapshot = Pick<
 // Relation keying
 // ============================================================
 
+/** Presentational label for `OntologyChange.name`. Not used as a lookup key. */
 function relationKey(relation: SerializedOntologyRelation): string {
   return `${relation.metaEdge}:${relation.from}:${relation.to}`;
+}
+
+/**
+ * Human-readable description of a relation for `OntologyChange.details`,
+ * naming `via` (and `partSide`, when present) so a composition relation
+ * re-pointed at a different realizing edge reads as a distinct change
+ * instead of two identical-looking "removed"/"added" entries (E-a-8).
+ */
+function relationDescription(relation: SerializedOntologyRelation): string {
+  const base = `${relation.metaEdge}(${relation.from}, ${relation.to})`;
+  const viaClause = relation.via === undefined ? "" : ` via "${relation.via}"`;
+  const partSideClause =
+    relation.partSide === undefined ?
+      ""
+    : ` (partSide: "${relation.partSide}")`;
+  return `${base}${viaClause}${partSideClause}`;
+}
+
+/**
+ * Injective lookup key for the before/after relation maps below.
+ *
+ * A delimiter join (`${metaEdge}:${from}:${to}`) collides for a kind name
+ * containing the delimiter, and a `via` change (composition's realizing
+ * edge) must diff as remove + add rather than disappearing as a no-op, so
+ * both `via` and `partSide` are folded into the key alongside the three
+ * original fields, through the same injective tuple encoding the claim keys
+ * use for exactly this reason (`src/utils/tuple-key.ts`).
+ */
+function relationMapKey(relation: SerializedOntologyRelation): string {
+  return encodeTupleKey([
+    relation.metaEdge,
+    relation.from,
+    relation.to,
+    relation.via ?? "",
+    relation.partSide ?? "",
+  ]);
 }
 
 function keyedRelations(
   relations: readonly SerializedOntologyRelation[],
 ): ReadonlyMap<string, SerializedOntologyRelation> {
   const result = new Map<string, SerializedOntologyRelation>();
-  for (const relation of relations) result.set(relationKey(relation), relation);
+  for (const relation of relations) {
+    result.set(relationMapKey(relation), relation);
+  }
   return result;
 }
 
@@ -324,8 +364,8 @@ function edgeEndpointAssignabilityDelta(
   beforeRegistry: KindRegistry,
   afterRegistry: KindRegistry,
 ): readonly EdgeEndpointAllowance[] {
-  const beforeEndpoints = buildSerializedEdgeEndpointKinds(before.edges);
-  const afterEndpoints = buildSerializedEdgeEndpointKinds(after.edges);
+  const beforeEndpoints = buildSerializedEdgeKindFacts(before.edges);
+  const afterEndpoints = buildSerializedEdgeKindFacts(after.edges);
 
   const allowances: EdgeEndpointAllowance[] = [];
   for (const edgeKind of Object.keys(after.edges)) {
@@ -484,7 +524,7 @@ function classifyRelation(
       entity: "relation",
       name,
       severity: "safe",
-      details: `Relation ${relation.metaEdge}(${relation.from}, ${relation.to}) was ${verb} alongside a removed kind`,
+      details: `Relation ${relationDescription(relation)} was ${verb} alongside a removed kind`,
     };
   }
 
@@ -499,7 +539,7 @@ function classifyRelation(
     entity: "relation",
     name,
     severity,
-    details: `Relation ${relation.metaEdge}(${relation.from}, ${relation.to}) was ${verb}`,
+    details: `Relation ${relationDescription(relation)} was ${verb}`,
     ...(probes.length > 0 ? { probes } : {}),
   };
 }

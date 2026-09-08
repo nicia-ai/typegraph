@@ -1,4 +1,5 @@
 import { type AnyEdgeType, type NodeType } from "../core/types";
+import { type CompositionPartSide } from "../registry/composition-relation";
 import {
   META_EDGE_BROADER,
   META_EDGE_DIFFERENT_FROM,
@@ -287,13 +288,32 @@ const partOfMetaEdge = createMetaEdge(META_EDGE_PART_OF, {
 });
 
 /**
- * Creates a partOf ontology relation.
+ * The options every composition relation (`partOf`/`hasPart`) requires.
  */
-export function partOf(part: NodeType, whole: NodeType): OntologyRelation {
+export type CompositionOptions = Readonly<{
+  /** The edge kind that realizes the composition instance-level. */
+  via: AnyEdgeType;
+  /** R5: required only when the edge admits both orientations (e.g. same-kind containment). */
+  partSide?: CompositionPartSide;
+}>;
+
+/**
+ * Creates a partOf ontology relation.
+ *
+ * `via` names the edge kind whose live rows realize this composition; a
+ * typo is a compile error because it is the edge's TYPE, not its name.
+ */
+export function partOf(
+  part: NodeType,
+  whole: NodeType,
+  options: CompositionOptions,
+): OntologyRelation {
   return {
     metaEdge: partOfMetaEdge,
     from: part,
     to: whole,
+    via: options.via.kind,
+    ...(options.partSide === undefined ? {} : { partSide: options.partSide }),
   };
 }
 
@@ -310,12 +330,21 @@ const hasPartMetaEdge = createMetaEdge(META_EDGE_HAS_PART, {
 
 /**
  * Creates a hasPart ontology relation.
+ *
+ * `via` names the edge kind whose live rows realize this composition; a
+ * typo is a compile error because it is the edge's TYPE, not its name.
  */
-export function hasPart(whole: NodeType, part: NodeType): OntologyRelation {
+export function hasPart(
+  whole: NodeType,
+  part: NodeType,
+  options: CompositionOptions,
+): OntologyRelation {
   return {
     metaEdge: hasPartMetaEdge,
     from: whole,
     to: part,
+    via: options.via.kind,
+    ...(options.partSide === undefined ? {} : { partSide: options.partSide }),
   };
 }
 

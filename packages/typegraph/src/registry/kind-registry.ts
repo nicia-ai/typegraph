@@ -23,6 +23,13 @@ import { type OntologyRelation } from "../ontology/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { compareCodePoints } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
+import {
+  type CompositionPair,
+  type CompositionPartSide,
+  type CompositionRelation,
+  EMPTY_COMPOSITION_RELATION,
+  normalizePartWhole,
+} from "./composition-relation";
 
 const DISJOINT_PAIR_SEPARATOR = "|";
 const ENCODED_DISJOINT_PAIR_PREFIX = "\u001Epair\u001E";
@@ -134,6 +141,23 @@ function computeSubClassComponents(
   return components;
 }
 
+/** Every precomputed ontology closure a `KindRegistry` is built from. */
+export type RegistryClosures = Readonly<{
+  subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
+  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
+  broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
+  narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
+  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
+  iriToKind: ReadonlyMap<string, string>;
+  relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
+  disjointPairs: ReadonlySet<string>;
+  partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
+  hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+  edgeInverses: ReadonlyMap<string, string>;
+  edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
+  edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
+}>;
+
 /**
  * KindRegistry holds precomputed closures for ontological reasoning.
  *
@@ -169,9 +193,18 @@ export class KindRegistry {
   // === Constraints ===
   readonly disjointPairs: ReadonlySet<string>; // Injectively encoded unordered pairs
 
-  // === Composition ===
+  // === Composition (declaration-level closures) ===
   readonly partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
   readonly hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
+
+  /**
+   * THE composition relation (item E): every declared `partOf`/`hasPart`
+   * pair, its realizing edge, its orientation, and its whole-side
+   * population. Defaults to empty so the many `new KindRegistry(...)` call
+   * sites that predate composition (chiefly `tests/property/**`) keep
+   * compiling unchanged.
+   */
+  readonly #composition: CompositionRelation;
 
   // === Edge Relationships ===
   readonly edgeInverses: ReadonlyMap<string, string>;
@@ -181,26 +214,14 @@ export class KindRegistry {
   constructor(
     nodeKinds: ReadonlyMap<string, NodeType>,
     edgeKinds: ReadonlyMap<string, AnyEdgeType>,
-    closures: {
-      subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
-      subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
-      broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
-      narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
-      equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
-      iriToKind: ReadonlyMap<string, string>;
-      relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
-      disjointPairs: ReadonlySet<string>;
-      partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
-      hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
-      edgeInverses: ReadonlyMap<string, string>;
-      edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
-      edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
-    },
+    closures: RegistryClosures,
     identity?: GraphIdentityConfig,
+    composition: CompositionRelation = EMPTY_COMPOSITION_RELATION,
   ) {
     this.nodeKinds = nodeKinds;
     this.edgeKinds = edgeKinds;
     this.identity = identity;
+    this.#composition = composition;
     this.subClassAncestors = closures.subClassAncestors;
     this.subClassDescendants = closures.subClassDescendants;
     this.#subClassComponents = computeSubClassComponents(
@@ -399,6 +420,161 @@ export class KindRegistry {
     return parts ? [...parts] : [];
   }
 
+  // === Composition Relation (item E) ===
+  //
+  // `getParts`/`getWholes` above keep their declaration-level closure
+  // semantics unchanged (§2.8 of the composition design); they are
+  // meaningful here because `via` is now required on every `partOf`/
+  // `hasPart` relation, so every declared pair they close over is itself a
+  // validated composition pair. The readers below are the ONLY way any
+  // other lane reaches `pairs` — nothing outside this class indexes into
+  // the relation directly, which is what keeps "is this edge kind a
+  // composition edge" and "which side is the part" answered once.
+
+  /** THE composition relation: every declared pair, its realizing edge, and its orientation. */
+  compositionRelation(): CompositionRelation {
+    return this.#composition;
+  }
+
+  /** Whether `edgeKind`'s live rows realize a composition pair. */
+  isCompositionEdge(edgeKind: string): boolean {
+    return this.#composition.edgeKinds.has(edgeKind);
+  }
+
+  /** Which endpoint of `edgeKind` carries the PART, or `undefined` if it is not a composition edge. */
+  compositionPartSide(edgeKind: string): CompositionPartSide | undefined {
+    return this.#composition.partSideByEdgeKind.get(edgeKind);
+  }
+
+  /**
+   * Every literal kind name a declared composition pair names as either
+   * endpoint, restricted to the ones `concreteKind` is assignable to. This is
+   * the one place a concrete node kind — which may be an undeclared subclass
+   * of the kind a `partOf`/`hasPart` was written against — is resolved onto
+   * the composition relation's declared vocabulary; every reader below routes
+   * through it so a subclass is never visible to one reader and invisible to
+   * another (E-a-r2-1). Edge-endpoint validation already accepts such a
+   * subclass through `isAssignableToAny`, so these rows really do exist.
+   */
+  private compositionDeclaredKindsAssignableFrom(
+    concreteKind: string,
+  ): readonly string[] {
+    const declaredKinds = new Set<string>();
+    for (const pair of this.#composition.pairs) {
+      declaredKinds.add(pair.partKind);
+      declaredKinds.add(pair.wholeKind);
+    }
+    return [...declaredKinds].filter((declaredKind) =>
+      this.isAssignableTo(concreteKind, declaredKind),
+    );
+  }
+
+  /**
+   * The declared composition pair between this part and whole kind, if any —
+   * either may be a subclass of the kind the pair was declared against. Two
+   * realizing edges may hold the same (part, whole) pair (E-a-2); when they
+   * do, this returns the code-point-first `viaEdgeKind` (the sort order
+   * `CompositionRelation.pairs` already carries), not "all of them".
+   */
+  getCompositionEdge(
+    partKind: string,
+    wholeKind: string,
+  ): CompositionPair | undefined {
+    return this.#composition.pairs.find(
+      (pair) =>
+        this.isAssignableTo(partKind, pair.partKind) &&
+        this.isAssignableTo(wholeKind, pair.wholeKind),
+    );
+  }
+
+  /** Every realizing edge kind, code-point ordered. */
+  compositionEdgeKinds(): readonly string[] {
+    return [...this.#composition.edgeKinds];
+  }
+
+  /**
+   * The realizing edge kinds reachable under `wholeKind`: pairs whose whole
+   * is `wholeKind` (or a kind `wholeKind` is a subclass of) itself, or any
+   * kind transitively part of one of those. This is what lets cascade and
+   * `parts()` cross heterogeneous edge kinds without the caller spelling the
+   * path.
+   */
+  compositionEdgeKindsUnder(wholeKind: string): readonly string[] {
+    const wholeKinds = new Set([wholeKind]);
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      wholeKind,
+    )) {
+      wholeKinds.add(declaredKind);
+      for (const part of this.getParts(declaredKind)) wholeKinds.add(part);
+    }
+    const edgeKinds = new Set<string>();
+    for (const pair of this.#composition.pairs) {
+      if (wholeKinds.has(pair.wholeKind)) edgeKinds.add(pair.viaEdgeKind);
+    }
+    return [...edgeKinds].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+  }
+
+  /** The wholes mirror of {@link compositionEdgeKindsUnder}. */
+  compositionEdgeKindsOver(partKind: string): readonly string[] {
+    const partKinds = new Set([partKind]);
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      partKind,
+    )) {
+      partKinds.add(declaredKind);
+      for (const whole of this.getWholes(declaredKind)) partKinds.add(whole);
+    }
+    const edgeKinds = new Set<string>();
+    for (const pair of this.#composition.pairs) {
+      if (partKinds.has(pair.partKind)) edgeKinds.add(pair.viaEdgeKind);
+    }
+    return [...edgeKinds].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+  }
+
+  /** Every part kind transitively under `wholeKind`, across every composition relation. */
+  compositionPartKindsUnder(wholeKind: string): readonly string[] {
+    const parts = new Set<string>();
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      wholeKind,
+    )) {
+      for (const part of this.getParts(declaredKind)) parts.add(part);
+    }
+    return [...parts].toSorted((left, right) => compareCodePoints(left, right));
+  }
+
+  /** Every whole kind transitively over `partKind`, across every composition relation. */
+  compositionWholeKindsOver(partKind: string): readonly string[] {
+    const wholes = new Set<string>();
+    for (const declaredKind of this.compositionDeclaredKindsAssignableFrom(
+      partKind,
+    )) {
+      for (const whole of this.getWholes(declaredKind)) wholes.add(whole);
+    }
+    return [...wholes].toSorted((left, right) =>
+      compareCodePoints(left, right),
+    );
+  }
+
+  /**
+   * The whole-side population a composition part of this concrete kind is
+   * held to — total over every concrete node kind that can appear as a
+   * composition part, because `ONTOLOGY_COMPOSITION_POPULATION_MIXED`
+   * refuses any graph where that would be ambiguous.
+   */
+  compositionPopulation(
+    concretePartKind: string,
+  ): "one" | "oneActive" | undefined {
+    for (const pair of this.#composition.pairs) {
+      if (this.isAssignableTo(concretePartKind, pair.partKind)) {
+        return pair.population;
+      }
+    }
+    return undefined;
+  }
+
   // === Edge Relationship Methods ===
 
   /**
@@ -495,21 +671,7 @@ export class KindRegistry {
 /**
  * Builder function to create empty closures.
  */
-export function createEmptyClosures(): {
-  subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
-  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
-  broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
-  iriToKind: ReadonlyMap<string, string>;
-  relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
-  disjointPairs: ReadonlySet<string>;
-  partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  edgeInverses: ReadonlyMap<string, string>;
-  edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
-} {
+export function createEmptyClosures(): RegistryClosures {
   return {
     subClassAncestors: new Map(),
     subClassDescendants: new Map(),
@@ -638,13 +800,10 @@ function collectOntologyRelations(
         disjoint.push([fromName, toName]);
         break;
       }
-      case META_EDGE_PART_OF: {
-        partOf.push([fromName, toName]);
-        break;
-      }
+      case META_EDGE_PART_OF:
       case META_EDGE_HAS_PART: {
-        // hasPart is inverse of partOf
-        partOf.push([toName, fromName]);
+        const { partKind, wholeKind } = normalizePartWhole(relation);
+        partOf.push([partKind, wholeKind]);
         break;
       }
       case META_EDGE_INVERSE_OF: {
@@ -961,21 +1120,7 @@ export function computeEquivalenceClasses(
 /** Computes all registry closures from already-normalized relation names. */
 export function computeClosuresFromNamedOntology(
   ontology: readonly NamedOntologyRelation[],
-): {
-  subClassAncestors: ReadonlyMap<string, ReadonlySet<string>>;
-  subClassDescendants: ReadonlyMap<string, ReadonlySet<string>>;
-  broaderClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  narrowerClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  equivalenceSets: ReadonlyMap<string, ReadonlySet<string>>;
-  iriToKind: ReadonlyMap<string, string>;
-  relatedKinds: ReadonlyMap<string, ReadonlySet<string>>;
-  disjointPairs: ReadonlySet<string>;
-  partOfClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  hasPartClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  edgeInverses: ReadonlyMap<string, string>;
-  edgeImplicationsClosure: ReadonlyMap<string, ReadonlySet<string>>;
-  edgeImplyingClosure: ReadonlyMap<string, ReadonlySet<string>>;
-} {
+): RegistryClosures {
   const collected = collectOntologyRelations(ontology);
 
   const { subClassAncestors, subClassDescendants, equivalenceSets } =

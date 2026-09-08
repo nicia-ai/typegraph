@@ -12,6 +12,7 @@
  * encoding here keeps the four sites from drifting apart.
  */
 import { getTypeName, type OntologyRelation } from "../ontology/types";
+import { encodeTupleKey } from "../utils/tuple-key";
 import {
   type ExtensionOntologyRelation,
   type GraphExtension,
@@ -20,11 +21,23 @@ import {
 export function graphExtensionOntologyKey(
   entry: ExtensionOntologyRelation,
 ): string {
-  return `${entry.metaEdge}|${entry.from}|${entry.to}`;
+  return encodeTupleKey([
+    entry.metaEdge,
+    entry.from,
+    entry.to,
+    entry.via ?? "",
+    entry.partSide ?? "",
+  ]);
 }
 
 export function compileTimeOntologyKey(relation: OntologyRelation): string {
-  return `${relation.metaEdge.name}|${getTypeName(relation.from)}|${getTypeName(relation.to)}`;
+  return encodeTupleKey([
+    relation.metaEdge.name,
+    getTypeName(relation.from),
+    getTypeName(relation.to),
+    relation.via ?? "",
+    relation.partSide ?? "",
+  ]);
 }
 
 /**
