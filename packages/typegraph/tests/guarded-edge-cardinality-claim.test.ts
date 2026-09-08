@@ -25,6 +25,7 @@ import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
 import {
   claimEdgeCardinalities,
+  edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
 } from "../src/store/claims/edge-claims";
 import { requireDefined } from "../src/utils/presence";
@@ -853,7 +854,10 @@ describe("guarded edge cardinality claim", () => {
     it("refuses before writing (typed ConfigurationError) when the claim relation is missing, for a two-axis kind", async () => {
       const { backend } = createLocalSqliteBackend();
       const claims = edgeCardinalityClaims(
-        { cardinality: "one", targetCardinality: "one" },
+        edgeCardinalityAxisReferences({
+          cardinality: "one",
+          targetCardinality: "one",
+        }),
         {
           graphId: bothAxesGraph.id,
           id: "e1",

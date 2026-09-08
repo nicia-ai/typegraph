@@ -146,7 +146,10 @@ describe("edgeCardinalityClaims claim order", () => {
 
   it("orders a two-axis claim set by compareClaimTargets, not declaration order", () => {
     const claims = edgeCardinalityClaims(
-      { cardinality: "one", targetCardinality: "one" },
+      edgeCardinalityAxisReferences({
+        cardinality: "one",
+        targetCardinality: "one",
+      }),
       subject,
     );
     expect(claims).toHaveLength(2);
@@ -164,10 +167,11 @@ describe("edgeCardinalityClaims claim order", () => {
       cardinality: "unique",
       targetCardinality: "one",
     } as const;
-    const first = edgeCardinalityClaims(declarations, subject).map(
+    const axisReferences = edgeCardinalityAxisReferences(declarations);
+    const first = edgeCardinalityClaims(axisReferences, subject).map(
       (claim) => claim.direction,
     );
-    const second = edgeCardinalityClaims(declarations, subject).map(
+    const second = edgeCardinalityClaims(axisReferences, subject).map(
       (claim) => claim.direction,
     );
     expect(first).toEqual(second);

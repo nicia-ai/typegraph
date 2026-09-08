@@ -435,4 +435,108 @@ export function registerEdgeTargetCardinalityTemporalIntegrationTests(
       }
     }
   });
+
+  /**
+   * Regression coverage for the reentry probe's self-count bug (#610 D.1
+   * review finding D1-R1-01): a `clearValidTo` reopen with NO delete
+   * transition used to re-probe EVERY declared axis, not just the
+   * active-only one. A non-active-only axis (`one`/`unique`) never lost its
+   * claim while the row stayed live and undeleted, so re-probing it counted
+   * this very row against itself and refused a reopen nothing else
+   * contends for. The two arms above (`AXES x BOUNDS`) never exercise this:
+   * `both` always pairs the SAME bound on both axes, so an `oneActive`+
+   * `oneActive` kind's reentry probe naturally excludes the row from every
+   * axis it re-checks (both axes read `validTo IS NULL`, which this row
+   * fails while its window is still ended) and a single-axis kind never
+   * re-checks a second, non-active-only axis at all.
+   */
+  const MIXED_BOUND_PAIRS: readonly Readonly<{
+    source: Bound | "unique";
+    target: Bound;
+  }>[] = [
+    { source: "one", target: "oneActive" },
+    { source: "unique", target: "oneActive" },
+    { source: "oneActive", target: "one" },
+  ];
+
+  describe("mixed-bound axes (one active-only, the other not)", () => {
+    for (const { source, target } of MIXED_BOUND_PAIRS) {
+      const edgeKind = `tgctMixed_${source}_${target}`;
+      const mixedEdge = defineEdge(edgeKind, { schema: z.object({}) });
+
+      function buildMixedGraph(id: string) {
+        return defineGraph({
+          id,
+          nodes: {
+            TgctPerson: { type: Person },
+            TgctTarget: { type: Target },
+          },
+          edges: {
+            [edgeKind]: {
+              type: mixedEdge,
+              from: [Person],
+              to: [Target],
+              cardinality: source,
+              targetCardinality: target,
+            },
+          },
+        });
+      }
+
+      describe(`cardinality=${source} targetCardinality=${target}`, () => {
+        it("reopening an ended window succeeds when nothing else contends", async () => {
+          const store = await context.createStore(buildMixedGraph(nextId()));
+          const collection = edgeCollection(store, edgeKind);
+          const alice = await store.nodes.TgctPerson.create({});
+          const targetNode = await store.nodes.TgctTarget.create({});
+
+          const edge = await collection.create(alice, targetNode, {});
+          await collection.update(
+            edge.id,
+            {},
+            { validTo: new Date().toISOString() },
+          );
+
+          await expect(
+            collection.update(edge.id, {}, { clearValidTo: true }),
+          ).resolves.toBeDefined();
+        });
+        // MUTATION CHECK (verified): revert the D.1 reentry-probe fix
+        // (probe every declared axis on a `clearValidTo`-only reopen,
+        // instead of only the active-only ones) — this case then throws
+        // `CardinalityError` instead of resolving.
+
+        it("the non-active-only axis still refuses a genuine competitor after the reopen", async () => {
+          const store = await context.createStore(buildMixedGraph(nextId()));
+          const collection = edgeCollection(store, edgeKind);
+          const alice = await store.nodes.TgctPerson.create({});
+          const bob = await store.nodes.TgctPerson.create({});
+          const targetNode = await store.nodes.TgctTarget.create({});
+          const otherTarget = await store.nodes.TgctTarget.create({});
+
+          const edge = await collection.create(alice, targetNode, {});
+          await collection.update(
+            edge.id,
+            {},
+            { validTo: new Date().toISOString() },
+          );
+          await collection.update(edge.id, {}, { clearValidTo: true });
+
+          // Whichever side is NOT active-only never released its claim, so a
+          // distinct edge contending that exact axis key must still refuse —
+          // proving the fix narrowed the reentry probe rather than dropping
+          // it. `unique`'s key is the whole (from, to) pair, so its
+          // competitor must reuse both endpoints; `one`'s key is the single
+          // constrained endpoint.
+          const [from, to] =
+            source === "unique" ? [alice, targetNode]
+            : source === "one" ? [alice, otherTarget]
+            : [bob, targetNode];
+          await expect(collection.create(from, to, {})).rejects.toBeInstanceOf(
+            CardinalityError,
+          );
+        });
+      });
+    }
+  });
 }

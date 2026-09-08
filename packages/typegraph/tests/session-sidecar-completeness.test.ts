@@ -77,7 +77,10 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
-import { edgeCardinalityClaims } from "../src/store/claims/edge-claims";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalityClaims,
+} from "../src/store/claims/edge-claims";
 import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import {
   runWritePlan,
@@ -338,7 +341,10 @@ function edgeInsertWork(
   // so a change to what a `unique` kind claims moves this fixture too.
   return {
     params,
-    claims: edgeCardinalityClaims({ cardinality: "unique" }, params),
+    claims: edgeCardinalityClaims(
+      edgeCardinalityAxisReferences({ cardinality: "unique" }),
+      params,
+    ),
   };
 }
 

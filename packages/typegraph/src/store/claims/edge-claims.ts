@@ -256,6 +256,13 @@ export function edgeCardinalityAxisReferences(
 /**
  * THE claims an edge write owes, in CLAIM order.
  *
+ * Takes the AXIS LIST, the same one {@link checkEdgeCardinalityConstraints}
+ * probes, rather than the raw {@link EdgeCardinalityDeclarations} — a caller
+ * that re-admits a row to only PART of its declaration (a window reopen with
+ * no delete transition re-admits just the active-only axes; see
+ * {@link file://../operations/edge-operations.ts}'s reentry branch) claims
+ * exactly what it probed, never a superset.
+ *
  * Claim order is {@link compareClaimTargets}, not probe order: two writers
  * that take the same two axis rows must take them in the same order or they
  * deadlock against each other, and the source and target axes of one edge
@@ -271,10 +278,10 @@ export function edgeCardinalityAxisReferences(
  * or "claimed but unprobed" (a refusal with no matching error).
  */
 export function edgeCardinalityClaims(
-  declarations: EdgeCardinalityDeclarations,
+  axisReferences: readonly EdgeCardinalityAxisRef[],
   subject: EdgeClaimSubject,
 ): readonly ClaimEdgeCardinalityParams[] {
-  const claims = edgeCardinalityAxisReferences(declarations)
+  const claims = axisReferences
     .filter(
       (ref) =>
         edgeCardinalitySpec(ref).claimsWhenBornEnded ||

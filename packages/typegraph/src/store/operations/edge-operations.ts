@@ -142,6 +142,7 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import { compareClaimTargets } from "../claims/axis";
 import {
   claimEdgeCardinalities,
+  type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   edgeCardinalityClaimMode,
   edgeCardinalityClaimRefusal,
@@ -329,7 +330,7 @@ type EdgeCreatePrepared = Readonly<{
  */
 function edgeInsertWork(prepared: EdgeCreatePrepared): EdgeInsertWork {
   const claims = edgeCardinalityClaims(
-    prepared.declarations,
+    edgeCardinalityAxisReferences(prepared.declarations),
     prepared.insertParams,
   );
   return {
@@ -466,7 +467,7 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
     await checkEdgeCardinalityConstraints(
       constraintContext,
       kind,
-      declarations,
+      edgeCardinalityAxisReferences(declarations),
       { fromKind, fromId: input.fromId, toKind, toId: input.toId },
       validTo,
     );
@@ -1463,7 +1464,9 @@ async function assertAtomicEdgeBatchCardinality<G extends GraphDef>(
           await checkEdgeCardinalityConstraints(
             constraintContext,
             input.kind,
-            edgeCardinalityDeclarations(ctx, input.kind),
+            edgeCardinalityAxisReferences(
+              edgeCardinalityDeclarations(ctx, input.kind),
+            ),
             {
               fromKind: input.fromKind,
               fromId: input.fromId,
@@ -1963,6 +1966,24 @@ async function performEdgeUpdate<G extends GraphDef>(
     effectiveValidTo === undefined &&
     (existing.deleted_at !== undefined || existing.valid_to !== undefined);
   if (reentersLivePopulation || reentersActivePopulation) {
+    // A resurrection (`reentersLivePopulation`) vacated EVERY declared axis —
+    // `deleted_at` excludes this row from every counted population, active-only
+    // or not — so it re-probes and re-claims the full declaration, same as a
+    // create. A pure window reopen with no delete transition
+    // (`reentersActivePopulation` alone) is narrower: a non-active-only axis
+    // (`one`/`unique`, `holderLiveness: "live"`) never released its claim while
+    // this row stayed live and undeleted, so it must be EXCLUDED here, not
+    // re-probed — the probe below has no edge id to exclude the proposed
+    // holder by (unlike the SQL takeover statement's
+    // `competingLiveEdgePredicate`, which excludes it), so probing an axis
+    // this row already holds would count the row against itself and refuse a
+    // reopen nothing else contends for.
+    const reentryAxisReferences: readonly EdgeCardinalityAxisRef[] =
+      reentersLivePopulation ?
+        edgeCardinalityAxisReferences(declarations)
+      : edgeCardinalityAxisReferences(declarations).filter(
+          (ref) => !edgeCardinalitySpec(ref).claimsWhenBornEnded,
+        );
     await checkEdgeCardinalityConstraints(
       {
         graphId: ctx.graphId,
@@ -1970,7 +1991,7 @@ async function performEdgeUpdate<G extends GraphDef>(
         backend: target,
       },
       input.identity.kind,
-      declarations,
+      reentryAxisReferences,
       {
         fromKind: existing.from_kind,
         fromId: existing.from_id,
@@ -1979,19 +2000,16 @@ async function performEdgeUpdate<G extends GraphDef>(
       },
       effectiveValidTo,
     );
-    // Re-entry re-admits this edge to every population its declaration
-    // constrains, so it claims every applicable axis exactly as a create
-    // does — BEFORE the update that re-admits it, because the probe above
-    // read a population no key fences. Both legs claim: a resurrect
+    // Re-entry re-admits this edge to every population {@link
+    // reentryAxisReferences} above decided it left, so it claims exactly
+    // those axes — BEFORE the update that re-admits it, because the probe
+    // above read a population no key fences. Both legs claim: a resurrect
     // (`clearDeleted`) and a reopened `oneActive`-shaped window (#469) put
     // the same row back into the same counted population, and a fence that
     // covered only the first would leave the second unfenced. Decided here,
     // ISSUED by the step that owns the row write, so the pair cannot be
-    // separated. Reclaiming an axis this edge already legitimately holds
-    // (e.g. a `one`-shaped axis untouched by a mere window reopen) is a
-    // harmless self-reclaim: the takeover statement excludes the proposed
-    // holder's own id from the competing-incumbent predicate.
-    reentryClaims = edgeCardinalityClaims(declarations, {
+    // separated.
+    reentryClaims = edgeCardinalityClaims(reentryAxisReferences, {
       graphId: ctx.graphId,
       id,
       kind: input.identity.kind,

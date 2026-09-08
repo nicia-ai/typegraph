@@ -105,6 +105,7 @@ import {
 import { type IdentityTarget } from "../identity/sql-target";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
+  edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
   type EdgeCardinalityDeclarations,
 } from "../store/claims/edge-claims";
@@ -2982,7 +2983,7 @@ async function processEdgeSlice(
       checkEdgeCardinalityConstraints(
         { graphId, registry, backend: cardinalityValidationBackend },
         edge.kind,
-        declarations,
+        edgeCardinalityAxisReferences(declarations),
         {
           fromKind: edge.from.kind,
           fromId: edge.from.id,
@@ -3325,7 +3326,7 @@ async function processEdge(
     checkEdgeCardinalityConstraints(
       { graphId, registry, backend: frame.target },
       edge.kind,
-      declarations,
+      edgeCardinalityAxisReferences(declarations),
       {
         fromKind: edge.from.kind,
         fromId: edge.from.id,
@@ -3363,7 +3364,13 @@ function importEdgeInsertWork(
   params: InsertEdgeParams,
   declarations: EdgeCardinalityDeclarations,
 ): EdgeInsertWork {
-  return { params, claims: edgeCardinalityClaims(declarations, params) };
+  return {
+    params,
+    claims: edgeCardinalityClaims(
+      edgeCardinalityAxisReferences(declarations),
+      params,
+    ),
+  };
 }
 
 // ============================================================

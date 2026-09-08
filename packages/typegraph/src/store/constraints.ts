@@ -41,6 +41,7 @@ import { type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
 import { type ConstraintFenceReason } from "./claims/backing";
 import {
+  type EdgeCardinalityAxisRef,
   edgeCardinalityAxisReferences,
   type EdgeCardinalityDeclarations,
   edgeCardinalitySpec,
@@ -218,9 +219,16 @@ export type EdgeEndpointTuple = Readonly<{
  * Checks every cardinality axis an edge's declaration constrains, source and
  * target alike.
  *
- * Folds over {@link edgeCardinalityAxisReferences} rather than testing `cardinality
- * !== "many"` directly, so a target-only declaration is probed exactly like a
- * source-only one. Per axis, reads {@link edgeCardinalitySpec} rather than
+ * Takes the AXIS LIST rather than the raw {@link EdgeCardinalityDeclarations},
+ * so the caller decides which axes this write actually owes a probe for.
+ * Every ordinary write (create, or an update re-entering the FULL live
+ * population on a resurrection) owes the complete
+ * {@link edgeCardinalityAxisReferences} fold, and every such caller passes
+ * exactly that. The one caller that does not is a window reopen with no
+ * delete transition: this row held its non-active-only axes continuously
+ * (see {@link file://./operations/edge-operations.ts}'s reentry branch for
+ * why probing them here would count the row against itself), so it passes a
+ * narrower list. Per axis, reads {@link edgeCardinalitySpec} rather than
  * re-spelling each cardinality's rules: which endpoint the axis covers
  * (`keyShape`), whether an edge born already ended joins the population at
  * all (`claimsWhenBornEnded`) and whether the population is the live one or
@@ -238,11 +246,11 @@ export type EdgeEndpointTuple = Readonly<{
 export async function checkEdgeCardinalityConstraints(
   ctx: ConstraintContext,
   edgeKind: string,
-  declarations: EdgeCardinalityDeclarations,
+  axisReferences: readonly EdgeCardinalityAxisRef[],
   endpoints: EdgeEndpointTuple,
   validTo: string | undefined,
 ): Promise<void> {
-  for (const ref of edgeCardinalityAxisReferences(declarations)) {
+  for (const ref of axisReferences) {
     const spec = edgeCardinalitySpec(ref);
 
     // An edge born ended never joins an active-only population, so it has

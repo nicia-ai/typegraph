@@ -17,7 +17,10 @@ import { tables } from "../src/backend/drizzle/schema/postgres";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { defineEdge, defineGraph, defineNode } from "../src/core";
 import { createStoreWithSchema } from "../src/store";
-import { edgeCardinalityClaims } from "../src/store/claims/edge-claims";
+import {
+  edgeCardinalityAxisReferences,
+  edgeCardinalityClaims,
+} from "../src/store/claims/edge-claims";
 import { requireDefined } from "../src/utils/presence";
 
 const Person = defineNode("Person", {
@@ -79,7 +82,10 @@ describe("schema-fenced edge batches on a real PostgreSQL engine", () => {
           props: { role: id },
         } as const;
         const claim = requireDefined(
-          edgeCardinalityClaims({ cardinality: "one" }, params)[0],
+          edgeCardinalityClaims(
+            edgeCardinalityAxisReferences({ cardinality: "one" }),
+            params,
+          )[0],
         );
         const statements = [
           buildDeleteStaleAtomicEdgeClaims(
