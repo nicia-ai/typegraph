@@ -76,11 +76,14 @@ import type {
   GraphBackend,
   GraphDef,
   IdentityTransferAssertion,
+  LineageDelta,
   Store,
   TransactionBackend,
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import {
+  readRevisionOrigin,
+  recordedRelationsLineage,
   resolveLineage,
   storeBackend,
   storeRuntime,
@@ -488,4 +491,68 @@ export function schemaActiveVersionOf(
   if (tagIndex === -1) return undefined;
   const parsed = Number(component.slice(tagIndex + SCHEMA_VERSION_TAG.length));
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * What changed on `baseStore` after `base` was minted — the BASE-side half of
+ * the pruned diff's safety argument (see `state-diff.ts`'s `diffAgainstBase`
+ * and `staging.ts`'s `stageBranches`): a key absent from EITHER side's delta
+ * is guaranteed identical to what the fork cloned from it, so restricting
+ * enumeration to the union of both deltas is lossless. `undefined` means this
+ * anchor form has no lineage `baseStore` can consult for it right now, and
+ * the caller must fall back to the full diff for this side.
+ *
+ * Mirrors `merge.ts`'s `assertTargetUnchanged`, NOT `resolveLineage`: a
+ * TypeGraph revision anchor is answered directly through the recorded
+ * relations, the same way `assertTargetUnchanged` re-reads the clock
+ * directly rather than going through `resolveLineage` — that selection is
+ * for a store with NO TypeGraph revision anchor at all, which a
+ * revision-anchored `base` can never be (see the module doc's precedence).
+ * An engine anchor is answered through `resolveLineage(baseStore)`, exactly
+ * as `assertTargetUnchanged`'s own engine branch does.
+ *
+ * The revision-anchor branch re-checks `assertTargetUnchanged`'s FIRST guard
+ * before trusting the numeric revision at all: `revisionOriginOf(base)`
+ * against `baseStore`'s LIVE origin row. A recorded-relations `changesSince`
+ * compares its `sinceRevision` argument as a bare number against the
+ * `recorded_from`/`recorded_to` columns (see `recordedRelationsLineage`'s own
+ * module doc, "Token identity is scoped to one store, not one `graphId`") —
+ * it has no way to tell a genuine anchor from a numerically coincidental one
+ * minted by a DIFFERENT revision-tracked store sharing this `graphId` (a
+ * clone, or a store whose origin row was reset). An origin mismatch answers
+ * `undefined` here, the same fallback-to-full-diff outcome as any other
+ * unanswerable case, rather than feeding `changesSince` a comparison it
+ * cannot make meaningful.
+ *
+ * A revision-anchored `base` minted before `baseStore` ever advanced its
+ * clock parses to `revisionAnchorOf(base) === undefined` (the "initial"
+ * sentinel) even though {@link hasRevisionAnchor} is true for it; this
+ * function returns `undefined` for that case too (falls back to the full
+ * diff) rather than resolving a genesis token, which costs nothing in
+ * practice — a store forked before its first tracked write has no rows to
+ * enumerate on the base side either.
+ */
+export async function lineageDeltaSinceAnchor<G extends GraphDef>(
+  baseStore: Store<G>,
+  base: BaseVersion,
+): Promise<LineageDelta | undefined> {
+  const revisionAnchor = revisionAnchorOf(base);
+  if (revisionAnchor !== undefined) {
+    if (!baseStore.historyEnabled) return undefined;
+    const liveOrigin = await readRevisionOrigin(
+      storeBackend(baseStore),
+      baseStore.revisionSchema,
+      baseStore.graphId,
+    );
+    if (liveOrigin !== revisionOriginOf(base)) return undefined;
+    return recordedRelationsLineage(baseStore).changesSince(
+      revisionAnchor as EngineRevision,
+      baseStore.graphId,
+    );
+  }
+  const engineAnchor = engineAnchorOf(base);
+  if (engineAnchor === undefined) return undefined;
+  const lineage = resolveLineage(baseStore);
+  if (lineage === undefined) return undefined;
+  return lineage.changesSince(engineAnchor, baseStore.graphId);
 }

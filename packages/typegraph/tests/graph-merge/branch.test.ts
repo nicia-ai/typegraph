@@ -8,7 +8,13 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { rowPropsToObject } from "../../src/backend/types";
+import { deriveBackend } from "../../src/backend/derive-backend";
+import {
+  type EngineRevision,
+  type LineageDelta,
+  type LineageMembers,
+  rowPropsToObject,
+} from "../../src/backend/types";
 import { branch } from "../../src/graph-merge/branch";
 import {
   applyMergePlan,
@@ -26,6 +32,7 @@ import { cloneWorkingCopyStrategy } from "../../src/graph-merge/working-copy";
 import { exportGraph, importGraph } from "../../src/interchange";
 import {
   backendMatrix,
+  createSqliteMergeBackend,
   getBackendProperty,
   getStoreBackend,
 } from "./test-utils";
@@ -601,5 +608,66 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(copiedRelationship?.fromId).toBe(sourceWork.id);
     expect(copiedRelationship?.toId).toBe(dependency.id);
     expect(copiedRelationship?.reason).toBe("waiting on import");
+  });
+});
+
+/** A `lineage` that always answers the same fixed revision. */
+function fixedRevisionLineage(revision: EngineRevision): LineageMembers {
+  const delta: LineageDelta = { kind: "keys", nodes: [], edges: [] };
+  return {
+    revision: () => Promise.resolve(revision),
+    changesSince: () => Promise.resolve(delta),
+  };
+}
+
+describe("branch(): forkRevision capture", () => {
+  let cleanups: (() => Promise<void>)[];
+
+  beforeEach(() => {
+    cleanups = [];
+  });
+
+  afterEach(async () => {
+    for (const cleanup of cleanups) {
+      await cleanup();
+    }
+  });
+
+  it("captures the working copy's own lineage revision right after the clone, before any write", async () => {
+    const { backend: baseBackend, cleanup: baseCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(baseCleanup);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+    await baseStore.nodes.Person.create({ name: "Alice" }, { id: "alice" });
+
+    const forkRevision = "engine-r7" as EngineRevision;
+    const result = await branch<G>(baseStore, () => {
+      const { backend, cleanup } = createSqliteMergeBackend();
+      cleanups.push(cleanup);
+      return Promise.resolve(
+        deriveBackend(backend, {
+          lineage: fixedRevisionLineage(forkRevision),
+        }),
+      );
+    });
+
+    const forked = unwrap(result);
+    expect(forked.forkRevision).toBe(forkRevision);
+  });
+
+  it("leaves forkRevision absent when the working copy resolves no lineage", async () => {
+    const { backend: baseBackend, cleanup: baseCleanup } =
+      createSqliteMergeBackend();
+    cleanups.push(baseCleanup);
+    const [baseStore] = await createStoreWithSchema(graph, baseBackend);
+
+    const result = await branch<G>(baseStore, () => {
+      const { backend, cleanup } = createSqliteMergeBackend();
+      cleanups.push(cleanup);
+      return Promise.resolve(backend);
+    });
+
+    const forked = unwrap(result);
+    expect(forked.forkRevision).toBeUndefined();
   });
 });
