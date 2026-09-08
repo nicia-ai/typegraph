@@ -76,6 +76,7 @@ export {
   serializeSchema,
 } from "../schema/serializer";
 export { type UniqueIntrospection } from "../store/introspect";
+export { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
@@ -93,6 +94,8 @@ export {
   storeQueryBackend,
   storeRuntime,
   transactionBackend,
+  type TransactionDeleteNodeWithPolicy,
+  transactionDeleteNodeWithPolicy,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";
 export { createStore, createStoreWithSchema } from "../store/store";
