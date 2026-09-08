@@ -765,7 +765,7 @@ describe("single-statement autocommit eligibility", () => {
       revisionTrackingEnabled: false,
       kindRegistered: true,
       convergesDynamically: false,
-      cardinality: "many" as const,
+      constrained: false,
     };
     const eligible = (
       overrides: Partial<
@@ -785,7 +785,7 @@ describe("single-statement autocommit eligibility", () => {
       expect(eligible({ revisionTrackingEnabled: true })).toBe(false);
       expect(eligible({ kindRegistered: false })).toBe(false);
       expect(eligible({ convergesDynamically: true })).toBe(false);
-      expect(eligible({ cardinality: "one" })).toBe(false);
+      expect(eligible({ constrained: true })).toBe(false);
       expect(eligible({ backend: deriveBackend(backend, {}) })).toBe(false);
     } finally {
       await backend.close();
@@ -823,7 +823,7 @@ describe("single-statement autocommit eligibility", () => {
       revisionTrackingEnabled: false,
       kindRegistered: true,
       convergesDynamically: false,
-      cardinality: "many",
+      constrained: false,
     };
 
     try {
@@ -882,7 +882,7 @@ describe("single-statement autocommit eligibility", () => {
       expect(
         canFuseSchemaFenceInFirstWrite({
           kind: "edge",
-          candidate: { ...edgeCandidate, cardinality: "one" },
+          candidate: { ...edgeCandidate, constrained: true },
         }),
       ).toBe(false);
     } finally {

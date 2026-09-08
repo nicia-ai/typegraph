@@ -177,13 +177,13 @@ function backendWithoutDisjointnessProbe(
 }
 
 /**
- * The same backend with the CARDINALITY probe blinded: `countEdgesFrom`
+ * The same backend with the CARDINALITY probe blinded: `countEdgesAtEndpoint`
  * reports zero regardless of what already exists, so the create reaches its
- * claim and the claim is what refuses. Only `countEdgesFrom` is hidden — the
+ * claim and the claim is what refuses. Only `countEdgesAtEndpoint` is hidden — the
  * `unique` cardinality's probe (`edgeExistsBetween`) is untouched, so this
  * fixture's `one` edge kind is the only one this blinds anything for.
  */
-const countEdgesFromZero: GraphBackend["countEdgesFrom"] = () =>
+const countEdgesAtEndpointZero: GraphBackend["countEdgesAtEndpoint"] = () =>
   Promise.resolve(0);
 
 function backendWithoutCardinalityProbe(backend: GraphBackend): GraphBackend {
@@ -191,13 +191,13 @@ function backendWithoutCardinalityProbe(backend: GraphBackend): GraphBackend {
   // frozen, and a decoration Proxy cannot shadow a non-configurable member.
   // `projectGraphBackend` is the audited way to get an unfrozen copy.
   return deriveBackend(projectGraphBackend(backend), {
-    countEdgesFrom: countEdgesFromZero,
+    countEdgesAtEndpoint: countEdgesAtEndpointZero,
     transaction: (run, options) =>
       backend.transaction(
         (target) =>
           run(
             deriveBackend(target, {
-              countEdgesFrom: countEdgesFromZero,
+              countEdgesAtEndpoint: countEdgesAtEndpointZero,
             }),
           ),
         options,

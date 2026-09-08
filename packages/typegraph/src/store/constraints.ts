@@ -35,16 +35,17 @@
  * one of these probes is in play, and only then.
  */
 import { type GraphEntityReadBackend, isLiveNodeRow } from "../backend/types";
-import {
-  checkCardinality,
-  checkDisjointness,
-  checkUniqueEdge,
-} from "../constraints";
+import { checkDisjointness } from "../constraints";
 import { type GraphDef } from "../core/define-graph";
-import { type Cardinality, type UniqueConstraint } from "../core/types";
+import { type UniqueConstraint } from "../core/types";
 import { type KindRegistry } from "../registry/kind-registry";
 import { type ConstraintFenceReason } from "./claims/backing";
-import { EDGE_CARDINALITY_SPECS } from "./claims/edge-claims";
+import {
+  edgeCardinalityAxisReferences,
+  type EdgeCardinalityDeclarations,
+  edgeCardinalitySpec,
+  edgeCardinalityViolation,
+} from "./claims/edge-claims";
 import { nodeClaimSites } from "./claims/sites";
 
 export { type ConstraintFenceReason } from "./claims/backing";
@@ -65,22 +66,26 @@ export type ConstraintContext = Readonly<{
 }>;
 
 /**
- * The constraint that makes an edge write of this cardinality constrained, or
+ * The constraint that makes an edge write of this declaration constrained, or
  * `undefined` when it is not.
  *
- * `many` declares no constraint, so its create runs no cardinality probe and
- * must NOT pay for the lock — the fence is for writes that check something, not
- * for writes in general. Every other cardinality counts or existence-tests
- * sibling edges before inserting, and nothing in the schema repeats that test.
+ * A declaration with no constrained axis (both options `many`, or absent)
+ * runs no cardinality probe and must NOT pay for the lock — the fence is for
+ * writes that check something, not for writes in general. Every constrained
+ * axis counts or existence-tests sibling edges before inserting, and nothing
+ * in the schema repeats that test.
  *
- * The one owner of this classification: `checkCardinalityConstraint`'s `many`
- * arm and this predicate are the same decision seen from two sides, and a
- * second inline `!== "many"` at a write path would be the copy that drifts.
+ * The one owner of this classification: it folds through
+ * {@link edgeCardinalityAxisReferences}, the same fold `checkEdgeCardinalityConstraints`
+ * iterates, so a second inline `!== "many"` at a write path — blind to a
+ * target-only declaration — can never drift from it.
  */
 export function edgeWriteNeedsConstraintFence(
-  cardinality: Cardinality,
+  declarations: EdgeCardinalityDeclarations,
 ): ConstraintFenceReason | undefined {
-  return cardinality === "many" ? undefined : "edgeCardinality";
+  return edgeCardinalityAxisReferences(declarations).length === 0 ?
+      undefined
+    : "edgeCardinality";
 }
 
 /**
@@ -170,9 +175,7 @@ export function graphOwesClaims(
     }
   }
   for (const registration of Object.values(graph.edges)) {
-    const reason = edgeWriteNeedsConstraintFence(
-      registration.cardinality ?? "many",
-    );
+    const reason = edgeWriteNeedsConstraintFence(registration);
     if (reason !== undefined) return reason;
   }
   return undefined;
@@ -203,71 +206,85 @@ export async function checkDisjointnessConstraint(
   }
 }
 
+/** The endpoint identity a cardinality probe reads and refuses against. */
+export type EdgeEndpointTuple = Readonly<{
+  fromKind: string;
+  fromId: string;
+  toKind: string;
+  toId: string;
+}>;
+
 /**
- * Checks cardinality constraints for an edge.
+ * Checks every cardinality axis an edge's declaration constrains, source and
+ * target alike.
  *
- * Reads {@link EDGE_CARDINALITY_SPECS} rather than re-spelling each
- * cardinality's rules: which endpoints the axis covers (`keyShape`), whether an
- * edge born already ended joins the population at all (`claimsWhenBornEnded`)
- * and whether the population is the live one or the active one
- * (`holderLiveness`) are the same three facts the claim's SQL reads. A probe
- * that spelled its own copy would be the drift that accepts a write the fence
- * then refuses (or the reverse).
+ * Folds over {@link edgeCardinalityAxisReferences} rather than testing `cardinality
+ * !== "many"` directly, so a target-only declaration is probed exactly like a
+ * source-only one. Per axis, reads {@link edgeCardinalitySpec} rather than
+ * re-spelling each cardinality's rules: which endpoint the axis covers
+ * (`keyShape`), whether an edge born already ended joins the population at
+ * all (`claimsWhenBornEnded`) and whether the population is the live one or
+ * the active one (`holderLiveness`) are the same three facts the claim's SQL
+ * reads. A probe that spelled its own copy would be the drift that accepts a
+ * write the fence then refuses (or the reverse).
  *
- * @throws CardinalityError if cardinality constraint is violated
+ * **These are limits on edge count, not on distinct neighbours**: nothing in
+ * the count mentions the opposite endpoint on a `from`/`to` axis, so a second
+ * distinct edge from the same source to a target-`one` target is refused
+ * exactly as a second edge from a different source would be.
+ *
+ * @throws CardinalityError if any constrained axis is violated
  */
-export async function checkCardinalityConstraint(
+export async function checkEdgeCardinalityConstraints(
   ctx: ConstraintContext,
   edgeKind: string,
-  cardinality: Cardinality,
-  fromKind: string,
-  fromId: string,
-  toKind: string,
-  toId: string,
+  declarations: EdgeCardinalityDeclarations,
+  endpoints: EdgeEndpointTuple,
   validTo: string | undefined,
 ): Promise<void> {
-  if (cardinality === "many") return;
-  const spec = EDGE_CARDINALITY_SPECS[cardinality];
+  for (const ref of edgeCardinalityAxisReferences(declarations)) {
+    const spec = edgeCardinalitySpec(ref);
 
-  // An edge born ended never joins an active-only population, so it has
-  // nothing to check and nothing to claim.
-  if (!spec.claimsWhenBornEnded && validTo !== undefined) return;
+    // An edge born ended never joins an active-only population, so it has
+    // nothing to check and nothing to claim.
+    if (!spec.claimsWhenBornEnded && validTo !== undefined) continue;
 
-  if (spec.keyShape === "fromAndTo") {
-    const exists = await ctx.backend.edgeExistsBetween({
+    if (spec.keyShape === "fromAndTo") {
+      const exists = await ctx.backend.edgeExistsBetween({
+        graphId: ctx.graphId,
+        edgeKind,
+        fromKind: endpoints.fromKind,
+        fromId: endpoints.fromId,
+        toKind: endpoints.toKind,
+        toId: endpoints.toId,
+      });
+      const error = edgeCardinalityViolation(
+        ref,
+        { edgeKind, ...endpoints },
+        exists ? 1 : 0,
+      );
+      if (error) throw error;
+      continue;
+    }
+
+    const endpoint = spec.keyShape;
+    const { endpointKind, endpointId } =
+      endpoint === "from" ?
+        { endpointKind: endpoints.fromKind, endpointId: endpoints.fromId }
+      : { endpointKind: endpoints.toKind, endpointId: endpoints.toId };
+    const count = await ctx.backend.countEdgesAtEndpoint({
       graphId: ctx.graphId,
       edgeKind,
-      fromKind,
-      fromId,
-      toKind,
-      toId,
+      endpoint,
+      endpointKind,
+      endpointId,
+      activeOnly: spec.holderLiveness === "liveAndActive",
     });
-    const error = checkUniqueEdge(
-      edgeKind,
-      fromKind,
-      fromId,
-      toKind,
-      toId,
-      exists ? 1 : 0,
+    const error = edgeCardinalityViolation(
+      ref,
+      { edgeKind, ...endpoints },
+      count,
     );
     if (error) throw error;
-    return;
   }
-
-  const count = await ctx.backend.countEdgesFrom({
-    graphId: ctx.graphId,
-    edgeKind,
-    fromKind,
-    fromId,
-    activeOnly: spec.holderLiveness === "liveAndActive",
-  });
-  const error = checkCardinality(
-    edgeKind,
-    fromKind,
-    fromId,
-    cardinality,
-    count,
-    count > 0,
-  );
-  if (error) throw error;
 }

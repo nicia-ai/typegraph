@@ -40,6 +40,7 @@ function edgeClaim(
 ): ClaimEdgeCardinalityParams {
   return {
     graphId: params.graphId,
+    direction: "source",
     cardinality,
     edgeKind: params.kind,
     edgeId: params.id,

@@ -48,7 +48,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "hardDeleteEdgesBatch",
   "getEdge",
   "getEdges",
-  "countEdgesFrom",
+  "countEdgesAtEndpoint",
   "edgeExistsBetween",
   "findEdgesConnectedTo",
   "findNodesByKind",

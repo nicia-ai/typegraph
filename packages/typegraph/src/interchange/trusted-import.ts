@@ -11,6 +11,7 @@ import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
 import type { EdgeRegistration } from "../core/types";
 import { TrustedImportError } from "../errors";
+import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
@@ -39,6 +40,29 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
       registration.matchIdentity,
       backend.capabilities,
       kind,
+    );
+  }
+
+  // Trusted import maintains no edge claim: `trustedImportGraphStream` writes
+  // through `session.insertEdges` beneath the claim path entirely, so a
+  // declared axis — source OR target — would be accepted here and written
+  // unfenced. One reason for both directions: the restriction is "this path
+  // maintains no claims", which is direction-blind.
+  const constrainedEdgeKinds = Object.entries(store.graph.edges)
+    .filter(
+      ([, registration]) =>
+        edgeCardinalityAxisReferences(registration).length > 0,
+    )
+    .map(([kind]) => kind);
+  if (constrainedEdgeKinds.length > 0) {
+    throw new TrustedImportError(
+      "Trusted import does not maintain edge cardinality claims.",
+      "cardinality_unsupported",
+      { graphId: store.graphId, edgeKinds: constrainedEdgeKinds },
+      {
+        suggestion:
+          'Use importGraph(), or declare the edge kind(s) unconstrained ("many" on both axes) and enforce the limit in application code.',
+      },
     );
   }
   if (store.historyEnabled) {

@@ -56,13 +56,13 @@ import {
   matchIdentitiesEqual,
   type SchemaDiff,
 } from "./migration";
-import { prepareOntologyTighteningPreflight } from "./ontology-tightening-preflight";
 import {
   computeSchemaHash,
   getSchemaHash,
   serializeSchema,
   serializeSchemaPreservingUnknownFields,
 } from "./serializer";
+import { prepareSchemaTighteningPreflight } from "./tightening-preflight";
 import { type SerializedSchema, serializedSchemaZod } from "./types";
 
 /**
@@ -470,10 +470,10 @@ export async function ensureSchema<G extends GraphDef>(
               {}
             : { schema: options.schema }),
           });
-      // Same reasoning, for the ontology tightening probe: derived here from
-      // the actual before/after documents this commit is about to publish,
-      // never accepted from the caller.
-      const ontologyPreflight = prepareOntologyTighteningPreflight({
+      // Same reasoning, for the schema tightening probe (ontology and edge
+      // cardinality): derived here from the actual before/after documents
+      // this commit is about to publish, never accepted from the caller.
+      const schemaTighteningPreflight = prepareSchemaTighteningPreflight({
         graphId: graph.id,
         fromVersion: activeSchema.version,
         toVersion: activeSchema.version + 1,
@@ -483,7 +483,7 @@ export async function ensureSchema<G extends GraphDef>(
         changes: diff.ontology,
       });
       const preflight = composeSchemaCommitPreflight([
-        ontologyPreflight,
+        schemaTighteningPreflight,
         identityPreflight,
       ]);
       const committedRow =
@@ -1193,9 +1193,9 @@ export async function migrateSchema<G extends GraphDef>(
 
   // No BEFORE document, no ontology to tighten against: a v1 initial commit
   // has nothing preceding it (mirrors `initializeSchema`'s exclusion).
-  const ontologyPreflight =
+  const schemaTighteningPreflight =
     storedSchema === undefined ? undefined : (
-      prepareOntologyTighteningPreflight({
+      prepareSchemaTighteningPreflight({
         graphId: target.id,
         fromVersion: currentVersion,
         toVersion: currentVersion + 1,
@@ -1212,7 +1212,7 @@ export async function migrateSchema<G extends GraphDef>(
     (
       identityPreflight === undefined &&
       edgeMatchIdentityPreflight === undefined &&
-      ontologyPreflight === undefined
+      schemaTighteningPreflight === undefined
     ) ?
       guardedDrops.length > 0 ?
         await commitDroppedKindsOnlyWhenEmpty(
@@ -1247,11 +1247,14 @@ export async function migrateSchema<G extends GraphDef>(
               guardedDrops,
             ),
           edgeMatchIdentityPreflight,
-          ontologyPreflight,
+          schemaTighteningPreflight,
           identityPreflight,
         ]),
         storedSchema,
-        identityPreflight === undefined && ontologyPreflight !== undefined ?
+        (
+          identityPreflight === undefined &&
+            schemaTighteningPreflight !== undefined
+        ) ?
           ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
         : undefined,
       );

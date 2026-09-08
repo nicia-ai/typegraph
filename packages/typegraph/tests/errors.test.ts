@@ -676,6 +676,9 @@ describe("CardinalityError", () => {
       edgeKind: "HasProfile",
       fromKind: "User",
       fromId: "user-1",
+      direction: "source",
+      toKind: "HasProfileTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 1,
     });
@@ -687,10 +690,13 @@ describe("CardinalityError", () => {
   });
 
   it("stores cardinality context", () => {
-    const details = {
+    const details: CardinalityErrorDetails = {
       edgeKind: "BelongsTo",
       fromKind: "Post",
       fromId: "post-1",
+      direction: "source",
+      toKind: "BelongsToTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 2,
     };
@@ -703,6 +709,9 @@ describe("CardinalityError", () => {
       edgeKind: "BelongsTo",
       fromKind: "Post",
       fromId: "post-1",
+      direction: "source",
+      toKind: "BelongsToTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 2,
     });
@@ -1118,6 +1127,9 @@ describe("error inheritance chain", () => {
         edgeKind: "E",
         fromKind: "K",
         fromId: "id",
+        direction: "source",
+        toKind: "ETarget",
+        toId: "target-1",
         cardinality: "one",
         existingCount: 1,
       }),

@@ -4,7 +4,7 @@
  * A batch decides every row before it writes any of them, so a probe that read
  * only the database would let two rows of one batch each see "no conflict" and
  * both land — the in-batch collision. This wrapper is the state that closes
- * that: it overlays the reads a cardinality probe makes (`countEdgesFrom`,
+ * that: it overlays the reads a cardinality probe makes (`countEdgesAtEndpoint`,
  * `edgeExistsBetween`) with the rows the batch has already accepted, so row
  * k+1's probe sees rows 1..k and refuses per ROW rather than at the flush.
  *
@@ -19,11 +19,29 @@
  * per batch, by the caller — a claim against this wrapper would still reach the
  * real target (`deriveBackend` forwards every non-overlaid member) but
  * would be a second, unsorted, per-row claim in addition to the batch's.
+ *
+ * The pending counters fold over {@link edgeCardinalityAxisReferences} — the same
+ * fold the write-time probe and the real claim use — rather than re-spelling
+ * each cardinality's rules inline, so a target-only declaration accumulates
+ * in-batch pending state exactly as a source-only one always has. Both the
+ * write side (`registerPendingEdgeForCardinality`) and the read side
+ * (`countEdgesAtEndpointCached`) key a `from`/`to`-shaped axis by the exact
+ * tuple `countEdgesAtEndpoint` itself reads — `(graphId, edgeKind, endpoint,
+ * endpointKind, endpointId, activeOnly)` — so the two sides cannot drift
+ * without one comparison in one function catching it.
  */
 import { deriveBackend } from "../../backend/derive-backend";
-import { type GraphBackend, type InsertEdgeParams } from "../../backend/types";
-import { type Cardinality } from "../../core/types";
+import {
+  type CountEdgesAtEndpointParams,
+  type GraphBackend,
+  type InsertEdgeParams,
+} from "../../backend/types";
 import { encodeTupleKey } from "../../utils/tuple-key";
+import {
+  edgeCardinalityAxisReferences,
+  type EdgeCardinalityDeclarations,
+  edgeCardinalitySpec,
+} from "../claims/edge-claims";
 import { type WriteTarget } from "./write-session";
 
 function buildEdgeEndpointCacheKey(
@@ -32,15 +50,6 @@ function buildEdgeEndpointCacheKey(
   id: string,
 ): string {
   return encodeTupleKey([graphId, kind, id]);
-}
-
-function buildEdgeFromCacheKey(
-  graphId: string,
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-): string {
-  return encodeTupleKey([graphId, edgeKind, fromKind, fromId]);
 }
 
 function buildEdgeBetweenCacheKey(
@@ -54,15 +63,16 @@ function buildEdgeBetweenCacheKey(
   return encodeTupleKey([graphId, edgeKind, fromKind, fromId, toKind, toId]);
 }
 
-function buildCountEdgesFromCacheKey(
-  params: Parameters<GraphBackend["countEdgesFrom"]>[0],
+function buildCountEdgesAtEndpointCacheKey(
+  params: CountEdgesAtEndpointParams,
 ): string {
   const activeOnly = params.activeOnly === true ? "1" : "0";
   return encodeTupleKey([
     params.graphId,
     params.edgeKind,
-    params.fromKind,
-    params.fromId,
+    params.endpoint,
+    params.endpointKind,
+    params.endpointId,
     activeOnly,
   ]);
 }
@@ -78,7 +88,7 @@ export function createEdgeBatchValidationBackend(
   backend: WriteTarget;
   registerPendingEdgeForCardinality: (
     insertParams: InsertEdgeParams,
-    cardinality: Cardinality,
+    declarations: EdgeCardinalityDeclarations,
   ) => void;
   seedEndpointRow: (
     graphId: string,
@@ -91,11 +101,10 @@ export function createEdgeBatchValidationBackend(
     string,
     Awaited<ReturnType<GraphBackend["getNode"]>>
   >();
-  const countEdgesFromCache = new Map<string, number>();
+  const countEdgesAtEndpointCache = new Map<string, number>();
   const edgeExistsCache = new Map<string, boolean>();
-  const pendingOneCounts = new Map<string, number>();
-  const pendingOneActiveCounts = new Map<string, number>();
-  const pendingUniquePairs = new Set<string>();
+  const pendingByTarget = new Map<string, number>();
+  const pendingUniqueTargets = new Set<string>();
 
   async function getNodeCached(
     graphId: string,
@@ -128,25 +137,16 @@ export function createEdgeBatchValidationBackend(
     endpointCache.set(cacheKey, row);
   }
 
-  async function countEdgesFromCached(
-    params: Parameters<GraphBackend["countEdgesFrom"]>[0],
+  async function countEdgesAtEndpointCached(
+    params: CountEdgesAtEndpointParams,
   ): Promise<number> {
-    const cacheKey = buildCountEdgesFromCacheKey(params);
-    let baseCount = countEdgesFromCache.get(cacheKey);
+    const cacheKey = buildCountEdgesAtEndpointCacheKey(params);
+    let baseCount = countEdgesAtEndpointCache.get(cacheKey);
     if (baseCount === undefined) {
-      baseCount = await backend.countEdgesFrom(params);
-      countEdgesFromCache.set(cacheKey, baseCount);
+      baseCount = await backend.countEdgesAtEndpoint(params);
+      countEdgesAtEndpointCache.set(cacheKey, baseCount);
     }
-    const pendingKey = buildEdgeFromCacheKey(
-      params.graphId,
-      params.edgeKind,
-      params.fromKind,
-      params.fromId,
-    );
-    const pendingCount =
-      params.activeOnly === true ?
-        (pendingOneActiveCounts.get(pendingKey) ?? 0)
-      : (pendingOneCounts.get(pendingKey) ?? 0);
+    const pendingCount = pendingByTarget.get(cacheKey) ?? 0;
     return baseCount + pendingCount;
   }
 
@@ -161,7 +161,7 @@ export function createEdgeBatchValidationBackend(
       params.toKind,
       params.toId,
     );
-    if (pendingUniquePairs.has(cacheKey)) {
+    if (pendingUniqueTargets.has(cacheKey)) {
       return true;
     }
     if (edgeExistsCache.has(cacheKey)) {
@@ -172,42 +172,61 @@ export function createEdgeBatchValidationBackend(
     return exists;
   }
 
+  /**
+   * Folds the row's declaration through {@link edgeCardinalityAxisReferences},
+   * exactly as the write-time probe and the real claim do, and records ONE
+   * pending entry per applicable axis — a `fromAndTo`-shaped axis (source
+   * `unique`) into `pendingUniqueTargets`, a `from`/`to`-shaped one into
+   * `pendingByTarget` under the same key `countEdgesAtEndpointCached` reads.
+   * An axis whose spec exempts a born-ended row (`claimsWhenBornEnded ===
+   * false`, and this row states a `validTo`) records nothing, matching the
+   * real claim it would never take.
+   */
   function registerPendingEdgeForCardinality(
     insertParams: InsertEdgeParams,
-    cardinality: Cardinality,
+    declarations: EdgeCardinalityDeclarations,
   ): void {
-    const fromCacheKey = buildEdgeFromCacheKey(
-      insertParams.graphId,
-      insertParams.kind,
-      insertParams.fromKind,
-      insertParams.fromId,
-    );
-    if (cardinality === "one") {
-      incrementPendingCount(pendingOneCounts, fromCacheKey);
-      return;
-    }
-    if (cardinality === "oneActive") {
-      if (insertParams.validTo === undefined) {
-        incrementPendingCount(pendingOneActiveCounts, fromCacheKey);
+    for (const ref of edgeCardinalityAxisReferences(declarations)) {
+      const spec = edgeCardinalitySpec(ref);
+      if (!spec.claimsWhenBornEnded && insertParams.validTo !== undefined) {
+        continue;
       }
-      return;
-    }
-    if (cardinality === "unique") {
-      const uniqueCacheKey = buildEdgeBetweenCacheKey(
-        insertParams.graphId,
-        insertParams.kind,
-        insertParams.fromKind,
-        insertParams.fromId,
-        insertParams.toKind,
-        insertParams.toId,
-      );
-      pendingUniquePairs.add(uniqueCacheKey);
+      if (spec.keyShape === "fromAndTo") {
+        pendingUniqueTargets.add(
+          buildEdgeBetweenCacheKey(
+            insertParams.graphId,
+            insertParams.kind,
+            insertParams.fromKind,
+            insertParams.fromId,
+            insertParams.toKind,
+            insertParams.toId,
+          ),
+        );
+        continue;
+      }
+      const endpoint = spec.keyShape;
+      const { endpointKind, endpointId } =
+        endpoint === "from" ?
+          {
+            endpointKind: insertParams.fromKind,
+            endpointId: insertParams.fromId,
+          }
+        : { endpointKind: insertParams.toKind, endpointId: insertParams.toId };
+      const key = buildCountEdgesAtEndpointCacheKey({
+        graphId: insertParams.graphId,
+        edgeKind: insertParams.kind,
+        endpoint,
+        endpointKind,
+        endpointId,
+        activeOnly: spec.holderLiveness === "liveAndActive",
+      });
+      incrementPendingCount(pendingByTarget, key);
     }
   }
 
   const validationBackend = deriveBackend(backend, {
     getNode: getNodeCached,
-    countEdgesFrom: countEdgesFromCached,
+    countEdgesAtEndpoint: countEdgesAtEndpointCached,
     edgeExistsBetween: edgeExistsBetweenCached,
   } satisfies Partial<WriteTarget>);
 

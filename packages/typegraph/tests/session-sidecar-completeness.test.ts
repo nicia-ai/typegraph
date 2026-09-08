@@ -77,7 +77,7 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledSelectSql } from "../src/query/sql-intent";
 import { buildKindRegistry } from "../src/registry";
-import { edgeCardinalityClaim } from "../src/store/claims/edge-claims";
+import { edgeCardinalityClaims } from "../src/store/claims/edge-claims";
 import { planNodeCreateClaims } from "../src/store/claims/node-claims";
 import {
   runWritePlan,
@@ -109,7 +109,7 @@ function createEdgeWithPlan(session: WriteSession): Promise<unknown> {
       toId: "fused-b",
       props: {},
     },
-    claim: undefined,
+    claims: [],
   };
   const command: EdgeCreateCommand = {
     kind: "edge.create",
@@ -338,7 +338,7 @@ function edgeInsertWork(
   // so a change to what a `unique` kind claims moves this fixture too.
   return {
     params,
-    claim: requireDefined(edgeCardinalityClaim("unique", params)),
+    claims: edgeCardinalityClaims({ cardinality: "unique" }, params),
   };
 }
 
@@ -733,7 +733,7 @@ const CASES: Record<keyof WriteSession, Case> = {
   reviseEdge: {
     run: async (raw) => {
       await seed(raw, "p");
-      const work = { id: "edge-p", props: {} };
+      const work = { id: "edge-p", props: {}, claims: [] };
       return (session) =>
         session.reviseEdge(work, {
           validityLowerBound: {},

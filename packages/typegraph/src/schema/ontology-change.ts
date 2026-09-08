@@ -611,7 +611,7 @@ function groupKey(group: UniquenessComponentProbeGroup): string {
  * unioned per kind and deduped, with a probe kind DROPPED when its
  * aggregated payload is empty — there is nothing for a commit preflight to
  * check, so there is nothing to run. This is what makes
- * `prepareOntologyTighteningPreflight` return `undefined` (no preflight
+ * `prepareSchemaTighteningPreflight` return `undefined` (no preflight
  * owed, no atomic-backend requirement) for a tightening that happens to
  * touch no live data, rather than for every `warning`-severity change
  * unconditionally.

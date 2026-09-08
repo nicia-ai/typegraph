@@ -22,9 +22,11 @@
  * ```
  */
 
+import type { EdgeCardinalityDeclaration } from "../backend/types";
 import type { KindEntity } from "../core/types";
 import type { OntologyChange } from "../schema/migration";
 import type { SchemaDiff } from "../schema/migration";
+import type { EdgeCardinalityDirection } from "../store/claims/edge-claims";
 import type { ConstraintFenceViolation } from "../store/claims/verify";
 // Type-only imports: `materialize-indexes.ts` and `claims/verify.ts`
 // value-import `ConfigurationError` / `MigrationError` from this file, but
@@ -722,8 +724,12 @@ export class EdgeMatchIdentityConflictError extends TypeGraphError {
  */
 export type CardinalityErrorDetails = Readonly<{
   edgeKind: string;
+  /** Which endpoint's population the write overran. */
+  direction: EdgeCardinalityDirection;
   fromKind: string;
   fromId: string;
+  toKind: string;
+  toId: string;
   cardinality: string;
   existingCount: number;
 }>;
@@ -736,7 +742,9 @@ export class CardinalityError extends TypeGraphError {
 
   constructor(details: CardinalityErrorDetails, options?: { cause?: unknown }) {
     super(
-      `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
+      details.direction === "target" ?
+        `Cardinality violation: "${details.edgeKind}" targeting ${details.toKind}/${details.toId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`
+      : `Cardinality violation: "${details.edgeKind}" from ${details.fromKind}/${details.fromId} allows "${details.cardinality}" but ${details.existingCount} edge(s) already exist`,
       "CARDINALITY_ERROR",
       {
         details,
@@ -1133,6 +1141,14 @@ export const MIGRATION_FAILURE_REASONS = [
    * the rows that must be resolved before retrying.
    */
   "ontology-tightening-violated",
+  /**
+   * An edge cardinality tightening (`cardinality` or `targetCardinality`
+   * newly constrained, or moved to a stricter constrained value) is false
+   * against existing rows. Inspect `details.violations` — in exactly the
+   * shape `store.verifyConstraintFences()` returns — for the rows that must
+   * be resolved before retrying.
+   */
+  "edge-cardinality-tightening-violated",
 ] as const;
 
 export type MigrationFailureReason = (typeof MIGRATION_FAILURE_REASONS)[number];
@@ -1205,6 +1221,21 @@ export type MigrationErrorDetails =
       changes: readonly OntologyChange[];
       /**
        * The rows that make the proposed ontology false, in exactly the
+       * shape `store.verifyConstraintFences()` returns — so the same rows
+       * that block the migration can be listed, resolved, and the
+       * migration retried.
+       */
+      violations: readonly ConstraintFenceViolation[];
+    }>
+  | Readonly<{
+      graphId: string;
+      fromVersion: number;
+      toVersion: number;
+      reason: "edge-cardinality-tightening-violated";
+      /** The axes this commit newly constrains — those that owed the data check. */
+      axes: readonly EdgeCardinalityDeclaration[];
+      /**
+       * The rows that make the proposed cardinality false, in exactly the
        * shape `store.verifyConstraintFences()` returns — so the same rows
        * that block the migration can be listed, resolved, and the
        * migration retried.
@@ -1724,6 +1755,7 @@ export class UnsupportedBackendCapabilityError extends TypeGraphError {
 /** Stable reasons an intentionally trusted initial import can be rejected. */
 export type TrustedImportErrorReason =
   | "backend_unsupported"
+  | "cardinality_unsupported"
   | "database_not_empty"
   | "fulltext_unsupported"
   | "history_unsupported"

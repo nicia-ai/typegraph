@@ -1,14 +1,20 @@
 /**
- * The data preflight an ontology tightening owes, run INSIDE the
- * schema-commit transaction.
+ * The data preflight a schema tightening owes, run INSIDE the schema-commit
+ * transaction.
  *
  * `classifyOntologyChanges` + `ontologyTighteningProbes` (`./ontology-change`)
- * decide WHAT to check; `auditConstraintFences`
- * (`src/store/claims/verify.ts`) is the ONE reader that actually checks it,
- * shared with `store.verifyConstraintFences()`. This module's only job is to
- * turn a proposed schema transition into the one `ConstraintFenceAuditPlan`
- * that reader needs, and to turn a non-empty violation report into the
- * `MigrationError` a caller refuses the commit with.
+ * decide WHAT the ontology half must check; `newlyConstrainedEdgeAxes` decides
+ * the same for the edge-cardinality half. `auditConstraintFences`
+ * (`src/store/claims/verify.ts`) is the ONE reader that actually checks
+ * either, shared with `store.verifyConstraintFences()`. This module's only
+ * job is to turn a proposed schema transition into the one
+ * `ConstraintFenceAuditPlan` that reader needs, and to turn a non-empty
+ * violation report into the `MigrationError` a caller refuses the commit
+ * with.
+ *
+ * Generalizes the ontology-only preflight rather than forking it:
+ * `OntologySnapshot` already carries `edges`, so no input change was needed
+ * to add the cardinality half.
  */
 import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
@@ -19,6 +25,10 @@ import {
 } from "../store/claims/verify";
 import { buildRegistryFromSerializedSchema } from "./deserializer";
 import {
+  type EdgeCardinalityDeclaration,
+  newlyConstrainedEdgeAxes,
+} from "./edge-cardinality-change";
+import {
   classifyOntologyChanges,
   type OntologyChange,
   type OntologyDataProbe,
@@ -26,7 +36,7 @@ import {
   ontologyTighteningProbes,
 } from "./ontology-change";
 
-export type OntologyTighteningPreflightParams = Readonly<{
+export type SchemaTighteningPreflightParams = Readonly<{
   graphId: string;
   fromVersion: number;
   toVersion: number;
@@ -84,7 +94,7 @@ function groupProbesByKind(
 }
 
 function buildOntologyTighteningViolatedError(
-  params: OntologyTighteningPreflightParams,
+  params: SchemaTighteningPreflightParams,
   changes: readonly OntologyChange[],
   violations: readonly ConstraintFenceViolation[],
 ): MigrationError {
@@ -114,32 +124,68 @@ function buildOntologyTighteningViolatedError(
   );
 }
 
+function buildEdgeCardinalityTighteningViolatedError(
+  params: SchemaTighteningPreflightParams,
+  axes: readonly EdgeCardinalityDeclaration[],
+  violations: readonly ConstraintFenceViolation[],
+): MigrationError {
+  const shown = violations
+    .slice(0, 2)
+    .map((violation) => JSON.stringify(violation))
+    .join("; ");
+  return new MigrationError(
+    `Edge cardinality tightening refused: ${String(violations.length)} existing row(s) violate the proposed cardinality. ` +
+      `${shown}. Run store.verifyConstraintFences() to list them, resolve the rows, then retry.`,
+    {
+      graphId: params.graphId,
+      fromVersion: params.fromVersion,
+      toVersion: params.toVersion,
+      reason: "edge-cardinality-tightening-violated",
+      axes,
+      violations,
+    },
+  );
+}
+
 /**
- * The data preflight an ontology tightening owes, or `undefined` when the
- * proposal tightens nothing. Runs INSIDE the schema-commit transaction.
+ * The data preflight a schema tightening owes, or `undefined` when the
+ * proposal tightens nothing on either the ontology or the edge-cardinality
+ * axis. Runs INSIDE the schema-commit transaction.
  *
  * Takes NO advisory lock. Under the PREVIOUS schema the tightening's kinds
  * are not yet disjoint (or their uniqueness components have not yet merged,
- * or the edge kind's endpoints have not yet shrunk), so a writer creating
- * the very row that will violate the new axiom owes no claim and takes no
- * lock — the lock cannot fence what it cannot see. The residual window this
- * leaves is the one the existing kind-emptiness fence already carries: a
- * writer that commits under the previous schema version between this probe
- * and the version CAS is invisible to it.
+ * or the edge kind's endpoints have not yet shrunk, or the edge kind's
+ * cardinality was not yet this constrained), so a writer creating the very
+ * row that will violate the new axiom owes no claim and takes no lock — the
+ * lock cannot fence what it cannot see. The residual window this leaves is
+ * the one the existing kind-emptiness fence already carries: a writer that
+ * commits under the previous schema version between this probe and the
+ * version CAS is invisible to it.
  * `store.verifyConstraintFences()` remains the post-hoc detector for exactly
  * that window.
+ *
+ * When BOTH halves have violations, the edge-cardinality refusal wins: it is
+ * the more specific diagnosis, and the two reasons are mutually exclusive
+ * gates on the same commit (fixing one leaves the other still refusing on
+ * retry).
  *
  * @throws ConfigurationError if either `params.before` or `params.after`
  *   cannot be interpreted as a coherent ontology and `params.changes` was
  *   not supplied (propagates from `classifyOntologyChanges`).
  */
-export function prepareOntologyTighteningPreflight(
-  params: OntologyTighteningPreflightParams,
+export function prepareSchemaTighteningPreflight(
+  params: SchemaTighteningPreflightParams,
 ): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
   const changes =
     params.changes ?? classifyOntologyChanges(params.before, params.after);
   const probes = ontologyTighteningProbes(changes);
-  if (probes.length === 0) return undefined;
+  const newlyConstrainedAxes = newlyConstrainedEdgeAxes(
+    params.before,
+    params.after,
+  );
+  if (probes.length === 0 && newlyConstrainedAxes.length === 0) {
+    return undefined;
+  }
 
   // Built once, outside the returned closure: every commit path already ran
   // `buildKindRegistry` on the target graph before reaching the preflight, so
@@ -163,14 +209,24 @@ export function prepareOntologyTighteningPreflight(
         uniqueConstraintNames: [
           ...new Set(uniquenessGroups.map((group) => group.constraintName)),
         ],
-        // Item A never touches cardinality.
-        edgeCardinalities: [],
+        edgeCardinalities: newlyConstrainedAxes,
         edgeEndpointAllowances: grouped.endpoints?.allowances ?? [],
       },
       uniquenessGroups,
       registry: proposedRegistry,
     });
     if (violations.length === 0) return;
+
+    const cardinalityViolations = violations.filter(
+      (violation) => violation.family === "edgeCardinality",
+    );
+    if (cardinalityViolations.length > 0) {
+      throw buildEdgeCardinalityTighteningViolatedError(
+        params,
+        newlyConstrainedAxes,
+        cardinalityViolations,
+      );
+    }
     throw buildOntologyTighteningViolatedError(params, changes, violations);
   };
 }

@@ -37,7 +37,7 @@ export type ChangeType = "added" | "removed" | "modified" | "renamed";
  * (`disjointWith` / `subClassOf` / `equivalentTo` / `sameAs` addition, or a
  * `subClassOf` / `equivalentTo` / `sameAs` removal) is `warning`-severity and
  * still routes through `ensureSchema`'s auto-migrate branch, but the commit
- * transaction runs a data probe first (`prepareOntologyTighteningPreflight`)
+ * transaction runs a data probe first (`prepareSchemaTighteningPreflight`)
  * and refuses with `MigrationError` `reason: "ontology-tightening-violated"`
  * when existing rows would violate the tightened ontology. `isBackwardsCompatible`
  * keeps meaning exactly "no `breaking` change" — it does not mean "safe to
@@ -1016,6 +1016,20 @@ function diffEdgeDef(
       kind: name,
       severity: "warning",
       details: `Cardinality changed from "${before.cardinality}" to "${after.cardinality}" for "${name}"`,
+      before,
+      after,
+    });
+  }
+
+  // Check target cardinality — same "modified"/"warning" shape as the source
+  // axis: severity policy is unchanged for both directions, because the data
+  // probe (not the severity) is what actually gates a tightening.
+  if (before.targetCardinality !== after.targetCardinality) {
+    changes.push({
+      type: "modified",
+      kind: name,
+      severity: "warning",
+      details: `Target cardinality changed from "${before.targetCardinality}" to "${after.targetCardinality}" for "${name}"`,
       before,
       after,
     });

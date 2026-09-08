@@ -30,6 +30,7 @@ import {
   type KindAnnotations,
   type NodeRegistration,
   type NodeType,
+  type TargetCardinality,
   type UniquenessScope,
 } from "../core/types";
 import { type GraphExtension } from "../graph-extension/extension-types";
@@ -86,6 +87,7 @@ export type EdgeIntrospection = Readonly<{
   from: readonly string[];
   to: readonly string[];
   cardinality: Cardinality;
+  targetCardinality: TargetCardinality;
   endpointExistence: EndpointExistence;
   properties: JsonSchema;
   annotations: KindAnnotations | undefined;
@@ -151,6 +153,7 @@ export function introspectSchema<G extends GraphDef>(
       from: reg.from.map((entry) => (entry as AllNodeTypes<G> & NodeType).kind),
       to: projectTargetKinds(reg.to),
       cardinality: reg.cardinality ?? "many",
+      targetCardinality: reg.targetCardinality ?? "many",
       endpointExistence: reg.endpointExistence ?? "notDeleted",
       properties: serializeSchemaProperties(edgeType.schema),
       annotations: edgeType.annotations,

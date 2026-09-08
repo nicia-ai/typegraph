@@ -81,7 +81,6 @@ import {
   type GraphDef,
 } from "../core/define-graph";
 import {
-  type Cardinality,
   type EdgeRegistration,
   type NodeRegistration,
   type UniqueConstraint,
@@ -105,15 +104,18 @@ import {
 } from "../identity/service";
 import { type IdentityTarget } from "../identity/sql-target";
 import { type KindRegistry } from "../registry/kind-registry";
-import { edgeCardinalityClaim } from "../store/claims/edge-claims";
+import {
+  edgeCardinalityClaims,
+  type EdgeCardinalityDeclarations,
+} from "../store/claims/edge-claims";
 import {
   checkUniquenessConstraints,
   type NodeClaimItem,
   planNodeCreateClaims,
 } from "../store/claims/node-claims";
 import {
-  checkCardinalityConstraint,
   checkDisjointnessConstraint,
+  checkEdgeCardinalityConstraints,
   graphOwesClaims,
 } from "../store/constraints";
 import { classifyDurableEdgeBatchOutcomes } from "../store/durable-edge-batch";
@@ -2100,6 +2102,9 @@ async function updateImportedEdge(
         id: edge.id,
         props,
         ...(edge.validTo !== undefined && { validTo: edge.validTo }),
+        // Import re-admits no row to a counted population here (see below),
+        // so it owes no claim.
+        claims: [],
       },
       {
         validityLowerBound: windowFence,
@@ -2501,7 +2506,7 @@ type EdgeImportCandidate = Readonly<{
 type PreparedEdgeImportCreate = Readonly<{
   candidate: EdgeImportCandidate;
   params: InsertEdgeParams;
-  cardinality: Cardinality;
+  declarations: EdgeCardinalityDeclarations;
 }>;
 
 /**
@@ -2544,7 +2549,7 @@ function prepareEdgeImportCreate(
   return {
     candidate,
     params,
-    cardinality: registration.cardinality ?? "many",
+    declarations: registration,
   };
 }
 
@@ -2966,22 +2971,24 @@ async function processEdgeSlice(
 
   const accepted: PreparedEdgeImportCreate[] = [];
   for (const prepared of preparedCreates) {
-    const { candidate, params, cardinality } = prepared;
+    const { candidate, params, declarations } = prepared;
     const { edge } = candidate;
 
     // The cardinality probe, per row and against the pending-aware overlay, so
-    // two `cardinality: "one"` edges from one source IN ONE SLICE refuse the
-    // second row instead of both passing and colliding at the batch claim —
-    // which runs once for the whole slice, outside every per-row recovery.
+    // two edges declaring the same axis from/to one node IN ONE SLICE refuse
+    // the second row instead of both passing and colliding at the batch claim
+    // — which runs once for the whole slice, outside every per-row recovery.
     const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
-      checkCardinalityConstraint(
+      checkEdgeCardinalityConstraints(
         { graphId, registry, backend: cardinalityValidationBackend },
         edge.kind,
-        cardinality,
-        edge.from.kind,
-        edge.from.id,
-        edge.to.kind,
-        edge.to.id,
+        declarations,
+        {
+          fromKind: edge.from.kind,
+          fromId: edge.from.id,
+          toKind: edge.to.kind,
+          toId: edge.to.id,
+        },
         edge.validTo,
       ),
     );
@@ -3009,7 +3016,7 @@ async function processEdgeSlice(
       });
       continue;
     }
-    registerPendingEdgeForCardinality(params, cardinality);
+    registerPendingEdgeForCardinality(params, declarations);
     if (pendingIdentityKey !== undefined) {
       pendingMatchIdentityOwners.add(pendingIdentityKey);
     }
@@ -3028,7 +3035,7 @@ async function processEdgeSlice(
     // changed under a bulk load and is why the per-row probe above exists for
     // everything that is not concurrent.
     const acceptedWork = accepted.map((prepared) =>
-      importEdgeInsertWork(prepared.params, prepared.cardinality),
+      importEdgeInsertWork(prepared.params, prepared.declarations),
     );
     const retryAcceptedIndividually = async (): Promise<void> => {
       for (const prepared of accepted) {
@@ -3036,7 +3043,7 @@ async function processEdgeSlice(
           frame,
           () =>
             frame.session.createEdge(
-              importEdgeInsertWork(prepared.params, prepared.cardinality),
+              importEdgeInsertWork(prepared.params, prepared.declarations),
             ),
         );
         if (rowResult.ok) {
@@ -3053,7 +3060,7 @@ async function processEdgeSlice(
       ({ params }) => params.matchIdentity !== undefined,
     ).length;
     const hasDurableIdentity = durableIdentityCount > 0;
-    const hasClaims = acceptedWork.some(({ claim }) => claim !== undefined);
+    const hasClaims = acceptedWork.some(({ claims }) => claims.length > 0);
     if (
       hasDurableIdentity &&
       durableIdentityCount === accepted.length &&
@@ -3313,16 +3320,18 @@ async function processEdge(
   // claims before it writes — the same order the collection create uses. No
   // pending state is needed: this path writes each edge as it goes, so the next
   // row's probe reads the previous one from the same transaction.
-  const { cardinality, params } = preparation.value;
+  const { declarations, params } = preparation.value;
   const cardinalityResult = await catchDeclaredConstraintRefusal(() =>
-    checkCardinalityConstraint(
+    checkEdgeCardinalityConstraints(
       { graphId, registry, backend: frame.target },
       edge.kind,
-      cardinality,
-      edge.from.kind,
-      edge.from.id,
-      edge.to.kind,
-      edge.to.id,
+      declarations,
+      {
+        fromKind: edge.from.kind,
+        fromId: edge.from.id,
+        toKind: edge.to.kind,
+        toId: edge.to.id,
+      },
       edge.validTo,
     ),
   );
@@ -3332,7 +3341,7 @@ async function processEdge(
 
   const { result: createResult } = await catchEdgeCreateRefusalWithSavepoint(
     frame,
-    () => frame.session.createEdge(importEdgeInsertWork(params, cardinality)),
+    () => frame.session.createEdge(importEdgeInsertWork(params, declarations)),
   );
   if (!createResult.ok) {
     return { status: "error", error: createResult.error };
@@ -3342,20 +3351,19 @@ async function processEdge(
 }
 
 /**
- * The insert unit for one imported edge: the row params and the cardinality
+ * The insert unit for one imported edge: the row params and every cardinality
  * claim the row owes.
  *
  * ONE owner, shared by the batched slice and the per-row fallback, for the same
  * reason {@link importNodeCreateWork} is one: two spellings of the same row are
- * two spellings that can drift. The claim is built here and ISSUED by the
+ * two spellings that can drift. The claims are built here and ISSUED by the
  * session, which is the only handle in this module that reaches a write member.
  */
 function importEdgeInsertWork(
   params: InsertEdgeParams,
-  cardinality: Cardinality,
+  declarations: EdgeCardinalityDeclarations,
 ): EdgeInsertWork {
-  const claim = edgeCardinalityClaim(cardinality, params);
-  return { params, claim };
+  return { params, claims: edgeCardinalityClaims(declarations, params) };
 }
 
 // ============================================================

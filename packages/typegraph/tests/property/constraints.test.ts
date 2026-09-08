@@ -2,9 +2,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import {
-  checkCardinality,
   checkDisjointness,
-  checkUniqueEdge,
   checkWherePredicate,
   computeUniqueKey,
 } from "../../src/constraints";
@@ -13,6 +11,11 @@ import {
   createEmptyClosures,
   KindRegistry,
 } from "../../src/registry/kind-registry";
+import {
+  type EdgeCardinalityAxisRef,
+  type EdgeCardinalityDirection,
+  edgeCardinalityViolation,
+} from "../../src/store/claims/edge-claims";
 import { requireDefined } from "../../src/utils/presence";
 
 // ============================================================
@@ -436,113 +439,102 @@ describe("checkWherePredicate Properties", () => {
 });
 
 // ============================================================
-// Property Tests - checkCardinality
+// Property Tests - edgeCardinalityViolation
 // ============================================================
 
-describe("checkCardinality Properties", () => {
-  describe("many cardinality", () => {
-    it("many never returns error", () => {
+describe("edgeCardinalityViolation Properties", () => {
+  const directionArb: fc.Arbitrary<EdgeCardinalityDirection> = fc.constantFrom(
+    "source",
+    "target",
+  );
+  const endpointsArb = fc.record({
+    edgeKind: edgeKindArb,
+    fromKind: kindNameArb,
+    fromId: nodeIdArb,
+    toKind: kindNameArb,
+    toId: nodeIdArb,
+  });
+
+  describe("many is unrepresentable", () => {
+    it("every axis this module can build declares something", () => {
+      // `EdgeCardinalityAxisRef` excludes `many` by construction (it is
+      // `ConstrainedCardinality` / `ConstrainedTargetCardinality`), so there
+      // is no arm to test here — this test documents that omission rather
+      // than exercising a branch.
+      const references: readonly EdgeCardinalityAxisRef[] = [
+        { direction: "source", cardinality: "one" },
+        { direction: "source", cardinality: "unique" },
+        { direction: "source", cardinality: "oneActive" },
+        { direction: "target", cardinality: "one" },
+        { direction: "target", cardinality: "oneActive" },
+      ];
+      for (const ref of references) {
+        expect(ref.cardinality).not.toBe("many");
+      }
+    });
+  });
+
+  describe("one / oneActive, either direction", () => {
+    it("zero existing edges never violates", () => {
       fc.assert(
         fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
-          fc.integer({ min: 0, max: 1000 }),
-          fc.boolean(),
-          (edgeKind, fromKind, fromId, count, hasActive) => {
-            const result = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "many",
-              count,
-              hasActive,
-            );
-
+          directionArb,
+          fc.constantFrom("one", "oneActive"),
+          endpointsArb,
+          (direction, cardinality, endpoints) => {
+            const ref = { direction, cardinality } as EdgeCardinalityAxisRef;
+            const result = edgeCardinalityViolation(ref, endpoints, 0);
             expect(result).toBeUndefined();
           },
         ),
         { numRuns: 50 },
       );
     });
-  });
 
-  describe("one cardinality", () => {
-    it("one allows zero existing edges", () => {
+    it("any positive count violates, naming the declared direction", () => {
       fc.assert(
         fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
-          (edgeKind, fromKind, fromId) => {
-            const result = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "one",
-              0,
-              false,
-            );
-
-            expect(result).toBeUndefined();
-          },
-        ),
-        { numRuns: 30 },
-      );
-    });
-
-    it("one rejects any existing edges", () => {
-      fc.assert(
-        fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
-          fc.integer({ min: 1, max: 100 }),
-          (edgeKind, fromKind, fromId, count) => {
-            const result = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "one",
-              count,
-              false,
-            );
+          directionArb,
+          fc.constantFrom("one", "oneActive"),
+          endpointsArb,
+          fc.integer({ min: 1, max: 1000 }),
+          (direction, cardinality, endpoints, count) => {
+            const ref = { direction, cardinality } as EdgeCardinalityAxisRef;
+            const result = edgeCardinalityViolation(ref, endpoints, count);
 
             expect(result).toBeDefined();
-            expect(requireDefined(result).message).toContain("one");
+            const error = requireDefined(result);
+            expect(error.details.direction).toBe(direction);
+            expect(error.details.cardinality).toBe(cardinality);
+            expect(error.details.existingCount).toBe(count);
+            expect(error.details.fromKind).toBe(endpoints.fromKind);
+            expect(error.details.fromId).toBe(endpoints.fromId);
+            expect(error.details.toKind).toBe(endpoints.toKind);
+            expect(error.details.toId).toBe(endpoints.toId);
+            expect(error.message).toContain(cardinality);
           },
         ),
-        { numRuns: 30 },
+        { numRuns: 50 },
       );
     });
 
-    it("one is monotonic: more edges = still error", () => {
+    it("is monotonic: a violating count stays a violation at a higher count", () => {
       fc.assert(
         fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
+          directionArb,
+          fc.constantFrom("one", "oneActive"),
+          endpointsArb,
           fc.integer({ min: 1, max: 50 }),
           fc.integer({ min: 1, max: 50 }),
-          (edgeKind, fromKind, fromId, count1, count2) => {
-            const result1 = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "one",
-              count1,
-              false,
-            );
-            const result2 = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "one",
+          (direction, cardinality, endpoints, count1, count2) => {
+            const ref = { direction, cardinality } as EdgeCardinalityAxisRef;
+            const result1 = edgeCardinalityViolation(ref, endpoints, count1);
+            const result2 = edgeCardinalityViolation(
+              ref,
+              endpoints,
               count1 + count2,
-              false,
             );
 
-            // If error at count1, still error at count1 + count2
             if (result1 === undefined) return;
             expect(result2).toBeDefined();
           },
@@ -552,177 +544,36 @@ describe("checkCardinality Properties", () => {
     });
   });
 
-  describe("oneActive cardinality", () => {
-    it("oneActive allows when no active edge", () => {
-      fc.assert(
-        fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
-          fc.integer({ min: 0, max: 100 }),
-          (edgeKind, fromKind, fromId, count) => {
-            const result = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "oneActive",
-              count,
-              false, // No active edge
-            );
+  describe("source:unique", () => {
+    const ref: EdgeCardinalityAxisRef = {
+      direction: "source",
+      cardinality: "unique",
+    };
 
-            expect(result).toBeUndefined();
-          },
-        ),
-        { numRuns: 30 },
+    it("allows when no existing pair", () => {
+      fc.assert(
+        fc.property(endpointsArb, (endpoints) => {
+          expect(edgeCardinalityViolation(ref, endpoints, 0)).toBeUndefined();
+        }),
+        { numRuns: 50 },
       );
     });
 
-    it("oneActive rejects when active edge exists", () => {
+    it("rejects when the pair already exists", () => {
       fc.assert(
         fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
-          (edgeKind, fromKind, fromId) => {
-            const result = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "oneActive",
-              1,
-              true, // Has active edge
-            );
+          endpointsArb,
+          fc.integer({ min: 1, max: 10 }),
+          (endpoints, count) => {
+            const result = edgeCardinalityViolation(ref, endpoints, count);
 
             expect(result).toBeDefined();
-            expect(requireDefined(result).message).toContain("oneActive");
+            expect(requireDefined(result).message).toContain("unique");
           },
         ),
-        { numRuns: 30 },
+        { numRuns: 50 },
       );
     });
-  });
-
-  describe("unique cardinality", () => {
-    it("unique passes through (checked separately)", () => {
-      fc.assert(
-        fc.property(
-          edgeKindArb,
-          kindNameArb,
-          nodeIdArb,
-          fc.integer({ min: 0, max: 100 }),
-          fc.boolean(),
-          (edgeKind, fromKind, fromId, count, hasActive) => {
-            const result = checkCardinality(
-              edgeKind,
-              fromKind,
-              fromId,
-              "unique",
-              count,
-              hasActive,
-            );
-
-            // unique is checked via checkUniqueEdge instead
-            expect(result).toBeUndefined();
-          },
-        ),
-        { numRuns: 30 },
-      );
-    });
-  });
-});
-
-// ============================================================
-// Property Tests - checkUniqueEdge
-// ============================================================
-
-describe("checkUniqueEdge Properties", () => {
-  it("allows when no existing edge", () => {
-    fc.assert(
-      fc.property(
-        edgeKindArb,
-        kindNameArb,
-        nodeIdArb,
-        kindNameArb,
-        nodeIdArb,
-        (edgeKind, fromKind, fromId, toKind, toId) => {
-          const result = checkUniqueEdge(
-            edgeKind,
-            fromKind,
-            fromId,
-            toKind,
-            toId,
-            0, // No existing
-          );
-
-          expect(result).toBeUndefined();
-        },
-      ),
-      { numRuns: 50 },
-    );
-  });
-
-  it("rejects when edge already exists", () => {
-    fc.assert(
-      fc.property(
-        edgeKindArb,
-        kindNameArb,
-        nodeIdArb,
-        kindNameArb,
-        nodeIdArb,
-        fc.integer({ min: 1, max: 10 }),
-        (edgeKind, fromKind, fromId, toKind, toId, count) => {
-          const result = checkUniqueEdge(
-            edgeKind,
-            fromKind,
-            fromId,
-            toKind,
-            toId,
-            count,
-          );
-
-          expect(result).toBeDefined();
-          expect(requireDefined(result).message).toContain("unique");
-        },
-      ),
-      { numRuns: 50 },
-    );
-  });
-
-  it("is monotonic: more edges = still error", () => {
-    fc.assert(
-      fc.property(
-        edgeKindArb,
-        kindNameArb,
-        nodeIdArb,
-        kindNameArb,
-        nodeIdArb,
-        fc.integer({ min: 1, max: 5 }),
-        fc.integer({ min: 1, max: 5 }),
-        (edgeKind, fromKind, fromId, toKind, toId, count1, count2) => {
-          const result1 = checkUniqueEdge(
-            edgeKind,
-            fromKind,
-            fromId,
-            toKind,
-            toId,
-            count1,
-          );
-          const result2 = checkUniqueEdge(
-            edgeKind,
-            fromKind,
-            fromId,
-            toKind,
-            toId,
-            count1 + count2,
-          );
-
-          // If error at count1, still error at count1 + count2
-          if (result1 === undefined) return;
-          expect(result2).toBeDefined();
-        },
-      ),
-      { numRuns: 30 },
-    );
   });
 });
 

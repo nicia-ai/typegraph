@@ -15,9 +15,11 @@
 import { type z } from "zod";
 
 import {
+  type Cardinality,
   type GraphAnnotations,
   type KindAnnotations,
   type NullCheckOp,
+  type TargetCardinality,
 } from "../core/types";
 import { type MetaEdgeName } from "../ontology/constants";
 
@@ -287,6 +289,8 @@ export type ExtensionEdgeDef = Readonly<{
   from: readonly string[];
   to: readonly string[] | Readonly<Record<string, readonly string[]>>;
   properties?: Readonly<Record<string, ExtensionPropertyType>>;
+  cardinality?: Cardinality;
+  targetCardinality?: TargetCardinality;
 }>;
 
 // ============================================================

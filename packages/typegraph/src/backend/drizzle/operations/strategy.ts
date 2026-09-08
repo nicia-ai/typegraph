@@ -3,7 +3,7 @@ import { getTableName, type SQL, sql } from "drizzle-orm";
 import type { FulltextStrategy } from "../../../query/dialect/fulltext-strategy";
 import type { VectorStrategy } from "../../../query/dialect/vector-strategy";
 import { isSqlFragment, type SqlFragment } from "../../../query/sql-fragment";
-import { type ConstrainedCardinality } from "../../../store/claims/edge-claims";
+import { type EdgeCardinalityAxisRef } from "../../../store/claims/edge-claims";
 import { isPresent, requireDefined } from "../../../utils/presence";
 import type { PrimaryKeyRelation } from "../../../utils/sql-errors";
 import type {
@@ -25,8 +25,8 @@ import type {
   ClaimEdgeCardinalityParams,
   CompareAndSetNodeParams,
   ContributionMaterializationIdentity,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
@@ -111,7 +111,7 @@ import {
   buildAtomicEdgeDeleteBatchWithSchemaFence,
   buildAtomicEdgeResolvedUpdateBatch,
   buildConvergeEdgeCreate,
-  buildCountEdgesFrom,
+  buildCountEdgesAtEndpoint,
   buildDeleteEdge,
   buildDeleteEdgesBatch,
   buildEdgeExistsBetween,
@@ -494,7 +494,7 @@ export type CommonOperationStrategy = Readonly<{
     nodeKind: string,
     nodeId: string,
   ) => SQL;
-  buildCountEdgesFrom: (params: CountEdgesFromParams) => SQL;
+  buildCountEdgesAtEndpoint: (params: CountEdgesAtEndpointParams) => SQL;
   buildEdgeExistsBetween: (params: EdgeExistsBetweenParams) => SQL;
   buildFindEdgesConnectedTo: (params: FindEdgesConnectedToParams) => SQL;
   buildFindNodesByKind: (params: FindNodesByKindParams) => SQL;
@@ -572,7 +572,7 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildContendedEdgeRowAudit: (
     graphId: string,
-    cardinality: ConstrainedCardinality,
+    ref: EdgeCardinalityAxisRef,
     edgeKinds: readonly string[],
   ) => SQL;
   buildDisjointOverlapAudit: (
@@ -703,7 +703,7 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildHardDeleteEdge,
   buildHardDeleteEdgesBatch,
   buildHardDeleteEdgesByNode,
-  buildCountEdgesFrom,
+  buildCountEdgesAtEndpoint,
   buildEdgeExistsBetween,
   buildFindEdgesConnectedTo,
   buildFindNodesByKind,
@@ -1236,13 +1236,13 @@ function createCommonOperationStrategy(
     },
     buildContendedEdgeRowAudit(
       graphId: string,
-      cardinality: ConstrainedCardinality,
+      ref: EdgeCardinalityAxisRef,
       edgeKinds: readonly string[],
     ): SQL {
       return buildContendedEdgeRowAudit(
         tables,
         graphId,
-        cardinality,
+        ref,
         edgeKinds,
       );
     },

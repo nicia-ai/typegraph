@@ -17,6 +17,7 @@ import {
   type EndpointExistence,
   type GraphAnnotations,
   type KindAnnotations,
+  type TargetCardinality,
   type TemporalMode,
   type UniquenessScope,
 } from "../core/types";
@@ -38,6 +39,8 @@ import { type JsonPointer } from "../query/json-pointer";
 const deleteBehaviorZod = z.enum(["restrict", "cascade", "disconnect"]);
 
 const cardinalityZod = z.enum(["many", "one", "unique", "oneActive"]);
+
+const targetCardinalityZod = z.enum(["many", "one", "oneActive"]);
 
 const endpointExistenceZod = z.enum(["notDeleted", "currentlyValid", "ever"]);
 
@@ -499,6 +502,7 @@ export type SerializedEdgeDef = Readonly<{
   targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
   properties: JsonSchema;
   cardinality: Cardinality;
+  targetCardinality: TargetCardinality;
   endpointExistence: EndpointExistence;
   matchIdentity?: Readonly<{
     name: string;
@@ -592,6 +596,12 @@ export const serializedSchemaZod = z
               .optional(),
             properties: z.record(z.string(), z.unknown()),
             cardinality: cardinalityZod,
+            // `.default("many")` is what makes a document stored before this
+            // option existed load as unconstrained on the target side: the
+            // record is `.loose()`, so an absent key parses to nothing, and
+            // without the default a persisted declaration on a NEWER document
+            // read by this schema would be silently dropped instead of kept.
+            targetCardinality: targetCardinalityZod.default("many"),
             endpointExistence: endpointExistenceZod,
             matchIdentity: z
               .object({

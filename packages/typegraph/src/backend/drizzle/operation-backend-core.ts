@@ -25,7 +25,9 @@ import {
   isSameClaimOwner,
 } from "../../store/claims/axis";
 import {
-  type ConstrainedCardinality,
+  type EdgeCardinalityAxisName,
+  edgeCardinalityAxisName,
+  type EdgeCardinalityAxisRef,
   edgeCardinalityClaimTarget,
   edgeClaimRelationMissing,
 } from "../../store/claims/edge-claims";
@@ -104,8 +106,8 @@ import type {
   CompareAndSetNodeParams,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
+  CountEdgesAtEndpointParams,
   CountEdgesByKindParams,
-  CountEdgesFromParams,
   CountNodesByKindParams,
   DeleteEdgeParams,
   DeleteEdgesBatchParams,
@@ -548,7 +550,7 @@ export type CommonOperationBackend = Pick<
   | "clearGraph"
   | "compareAndSetNode"
   | "countEdgesByKind"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "countNodesByKind"
   | "deleteEdge"
   | "deleteEdgesBatch"
@@ -4371,6 +4373,7 @@ export function createCommonOperationBackend(
     plan: ManagedEdgeCreatePlan,
   ): Promise<EdgeCreateCommandResult> {
     const { params } = plan;
+    const claims = plan.cardinalityClaims ?? [];
     if (
       plan.schemaFence !== undefined &&
       plan.schemaFence.graphId !== params.graphId
@@ -4384,7 +4387,7 @@ export function createCommonOperationBackend(
         },
       );
     }
-    if (plan.schemaFence !== undefined && plan.cardinalityClaim !== undefined) {
+    if (plan.schemaFence !== undefined && claims.length > 0) {
       return {
         outcome: "unsupported",
         entity: "edge",
@@ -4401,9 +4404,14 @@ export function createCommonOperationBackend(
         dimensions: ["schemaFence"],
       };
     }
+    // v1 fuses at most one claim: the fused CTE
+    // (`buildInsertEdgeIfEndpointsLiveWithCardinalityClaim`) reserves exactly
+    // one axis row. A two-axis plan takes the portable claim-then-insert
+    // path on every engine — refused here, before any SQL runs, never a
+    // silently-dropped second axis.
     if (
-      plan.cardinalityClaim !== undefined &&
-      executeEdgeCardinalityInsert === undefined
+      claims.length > 1 ||
+      (claims.length === 1 && executeEdgeCardinalityInsert === undefined)
     ) {
       return {
         outcome: "unsupported",
@@ -4415,7 +4423,7 @@ export function createCommonOperationBackend(
     let row: EdgeRow | undefined;
     if (plan.schemaFence !== undefined) {
       row = await executeEdgeSchemaFencedInsert(params, plan.schemaFence);
-    } else if (plan.cardinalityClaim === undefined) {
+    } else if (claims.length === 0) {
       row = await executeEdgeEndpointInsert(params);
     } else {
       // The unsupported case is returned above before any SQL executes.
@@ -4429,7 +4437,8 @@ export function createCommonOperationBackend(
           },
         );
       }
-      row = await executeEdgeCardinalityInsert(params, plan.cardinalityClaim);
+      const claim = requireDefined(claims[0]);
+      row = await executeEdgeCardinalityInsert(params, claim);
     }
 
     return row === undefined ?
@@ -4461,7 +4470,7 @@ export function createCommonOperationBackend(
     // Durable convergence delegates that decision to the row-level unique
     // arbiter and may therefore execute directly on a root session.
     if (
-      plan.cardinalityClaim !== undefined ||
+      (plan.cardinalityClaims ?? []).length > 0 ||
       operationStrategy.buildConvergeEdgeCreate === undefined ||
       (!durable && !options.dynamicEdgeConvergence) ||
       (!durable && context.coordination === "none") ||
@@ -5050,8 +5059,8 @@ export function createCommonOperationBackend(
       }
     },
 
-    async countEdgesFrom(params: CountEdgesFromParams): Promise<number> {
-      const query = operationStrategy.buildCountEdgesFrom(params);
+    async countEdgesAtEndpoint(params: CountEdgesAtEndpointParams): Promise<number> {
+      const query = operationStrategy.buildCountEdgesAtEndpoint(params);
       const row = await execution.execGet<{ count: string | number }>(query);
       return Number(row?.count ?? 0);
     },
@@ -5329,19 +5338,23 @@ export function createCommonOperationBackend(
         nodeId: row.node_id,
       }));
 
-      // One statement per declared cardinality, because that is the
-      // granularity at which the population's key and liveness differ.
-      const edgeKindsByCardinality = new Map<
-        ConstrainedCardinality,
-        string[]
+      // One statement per declared axis, because that is the granularity at
+      // which the population's key and liveness differ.
+      const edgeKindsByAxis = new Map<
+        EdgeCardinalityAxisName,
+        Readonly<{ ref: EdgeCardinalityAxisRef; edgeKinds: string[] }>
       >();
       for (const declaration of params.edgeCardinalities) {
-        const kinds = edgeKindsByCardinality.get(declaration.cardinality) ?? [];
-        kinds.push(declaration.edgeKind);
-        edgeKindsByCardinality.set(declaration.cardinality, kinds);
+        const axisName = edgeCardinalityAxisName(declaration);
+        const entry = edgeKindsByAxis.get(axisName) ?? {
+          ref: declaration,
+          edgeKinds: [],
+        };
+        entry.edgeKinds.push(declaration.edgeKind);
+        edgeKindsByAxis.set(axisName, entry);
       }
       const contendedEdgeRows: ContendedEdgeRow[] = [];
-      for (const [cardinality, edgeKinds] of edgeKindsByCardinality) {
+      for (const { ref, edgeKinds } of edgeKindsByAxis.values()) {
         const rows = await execution.execAll<{
           edge_id: string;
           edge_kind: string;
@@ -5352,14 +5365,14 @@ export function createCommonOperationBackend(
         }>(
           operationStrategy.buildContendedEdgeRowAudit(
             params.graphId,
-            cardinality,
+            ref,
             edgeKinds,
           ),
         );
         for (const row of rows) {
           contendedEdgeRows.push({
             edgeKind: row.edge_kind,
-            cardinality,
+            ...ref,
             edgeId: row.edge_id,
             fromKind: row.from_kind,
             fromId: row.from_id,

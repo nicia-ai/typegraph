@@ -5,7 +5,6 @@
  * SQL implementations (SQLite, PostgreSQL) behind a common interface.
  */
 import {
-  type Cardinality,
   type IndexEntity,
   type JsonScalar,
   type JsonValue,
@@ -26,6 +25,10 @@ import {
   type CompiledTemporaryStatementSql,
 } from "../query/sql-intent";
 import { type SerializedSchema } from "../schema/types";
+// Type-only: `store/claims/edge-claims.ts` value-imports several params
+// types from this file, but a type-only import is erased at runtime, so this
+// back-edge creates no value cycle.
+import { type EdgeCardinalityAxisRef } from "../store/claims/edge-claims";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 
 // ============================================================
@@ -1134,7 +1137,14 @@ export type ManagedEdgeCreatePlan = Readonly<{
   entity: "edge";
   params: InsertEdgeParams;
   schemaFence?: SchemaWriteFenceParams;
-  cardinalityClaim?: ClaimEdgeCardinalityParams;
+  /**
+   * Every cardinality claim this create owes. A command port applies EVERY
+   * entry or returns `unsupported` with the `"cardinalityClaim"` dimension
+   * before executing any SQL — the bundled fused insert applies exactly one
+   * entry and refuses a two-axis plan to the portable path (see
+   * `executeEdgeManagedCreate`).
+   */
+  cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
 }>;
 
 /** A node create command accepted by the authoritative command port. */
@@ -2349,7 +2359,10 @@ export type GraphBackend = Readonly<{
   ) => Promise<readonly EdgeRow[]>;
 
   // === Edge Cardinality Operations ===
-  countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
+  countEdgesAtEndpoint: (
+    this: void,
+    params: CountEdgesAtEndpointParams,
+  ) => Promise<number>;
   edgeExistsBetween: (
     this: void,
     params: EdgeExistsBetweenParams,
@@ -3558,7 +3571,7 @@ export type EdgeEntityReadBackend = Pick<
   GraphBackend,
   | "getEdge"
   | "getEdges"
-  | "countEdgesFrom"
+  | "countEdgesAtEndpoint"
   | "edgeExistsBetween"
   | "findEdgesConnectedTo"
   | "findEdgesByKind"
@@ -3837,7 +3850,7 @@ export function createTransactionReadBackend(
         getEdges: (graphId: string, ids: readonly string[]) =>
           getEdges(graphId, ids),
       }),
-    countEdgesFrom: (params) => backend.countEdgesFrom(params),
+    countEdgesAtEndpoint: (params) => backend.countEdgesAtEndpoint(params),
     edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
     findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
     findNodesByKind: (params) => backend.findNodesByKind(params),
@@ -4007,25 +4020,24 @@ export type HardDeleteUniquesByConcreteKindParams = Readonly<{
  * and the SQL builder read it. A caller that rendered the axis and key itself
  * would be a second spelling of that decision.
  */
-export type ClaimEdgeCardinalityParams = Readonly<{
-  graphId: string;
-  /** The declared cardinality; `many` declares nothing and never claims. */
-  cardinality: Exclude<Cardinality, "many">;
-  edgeKind: string;
-  /** The edge that will hold the axis if this claim lands. */
-  edgeId: string;
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-}>;
+export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef &
+  Readonly<{
+    graphId: string;
+    edgeKind: string;
+    /** The edge that will hold the axis if this claim lands. */
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+  }>;
 
 /**
  * What a claim statement decided.
  *
  * `refused` carries the incumbent so the caller can say which edge holds the
- * axis; the typed refusal itself is the store's, built from the same
- * `checkCardinality` / `checkUniqueEdge` owners the probe uses, so a caller
+ * axis; the typed refusal itself is the store's, built from
+ * `edgeCardinalityViolation`, the same owner the probe uses, so a caller
  * cannot tell which layer refused.
  */
 export type EdgeClaimOutcome =
@@ -4039,11 +4051,10 @@ export type PurgeEdgeClaimsParams = Readonly<{
 }>;
 
 /** One edge kind's declared cardinality, as the fence audit reads it. */
-export type EdgeCardinalityDeclaration = Readonly<{
-  edgeKind: string;
-  /** `many` declares nothing, so it is unrepresentable here. */
-  cardinality: Exclude<Cardinality, "many">;
-}>;
+export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+  }>;
 
 /**
  * What a constraint-fence audit asks the database about: the declarations the
@@ -4109,15 +4120,15 @@ export type ContendedUniqueRow = Readonly<{
  * one other live edge. The endpoints are returned whole so the caller can name
  * the claim key through the one builder that renders it.
  */
-export type ContendedEdgeRow = Readonly<{
-  edgeKind: string;
-  cardinality: Exclude<Cardinality, "many">;
-  edgeId: string;
-  fromKind: string;
-  fromId: string;
-  toKind: string;
-  toId: string;
-}>;
+export type ContendedEdgeRow = EdgeCardinalityAxisRef &
+  Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+  }>;
 
 /** One node id live under BOTH kinds of a declared disjoint pair. */
 export type DisjointOverlapRow = Readonly<{
@@ -4258,13 +4269,28 @@ export type SetActiveVersionParams = Readonly<{
 }>;
 
 /**
- * Parameters for counting edges from a source node.
+ * Parameters for counting edges at one endpoint.
+ *
+ * One member and one statement answer both the source-side and target-side
+ * count rather than a mirrored `countEdgesTo` — two members with two SQL
+ * builders, two cache keys and two liveness spellings that would drift.
+ * `endpoint` selects which column pair (`fromKind`/`fromId` or
+ * `toKind`/`toId`) the predicate reads.
  */
-export type CountEdgesFromParams = Readonly<{
+export type CountEdgesAtEndpointParams = Readonly<{
   graphId: string;
   edgeKind: string;
-  fromKind: string;
-  fromId: string;
+  /** Which endpoint column pair the predicate reads. */
+  endpoint: "from" | "to";
+  /**
+   * Deliberately not `kind` / `id`: those names, on a shape this narrow,
+   * would structurally satisfy {@link DeleteEdgeParams} /
+   * {@link HardDeleteEdgeParams} (`{graphId, id, kind?}`) and silently
+   * conscript this READ into `write-surface.ts`'s derived graph-entity WRITE
+   * surface.
+   */
+  endpointKind: string;
+  endpointId: string;
   /** If true, only count edges where valid_to IS NULL */
   activeOnly?: boolean;
 }>;

@@ -319,6 +319,7 @@ export type {
   NodeProps,
   NodeRegistration,
   NodeType,
+  TargetCardinality,
   TemporalMode,
   UniqueConstraint,
   UniquenessScope,
@@ -621,6 +622,11 @@ export type {
   OntologyDataProbe,
   UniquenessComponentProbeGroup,
 } from "./schema";
+// The axes a schema commit's edge-cardinality tightening owes, for a
+// consumer narrowing `MigrationErrorDetails` on
+// `reason: "edge-cardinality-tightening-violated"` — same reasoning as the
+// ontology probe types above. Also available from the "./backend" subpath.
+export type { EdgeCardinalityDeclaration } from "./backend/types";
 export type {
   AlgorithmCyclePolicy,
   BaseTraversalOptions,

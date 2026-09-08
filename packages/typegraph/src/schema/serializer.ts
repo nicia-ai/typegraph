@@ -509,6 +509,7 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     ...(targetKindsBySource === undefined ? {} : { targetKindsBySource }),
     properties: serializeZodSchema(edge.schema),
     cardinality: registration.cardinality ?? "many",
+    targetCardinality: registration.targetCardinality ?? "many",
     endpointExistence: registration.endpointExistence ?? "notDeleted",
     ...(registration.matchIdentity === undefined ?
       {}

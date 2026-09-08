@@ -66,7 +66,7 @@ function ordinaryEdgeCreatePlan(
     plan: {
       entity: "edge",
       params,
-      cardinalityClaim: claim,
+      cardinalityClaims: [claim],
     },
   };
 }
@@ -152,6 +152,7 @@ describe("guarded edge cardinality claim", () => {
     } as const;
     const claim = {
       graphId: graph.id,
+      direction: "source" as const,
       cardinality: "one" as const,
       edgeKind: "one",
       edgeId: params.id,
@@ -169,7 +170,7 @@ describe("guarded edge cardinality claim", () => {
             entity: "edge",
             params,
             schemaFence: { graphId: graph.id, expectedVersion: 1 },
-            cardinalityClaim: claim,
+            cardinalityClaims: [claim],
           },
         },
         graphCommandExecutionContext("transaction"),
@@ -232,7 +233,7 @@ describe("guarded edge cardinality claim", () => {
                   execute(plan) {
                     if (
                       plan.kind === "edge.create" &&
-                      plan.plan.cardinalityClaim !== undefined
+                      (plan.plan.cardinalityClaims ?? []).length > 0
                     ) {
                       return Promise.resolve({
                         outcome: "unsupported" as const,
@@ -296,7 +297,7 @@ describe("guarded edge cardinality claim", () => {
                   execute(command, context) {
                     if (
                       command.kind === "edge.create" &&
-                      command.plan.cardinalityClaim !== undefined
+                      (command.plan.cardinalityClaims ?? []).length > 0
                     ) {
                       return Promise.resolve({
                         outcome: "unsupported" as const,
@@ -332,6 +333,7 @@ describe("guarded edge cardinality claim", () => {
     const to = await fixture.store.nodes.Person.create({ name: "to" });
     const claim = {
       graphId: graph.id,
+      direction: "source" as const,
       cardinality: "one" as const,
       edgeKind: "one",
       edgeId: "planned-outcome",
@@ -472,6 +474,7 @@ describe("guarded edge cardinality claim", () => {
 
     await claim({
       graphId: graph.id,
+      direction: "source",
       cardinality: "one",
       edgeKind: "one",
       edgeId: "stale-holder",
@@ -529,6 +532,7 @@ describe("guarded edge cardinality claim", () => {
             },
             {
               graphId: graph.id,
+              direction: "source",
               cardinality: "one",
               edgeKind: "one",
               edgeId: "duplicate-edge-id",
@@ -573,6 +577,7 @@ describe("guarded edge cardinality claim", () => {
             },
             {
               graphId: graph.id,
+              direction: "source",
               cardinality: "one",
               edgeKind: "one",
               edgeId: "different-edge-id",
@@ -728,6 +733,7 @@ describe("guarded edge cardinality claim", () => {
 
       await backend.claimEdgeCardinality?.({
         graphId: graph.id,
+        direction: "source",
         cardinality: "one",
         edgeKind: "one",
         edgeId: "missing-stale-holder",
