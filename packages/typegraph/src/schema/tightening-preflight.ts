@@ -20,7 +20,10 @@ import { type SchemaCommitPreflightBackend } from "../backend/types";
 import { MigrationError } from "../errors";
 import { createSqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
-import { readEdgeAcyclicityViolations } from "../store/acyclicity";
+import {
+  readEdgeAcyclicityViolations,
+  standaloneAcyclicRelation,
+} from "../store/acyclicity";
 import {
   auditConstraintFences,
   type ConstraintFenceViolation,
@@ -317,10 +320,9 @@ export function prepareSchemaTighteningPreflight(
             target,
             operation: "schema-commit:acyclic-tightening",
           },
-          grouped.acyclicity.edgeKinds.map((edgeKind) => ({
-            name: edgeKind,
-            members: [{ edgeKind, reversed: false }],
-          })),
+          grouped.acyclicity.edgeKinds.map((edgeKind) =>
+            standaloneAcyclicRelation(edgeKind),
+          ),
         )
       );
 

@@ -142,6 +142,7 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import {
   assertEdgeRelationsAcyclic,
+  edgeKindIsInAcyclicRelation,
   type ProposedRelationEdge,
 } from "../acyclicity";
 import { compareClaimTargets } from "../claims/axis";
@@ -604,16 +605,17 @@ function edgeCardinalityDeclarations<G extends GraphDef>(
 }
 
 /**
- * Whether this edge kind declares `acyclic: true`. A kind this graph does
- * not define answers `false`, matching {@link edgeCardinality}'s unknown-kind
- * default.
+ * Whether this edge kind participates in an acyclic relation. A kind this
+ * graph does not define answers `false`, matching {@link edgeCardinality}'s
+ * unknown-kind default. Delegates to
+ * {@link file://../acyclicity.ts edgeKindIsInAcyclicRelation}, the one owner
+ * of this decision, rather than re-reading `registration.acyclic` here.
  */
 function edgeAcyclic<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   kind: string,
 ): boolean {
-  if (!hasOwnKey(ctx.graph.edges, kind)) return false;
-  return getEdgeRegistration(ctx.graph, kind).acyclic === true;
+  return edgeKindIsInAcyclicRelation(ctx.graph, kind);
 }
 
 /**

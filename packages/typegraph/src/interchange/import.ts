@@ -108,7 +108,10 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { type DialectAdapter } from "../query/dialect/types";
 import { type KindRegistry } from "../registry/kind-registry";
-import { assertEdgeRelationsAcyclic } from "../store/acyclicity";
+import {
+  assertEdgeRelationsAcyclic,
+  edgeKindIsInAcyclicRelation,
+} from "../store/acyclicity";
 import {
   edgeCardinalityAxisReferences,
   edgeCardinalityClaims,
@@ -3036,7 +3039,7 @@ async function processEdgeSlice(
     // ids already use (`deferred`, processed via `processEdge` below),
     // where the row lands inside the transaction before the next row's
     // probe runs and the database itself carries the in-batch state.
-    if (edgeSchemas.get(edge.kind)?.registration.acyclic === true) {
+    if (edgeKindIsInAcyclicRelation(frame.graph, edge.kind)) {
       deferred.push(edge);
       continue;
     }
@@ -3417,7 +3420,7 @@ async function processEdge(
       const row = await frame.session.createEdge(
         importEdgeInsertWork(params, declarations),
       );
-      if (schemaEntry.registration.acyclic === true) {
+      if (edgeKindIsInAcyclicRelation(frame.graph, edge.kind)) {
         await assertEdgeRelationsAcyclic(
           {
             graphId,

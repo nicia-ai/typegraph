@@ -11,6 +11,7 @@ import { resolveGraphVectorSlots } from "../core/embedding";
 import { getSearchableFields } from "../core/searchable";
 import type { EdgeRegistration } from "../core/types";
 import { TrustedImportError } from "../errors";
+import { acyclicEdgeKinds } from "../store/acyclicity";
 import { edgeCardinalityAxisReferences } from "../store/claims/edge-claims";
 import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import { storeBackend } from "../store/runtime-port";
@@ -98,14 +99,12 @@ function rejectUnsupportedStoreFeatures<G extends GraphDef>(
     );
   }
 
-  const acyclicEdgeKinds = Object.entries(store.graph.edges)
-    .filter(([, registration]) => registration.acyclic === true)
-    .map(([edgeKind]) => edgeKind);
-  if (acyclicEdgeKinds.length > 0) {
+  const acyclicKinds = acyclicEdgeKinds(store.graph);
+  if (acyclicKinds.length > 0) {
     throw new TrustedImportError(
       "Trusted import does not enforce edge acyclicity: it holds one transaction for the whole stream, validates nothing by contract, and has no per-row point to probe the relation at.",
       "acyclicity_unsupported",
-      { graphId: store.graphId, edgeKinds: acyclicEdgeKinds },
+      { graphId: store.graphId, edgeKinds: acyclicKinds },
     );
   }
 

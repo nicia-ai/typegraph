@@ -28,6 +28,7 @@ import type { GraphDef } from "../../core/define-graph";
 import { DatabaseOperationError } from "../../errors";
 import type { KindRegistry } from "../../registry/kind-registry";
 import { hasOwnKey } from "../../utils/object";
+import { edgeKindIsInAcyclicRelation } from "../acyclicity";
 import { edgeCardinalityAxisReferences } from "../claims/edge-claims";
 import { edgeWriteNeedsConstraintFence } from "../constraints";
 import { getEmbeddingFields } from "../embedding-sync";
@@ -242,7 +243,14 @@ export function resolveAtomicEdgeConvergenceExecutor(
   }
   // No native program applies a constrained cardinality axis or acyclicity;
   // such a create must re-enter the portable path, which probes and refuses.
-  if (edgeWriteNeedsConstraintFence(registration) !== undefined) return;
+  if (
+    edgeWriteNeedsConstraintFence({
+      ...registration,
+      acyclic: edgeKindIsInAcyclicRelation(input.graph, input.kind),
+    }) !== undefined
+  ) {
+    return;
+  }
   const declaredFields = registration.matchIdentity.fields;
   if (
     declaredFields.length !== input.matchOn.length ||
@@ -278,7 +286,7 @@ export function resolveAtomicEdgeBatchExecutor(
         // rows cannot express. Any acyclic kind in the batch sends the WHOLE
         // batch through the portable path, which probes the combined insert
         // once, after it lands.
-        input.graph.edges[item.kind]?.acyclic !== true,
+        !edgeKindIsInAcyclicRelation(input.graph, item.kind),
     )
   ) {
     return;
@@ -413,7 +421,10 @@ function isAtomicResolvedEdgeKindEligible(
     // No native program applies a constrained cardinality axis or
     // acyclicity; such a create must re-enter the portable path, which
     // probes and refuses.
-    edgeWriteNeedsConstraintFence(registration) === undefined &&
+    edgeWriteNeedsConstraintFence({
+      ...registration,
+      acyclic: edgeKindIsInAcyclicRelation(input.graph, input.kind),
+    }) === undefined &&
     registration.matchIdentity === undefined
   );
 }

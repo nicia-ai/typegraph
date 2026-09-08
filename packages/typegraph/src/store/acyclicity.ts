@@ -64,20 +64,47 @@ export type AcyclicEdgeRelation = Readonly<{
 }>;
 
 /**
+ * A standalone `acyclic: true` registration's own relation (D.2): the edge
+ * kind IS the relation, named after itself, with one `reversed: false`
+ * member. The one constructor for this shape, so a caller that reasons over
+ * a proposed edge kind rather than a runtime {@link GraphDef} — the
+ * schema-tightening preflight, grouping a tightening's newly-declared edge
+ * kinds — builds the identical shape {@link acyclicEdgeRelations} does,
+ * rather than hand-spelling the member literal a second time.
+ */
+export function standaloneAcyclicRelation(
+  edgeKind: string,
+): AcyclicEdgeRelation {
+  return { name: edgeKind, members: [{ edgeKind, reversed: false }] };
+}
+
+const acyclicEdgeRelationsCache = new WeakMap<
+  GraphDef,
+  readonly AcyclicEdgeRelation[]
+>();
+
+/**
  * Every acyclic relation this graph declares, in code-point order by name.
  * In D.2 each `acyclic: true` edge kind is its own relation, named after
  * itself, with one `reversed: false` member.
+ *
+ * Memoized per `GraphDef` object identity: {@link assertEdgeRelationsAcyclic}
+ * calls {@link acyclicRelationForEdgeKind} (which reads this) once per
+ * proposed edge, and a `GraphDef` never changes its edge registrations after
+ * `defineGraph` returns it, so rebuilding and re-sorting this list per row of
+ * a large batch would be pure waste.
  */
 export function acyclicEdgeRelations(
   graph: GraphDef,
 ): readonly AcyclicEdgeRelation[] {
-  return Object.entries(graph.edges)
+  const cached = acyclicEdgeRelationsCache.get(graph);
+  if (cached !== undefined) return cached;
+  const relations = Object.entries(graph.edges)
     .filter(([, registration]) => registration.acyclic === true)
-    .map(([edgeKind]): AcyclicEdgeRelation => ({
-      name: edgeKind,
-      members: [{ edgeKind, reversed: false }],
-    }))
+    .map(([edgeKind]) => standaloneAcyclicRelation(edgeKind))
     .toSorted((left, right) => compareStrings(left.name, right.name));
+  acyclicEdgeRelationsCache.set(graph, relations);
+  return relations;
 }
 
 /** The relation an edge of this kind belongs to, or `undefined`. */
@@ -88,6 +115,40 @@ export function acyclicRelationForEdgeKind(
   return acyclicEdgeRelations(graph).find((relation) =>
     relation.members.some((member) => member.edgeKind === edgeKind),
   );
+}
+
+/**
+ * Every edge kind that participates in ANY acyclic relation, in code-point
+ * order. A projection of {@link acyclicEdgeRelations} for callers that need
+ * the flat kind list (a trusted-import capability refusal, an import-time
+ * batching decision over more than one candidate edge) rather than the
+ * relation structure itself — reading it through this function rather than
+ * re-filtering `graph.edges` keeps them from drifting once a relation can
+ * have more than one member (item E).
+ */
+export function acyclicEdgeKinds(graph: GraphDef): readonly string[] {
+  return acyclicEdgeRelations(graph).flatMap((relation) =>
+    relation.members.map((member) => member.edgeKind),
+  );
+}
+
+/**
+ * Whether this edge kind participates in ANY acyclic relation. THE predicate
+ * every write-eligibility, fused-command, or import-batching decision must
+ * consult instead of re-reading `registration.acyclic === true` directly
+ * (AGENTS.md "one predicate, one owner": a second inline spelling of an
+ * existing decision drifts even while the copies still agree). Today this is
+ * exactly `registration.acyclic === true`, because D.2's relations are all
+ * standalone singletons — but once item E composes oriented unions, a member
+ * edge kind may carry `acyclic` false (or nothing) on its OWN registration
+ * while still belonging to a composed relation, and every call site routed
+ * through this function keeps answering correctly with no change of its own.
+ */
+export function edgeKindIsInAcyclicRelation(
+  graph: GraphDef,
+  edgeKind: string,
+): boolean {
+  return acyclicRelationForEdgeKind(graph, edgeKind) !== undefined;
 }
 
 /** An edge a writer proposes to have in the relation when the frame commits. */
