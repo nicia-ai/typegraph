@@ -9,7 +9,7 @@
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -31,6 +31,7 @@ import {
 } from "../src/query/compiler/schema";
 import { getDialect, sqliteDialect } from "../src/query/dialect";
 import { renderSqlite } from "../src/query/sql-fragment";
+import * as acyclicityModule from "../src/store/acyclicity";
 import {
   type AcyclicEdgeRelation,
   acyclicEdgeRelations,
@@ -47,13 +48,21 @@ import {
 import { createTestBackend, matchingObject } from "./test-utils";
 
 const Task = defineNode("Task", { schema: z.object({ name: z.string() }) });
+// A second node kind exists solely so the mixed-orientation relation test
+// below can put a real Task/Milestone split on `blockedBy`'s endpoints — see
+// D2-07 / D2R2-03: with a single node kind, the reversed member's from_kind
+// and to_kind columns are both the literal "Task", so a CASE-arm swap on the
+// projected kind columns is invisible.
+const Milestone = defineNode("Milestone", {
+  schema: z.object({ name: z.string() }),
+});
 const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
 const blockedBy = defineEdge("blockedBy", { schema: z.object({}) });
 const plainMany = defineEdge("plainMany", { schema: z.object({}) });
 
 const graph = defineGraph({
   id: "unit_acyclicity",
-  nodes: { Task: { type: Task } },
+  nodes: { Task: { type: Task }, Milestone: { type: Milestone } },
   edges: {
     dependsOn: {
       type: dependsOn,
@@ -62,7 +71,12 @@ const graph = defineGraph({
       cardinality: "many",
       acyclic: true,
     },
-    blockedBy: { type: blockedBy, from: [Task], to: [Task], acyclic: true },
+    blockedBy: {
+      type: blockedBy,
+      from: [Task],
+      to: [Task, Milestone],
+      acyclic: true,
+    },
     plainMany: { type: plainMany, from: [Task], to: [Task] },
   },
 });
@@ -83,6 +97,51 @@ describe("acyclicEdgeRelations / acyclicRelationForEdgeKind", () => {
 
   it("answers undefined for a non-acyclic edge kind", () => {
     expect(acyclicRelationForEdgeKind(graph, "plainMany")).toBeUndefined();
+  });
+});
+
+// D2R2-01: the single-create acyclicity gate must route through
+// `edgeKindIsInAcyclicRelation` (the one owner, per `edgeAcyclic` in
+// edge-operations.ts), not re-read `registration.acyclic === true` directly.
+// Item E's composed relations will make a member kind participate in an
+// acyclic relation while its OWN registration carries no `acyclic` key
+// (D-10); until item E ships there is no way to produce that shape through
+// `defineGraph`, so this test simulates it exactly as the review that caught
+// this did: by making the shared predicate answer `true` for a plain edge
+// kind, the same thing a composed relation will do for real. It spies on
+// `assertEdgeRelationsAcyclic` itself (rather than letting it run for real)
+// because that function's own relation lookup is an intra-module call that
+// a spy on the module's exports cannot intercept — the point here is
+// narrower and precise: does the single-create path even REACH the probe.
+describe("single-create acyclicity gate: routes through the one-owner predicate (D2R2-01)", () => {
+  it("calls assertEdgeRelationsAcyclic for a kind whose own registration has no acyclic flag, once the shared predicate says it is in a relation", async () => {
+    const backend = createTestBackend();
+    const store = createStore(graph, backend);
+    const a = await store.nodes.Task.create({ name: "a" });
+    const b = await store.nodes.Task.create({ name: "b" });
+
+    // `plainMany` declares no `acyclic` key at all (see the graph fixture
+    // above) — exactly the composed-member shape D-10 describes.
+    expect(acyclicRelationForEdgeKind(graph, "plainMany")).toBeUndefined();
+
+    const isInAcyclicRelationSpy = vi
+      .spyOn(acyclicityModule, "edgeKindIsInAcyclicRelation")
+      .mockImplementation((_graph, edgeKind) => edgeKind === "plainMany");
+    const assertAcyclicSpy = vi
+      .spyOn(acyclicityModule, "assertEdgeRelationsAcyclic")
+      .mockResolvedValue(undefined);
+
+    try {
+      await store.edges.plainMany.create(a, b);
+      expect(assertAcyclicSpy).toHaveBeenCalledTimes(1);
+      const proposed = assertAcyclicSpy.mock.calls[0]?.[1];
+      expect(proposed).toEqual([
+        expect.objectContaining({ edgeKind: "plainMany" }),
+      ]);
+    } finally {
+      isInAcyclicRelationSpy.mockRestore();
+      assertAcyclicSpy.mockRestore();
+    }
   });
 });
 
@@ -258,6 +317,33 @@ function backendWhoseExecuteThrows(code: unknown): GraphBackend {
   });
 }
 
+/**
+ * A backend whose `execute` throws the shape a real Drizzle-wrapped driver
+ * failure has (D2R2-04): the top-level error's `.message` is the query text
+ * and carries no `code`, and the real driver error — carrying `code` — sits
+ * one `.cause` link down, exactly how `DrizzleQueryError` wraps node-postgres
+ * / postgres-js (see `src/utils/sql-errors.ts`'s `errorChain` doc comment).
+ * `backendWhoseExecuteThrows` puts `code` on the top-level error instead,
+ * which never exercises the chain walk `isStatementCutShortError` exists
+ * for.
+ */
+function backendWhoseExecuteThrowsNestedCause(code: unknown): GraphBackend {
+  const base = createTestBackend();
+  return deriveBackend(base, {
+    execute: () => {
+      const driverError = Object.assign(
+        new Error(`driver error: ${String(code)}`),
+        {
+          code,
+        },
+      );
+      throw new Error("Failed query: simulated statement failure", {
+        cause: driverError,
+      });
+    },
+  });
+}
+
 function acyclicityContext(backend: GraphBackend) {
   return {
     graphId: graph.id,
@@ -298,6 +384,13 @@ describe("engine cut-short mid-probe: EdgeAcyclicityIndeterminateError vs a prop
       ).rejects.toThrow(EdgeAcyclicityIndeterminateError);
     });
   }
+
+  it("reports EdgeAcyclicityIndeterminateError when the cut-short code sits one `.cause` link down (Drizzle-wrapped shape, D2R2-04)", async () => {
+    const backend = backendWhoseExecuteThrowsNestedCause("57014");
+    await expect(
+      assertEdgeRelationsAcyclic(acyclicityContext(backend), [PROPOSED_EDGE]),
+    ).rejects.toThrow(EdgeAcyclicityIndeterminateError);
+  });
 
   it("propagates an unrecognized error code unchanged rather than reporting 'no cycle'", async () => {
     const backend = backendWhoseExecuteThrows("42P01");
@@ -405,7 +498,10 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
     const store = createStore(graph, backend);
     const a = await store.nodes.Task.create({ name: "a" });
     const b = await store.nodes.Task.create({ name: "b" });
-    const c = await store.nodes.Task.create({ name: "c" });
+    // `c` is deliberately the OTHER node kind: with every node the same kind,
+    // a from_kind/to_kind CASE-arm swap on the reversed member is invisible
+    // (both columns read "Task" either way) — see D2-07 / D2R2-03.
+    const c = await store.nodes.Milestone.create({ name: "c" });
 
     // Given `blockedBy` is the RELATION's reversed member, these two stored
     // rows compose the relation-direction graph  c -> a -> b  (not a cycle):
@@ -427,7 +523,7 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
       kind: "blockedBy",
       fromKind: "Task",
       fromId: a.id,
-      toKind: "Task",
+      toKind: "Milestone",
       toId: c.id,
       props: {},
     });
@@ -453,7 +549,7 @@ describe("buildEdgeAcyclicityProbe / readEdgeAcyclicityViolations: a mixed-orien
       kind: "dependsOn",
       fromKind: "Task",
       fromId: b.id,
-      toKind: "Task",
+      toKind: "Milestone",
       toId: c.id,
       props: {},
     });

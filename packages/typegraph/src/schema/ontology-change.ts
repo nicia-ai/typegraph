@@ -754,7 +754,7 @@ function groupKey(group: UniquenessComponentProbeGroup): string {
  * unconditionally.
  *
  * Deterministic order: `nodeDisjointness`, `nodeUniquenessComponent`, then
- * `edgeEndpointAssignability`.
+ * `edgeEndpointAssignability`, then `edgeAcyclicity`.
  */
 export function ontologyTighteningProbes(
   changes: readonly OntologyChange[],

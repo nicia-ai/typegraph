@@ -494,8 +494,11 @@ async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   // cardinality, acyclicity has no database key that could back it
   // (`CONSTRAINT_FENCE_BACKING.edgeAcyclicity === "lockOnly"`), so a
   // guarded-claim or durable-identity create that skips the cardinality
-  // READ still owes this probe when the kind declares `acyclic: true`.
-  if ((options?.validateAcyclicity ?? true) && registration.acyclic === true) {
+  // READ still owes this probe when the kind participates in an acyclic
+  // relation (`edgeAcyclic`, the one owner of this decision — not this
+  // registration's own `acyclic` key, which a composed member can lack
+  // while still belonging to the relation).
+  if ((options?.validateAcyclicity ?? true) && edgeAcyclic(ctx, kind)) {
     const lock = requireDefined(
       options?.lock,
       "an acyclic edge create reached validateAndPrepareEdgeCreate with no write lock",
