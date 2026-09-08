@@ -36,7 +36,7 @@ import { claimSupport } from "./backing";
 export type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
 /** A target-side cardinality that declares something. */
-export type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
+type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
 
 /** Which endpoint's population a declared cardinality bounds. */
 export type EdgeCardinalityDirection = "source" | "target";
@@ -108,7 +108,7 @@ export type EdgeCardinalitySpec = Readonly<{
  * shape where the probe accepts a write the fence then refuses forever (or
  * the reverse).
  */
-export const EDGE_CARDINALITY_SPECS = {
+const EDGE_CARDINALITY_SPECS = {
   "source:one": {
     keyShape: "from",
     claimsWhenBornEnded: true,
@@ -452,7 +452,7 @@ export function edgeCardinalityClaimMode(
  * declared gap with a parity-matrix row, never a silent unfencing and never a
  * new refusal.
  */
-export async function claimEdgeCardinality(
+async function claimEdgeCardinality(
   backend: ClaimTargetMembers,
   verdict: BundleVerdictOf<typeof CLAIMS>,
   claim: ClaimEdgeCardinalityParams,
