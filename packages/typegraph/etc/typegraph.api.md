@@ -114,8 +114,14 @@ export type AggregateResult<R extends Record<string, FieldRef | AggregateExpr>> 
 // @public
 export type AlgorithmCyclePolicy = RecursiveCyclePolicy;
 
+// @public (undocumented)
+type AliasExpansionAxis = "exact" | "subClasses" | "narrower";
+
 // @public
 export type AliasMap = Readonly<Record<string, NodeAlias<NodeType, boolean>>>;
+
+// @public
+type AliasNodeType<G extends GraphDef, K extends string> = SubsumptionAffected<G, K> extends true ? PolymorphicNodeType<G["nodes"][K]["type"]> : G["nodes"][K]["type"];
 
 // @public (undocumented)
 const ALL_META_EDGE_NAMES: readonly ["subClassOf", "broader", "narrower", "relatedTo", "equivalentTo", "sameAs", "differentFrom", "disjointWith", "partOf", "hasPart", "inverseOf", "implies"];
@@ -296,6 +302,7 @@ export type BaseStoreOptions = Readonly<{
     schema?: SqlSchema;
     queryDefaults?: Readonly<{
         traversalExpansion?: TraversalExpansion;
+        includeSubClasses?: boolean;
     }>;
 }>;
 
@@ -1335,6 +1342,7 @@ type CreateQueryBuilderOptions = Readonly<{
     dialect?: SqlDialect;
     schema?: SqlSchema;
     defaultTraversalExpansion?: TraversalExpansion;
+    defaultIncludeSubClasses?: boolean;
     identityEnabled?: boolean;
     identitySameIdAcrossKinds?: "fold" | "ignore";
 }>;
@@ -2483,7 +2491,20 @@ export type EndpointPairErrorDetails = Readonly<{
 export const ENTITY_ALREADY_EXISTS_CODE = "ENTITY_ALREADY_EXISTS";
 
 // @public
-export function equivalentTo(kindA: NodeType | AnyEdgeType, kindBOrIri: NodeType | string): OntologyRelation;
+export function equivalentTo<A extends NodeType, B extends NodeType>(kindA: A, kindB: B & EquivalentToCheck<A, B>): TypedOntologyRelation<typeof META_EDGE_EQUIVALENT_TO, A, B>;
+
+// @public (undocumented)
+export function equivalentTo(kindA: NodeType | AnyEdgeType, kindBOrIri: string): OntologyRelation;
+
+// @public (undocumented)
+export function equivalentTo(kindA: AnyEdgeType, kindB: NodeType): OntologyRelation;
+
+// @public
+type EquivalentToCheck<A extends NodeType, B extends NodeType> = [
+IncompatibleKeys<NodeProps<A>, NodeProps<B>>
+] extends [never] ? [
+IncompatibleKeys<NodeProps<B>, NodeProps<A>>
+] extends [never] ? unknown : StructuralSubtypeMismatch<B["kind"], A["kind"], IncompatibleKeys<NodeProps<B>, NodeProps<A>>> : StructuralSubtypeMismatch<A["kind"], B["kind"], IncompatibleKeys<NodeProps<A>, NodeProps<B>>>;
 
 // @public
 export type ErrorCategory = "user" | "constraint" | "system";
@@ -3935,6 +3956,13 @@ export class IncompatibleChangeError extends GraphExtensionError {
 type IncompatibleChangeType = (typeof INCOMPATIBLE_CHANGE_TYPES)[number];
 
 // @public
+type IncompatibleKeys<Child, Parent> = {
+    [K in LiteralKeysOf<Parent>]-?: K extends keyof Child ? [
+    Child[K]
+    ] extends [Parent[K]] ? never : K : undefined extends Parent[K] ? never : K;
+}[LiteralKeysOf<Parent>] & string;
+
+// @public
 type IndexChange = Readonly<{
     type: ChangeType;
     name: string;
@@ -4562,6 +4590,11 @@ export const libsqlVectorStrategy: VectorStrategy;
 export function limitFragment<G extends GraphDef>(n: number): FlexibleQueryFragment<G>;
 
 // @public
+type LiteralKeysOf<T> = {
+    [K in keyof T]-?: string extends K ? never : K;
+}[keyof T] & string;
+
+// @public
 type LiteralValue = Readonly<{
     __type: "literal";
     value: string | number | boolean;
@@ -4710,6 +4743,15 @@ export type MeasurableTransactionContext<G extends GraphDef> = TransactionContex
 
 // @public
 const META_EDGE_BRAND: "__metaEdge";
+
+// @public
+const META_EDGE_EQUIVALENT_TO: "equivalentTo";
+
+// @public
+const META_EDGE_SAME_AS: "sameAs";
+
+// @public
+const META_EDGE_SUB_CLASS_OF: "subClassOf";
 
 // @public
 export type MetaEdge<K extends string = string> = Readonly<{
@@ -5532,6 +5574,11 @@ type PointerSegmentsForObject<T, Current extends Depth> = {
     [K in ObjectPointerKey<T>]: readonly [K] | (Current extends 1 ? readonly [K] : readonly [K, ...JsonPointerSegmentsFor<T[K], Decrement<Current>>]);
 }[ObjectPointerKey<T>];
 
+// @public
+type PolymorphicNodeType<N extends NodeType> = Omit<N, "kind"> & Readonly<{
+    kind: string;
+}>;
+
 // @public (undocumented)
 export type PopulatedSchemaKind = SchemaKindEmptinessProbe & Readonly<{
     count: number;
@@ -5639,16 +5686,36 @@ type QueryAst = Readonly<{
 export class QueryBuilder<G extends GraphDef, Aliases extends AliasMap = EmptyAliasMap, EdgeAliases extends EdgeAliasMap = EmptyEdgeAliasMap, RecursiveAliases extends RecursiveAliasMap = EmptyRecursiveAliasMap, CoordinateState extends QueryCoordinateState = "open"> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState);
     aggregate<R extends Record<string, FieldRef | AggregateExpr>>(fields: R): ExecutableAggregateQuery<G, Aliases, R>;
-    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options?: {
-        includeSubClasses?: false;
+    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>): QueryBuilder<G, Aliases & Record<A, NodeAlias<AliasNodeType<G, K>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
+    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
+        includeSubClasses: false;
+        includeNarrower?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<G["nodes"][K]["type"]>>, EdgeAliases, RecursiveAliases, CoordinateState>;
     // (undocumented)
     from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
         includeSubClasses: true;
+        includeNarrower?: false;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
+    from<K extends keyof G["nodes"] & string, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
+        includeNarrower: true;
+        includeSubClasses?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
-    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
-        includeSubClasses?: boolean;
+    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
+        includeSubClasses: false;
+        includeNarrower?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
+    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
+        includeSubClasses?: true;
+        includeNarrower?: false;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>>>, EdgeAliases, RecursiveAliases, CoordinateState>;
+    // (undocumented)
+    fromDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
+        includeNarrower: true;
+        includeSubClasses?: false;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias>, EdgeAliases, RecursiveAliases, CoordinateState>;
     fuseWith(options: HybridFusionOptions): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     groupBy<A extends keyof Aliases & string>(alias: A, field: string): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
     groupByNode<A extends keyof Aliases & string>(alias: A): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState>;
@@ -5701,6 +5768,7 @@ type QueryBuilderConfig = Readonly<{
     registry: KindRegistry;
     schemaIntrospector: SchemaIntrospector;
     defaultTraversalExpansion: TraversalExpansion;
+    defaultIncludeSubClasses: boolean;
     identityEnabled: boolean;
     identitySameIdAcrossKinds: "fold" | "ignore";
     backend?: GraphBackend;
@@ -5713,7 +5781,7 @@ type QueryBuilderState = Readonly<{
     startAlias: string;
     startKinds: readonly string[];
     currentAlias: string;
-    includeSubClasses: boolean;
+    startExpansion: AliasExpansionAxis;
     traversals: readonly Traversal[];
     predicates: readonly NodePredicate[];
     projection: readonly ProjectedField[];
@@ -5756,7 +5824,7 @@ export type QueryOptions = NoRecordedCoordinate & Readonly<{
 type QueryStart = Readonly<{
     alias: string;
     kinds: readonly string[];
-    includeSubClasses: boolean;
+    expansion: AliasExpansionAxis;
 }>;
 
 // @public (undocumented)
@@ -6318,8 +6386,11 @@ export type RuntimeNodeReferenceFor<T extends RuntimeNodeKind> = T extends Runti
 // @public
 export type RuntimeNodeTypeFor<T extends RuntimeNodeKind> = T extends RuntimeNodeKind<infer K, infer S> ? NodeType<K, S> : never;
 
-// @public @deprecated
-export function sameAs(kindA: NodeType, kindBOrIri: NodeType | string): OntologyRelation;
+// @public @deprecated (undocumented)
+export function sameAs<A extends NodeType, B extends NodeType>(kindA: A, kindB: B & EquivalentToCheck<A, B>): TypedOntologyRelation<typeof META_EDGE_SAME_AS, A, B>;
+
+// @public @deprecated (undocumented)
+export function sameAs(kindA: NodeType, kindBOrIri: string): OntologyRelation;
 
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
@@ -7443,7 +7514,19 @@ type StringPredicate = Readonly<{
 }>;
 
 // @public
-export function subClassOf(child: NodeType, parent: NodeType): OntologyRelation;
+type StructuralSubtypeMismatch<ChildKind extends string, ParentKind extends string, Fields extends string> = Readonly<{
+    __typegraphSubClassOfError: `subClassOf(${ChildKind}, ${ParentKind}): the child's schema must extend the parent's`;
+    missingOrIncompatibleProperties: Fields;
+    fix: "Give the child these properties with compatible types, or declare broader(child, parent) instead.";
+}>;
+
+// @public
+export function subClassOf<C extends NodeType, P extends NodeType>(child: C, parent: P & SubClassOfCheck<C, P>): TypedOntologyRelation<typeof META_EDGE_SUB_CLASS_OF, C, P>;
+
+// @public
+type SubClassOfCheck<C extends NodeType, P extends NodeType> = [
+IncompatibleKeys<NodeProps<C>, NodeProps<P>>
+] extends [never] ? unknown : StructuralSubtypeMismatch<C["kind"], P["kind"], IncompatibleKeys<NodeProps<C>, NodeProps<P>>>;
 
 // @public (undocumented)
 type SubgraphEdgeProjectionField<E extends AnyEdgeType = AnyEdgeType> = EdgeProjectionPropertyKey<E> | "meta";
@@ -7514,6 +7597,32 @@ export type SubsetEdge<G extends GraphDef, K extends EdgeKinds<G>> = {
 export type SubsetNode<G extends GraphDef, K extends NodeKinds<G>> = {
     [Kind in K]: Node<G["nodes"][Kind]["type"]>;
 }[K];
+
+// @public
+type SubsumptionAffected<G extends GraphDef, K extends string> = [
+Extract<G["ontology"][number], {
+    metaEdge: {
+        name: "subClassOf";
+    };
+    to: {
+        kind: K;
+    };
+} | {
+    metaEdge: {
+        name: "equivalentTo" | "sameAs";
+    };
+    from: {
+        kind: K;
+    };
+} | {
+    metaEdge: {
+        name: "equivalentTo" | "sameAs";
+    };
+    to: {
+        kind: K;
+    };
+}>
+] extends [never] ? false : true;
 
 // @public
 export function sum(alias: string, field: string): AggregateExpr;
@@ -7699,16 +7808,36 @@ class TraversalBuilder<G extends GraphDef, Aliases extends AliasMap, EdgeAliases
     } ? D : DC, O extends {
         path: infer P extends boolean | string;
     } ? P : PC, RecAliases, CoordinateState, ET>;
-    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options?: {
-        includeSubClasses?: false;
+    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>): QueryBuilder<G, Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    // (undocumented)
+    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
+        includeSubClasses: false;
+        includeNarrower?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     // (undocumented)
     to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
         includeSubClasses: true;
+        includeNarrower?: false;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    // (undocumented)
+    to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(kind: K, alias: UniqueAlias<A, Aliases>, options: {
+        includeNarrower: true;
+        includeSubClasses?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
-    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
-        includeSubClasses?: boolean;
+    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
+        includeSubClasses: false;
+        includeNarrower?: false;
     }): QueryBuilder<G, Aliases & Record<A, NodeAlias<DynamicNodeTypeFor$1<T>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    // (undocumented)
+    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options?: {
+        includeSubClasses?: true;
+        includeNarrower?: false;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor$1<T>>, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
+    // (undocumented)
+    toDynamic<T extends string | RuntimeNodeKind, A extends string>(kind: T, alias: UniqueAlias<A, Aliases>, options: {
+        includeNarrower: true;
+        includeSubClasses?: false;
+    }): QueryBuilder<G, Aliases & Record<A, NodeAlias<NodeType, Optional>>, EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>, RecAliases & BuildRecursiveAliases<DC, PC, A>, CoordinateState>;
     whereEdge(alias: EA, predicateFunction: (edge: EdgeAccessor<ET>) => Predicate): TraversalBuilder<G, Aliases, EdgeAliases, EK, EA, Dir, Optional, DC, PC, RecAliases, CoordinateState, ET>;
 }
 
@@ -7754,6 +7883,13 @@ export const tsvectorStrategy: FulltextStrategy;
 
 // @public
 export type TypedEdgeCollection<R extends EdgeRegistration> = EdgeCollection<R["type"], EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType, EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType, EdgeAllowedPairs<R>>;
+
+// @public
+type TypedOntologyRelation<M extends string, From extends NodeType | AnyEdgeType | string, To extends NodeType | AnyEdgeType | string> = Readonly<{
+    metaEdge: MetaEdge<M>;
+    from: From;
+    to: To;
+}>;
 
 // @public
 export type TypedRecordedStoreViewEdgeCollection<R extends EdgeRegistration> = RecordedStoreViewEdgeCollection<R["type"], EdgeFromTypes<R> extends NodeType ? EdgeFromTypes<R> : NodeType, EdgeToTypes<R> extends NodeType ? EdgeToTypes<R> : NodeType, EdgeAllowedPairs<R>>;

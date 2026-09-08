@@ -496,6 +496,35 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `CompositionPair` / `CompositionRelation` as forgotten exports. `./indexes`
 // and `./adapters/drizzle/indexes` never reach the registry and are
 // unaffected.
+//
+// Typed subsumption batch (C.1/C.2/Q3/C.3): measured, not assumed — every
+// added name below was confirmed against a merge-base build run through this
+// same script (a temporary unconditional dump of each entrypoint's forgotten-
+// export set, diffed line by line against this batch's set, then reverted).
+//
+// `.` gains exactly the 13 new declarations this batch introduces, all
+// reachable only through `subClassOf`/`equivalentTo`/`sameAs`'s new generic
+// signatures, none of them exported directly at the root: `TypedOntologyRelation`,
+// `SubClassOfCheck`, `EquivalentToCheck`, `IncompatibleKeys`, `LiteralKeysOf`,
+// `StructuralSubtypeMismatch`, `META_EDGE_SUB_CLASS_OF`,
+// `META_EDGE_EQUIVALENT_TO`, `META_EDGE_SAME_AS`, `PolymorphicNodeType`,
+// `AliasExpansionAxis`, `AliasNodeType`, `SubsumptionAffected` (388 → 401).
+//
+// The six Store-bearing entrypoints that render `QueryBuilder`/`Store`
+// without naming the ontology relation functions themselves (`./interchange`,
+// `./profiler`, `./graph-merge`, `./provenance`, `./sqlite/local`,
+// `./postgres/pglite`) each gain only the four names reachable through the
+// widened `from`/`to`/`fromDynamic`/`toDynamic` overloads and `QueryStart`'s
+// new `expansion` field — `AliasExpansionAxis`, `AliasNodeType`,
+// `PolymorphicNodeType`, `SubsumptionAffected` (+4 apiece) — never the
+// `subClassOf`/`equivalentTo`/`sameAs`-only names above, since none of these
+// six re-exports those functions. No other entrypoint moves: `./backend`,
+// `./core`, `./schema`, `./graph-extension`, `./indexes`, and the five
+// `./adapters/drizzle/*` entrypoints render neither the ontology relation
+// functions nor a `QueryBuilder`, so none of this batch's new vocabulary
+// becomes reachable there. `./schema` gains `isTypeLevelSubtype` and
+// `projectTypeVisible` as DIRECT exports (visible in the api report diff, not
+// this ledger), so its forgotten-export debt is unaffected.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 393,
