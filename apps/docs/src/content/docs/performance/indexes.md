@@ -476,7 +476,7 @@ additional index is needed to declare an edge `acyclic: true`.
 
 `store.edges[kind].bulkCreate()` runs one combined probe across every row in
 the call, treating them all as simultaneous origins against the
-newly-inserted set — the only way to catch a cycle formed entirely _within_
+newly-inserted set — the only way to catch a cycle formed entirely *within*
 one batch (`a → b` and `b → a` in the same call). When the batch is itself a
 long path (importing or seeding a 10,000-edge chain in one `bulkCreate`),
 each origin's walk traverses the rest of that path, so cost grows with the
