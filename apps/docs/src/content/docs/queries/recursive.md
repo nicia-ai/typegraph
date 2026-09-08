@@ -462,7 +462,12 @@ For the whole-plus-parts *export* shape (rather than a query result), see
 
 - **One recursive traversal per query.** A query with multiple `.recursive()` calls throws
   `UnsupportedPredicateError`. If you need multiple recursive paths, run separate queries or
-  use [set operations](/queries/combine) to merge results.
+  use [set operations](/queries/combine) to merge results. `parts()`/`wholes()` count toward
+  this limit whenever they recurse (the default — see
+  [Composition Shortcuts](#composition-shortcuts-parts-and-wholes)): combining either with any
+  other `.traverse()`/`.recursive()` step in the same query throws `UnsupportedPredicateError`
+  naming the step and the `maxHops: 1` workaround, which compiles to a direct (non-recursive)
+  traversal and so does not count.
 - **Edge properties are not projected** in recursive results. You can filter on edge properties
   with `whereEdge()`, but the `select()` context only exposes the start node, target node, and
   any depth/path aliases.

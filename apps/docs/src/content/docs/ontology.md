@@ -399,11 +399,18 @@ constraint, so it stays safe regardless.
 Not every "this belongs to that" relationship is composition. Before reaching
 for `partOf`/`hasPart`, place the relation in exactly one of three tiers:
 
-| tier | what you write | what the runtime guarantees |
-| --- | --- | --- |
-| 1 — Composition | `partOf(Part, Whole, { via: edge })` | one whole per part across every composition relation; acyclic over the union of realizing edge kinds; deleting a whole deletes its parts leaf-first; `parts()`/`wholes()` navigation across heterogeneous edge kinds |
-| 2 — Aggregation | `cardinality`, `targetCardinality`, `acyclic` on an edge registration | each rule enforced independently, with no ownership slot, no cascade, no cross-relation constraint |
-| 3 — Mereology | an ordinary edge kind + `.recursive()` | transitivity only, no integrity claim |
+| tier | what you write | what the runtime guarantees today | planned for tier 1 |
+| --- | --- | --- | --- |
+| 1 — Composition | `partOf(Part, Whole, { via: edge })` | the realizing edge's whole-side cardinality is `"one"`/`"oneActive"`; every endpoint pair the edge admits is a declared composition pair in that orientation; `parts()`/`wholes()` navigation across heterogeneous, mixed-orientation edge kinds; `subgraph({ composition: true })` exports a root plus its parts closure | one whole per part enforced cross-relation at write time; acyclicity checked over the union of realizing edge kinds; deleting a whole deletes its parts leaf-first (cascade) |
+| 2 — Aggregation | `cardinality`, `targetCardinality`, `acyclic` on an edge registration | each rule enforced independently, with no ownership slot, no cascade, no cross-relation constraint | — |
+| 3 — Mereology | an ordinary edge kind + `.recursive()` | transitivity only, no integrity claim | — |
+
+The "planned for tier 1" column is not yet implemented: declaring `partOf`/
+`hasPart` today validates the relation's shape (`via`, `partSide`,
+cardinality, endpoint-pair completeness) but does not yet enforce one whole
+per part, does not yet check acyclicity over the composition union, and does
+not yet cascade a delete from whole to parts. Do not rely on any of the three
+until a release note says otherwise.
 
 **The only tier with a cascade is the only tier with an ownership slot.** A
 part with two owners is not a part. Any relation whose users need shared
@@ -428,15 +435,16 @@ deletion retracts claims but leaves the referenced entity standing on
 remaining support, is aggregation — declaring either `partOf` would be wrong,
 not just imprecise.
 
-#### Upgrade prerequisite: the composition claim needs `typegraph_edge_claims`
+#### Upgrade prerequisite (forthcoming): the composition claim will need `typegraph_edge_claims`
 
-Composition's one-whole-per-part guarantee rides the same reserved relation
-edge cardinality claims already use, `typegraph_edge_claims`. A deployment
-initialized before that relation existed must provision it (under owner
-credentials — see [Backend Setup](/backend-setup)) **before** declaring the
-first `partOf`/`hasPart`. Declaring composition against a database missing
-that relation fails with `EDGE_CLAIM_RELATION_MISSING`, naming the
-provisioning step to run.
+Not yet applicable in this release: declaring `partOf`/`hasPart` does not
+check for `typegraph_edge_claims` today. Once the one-whole-per-part
+guarantee above ships, it is expected to ride the same reserved relation edge
+cardinality claims already use, and a deployment initialized before that
+relation existed will need to provision it (under owner credentials — see
+[Backend Setup](/backend-setup)) before declaring the first `partOf`/
+`hasPart`. This section will be updated with the exact error code and
+provisioning step once that lane lands.
 
 ### Edge Relationships
 

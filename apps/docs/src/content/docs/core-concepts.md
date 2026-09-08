@@ -489,10 +489,12 @@ Cardinality and target cardinality constrain one edge kind's own population;
 they say nothing about what happens to the nodes on either end when the
 relation is a real whole/part relationship. That's a separate declaration,
 [**composition**](/ontology#composition) (`partOf` / `hasPart`): it names
-which edge kind *realizes* containment, requires that edge to declare
-`cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side,
-and adds ownership (one whole per part) and cascade (deleting a whole deletes
-its parts) on top — guarantees plain cardinality never provides on its own.
+which edge kind *realizes* containment and requires that edge to declare
+`cardinality`/`targetCardinality: "one"` or `"oneActive"` on the whole side.
+Ownership (one whole per part, enforced cross-relation) and cascade (deleting
+a whole deletes its parts) are the guarantees this declaration is *for* — see
+the [containment tiers](/ontology#choosing-a-containment-tier) table for
+which of them are enforced today versus still forthcoming.
 
 ### Edge Operations
 
