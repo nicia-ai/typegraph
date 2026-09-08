@@ -438,10 +438,13 @@ describe("C.2 — known gap: unconvertible Zod constructs project identically (C
   // widening this pin further.
   //
   // Child genuinely lacks Parent's "tags" property, so `subClassOf(Child,
-  // Parent)` would also fail C.1's compile-time check — this reaches C.2
-  // through the deserialized-document route instead, the same way an
-  // older, laxer validator (or a hand-edited document) could have written
-  // it, matching the "deserialized documents" pattern above.
+  // Parent)` would also fail C.1's compile-time check for THIS pair — this
+  // reaches C.2 through the deserialized-document route instead, the same
+  // way an older, laxer validator (or a hand-edited document) could have
+  // written it, matching the "deserialized documents" pattern above. That is
+  // not true in general: the next test reaches the same gap from a plain
+  // live `defineGraph` (no deserialization needed at all) with a
+  // value-constraint mismatch C.1 cannot see (C13-R2-02).
   it("does not refuse a persisted subClassOf pair that differs only inside a z.set()/z.map() field", () => {
     const SetChild = defineNode("SetChild", {
       schema: z.object({ note: z.string() }),
@@ -470,5 +473,45 @@ describe("C.2 — known gap: unconvertible Zod constructs project identically (C
     expect(() =>
       deserializeSchema(withUnconvertibleRelation).buildRegistry(),
     ).not.toThrow();
+  });
+
+  // C13-R2-02: the gap above is not confined to a hand-edited or otherwise
+  // deserialized document. A live, ordinary `defineGraph` reaches it too, as
+  // long as the incompatibility is hidden behind a VALUE-level constraint
+  // (invisible to C.1) rather than a missing property (which C.1 would
+  // refuse before this pair ever reached the registry). Both `tags` fields
+  // infer to the identical `Set<string>` TypeScript type, so
+  // `subClassOf(SetChildLive, SetParentLive)` compiles; `serializeSchemaProperties`
+  // then collapses both kinds' `z.set()` field to the SAME `{ type: "object" }`
+  // fallback, so the genuinely tighter `code` constraint on the parent is
+  // never compared and `buildKindRegistry` accepts the pair.
+  it("does not refuse a live subClassOf pair whose incompatibility is hidden behind a z.set() field (C13-R2-02)", () => {
+    const SetChildLive = defineNode("SetChildLive", {
+      schema: z.object({ code: z.string(), tags: z.set(z.string()) }),
+    });
+    const SetParentLive = defineNode("SetParentLive", {
+      schema: z.object({
+        code: z.string().min(5),
+        tags: z.set(z.string()),
+      }),
+    });
+    const relation = subClassOf(SetChildLive, SetParentLive);
+
+    const registry = buildKindRegistry(
+      defineGraph({
+        id: "subclass_unconvertible_gap_live",
+        nodes: {
+          SetChildLive: { type: SetChildLive },
+          SetParentLive: { type: SetParentLive },
+        },
+        edges: {},
+        ontology: [relation],
+      }),
+    );
+
+    // Documents the gap, it does not endorse it: a "SetChildLive" row with
+    // `code: "hi"` satisfies neither `SetParentLive`'s declared nor its
+    // intended contract, yet the registry calls it assignable.
+    expect(registry.isAssignableTo("SetChildLive", "SetParentLive")).toBe(true);
   });
 });

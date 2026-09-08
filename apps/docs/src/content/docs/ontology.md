@@ -96,6 +96,16 @@ authored extension, and a deserialized persisted document), throwing a
 | `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | an `equivalentTo`/`sameAs` pair fails in one direction |
 | `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | the same, but the pair is incomparable |
 
+**Known gap:** the registry check compares kinds' projected JSON Schema, and
+a Zod construct `z.toJSONSchema` cannot convert (`z.set()`, `z.map()`, and
+others) projects as a generic `{ type: "object" }` for every kind that
+contains one — so two kinds that differ only inside such a field are
+indistinguishable to the check and a genuinely incompatible pair is silently
+accepted rather than refused. This applies equally to a compile-time graph,
+an `evolve()`-authored extension, and a deserialized document; avoid
+`z.set()`/`z.map()` on a node schema that participates in `subClassOf` or
+`equivalentTo` until the projection is made distinguishable.
+
 If your hierarchy is a **taxonomy** rather than a genuine subtype
 relationship — the child doesn't actually extend the parent's schema —
 declare `broader(child, parent)` instead; see
