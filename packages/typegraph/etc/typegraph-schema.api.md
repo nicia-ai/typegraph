@@ -2397,7 +2397,7 @@ type StrategyTableContribution = TableContribution;
 export type StructuralIncomparableReason = "unsupported-keyword" | "schema-reference" | "type-token-array" | "unsupported-construct" | "max-depth-exceeded";
 
 // @public
-export type StructuralSubtypeReason = "missing-required-property" | "optional-in-child-required-in-parent" | "type-token-mismatch" | "unconstrained-where-parent-constrains" | "value-set-not-subset" | "string-length-not-tighter" | "pattern-mismatch" | "numeric-bound-not-tighter" | "multiple-of-mismatch" | "array-bounds-not-tighter" | "tuple-arity-mismatch" | "no-matching-union-member" | "property-names-mismatch";
+export type StructuralSubtypeReason = "missing-required-property" | "optional-in-child-required-in-parent" | "type-token-mismatch" | "unconstrained-where-parent-constrains" | "value-set-not-subset" | "string-length-not-tighter" | "pattern-mismatch" | "format-mismatch" | "numeric-bound-not-tighter" | "multiple-of-mismatch" | "array-bounds-not-tighter" | "tuple-arity-mismatch" | "no-matching-union-member" | "property-names-mismatch";
 
 // @public
 export type StructuralSubtypeResult = Readonly<{

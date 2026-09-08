@@ -32,9 +32,16 @@
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
  *    which is why recursion here cannot diverge.
  * 3. Either side carrying a keyword this predicate recognizes as
- *    CONSTRAINING but does not model — `not` (`z.never()`), `allOf`
- *    (`z.intersection`, whose subtyping is a named follow-up), or
- *    `contentEncoding` (`z.file()`) — is `incomparable` ("unsupported-keyword").
+ *    CONSTRAINING but does not model the semantics of — `not` (`z.never()`),
+ *    `allOf` (`z.intersection`, whose subtyping is a named follow-up),
+ *    `contentEncoding` (`z.file()`), or a standard JSON Schema 2020-12
+ *    vocabulary keyword this predicate's rule set never modeled
+ *    (`uniqueItems`, `contains`/`minContains`/`maxContains`,
+ *    `minProperties`/`maxProperties`, `patternProperties`,
+ *    `dependentRequired`/`dependentSchemas`, `if`/`then`/`else`,
+ *    `unevaluatedProperties`/`unevaluatedItems` — none emitted by the Zod
+ *    projection today, but reachable through a hand-written `JsonSchema`) —
+ *    is `incomparable` ("unsupported-keyword").
  * 4. Any OTHER keyword outside `COMPARABLE_KEYWORDS` is silently IGNORED for
  *    subtyping. This is deliberately the opposite of `isBreakingPropertyChange`'s
  *    diff rule, where an unrecognized key is user data whose change must be
@@ -42,8 +49,8 @@
  *    not understand as adding no constraint, and this predicate follows that
  *    reading. A `searchable()` field's `_searchableField` tag
  *    (src/core/searchable.ts:120) and an arbitrary `.meta()` key both fall
- *    out of this rule with no special case — see `format` below for the one
- *    keyword this predicate recognizes AND still treats as non-constraining.
+ *    out of this rule with no special case. `format` is NOT covered by this
+ *    rule — see rule 7 below for why it is compared as a constraint instead.
  * 5. If the two schemas are identical once irrelevant keywords are dropped,
  *    they are mutual subtypes — this is what makes reflexivity hold for
  *    every comparable schema by construction.
@@ -63,11 +70,19 @@
  *    drop optional properties (width subtyping — the parent's
  *    `additionalProperties: false` is NOT applied to the child's added
  *    keys, only an explicit non-`false` `additionalProperties` schema
- *    constrains them), arrays compare bounds/items/tuple prefixes, strings
- *    compare length bounds and `pattern` (`format` is an ANNOTATION here,
- *    not a constraint — the projection emits it exactly where `pattern`
- *    already carries the real constraint, e.g. `z.email()`, `z.uuid()`,
- *    `z.iso.*`), and numbers compare bounds folding `exclusiveMinimum` /
+ *    constrains them; and a parent-declared property the child leaves to its
+ *    own OPEN additional-properties schema is compared against that schema
+ *    rather than skipped, since an open child does not actually omit the
+ *    property — it just declares no NAMED constraint for it), arrays compare
+ *    bounds/items/tuple prefixes (a closed parent tuple — `prefixItems` with
+ *    no `items` — additionally requires the child be bounded to the same
+ *    arity, since the Zod tuple projection encodes "no rest element" only by
+ *    omitting `items`, not with an explicit length bound), strings compare
+ *    length bounds, `pattern`, and `format` (`format` carries a real
+ *    constraint here, not merely an annotation: `z.url()` and `z.jwt()`
+ *    project `format` with no accompanying `pattern`, so treating it as
+ *    decoration would accept a bare `z.string()` as a subtype of either),
+ *    and numbers compare bounds folding `exclusiveMinimum` /
  *    `exclusiveMaximum` in.
  *
  * An unmodeled construct always yields `{ verdict: "incomparable" }` and is
@@ -79,7 +94,6 @@ import { sortedReplacer } from "./canonical";
 import {
   isObjectSchema,
   propertySchemasEqual,
-  propertyTypeSignature,
   stripSchemaMetadata,
 } from "./migration";
 import { type JsonSchema } from "./types";
@@ -97,6 +111,7 @@ export type StructuralSubtypeReason =
   | "value-set-not-subset"
   | "string-length-not-tighter"
   | "pattern-mismatch"
+  | "format-mismatch"
   | "numeric-bound-not-tighter"
   | "multiple-of-mismatch"
   | "array-bounds-not-tighter"
@@ -171,9 +186,6 @@ const INTEGER_TYPE_TOKEN = "integer";
 const BOOLEAN_TYPE_TOKEN = "boolean";
 const NULL_TYPE_TOKEN = "null";
 
-const ANY_OF_SIGNATURE = "anyOf";
-const ONE_OF_SIGNATURE = "oneOf";
-
 /**
  * Keywords the Zod projection can emit that DO constrain the value space but
  * this predicate does not model the semantics of. Unlike an ordinary
@@ -184,23 +196,49 @@ const ONE_OF_SIGNATURE = "oneOf";
  * would make every schema a subtype of the bottom type). `allOf`
  * (`z.intersection`) is named explicitly per the lead's ruling: intersection
  * subtyping is real and deliberately deferred, not merely undecorated.
+ *
+ * The remaining entries are standard JSON Schema 2020-12 vocabulary keywords
+ * this predicate's rule set does not model at all, even though the Zod
+ * projection never emits them today — the public `isStructuralSubtype`
+ * surface accepts a hand-written `JsonSchema`, and silently treating an
+ * unimplemented constraint as decoration would be unsound for that caller
+ * the same way it was for `format` before this predicate learned to compare
+ * it (see `COMPARABLE_KEYWORDS`).
  */
 const UNMODELED_CONSTRAINING_KEYWORDS: ReadonlySet<string> = new Set([
   "not",
   "allOf",
   "contentEncoding",
+  "uniqueItems",
+  "contains",
+  "minContains",
+  "maxContains",
+  "minProperties",
+  "maxProperties",
+  "patternProperties",
+  "dependentRequired",
+  "dependentSchemas",
+  "if",
+  "then",
+  "else",
+  "unevaluatedProperties",
+  "unevaluatedItems",
 ]);
 
 /**
  * Exactly the constraining keywords this predicate actively compares. Every
- * other key surviving `stripSchemaMetadata` — `format` included, since the
- * projection emits it as a pure annotation alongside the `pattern` that
- * carries the actual constraint — is dropped by `comparableKeywords` and
- * never blocks a verdict. That drop is rule 4 above, deliberately the
- * opposite of `isBreakingPropertyChange`'s diff rule (there, an unrecognized
- * key is user data whose change must be surfaced; here, an unrecognized key
- * constrains nothing, so it cannot make two schemas differ for subtyping
- * purposes) because the two predicates answer different questions.
+ * other key surviving `stripSchemaMetadata` and `UNMODELED_CONSTRAINING_KEYWORDS`
+ * — an arbitrary `.meta()` key or `searchable()`'s `_searchableField` tag —
+ * is dropped by `comparableKeywords` and never blocks a verdict. That drop is
+ * rule 4 above, deliberately the opposite of `isBreakingPropertyChange`'s
+ * diff rule (there, an unrecognized key is user data whose change must be
+ * surfaced; here, an unrecognized key constrains nothing, so it cannot make
+ * two schemas differ for subtyping purposes) because the two predicates
+ * answer different questions. `format` is NOT one of the dropped keys: the
+ * Zod projection emits it with no accompanying `pattern` for `z.url()` and
+ * `z.jwt()`, so ignoring it would accept a bare `z.string()` as a subtype of
+ * either — it is compared exactly like `pattern` (present on the child,
+ * absent or identical on the parent).
  */
 const COMPARABLE_KEYWORDS: ReadonlySet<string> = new Set([
   "type",
@@ -217,6 +255,7 @@ const COMPARABLE_KEYWORDS: ReadonlySet<string> = new Set([
   "minLength",
   "maxLength",
   "pattern",
+  "format",
   "minimum",
   "maximum",
   "exclusiveMinimum",
@@ -321,17 +360,23 @@ function compareSchemas(
     return SUBTYPE;
   }
 
-  const childSignature = propertyTypeSignature(child);
-  const parentSignature = propertyTypeSignature(parent);
-  if (isUnionSignature(childSignature) || isUnionSignature(parentSignature)) {
+  if (isUnionSchema(child) || isUnionSchema(parent)) {
     return compareUnion(child, parent, path, depth);
   }
 
   return compareLeaf(child, parent, path, depth);
 }
 
-function isUnionSignature(signature: string): boolean {
-  return signature === ANY_OF_SIGNATURE || signature === ONE_OF_SIGNATURE;
+/**
+ * Whether `schema` itself carries a union keyword (`anyOf` or `oneOf`).
+ * Checked directly on the keyword rather than through migration's
+ * `propertyTypeSignature` — that helper is the diff's construct SELECTOR
+ * (which reads `type` before `anyOf`/`oneOf`, so a schema carrying both would
+ * silently hide its union from a caller using it as a union detector) and is
+ * not the right owner for this question.
+ */
+function isUnionSchema(schema: JsonSchema): boolean {
+  return hasOwnKey(schema, "anyOf") || hasOwnKey(schema, "oneOf");
 }
 
 // ============================================================
@@ -350,9 +395,16 @@ function compareUnion(
 ): StructuralSubtypeResult {
   const childMembers = unionMembers(child);
   const parentMembers = unionMembers(parent);
+  const childIsUnion = isUnionSchema(child);
 
   for (const [childIndex, childMember] of childMembers.entries()) {
-    const memberPath = [...path, unionMemberSegment(childIndex)];
+    // Only a real union member gets an `anyOf[i]` segment. When `child`
+    // itself carries no `anyOf`/`oneOf` (`compareUnion` was reached because
+    // `parent` is the union), `unionMembers` synthesizes a single-element
+    // `[child]` — appending a segment for that synthesized member would
+    // point a caller at a path the child schema never actually has.
+    const memberPath =
+      childIsUnion ? [...path, unionMemberSegment(childIndex)] : path;
     let matchedParentMember = false;
     for (const parentMember of parentMembers) {
       const probeResult = compareSchemas(
@@ -486,12 +538,26 @@ function compareValueSets(
 // Objects
 // ============================================================
 
-function additionalPropertiesSchema(
-  value: boolean | JsonSchema | undefined,
-): JsonSchema | undefined {
-  if (value === false) return undefined;
-  if (value === undefined || value === true) return {};
-  return value;
+/**
+ * The single owner of "does this side permit undeclared keys, and under what
+ * schema": `undefined` when the side is CLOSED (an explicit
+ * `additionalProperties: false` — every `z.object` projects this), otherwise
+ * the schema those undeclared keys must satisfy (`{}`, the top type, when
+ * `additionalProperties` is `true` or absent; the catchall schema itself
+ * otherwise). Every caller in `compareObject` reads this one function rather
+ * than re-spelling the `!== undefined && !== false` / `!== false` checks —
+ * two such inline re-spellings previously disagreed with each other (one
+ * treating an ABSENT `additionalProperties` as open, the other as closed),
+ * which is exactly the seam that let a `z.looseObject`/`z.record`/`.catchall`
+ * child evade a parent-declared property by leaving it undeclared.
+ */
+function openExtrasSchema(schema: JsonSchema): JsonSchema | undefined {
+  const additionalProperties = schema.additionalProperties;
+  if (additionalProperties === false) return undefined;
+  if (additionalProperties === undefined || additionalProperties === true) {
+    return {};
+  }
+  return additionalProperties;
 }
 
 function compareObject(
@@ -517,45 +583,58 @@ function compareObject(
     }
   }
 
+  const childExtrasSchema = openExtrasSchema(child);
+
   for (const [name, parentProperty] of Object.entries(parentProps)) {
-    if (!hasOwnKey(childProps, name)) continue;
-    const propertyResult = compareSchemas(
-      requireDefined(childProps[name]),
+    if (hasOwnKey(childProps, name)) {
+      const propertyResult = compareSchemas(
+        requireDefined(childProps[name]),
+        parentProperty,
+        [...path, name],
+        depth + 1,
+      );
+      if (propertyResult.verdict !== "subtype") return propertyResult;
+      continue;
+    }
+    // The child does not declare `name` by name. A CLOSED child (the common
+    // `z.object` case) genuinely omits it — the "child may omit optional
+    // parent properties" rule. An OPEN child (`z.looseObject`, `z.record`,
+    // `.catchall`) does not omit it: any value satisfying the child could
+    // still carry `name`, so the child's additional-properties schema must
+    // itself narrow the parent's declared property, not be skipped (this is
+    // the fix for the width-subtyping evasion above).
+    if (childExtrasSchema === undefined) continue;
+    const extraResult = compareSchemas(
+      childExtrasSchema,
       parentProperty,
       [...path, name],
       depth + 1,
     );
-    if (propertyResult.verdict !== "subtype") return propertyResult;
+    if (extraResult.verdict !== "subtype") return extraResult;
   }
 
-  // Width subtyping. The parent's `additionalProperties: false` (or its
-  // absence) is not applied to the child's extra keys — every `z.object`
-  // projects `false`, so this branch is skipped for the common case, and the
-  // child's added properties are unconstrained rather than refused.
-  const parentAdditional = parent.additionalProperties;
-  if (parentAdditional !== undefined && parentAdditional !== false) {
-    const parentAdditionalSchema = requireDefined(
-      additionalPropertiesSchema(parentAdditional),
-    );
-
+  // Width subtyping for keys NEITHER side declares by name. The parent's
+  // `additionalProperties: false` (or its absence) is not applied to the
+  // child's extra keys — every `z.object` projects `false`, so this branch is
+  // skipped for the common case, and the child's added properties are
+  // unconstrained rather than refused.
+  const parentExtrasSchema = openExtrasSchema(parent);
+  if (parentExtrasSchema !== undefined) {
     for (const [name, childProperty] of Object.entries(childProps)) {
       if (hasOwnKey(parentProps, name)) continue;
       const extraResult = compareSchemas(
         childProperty,
-        parentAdditionalSchema,
+        parentExtrasSchema,
         [...path, name],
         depth + 1,
       );
       if (extraResult.verdict !== "subtype") return extraResult;
     }
 
-    if (child.additionalProperties !== false) {
-      const childAdditionalSchema = requireDefined(
-        additionalPropertiesSchema(child.additionalProperties),
-      );
+    if (childExtrasSchema !== undefined) {
       const additionalResult = compareSchemas(
-        childAdditionalSchema,
-        parentAdditionalSchema,
+        childExtrasSchema,
+        parentExtrasSchema,
         [...path, ADDITIONAL_PROPERTIES_SEGMENT],
         depth + 1,
       );
@@ -618,6 +697,15 @@ function compareArray(
         depth + 1,
       );
       if (memberResult.verdict !== "subtype") return memberResult;
+    }
+    // A parent tuple with no rest element (`prefixItems` present, `items`
+    // absent) has no elements beyond its declared prefix under the Zod tuple
+    // projection (see the `childIsClosedTuple` comment below for the mirror
+    // case). A child of equal prefix arity that ALSO carries `items` (a rest
+    // element, e.g. `z.tuple([string], number)`) permits values longer than
+    // the parent ever allows, even though the prefix lengths matched above.
+    if (parent.items === undefined && child.items !== undefined) {
+      return notSubtype("tuple-arity-mismatch", path);
     }
   } else if (childPrefix !== undefined && parent.items !== undefined) {
     // A tuple narrowing a homogeneous parent array: every prefix member must
@@ -683,6 +771,13 @@ function compareStringConstraints(
 
   if (parent.pattern !== undefined && child.pattern !== parent.pattern) {
     return notSubtype("pattern-mismatch", path);
+  }
+
+  // `format` carries a real constraint, mirroring `pattern`: `z.url()` and
+  // `z.jwt()` project `format` with no accompanying `pattern`, so a parent
+  // format with no matching child format is not narrowed by anything else.
+  if (parent.format !== undefined && child.format !== parent.format) {
+    return notSubtype("format-mismatch", path);
   }
 
   return SUBTYPE;

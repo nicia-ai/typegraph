@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { searchable } from "../src/core/searchable";
 import {
   computeSchemaDiff,
   isStructuralSubtype,
@@ -211,7 +212,7 @@ describe("object width and depth", () => {
     });
   });
 
-  it("reverses correctly: parent-adds-required-optional-in-child is not a subtype in that direction either", () => {
+  it("a required child property that the parent leaves optional is a subtype (reverse of the optional-in-child row)", () => {
     // Mirror of "child declares a parent-required property as optional":
     // swap child/parent and expect the reverse (subtype) verdict.
     assertVerdict(
@@ -220,6 +221,13 @@ describe("object width and depth", () => {
         z.object({ name: z.string().optional() }),
       ),
       "subtype",
+    );
+  });
+
+  it("reverse of 'child re-declares a parent property with a mismatched type' is also type-token-mismatch", () => {
+    assertVerdict(
+      verdict(z.object({ age: z.number() }), z.object({ age: z.string() })),
+      { reason: "type-token-mismatch" },
     );
   });
 });
@@ -277,6 +285,38 @@ describe("additionalProperties", () => {
       verdict(z.object({ a: z.string() }), z.looseObject({ a: z.string() })),
       "subtype",
     );
+  });
+
+  // C2-02: an OPEN child does not actually omit a parent-declared property it
+  // leaves unnamed — any value satisfying the child could still carry that
+  // key, so the child's additional-properties schema must narrow the
+  // parent's declared property rather than being skipped. Before the fix,
+  // each of these three constructors evaded the parent's typed `b` entirely.
+  it("z.looseObject child evading a parent's optional typed property is refused, not accepted", () => {
+    const result = verdict(
+      z.looseObject({ a: z.string() }),
+      z.object({ a: z.string(), b: z.number().optional() }),
+    );
+    expect(result.verdict).not.toBe("subtype");
+    expect(result).toMatchObject({ path: ["b"] });
+  });
+
+  it("z.record child evading a parent's optional typed property is refused, not accepted", () => {
+    const result = verdict(
+      z.record(z.string(), z.string()),
+      z.object({ b: z.number().optional() }),
+    );
+    expect(result.verdict).not.toBe("subtype");
+    expect(result).toMatchObject({ path: ["b"] });
+  });
+
+  it(".catchall child evading a parent's optional typed property is refused, not accepted", () => {
+    const result = verdict(
+      z.object({ a: z.string() }).catchall(z.string()),
+      z.object({ a: z.string(), b: z.number().optional() }),
+    );
+    expect(result.verdict).not.toBe("subtype");
+    expect(result).toMatchObject({ path: ["b"] });
   });
 });
 
@@ -478,21 +518,61 @@ describe("scalars", () => {
       parent: z.number(),
       expected: "subtype",
     },
+    // C2-01: `z.url()` and `z.jwt()` project `format` with NO accompanying
+    // `pattern` (unlike every other format-bearing construct, e.g.
+    // `z.email()`/`z.uuid()`), so `format` must itself be a constraint or a
+    // bare `z.string()` is unsoundly accepted as a subtype of either.
+    {
+      name: "z.url() subtype z.string()",
+      child: z.url(),
+      parent: z.string(),
+      expected: "subtype",
+    },
+    {
+      name: "z.string() not subtype z.url() -> format-mismatch",
+      child: z.string(),
+      parent: z.url(),
+      expected: { reason: "format-mismatch" },
+    },
+    {
+      name: "z.jwt() subtype z.string()",
+      child: z.jwt(),
+      parent: z.string(),
+      expected: "subtype",
+    },
+    {
+      name: "z.string() not subtype z.jwt() -> format-mismatch",
+      child: z.string(),
+      parent: z.jwt(),
+      expected: { reason: "format-mismatch" },
+    },
+    {
+      name: "z.url() not subtype z.jwt() -> format-mismatch (both format-only, no pattern)",
+      child: z.url(),
+      parent: z.jwt(),
+      expected: { reason: "format-mismatch" },
+    },
   ];
 
   it.each(rows.map((row) => [row.name, row] as const))("%s", (_name, row) => {
     assertVerdict(verdict(row.child, row.parent), row.expected);
   });
 
-  it("format is an annotation, not a constraint (D5): two schemas differing only in format are mutual subtypes", () => {
-    const withEmailFormat: JsonSchema = { type: "string", format: "email" };
-    const withUuidFormat: JsonSchema = { type: "string", format: "uuid" };
-    expect(isStructuralSubtype(withEmailFormat, withUuidFormat)).toEqual({
-      verdict: "subtype",
-    });
-    expect(isStructuralSubtype(withUuidFormat, withEmailFormat)).toEqual({
-      verdict: "subtype",
-    });
+  it("format equal on both sides does not block subtyping", () => {
+    const withEmailFormat: JsonSchema = {
+      type: "string",
+      format: "email",
+      pattern: "^a$",
+    };
+    const withSameFormatLooserPattern: JsonSchema = {
+      type: "string",
+      format: "email",
+    };
+    // child (no pattern) is NOT tighter than a parent requiring "^a$", so
+    // only the reverse direction is a subtype.
+    expect(
+      isStructuralSubtype(withEmailFormat, withSameFormatLooserPattern),
+    ).toEqual({ verdict: "subtype" });
   });
 });
 
@@ -562,6 +642,28 @@ describe("arrays and tuples", () => {
     );
   });
 
+  // C2-03: a tuple-with-rest child (`z.tuple([...], rest)`) has the SAME
+  // `prefixItems` length as a closed parent tuple here, so the arity check
+  // above cannot catch it — only checking that the parent is also closed
+  // (no `items`) does.
+  it("a tuple with a rest element is not a subtype of a same-arity closed tuple", () => {
+    const result = verdict(
+      z.tuple([z.string()], z.number()),
+      z.tuple([z.string()]),
+    );
+    expect(result).toMatchObject({
+      verdict: "not-subtype",
+      reason: "tuple-arity-mismatch",
+    });
+  });
+
+  it("a same-arity closed tuple is still a subtype of an equally closed tuple", () => {
+    assertVerdict(
+      verdict(z.tuple([z.string()]), z.tuple([z.string()])),
+      "subtype",
+    );
+  });
+
   it("z.tuple([z.string()]) subtype z.array(z.string())", () => {
     assertVerdict(
       verdict(z.tuple([z.string()]), z.array(z.string())),
@@ -622,6 +724,26 @@ describe("unions and nullability", () => {
   it("a union member that is itself incomparable propagates incomparable, not no-matching-union-member", () => {
     const result = verdict(z.union([z.string(), z.never()]), z.string());
     expect(result.verdict).toBe("incomparable");
+  });
+
+  // C2-05: a hand-written schema carrying both `type` and `anyOf` must still
+  // be read as a union — `propertyTypeSignature` (migration's construct
+  // SELECTOR, not a union detector) would read `type` first and hide the
+  // `anyOf` entirely, silently dropping the parent's union constraint.
+  it("a parent carrying both type and anyOf still enforces the union (C2-05)", () => {
+    const child: JsonSchema = { type: "string" };
+    const parent: JsonSchema = {
+      type: "string",
+      anyOf: [{ const: "a" }, { const: "b" }],
+    };
+    const result = isStructuralSubtype(child, parent);
+    expect(result).toMatchObject({
+      verdict: "not-subtype",
+      reason: "no-matching-union-member",
+      // C2-10: the child isn't itself a union, so no `anyOf[i]` segment is
+      // synthesized onto a path the child schema doesn't actually have.
+      path: [],
+    });
   });
 });
 
@@ -717,16 +839,16 @@ describe("incomparable constructs", () => {
   });
 
   it("a searchable() field does not make a pair incomparable (D1; src/core/searchable.ts:120)", () => {
-    const withSearchable: JsonSchema = {
-      type: "string",
-      _searchableField: { language: "english" },
-    };
+    // Built from the real `searchable()` tag (not a hand-written literal) so
+    // this test ratchets against a change to `SEARCHABLE_FIELD_KEY` or to the
+    // tag's projected shape.
+    const withSearchable = projected(searchable());
     assertVerdict(
       isStructuralSubtype(withSearchable, withSearchable),
       "subtype",
     );
     assertVerdict(
-      isStructuralSubtype(withSearchable, { type: "string" }),
+      isStructuralSubtype(withSearchable, projected(z.string())),
       "subtype",
     );
   });
@@ -737,6 +859,35 @@ describe("incomparable constructs", () => {
     assertVerdict(verdict(child, parent), "subtype");
     assertVerdict(verdict(parent, child), "subtype");
   });
+
+  // C2-06: standard JSON Schema 2020-12 vocabulary keywords this predicate's
+  // rule set does not model must refuse rather than silently accept, even
+  // though the Zod projection never emits them — the public
+  // `isStructuralSubtype` surface takes an arbitrary hand-written schema.
+  it.each([
+    [
+      "uniqueItems",
+      { type: "array", items: { type: "string" }, uniqueItems: true },
+    ],
+    ["minProperties", { type: "object", minProperties: 3 }],
+    [
+      "patternProperties",
+      { type: "object", patternProperties: { "^x": { type: "string" } } },
+    ],
+  ] as const)(
+    "a parent carrying an unmodeled %s keyword is incomparable",
+    (_label, parent) => {
+      const child: JsonSchema =
+        parent.type === "array" ?
+          { type: "array", items: { type: "string" } }
+        : { type: "object" };
+      const result = isStructuralSubtype(child, parent);
+      expect(result).toMatchObject({
+        verdict: "incomparable",
+        reason: "unsupported-keyword",
+      });
+    },
+  );
 });
 
 // ============================================================
@@ -810,6 +961,8 @@ describe("projection coverage", () => {
     ["z.string().regex(...)", z.string().regex(/^[a-z]+$/)],
     ["z.email()", z.email()],
     ["z.uuid()", z.uuid()],
+    ["z.url()", z.url()],
+    ["z.jwt()", z.jwt()],
     ["z.iso.date()", z.iso.date()],
     ["z.templateLiteral", z.templateLiteral(["a", z.string()])],
     ["z.string().startsWith", z.string().startsWith("x")],

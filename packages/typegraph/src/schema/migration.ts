@@ -689,7 +689,7 @@ function diffNodeDef(
  * JSON-encoded props no longer satisfy the declared type, which no data-free
  * migration can reconcile.
  */
-export function propertyTypeSignature(schema: JsonSchema): string {
+function propertyTypeSignature(schema: JsonSchema): string {
   if (schema.type !== undefined) return JSON.stringify(schema.type);
   if (schema.const !== undefined) return "const";
   if (schema.enum !== undefined) return "enum";

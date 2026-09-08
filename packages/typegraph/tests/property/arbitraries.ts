@@ -156,11 +156,21 @@ function objectContainerArb(
     isRequired: fc.boolean(),
   });
   return fc
-    .uniqueArray(fieldArb, {
-      selector: (field) => field.name,
-      maxLength: OBJECT_FIELD_NAME_POOL.length,
+    .record({
+      fields: fc.uniqueArray(fieldArb, {
+        selector: (field) => field.name,
+        maxLength: OBJECT_FIELD_NAME_POOL.length,
+      }),
+      // `false` (the common `z.object` shape) or `{}` — an explicitly OPEN,
+      // unconstrained extras schema (`z.looseObject`'s projection) — so P2
+      // and P6 also exercise compareObject's width-subtyping branch for a
+      // parent property the child leaves to its own open extras (C2-02).
+      // Always `{}` rather than a typed catchall schema: `{}` is the top
+      // type, so every tightening operation below stays sound regardless of
+      // which additionalProperties value a generated object carries.
+      isOpen: fc.boolean(),
     })
-    .map((fields) => {
+    .map(({ fields, isOpen }) => {
       const properties: Record<string, JsonSchema> = {};
       const required: string[] = [];
       for (const field of fields) {
@@ -171,7 +181,7 @@ function objectContainerArb(
         type: "object",
         properties,
         required,
-        additionalProperties: false,
+        additionalProperties: isOpen ? {} : false,
       };
     });
 }
@@ -308,6 +318,12 @@ function tightenDropOptionalPropertyArb(
   parent: JsonSchema,
 ): fc.Arbitrary<JsonSchema> | undefined {
   if (!isObjectSchema(parent)) return undefined;
+  // Dropping a declared property is only a sound tightening when `parent` is
+  // CLOSED: an open `parent` (per C2-02) still constrains that property name
+  // through its own additional-properties schema, so simply omitting the
+  // property from `properties` would fall back to that OPEN schema — which
+  // may be looser than the one being dropped, un-tightening the child.
+  if (parent.additionalProperties !== false) return undefined;
   const parentProps = parent.properties ?? {};
   const parentRequired = new Set(parent.required);
   const optionalNames = Object.keys(parentProps).filter(
