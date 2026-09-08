@@ -1467,6 +1467,7 @@ export type ConstraintFenceViolationRows = Readonly<{
     contendedUniqueRows: readonly ContendedUniqueRow[];
     contendedEdgeRows: readonly ContendedEdgeRow[];
     disjointOverlaps: readonly DisjointOverlapRow[];
+    misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 // @public
@@ -1985,6 +1986,12 @@ export type EdgeCreateCommandResult = Readonly<{
     "schemaFence" | "cardinalityClaim" | "endpointPredicate",
     ...(readonly ("schemaFence" | "cardinalityClaim" | "endpointPredicate")[])
     ];
+}>;
+
+// @public
+export type EdgeEndpointAllowance = Readonly<{
+    edgeKind: string;
+    allowedPairs: readonly (readonly [string, string])[];
 }>;
 
 // @public
@@ -3082,6 +3089,16 @@ export type MigrateRecordedAnchorOptions = Readonly<{
 }>;
 
 // @public
+export type MisassignedEdgeEndpointRow = Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
 export function missingRequiredExtras<const D extends CapabilityBundleDefinition, Op extends OperationNames<D>>(definition: D, verdict: BundleVerdictOf<D>, operation: Op): readonly string[];
 
 // @public
@@ -3255,6 +3272,7 @@ export type ReadConstraintFenceViolationsParams = Readonly<{
     uniqueConstraintNames: readonly string[];
     disjointKindPairs: readonly (readonly [string, string])[];
     edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+    edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
 }>;
 
 // @public
@@ -3527,6 +3545,7 @@ export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "co
 // @internal
 export type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
 }>;
 
 // @public (undocumented)

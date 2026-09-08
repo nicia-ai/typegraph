@@ -405,38 +405,77 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `BulkOperationHookContext`. Gate: every added symbol at every moved
 //   entrypoint is one of those eight names, no entrypoint's debt decreased,
 //   and no other entrypoint moved.
+//
+// Ontology change classification batch (roadmap §3.A, item A): the fourth
+// constraint-fence-audit family (`edgeEndpointAssignability`) adds
+// `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow` to
+// `src/backend/types.ts`'s `ReadConstraintFenceViolationsParams` /
+// `ConstraintFenceViolationRows`, and the new `MigrationErrorDetails`
+// `"ontology-tightening-violated"` member carries `changes: readonly
+// OntologyChange[]` (whose own `probes?: readonly OntologyDataProbe[]` names
+// the new `OntologyDataProbe` union and its `UniquenessComponentProbeGroup`
+// member). `OntologyChange` itself was ALREADY forgotten-export debt
+// everywhere it renders (pre-existing, via `SchemaDiff.ontology`) and so is
+// NOT part of this batch's delta — only the four truly new names are.
+// Measured, not assumed:
+// - `./schema` (271→273, +2) and the six `./adapters/drizzle/*` sub-entrypoints
+//   plus `./adapters/drizzle/engine` (each +2: `./adapters/drizzle/sqlite`
+//   247→249, `./adapters/drizzle/postgres` 246→248,
+//   `./adapters/drizzle/postgres/pglite` 250→252,
+//   `./adapters/drizzle/sqlite/local` 250→252,
+//   `./adapters/drizzle/sqlite/libsql` 250→252, `./adapters/drizzle/engine`
+//   320→322) gain only `EdgeEndpointAllowance` and `MisassignedEdgeEndpointRow`:
+//   `./schema` exports `OntologyChange` / `OntologyDataProbe` /
+//   `UniquenessComponentProbeGroup` directly (`classifyOntologyChanges`,
+//   `ontologyTighteningProbes`), so nothing else the new
+//   `MigrationErrorDetails` member or the fourth audit family reaches needs a
+//   forgotten name there or at the backend-adapter entrypoints, which never
+//   name `OntologyChange` at all.
+// - The seven `Store`-bearing entrypoints that do not export
+//   `classifyOntologyChanges` (`.` 388→392, `./interchange` 709→713,
+//   `./profiler` 711→715, `./graph-merge` 726→730, `./provenance` 717→721,
+//   `./sqlite/local` 706→710, `./postgres/pglite` 706→710) each gain all four:
+//   `EdgeEndpointAllowance`, `MisassignedEdgeEndpointRow`, `OntologyDataProbe`,
+//   and `UniquenessComponentProbeGroup` (+4 apiece). `./backend`,
+//   `./adapters/drizzle/indexes`, `./core`, `./graph-extension`, and
+//   `./indexes` are unaffected: `./backend` exports `EdgeEndpointAllowance`
+//   and `MisassignedEdgeEndpointRow` directly, and the other four never reach
+//   `MigrationErrorDetails`, `ReadConstraintFenceViolationsParams`, or
+//   `ConstraintFenceViolationRows` at all. Gate: every added symbol at every
+//   moved entrypoint is one of the four names above (never `OntologyChange`
+//   itself), no entrypoint's debt decreased, and exactly 14 entrypoints moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 388,
-    sha256: "ba5d322f78a05b64e3c21926da4836acb52a26ee41906b9904915884dae7c6ac",
+    count: 392,
+    sha256: "90590b1f13bbc79accec374b63a51b617b4445789d1d0abf776c3085eb3cfd75",
   },
   "./adapters/drizzle/engine": {
-    count: 320,
-    sha256: "e4dd8a48116696b9fa69b13c67a1213c3ba034b0093ed3f646f0dcaa7bbaaefa",
+    count: 322,
+    sha256: "c1184d0391487c646381096ba4499a6b065f6249a24caaa0d47d237f40384b78",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 246,
-    sha256: "5fc01b18bbba5ed13dbd7505f6c8272b6c584205e560cc93f07d6ff65c699996",
+    count: 248,
+    sha256: "14101f3a480081f3650fb72d0c65c73898e9ce6b1e622f25ffc3509af1029673",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 250,
-    sha256: "924e5570b2adaaf898c2b60bf40cbdf1253049cf5f84820cb0426e3235df524f",
+    count: 252,
+    sha256: "7fc79f06823339308e4077229a53c97cad6c32ddc265a2658bcf982ad00983c0",
   },
   "./adapters/drizzle/sqlite": {
-    count: 247,
-    sha256: "6ecc56851e7c322b365927d926ecd116db03998df0eaf6b14edc2106aa88b6ac",
+    count: 249,
+    sha256: "8eef6c35cd1162acda9ed9f8f2c509aecda288112b719efc053b0c35782e79ab",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 250,
-    sha256: "25e36fa53b2453fbbc139ce0f52fa55ec9364c305830aaf6c7f726d07bbcd068",
+    count: 252,
+    sha256: "28ddcda4fb17ca95efd42b00715b177ad4681aa473ea4cab6c8a2643cb449f6f",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 250,
-    sha256: "25e36fa53b2453fbbc139ce0f52fa55ec9364c305830aaf6c7f726d07bbcd068",
+    count: 252,
+    sha256: "28ddcda4fb17ca95efd42b00715b177ad4681aa473ea4cab6c8a2643cb449f6f",
   },
   "./backend": {
     count: 16,
@@ -454,36 +493,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 726,
-    sha256: "f1da24e06c52e543d6800f1fb133e11d1e51d57fae34350374e929cd6a2eafcc",
+    count: 730,
+    sha256: "ac9e2060f9ea27fb9e86d34aa149399103ca0f4ecb0331278c9f08400405f4ae",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 709,
-    sha256: "becc3255cb26ff4e4ad1cdcfc8206cc8089959e6f7eca8a90aa193798537b1d9",
+    count: 713,
+    sha256: "a2554712de880f0a40d4f97619da39c6c322574d095f01b1b5267a566ae37ac8",
   },
   "./postgres/pglite": {
-    count: 706,
-    sha256: "d50d475ca5b4970bc1efd457a42d8265133435a98f23b5b3baa1cc4a9105062c",
+    count: 710,
+    sha256: "6f5552bf9a5e998997e3f965460d3e643f052c85fc71510adf94615ab81914f5",
   },
   "./profiler": {
-    count: 711,
-    sha256: "347f130d75145c9c8577ead5911bcd1ceb2ba5d305d7e4c868ae58168e4503a1",
+    count: 715,
+    sha256: "98ae19d1f08289dea5954115d2d694f3fb5b4be85993040910f28c3e74891c0d",
   },
   "./provenance": {
-    count: 717,
-    sha256: "071dbec959d860ee44eb31f7b412a4ad562c9b05e2669f160748e6f3811e23ba",
+    count: 721,
+    sha256: "3b7b8e200acec162f0d0d83f82bfa8ef7379e2bf9458d46c4a8ab3a64c230e47",
   },
   "./schema": {
-    count: 271,
-    sha256: "a7078b0bb662cbe6f4a1a511cfc1f06971db0cb1e0272a4fa5ea13a8691c56d2",
+    count: 273,
+    sha256: "d8daaf0d30dddffcfd484018daba5fc0e4ebd0f96ac7cc4df65ff37f97a1b7e2",
   },
   "./sqlite/local": {
-    count: 706,
-    sha256: "d50d475ca5b4970bc1efd457a42d8265133435a98f23b5b3baa1cc4a9105062c",
+    count: 710,
+    sha256: "6f5552bf9a5e998997e3f965460d3e643f052c85fc71510adf94615ab81914f5",
   },
 };
 

@@ -134,6 +134,9 @@ type ClaimIndexMaterializationParams = Readonly<{
 }>;
 
 // @public
+export function classifyOntologyChanges(before: OntologySnapshot, after: OntologySnapshot): readonly OntologyChange[];
+
+// @public
 export function classifySchemaChanges(diff: SchemaDiff): SchemaChangeClassification;
 
 // @public
@@ -200,6 +203,7 @@ type ConstraintFenceViolationRows = Readonly<{
     contendedUniqueRows: readonly ContendedUniqueRow[];
     contendedEdgeRows: readonly ContendedEdgeRow[];
     disjointOverlaps: readonly DisjointOverlapRow[];
+    misassignedEdgeEndpointRows?: readonly MisassignedEdgeEndpointRow[];
 }>;
 
 // @public
@@ -570,6 +574,12 @@ type EdgeCreateCommandResult = Readonly<{
     "schemaFence" | "cardinalityClaim" | "endpointPredicate",
     ...(readonly ("schemaFence" | "cardinalityClaim" | "endpointPredicate")[])
     ];
+}>;
+
+// @public
+type EdgeEndpointAllowance = Readonly<{
+    edgeKind: string;
+    allowedPairs: readonly (readonly [string, string])[];
 }>;
 
 // @public
@@ -1774,6 +1784,16 @@ export type MigrationHookContext = Readonly<{
 }>;
 
 // @public
+type MisassignedEdgeEndpointRow = Readonly<{
+    edgeKind: string;
+    edgeId: string;
+    fromKind: string;
+    fromId: string;
+    toKind: string;
+    toId: string;
+}>;
+
+// @public
 const NODE_TYPE_BRAND: "__nodeType";
 
 // @public
@@ -1911,6 +1931,19 @@ export type OntologyChange = Readonly<{
     name: string;
     severity: ChangeSeverity;
     details: string;
+    probes?: readonly OntologyDataProbe[];
+}>;
+
+// @public
+export type OntologyDataProbe = Readonly<{
+    kind: "nodeDisjointness";
+    pairs: readonly (readonly [string, string])[];
+}> | Readonly<{
+    kind: "nodeUniquenessComponent";
+    groups: readonly UniquenessComponentProbeGroup[];
+}> | Readonly<{
+    kind: "edgeEndpointAssignability";
+    allowances: readonly EdgeEndpointAllowance[];
 }>;
 
 // @public
@@ -1919,6 +1952,12 @@ type OntologyRelation = Readonly<{
     from: NodeType | AnyEdgeType | string;
     to: NodeType | AnyEdgeType | string;
 }>;
+
+// @public
+export type OntologySnapshot = Pick<SerializedSchema, "ontology" | "nodes" | "edges">;
+
+// @public
+export function ontologyTighteningProbes(changes: readonly OntologyChange[]): readonly OntologyDataProbe[];
 
 // @public
 export function parseSerializedSchema(json: string): SerializedSchema;
@@ -1961,6 +2000,7 @@ type ReadConstraintFenceViolationsParams = Readonly<{
     uniqueConstraintNames: readonly string[];
     disjointKindPairs: readonly (readonly [string, string])[];
     edgeCardinalities: readonly EdgeCardinalityDeclaration[];
+    edgeEndpointAllowances?: readonly EdgeEndpointAllowance[];
 }>;
 
 // @public
@@ -2080,6 +2120,7 @@ export type SchemaChangeClassification = "identical" | "additive" | "incompatibl
 // @internal
 type SchemaCommitPreflightBackend = TransactionBackend & Readonly<{
     executeSchemaDdl?: (this: void, ddl: string) => Promise<void>;
+    readConstraintFenceViolations?: GraphBackend["readConstraintFenceViolations"];
 }>;
 
 // @public
@@ -2493,6 +2534,12 @@ type UniqueConstraintPredicate = Readonly<{
 // @public
 type UniqueConstraintPredicateBuilder<S extends z.ZodObject<z.ZodRawShape>> = Readonly<{
     [K in keyof z.infer<S>]-?: UniqueConstraintField;
+}>;
+
+// @public
+export type UniquenessComponentProbeGroup = Readonly<{
+    constraintName: string;
+    coveredKinds: readonly string[];
 }>;
 
 // @public
