@@ -212,13 +212,18 @@ import {
   loadActiveSchemaWithBootstrap,
   loadAndMergeGraphExtensionDocument,
   loadAndVerifyGraph,
+  ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
   parseSerializedSchema,
   requiresMigration as requiresMigrationImpl,
   type SchemaManagerOptions,
   type SchemaValidationResult,
 } from "../schema/manager";
 import { type SchemaDiff } from "../schema/migration";
-import { serializeSchema } from "../schema/serializer";
+import { prepareOntologyTighteningPreflight } from "../schema/ontology-tightening-preflight";
+import {
+  serializeSchema,
+  serializeSchemaPreservingUnknownFields,
+} from "../schema/serializer";
 import { type SerializedSchema } from "../schema/types";
 import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
@@ -4336,6 +4341,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.graphId,
       );
     }
+    // Extension `evolve()` used to pass ontology through `classifyModifications`
+    // unclassified — that function's own docblock explains why (ontology is out
+    // of its scope by design). The ontology half is classified here instead,
+    // against the exact after-document the commit is about to publish.
+    const ontologyPreflight = prepareOntologyTighteningPreflight({
+      graphId: this.graphId,
+      fromVersion: activeRow.version,
+      toVersion: activeRow.version + 1,
+      before: storedSchema,
+      after: serializeSchemaPreservingUnknownFields(
+        merged,
+        activeRow.version + 1,
+        storedSchema,
+      ),
+    });
     const identityCandidate =
       merged.identity === undefined ?
         undefined
@@ -4368,7 +4388,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         )
       );
     const committed =
-      identityCandidate === undefined ?
+      ontologyPreflight === undefined && identityCandidate === undefined ?
         classification.requireEmpty.length > 0 ?
           await commitEvolvedSchemaWhenRequiredKindsAreEmpty(
             this.#backend,
@@ -4393,12 +4413,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               this.graphId,
               classification,
             );
-            await identityCandidate.identitySchemaPreflight(
+            // Ontology BEFORE identity: the identity closure is derived from
+            // the ontology being committed, so rebuilding it under an
+            // ontology the data falsifies is work a refusal would only
+            // throw away.
+            await ontologyPreflight?.(target);
+            await identityCandidate?.identitySchemaPreflight(
               target,
               identityProvisioning?.provisionInCommit ?? [],
             );
           },
           storedSchema,
+          identityCandidate === undefined && ontologyPreflight !== undefined ?
+            ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+          : undefined,
         );
     // Provision per-field vector tables + durable markers for any embedding
     // fields this evolution introduced (idempotent for fields that already

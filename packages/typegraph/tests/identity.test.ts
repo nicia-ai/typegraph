@@ -492,13 +492,17 @@ describe("Operational Identity", () => {
       identity: { sameIdAcrossKinds: "fold" },
     });
 
+    // Person:"alice" and Author:"alice" already violate the newly-added
+    // `disjointWith(Person, Author)` directly — a plain node-disjointness
+    // fact, true whether or not identity is involved. The ontology-tightening
+    // preflight runs BEFORE the identity closure rebuild (item A's
+    // ordering), so it refuses here and the identity contradiction check
+    // underneath is never reached.
     await expect(
       createStoreWithSchema(contradictory, backend),
     ).rejects.toMatchObject({
-      name: "ConfigurationError",
-      details: matchingObject({
-        code: "IDENTITY_SCHEMA_CONTRADICTION",
-      }),
+      name: "MigrationError",
+      details: matchingObject({ reason: "ontology-tightening-violated" }),
     });
     const activeSchema = await backend.getActiveSchema(graph.id);
     expect(activeSchema?.version).toBe(1);
@@ -517,11 +521,14 @@ describe("Operational Identity", () => {
       identity: { sameIdAcrossKinds: "fold" },
     });
 
+    // Same reasoning as above: the ontology tightening this migration
+    // proposes is already false against the live `alice` rows, so it is
+    // refused before identity's own (ontology-driven) revalidation runs.
     await expect(
       createStoreWithSchema(contradictory, backend),
     ).rejects.toMatchObject({
-      name: "ConfigurationError",
-      details: matchingObject({ code: "IDENTITY_SCHEMA_CONTRADICTION" }),
+      name: "MigrationError",
+      details: matchingObject({ reason: "ontology-tightening-violated" }),
     });
     const activeSchema = await backend.getActiveSchema(graph.id);
     expect(activeSchema?.version).toBe(1);

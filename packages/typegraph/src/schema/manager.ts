@@ -56,6 +56,7 @@ import {
   matchIdentitiesEqual,
   type SchemaDiff,
 } from "./migration";
+import { prepareOntologyTighteningPreflight } from "./ontology-tightening-preflight";
 import {
   computeSchemaHash,
   getSchemaHash,
@@ -460,7 +461,7 @@ export async function ensureSchema<G extends GraphDef>(
       // preflight, whichever public path drove it. It is derived HERE —
       // never accepted from the caller — so it cannot be substituted or
       // suppressed; `options.schema` only points it at the effective tables.
-      const preflight =
+      const identityPreflight =
         graph.identity === undefined ?
           undefined
         : await prepareIdentitySchemaCommit(backend, graph, {
@@ -469,6 +470,20 @@ export async function ensureSchema<G extends GraphDef>(
               {}
             : { schema: options.schema }),
           });
+      // Same reasoning, for the ontology tightening probe: derived here from
+      // the actual before/after documents this commit is about to publish,
+      // never accepted from the caller.
+      const ontologyPreflight = prepareOntologyTighteningPreflight({
+        graphId: graph.id,
+        fromVersion: activeSchema.version,
+        toVersion: activeSchema.version + 1,
+        before: storedSchema,
+        after: currentSchema,
+      });
+      const preflight = composeSchemaCommitPreflight([
+        ontologyPreflight,
+        identityPreflight,
+      ]);
       const committedRow =
         preflight === undefined ?
           await commitNewSchemaVersion(
@@ -483,6 +498,9 @@ export async function ensureSchema<G extends GraphDef>(
             activeSchema.version,
             preflight,
             storedSchema,
+            identityPreflight === undefined ?
+              ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+            : undefined,
           );
       await options?.onAfterMigrate?.(hookContext);
       return {
@@ -738,25 +756,96 @@ function schemaNotInitializedError(
 }
 
 /**
+ * What a caller of `commitNewSchemaVersionWithPreflight` refuses with when
+ * the backend cannot commit a preflight atomically. Reusing IDENTITY's code
+ * for an ontology-only tightening would misdirect an operator on a graph
+ * with identity disabled, so the primitive takes this bag rather than
+ * hardcoding one message.
+ */
+export type AtomicPreflightCapabilityError = Readonly<{
+  code: string;
+  message: string;
+  suggestion?: string;
+}>;
+
+const IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically commit identity data with a schema transition.",
+  };
+
+/**
+ * Thrown when an ontology tightening (see `./ontology-tightening-preflight`)
+ * needs the atomic preflight-commit primitive and the backend does not
+ * implement it.
+ */
+export const ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR: AtomicPreflightCapabilityError =
+  {
+    code: "ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+    message:
+      "This backend cannot atomically validate an ontology tightening against existing data as part of a schema transition.",
+    suggestion:
+      "Run this migration through a backend built by `createSqliteBackend` or " +
+      "`createPostgresBackend`, or implement `commitSchemaVersionWithPreflight`.",
+  };
+
+/**
  * Returns the backend's atomic preflight-commit primitive, throwing
- * `IDENTITY_REQUIRES_ATOMIC_BACKEND` if the backend doesn't support
- * committing identity data atomically with a schema transition.
+ * `capabilityError` if the backend doesn't support committing a preflight
+ * atomically with a schema transition.
  */
 function requireCommitWithPreflight(
   backend: GraphBackend,
   graph: GraphDef,
+  capabilityError: AtomicPreflightCapabilityError,
 ): NonNullable<GraphBackend["commitSchemaVersionWithPreflight"]> {
   const commitWithPreflight = backend.commitSchemaVersionWithPreflight;
   if (commitWithPreflight === undefined) {
     throw new ConfigurationError(
-      "This backend cannot atomically commit identity data with a schema transition.",
-      {
-        code: "IDENTITY_REQUIRES_ATOMIC_BACKEND",
-        graphId: graph.id,
-      },
+      capabilityError.message,
+      { code: capabilityError.code, graphId: graph.id },
+      capabilityError.suggestion === undefined ?
+        undefined
+      : { suggestion: capabilityError.suggestion },
     );
   }
   return commitWithPreflight;
+}
+
+/**
+ * THE order a schema-commit preflight runs its steps in, and the one place
+ * that order is spelled: structural gates that decide whether the commit is
+ * legal at all (dropped-kinds / required-kinds-empty), then
+ * `edgeMatchIdentityPreflight`, then the ontology-tightening preflight, then
+ * the identity preflight (whose last act is the closure rebuild).
+ *
+ * Ontology precedes identity because the identity closure is DERIVED from
+ * the ontology being committed (`identitySchemaCommitPreflight` rebuilds it
+ * from the target registry), so rebuilding it under an ontology the data
+ * falsifies is work a refusal would only throw away.
+ *
+ * `undefined` steps drop out; an all-`undefined` list yields `undefined`,
+ * which is the caller's signal to take the plain commit primitive and pay
+ * for no transaction it does not need.
+ *
+ * @internal Exported for `tests/schema-commit-preflight-order.test.ts`
+ * only — not re-exported through `src/schema/index.ts` or the package root,
+ * the same convention `commitNewSchemaVersionWithPreflight` already uses.
+ */
+export function composeSchemaCommitPreflight(
+  steps: readonly (
+    ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined
+  )[],
+): ((target: SchemaCommitPreflightBackend) => Promise<void>) | undefined {
+  const defined = steps.filter(
+    (step): step is (target: SchemaCommitPreflightBackend) => Promise<void> =>
+      step !== undefined,
+  );
+  if (defined.length === 0) return undefined;
+  return async (target: SchemaCommitPreflightBackend): Promise<void> => {
+    for (const step of defined) await step(target);
+  };
 }
 
 async function commitInitialEdgeIdentityOnEmptyKinds(
@@ -892,7 +981,11 @@ async function initializeSchemaImpl<G extends GraphDef>(
       : commitWithPreflight(commit, edgeMatchIdentityPreflight);
   }
 
-  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
+  const commitWithPreflight = requireCommitWithPreflight(
+    backend,
+    graph,
+    IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
+  );
 
   // An identity-enabled graph's FIRST schema commit is an enablement: a
   // legacy database populated through an unmanaged Store can already hold
@@ -1070,10 +1163,28 @@ export async function migrateSchema<G extends GraphDef>(
     currentVersion,
   );
 
+  // No BEFORE document, no ontology to tighten against: a v1 initial commit
+  // has nothing preceding it (mirrors `initializeSchema`'s exclusion).
+  const ontologyPreflight =
+    storedSchema === undefined ? undefined : (
+      prepareOntologyTighteningPreflight({
+        graphId: target.id,
+        fromVersion: currentVersion,
+        toVersion: currentVersion + 1,
+        before: storedSchema,
+        after: serializeSchemaPreservingUnknownFields(
+          target,
+          currentVersion + 1,
+          storedSchema,
+        ),
+      })
+    );
+
   const committed =
     (
       identityPreflight === undefined &&
-      edgeMatchIdentityPreflight === undefined
+      edgeMatchIdentityPreflight === undefined &&
+      ontologyPreflight === undefined
     ) ?
       guardedDrops.length > 0 ?
         await commitDroppedKindsOnlyWhenEmpty(
@@ -1105,9 +1216,17 @@ export async function migrateSchema<G extends GraphDef>(
             guardedDrops,
           );
           await edgeMatchIdentityPreflight?.(transactionBackend);
+          // Ontology BEFORE identity: the identity closure is derived from
+          // the ontology being committed, so rebuilding it under an
+          // ontology the data falsifies is work a refusal would only throw
+          // away. See `composeSchemaCommitPreflight`'s docblock.
+          await ontologyPreflight?.(transactionBackend);
           await identityPreflight?.(transactionBackend);
         },
         storedSchema,
+        identityPreflight === undefined && ontologyPreflight !== undefined ?
+          ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR
+        : undefined,
       );
   return committed.version;
 }
@@ -1515,20 +1634,34 @@ async function buildNewSchemaVersionCommit<G extends GraphDef>(
   };
 }
 
-/** @internal Commits a data preflight and schema CAS in one transaction. */
+/**
+ * @internal Commits a data preflight and schema CAS in one transaction.
+ *
+ * `capabilityError` names the reason a preflight is owed when the backend
+ * cannot commit one atomically. Defaults to the identity capability error —
+ * every caller that composes an ontology preflight alongside (or instead of)
+ * an identity one passes `ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR`
+ * when identity contributed no step of its own, so the refusal names the
+ * state that actually required atomicity.
+ */
 export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
   backend: GraphBackend,
   graph: G,
   currentVersion: number,
   preflight: (target: SchemaCommitPreflightBackend) => Promise<void>,
   previous: SerializedSchema | undefined,
+  capabilityError: AtomicPreflightCapabilityError = IDENTITY_ATOMIC_PREFLIGHT_CAPABILITY_ERROR,
 ): Promise<SchemaVersionRow> {
   if (backend.commitSchemaVersionWithPreflight === undefined) {
     // Match the graph-validation ordering of the plain path: reject a
     // structurally invalid graph before probing backend capability.
     buildKindRegistry(graph);
   }
-  const commitWithPreflight = requireCommitWithPreflight(backend, graph);
+  const commitWithPreflight = requireCommitWithPreflight(
+    backend,
+    graph,
+    capabilityError,
+  );
   // Same catalog-race retry as `initializeSchema`, for the same in-transaction
   // identity DDL. The commit payload is built once, outside the retry, so a
   // re-run commits the identical version and hash rather than recomputing one.
