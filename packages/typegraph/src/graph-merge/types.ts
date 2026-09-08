@@ -79,6 +79,20 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
    * falls back to comparing the branch's hash against the fork source's.
    */
   schemaAnchor?: Readonly<{ version: number; hash: string }> | undefined;
+  /**
+   * Releases the branch's working-copy backend — the composed close a
+   * {@link WorkingCopyStrategy} built (e.g. a forked working copy's
+   * connection AND its host-level fork, see `forkedWorkingCopyStrategy`).
+   * Idempotent the same way {@link IngestionBranch.close} is: both coalesce
+   * concurrent calls onto one release of the working copy's backend and make
+   * a completed release final, so a backend whose own `close` is not
+   * idempotent is still released exactly once; a release that FAILED is
+   * retried by the next call rather than cached. `branch()` sets this; a hand-built `GraphBranch` (the merge
+   * primitive's own committed-target stand-in, `tests/`-only fixtures) must
+   * supply one too — a no-op when the object does not own a disposable
+   * backend at all.
+   */
+  close: () => Promise<void>;
 }>;
 
 declare const INGESTION_BRANCH_BRAND: unique symbol;

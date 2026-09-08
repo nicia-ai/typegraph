@@ -18,7 +18,6 @@ import type {
   IdentityAssertionWriteFacade,
   IdentityFacade,
 } from "./typegraph-internal";
-import { storeBackend } from "./typegraph-internal";
 import type {
   BranchOptions,
   GraphBranch,
@@ -26,7 +25,10 @@ import type {
   MergeBranch,
 } from "./types";
 import type { MakeBackend } from "./working-copy";
-import { cloneIngestionWorkingCopyStrategy } from "./working-copy";
+import {
+  cloneIngestionWorkingCopyStrategy,
+  coalescedWorkingCopyClose,
+} from "./working-copy";
 
 const PRIVATE_BRANCHES = new WeakMap<object, unknown>();
 
@@ -95,7 +97,7 @@ export async function ingestionBranch<G extends GraphDef>(
       nodes: store.nodes,
       edges: store.edges,
       ...identityAccess,
-      close: async (): Promise<void> => storeBackend(store).close(),
+      close: coalescedWorkingCopyClose(store),
     }) as unknown as IngestionBranch<G>;
     PRIVATE_BRANCHES.set(handle, privateBranch);
     registerIngestionImportTarget(handle, store);

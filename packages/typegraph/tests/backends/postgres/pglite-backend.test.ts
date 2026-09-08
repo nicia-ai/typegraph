@@ -34,6 +34,7 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { sharesSerializedTransactionResource } from "../../../src/backend/transaction-resource";
 import { type GraphBackend } from "../../../src/backend/types";
+import { computeBaseVersion } from "../../../src/graph-merge/base-version";
 import { cloneWorkingCopyStrategy } from "../../../src/graph-merge/working-copy";
 import {
   exportGraph,
@@ -681,7 +682,7 @@ describe("PGlite backend", () => {
       const workingCopy = await withGuardTimeout(
         cloneWorkingCopyStrategy<typeof peopleGraph>(() =>
           makeCloneBackend(),
-        ).create(base),
+        ).create(base, await computeBaseVersion(base)),
       );
 
       await expectClonedPeople(workingCopy);
@@ -696,7 +697,7 @@ describe("PGlite backend", () => {
       const workingCopy = await withGuardTimeout(
         cloneWorkingCopyStrategy<typeof peopleGraph>(() =>
           makeCloneBackend(),
-        ).create(base),
+        ).create(base, await computeBaseVersion(base)),
       );
 
       await expectClonedPeople(workingCopy);

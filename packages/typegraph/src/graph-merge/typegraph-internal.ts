@@ -4,7 +4,14 @@ export {
   requireWriteFence,
   resolveWriteFencePlan,
 } from "../backend/capabilities/write-fence";
-export { snapshotExportContention } from "../backend/transaction-resource";
+export {
+  isBackendDerivedFrom,
+  wrapWithManagedClose,
+} from "../backend/derive-backend";
+export {
+  sharesSerializedTransactionResource,
+  snapshotExportContention,
+} from "../backend/transaction-resource";
 export type {
   GraphBackend,
   NodeRow,
@@ -44,7 +51,10 @@ export {
 } from "../ontology/constants";
 // The provenance ownership probe needs graph-scoped raw SQL to look for rows
 // under a graph id whose schema was never registered.
-export { createSqlSchema } from "../query/compiler/schema";
+export {
+  createSqlSchema,
+  type ResolvedSqlTableNames,
+} from "../query/compiler/schema";
 export { sql } from "../query/sql-fragment";
 export { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 export { sortedReplacer } from "../schema/canonical";
@@ -67,8 +77,13 @@ export {
   transactionBackend,
 } from "../store/runtime-port";
 export type { Store } from "../store/store";
-export { createStoreWithSchema } from "../store/store";
-export { type Edge, type Node, type ValidityEndMutation } from "../store/types";
+export { createStore, createStoreWithSchema } from "../store/store";
+export {
+  type Edge,
+  type Node,
+  type StoreOptions,
+  type ValidityEndMutation,
+} from "../store/types";
 export { compareCodePoints } from "../utils/compare";
 export { canonicalizeDatabaseTimestamp } from "../utils/date";
 export { sha256Hex } from "../utils/hash";

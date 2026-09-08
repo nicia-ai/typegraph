@@ -84,6 +84,7 @@ export {
   type UnboundLiveStoreOptions,
   type UpdateEdgeInput,
   type UpdateNodeInput,
+  type WorkingCopyOptions,
 } from "./types";
 export { compareAndSetAbsent } from "./types";
 

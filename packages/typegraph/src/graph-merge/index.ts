@@ -184,5 +184,13 @@ export {
   asBranchId,
   VALIDITY_END_TARGET_PRECEDENCE,
 } from "./types";
-export type { MakeBackend, WorkingCopyStrategy } from "./working-copy";
-export { cloneWorkingCopyStrategy } from "./working-copy";
+export type {
+  ForkedWorkingCopyOptions,
+  ForkHandle,
+  MakeBackend,
+  WorkingCopyStrategy,
+} from "./working-copy";
+export {
+  cloneWorkingCopyStrategy,
+  forkedWorkingCopyStrategy,
+} from "./working-copy";

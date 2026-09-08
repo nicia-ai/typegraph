@@ -551,6 +551,25 @@ export type HistoryStoreOptions = BaseStoreOptions &
 export type StoreOptions = LiveStoreOptions | HistoryStoreOptions;
 
 /**
+ * The subset of a store's construction options that describe its own
+ * observable behavior rather than its recorded-time configuration: hooks,
+ * upsert coalescing, the SQL schema (custom table names), the auto-refresh-
+ * statistics threshold, query defaults, and an externally-bound recorded-read
+ * relation. `Store.workingCopyOptions` is the one place these are read off a
+ * live store, so a working-copy strategy that needs them never re-derives
+ * them from private construction state.
+ *
+ * `history` and `revisionTracking` are deliberately excluded: a working-copy
+ * strategy decides those for itself (a fork mirrors the base's own
+ * `historyEnabled`/`revisionTrackingEnabled`; a clone documents why it keeps
+ * a narrower subset — see `cloneWorkingCopyStrategy`'s doc comment).
+ */
+export type WorkingCopyOptions = Omit<
+  LiveStoreOptions,
+  "history" | "revisionTracking"
+>;
+
+/**
  * A mutable handle to the current `Store`, used by `store.evolve(...)`
  * so long-lived consumers can dereference through the ref and pick up
  * the new Store after each evolve call. When the ref is passed via

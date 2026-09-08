@@ -40,7 +40,10 @@ import { z } from "zod";
 import { createStore, defineGraph, defineNode } from "../src";
 import { writeFenceDeclarationLine } from "../src/backend/capabilities/write-fence";
 import { TypeGraphError } from "../src/errors";
-import { cloneWorkingCopyStrategy } from "../src/graph-merge";
+import {
+  cloneWorkingCopyStrategy,
+  computeBaseVersion,
+} from "../src/graph-merge";
 import {
   createLoggedPostgresBackend,
   createLoggedSqliteBackend,
@@ -213,9 +216,9 @@ describe("T16 — (f) revisionTracking: true alone on unfenced refuses, zero sta
     const strategy = cloneWorkingCopyStrategy<typeof plainGraph>(() =>
       Promise.resolve(fresh.backend),
     );
-    await expect(strategy.create(baseStore)).rejects.toThrow(
-      writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"),
-    );
+    await expect(
+      strategy.create(baseStore, await computeBaseVersion(baseStore)),
+    ).rejects.toThrow(writeFenceRefusal("RECORDED_CLOCK_REQUIRES_WRITE_FENCE"));
   });
 });
 

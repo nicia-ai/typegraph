@@ -1073,7 +1073,9 @@ const fork = unwrap(await branch(base, makeBackend, { id: asBranchId("worker-1")
 
 For a custom isolation mechanism (e.g. a future copy-on-write namespace), pass a
 `WorkingCopyStrategy` as the fourth argument to `branch()` — its single `create`
-method returns an independently-mutable store over the same graph definition.
+method receives the base store and the `BaseVersion` `branch()` already
+stamped off it, and returns an independently-mutable store over the same
+graph definition.
 
 **A branch is a data fork.** `branch()` records the clone's committed schema
 `(version, hash)` at fork time, and the merge refuses (typed, as
@@ -1083,6 +1085,187 @@ round-trip migration that restores the original document hash. Those
 operations mutate rows through their own preflights, and projecting the side
 effects into a merge would detach them from the schema change that caused
 them. Apply schema changes to the target first (or re-fork), then merge.
+
+### Forked working copies
+
+A second bundled strategy, `forkedWorkingCopyStrategy<G, TFork>({ fork, connect })`,
+targets a fork-capable host instead of a streamed-interchange clone: `fork`
+asks the host itself to produce a complete, independent copy of the database
+`baseStore` is on, and `connect` opens a backend on that copy.
+
+```typescript
+import {
+  asBranchId,
+  branch,
+  forkedWorkingCopyStrategy,
+  unwrap,
+  type ForkHandle,
+} from "@nicia-ai/typegraph/graph-merge";
+import { createPostgresBackend } from "@nicia-ai/typegraph/adapters/drizzle/postgres";
+import { decorateBackend } from "@nicia-ai/typegraph/backend";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
+
+// A host whose fork call returns a new connection string for the branch —
+// this is the shape of the copy-on-write branching APIs some Postgres hosts
+// offer (Neon and Supabase branches, for example), without either SDK.
+type HostBranch = ForkHandle & Readonly<{ connectionString: string }>;
+
+const strategy = forkedWorkingCopyStrategy<G, HostBranch>({
+  fork: async () => {
+    const created = await hostBranchApi.createBranch(baseDatabaseId);
+    return {
+      connectionString: created.connectionString,
+      dispose: async () => hostBranchApi.deleteBranch(created.id),
+    };
+  },
+  connect: async (fork) => {
+    // `createPostgresBackend` takes a Drizzle database, not a pool — open
+    // one here. Its `close()` deliberately does not end a caller-owned pool
+    // (Drizzle leaves connection lifecycle to the caller), so compose the
+    // pool's own shutdown into this fork's `close` through the public
+    // `decorateBackend` (never a spread) — `branch()`'s composed close then
+    // ends the pool along with releasing the fork.
+    const pool = new Pool({ connectionString: fork.connectionString });
+    const backend = createPostgresBackend(drizzle(pool));
+    return decorateBackend(backend, {
+      close: async () => {
+        await backend.close();
+        await pool.end();
+      },
+    });
+  },
+});
+
+// `makeBackend` is ignored once an explicit strategy is supplied — pass a
+// factory whose only job is to reject if it is ever called by mistake.
+const rejectMakeBackend = () =>
+  Promise.reject(new Error("makeBackend must not be called"));
+
+const worker = unwrap(
+  await branch(
+    base,
+    rejectMakeBackend,
+    { id: asBranchId("worker-1") },
+    strategy,
+  ),
+);
+
+// ... write on worker.store, plan and apply the merge ...
+
+await worker.close();
+```
+
+`TFork` must extend `ForkHandle` (`{ dispose?: () => Promise<void> }`).
+`create()` calls `fork(baseStore)`, then `connect(fork)`; the connected
+backend's `close` is composed with the fork's `dispose` through `deriveBackend`
+(never a spread), so `worker.close()` — the branch's public release call —
+releases both the connection and the fork. A `connect` failure disposes the fork before
+rethrowing, leaving nothing open and the base untouched.
+
+A fork inherits the base's WHOLE construction option set — hooks, upsert
+coalescing, the SQL schema (custom table names), the auto-refresh-statistics
+threshold, query defaults, and an externally-bound recorded-read relation —
+read once through `Store.workingCopyOptions`, plus `history`/
+`revisionTracking`, matched to the base's own `historyEnabled`/
+`revisionTrackingEnabled`. This is safe precisely because a fork is the SAME
+physical database as the base: a custom `schema` names relations the fork
+carries too, and an external `recordedRead` binding points at one. The clone
+strategy inherits only `revisionTracking` — its fresh backend is a distinct,
+empty database, so a schema naming the base's tables or a `recordedRead`
+binding populated nowhere on the clone would misdirect it.
+
+Because the fork's store reads and writes through the base's table names,
+`connect()`'s backend must bind those SAME names. `create()` compares the
+connected backend's own table bindings against the base's own resolved SQL
+schema (`Store.revisionSchema` — the base's explicit `schema` option, or its
+backend's own `tableNames` otherwise), and refuses with a `BranchError`,
+closing the backend first, when they disagree: a backend bound to different
+(often just the default) table names would read and write through tables the
+fork's rows were never written to.
+
+**A fork preserves what a clone drops, and that is why it is safe to merge.**
+The clone strategy above streams the base through public interchange with
+`includeDeleted: false`, so it omits every soft-deleted row entirely: the
+interchange `meta` schema has no `deletedAt` field, so a tombstoned row would
+otherwise round-trip as LIVE and read as a spurious resurrection on the
+clone's diff. It also regenerates `created_at`/`updated_at` on import — safe
+only because the merge's state diff always compares against the *original*
+base store, never the clone. A fork is never rebuilt through
+`exportGraphStream`/`importGraphStream`, so none of that applies: tombstones,
+`created_at`/`updated_at`, and the `version` column carry over unchanged, and
+— with `history: true` — the fork physically carries the base's recorded
+relations, so `store.asOfRecorded(<an instant before the fork>)` answers from
+that history. A clone-based branch never enables history, so the same call on
+it refuses outright.
+
+`create()` asserts `computeBaseVersion(forkStore) === base` right after
+attaching the store, where `base` is the token `branch()` already stamped off
+the ORIGINAL base store before invoking the strategy — cheap when the base has
+revision tracking (an O(1) anchor compare), an O(graph) content fingerprint
+otherwise, and computed exactly once either way. This proves base-token
+equality at the instant the fork was taken, not byte-for-byte physical
+identity: the untracked fingerprint deliberately omits tombstones,
+`created_at`/`updated_at`, the `version` column, and recorded history (the "A
+fork preserves what a clone drops" paragraph above) — providing those
+unchanged is the FORK MECHANISM's job, not something this assertion re-verifies
+on every branch. That is still the right fence: the merge's lost-update guard
+reads `version` and the diff reads tombstones/timestamps straight off the
+fork, so a `fork` that is not a true physical copy breaks them regardless of
+what the content fingerprint agrees on. A mismatch closes the backend first
+and refuses with a `BranchError` carrying `forkVersion`/`baseVersion` in
+`error.details`; `branch()` catches it and returns that `BranchError` as the
+`cause` of the outer `BranchError` it resolves with. Only a base-token
+mismatch is refused here — a fork taken while the base was mid-write, or a
+`fork` that returns a different graph; divergence confined to the physical
+state the token omits (tombstones, timestamps, row versions, recorded
+history) passes the fence, and keeping that state faithful remains the fork
+mechanism's contract.
+
+`create()` also refuses BEFORE ever attaching a store when `connect()`'s
+backend aliases the base's own backend: the same backend object, one derived
+from the other through `deriveBackend`, or two wrappers sharing one underlying
+connection. Without this check, a `connect()` that mistakenly hands back the
+base's own backend (a cached factory keyed by database name, say) would pass
+every fence below trivially — every write on the "fork" would actually mutate
+the base, and closing the working copy would close the base's own backend. The
+refusal disposes only the fork (never the aliased backend, which the base
+still owns) and throws a `BranchError` naming `connect()`. This cannot detect
+every aliasing shape: a fresh backend built over the base's own connection
+pool is indistinguishable from a real fork's connection when that pool audits
+as independent (the normal case for a default-size `pg.Pool`) — a pooled
+checkout genuinely is a different connection from the pool's perspective.
+
+`ingestionBranch()` stays clone-based. Its strategy derives a working-copy
+schema with node uniqueness deferred so an untrusted batch's repeated keys can
+reach entity resolution before validation; a host-level fork carries the
+base's schema exactly, uniqueness included, with no hook to relax it.
+
+:::caution[Suspend hazard]
+A fork-capable host that suspends idle compute to reclaim it between requests
+drops that compute's in-process state, including anything memoized against a
+particular connection or session. TypeGraph's own locking already assumes
+this rather than trusting a lock survives idle time: the recorded-write lock
+memo (`RecordedGraphLockMemo`, populated by
+`memoizeAcquiredRecordedGraphWriteLock`) and the schema-fence lease
+(`memoizeLeasedSchemaFence`) are both keyed weakly by the transaction-scoped
+backend object, so they hold for exactly one transaction's lifetime and
+re-acquire on the next one, and the write fence itself (see
+[Write fence declaration](/backend-setup#write-fence-declaration-writefence))
+is resolved and its lock taken fresh per transaction, never cached across
+one. An ordinary sequence of separate `store` calls — each its own
+transaction — therefore tolerates a suspend between any two of them.
+
+What does NOT tolerate a suspend is a single `store.transaction` callback:
+every read and write the callback issues, and the lock it holds, runs on one
+native database transaction over one connection, so a suspend partway
+through drops that connection out from under the callback and aborts
+whatever was in flight. Keep a `store.transaction` callback's wall-clock
+duration short and free of anything that could let the host suspend
+underneath it — an external API call, a human approval step, a long queue
+wait — and commit a long-running workflow across multiple `store.transaction`
+calls instead of holding one open across such a wait.
+:::
 
 ### Constraint-aware ingestion branches
 

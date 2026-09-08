@@ -195,6 +195,18 @@ export type BaseNodeLookup = Readonly<{
     }>) => Promise<readonly (readonly Node<NodeType>[])[]>;
 }>;
 
+// @public (undocumented)
+type BaseStoreOptions = Readonly<{
+    hooks?: StoreHooks;
+    revisionTracking?: boolean;
+    autoRefreshStatistics?: false | number;
+    coalesceUnchangedUpserts?: boolean;
+    schema?: SqlSchema;
+    queryDefaults?: Readonly<{
+        traversalExpansion?: TraversalExpansion;
+    }>;
+}>;
+
 // @public
 type BaseTraversalOptions<G extends GraphDef> = TemporalAlgorithmOptions & IterativeMemoryOptions & Readonly<{
     edges: readonly EdgeKinds<G>[];
@@ -467,6 +479,13 @@ type BulkFindRuntimeEdgesFromParams<NT extends RuntimeNodeKind, ET extends Runti
 type BulkFindRuntimeEdgesFromResult<NT extends RuntimeNodeKind, ET extends RuntimeEdgeKind> = Readonly<{
     source: RuntimeNodeReferenceFor<NT>;
     edges: readonly RuntimeEdgeFor<ET>[];
+}>;
+
+// @public
+type BulkOperationHookContext = HookContext & Readonly<{
+    operation: "compareAndSet" | "updateWhere";
+    entity: "node";
+    kind: string;
 }>;
 
 // @public
@@ -2239,6 +2258,20 @@ type FindNodesByKindParams = Readonly<{
 }>;
 
 // @public
+export type ForkedWorkingCopyOptions<G extends GraphDef, TFork extends ForkHandle> = Readonly<{
+    fork: (baseStore: Store<G>) => Promise<TFork>;
+    connect: (fork: TFork) => Promise<GraphBackend>;
+}>;
+
+// @public
+export function forkedWorkingCopyStrategy<G extends GraphDef, TFork extends ForkHandle>(options: ForkedWorkingCopyOptions<G, TFork>): WorkingCopyStrategy<G>;
+
+// @public
+export type ForkHandle = Readonly<{
+    dispose?: () => Promise<void>;
+}>;
+
+// @public
 type FulltextAccessor = Readonly<{
     matches: (query: string, k?: number, options?: MatchesOptions) => Predicate;
 }>;
@@ -2594,6 +2627,7 @@ export type GraphBranch<G extends GraphDef> = Readonly<{
         version: number;
         hash: string;
     }> | undefined;
+    close: () => Promise<void>;
 }>;
 
 // @public
@@ -2738,6 +2772,14 @@ type HardDeleteUniquesByNodeIdsParams = Readonly<{
 
 // @public (undocumented)
 type HasMeta<Selection extends readonly string[] | undefined> = Selection extends readonly string[] ? "meta" extends Selection[number] ? true : false : false;
+
+// @public
+type HookContext = Readonly<{
+    operationId: string;
+    graphId: string;
+    startedAt: Date;
+    attempt?: number;
+}>;
 
 // @public (undocumented)
 type HybridFulltextOptions = Readonly<{
@@ -3435,6 +3477,12 @@ type LiteralValue = Readonly<{
     __type: "literal";
     value: string | number | boolean;
     valueType?: ValueType | undefined;
+}>;
+
+// @public
+type LiveStoreOptions = BaseStoreOptions & Readonly<{
+    history?: false | undefined;
+    recordedRead?: ExternalRecordedReadSource | undefined;
 }>;
 
 // @public (undocumented)
@@ -4624,6 +4672,14 @@ export function openProvenanceStore<G extends GraphDef>(target: Store<G>): Promi
 export function openProvenanceStore(backend: GraphBackend, targetGraphId: string): Promise<Store<ProvenanceGraph>>;
 
 // @public
+type OperationHookContext = HookContext & Readonly<{
+    operation: "create" | "update" | "delete";
+    entity: KindEntity;
+    kind: string;
+    id: string;
+}>;
+
+// @public
 type OptionalGraphBackendMember = OptionalKeys<GraphBackend>;
 
 // @public
@@ -5023,6 +5079,12 @@ type QueryCoordinateState = "open" | "sealed";
 
 // @public (undocumented)
 type QueryExecutionBackend = Pick<GraphBackend, "execute">;
+
+// @public
+type QueryHookContext = HookContext & Readonly<{
+    sql: string;
+    params: readonly unknown[];
+}>;
 
 // @public (undocumented)
 type QueryOptions = NoRecordedCoordinate & Readonly<{
@@ -5922,6 +5984,7 @@ type StoreCore<G extends GraphDef> = Readonly<{
     revisionTrackingEnabled: boolean;
     revisionSchema: SqlSchema;
     recordedReadBound: boolean;
+    workingCopyOptions: WorkingCopyOptions;
     nodes: GraphNodeCollections<G>;
     edges: GraphEdgeCollections<G>;
     algorithms: GraphAlgorithms<G>;
@@ -5998,6 +6061,26 @@ interface StoreEvolution<G extends GraphDef, TStore extends StoreCore<G>> {
         ref?: TStore extends TRefStore ? StoreRef<TRefStore> : never;
     }>) => Promise<TStore>;
 }
+
+// @public
+type StoreHooks = Readonly<{
+    onQueryStart?: (ctx: QueryHookContext) => void;
+    onQueryEnd?: (ctx: QueryHookContext, result: Readonly<{
+        rowCount: number;
+        durationMs: number;
+    }>) => void;
+    onOperationStart?: (ctx: OperationHookContext) => void;
+    onBulkOperationStart?: (ctx: BulkOperationHookContext) => void;
+    onOperationEnd?: (ctx: OperationHookContext, result: Readonly<{
+        durationMs: number;
+        outcome: "written" | "unchanged" | "unknown";
+    }>) => void;
+    onBulkOperationEnd?: (ctx: BulkOperationHookContext, result: Readonly<{
+        affectedCount: number;
+        durationMs: number;
+    }>) => void;
+    onError?: (ctx: HookContext, error: Error) => void;
+}>;
 
 // @public
 type StoreIdentityAccess<G extends GraphDef> = G["identity"] extends GraphIdentityConfig ? Readonly<{
@@ -7251,8 +7334,11 @@ type WidenBrandedIds<T> = {
 };
 
 // @public
+type WorkingCopyOptions = Omit<LiveStoreOptions, "history" | "revisionTracking">;
+
+// @public
 export type WorkingCopyStrategy<G extends GraphDef> = Readonly<{
-    create: (baseStore: Store<G>) => Promise<Store<G>>;
+    create: (baseStore: Store<G>, base: BaseVersion) => Promise<Store<G>>;
 }>;
 
 // @public

@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("31 reasoned entries sum to 90 accesses; 50 deferred entries sum to 217", () => {
+  it("31 reasoned entries sum to 91 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -132,8 +132,10 @@ describe("capability bundle totality (T9)", () => {
     // introspection bag then added `catalog`, a reasoned member whose own
     // absence refusal lives in backend/capabilities/ — a directory the live
     // scanner excludes wholesale — so its measured access count is 0 and
-    // the floor is unchanged.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(90);
+    // the floor is unchanged. The forked working-copy strategy then reads
+    // the connected backend's `tableNames` to fence them against the base
+    // store's resolved schema — 90 -> 91.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(91);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });
