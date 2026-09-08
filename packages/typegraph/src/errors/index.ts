@@ -1847,6 +1847,7 @@ export class UnsupportedBackendCapabilityError extends TypeGraphError {
 
 /** Stable reasons an intentionally trusted initial import can be rejected. */
 export type TrustedImportErrorReason =
+  | "acyclicity_unsupported"
   | "backend_unsupported"
   | "cardinality_unsupported"
   | "database_not_empty"
