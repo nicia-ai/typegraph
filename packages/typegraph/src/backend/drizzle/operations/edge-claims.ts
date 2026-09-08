@@ -1,10 +1,10 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  type ConstrainedCardinality,
-  EDGE_CARDINALITY_SPECS,
+  edgeCardinalityAxisName,
   edgeCardinalityClaimTarget,
   type EdgeCardinalitySpec,
+  edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
 import { resolveStampedValidityLowerBound } from "../../../utils/date";
 import type {
@@ -196,25 +196,49 @@ function proposedRelationCte(
 }
 
 /**
+ * The endpoint terms {@link EdgeCardinalitySpec.keyShape} says a predicate
+ * must read: from-terms for `"from"`, to-terms for `"to"`, both for
+ * `"fromAndTo"`. The one renderer of that fold, so a source-axis predicate and
+ * a target-axis predicate cannot spell two different subsets of these columns.
+ */
+function endpointTerms(
+  edgesName: string,
+  edges: Tables["edges"],
+  keyShape: EdgeCardinalitySpec["keyShape"],
+  values: ClaimValueSource,
+): SQL {
+  const fromTerms =
+    keyShape === "from" || keyShape === "fromAndTo" ?
+      sql` AND ${qualified(edgesName, edges.fromKind)} = ${values.fromKind} AND ${qualified(edgesName, edges.fromId)} = ${values.fromId}`
+    : sql``;
+  const toTerms =
+    keyShape === "to" || keyShape === "fromAndTo" ?
+      sql` AND ${qualified(edgesName, edges.toKind)} = ${values.toKind} AND ${qualified(edgesName, edges.toId)} = ${values.toId}`
+    : sql``;
+  return sql`${fromTerms}${toTerms}`;
+}
+
+/**
  * Splits a chunk into the groups that can share one statement.
  *
  * The claim predicates are shaped by {@link EdgeCardinalitySpec}: which
  * endpoints the axis key covers, and what a holder must still be. Those are
  * predicate SHAPE, not values, so they cannot ride in the `proposed` relation
  * without becoming OR-guarded terms the planner can no longer seek on — which
- * is the cost this rewrite exists to remove. One statement per distinct
- * cardinality keeps every term index-seekable; a chunk of one edge kind, the
- * ordinary case, still renders exactly one statement.
+ * is the cost this rewrite exists to remove. One statement per distinct axis
+ * spec keeps every term index-seekable; a chunk of one edge kind and one
+ * direction, the ordinary case, still renders exactly one statement.
  *
  * First-appearance order, so a rendered program is deterministic.
  */
-function groupEntriesByCardinality(
+function groupEntriesBySpec(
   entries: readonly ClaimEdgeCardinalityParams[],
 ): readonly (readonly ClaimEdgeCardinalityParams[])[] {
-  const groups = new Map<ConstrainedCardinality, ClaimEdgeCardinalityParams[]>();
+  const groups = new Map<string, ClaimEdgeCardinalityParams[]>();
   for (const entry of entries) {
-    const group = groups.get(entry.cardinality);
-    if (group === undefined) groups.set(entry.cardinality, [entry]);
+    const name = edgeCardinalityAxisName(entry);
+    const group = groups.get(name);
+    if (group === undefined) groups.set(name, [entry]);
     else group.push(entry);
   }
   return [...groups.values()];
@@ -227,7 +251,7 @@ function specOf(
   if (first === undefined) {
     throw new TypeError("A cardinality group is never empty.");
   }
-  return EDGE_CARDINALITY_SPECS[first.cardinality];
+  return edgeCardinalitySpec(first);
 }
 
 /**
@@ -242,10 +266,6 @@ function competingLiveEdgePredicate(
 ): SQL {
   const { edges } = tables;
   const edgesName = getTableName(edges);
-  const toEndpointTerms =
-    spec.keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.toKind)} = ${values.toKind} AND ${qualified(edgesName, edges.toId)} = ${values.toId}`
-    : sql``;
   const activeTerm =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
@@ -255,9 +275,7 @@ function competingLiveEdgePredicate(
     ${qualified(edgesName, edges.graphId)} = ${values.graphId}
       AND ${qualified(edgesName, edges.id)} <> ${values.edgeId}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${values.edgeKind}
-      AND ${qualified(edgesName, edges.fromKind)} = ${values.fromKind}
-      AND ${qualified(edgesName, edges.fromId)} = ${values.fromId}${toEndpointTerms}${activeTerm}
+      AND ${qualified(edgesName, edges.kind)} = ${values.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, values)}${activeTerm}
   `;
 }
 
@@ -317,10 +335,6 @@ function recordedClaimHolderIsLivePredicate(
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const edgesName = getTableName(edges);
-  const toEndpointTerms =
-    spec.keyShape === "fromAndTo" ?
-      sql` AND ${qualified(edgesName, edges.toKind)} = ${values.toKind} AND ${qualified(edgesName, edges.toId)} = ${values.toId}`
-    : sql``;
   const activeTerm =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(edgesName, edges.validTo)} IS NULL`
@@ -329,9 +343,7 @@ function recordedClaimHolderIsLivePredicate(
     ${qualified(edgesName, edges.graphId)} = ${qualified(claimsName, edgeClaims.graphId)}
       AND ${qualified(edgesName, edges.id)} = ${qualified(claimsName, edgeClaims.edgeId)}
       AND ${qualified(edgesName, edges.deletedAt)} IS NULL
-      AND ${qualified(edgesName, edges.kind)} = ${values.edgeKind}
-      AND ${qualified(edgesName, edges.fromKind)} = ${values.fromKind}
-      AND ${qualified(edgesName, edges.fromId)} = ${values.fromId}${toEndpointTerms}${activeTerm}
+      AND ${qualified(edgesName, edges.kind)} = ${values.edgeKind}${endpointTerms(edgesName, edges, spec.keyShape, values)}${activeTerm}
   `;
 }
 
@@ -340,7 +352,7 @@ function recordedClaimHolderIsLivePredicate(
  * The schema and endpoint gates ensure a stale fence remains a side-effect-free
  * no-op; a later edge refusal rolls this mutation back with the whole program.
  *
- * One statement per cardinality group; see {@link groupEntriesByCardinality}.
+ * One statement per axis-spec group; see {@link groupEntriesBySpec}.
  *
  * The `stale` CTE names its projection distinctly (`stale_graph_id`, …): the
  * row-value comparison the DELETE ends with is against the target relation's
@@ -356,7 +368,7 @@ export function buildDeleteStaleAtomicEdgeClaims(
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
   const values = PROPOSED_CLAIM_VALUES;
-  return groupEntriesByCardinality(entries).map((group) => {
+  return groupEntriesBySpec(entries).map((group) => {
     const spec = specOf(group);
     return sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
@@ -392,7 +404,7 @@ export function buildDeleteStaleAtomicEdgeClaims(
 /**
  * Acquires every still-unowned axis before inserting the guarded edge rows.
  *
- * One statement per cardinality group; see {@link groupEntriesByCardinality}.
+ * One statement per axis-spec group; see {@link groupEntriesBySpec}.
  */
 export function buildAcquireAtomicEdgeClaims(
   tables: Tables,
@@ -409,7 +421,7 @@ export function buildAcquireAtomicEdgeClaims(
     `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}"`,
   );
   const values = PROPOSED_CLAIM_VALUES;
-  return groupEntriesByCardinality(entries).map((group) => {
+  return groupEntriesBySpec(entries).map((group) => {
     const spec = specOf(group);
     return sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
@@ -442,7 +454,7 @@ export function buildAcquireAtomicEdgeClaims(
  * refusal leg in a rendered program — the backend tests discriminate the three
  * claim phases by them.
  *
- * One statement per cardinality group; see {@link groupEntriesByCardinality}.
+ * One statement per axis-spec group; see {@link groupEntriesBySpec}.
  */
 export function buildAssertAtomicEdgeClaimsOwned(
   tables: Tables,
@@ -457,7 +469,7 @@ export function buildAssertAtomicEdgeClaimsOwned(
     `"${edgeClaims.graphId.name}", "${edgeClaims.axis.name}", "${edgeClaims.key.name}", "${edgeClaims.edgeId.name}", "${edgeClaims.updatedAt.name}"`,
   );
   const values = PROPOSED_CLAIM_VALUES;
-  return groupEntriesByCardinality(entries).map(
+  return groupEntriesBySpec(entries).map(
     (group) => sql`
       WITH ${schemaFenceCte(tables, schemaFence, schemaLockClause)},
       ${proposedRelationCte(tables, group)}
@@ -576,7 +588,7 @@ export function buildLockEdgeClaimGuarded(
       ${quotedColumn(edgeClaims.edgeId)} AS holder_edge_id,
       EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), EDGE_CARDINALITY_SPECS[params.cardinality])}
+        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), edgeCardinalitySpec(params))}
       ) AS has_incumbent
   `;
 }
@@ -626,7 +638,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
       FROM live_endpoints
       WHERE NOT EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(claim), EDGE_CARDINALITY_SPECS[claim.cardinality])}
+        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(claim), edgeCardinalitySpec(claim))}
       )
     ),
     claim AS (
@@ -685,9 +697,10 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
  * `edgeExistsBetween` filter on — so the fence's liveness predicate and the
  * probe's read the same shape.
  *
- * The `valid_to IS NULL` term and the to-endpoint terms are not spelled here:
- * they are read from {@link EDGE_CARDINALITY_SPECS}, the same table the
- * TypeScript probe reads.
+ * The `valid_to IS NULL` term and the endpoint terms are not spelled here:
+ * `holderLiveness` and `keyShape` are read from {@link edgeCardinalitySpec},
+ * the same table the TypeScript probe reads, and {@link endpointTerms}
+ * renders the from- and/or to-terms `keyShape` names.
  */
 export function buildTakeOverEdgeClaim(
   tables: Tables,
@@ -696,7 +709,7 @@ export function buildTakeOverEdgeClaim(
 ): SQL {
   const { edgeClaims, edges } = tables;
   const claimsName = getTableName(edgeClaims);
-  const spec = EDGE_CARDINALITY_SPECS[params.cardinality];
+  const spec = edgeCardinalitySpec(params);
   const target = edgeCardinalityClaimTarget(params);
 
   return sql`
@@ -739,7 +752,7 @@ export function buildTakeOverEdgeClaimGuarded(
       AND ${qualified(claimsName, edgeClaims.edgeId)} <> ${params.edgeId}
       AND NOT EXISTS (
         SELECT 1 FROM ${edges}
-        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), EDGE_CARDINALITY_SPECS[params.cardinality])}
+        WHERE ${competingLiveEdgePredicate(tables, boundClaimValues(params), edgeCardinalitySpec(params))}
       )
     RETURNING ${quotedColumn(edgeClaims.edgeId)} as holder_edge_id
   `;

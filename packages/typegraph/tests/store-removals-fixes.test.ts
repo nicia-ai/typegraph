@@ -556,6 +556,7 @@ describe("materializeRemovals edge-claim housekeeping", () => {
     );
     await requireDefined(backend.claimEdgeCardinality)({
       graphId: baseGraph.id,
+      direction: "source",
       cardinality: "one",
       edgeKind: "taggedPerson",
       edgeId: edge.id,

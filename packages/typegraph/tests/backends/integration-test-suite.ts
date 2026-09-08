@@ -56,20 +56,25 @@ import {
   registerCurrentIdentityTraversalTests,
   registerDatabaseExpressionQueryIntegrationTests,
   registerDurableEdgeMatchIdentityIntegrationTests,
+  registerEdgeCardinalityTighteningIntegrationTests,
   registerEdgeCaseIntegrationTests,
   registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
+  registerEdgeTargetCardinalityIntegrationTests,
+  registerEdgeTargetCardinalityTemporalIntegrationTests,
   registerExpressionSubqueryQueryIntegrationTests,
   registerFulltextIntegrationTests,
   registerGraphAnnotationsIntegrationTests,
   registerGraphMergeCallbackIntegrationTests,
   registerGraphMergePlanIntegrationTests,
   registerGraphMergeReviewIntegrationTests,
+  registerGraphMergeTargetCardinalityIntegrationTests,
   registerHistoricalIdentityTraversalTests,
   registerIdentityImportIntegrationTests,
   registerIdentityIntegrationTests,
   registerIdentitySeparationIntegrationTests,
+  registerImportTargetCardinalityIntegrationTests,
   registerImportUniquenessIntegrationTests,
   registerLateMaterializationIntegrationTests,
   registerLegacyClaimAxisIntegrationTests,
@@ -343,6 +348,7 @@ export function createIntegrationTestSuite<
     registerConstraintFenceTransactionHealthTests(context);
     registerConstraintFenceVerificationIntegrationTests(context);
     registerOntologyTighteningIntegrationTests(context);
+    registerEdgeCardinalityTighteningIntegrationTests(context);
     registerRecordedReadBindingIntegrationTests(context);
     registerSetOperationIntegrationTests(context);
     registerSetNodeMutationIntegrationTests(context);
@@ -364,7 +370,9 @@ export function createIntegrationTestSuite<
     registerFulltextIntegrationTests(context);
     registerGraphMergeCallbackIntegrationTests(context);
     registerGraphMergePlanIntegrationTests(context);
+    registerGraphMergeTargetCardinalityIntegrationTests(context);
     registerGraphMergeReviewIntegrationTests(context);
+    registerImportTargetCardinalityIntegrationTests(context);
     registerImportUniquenessIntegrationTests(context);
     registerIdentityIntegrationTests(context);
     registerIdentityImportIntegrationTests(context);
@@ -373,6 +381,8 @@ export function createIntegrationTestSuite<
     registerIdentitySeparationIntegrationTests(context);
     registerEdgeCaseIntegrationTests(context);
     registerEdgeClaimSelfHealIntegrationTests(context);
+    registerEdgeTargetCardinalityIntegrationTests(context);
+    registerEdgeTargetCardinalityTemporalIntegrationTests(context);
     registerCrossBackendConsistencyTests(context);
     registerDurableEdgeMatchIdentityIntegrationTests(context);
     registerTrustedImportIntegrationTests(context);

@@ -5,6 +5,7 @@
  * pure-unit budget.
  */
 export const PGLITE_TEST_FILES = [
+  "tests/atomic-edge-target-cardinality.test.ts",
   "tests/atomic-generated-edge-batch-pglite.test.ts",
   "tests/atomic-generated-node-batch-pglite.test.ts",
   "tests/atomic-mutation-program-pglite-routing.test.ts",

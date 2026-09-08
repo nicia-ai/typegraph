@@ -2,11 +2,14 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  CardinalityError,
   CompilerInvariantError,
+  ConfigurationError,
   defineEdge,
   defineGraph,
   defineNode,
 } from "../src";
+import { claimsVerdict } from "../src/backend/capabilities/resolve";
 import { graphCommandExecutionContext } from "../src/backend/command-contract";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
@@ -20,6 +23,11 @@ import { createSqlSchema } from "../src/query/compiler/schema";
 import { sql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { createStore, createStoreWithSchema } from "../src/store";
+import {
+  claimEdgeCardinalities,
+  edgeCardinalityAxisReferences,
+  edgeCardinalityClaims,
+} from "../src/store/claims/edge-claims";
 import { requireDefined } from "../src/utils/presence";
 import { createRecordedPostgresStore } from "./statement-recorder";
 import { createInitializedStore } from "./test-utils";
@@ -66,23 +74,43 @@ function ordinaryEdgeCreatePlan(
     plan: {
       entity: "edge",
       params,
-      cardinalityClaim: claim,
+      cardinalityClaims: [claim],
     },
   };
 }
 
 async function readClaimRows(
   backend: GraphBackend,
+  graphId: string = graph.id,
 ): Promise<readonly { axis: string; key: string; edge_id: string }[]> {
   const schema = createSqlSchema(backend.tableNames);
   return backend.execute<{ axis: string; key: string; edge_id: string }>(
     asCompiledRowsSql(sql`
       SELECT axis, key, edge_id
       FROM ${sql.identifier(schema.tables.edgeClaims)}
-      WHERE graph_id = ${graph.id}
+      WHERE graph_id = ${graphId}
       ORDER BY axis, key
     `),
   );
+}
+
+const bothAxesGraph = defineGraph({
+  id: "guarded_edge_cardinality_claim_both_axes",
+  nodes: { Person: { type: Person } },
+  edges: {
+    both: {
+      type: relation,
+      from: [Person],
+      to: [Person],
+      cardinality: "one",
+      targetCardinality: "one",
+    },
+  },
+});
+
+/** Simulates a database bootstrapped before `typegraph_edge_claims` existed. */
+function claimRelationMissing(): never {
+  throw new Error("no such table: typegraph_edge_claims");
 }
 
 describe("guarded edge cardinality claim", () => {
@@ -152,6 +180,7 @@ describe("guarded edge cardinality claim", () => {
     } as const;
     const claim = {
       graphId: graph.id,
+      direction: "source" as const,
       cardinality: "one" as const,
       edgeKind: "one",
       edgeId: params.id,
@@ -169,7 +198,7 @@ describe("guarded edge cardinality claim", () => {
             entity: "edge",
             params,
             schemaFence: { graphId: graph.id, expectedVersion: 1 },
-            cardinalityClaim: claim,
+            cardinalityClaims: [claim],
           },
         },
         graphCommandExecutionContext("transaction"),
@@ -232,7 +261,7 @@ describe("guarded edge cardinality claim", () => {
                   execute(plan) {
                     if (
                       plan.kind === "edge.create" &&
-                      plan.plan.cardinalityClaim !== undefined
+                      (plan.plan.cardinalityClaims ?? []).length > 0
                     ) {
                       return Promise.resolve({
                         outcome: "unsupported" as const,
@@ -296,7 +325,7 @@ describe("guarded edge cardinality claim", () => {
                   execute(command, context) {
                     if (
                       command.kind === "edge.create" &&
-                      command.plan.cardinalityClaim !== undefined
+                      (command.plan.cardinalityClaims ?? []).length > 0
                     ) {
                       return Promise.resolve({
                         outcome: "unsupported" as const,
@@ -332,6 +361,7 @@ describe("guarded edge cardinality claim", () => {
     const to = await fixture.store.nodes.Person.create({ name: "to" });
     const claim = {
       graphId: graph.id,
+      direction: "source" as const,
       cardinality: "one" as const,
       edgeKind: "one",
       edgeId: "planned-outcome",
@@ -472,6 +502,7 @@ describe("guarded edge cardinality claim", () => {
 
     await claim({
       graphId: graph.id,
+      direction: "source",
       cardinality: "one",
       edgeKind: "one",
       edgeId: "stale-holder",
@@ -529,6 +560,7 @@ describe("guarded edge cardinality claim", () => {
             },
             {
               graphId: graph.id,
+              direction: "source",
               cardinality: "one",
               edgeKind: "one",
               edgeId: "duplicate-edge-id",
@@ -573,6 +605,7 @@ describe("guarded edge cardinality claim", () => {
             },
             {
               graphId: graph.id,
+              direction: "source",
               cardinality: "one",
               edgeKind: "one",
               edgeId: "different-edge-id",
@@ -728,6 +761,7 @@ describe("guarded edge cardinality claim", () => {
 
       await backend.claimEdgeCardinality?.({
         graphId: graph.id,
+        direction: "source",
         cardinality: "one",
         edgeKind: "one",
         edgeId: "missing-stale-holder",
@@ -753,5 +787,167 @@ describe("guarded edge cardinality claim", () => {
     } finally {
       await backend.close();
     }
+  });
+
+  describe("a two-axis declaration (source AND target both constrained)", () => {
+    it("takes the portable path for a two-axis plan, issuing both claims", async () => {
+      const fixture = await createRecordedPostgresStore(bothAxesGraph);
+      const from = await fixture.store.nodes.Person.create({ name: "from" });
+      const to = await fixture.store.nodes.Person.create({ name: "to" });
+
+      fixture.reset();
+      const created = await fixture.store.edges.both.create(from, to, {});
+
+      const statements = fixture.statements.map((statement) => statement.query);
+      // Never fused: no single statement carries both a claim insert and an
+      // edge insert for this write.
+      expect(
+        statements.some(
+          (query) =>
+            /insert into "typegraph_edge_claims"/iu.test(query) &&
+            /insert into "typegraph_edges"/iu.test(query),
+        ),
+      ).toBe(false);
+      expect(
+        statements.some((query) =>
+          /insert into "typegraph_edge_claims"/iu.test(query),
+        ),
+      ).toBe(true);
+      expect(
+        statements.some((query) =>
+          /insert into "typegraph_edges"/iu.test(query),
+        ),
+      ).toBe(true);
+
+      const rows = await readClaimRows(fixture.backend, bothAxesGraph.id);
+      expect(rows.filter((row) => row.edge_id === created.id)).toHaveLength(2);
+    });
+
+    // The store never hands the port a two-axis plan — `usesGuardedCardinalityClaim`
+    // requires exactly one constrained axis, so the test above always takes the
+    // portable path. The port's own `claims.length > 1` refusal
+    // (`operation-backend-core.ts`, before the fused CTE builder runs) is
+    // therefore reachable only by calling `transaction.commands.execute`
+    // directly, bypassing the store gate — which is what this test does. Per
+    // AGENTS.md ("Every new command dimension ships with a custom-port
+    // refusal test that reaches the fallback and proves no partial row or
+    // sidecar write occurred"), this pins the port's OWN refusal rather than
+    // relying on the store never asking for it.
+    it("refuses a hand-built two-axis plan at the port before any SQL runs", async () => {
+      const fixture = await createRecordedPostgresStore(bothAxesGraph);
+      const from = await fixture.store.nodes.Person.create({
+        name: "port-from",
+      });
+      const to = await fixture.store.nodes.Person.create({ name: "port-to" });
+
+      fixture.reset();
+      const params = {
+        graphId: bothAxesGraph.id,
+        id: "two-axis-port-probe",
+        kind: "both",
+        fromKind: "Person",
+        fromId: from.id,
+        toKind: "Person",
+        toId: to.id,
+        props: {},
+      } as const;
+      const claims = edgeCardinalityClaims(
+        edgeCardinalityAxisReferences({
+          cardinality: "one",
+          targetCardinality: "one",
+        }),
+        {
+          graphId: params.graphId,
+          id: params.id,
+          kind: params.kind,
+          fromKind: params.fromKind,
+          fromId: params.fromId,
+          toKind: params.toKind,
+          toId: params.toId,
+        },
+      );
+      expect(claims).toHaveLength(2);
+
+      const result = await fixture.backend.transaction(async (transaction) =>
+        transaction.commands.execute(
+          {
+            kind: "edge.create",
+            plan: { entity: "edge", params, cardinalityClaims: claims },
+          },
+          graphCommandExecutionContext("transaction"),
+        ),
+      );
+      expect(result).toEqual({
+        outcome: "unsupported",
+        entity: "edge",
+        dimensions: ["cardinalityClaim"],
+      });
+      expect(fixture.statements).toEqual([]);
+      expect(await fixture.store.edges.both.find()).toEqual([]);
+      expect(await readClaimRows(fixture.backend, bothAxesGraph.id)).toEqual(
+        [],
+      );
+    });
+    // MUTATION CHECK (verified): drop `targetCardinality` from `declarations`
+    // in `validateAndPrepareEdgeCreate`
+    // (`src/store/operations/edge-operations.ts`) — the same construction
+    // site `atomic-edge-target-cardinality.test.ts` mutates. `rows.filter(...)
+    // .toHaveLength(2)` drops to 1 (only the source claim lands) and this
+    // test fails.
+
+    it("refuses on a contended target axis, leaving no edge row and no residue on the source axis", async () => {
+      const fixture = await createRecordedPostgresStore(bothAxesGraph);
+      const alice = await fixture.store.nodes.Person.create({ name: "alice" });
+      const bob = await fixture.store.nodes.Person.create({ name: "bob" });
+      const carol = await fixture.store.nodes.Person.create({ name: "carol" });
+      const dana = await fixture.store.nodes.Person.create({ name: "dana" });
+
+      await fixture.store.edges.both.create(alice, bob, {});
+      // carol's source axis (empty) claims fine; bob's target axis is
+      // already held by alice's edge, so the whole write refuses.
+      await expect(
+        fixture.store.edges.both.create(carol, bob, {}),
+      ).rejects.toBeInstanceOf(CardinalityError);
+      expect(await fixture.store.edges.both.findTo(bob)).toHaveLength(1);
+
+      // carol's source axis was not left "occupied" by the refused attempt:
+      // a fresh, otherwise-valid write for carol still succeeds.
+      await expect(
+        fixture.store.edges.both.create(carol, dana, {}),
+      ).resolves.toBeDefined();
+    });
+
+    it("refuses before writing (typed ConfigurationError) when the claim relation is missing, for a two-axis kind", async () => {
+      const { backend } = createLocalSqliteBackend();
+      const claims = edgeCardinalityClaims(
+        edgeCardinalityAxisReferences({
+          cardinality: "one",
+          targetCardinality: "one",
+        }),
+        {
+          graphId: bothAxesGraph.id,
+          id: "e1",
+          kind: "both",
+          fromKind: "Person",
+          fromId: "alice",
+          toKind: "Person",
+          toId: "bob",
+        },
+      );
+      expect(claims).toHaveLength(2);
+      const failingBackend = deriveBackend(backend, {
+        claimEdgeCardinality: claimRelationMissing,
+        claimEdgeCardinalityGuarded: claimRelationMissing,
+        claimEdgeCardinalityBatch: claimRelationMissing,
+      });
+      await expect(
+        claimEdgeCardinalities(
+          failingBackend,
+          claimsVerdict(failingBackend),
+          claims,
+        ),
+      ).rejects.toBeInstanceOf(ConfigurationError);
+      await backend.close();
+    });
   });
 });

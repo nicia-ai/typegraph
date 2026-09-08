@@ -25,6 +25,10 @@ import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { compareCodePoints, compareStrings } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
+// Type-only: `edge-claims.ts` value-imports `edgeCardinalityAxis` from this
+// file, but a type-only import is erased at runtime, so this back-edge
+// creates no value cycle.
+import { type EdgeCardinalityAxisRef } from "./edge-claims";
 
 /**
  * The one code point an axis component may not contain, written as an escape
@@ -204,20 +208,37 @@ export function uniquenessProbeKinds(
 }
 
 /**
- * THE axis an edge cardinality claim is written at: the declared cardinality
- * and the edge kind, which together name the population the constraint counts.
+ * The prefix marking an axis as a TARGET-side population.
  *
- * `one` and `oneActive` on one kind are DIFFERENT axes on purpose — they count
- * different populations (every live edge from a source vs every active one) —
- * so a kind whose declaration changed cannot inherit rows the old declaration
- * wrote. The cardinality tokens contain no `:`, so the pair is injective over
- * arbitrary edge kind names.
+ * The reserved U+001E device the disjointness axis already uses (`:41-42`):
+ * a source axis is `"<cardinality>:<edgeKind>"` and can never begin with the
+ * separator, so the two namespaces cannot collide however an edge kind is
+ * named. Source axis strings are unchanged byte for byte — existing
+ * `typegraph_edge_claims` rows keep fencing what they fence today, with no
+ * migration.
+ */
+const TARGET_AXIS_PREFIX = `${AXIS_SEPARATOR}to${AXIS_SEPARATOR}`;
+
+/**
+ * THE axis an edge cardinality claim is written at: the direction, the
+ * declared cardinality and the edge kind, which together name the population
+ * the constraint counts.
+ *
+ * `one` and `oneActive` on one kind (in either direction) are DIFFERENT axes
+ * on purpose — they count different populations (every live edge vs every
+ * active one) — so a kind whose declaration changed cannot inherit rows the
+ * old declaration wrote. The cardinality tokens contain no `:`, so the pair is
+ * injective over arbitrary edge kind names. The signature takes the direction
+ * explicitly (rather than a bare cardinality) so every caller must say which
+ * endpoint's population it means; a caller that cannot say is a caller that
+ * was guessing.
  */
 export function edgeCardinalityAxis(
-  cardinality: string,
+  ref: EdgeCardinalityAxisRef,
   edgeKind: string,
 ): string {
-  return `${cardinality}:${edgeKind}`;
+  const base = `${ref.cardinality}:${edgeKind}`;
+  return ref.direction === "source" ? base : `${TARGET_AXIS_PREFIX}${base}`;
 }
 
 /** The relation a claim row lives in. */

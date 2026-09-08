@@ -31,7 +31,7 @@ import {
   type TransactionBackend,
   type UpdateEdgeParams,
 } from "../../backend/types";
-import { claimEdgeCardinality, purgeEdgeClaims } from "../claims/edge-claims";
+import { claimEdgeCardinalities, purgeEdgeClaims } from "../claims/edge-claims";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { type WriteParamsDraft } from "./write-fences";
 
@@ -84,15 +84,16 @@ export type EdgeUpdateWork = Readonly<{
   validFrom?: string | null;
   clearDeleted?: boolean;
   /**
-   * The cardinality claim this update owes, present only when the write
-   * RE-ADMITS the row to the population its cardinality constrains — a
-   * resurrection, or a reopened `oneActive` window. Built by the caller (a pure
-   * function of the verdict it reached) and ISSUED here, at its PRE-INSERT
-   * placement: the probe that authorised the write read a population no key
-   * fences, so the claim row is what refuses a peer that read the same
-   * population, and a claim issued after the row it fences is not a fence.
+   * Every cardinality claim this update owes, empty unless the write
+   * RE-ADMITS the row to a population its declaration constrains — a
+   * resurrection, or a reopened `oneActive`-shaped window, on either axis.
+   * Built by the caller (a pure function of the verdict it reached) and
+   * ISSUED here, at its PRE-INSERT placement: the probe that authorised the
+   * write read a population no key fences, so the claim rows are what refuse
+   * a peer that read the same population, and a claim issued after the row
+   * it fences is not a fence.
    */
-  claim?: ClaimEdgeCardinalityParams;
+  claims: readonly ClaimEdgeCardinalityParams[];
 }> &
   // The window END is the SAME discriminated pair `UpdateEdgeParams` declares,
   // not a re-spelling with two independent optionals: "state an end" and "clear
@@ -121,10 +122,8 @@ export async function applyEdgeUpdate(
   args: EdgeUpdateWork & WriteParamsDraft,
   backend: Backend,
 ): Promise<EdgeRow> {
-  const { claim, ...rowWork } = args;
-  if (claim !== undefined) {
-    await claimEdgeCardinality(backend, ctx.claimsVerdict(), claim);
-  }
+  const { claims, ...rowWork } = args;
+  await claimEdgeCardinalities(backend, ctx.claimsVerdict(), claims);
   // Every key of the work record and of the fence draft is a field of
   // `UpdateEdgeParams`, and both are built with the same "present only when
   // stated" discipline the call site used to apply field by field, so the

@@ -676,6 +676,9 @@ describe("CardinalityError", () => {
       edgeKind: "HasProfile",
       fromKind: "User",
       fromId: "user-1",
+      direction: "source",
+      toKind: "HasProfileTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 1,
     });
@@ -687,10 +690,13 @@ describe("CardinalityError", () => {
   });
 
   it("stores cardinality context", () => {
-    const details = {
+    const details: CardinalityErrorDetails = {
       edgeKind: "BelongsTo",
       fromKind: "Post",
       fromId: "post-1",
+      direction: "source",
+      toKind: "BelongsToTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 2,
     };
@@ -703,11 +709,48 @@ describe("CardinalityError", () => {
       edgeKind: "BelongsTo",
       fromKind: "Post",
       fromId: "post-1",
+      direction: "source",
+      toKind: "BelongsToTarget",
+      toId: "target-1",
       cardinality: "one",
       existingCount: 2,
     });
     expectTypeOf(error.details).toEqualTypeOf<CardinalityErrorDetails>();
     expectTypeOf(error.details.existingCount).toBeNumber();
+  });
+
+  // Review finding D1-R2-09: the suggestion must name the option the caller
+  // actually set. A `direction: "target"` violation is never fixed by
+  // `cardinality` (already its default, "many"), so the suggestion has to
+  // name `targetCardinality` instead.
+  it("suggests targetCardinality, not cardinality, for a target-direction violation", () => {
+    const error = new CardinalityError({
+      edgeKind: "ownedBy",
+      fromKind: "Item",
+      fromId: "item-1",
+      direction: "target",
+      toKind: "Owner",
+      toId: "owner-1",
+      cardinality: "one",
+      existingCount: 1,
+    });
+    expect(error.suggestion).toContain("targetCardinality");
+    expect(error.suggestion).not.toContain('use cardinality "many"');
+  });
+
+  it("suggests cardinality for a source-direction violation", () => {
+    const error = new CardinalityError({
+      edgeKind: "ownedBy",
+      fromKind: "Item",
+      fromId: "item-1",
+      direction: "source",
+      toKind: "Owner",
+      toId: "owner-1",
+      cardinality: "unique",
+      existingCount: 1,
+    });
+    expect(error.suggestion).toContain('use cardinality "many"');
+    expect(error.suggestion).not.toContain("targetCardinality");
   });
 });
 
@@ -1118,6 +1161,9 @@ describe("error inheritance chain", () => {
         edgeKind: "E",
         fromKind: "K",
         fromId: "id",
+        direction: "source",
+        toKind: "ETarget",
+        toId: "target-1",
         cardinality: "one",
         existingCount: 1,
       }),

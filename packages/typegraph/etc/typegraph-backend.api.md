@@ -6,27 +6,12 @@
 
 // @public
 export type AdapterBackend<TNativeTransaction> = GraphBackend & Readonly<{
-    schemaProvisioning: SchemaProvisioning;
     transactionWithNative: <T>(this: void, fn: (tx: TransactionBackend, nativeTransaction: TNativeTransaction) => Promise<T>, options?: TransactionOptions) => Promise<T>;
     adoptTransaction: (this: void, externalTransaction: TNativeTransaction) => TransactionBackend;
-    adoptSchemaWriteTransaction?: (this: void, externalTransaction: TNativeTransaction, graphId: string, options: Readonly<{
-        waitBudgetMs: number;
-    }>) => Promise<AdoptedSchemaWriteTransaction>;
 }>;
 
 // @public (undocumented)
 export type AdapterBackendTransactions<TNativeTransaction> = Pick<AdapterBackend<TNativeTransaction>, "transactionWithNative" | "adoptTransaction">;
-
-// @public
-export type AdoptedSchemaWriteTransaction = Readonly<{
-    backend: SchemaWriteTransactionBackend & Readonly<{
-        commitSchemaVersion: GraphBackend["commitSchemaVersion"];
-        ensureVectorSlotContributions?: (this: void, slots: readonly VectorSlot[], options?: Readonly<{
-            onDrift?: "throw" | "skip";
-        }>) => Promise<void>;
-    }>;
-    activeSchema: SchemaVersionRow | undefined;
-}>;
 
 // @public
 export const ALL_FULLTEXT_MODES: readonly FulltextQueryMode[];
@@ -499,7 +484,6 @@ export type BackendCapabilities = Readonly<{
         unitOfWork?: "interactive" | "optimistic-retry" | "batch" | "none";
     }>;
     windowFunctions: boolean;
-    orderedAggregates?: boolean;
     clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
@@ -512,6 +496,7 @@ export type BackendCapabilities = Readonly<{
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
+    recordedTimeOwnership?: "typegraph-relations" | "engine-native";
 }>;
 
 // @public
@@ -1223,31 +1208,6 @@ export const CAPABILITY_BUNDLES: readonly [{
             readonly member: "ensureRevisionOriginsTable";
         }];
     }];
-}, {
-    readonly id: "endpointSetRead";
-    readonly kind: "graduated";
-    readonly crossCheck: "none";
-    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
-    readonly extras: readonly [{
-        readonly id: "findEdgesByEndpointSet";
-        readonly members: readonly ["findEdgesByEndpointSet"];
-        readonly disposition: {
-            readonly kind: "refuse";
-            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
-        };
-    }];
-    readonly operations: readonly [{
-        readonly operation: "bulk endpoint read";
-        readonly disposition: {
-            readonly kind: "refuse";
-            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
-        };
-        readonly requires: readonly ["findEdgesByEndpointSet"];
-        readonly sites: readonly [{
-            readonly file: "store/collections/edge-collection.ts";
-            readonly member: "findEdgesByEndpointSet";
-        }];
-    }];
 }];
 
 // @public (undocumented)
@@ -1367,9 +1327,8 @@ export type CheckUniqueParams = Readonly<{
 }>;
 
 // @public
-export type ClaimEdgeCardinalityParams = Readonly<{
+export type ClaimEdgeCardinalityParams = EdgeCardinalityAxisRef & Readonly<{
     graphId: string;
-    cardinality: Exclude<Cardinality, "many">;
     edgeKind: string;
     edgeId: string;
     fromKind: string;
@@ -1503,6 +1462,12 @@ class ConfigurationError extends TypeGraphError {
 }
 
 // @public
+type ConstrainedCardinality = Exclude<Cardinality, "many">;
+
+// @public
+type ConstrainedTargetCardinality = Exclude<TargetCardinality, "many">;
+
+// @public
 export type ConstraintFenceViolationRows = Readonly<{
     contendedUniqueRows: readonly ContendedUniqueRow[];
     contendedEdgeRows: readonly ContendedEdgeRow[];
@@ -1511,9 +1476,8 @@ export type ConstraintFenceViolationRows = Readonly<{
 }>;
 
 // @public
-export type ContendedEdgeRow = Readonly<{
+export type ContendedEdgeRow = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
-    cardinality: Exclude<Cardinality, "many">;
     edgeId: string;
     fromKind: string;
     fromId: string;
@@ -1724,7 +1688,14 @@ export type ContributionRepopulationStats = Readonly<{
 }>;
 
 // @public
-export type ContributionScope = "deployment" | "graph";
+export type CountEdgesAtEndpointParams = Readonly<{
+    graphId: string;
+    edgeKind: string;
+    endpoint: "from" | "to";
+    endpointKind: string;
+    endpointId: string;
+    activeOnly?: boolean;
+}>;
 
 // @public
 export type CountEdgesByKindParams = Readonly<{
@@ -1737,15 +1708,6 @@ export type CountEdgesByKindParams = Readonly<{
     excludeDeleted?: boolean;
     temporalMode?: TemporalMode;
     asOf?: string;
-}>;
-
-// @public
-export type CountEdgesFromParams = Readonly<{
-    graphId: string;
-    edgeKind: string;
-    fromKind: string;
-    fromId: string;
-    activeOnly?: boolean;
 }>;
 
 // @public
@@ -1868,12 +1830,8 @@ export type DeleteUniqueParams = Readonly<{
 }>;
 
 // @public
-export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
-
-// @public
 export interface DialectAdapter {
     readonly analyzeTemporaryTable: (this: void, table: SqlFragment) => SqlFragment | undefined;
-    readonly appendTextJsonArray: (this: void, array: SqlFragment, values: readonly SqlFragment[]) => SqlFragment;
     readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
     readonly bindValue: (this: void, value: unknown) => unknown;
     readonly booleanLiteral: (this: void, value: boolean) => SqlFragment;
@@ -1890,7 +1848,6 @@ export interface DialectAdapter {
     readonly jsonArrayContains: (this: void, column: SqlFragment, value: unknown) => SqlFragment;
     readonly jsonArrayContainsAll: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
-    readonly jsonArrayContainsExpression?: (this: void, column: SqlFragment, value: SqlFragment, valueType: ValueType) => SqlFragment;
     readonly jsonArrayLength: (this: void, column: SqlFragment) => SqlFragment;
     readonly jsonExtract: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractBoolean: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
@@ -1906,30 +1863,10 @@ export interface DialectAdapter {
     readonly jsonSetProperties: (this: void, column: SqlFragment, patch: Readonly<Record<string, JsonValue>>, unsetProperties?: readonly string[]) => SqlFragment;
     readonly name: SqlDialect;
     readonly nullSafeEquals: (this: void, left: SqlFragment, right: SqlFragment) => SqlFragment;
-    readonly orderedRecordJsonArray: (this: void, options: Readonly<{
-        fields: readonly Readonly<{
-            name: string;
-            value: SqlFragment;
-            valueType: ValueType;
-        }>[];
-        orderBy: readonly SqlFragment[];
-        filter: SqlFragment | undefined;
-    }>) => SqlFragment;
-    readonly orderedRowsJsonArray: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string) => SqlFragment;
-    readonly orderedScalarJsonArray: (this: void, options: Readonly<{
-        value: SqlFragment;
-        valueType: ValueType;
-        orderBy: readonly SqlFragment[];
-        filter: SqlFragment | undefined;
-    }>) => SqlFragment;
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly quoteIdentifier: (this: void, name: string) => string;
-    readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
-    readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
-    readonly textJsonArray: (this: void, values: readonly SqlFragment[]) => SqlFragment;
-    unboundedLimit(): SqlFragment;
     readonly wrapSetOperationOperand: (this: void, inner: SqlFragment) => SqlFragment;
 }
 
@@ -1980,9 +1917,17 @@ export type DurableEdgeBatchMembers = Readonly<{
 }>;
 
 // @public
-export type EdgeCardinalityDeclaration = Readonly<{
+type EdgeCardinalityAxisRef = Readonly<{
+    direction: "source";
+    cardinality: ConstrainedCardinality;
+}> | Readonly<{
+    direction: "target";
+    cardinality: ConstrainedTargetCardinality;
+}>;
+
+// @public
+export type EdgeCardinalityDeclaration = EdgeCardinalityAxisRef & Readonly<{
     edgeKind: string;
-    cardinality: Exclude<Cardinality, "many">;
 }>;
 
 // @public
@@ -2066,7 +2011,7 @@ export type EdgeEndpointAllowance = Readonly<{
 type EdgeEndpointSide = "from" | "to";
 
 // @public (undocumented)
-export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesFrom" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
+export type EdgeEntityReadBackend = Pick<GraphBackend, "getEdge" | "getEdges" | "countEdgesAtEndpoint" | "edgeExistsBetween" | "findEdgesConnectedTo" | "findEdgesByKind" | "findEdgesByEndpointSet" | "findEdgesByHeterogeneousEndpointSet" | "countEdgesByKind">;
 
 // @public (undocumented)
 export type EdgeEntityWriteBackend = Pick<GraphBackend, "insertEdge" | "commands" | "insertEdgeNoReturn" | "insertEdgesBatch" | "insertEdgesBatchReturning" | "insertEdgesDurableBatchReturning" | "updateEdge" | "deleteEdge" | "deleteEdgesBatch" | "hardDeleteEdge" | "hardDeleteEdgesBatch">;
@@ -2117,105 +2062,7 @@ export type EdgeRow = Readonly<{
 }>;
 
 // @public
-export const ENDPOINT_SET_READ: {
-    readonly id: "endpointSetRead";
-    readonly kind: "graduated";
-    readonly crossCheck: "none";
-    readonly portSurfaceCode: "BUNDLE_PORT_SURFACE_MISMATCH";
-    readonly extras: readonly [{
-        readonly id: "findEdgesByEndpointSet";
-        readonly members: readonly ["findEdgesByEndpointSet"];
-        readonly disposition: {
-            readonly kind: "refuse";
-            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
-        };
-    }];
-    readonly operations: readonly [{
-        readonly operation: "bulk endpoint read";
-        readonly disposition: {
-            readonly kind: "refuse";
-            readonly code: "ENDPOINT_SET_READ_UNSUPPORTED";
-        };
-        readonly requires: readonly ["findEdgesByEndpointSet"];
-        readonly sites: readonly [{
-            readonly file: "store/collections/edge-collection.ts";
-            readonly member: "findEdgesByEndpointSet";
-        }];
-    }];
-};
-
-// @public
 export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
-
-// @public (undocumented)
-export class EndpointSetReadConformanceError extends TypeGraphError {
-    constructor(message: string, details?: Readonly<Record<string, unknown>>);
-}
-
-// @public (undocumented)
-export type EndpointSetReadConformanceFixture = Readonly<{
-    backend: GraphBackend;
-    equal: EndpointSetReadEquality;
-    successes: readonly EndpointSetReadConformanceSuccess[];
-    refusals: readonly EndpointSetReadConformanceRefusal[];
-}>;
-
-// @public (undocumented)
-export type EndpointSetReadConformanceRefusal = Readonly<{
-    name: string;
-    params: FindEdgesByEndpointSetParams;
-    errorMatches?: (error: unknown) => boolean;
-}>;
-
-// @public (undocumented)
-export type EndpointSetReadConformanceReport = Readonly<{
-    passed: readonly string[];
-}>;
-
-// @public (undocumented)
-export type EndpointSetReadConformanceSuccess = Readonly<{
-    name: string;
-    params: FindEdgesByEndpointSetParams;
-    expected: readonly EdgeRow[];
-}>;
-
-// @public
-export type EndpointSetReadEquality = (actual: readonly EdgeRow[], expected: readonly EdgeRow[]) => boolean;
-
-// @public (undocumented)
-type EndpointSetReadExtraMember = ExtraMember<typeof ENDPOINT_SET_READ, keyof ExtrasOf<typeof ENDPOINT_SET_READ>>;
-
-// @public (undocumented)
-export function endpointSetReadMembers(port: Readonly<Partial<Pick<GraphBackend, EndpointSetReadExtraMember>>>, verdict: BundleVerdictOf<typeof ENDPOINT_SET_READ>): PartialBundleBinding<EndpointSetReadExtraMember>;
-
-// @public (undocumented)
-export function endpointSetReadVerdict(backend: GraphBackend): BundleVerdictOf<typeof ENDPOINT_SET_READ>;
-
-// @public (undocumented)
-const ENGINE_REVISION_BRAND: unique symbol;
-
-// @public
-export type EngineRecordedRevision = Readonly<{
-    revision: string;
-    recordedAt: string;
-}>;
-
-// @public
-export type EngineRecordedTimeMembers = Readonly<{
-    source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
-    revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
-}>;
-
-// @public
-export type EngineRevision = string & Readonly<{
-    [ENGINE_REVISION_BRAND]: "EngineRevision";
-}>;
-
-// @public
-export type EntityKey = Readonly<{
-    kind: string;
-    id: string;
-}>;
 
 // @public
 type ErrorCategory = "user" | "constraint" | "system";
@@ -2270,6 +2117,8 @@ export type ExtensionEdgeDef = Readonly<{
     from: readonly string[];
     to: readonly string[] | Readonly<Record<string, readonly string[]>>;
     properties?: Readonly<Record<string, ExtensionPropertyType>>;
+    cardinality?: Cardinality;
+    targetCardinality?: TargetCardinality;
 }>;
 
 // @public
@@ -2636,9 +2485,7 @@ export type GraphBackend = Readonly<{
     insertNodesBatch?: (this: void, params: readonly InsertNodeParams[]) => Promise<void>;
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
-    upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
-    updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
     compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
@@ -2656,7 +2503,7 @@ export type GraphBackend = Readonly<{
     hardDeleteEdgesBatch?: (this: void, params: DeleteEdgesBatchParams) => Promise<void>;
     getEdge: (this: void, graphId: string, id: string) => Promise<EdgeRow | undefined>;
     getEdges?: (this: void, graphId: string, ids: readonly string[]) => Promise<readonly EdgeRow[]>;
-    countEdgesFrom: (this: void, params: CountEdgesFromParams) => Promise<number>;
+    countEdgesAtEndpoint: (this: void, params: CountEdgesAtEndpointParams) => Promise<number>;
     edgeExistsBetween: (this: void, params: EdgeExistsBetweenParams) => Promise<boolean>;
     findEdgesConnectedTo: (this: void, params: FindEdgesConnectedToParams) => Promise<readonly EdgeRow[]>;
     findNodesByKind: (this: void, params: FindNodesByKindParams) => Promise<readonly NodeRow[]>;
@@ -2740,8 +2587,6 @@ export type GraphBackend = Readonly<{
     claimIndexMaterialization?: (this: void, params: ClaimIndexMaterializationParams) => Promise<boolean>;
     releaseIndexMaterializationClaim?: (this: void, params: ReleaseIndexMaterializationClaimParams) => Promise<void>;
     catalog?: BackendCatalogProbes | undefined;
-    lineage?: LineageMembers | undefined;
-    recordedTime?: EngineRecordedTimeMembers | undefined;
     ensureContributionMaterializationsTable?: (this: void) => Promise<void>;
     getContributionMaterialization?: (this: void, identity: ContributionMaterializationIdentity) => Promise<ContributionMaterializationRow | undefined>;
     recordContributionMaterialization?: (this: void, params: RecordContributionMaterializationParams) => Promise<void>;
@@ -2900,20 +2745,6 @@ export function hasAtomicMutationProgramRegistration(target: GraphBackend | Tran
 
 // @public
 export function hasAtomicSqlProgramRegistration(target: GraphBackend | TransactionBackend): boolean;
-
-// @public
-export type HeterogeneousNodeUpsertEntry = Readonly<{
-    kind: string;
-    id: string;
-    props: Readonly<Record<string, unknown>>;
-    updateProps: Readonly<Record<string, unknown>>;
-}>;
-
-// @public
-export type HeterogeneousNodeUpsertParams = Readonly<{
-    entries: readonly HeterogeneousNodeUpsertEntry[];
-    schemaFence: SchemaWriteFenceParams;
-}>;
 
 // @public
 export type HybridSearchParams = Readonly<{
@@ -3203,27 +3034,6 @@ export type KindRemovalRow = Readonly<{
 }>;
 
 // @public
-export type LineageBackend = Pick<GraphBackend, "lineage">;
-
-// @public
-export type LineageDelta = Readonly<{
-    kind: "keys";
-    nodes: readonly EntityKey[];
-    edges: readonly EntityKey[];
-}> | Readonly<{
-    kind: "unbounded";
-}>;
-
-// @public
-export type LineageMembers = Readonly<{
-    revision: (this: void, session: LineageSession) => Promise<EngineRevision>;
-    changesSince: (this: void, session: LineageSession, revision: EngineRevision, graphId: string) => Promise<LineageDelta>;
-}>;
-
-// @public
-export type LineageSession = Pick<TransactionBackend, "execute" | "executeRaw">;
-
-// @public
 export type LiveNodeRow = NodeRow & Readonly<{
     deleted_at: undefined;
 }>;
@@ -3239,7 +3049,7 @@ export type ManagedEdgeCreatePlan = Readonly<{
     entity: "edge";
     params: InsertEdgeParams;
     schemaFence?: SchemaWriteFenceParams;
-    cardinalityClaim?: ClaimEdgeCardinalityParams;
+    cardinalityClaims?: readonly ClaimEdgeCardinalityParams[];
 }>;
 
 // @public
@@ -3337,27 +3147,14 @@ export type NodeCreateCommandResult = Readonly<{
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
     entity: "node";
     kind: string;
     keySystemColumns?: readonly SystemColumnName[];
-    keys?: readonly (Readonly<{
-        type: "field";
-        pointer: JsonPointer;
-        valueType: ValueType | undefined;
-        direction: "asc" | "desc";
-    }> | Readonly<{
-        type: "system";
-        column: "graph_id" | "kind" | "id" | "deleted_at" | "valid_from" | "valid_to" | "created_at" | "updated_at" | "version";
-        direction: "asc" | "desc";
-    }>)[];
 }>;
-
-// @public (undocumented)
-export type NodeIndexKey = NonNullable<NodeIndexDeclaration["keys"]>[number];
 
 // @public (undocumented)
 export type NodeInsertClaim = Readonly<{
@@ -3570,20 +3367,11 @@ export function recordedRevisionOriginsMembers(port: Readonly<Partial<Pick<Graph
 export function recordedRevisionOriginsVerdict(backend: GraphBackend): BundleVerdictOf<typeof RECORDED_REVISION_ORIGINS>;
 
 // @public
-export type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
-
-// @public
 export type RecordedTableNames = Readonly<{
     recordedClock: string;
     recordedEdges: string;
     recordedNodes: string;
 }>;
-
-// @public
-export type RecordedTimeBackend = Pick<GraphBackend, "recordedTime">;
-
-// @public
-export type RecordedTimeSession = Pick<TransactionBackend, "execute" | "executeRaw">;
 
 // @public
 export type RecordIndexMaterializationParams = Readonly<{
@@ -3722,23 +3510,8 @@ export function requireWriteFence(plan: WriteFencePlan, operation: string, requi
 // @public
 export function resolveBundle<const D extends CapabilityBundleDefinition>(backend: GraphBackend, definition: D): BundleVerdictOf<D>;
 
-// @public
-export type ResolvedNodeUpdateBatchEntry = Readonly<{
-    graphId: string;
-    kind: string;
-    id: string;
-    props: Readonly<Record<string, unknown>>;
-    expectedVersion: number;
-}>;
-
-// @public
-export type ResolvedNodeUpdateBatchParams = Readonly<{
-    entries: readonly ResolvedNodeUpdateBatchEntry[];
-}>;
-
 // @public (undocumented)
 export type ResolvedSqlTableNames = Readonly<{
-    schemaVersions?: string;
     nodes: string;
     edges: string;
     recordedNodes: string;
@@ -3779,9 +3552,6 @@ export function runAtomicMutationProgramConformance(fixture: AtomicMutationProgr
 // @public
 export function runAtomicTransportConformance<TSnapshot = unknown, TParameterSnapshot = readonly CompiledAtomicSqlStatement[] | undefined>(fixture: AtomicTransportConformanceFixture<TSnapshot, TParameterSnapshot>): Promise<AtomicTransportConformanceReport>;
 
-// @public
-export function runEndpointSetReadConformance(fixture: EndpointSetReadConformanceFixture): Promise<EndpointSetReadConformanceReport>;
-
 // @public (undocumented)
 export type SchemaCommitBackend = Pick<GraphBackend, "commitSchemaVersion" | "commitSchemaVersionIfKindsEmpty" | "setActiveVersion">;
 
@@ -3799,9 +3569,6 @@ export type SchemaKindEmptinessProbe = Readonly<{
     kind: string;
     rows: "nonDeleted" | "all";
 }>;
-
-// @public
-export type SchemaProvisioning = "dml-only" | "transactional";
 
 // @public (undocumented)
 export type SchemaReadBackend = Pick<GraphBackend, "getActiveSchema" | "getSchemaVersion">;
@@ -3821,14 +3588,6 @@ export type SchemaWriteFenceBackend = Pick<GraphBackend, "lockSchemaVersionForWr
 
 // @public
 type SchemaWriteFenceParams = LockSchemaVersionForWriteParams;
-
-// @internal
-type SchemaWriteTransactionBackend = TransactionBackend & Readonly<{
-    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
-    tableExists: (this: void, tableName: string) => Promise<boolean>;
-    executeSchemaDdl: (this: void, ddl: string) => Promise<void>;
-    deleteSchemaVectorSlotContribution: (this: void, slot: VectorSlot) => Promise<void>;
-}>;
 
 // @public
 export type SerializedClosures = Readonly<{
@@ -3854,6 +3613,7 @@ export type SerializedEdgeDef = Readonly<{
     targetKindsBySource?: Readonly<Record<string, readonly string[]>>;
     properties: JsonSchema;
     cardinality: Cardinality;
+    targetCardinality?: TargetCardinality;
     endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
@@ -3998,7 +3758,6 @@ export type SqlPlaceholderChunk = Readonly<{
 
 // @public
 export type SqlTableNames = Readonly<{
-    schemaVersions?: string | undefined;
     nodes: string;
     edges: string;
     recordedNodes?: string | undefined;
@@ -4176,7 +3935,6 @@ export type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_
 
 // @public
 export type TableContribution = Readonly<{
-    scope?: ContributionScope;
     logicalName: string;
     owner: string;
     tableName: string;
@@ -4192,6 +3950,9 @@ export type TableState = Readonly<{
 }>;
 
 // @public
+type TargetCardinality = Exclude<Cardinality, "unique">;
+
+// @public
 export type TemporalMode = "current" | "asOf" | "includeEnded" | "includeTombstones";
 
 // @public
@@ -4200,7 +3961,7 @@ export type TombstonedNodeRow = NodeRow & Readonly<{
 }>;
 
 // @public
-export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & LineageBackend & RecordedTimeBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
+export type TransactionBackend = Readonly<BackendIdentity & GraphEntityReadBackend & GraphEntityWriteBackend & UniqueConstraintBackend & Pick<GraphBackend, "claimEdgeCardinality" | "claimEdgeCardinalityGuarded" | "claimEdgeCardinalityBatch" | "purgeEdgeClaims"> & SchemaReadBackend & SchemaWriteFenceBackend & VectorOperationBackend & FulltextOperationBackend & IndexMaterializationBackend & CatalogBackend & ContributionMaterializationBackend & RemovalMaterializationBackend & GraphLifecycleBackend & QueryExecutionBackend & RawQueryExecutionBackend & RawStatementExecutionBackend>;
 
 // @public
 export type TransactionOptions = Readonly<{
@@ -4249,11 +4010,6 @@ type TypeGraphErrorOptions = Readonly<{
 
 // @public
 export const UNBUNDLED_OPTIONAL_MEMBERS: {
-    readonly upsertHeterogeneousNodes: {
-        readonly kind: "reasoned";
-        readonly reason: "Exact-session PostgreSQL heterogeneous node upsert program.";
-        readonly accesses: 6;
-    };
     readonly adoptBaseSchema: {
         readonly kind: "reasoned";
         readonly reason: "Privileged deployment-wide physical-schema adoption. Bundled backends implement the versioned marker lifecycle; custom backends may omit it when they provision their own base relations.";
@@ -4291,8 +4047,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly tableNames: {
         readonly kind: "reasoned";
-        readonly reason: "Physical names read by the compiler and schema-checked reads. The optional schema-version binding is required only by checked reads; its absence refuses that operation.";
-        readonly accesses: 25;
+        readonly reason: "Not a capability — a name map the compiler reads on every backend. Absence is impossible in practice and meaningless as a decision.";
+        readonly accesses: 24;
     };
     readonly fenceSql: {
         readonly kind: "reasoned";
@@ -4341,8 +4097,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly identityTableDdl: {
         readonly kind: "reasoned";
-        readonly reason: "Same identity-DDL family as ensureIdentityTables. Adopted evolution adds one Store handoff of the DDL factory and one same-session catalog inspection before the fenced schema commit; both refuse absent DDL rather than skipping required storage.";
-        readonly accesses: 4;
+        readonly reason: "Same identity-DDL family as ensureIdentityTables.";
+        readonly accesses: 2;
     };
     readonly recordedTableDdl: {
         readonly kind: "reasoned";
@@ -4425,16 +4181,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     readonly catalog: {
         readonly kind: "reasoned";
         readonly reason: "Physical-schema introspection (table/index presence, PostgreSQL's invalid-index leftover state, normalized column types) a store path consults directly rather than through a bundle disposition; its own absence has one typed refusal naming it, not a per-operation fallback. That refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory), so its access count is measured as zero even though the refusal reads the member.";
-        readonly accesses: 0;
-    };
-    readonly lineage: {
-        readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. Every OTHER consumer — `assertTargetUnchanged`'s commit-time engine-anchor check among them — reaches `lineage` through `resolveLineage`/`requireLineage` rather than a raw `.lineage` read of its own, so none of them add to this count.";
-        readonly accesses: 2;
-    };
-    readonly recordedTime: {
-        readonly kind: "reasoned";
-        readonly reason: "The engine's own recorded (system-time) read source and revision clock. Present only when a backend's engine declares it, and consulted only through resolveRecordedTimeOwnership/requireRecordedTime, both of which live in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). createSqlBackend's co-requirement check against `lineage` and both dialects' transaction-scoped threading all read `.recordedTime` off `EngineProvisioning`, not off a `GraphBackend`/`TransactionBackend`-typed receiver, so none of them add to this count either.";
         readonly accesses: 0;
     };
     readonly claimIndexMaterialization: {
@@ -4537,7 +4283,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "vectorSlotContributions";
-        readonly ceiling: 3;
+        readonly ceiling: 1;
     };
     readonly executeDdl: {
         readonly kind: "deferred";
@@ -4549,7 +4295,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "rawStatementReuse";
-        readonly ceiling: 11;
+        readonly ceiling: 7;
     };
     readonly executeTemporaryStatement: {
         readonly kind: "deferred";
@@ -4557,11 +4303,17 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly bundle: "temporaryStatements";
         readonly ceiling: 3;
     };
+    readonly findEdgesByEndpointSet: {
+        readonly kind: "deferred";
+        readonly workstream: "WS5b";
+        readonly bundle: "endpointSetRead";
+        readonly ceiling: 1;
+    };
     readonly findEdgesByHeterogeneousEndpointSet: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "heterogeneousEndpointSetRead";
-        readonly ceiling: 5;
+        readonly ceiling: 4;
     };
     readonly fulltextSearch: {
         readonly kind: "deferred";
@@ -4672,12 +4424,6 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly ceiling: 6;
     };
     readonly updateNodeSet: {
-        readonly kind: "deferred";
-        readonly workstream: "WS5b";
-        readonly bundle: "batchEntityWrite";
-        readonly ceiling: 6;
-    };
-    readonly updateResolvedNodesBatch: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "batchEntityWrite";
@@ -5156,7 +4902,8 @@ type WriteFenceTarget = Readonly<{
 
 // @public
 export const WS5B_SEED_BUNDLES: {
-    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet"];
+    readonly endpointSetRead: readonly ["findEdgesByEndpointSet"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
     readonly hybridSearch: readonly ["hybridSearch"];
@@ -5173,7 +4920,7 @@ export const WS5B_SEED_BUNDLES: {
 };
 
 // @public
-export type Ws5bBundleId = "batchEntityWrite" | "heterogeneousEndpointSetRead" | "vectorOperations" | "hybridSearch" | "vectorSlotContributions" | "fulltextOperations" | "fulltextProvisioning" | "databaseExtensions" | "contributionProvisioning" | "indexMaterialization" | "ddlExecution" | "temporaryStatements" | "rawStatementReuse" | "trustedImport";
+export type Ws5bBundleId = "batchEntityWrite" | "endpointSetRead" | "heterogeneousEndpointSetRead" | "vectorOperations" | "hybridSearch" | "vectorSlotContributions" | "fulltextOperations" | "fulltextProvisioning" | "databaseExtensions" | "contributionProvisioning" | "indexMaterialization" | "ddlExecution" | "temporaryStatements" | "rawStatementReuse" | "trustedImport";
 
 // (No @packageDocumentation comment for this package)
 

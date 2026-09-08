@@ -65,6 +65,10 @@ const verifyManages = defineEdge("verifyManages", {
   schema: z.object({}),
 });
 
+const verifyAssignedTo = defineEdge("verifyAssignedTo", {
+  schema: z.object({}),
+});
+
 /**
  * One graph carrying all three families: a scope spanning a hierarchy, a
  * declared disjoint pair, and a `cardinality: "one"` edge.
@@ -84,6 +88,15 @@ const verifyGraph = defineGraph({
       from: [VerifyEmployee],
       to: [VerifyProject],
       cardinality: "one",
+    },
+    // Both axes, so one graph exercises target-side reporting AND
+    // independent per-axis reporting on the same edge kind.
+    verifyAssignedTo: {
+      type: verifyAssignedTo,
+      from: [VerifyEmployee],
+      to: [VerifyProject],
+      cardinality: "one",
+      targetCardinality: "one",
     },
   },
   ontology: [
@@ -271,6 +284,112 @@ export function registerConstraintFenceVerificationIntegrationTests(
       expect(violation.edgeIds).toEqual(
         [edge.id, "verify-unfenced-edge"].toSorted(),
       );
+    });
+
+    it("reports a target-side violation with the target-axis ClaimTarget (issue #610)", async () => {
+      const store = await context.createStore(verifyGraph);
+      const first = await store.nodes.VerifyEmployee.create({
+        email: "target-fence-1@example.com",
+      });
+      const second = await store.nodes.VerifyEmployee.create({
+        email: "target-fence-2@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "Shared",
+      });
+      const edge = await store.edges.verifyAssignedTo.create(
+        first,
+        project,
+        {},
+      );
+
+      // Second employee assigned to the SAME project, written unfenced
+      // (pre-upgrade shape): the target axis is now contended.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-target-unfenced-edge",
+        kind: "verifyAssignedTo",
+        fromKind: "VerifyEmployee",
+        fromId: second.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+      });
+
+      const violations = await store.verifyConstraintFences();
+      const targetViolations = violations.filter(
+        (candidate) =>
+          candidate.family === "edgeCardinality" &&
+          candidate.target.axis !== "one:verifyAssignedTo",
+      );
+      expect(targetViolations).toHaveLength(1);
+      const violation = requireDefined(targetViolations[0]);
+      if (violation.family !== "edgeCardinality") {
+        throw new Error(`expected an edge violation, got ${violation.family}`);
+      }
+      expect(violation.target).toEqual({
+        relation: "edgeClaims",
+        graphId: verifyGraph.id,
+        axis: "\u001Eto\u001Eone:verifyAssignedTo",
+        key: encodeTupleKey(["VerifyProject", project.id]),
+      });
+      expect(violation.edgeIds).toEqual(
+        [edge.id, "verify-target-unfenced-edge"].toSorted(),
+      );
+    });
+    // MUTATION CHECK (verified): have `fenceDeclarations`
+    // (`src/store/claims/verify.ts`) emit source refs only (drop the
+    // `edgeCardinalityAxisReferences` fold in favor of the pre-D.1
+    // single-cardinality read). The target-side violation this test asserts
+    // goes unreported and `targetViolations` reads `[]`.
+
+    it("reports both axes independently when an edge kind declares both", async () => {
+      const store = await context.createStore(verifyGraph);
+      const employee = await store.nodes.VerifyEmployee.create({
+        email: "both-axes@example.com",
+      });
+      const otherEmployee = await store.nodes.VerifyEmployee.create({
+        email: "both-axes-2@example.com",
+      });
+      const project = await store.nodes.VerifyProject.create({
+        title: "BothAxes",
+      });
+      const otherProject = await store.nodes.VerifyProject.create({
+        title: "BothAxesOther",
+      });
+      await store.edges.verifyAssignedTo.create(employee, project, {});
+
+      // Contend the SOURCE axis (employee already has one) and the TARGET
+      // axis (project already has one), written unfenced.
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-both-source-unfenced",
+        kind: "verifyAssignedTo",
+        fromKind: "VerifyEmployee",
+        fromId: employee.id,
+        toKind: "VerifyProject",
+        toId: otherProject.id,
+        props: {},
+      });
+      await store.backend.insertEdge({
+        graphId: verifyGraph.id,
+        id: "verify-both-target-unfenced",
+        kind: "verifyAssignedTo",
+        fromKind: "VerifyEmployee",
+        fromId: otherEmployee.id,
+        toKind: "VerifyProject",
+        toId: project.id,
+        props: {},
+      });
+
+      const violations = await store.verifyConstraintFences();
+      const assignedToViolations = violations.filter(
+        (candidate) =>
+          candidate.family === "edgeCardinality" &&
+          (candidate.target.axis === "one:verifyAssignedTo" ||
+            candidate.target.axis === "\u001Eto\u001Eone:verifyAssignedTo"),
+      );
+      expect(assignedToViolations).toHaveLength(2);
     });
 
     it("does not report a soft-deleted second edge on the same axis", async () => {

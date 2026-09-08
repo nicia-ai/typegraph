@@ -46,7 +46,8 @@ export type EdgeAutocommitSingleStatementCandidate = Readonly<{
   revisionTrackingEnabled: boolean;
   kindRegistered: boolean;
   convergesDynamically: boolean;
-  cardinality: "many" | "one" | "unique" | "oneActive";
+  /** Whether the edge kind declares any cardinality axis, source or target. */
+  constrained: boolean;
 }>;
 
 export type AutocommitSingleStatementCandidate =
@@ -123,7 +124,7 @@ export function canFuseSchemaFenceInFirstWrite(
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
         !candidate.convergesDynamically &&
-        candidate.cardinality === "many"
+        !candidate.constrained
       );
     }
   }
@@ -197,7 +198,7 @@ export function isAutocommitSingleStatementWrite(
         !candidate.revisionTrackingEnabled &&
         candidate.kindRegistered &&
         !candidate.convergesDynamically &&
-        candidate.cardinality === "many"
+        !candidate.constrained
       );
     }
   }

@@ -455,85 +455,105 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   pre-existing debt everywhere including `.`), `.` is the one entrypoint
 //   this batch leaves unchanged, no OTHER entrypoint's debt decreased, and
 //   exactly 13 entrypoints moved.
+//
+// Target-side edge cardinality (issue #610): every entrypoint that reaches
+// `GraphBackend`, `ManagedEdgeCreatePlan`, `CardinalityErrorDetails`,
+// `MigrationErrorDetails`, or the serialized/introspected edge shapes picks
+// up `EdgeCardinalityAxisRef`, `EdgeCardinalityDirection`,
+// `ConstrainedCardinality`, `ConstrainedTargetCardinality`, and/or
+// `CountEdgesAtEndpointParams` as forgotten exports (the renamed
+// `countEdgesFrom` → `countEdgesAtEndpoint` member and its widened claim/audit
+// param types). `./core`, `./indexes` and `./adapters/drizzle/indexes` reach
+// none of those shapes and are unaffected.
+//
+// D.1 review fix (finding D1-R1-05): `.` (the package root) now exports
+// `EdgeCardinalityAxisRef` and `EdgeCardinalityDirection` directly — the two
+// types `EdgeCardinalityDeclaration` (already public from `.`) and
+// `CardinalityErrorDetails.direction` (already public from `.`) are built
+// from — so a consumer of `"@nicia-ai/typegraph"` alone can name either
+// field's type without a subpath import. `.`'s debt therefore DROPS 391→389
+// (two names move from forgotten to real exports); every OTHER entrypoint is
+// unaffected, since none of them re-exports either name and both remain
+// forgotten there exactly as the paragraph above describes.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 388,
-    sha256: "ba5d322f78a05b64e3c21926da4836acb52a26ee41906b9904915884dae7c6ac",
+    count: 389,
+    sha256: "616322c9babf73c8578d0d7c86a0108055bede2c76362addb80e940687cc987e",
   },
   "./adapters/drizzle/engine": {
-    count: 322,
-    sha256: "c1184d0391487c646381096ba4499a6b065f6249a24caaa0d47d237f40384b78",
+    count: 325,
+    sha256: "ad93ca20f9939f682c612dc5be7a3e8593b4f1ca0fb93cfe4d1d3c0b20baf675",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 248,
-    sha256: "14101f3a480081f3650fb72d0c65c73898e9ce6b1e622f25ffc3509af1029673",
+    count: 252,
+    sha256: "dbdb9ec1e7034a1721eebd624d3bea46bf43def2aa0855284ccfc5da720ceb2b",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 252,
-    sha256: "7fc79f06823339308e4077229a53c97cad6c32ddc265a2658bcf982ad00983c0",
+    count: 256,
+    sha256: "161936583ff06b9db2fff2ec2c9629af3ce145a9450eecdca790a7e3a308f7de",
   },
   "./adapters/drizzle/sqlite": {
-    count: 249,
-    sha256: "8eef6c35cd1162acda9ed9f8f2c509aecda288112b719efc053b0c35782e79ab",
+    count: 253,
+    sha256: "f21c6ed25dcc6a95efbd34d3fcc5d24e771042ab0d05f7fbff78aadbc0d47e3b",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 252,
-    sha256: "28ddcda4fb17ca95efd42b00715b177ad4681aa473ea4cab6c8a2643cb449f6f",
+    count: 256,
+    sha256: "ad9c65771dc326df5827da7d8650154ae0fa47afac44de97f90738de6feba530",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 252,
-    sha256: "28ddcda4fb17ca95efd42b00715b177ad4681aa473ea4cab6c8a2643cb449f6f",
+    count: 256,
+    sha256: "ad9c65771dc326df5827da7d8650154ae0fa47afac44de97f90738de6feba530",
   },
   "./backend": {
-    count: 16,
-    sha256: "fbcbd40667f4a4374dd0e267e595a852e5dfeec68d3d4e5e775848bc6468738f",
+    count: 20,
+    sha256: "aa70f937be267b441a0dff63e92d4e45aad8043a3d248a535771c1271c10f5f6",
   },
   "./core": {
     count: 72,
     sha256: "bf73c4f71677d2b3ec2e36bfd37e9ede5c3f57377fc923f0df2eb1b500cfc84d",
   },
   "./graph-extension": {
-    count: 16,
-    sha256: "1678650d02e0d9d7cc767ffbacbf163724c82fd4590c219b97d3dff85a6bf2f6",
+    count: 18,
+    sha256: "621501c502ff0fd24d2955e39360cc24e1b36b051f75784a5a1d8950a39aa4ab",
   },
   // MergePlanReadContext derives its read-only surface from the runtime method
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 730,
-    sha256: "ac9e2060f9ea27fb9e86d34aa149399103ca0f4ecb0331278c9f08400405f4ae",
+    count: 734,
+    sha256: "10524fe7c2563e7ccfa0b2b19dc2a2e708a1497a398f858ec18ddfaa44728a56",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 713,
-    sha256: "a2554712de880f0a40d4f97619da39c6c322574d095f01b1b5267a566ae37ac8",
+    count: 717,
+    sha256: "2cdf5aea248a0c62c5150fb6c7d661e4b10dcef51fd4f51a6dd09d3ee56fd432",
   },
   "./postgres/pglite": {
-    count: 710,
-    sha256: "6f5552bf9a5e998997e3f965460d3e643f052c85fc71510adf94615ab81914f5",
+    count: 714,
+    sha256: "db240c34a47d70b67e3991303e52ed39c3956e6ae50ce92014752f1f7e22f7c9",
   },
   "./profiler": {
-    count: 715,
-    sha256: "98ae19d1f08289dea5954115d2d694f3fb5b4be85993040910f28c3e74891c0d",
+    count: 719,
+    sha256: "fc468ba6b73cbbfdf102ea4a4682ad90f6cf5880d7fe577c6d51663dd497e292",
   },
   "./provenance": {
-    count: 721,
-    sha256: "3b7b8e200acec162f0d0d83f82bfa8ef7379e2bf9458d46c4a8ab3a64c230e47",
+    count: 725,
+    sha256: "adb09e968c00cd950b13d563e5fb6dbc296ec81af2da0e398719fd7baba228e7",
   },
   "./schema": {
-    count: 273,
-    sha256: "d8daaf0d30dddffcfd484018daba5fc0e4ebd0f96ac7cc4df65ff37f97a1b7e2",
+    count: 277,
+    sha256: "40f55b05aab182551ad9c5ef9c763c7cc0ba1bc3ce32aaf43f1e8668f9417ebf",
   },
   "./sqlite/local": {
-    count: 710,
-    sha256: "6f5552bf9a5e998997e3f965460d3e643f052c85fc71510adf94615ab81914f5",
+    count: 714,
+    sha256: "db240c34a47d70b67e3991303e52ed39c3956e6ae50ce92014752f1f7e22f7c9",
   },
 };
 

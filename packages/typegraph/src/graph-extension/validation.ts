@@ -190,7 +190,11 @@ const EDGE_BODY_KEYS: ReadonlySet<string> = new Set([
   "from",
   "to",
   "properties",
+  "cardinality",
+  "targetCardinality",
 ]);
+const CARDINALITY_VALUES = ["many", "one", "unique", "oneActive"] as const;
+const TARGET_CARDINALITY_VALUES = ["many", "one", "oneActive"] as const;
 const ONTOLOGY_ENTRY_KEYS: ReadonlySet<string> = new Set([
   "metaEdge",
   "from",
@@ -629,12 +633,34 @@ function validateEdgeDocument(
       );
   if (properties === undefined) return undefined;
 
+  const cardinalityResult = validateOptionalLiteral(
+    raw["cardinality"],
+    CARDINALITY_VALUES,
+    `${path}/cardinality`,
+    "Edge `cardinality`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+  if (!cardinalityResult.ok) return undefined;
+
+  const targetCardinalityResult = validateOptionalLiteral(
+    raw["targetCardinality"],
+    TARGET_CARDINALITY_VALUES,
+    `${path}/targetCardinality`,
+    "Edge `targetCardinality`",
+    "INVALID_DOCUMENT_SHAPE",
+    issues,
+  );
+  if (!targetCardinalityResult.ok) return undefined;
+
   return compactUndefined<ExtensionEdgeDef>({
     description,
     annotations,
     from,
     to,
     properties,
+    cardinality: cardinalityResult.value,
+    targetCardinality: targetCardinalityResult.value,
   });
 }
 

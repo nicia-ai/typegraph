@@ -812,5 +812,53 @@ export function registerOntologyTighteningIntegrationTests(
     // `ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR` (instead of
     // only when identity contributed no preflight step) would misdirect this
     // identity-only commit's refusal and make this case fail.
+
+    it("names EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND, not the ontology code, for a commit that only newly constrains an edge cardinality", async () => {
+      // v1 declares no ontology relation at all and no edge kinds; v2 adds a
+      // BRAND-NEW edge kind with a constrained `cardinality` — no
+      // disjointness, uniqueness, or endpoint-assignability axiom is touched
+      // by either version, so a refusal naming the ontology code would be
+      // actively misleading about which axis this commit tightened.
+      const id = "edge_cardinality_tightening_capability_atomic";
+      const graphWith = (withEdge: boolean) =>
+        defineGraph({
+          id,
+          nodes: {
+            Person: { type: Person },
+            Organization: { type: Organization },
+          },
+          edges:
+            withEdge ?
+              {
+                worksFor: {
+                  type: worksFor,
+                  from: [Person],
+                  to: [Organization],
+                  cardinality: "one" as const,
+                },
+              }
+            : {},
+        });
+
+      await context.createStore(graphWith(false));
+
+      const restrictedBackend = withoutCommitWithPreflight(
+        context.getBackend(),
+      );
+      const error = await createAdapterStoreWithSchema(
+        graphWith(true),
+        restrictedBackend,
+      ).catch((error_: unknown) => error_);
+
+      expect(error).toBeInstanceOf(ConfigurationError);
+      expect((error as ConfigurationError).details).toMatchObject({
+        code: "EDGE_CARDINALITY_TIGHTENING_REQUIRES_ATOMIC_BACKEND",
+      });
+      expect(await activeVersion(context, id)).toBe(1);
+    });
+    // MUTATION CHECK (verified): reverting `prepareSchemaTighteningPreflight`
+    // to always report `ONTOLOGY_TIGHTENING_ATOMIC_PREFLIGHT_CAPABILITY_ERROR`
+    // (this workstream's fix for D1-R1-03) makes this case fail with
+    // `details.code` reading `"ONTOLOGY_TIGHTENING_REQUIRES_ATOMIC_BACKEND"`.
   });
 }

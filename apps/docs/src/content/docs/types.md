@@ -497,6 +497,25 @@ type Cardinality = "many" | "one" | "unique" | "oneActive";
 | `"unique"` | At most one edge per source-target pair |
 | `"oneActive"` | At most one active edge (`validTo` is `undefined`) per source node |
 
+### `TargetCardinality`
+
+Controls how many edges of a type can point AT one target node, independent
+of `Cardinality`, which bounds the edges leaving one source.
+
+```typescript
+type TargetCardinality = "many" | "one" | "oneActive";
+```
+
+| Value | Description |
+|-------|-------------|
+| `"many"` | No limit on edges (default) |
+| `"one"` | At most one edge per target node |
+| `"oneActive"` | At most one active edge (`validTo` is `undefined`) per target node |
+
+There is no `"unique"` target cardinality: pair uniqueness is a property of
+the `(source, target)` pair, already declared from the source side by
+`Cardinality`'s `"unique"` value.
+
 ### `InferenceType`
 
 Controls how ontology relationships affect queries.

@@ -19,7 +19,6 @@ const UNIQUE_KEY_SEPARATOR = "\u001E";
 const UNIQUE_KEY_NULL_MARKER = "\u001F"; // ASCII Unit Separator
 import { getEdgeEndpointPairs, isEdgeTargetMap } from "../core/edge-endpoints";
 import {
-  type Cardinality,
   type Collation,
   type EdgeRegistration,
   type NullCheckOp,
@@ -27,7 +26,6 @@ import {
   type UniquenessScope,
 } from "../core/types";
 import {
-  CardinalityError,
   ConfigurationError,
   DisjointError,
   EndpointError,
@@ -436,86 +434,12 @@ export function createUniquenessError(
 // ============================================================
 // Cardinality Validation
 // ============================================================
-
-/**
- * Checks if adding an edge would violate cardinality constraints.
- *
- * @param edgeKind - The edge kind being added
- * @param fromKind - The source node kind
- * @param fromId - The source node ID
- * @param cardinality - The cardinality constraint
- * @param existingEdgeCount - Number of existing edges of this kind from this source
- * @param hasActiveEdge - Whether there's an active (valid_to IS NULL) edge
- * @returns Error if violation, undefined if valid
- */
-export function checkCardinality(
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-  cardinality: Cardinality,
-  existingEdgeCount: number,
-  hasActiveEdge: boolean,
-): CardinalityError | undefined {
-  switch (cardinality) {
-    case "many": {
-      // No constraint
-      return undefined;
-    }
-    case "one": {
-      // At most one edge of this kind from any source node
-      if (existingEdgeCount > 0) {
-        return new CardinalityError({
-          edgeKind,
-          fromKind,
-          fromId,
-          cardinality: "one",
-          existingCount: existingEdgeCount,
-        });
-      }
-      return undefined;
-    }
-    case "unique": {
-      // unique is checked separately per (source, target) pair
-      return undefined;
-    }
-    case "oneActive": {
-      // At most one edge with valid_to IS NULL from any source
-      if (hasActiveEdge) {
-        return new CardinalityError({
-          edgeKind,
-          fromKind,
-          fromId,
-          cardinality: "oneActive",
-          existingCount: 1,
-        });
-      }
-      return undefined;
-    }
-  }
-}
-
-/**
- * Checks unique edge constraint (at most one edge between any source-target pair).
- */
-export function checkUniqueEdge(
-  edgeKind: string,
-  fromKind: string,
-  fromId: string,
-  _toKind: string,
-  _toId: string,
-  existingCount: number,
-): CardinalityError | undefined {
-  if (existingCount > 0) {
-    return new CardinalityError({
-      edgeKind,
-      fromKind,
-      fromId,
-      cardinality: "unique",
-      existingCount,
-    });
-  }
-  return undefined;
-}
+//
+// Cardinality's refusal is built by `edgeCardinalityViolation`
+// (`store/claims/edge-claims.ts`), the one owner both the write-time probe
+// (`store/constraints.ts`) and the claim fence's refusal translation call —
+// so the fence's error is `instanceof` the same class and carries the same
+// payload as the probe's for the same violation.
 
 // ============================================================
 // Endpoint Validation

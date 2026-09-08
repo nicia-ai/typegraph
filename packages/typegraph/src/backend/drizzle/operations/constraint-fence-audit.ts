@@ -18,8 +18,8 @@
 import { getTableName, type SQL, sql } from "drizzle-orm";
 
 import {
-  type ConstrainedCardinality,
-  EDGE_CARDINALITY_SPECS,
+  type EdgeCardinalityAxisRef,
+  edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
 import { quotedColumn, type Tables } from "./shared";
 
@@ -90,24 +90,26 @@ export function buildContendedUniqueRowAudit(
 }
 
 /**
- * Live edges of the named kinds sharing one declared cardinality's population
- * with another live edge.
+ * Live edges of the named kinds sharing one declared cardinality axis's
+ * population with another live edge.
  *
- * Which endpoints the population is keyed by and what a member must still BE
- * are read from {@link EDGE_CARDINALITY_SPECS} — the same table the probe and
- * the claim's SQL read — so the audit cannot report a population the fence does
- * not fence, or miss one it does. One statement per cardinality, because that
- * is the granularity at which the spec differs.
+ * Which endpoint the population is keyed by (`keyShape`) and what a member
+ * must still BE (`holderLiveness`) are read from
+ * {@link edgeCardinalitySpec} — the same table the probe and the claim's SQL
+ * read — so the audit cannot report a population the fence does not fence, or
+ * miss one it does: `"from"` emits from-terms only, `"to"` emits to-terms
+ * only, `"fromAndTo"` emits both. One statement per axis, because that is the
+ * granularity at which the spec differs.
  */
 export function buildContendedEdgeRowAudit(
   tables: Tables,
   graphId: string,
-  cardinality: ConstrainedCardinality,
+  ref: EdgeCardinalityAxisRef,
   edgeKinds: readonly string[],
 ): SQL {
   const { edges } = tables;
   const relation = getTableName(edges);
-  const spec = EDGE_CARDINALITY_SPECS[cardinality];
+  const spec = edgeCardinalitySpec(ref);
   const activeOnly =
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(relation, edges.validTo)} IS NULL`
@@ -116,8 +118,15 @@ export function buildContendedEdgeRowAudit(
     spec.holderLiveness === "liveAndActive" ?
       sql` AND ${qualified(PEER, edges.validTo)} IS NULL`
     : sql.empty();
+  const peerFromEndpoints =
+    spec.keyShape === "from" || spec.keyShape === "fromAndTo" ?
+      sql`
+        AND ${qualified(PEER, edges.fromKind)} = ${qualified(relation, edges.fromKind)}
+                  AND ${qualified(PEER, edges.fromId)} = ${qualified(relation, edges.fromId)}
+      `
+    : sql.empty();
   const peerToEndpoints =
-    spec.keyShape === "fromAndTo" ?
+    spec.keyShape === "to" || spec.keyShape === "fromAndTo" ?
       sql`
         AND ${qualified(PEER, edges.toKind)} = ${qualified(relation, edges.toKind)}
                   AND ${qualified(PEER, edges.toId)} = ${qualified(relation, edges.toId)}
@@ -139,9 +148,7 @@ export function buildContendedEdgeRowAudit(
       AND EXISTS (
         SELECT 1 FROM ${edges} AS ${sql.raw(`"${PEER}"`)}
         WHERE ${qualified(PEER, edges.graphId)} = ${qualified(relation, edges.graphId)}
-          AND ${qualified(PEER, edges.kind)} = ${qualified(relation, edges.kind)}
-          AND ${qualified(PEER, edges.fromKind)} = ${qualified(relation, edges.fromKind)}
-          AND ${qualified(PEER, edges.fromId)} = ${qualified(relation, edges.fromId)}${peerToEndpoints}
+          AND ${qualified(PEER, edges.kind)} = ${qualified(relation, edges.kind)}${peerFromEndpoints}${peerToEndpoints}
           AND ${qualified(PEER, edges.deletedAt)} IS NULL${peerActiveOnly}
           AND ${qualified(PEER, edges.id)} <> ${qualified(relation, edges.id)}
       )

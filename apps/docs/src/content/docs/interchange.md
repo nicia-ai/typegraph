@@ -429,6 +429,13 @@ The contract is deliberately narrow:
 - Recorded-time history, revision tracking, node uniqueness constraints,
   `searchable()` fields, and `embedding()` fields are rejected in this first
   version because their sidecar writes would otherwise be skipped.
+- A target graph declaring [target cardinality](/core-concepts#target-cardinality)
+  or source-side `cardinality` constraints on any edge kind is rejected with
+  `details.reason === "cardinality_unsupported"` — trusted import writes only
+  the node and edge relations, so it cannot also maintain the cardinality
+  claim rows those constraints depend on. Use `importGraphStream` for a graph
+  with constrained edge kinds; it maintains claims the same way the store's
+  normal write path does.
 - Operational Identity-enabled target stores are rejected with
   `details.reason === "identity_unsupported"`; identity-bearing input is
   rejected with `details.reason === "invalid_stream"`. The trusted session

@@ -709,6 +709,45 @@ describe("trusted import", () => {
   });
 
   it.each([
+    { name: "source-only", cardinality: { cardinality: "one" as const } },
+    {
+      name: "target-only",
+      cardinality: { targetCardinality: "one" as const },
+    },
+    {
+      name: "both axes",
+      cardinality: {
+        cardinality: "one" as const,
+        targetCardinality: "one" as const,
+      },
+    },
+  ])(
+    "rejects a declared edge cardinality ($name) — trusted import maintains no claim",
+    async ({ cardinality }) => {
+      const node = defineNode("CardinalityPerson", { schema: z.object({}) });
+      const relation = defineEdge("cardinalityKnows", {
+        schema: z.object({}),
+      });
+      const graph = defineGraph({
+        id: "trusted_import_reject_cardinality",
+        nodes: { CardinalityPerson: { type: node } },
+        edges: {
+          cardinalityKnows: {
+            type: relation,
+            from: [node],
+            to: [node],
+            ...cardinality,
+          },
+        },
+      });
+      const store = createStore(graph, createTestBackend());
+      await expect(trustedImportGraph(store, graphData([]))).rejects.toEqual(
+        expectReason("cardinality_unsupported"),
+      );
+    },
+  );
+
+  it.each([
     {
       reason: "fulltext_unsupported",
       graph: defineGraph({

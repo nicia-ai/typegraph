@@ -15,9 +15,11 @@ import { embedding } from "../core/embedding";
 import { defineNode } from "../core/node";
 import { searchable } from "../core/searchable";
 import {
+  type Cardinality,
   type KindAnnotations,
   type NodeType,
   type NullCheckOp,
+  type TargetCardinality,
   type UniqueConstraint,
 } from "../core/types";
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
@@ -93,6 +95,8 @@ type CompiledEdge = Readonly<{
   to:
     | readonly (NodeType | string)[]
     | Readonly<Record<string, readonly (NodeType | string)[]>>;
+  cardinality?: Cardinality;
+  targetCardinality?: TargetCardinality;
 }>;
 
 // ============================================================
@@ -258,6 +262,8 @@ function compileEdge(
       annotations: document.annotations,
       from: Object.freeze(from),
       to,
+      cardinality: document.cardinality,
+      targetCardinality: document.targetCardinality,
     }),
   );
 }
