@@ -156,12 +156,24 @@ across the pair — the two kinds share one claim axis, so a value unique for
 
 Because subsumption is a strict order (`isSubClassOf(k, k)` is always false,
 and `expandSubClasses` never repeats a kind), a kind that sits strictly
-between two mutually-equivalent kinds collapses into the same class too: with
-`Physician subClassOf Doctor` and `Doctor equivalentTo Physician` declared
-together, `Physician` and `Doctor` are simply the same class and every other
-kind's relationship to one is its relationship to both. This is the
-mathematically forced consequence of making `equivalentTo` mutual subsumption,
-not a special case the registry detects.
+between two mutually-equivalent kinds collapses into the same class too, even
+though nothing declares it equivalent to either one directly:
+
+```typescript
+equivalentTo(Doctor, Physician);
+subClassOf(Doctor, Consultant);
+subClassOf(Consultant, Physician);
+// Doctor and Physician were declared equivalent; Consultant only ever
+// declared subClassOf. But Doctor ⊑ Consultant ⊑ Physician ⊑ Doctor is now a
+// cycle, so all three are mutually assignable and share one subclass
+// component: ["Consultant", "Doctor", "Physician"].
+```
+
+This is the mathematically forced consequence of making `equivalentTo` mutual
+subsumption, not a special case the registry detects — `Consultant` never
+appears in an `equivalentTo` declaration, but the closure over `subClassOf`
+and `equivalentTo` together puts it on the same cycle as `Doctor` and
+`Physician`.
 
 `equivalentTo` also maps a type to an external IRI for cross-system mapping,
 exactly as before. An IRI is an inert reference — it never becomes a kind of
