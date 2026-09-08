@@ -805,8 +805,11 @@ properly configured indexes.
 
 ### Use specific kinds
 
-Unless you specifically need to query across a hierarchy, avoid `includeSubClasses: true`. Being
-specific about the node kind allows the SQL engine to use more restrictive index scans.
+A query against a kind with `subClassOf` descendants returns their rows too
+by default. Unless you specifically need to query across the hierarchy, pass
+`{ includeSubClasses: false }` (or set `queryDefaults.includeSubClasses:
+false` on the store). Being specific about the node kind allows the SQL
+engine to use more restrictive index scans.
 
 ### Use cursor pagination
 

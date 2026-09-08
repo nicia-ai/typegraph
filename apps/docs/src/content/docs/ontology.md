@@ -173,16 +173,18 @@ is claimed, the resulting alias is untyped (no static property access; use
 fixed-vocabulary reading of a kind taxonomy — a handful of concepts known at
 schema-authoring time, each declared as its own node kind. For a vocabulary
 that grows at runtime (new concepts added without a schema change), prefer
-the instance-level pattern instead: a single `Concept` node kind, an
-`acyclic` `broader` **edge** between concept instances, traversed with
+the instance-level pattern instead: a single `Concept` node kind, a
+`broader` **edge** between concept instances, traversed with
 `.recursive()` — the SKOS / Wikidata / LinkML model. Choose the kind-level
 form when the vocabulary is closed and small; choose the instance-level form
-when it is open-ended.
+when it is open-ended. Edge-level cycle prevention is not yet available
+(tracked on the roadmap); until then, a `broader` chain's freedom from
+cycles is a data-authoring discipline the application enforces.
 
 ```typescript
 // Instance-level: a single Concept kind, broader as an edge
 const Concept = defineNode("Concept", { schema: z.object({ label: z.string() }) });
-const broaderEdge = defineEdge("broader", { schema: z.object({}), acyclic: true });
+const broaderEdge = defineEdge("broader", { schema: z.object({}) });
 
 const ancestors = await store
   .query()
@@ -672,7 +674,7 @@ checker cannot see (value-level constraints). See
 ```typescript
 function subClassOf<C extends NodeType, P extends NodeType>(
   child: C,
-  parent: SubClassOfParent<C, P>, // resolves to P, or a mismatch object naming the incompatible fields
+  parent: P & SubClassOfCheck<C, P>, // SubClassOfCheck resolves to `unknown` on success, or a mismatch object naming the incompatible fields
 ): TypedOntologyRelation<"subClassOf", C, P>;
 ```
 
