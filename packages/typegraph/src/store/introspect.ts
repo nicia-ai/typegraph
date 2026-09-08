@@ -40,7 +40,10 @@ import {
   extensionKindNames,
 } from "../graph-extension/ontology-keys";
 import { getTypeName } from "../ontology/types";
-import { type CompositionPartSide } from "../registry/composition-relation";
+import {
+  type CompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
 import { serializeSchemaProperties } from "../schema/serializer";
 import { type JsonSchema } from "../schema/types";
 
@@ -171,8 +174,7 @@ export function introspectSchema<G extends GraphDef>(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
-    ...(relation.via === undefined ? {} : { via: relation.via }),
-    ...(relation.partSide === undefined ? {} : { partSide: relation.partSide }),
+    ...compositionRelationFields(relation),
     origin:
       runtimeOntologyKeys.has(compileTimeOntologyKey(relation)) ? "runtime" : (
         "compile-time"

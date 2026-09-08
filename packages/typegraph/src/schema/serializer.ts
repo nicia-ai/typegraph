@@ -36,6 +36,7 @@ import {
   type MetaEdge,
   type OntologyRelation,
 } from "../ontology/types";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { computeClosuresFromOntology } from "../registry/kind-registry";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
@@ -601,11 +602,7 @@ function serializeOntologyRelation(
     metaEdge: relation.metaEdge.name,
     from: getTypeName(relation.from),
     to: getTypeName(relation.to),
-    // Emitted only when present so a schema with no composition relations
-    // hashes byte-identically to one serialized before `via`/`partSide`
-    // existed.
-    ...(relation.via === undefined ? {} : { via: relation.via }),
-    ...(relation.partSide === undefined ? {} : { partSide: relation.partSide }),
+    ...compositionRelationFields(relation),
   };
 }
 

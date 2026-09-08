@@ -82,17 +82,29 @@ export type CompositionIssue = Readonly<{
 // ============================================================
 
 /**
+ * `facts.pairs` — the edge's admitted `(from, to)` pairs, already resolved
+ * (source-dependent target map or plain Cartesian product) by the one site
+ * that builds it — asserted present. `pairs` is typed optional only because
+ * `EdgeKindFacts` is shared with older, pre-pairs consumers; composition's
+ * two construction sites (`buildGraphEdgeKindFacts`, the deserializer's)
+ * always populate it, so a missing one here is a builder defect, not a shape
+ * this function should quietly re-derive a Cartesian product for (a second,
+ * driftable spelling of the same value). The two call sites below share one
+ * message for that defect.
+ */
+function requireEdgePairs(
+  facts: EdgeKindFacts,
+): readonly Readonly<{ from: string; to: string }>[] {
+  return requireDefined(
+    facts.pairs,
+    "EdgeKindFacts.pairs must be populated for composition validation",
+  );
+}
+
+/**
  * Whether the realizing edge admits an instance whose `from` endpoint is
  * (assignable to) `fromCandidate` and whose `to` endpoint is (assignable to)
- * `toCandidate`, against `EdgeKindFacts.pairs` — the edge's admitted
- * `(from, to)` pairs, already resolved (source-dependent target map or plain
- * Cartesian product) by the one site that builds it. `pairs` is typed
- * optional only because `EdgeKindFacts` is shared with older, pre-pairs
- * consumers; composition's two construction sites
- * (`buildGraphEdgeKindFacts`, the deserializer's) always populate it, so
- * a missing one here is a builder defect, not a shape this function should
- * quietly re-derive a Cartesian product for (a second, driftable spelling of
- * the same value).
+ * `toCandidate`, against `EdgeKindFacts.pairs`.
  */
 function edgeAdmitsPair(
   fromCandidate: string,
@@ -100,10 +112,7 @@ function edgeAdmitsPair(
   facts: EdgeKindFacts,
   registry: KindRegistry,
 ): boolean {
-  return requireDefined(
-    facts.pairs,
-    "EdgeKindFacts.pairs must be populated for composition validation",
-  ).some(
+  return requireEdgePairs(facts).some(
     (pair) =>
       registry.isAssignableTo(fromCandidate, pair.from) &&
       registry.isAssignableTo(toCandidate, pair.to),
@@ -190,6 +199,28 @@ export function normalizePartWhole(
   return relation.metaEdge === META_EDGE_PART_OF ?
       { partKind: relation.from, wholeKind: relation.to }
     : { partKind: relation.to, wholeKind: relation.from };
+}
+
+/**
+ * Copies `via`/`partSide` onto a fresh object only when present, so a
+ * relation carrying neither serializes/copies byte-identically to one from
+ * before composition existed (schema hashing depends on this — see
+ * `serializeOntologyRelation`, `src/schema/serializer.ts`). Every
+ * representation that carries these two fields (the compiler, the extension
+ * validator, the serializer, the deserializer, the registry builder, and
+ * introspection) copies them through this one function instead of
+ * re-spelling the same conditional spread six times over.
+ */
+export function compositionRelationFields(
+  source: Readonly<{
+    via?: string | undefined;
+    partSide?: CompositionPartSide | undefined;
+  }>,
+): Readonly<{ via?: string; partSide?: CompositionPartSide }> {
+  return {
+    ...(source.via === undefined ? {} : { via: source.via }),
+    ...(source.partSide === undefined ? {} : { partSide: source.partSide }),
+  };
 }
 
 /** The subset of {@link CompositionIssueCode} `inferCompositionPartSide` can return. */
@@ -392,10 +423,7 @@ export function buildCompositionRelation(
       representativeByEdgeKind.get(edgeKind),
       `Composition edge "${edgeKind}" has an orientation with no declaring relation.`,
     );
-    for (const { from, to } of requireDefined(
-      facts.pairs,
-      "EdgeKindFacts.pairs must be populated for composition validation",
-    )) {
+    for (const { from, to } of requireEdgePairs(facts)) {
       if (!declaredTuples.has(encodeTupleKey([from, to]))) {
         issues.push({
           code: "ONTOLOGY_COMPOSITION_VIA_MIXED",

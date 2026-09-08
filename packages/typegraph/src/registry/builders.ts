@@ -18,6 +18,7 @@ import {
 } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { buildValidatedKindRegistry } from "./build-validated";
+import { compositionRelationFields } from "./composition-relation";
 import { type EdgeKindFacts } from "./edge-kind-facts";
 import type { KindRegistry } from "./kind-registry";
 
@@ -65,10 +66,7 @@ export function buildKindRegistry<G extends GraphDef>(graph: G): KindRegistry {
               relation.from
             : relation.from.kind,
           to: typeof relation.to === "string" ? relation.to : relation.to.kind,
-          ...(relation.via === undefined ? {} : { via: relation.via }),
-          ...(relation.partSide === undefined ?
-            {}
-          : { partSide: relation.partSide }),
+          ...compositionRelationFields(relation),
         })),
     edgeFacts: buildGraphEdgeKindFacts(graph.edges),
     ...(graph.identity === undefined ? {} : { identity: graph.identity }),

@@ -23,6 +23,10 @@ import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { validateOntologyRelations } from "../ontology/validation";
 import { encodeJsonPointerSegment } from "../query/json-pointer";
 import {
+  type CompositionPartSide,
+  compositionRelationFields,
+} from "../registry/composition-relation";
+import {
   isUnstorablePropertyName,
   RESERVED_EDGE_KEYS,
   RESERVED_NODE_KEYS,
@@ -856,10 +860,10 @@ function validateOntologySection(
       metaEdge: metaEdge as MetaEdgeName,
       from,
       to,
-      ...(via === undefined ? {} : { via }),
-      ...(partSide === undefined ?
-        {}
-      : { partSide: partSide as "from" | "to" }),
+      ...compositionRelationFields({
+        via,
+        partSide: partSide as CompositionPartSide | undefined,
+      }),
     });
   }
   return result;

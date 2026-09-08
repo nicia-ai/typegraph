@@ -8,6 +8,7 @@
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
 import { buildValidatedKindRegistry } from "../registry/build-validated";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { type EdgeKindFacts } from "../registry/edge-kind-facts";
 import type { KindRegistry } from "../registry/kind-registry";
 import { hasOwnKey } from "../utils/object";
@@ -162,10 +163,7 @@ export function buildRegistryFromSerializedSchema(
         metaEdge: relation.metaEdge,
         from: relation.from,
         to: relation.to,
-        ...(relation.via === undefined ? {} : { via: relation.via }),
-        ...(relation.partSide === undefined ?
-          {}
-        : { partSide: relation.partSide }),
+        ...compositionRelationFields(relation),
       }),
     ),
     edgeFacts: buildSerializedEdgeKindFacts(schema.edges),

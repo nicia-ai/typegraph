@@ -25,6 +25,7 @@ import {
 import { ALL_META_EDGE_NAMES, type MetaEdgeName } from "../ontology/constants";
 import { core as coreOntology } from "../ontology/core-meta-edges";
 import { type MetaEdge, type OntologyRelation } from "../ontology/types";
+import { compositionRelationFields } from "../registry/composition-relation";
 import { compactUndefined, createDataKeyedBag } from "../utils/object";
 import {
   type ExtensionArrayItemType,
@@ -492,7 +493,6 @@ function compileOntologyRelation(
     metaEdge,
     from: fromNode ?? relation.from,
     to: toNode ?? relation.to,
-    ...(relation.via === undefined ? {} : { via: relation.via }),
-    ...(relation.partSide === undefined ? {} : { partSide: relation.partSide }),
+    ...compositionRelationFields(relation),
   };
 }
