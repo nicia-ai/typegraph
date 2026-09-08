@@ -45,12 +45,12 @@ properties between types, or automatically expand every query.
 
 | Relation / feature | Runtime contract |
 | --- | --- |
-| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and opt-in node-query expansion with `includeSubClasses`. The closure now also includes every `equivalentTo`/`sameAs` class — two equivalent kinds are mutual subclasses of each other |
+| `subClassOf` | Transitive registry closure, write-path endpoint assignability, and node-query expansion with `includeSubClasses` (default: `true`). The closure now also includes every `equivalentTo`/`sameAs` class — two equivalent kinds are mutual subclasses of each other. The child's schema output must structurally extend the parent's — checked at compile time and refused at registry build otherwise |
 | `disjointWith` | Same-ID collision enforcement, propagated through interleaved `subClassOf` and `equivalentTo` closure (`sameAs` remains a deprecated equivalence alias) |
 | `implies` | Transitive registry closure and opt-in traversal expansion with `expand: "implying"`; endpoints are validated |
 | `inverseOf` | Single inverse partner, endpoint reversal validation, and traversal expansion with `expand: "inverse"` (the default store setting) |
 | `equivalentTo` | Between two registered kinds, MUTUAL SUBSUMPTION: folded into the same closure `subClassOf` reads, so `isAssignableTo`, `expandSubClasses`/`includeSubClasses`, edge-endpoint acceptance, disjointness propagation and the `kindWithSubClasses` claim axis all treat the two kinds as substitutable. An IRI on either side stays an inert cross-system reference — it never becomes a kind, but a class reached *through* one still folds together. Restricted to node kinds: an equivalence class that mixes a node kind and an edge kind, or that holds more than one registered edge kind, is refused (`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`). `sameAs` is folded in as a full alias — the merge type reconciler and the registry treat a `sameAs` declaration identically to `equivalentTo` |
-| `broader` / `narrower` | Transitive registry introspection only |
+| `broader` / `narrower` | Transitive registry introspection, plus kind-taxonomy query expansion with `includeNarrower` (untyped alias — no schema relationship is claimed) |
 | `partOf` / `hasPart` | Transitive registry introspection only |
 | `relatedTo` | Symmetric direct registry introspection through `getRelatedKinds` only |
 | Type-level `sameAs` | Deprecated name for `equivalentTo` (see above); prefer calling `equivalentTo` directly |
@@ -75,29 +75,77 @@ subClassOf(Article, Media);
 subClassOf(Company, Organization);
 ```
 
-**Query Behavior:**
+**The structural contract:** `subClassOf(child, parent)` requires the child's
+schema output to structurally extend the parent's — every property the
+parent requires, the child has with a compatible type; the child may add
+properties (width subtyping) or narrow an optional-in-parent property.
+`equivalentTo`/`sameAs` between two registered kinds check the same contract
+in **both** directions. The check runs twice: at **compile time**
+(TypeScript rejects an incompatible pair with a message naming the missing
+or incompatible fields), and at **registry build** for whatever the type
+checker cannot see — a value-level constraint like `z.string().min(3)`
+tightening a bare `z.string()`. The registry check is authoritative and
+covers all three authoring routes (a compile-time graph, an `evolve()`-
+authored extension, and a deserialized persisted document), throwing a
+`ConfigurationError` under one of four codes:
 
-Subclass expansion is **opt-in** via `includeSubClasses: true`:
+| code | when |
+| --- | --- |
+| `ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE` | a `subClassOf` child's schema does not extend its parent's |
+| `ONTOLOGY_SUBCLASS_SCHEMA_INCOMPARABLE` | the projected JSON Schema cannot judge the pair (`$ref`, `allOf`, `not`, or an unmodeled keyword) |
+| `ONTOLOGY_EQUIVALENCE_NOT_STRUCTURAL_SUBTYPE` | an `equivalentTo`/`sameAs` pair fails in one direction |
+| `ONTOLOGY_EQUIVALENCE_SCHEMA_INCOMPARABLE` | the same, but the pair is incomparable |
+
+**Known gap:** the registry check compares kinds' projected JSON Schema, and
+a Zod construct `z.toJSONSchema` cannot convert (`z.set()`, `z.map()`, and
+others) projects as a generic `{ type: "object" }` for every kind that
+contains one — so two kinds that differ only inside such a field are
+indistinguishable to the check and a genuinely incompatible pair is silently
+accepted rather than refused. This applies equally to a compile-time graph,
+an `evolve()`-authored extension, and a deserialized document; avoid
+`z.set()`/`z.map()` on a node schema that participates in `subClassOf` or
+`equivalentTo` until the projection is made distinguishable.
+
+If your hierarchy is a **taxonomy** rather than a genuine subtype
+relationship — the child doesn't actually extend the parent's schema —
+declare `broader(child, parent)` instead; see
+[Hierarchical (Concept Hierarchy)](#hierarchical-concept-hierarchy) below and
+`includeNarrower` in [Source](/queries/source#includenarrower--kind-level-taxonomies).
+
+**Query behavior — polymorphic by default:**
+
+A query against a kind other kinds declare themselves `subClassOf` returns
+subtype rows **by default**, since the structural contract guarantees the
+subtype rows satisfy the parent's shape:
 
 ```typescript
-// Without expansion: returns only nodes with kind="Media"
-const mediaOnly = await store
+// Default: returns Media, Podcast, AND Article nodes
+const allMedia = await store
   .query()
   .from("Media", "m")
   .select((ctx) => ctx.m)
   .execute();
+// Results include nodes of kind "Media", "Podcast", and "Article"
 
-// With expansion: returns Media, Podcast, AND Article nodes
-const allMedia = await store
+// Narrowed: returns only nodes with kind="Media"
+const mediaOnly = await store
   .query()
-  .from("Media", "m", { includeSubClasses: true })
+  .from("Media", "m", { includeSubClasses: false })
   .select((ctx) => ctx.m)
   .execute();
-// Results include nodes of kind "Media", "Podcast", and "Article"
 ```
 
 This is a fundamental difference from traditional ORM inheritance—TypeGraph stores the concrete type
-(`kind: "Podcast"`) in the database, and expands at query time when requested.
+(`kind: "Podcast"`) in the database, and expands at query time by default. The
+alias's `kind` field and `NodeId` brand widen to `string` for a kind the
+ontology can actually affect (a graph with no subsumption relations keeps its
+exact literal types); only the parent's own properties are statically typed on
+the alias, since that is all the contract guarantees. `search()` and the
+collection APIs (`find`, `count`, `updateWhere`, `compareAndSet`) are
+unaffected and stay exact-kind. See
+[Subclass queries are polymorphic](/queries/source) for the full option and
+`queryDefaults.includeSubClasses` in [Schemas & Stores](/schemas-stores) for
+the store-wide migration knob.
 
 **Changing this on a populated graph**: adding a `subClassOf` relation is
 checked against existing data before it commits — it can merge two
@@ -105,6 +153,9 @@ uniqueness components or propagate a `disjointWith` down to a new
 descendant — and removing one is checked for live edges whose endpoints rely
 on the subsumption. See
 [Ontology tightenings are checked against your data](/schema-evolution#ontology-tightenings-are-checked-against-your-data).
+An incompatible hierarchy on a populated graph is refused before the upgrade
+even reaches that data check — see
+[Schema evolution](/schema-evolution#structural-subsumption-is-checked-before-you-upgrade).
 
 ### Hierarchical (Concept Hierarchy)
 
@@ -123,6 +174,37 @@ but is **not** an instance of "AI".
 // Get all topics narrower than Technology
 const narrowerTopics = registry.expandNarrower("Technology");
 // ["ArtificialIntelligence", "MachineLearning", "DeepLearning", ...]
+```
+
+A query can expand through this same closure with `includeNarrower: true` on
+`from()`/`to()`/`fromDynamic()`/`toDynamic()` — since no schema relationship
+is claimed, the resulting alias is untyped (no static property access; use
+`fromDynamic()`'s `.field(name)` discriminator). This is the small,
+fixed-vocabulary reading of a kind taxonomy — a handful of concepts known at
+schema-authoring time, each declared as its own node kind. For a vocabulary
+that grows at runtime (new concepts added without a schema change), prefer
+the instance-level pattern instead: a single `Concept` node kind, a
+`broader` **edge** between concept instances, traversed with
+`.recursive()` — the SKOS / Wikidata / LinkML model. Choose the kind-level
+form when the vocabulary is closed and small; choose the instance-level form
+when it is open-ended. Edge-level cycle prevention is not yet available
+(tracked on the roadmap); until then, a `broader` chain's freedom from
+cycles is a data-authoring discipline the application enforces.
+
+```typescript
+// Instance-level: a single Concept kind, broader as an edge
+const Concept = defineNode("Concept", { schema: z.object({ label: z.string() }) });
+const broaderEdge = defineEdge("broader", { schema: z.object({}) });
+
+const ancestors = await store
+  .query()
+  .from("Concept", "c")
+  .whereNode("c", (n) => n.id.eq(leafConceptId))
+  .traverse("broader", "e")
+  .recursive()
+  .to("Concept", "ancestor")
+  .select((ctx) => ctx.ancestor)
+  .execute();
 ```
 
 **Changing this on a populated graph**: `broader`/`narrower` never gate a
@@ -538,15 +620,22 @@ These have different semantics:
 - `broader`: Conceptual relation (ML **relates to** AI, but ML instance ≠ AI instance)
 
 ```typescript
-// CORRECT: Type hierarchy
+// CORRECT: Type hierarchy — Podcast's schema extends Media's
 subClassOf(Podcast, Media);
 
-// CORRECT: Concept hierarchy
+// CORRECT: Concept hierarchy — MachineLearning does not extend
+// ArtificialIntelligence's schema, so this could not compile as subClassOf
 broader(MachineLearning, ArtificialIntelligence);
 
-// WRONG: Don't mix them
+// WRONG: Don't mix them — and since C.1/C.2, a subClassOf declaration whose
+// child does not structurally extend the parent no longer compiles, and is
+// refused at registry build even when authored dynamically:
 // subClassOf(MachineLearning, ArtificialIntelligence);
 ```
+
+If you already have a `subClassOf` that models a taxonomy rather than a
+subtype relationship, the fix is `broader(child, parent)` plus
+`includeNarrower: true` on the queries that relied on the old expansion.
 
 ### Use Disjoint Constraints
 
@@ -586,10 +675,17 @@ This lets you query efficiently in either direction without duplicating edges.
 
 #### `subClassOf(child, parent)`
 
-Declares type inheritance.
+Declares type inheritance. `child`'s schema output must structurally extend
+`parent`'s — checked at compile time (a mismatched pair fails to compile,
+naming the incompatible fields) and at registry build for what the type
+checker cannot see (value-level constraints). See
+[the structural contract](#subsumption-type-inheritance) above.
 
 ```typescript
-function subClassOf(child: NodeType, parent: NodeType): OntologyRelation;
+function subClassOf<C extends NodeType, P extends NodeType>(
+  child: C,
+  parent: P & SubClassOfCheck<C, P>, // SubClassOfCheck resolves to `unknown` on success, or a mismatch object naming the incompatible fields
+): TypedOntologyRelation<"subClassOf", C, P>;
 ```
 
 #### `broader(narrower, broader)`
@@ -615,7 +711,9 @@ external IRI for cross-system mapping. The left parameter accepts an edge kind
 too, so an edge can be mapped to an IRI — subsumption itself stays a node-kind
 relation, so an equivalence class mixing a node kind and an edge kind, or
 holding more than one registered edge kind, is refused
-(`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`; see "Equivalence" above).
+(`ONTOLOGY_EQUIVALENCE_INVALID_CLASS`; see "Equivalence" above). Between two
+node kinds, `equivalentTo` carries the same structural contract as
+`subClassOf`, checked in **both** directions.
 
 ```typescript
 function equivalentTo(

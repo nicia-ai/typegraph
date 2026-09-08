@@ -26,7 +26,8 @@ const results = await store
 |-----------|------|-------------|
 | `kind` | `string` | The node kind to query (must exist in your graph definition) |
 | `alias` | `string` | A unique identifier for referencing this node in the query |
-| `options.includeSubClasses` | `boolean` | Include nodes of subclass kinds (default: `false`) |
+| `options.includeSubClasses` | `boolean` | Include nodes of subclass kinds (default: `true`) |
+| `options.includeNarrower` | `boolean` | Include nodes of `broader`/`narrower` descendant kinds instead of `subClassOf` descendants (default: `false`; mutually exclusive with `includeSubClasses`) |
 
 ## Aliases
 
@@ -57,7 +58,12 @@ store
 
 ## Subclass Expansion
 
-If your ontology defines subclass relationships, you can query a parent kind and include all subclasses:
+A query against a kind that other kinds declare `subClassOf` (or that
+participates in a registered-kind `equivalentTo`/`sameAs`) is **polymorphic by
+default**: `subClassOf` carries a structural contract (the child's schema
+extends the parent's, checked at compile time and at registry build), so a
+supertype query that silently excluded its subtypes would be a partial answer
+presented as complete.
 
 ```typescript
 // Graph definition with subclass relationships:
@@ -65,31 +71,77 @@ If your ontology defines subclass relationships, you can query a parent kind and
 // subClassOf(Article, Media)
 // subClassOf(Video, Media)
 
-// Query only exact Media nodes (default behavior)
-const exactMedia = await store
-  .query()
-  .from("Media", "m")
-  .select((ctx) => ctx.m)
-  .execute();
-
-// Query Media and all subclasses
+// Query Media and all subclasses (default behavior)
 const allMedia = await store
   .query()
-  .from("Media", "m", { includeSubClasses: true })
+  .from("Media", "m")
   .select((ctx) => ({
     kind: ctx.m.kind,   // "Media" | "Podcast" | "Article" | "Video"
     title: ctx.m.title,
   }))
   .execute();
+
+// Query only exact Media nodes
+const exactMedia = await store
+  .query()
+  .from("Media", "m", { includeSubClasses: false })
+  .select((ctx) => ctx.m)
+  .execute();
 ```
 
-When `includeSubClasses: true`:
+By default (`includeSubClasses` absent, or explicitly `true`):
 
 - Results include nodes of the specified kind AND all subclass kinds — AND any
   kind declared `equivalentTo` the specified kind (or one of its subclasses),
   since equivalence is mutual subsumption and folds into the same closure
-- The `kind` field in results reflects the actual node kind
-- All properties common to the parent kind are accessible
+- The `kind` field in results reflects the actual node kind, so its type is
+  widened to `string` (and the row's id brand widened correspondingly) for a
+  kind the ontology can actually affect — a graph declaring no subsumption
+  relations keeps its exact literal types
+- Only the properties the structural contract guarantees — the PARENT kind's
+  own properties — are statically accessible; a subclass-only field needs
+  `fromDynamic()` or a cast, the same way a graph-extension kind's field does
+
+**Limitation — `evolve()`-declared subsumption isn't visible to the alias
+type.** The `kind`/`NodeId` widening above is computed from your
+compile-time graph definition. A `subClassOf` an [extension](/graph-extensions)
+adds at `store.evolve(...)` time changes what the LIVE registry accepts and
+returns, but `evolve()` still returns `Store<G>` with the same compile-time
+`G` — so `from("Media", "m")` keeps typing `m` as exact `Media` even though a
+row may now come back as the extension's `Podcast` subclass. Passing that
+row's `id` to `store.nodes.Media.update(...)` would then typecheck and
+silently match nothing. Use `fromDynamic()` (always polymorphically typed) or
+`{ includeSubClasses: false }` for a kind a runtime extension subclasses.
+
+Pass `{ includeSubClasses: false }` to narrow one alias back to the exact
+kind, or set `queryDefaults.includeSubClasses: false` on `createStore(...)` to
+restore the exact-kind behavior everywhere. `search()` and the collection
+APIs (`find`, `count`, `updateWhere`, `compareAndSet`) are unaffected by this
+default and stay exact-kind.
+
+### `includeNarrower` — kind-level taxonomies
+
+`broader`/`narrower` model a hierarchy that is **not** a subtype relationship
+— no schema contract is claimed, so the alias type stays untyped (`NodeAlias`,
+no static property access). Use it for a small, fixed vocabulary known at
+schema-authoring time; for a vocabulary that grows at runtime, prefer an
+instance-level concept kind with a `broader` **edge** traversed
+with `.recursive()` (see [Ontology](/ontology)).
+
+```typescript
+// ontology: [broader(Podcast, Media), broader(Video, Media)]
+const rows = await store
+  .query()
+  .from("Media", "m", { includeNarrower: true })
+  .select((ctx) => ctx.m)
+  .execute();
+```
+
+`includeSubClasses` and `includeNarrower` are mutually exclusive on one
+alias — passing both `true` is refused (`QUERY_ALIAS_EXPANSION_CONFLICT`)
+rather than silently unioned. An expansion naming a kind that is not
+registered, or (on `to()`/`toDynamic()`) that the traversed edge does not
+admit as an endpoint, is refused too, rather than silently narrowed.
 
 ## Runtime-declared kinds
 

@@ -712,7 +712,16 @@ function serializeZodSchema(schema: z.ZodType): JsonSchema {
     const jsonSchema = z.toJSONSchema(schema);
     return jsonSchema as JsonSchema;
   } catch {
-    // Fallback for schemas that can't be converted
+    // Fallback for schemas that can't be converted (e.g. z.set(), z.map()).
+    // Every unconvertible construct collapses to this SAME `{ type: "object" }`
+    // projection, so two structurally unrelated schemas that both fail
+    // conversion become indistinguishable to any caller comparing
+    // projections — including src/registry/validate-structural-subsumption.ts
+    // (C13-R1-09), which otherwise treats identical projections as proof of
+    // structural subtyping. Fine for a best-effort introspection view; NOT
+    // sound as an equality oracle. A caller that needs to tell "genuinely
+    // identical" from "both unprojectable" apart cannot do so from this
+    // return value alone.
     return { type: "object" };
   }
 }

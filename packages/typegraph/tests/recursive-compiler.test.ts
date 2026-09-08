@@ -61,7 +61,7 @@ function createAst(overrides: Partial<QueryAst> = {}): QueryAst {
     start: {
       alias: "source",
       kinds: ["StartNode"],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [
       createTraversal({

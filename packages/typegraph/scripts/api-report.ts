@@ -496,10 +496,48 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // `CompositionPair` / `CompositionRelation` as forgotten exports. `./indexes`
 // and `./adapters/drizzle/indexes` never reach the registry and are
 // unaffected.
+//
+// Typed subsumption batch (C.1/C.2/Q3/C.3): measured, not assumed — every
+// added name below was confirmed against a merge-base build run through this
+// same script (a temporary unconditional dump of each entrypoint's forgotten-
+// export set, diffed line by line against this batch's set, then reverted).
+//
+// `.` gains exactly the 13 new declarations this batch introduces, all
+// reachable only through `subClassOf`/`equivalentTo`/`sameAs`'s new generic
+// signatures, none of them exported directly at the root: `TypedOntologyRelation`,
+// `SubClassOfCheck`, `EquivalentToCheck`, `IncompatibleKeys`, `LiteralKeysOf`,
+// `StructuralSubtypeMismatch`, `META_EDGE_SUB_CLASS_OF`,
+// `META_EDGE_EQUIVALENT_TO`, `META_EDGE_SAME_AS`, `PolymorphicNodeType`,
+// `AliasExpansionAxis`, `AliasNodeType`, `SubsumptionAffected` (388 → 401).
+//
+// The six Store-bearing entrypoints that render `QueryBuilder`/`Store`
+// without naming the ontology relation functions themselves (`./interchange`,
+// `./profiler`, `./graph-merge`, `./provenance`, `./sqlite/local`,
+// `./postgres/pglite`) each gain only the four names reachable through the
+// widened `from`/`to`/`fromDynamic`/`toDynamic` overloads and `QueryStart`'s
+// new `expansion` field — `AliasExpansionAxis`, `AliasNodeType`,
+// `PolymorphicNodeType`, `SubsumptionAffected` (+4 apiece) — never the
+// `subClassOf`/`equivalentTo`/`sameAs`-only names above, since none of these
+// six re-exports those functions. No other entrypoint moves: `./backend`,
+// `./core`, `./schema`, `./graph-extension`, `./indexes`, and the five
+// `./adapters/drizzle/*` entrypoints render neither the ontology relation
+// functions nor a `QueryBuilder`, so none of this batch's new vocabulary
+// becomes reachable there. `./schema` gains `isTypeLevelSubtype` and
+// `projectTypeVisible` as DIRECT exports (visible in the api report diff, not
+// this ledger), so its forgotten-export debt is unaffected.
+//
+// C13-R2-01 follow-up: `SubsumptionAffected` gained a new private helper,
+// `OntologyTypeErased` (whether `G["ontology"]` has lost its `const`-inferred
+// tuple shape — see its docblock in `src/query/builder/types.ts`), reachable
+// through the exact same seven entrypoints as `SubsumptionAffected` itself
+// and no others, for the same reason: `.` (+1: 401 → 402) and the six
+// Store-bearing entrypoints above (+1 apiece: `./interchange` 717 → 718,
+// `./profiler` 719 → 720, `./graph-merge` 734 → 735, `./provenance`
+// 725 → 726, `./sqlite/local` 714 → 715, `./postgres/pglite` 714 → 715).
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 393,
-    sha256: "27f8af30ef5a4c1e84431ff8c8b1f528b3e9dba6ede97ef36c3c1ea4be9293ba",
+    count: 407,
+    sha256: "cbad4486e0965d1cbc9dbad44d7938b27966a2d8efc738af0cccb85170280eab",
   },
   "./adapters/drizzle/engine": {
     count: 326,
@@ -545,36 +583,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 739,
-    sha256: "38d436ff288c0a640549413859fd3b5e3e610e89c8855a426c158de3bed709fb",
+    count: 744,
+    sha256: "52c9d36db2b2c1a1f946d6e08a7253dfbdd03613727a8188fecac423ea44ebe0",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 722,
-    sha256: "2f7938753690c051be887099ed6d04165e1b1aa440827faa1a778ab7cb3701db",
+    count: 727,
+    sha256: "eb1c3a5de4c5159c5698981cb0972441e354913a5cc4767ae0d018a3389e3748",
   },
   "./postgres/pglite": {
-    count: 719,
-    sha256: "d5bd2903cec1dfce5bcb6e7ec6b4cf9c454838b4855700add393e6df1cab0549",
+    count: 724,
+    sha256: "a6707aeb7d76810f3548fbf5e01aa5fb69135926fc0ebe7a2d05f9f61ca27b4f",
   },
   "./profiler": {
-    count: 724,
-    sha256: "5f00b0044d3adf5f1ed6f44296d8b41fb491014dabc7a2ca32c5ba22865346b1",
+    count: 729,
+    sha256: "8b7280dd557de2cd44d775b3460650068ff68ad16e6c3b7f8cf03991f35dbf55",
   },
   "./provenance": {
-    count: 730,
-    sha256: "81bb3e7eace688e881ef235753ea4c41fcdbf659753d1f0da422432040a86af9",
+    count: 735,
+    sha256: "8453e575a6964dbbed2185c9323a59f0f0b02f08dc4ebb9725136a439cd5eaf6",
   },
   "./schema": {
     count: 281,
     sha256: "680f42a4071d001152f018bdbbec952785ccb1f1aa1ec5400b6ae35b177c2a50",
   },
   "./sqlite/local": {
-    count: 719,
-    sha256: "d5bd2903cec1dfce5bcb6e7ec6b4cf9c454838b4855700add393e6df1cab0549",
+    count: 724,
+    sha256: "a6707aeb7d76810f3548fbf5e01aa5fb69135926fc0ebe7a2d05f9f61ca27b4f",
   },
 };
 

@@ -310,6 +310,29 @@ Pass `ontology: [{ metaEdge, from, to }, ...]` to declare ontology
 relations between kinds (subClassOf, partOf, etc.). The meta-edge name
 must match a meta-edge known to the merged graph.
 
+A `subClassOf` (or `equivalentTo`/`sameAs`) relation declared this way is
+checked against the same structural contract a compile-time declaration
+gets — the child's schema must extend the parent's — at `evolve()`, before
+any write. Because extension relations are authored as plain data (`{
+metaEdge: "subClassOf", from: "Child", to: "Parent" }`) rather than through
+the typed `subClassOf()` function, there is no compile-time check to catch
+the mismatch first; `evolve()` throws a `ConfigurationError` (the same codes
+`/ontology` documents) and no kind from the extension becomes reachable.
+This also covers **redeclaring** an existing kind through a later
+`evolve()`: the registry is rebuilt from the merged graph on every call, so
+a redeclaration that breaks a hierarchy it already participates in — as a
+parent, a child, or an equivalent — is re-checked and refused just as a
+first declaration would be.
+
+**A `subClassOf` declared through `evolve()` is invisible to the
+compile-time alias type.** `evolve()` returns `Store<G>` with the same
+compile-time `G` it was called on, so a base-graph kind that only becomes
+polymorphic through an extension's `subClassOf` still types `from(kind,
+alias)` as the narrow, exact kind — even though a row may come back as the
+extension's subclass at runtime. See [Query Source ▸ Subclass
+Expansion](/queries/source#subclass-expansion) for the `fromDynamic()` /
+`includeSubClasses: false` workaround.
+
 ## `store.evolve(extension, options?)`
 
 ```ts

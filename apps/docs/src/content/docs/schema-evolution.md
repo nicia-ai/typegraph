@@ -288,6 +288,45 @@ ontology tightening check above: it takes no additional lock, so a writer
 committing under the previous schema version between the probe and the
 version compare-and-swap is invisible to it.
 
+## Structural subsumption is checked before you upgrade
+
+Separately from the data check above, a `subClassOf`/`equivalentTo`/`sameAs`
+hierarchy is checked for a **schema-shape** violation — the child's schema
+no longer structurally extends the parent's — and this check happens before
+the data check, before any commit: `getSchemaChanges(backend, graph)` throws
+a `ConfigurationError` naming the child, the parent, and the offending
+property path if the graph you're about to commit would introduce one. This
+runs even when a migration only edits a node kind's **property** schema and
+touches no relation at all — a property change on a kind already party to an
+existing hierarchy can break it just as surely as a relation change can.
+
+**`requiresMigration` does not surface this refusal.** By design, it
+collapses any `ConfigurationError` from `getSchemaChanges` — this one
+included — to `true` rather than propagating it, so it can serve as a
+least-privilege routing check that never throws for a document it cannot
+interpret. Call `getSchemaChanges` directly (as below) to see the refusal
+and its details; `requiresMigration` only tells you a migration is needed,
+never why.
+
+```typescript
+try {
+  await getSchemaChanges(backend, graph);
+} catch (error) {
+  if (error instanceof ConfigurationError) {
+    console.log(error.details.code); // e.g. ONTOLOGY_SUBCLASS_NOT_STRUCTURAL_SUBTYPE
+    console.log(error.details.childKind, error.details.parentKind);
+  }
+}
+```
+
+No data migration is required for this class of refusal — it's a
+schema-authoring fix (loosen the parent, tighten the child, or replace
+`subClassOf` with `broader` if the relation was really a taxonomy). Only the
+**AFTER** side of a diff is enforced this way; the BEFORE (stored) side is a
+delta input the diff never writes through, so an already-incoherent
+persisted document can still be repaired by a fix-forward migration that
+removes the offending relation.
+
 ## Breaking Changes
 
 These require explicit handling:

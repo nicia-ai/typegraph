@@ -69,7 +69,7 @@ function subqueryAst(alias: string, kind: string, graphId?: string): QueryAst {
     start: {
       alias,
       kinds: [kind],
-      includeSubClasses: false,
+      expansion: "exact" as const,
     },
     traversals: [],
     predicates: [],

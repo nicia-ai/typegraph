@@ -28,10 +28,21 @@
  * 1. A pair nested past `MAX_STRUCTURAL_SUBTYPE_DEPTH` is `incomparable`
  *    ("max-depth-exceeded") — schemas arrive from persisted documents, and
  *    the guard mirrors `MAX_JSON_POINTER_DEPTH` (src/query/json-pointer.ts).
- * 2. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
+ * 2. If child and parent are the SAME schema — every keyword equal, once only
+ *    non-constraining metadata (`description`/`title`/`default`/`$schema`)
+ *    is dropped — child is trivially a subtype of parent, regardless of
+ *    which keywords either side carries. This runs before rules 3–4 on
+ *    purpose: it is what lets a child that copies a `$ref` (recursive
+ *    `z.lazy`) or `allOf` (`z.intersection`) property VERBATIM from its
+ *    parent still compare as a subtype for that property, even though rules
+ *    3–4 can never judge `$ref`/`allOf` on their own. Two DIFFERENT `$ref`
+ *    targets, or a child that merely narrows an `allOf` member, still fall
+ *    through to rule 3/4 and are refused — this rule only ever fires on
+ *    exact equality, so it cannot mask a genuine incompatibility.
+ * 3. Either side carrying `$ref` is `incomparable` ("schema-reference"): the
  *    projection emits `$ref` exactly at a self- or mutually-recursive cycle,
  *    which is why recursion here cannot diverge.
- * 3. Either side carrying a keyword this predicate recognizes as
+ * 4. Either side carrying a keyword this predicate recognizes as
  *    CONSTRAINING but does not model the semantics of — `not` (`z.never()`),
  *    `allOf` (`z.intersection`, whose subtyping is a named follow-up),
  *    `contentEncoding` (`z.file()`), or a standard JSON Schema 2020-12
@@ -42,7 +53,7 @@
  *    `unevaluatedProperties`/`unevaluatedItems` — none emitted by the Zod
  *    projection today, but reachable through a hand-written `JsonSchema`) —
  *    is `incomparable` ("unsupported-keyword").
- * 4. Any OTHER keyword outside `COMPARABLE_KEYWORDS` is silently IGNORED for
+ * 5. Any OTHER keyword outside `COMPARABLE_KEYWORDS` is silently IGNORED for
  *    subtyping. This is deliberately the opposite of `isBreakingPropertyChange`'s
  *    diff rule, where an unrecognized key is user data whose change must be
  *    surfaced: standard JSON Schema semantics treat a keyword a reader does
@@ -50,11 +61,13 @@
  *    reading. A `searchable()` field's `_searchableField` tag
  *    (src/core/searchable.ts:120) and an arbitrary `.meta()` key both fall
  *    out of this rule with no special case. `format` is NOT covered by this
- *    rule — see rule 7 below for why it is compared as a constraint instead.
- * 5. If the two schemas are identical once irrelevant keywords are dropped,
- *    they are mutual subtypes — this is what makes reflexivity hold for
- *    every comparable schema by construction.
- * 6. If either side is a union (`anyOf`, or `oneOf` — read as `anyOf`; the
+ *    rule — see rule 8 below for why it is compared as a constraint instead.
+ * 6. If the two schemas are identical once irrelevant keywords are dropped,
+ *    they are mutual subtypes — a NARROWER identity check than rule 2 above
+ *    (it tolerates schemas that differ only in an annotation/unrecognized
+ *    key), reachable only once rules 3–4 have already cleared both sides of
+ *    `$ref` and any unmodeled constraining keyword.
+ * 7. If either side is a union (`anyOf`, or `oneOf` — read as `anyOf`; the
  *    projection emits `oneOf` only for `z.discriminatedUnion`, whose members
  *    are mutually exclusive by construction, so the two readings coincide
  *    over this fragment, with no overlap detection performed), every child
@@ -73,7 +86,7 @@
  *    compared too, through the ordinary rule set; the child's own sibling
  *    keywords are not, since dropping them is conservative (see
  *    `compareUnionSiblingConstraints`).
- * 7. Otherwise the two are compared as leaves: value sets (`const`/`enum`)
+ * 8. Otherwise the two are compared as leaves: value sets (`const`/`enum`)
  *    must narrow, type tokens must agree (`integer` narrows `number`),
  *    objects compare property-by-property with the child allowed to add or
  *    drop optional properties (width subtyping — the parent's
@@ -167,6 +180,110 @@ export function isStructuralSubtype(
   parent: JsonSchema,
 ): StructuralSubtypeResult {
   return compareSchemas(child, parent, [], 0);
+}
+
+// ============================================================
+// C.1 ↔ C.2 agreement projection
+// ============================================================
+
+/**
+ * Exactly the JSON Schema keywords TypeScript's structural assignability
+ * over `z.infer` can see: the shape (`type`, `properties`, `required`,
+ * `items`, `prefixItems`, `anyOf`, `oneOf`, `additionalProperties`) and
+ * literal value sets (`const`, `enum`) — both of which round-trip through a
+ * Zod schema's inferred TYPE. Every value-level constraint this predicate
+ * also compares (`minLength`/`maxLength`, `pattern`, `format`,
+ * `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`, `multipleOf`,
+ * `minItems`/`maxItems`) narrows a value at RUNTIME without narrowing its
+ * static TYPE — `z.string()` and `z.string().min(3)` share the type
+ * `string` — so C.1's compile-time check is blind to them.
+ */
+const TYPE_VISIBLE_KEYWORDS: ReadonlySet<string> = new Set([
+  "type",
+  "const",
+  "enum",
+  "properties",
+  "required",
+  "items",
+  "prefixItems",
+  "anyOf",
+  "oneOf",
+  "additionalProperties",
+]);
+
+function projectTypeVisibleValue(key: string, value: unknown): unknown {
+  switch (key) {
+    case "properties": {
+      const projected = createDataKeyedBag<JsonSchema>();
+      for (const [propertyName, propertySchema] of Object.entries(
+        value as Record<string, JsonSchema>,
+      )) {
+        projected[propertyName] = projectTypeVisible(propertySchema);
+      }
+      return projected;
+    }
+    case "items": {
+      return projectTypeVisible(value as JsonSchema);
+    }
+    case "prefixItems":
+    case "anyOf":
+    case "oneOf": {
+      return (value as readonly JsonSchema[]).map((member) =>
+        projectTypeVisible(member),
+      );
+    }
+    case "additionalProperties": {
+      return typeof value === "boolean" ? value : (
+          projectTypeVisible(value as JsonSchema)
+        );
+    }
+    default: {
+      return value;
+    }
+  }
+}
+
+/**
+ * `schema`, recursively reduced to only {@link TYPE_VISIBLE_KEYWORDS} — the
+ * fragment of a JSON Schema that TypeScript's structural assignability over
+ * `z.infer` can actually see. Feeds {@link isTypeLevelSubtype}.
+ */
+export function projectTypeVisible(schema: JsonSchema): JsonSchema {
+  const projected = createDataKeyedBag<unknown>();
+  for (const [key, value] of Object.entries(schema)) {
+    if (!TYPE_VISIBLE_KEYWORDS.has(key)) continue;
+    projected[key] = projectTypeVisibleValue(key, value);
+  }
+  return projected;
+}
+
+/**
+ * The RUNTIME prediction of what `subClassOf(child, parent)` / C.1's
+ * conditional-type check resolves to: `isStructuralSubtype` applied to each
+ * side's {@link projectTypeVisible} projection, rather than the full schema.
+ *
+ * One comparison engine (`isStructuralSubtype`), one projection
+ * (`projectTypeVisible`) — this is not a second walk of the schema, only a
+ * narrower view fed into the same predicate C.2 uses.
+ *
+ * `isStructuralSubtype(c, p).verdict === "subtype"` implies
+ * `isTypeLevelSubtype(c, p).verdict === "subtype"` — a hierarchy C.2 accepts
+ * always compiles under C.1
+ * (`tests/property/typed-subsumption-agreement.test.ts`). The converse does
+ * NOT hold: TypeScript cannot see a value-level constraint, so
+ * `isTypeLevelSubtype` accepts pairs `isStructuralSubtype` refuses (a bare
+ * `z.string()` child under a `z.string().min(3)` parent erases to identical
+ * types but is not a runtime subtype) — this is "C.1 is a filter, C.2 is the
+ * authority" (roadmap §1.3), not a defect in either predicate.
+ */
+export function isTypeLevelSubtype(
+  child: JsonSchema,
+  parent: JsonSchema,
+): StructuralSubtypeResult {
+  return isStructuralSubtype(
+    projectTypeVisible(child),
+    projectTypeVisible(parent),
+  );
 }
 
 // ============================================================
@@ -368,6 +485,23 @@ function compareSchemas(
 ): StructuralSubtypeResult {
   if (depth > MAX_STRUCTURAL_SUBTYPE_DEPTH) {
     return incomparable("max-depth-exceeded", path);
+  }
+
+  // A schema is trivially a subtype of itself, regardless of which keywords
+  // it carries — including `$ref` (recursive `z.lazy`) and `allOf`
+  // (`z.intersection`), which the guards just below cannot judge at all.
+  // This full-schema identity check (every keyword, not just
+  // COMPARABLE_KEYWORDS) must run BEFORE those guards, or a child that
+  // copies a parent's `$ref`/`allOf` property verbatim is refused as
+  // SCHEMA_INCOMPARABLE instead of accepted as an identical, and therefore
+  // trivially compatible, property.
+  if (
+    propertySchemasEqual(
+      stripSchemaMetadata(child),
+      stripSchemaMetadata(parent),
+    )
+  ) {
+    return SUBTYPE;
   }
 
   if (hasOwnKey(child, "$ref") || hasOwnKey(parent, "$ref")) {

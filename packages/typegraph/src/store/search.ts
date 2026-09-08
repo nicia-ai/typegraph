@@ -271,9 +271,19 @@ function buildKindCandidates(
       { capability: "search", graphId: ctx.graphId },
     );
   }
+  // Pinned exact-kind, defense in depth: `resolveSearchKinds` has already
+  // expanded the kind set and this runs PER resolved kind, so
+  // `backend.fulltextSearch({ nodeKind: kind, ... })` below already scopes
+  // the physical search to `kind` regardless of what this candidate
+  // subquery's `from()` widens to — inheriting the query-builder default
+  // here would not currently change any result (tests/polymorphic-default.test.ts
+  // documents this), but keeping it explicit is what would make an un-opted
+  // `search()` silently polymorphic if that outer scoping ever changed
+  // (search()'s own `includeSubClasses` option stays the one and only axis
+  // for this facade).
   const chain = ctx
     .createQuery()
-    .from(nodeKind, SEARCH_CANDIDATE_ALIAS)
+    .from(nodeKind, SEARCH_CANDIDATE_ALIAS, { includeSubClasses: false })
     .whereNode(SEARCH_CANDIDATE_ALIAS, where);
   const compiled = chain
     .select(

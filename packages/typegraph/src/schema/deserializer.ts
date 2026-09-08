@@ -7,7 +7,10 @@
  */
 import { type AnyEdgeType, type NodeType } from "../core/types";
 import { type NamedOntologyRelation } from "../ontology/validation";
-import { buildValidatedKindRegistry } from "../registry/build-validated";
+import {
+  buildValidatedKindRegistry,
+  type StructuralSubsumptionMode,
+} from "../registry/build-validated";
 import { compositionRelationFields } from "../registry/composition-relation";
 import { type EdgeKindFacts } from "../registry/edge-kind-facts";
 import type { KindRegistry } from "../registry/kind-registry";
@@ -151,6 +154,7 @@ export function deserializeSchema(
  */
 export function buildRegistryFromSerializedSchema(
   schema: Pick<SerializedSchema, "ontology" | "nodes" | "edges" | "identity">,
+  structuralSubsumption: StructuralSubsumptionMode = "enforce",
 ): KindRegistry {
   // Build empty node/edge kind maps (we don't have the actual Zod schemas)
   const nodeKinds = new Map<string, NodeType>();
@@ -177,6 +181,15 @@ export function buildRegistryFromSerializedSchema(
       isNodeKind: (name) => hasOwnKey(schema.nodes, name),
       isEdgeKind: (name) => hasOwnKey(schema.edges, name),
     },
+    // The persisted document's own projected property schema per node kind
+    // — the C.2 structural-subsumption check's schema source for a
+    // deserialized ontology (`src/registry/validate-structural-subsumption.ts`).
+    nodePropertySchemas: (kind) => {
+      const nodeDef =
+        hasOwnKey(schema.nodes, kind) ? schema.nodes[kind] : undefined;
+      return nodeDef?.properties;
+    },
+    structuralSubsumption,
     ...(schema.identity === undefined ? {} : { identity: schema.identity }),
   });
 }

@@ -75,6 +75,7 @@ import {
   registerMigrateSchemaKindIntegrationTests,
   registerOntologyEquivalenceIntegrationTests,
   registerOntologyTighteningIntegrationTests,
+  registerOntologyTypedSubsumptionIntegrationTests,
   registerOrderingIntegrationTests,
   registerPaginationIntegrationTests,
   registerPredicateIntegrationTests,
@@ -307,6 +308,7 @@ export function createIntegrationTestSuite<
     registerMigrateSchemaKindIntegrationTests(context);
     registerReconciledSchemaIntegrationTests(context);
     registerOntologyEquivalenceIntegrationTests(context);
+    registerOntologyTypedSubsumptionIntegrationTests(context);
     registerRecordedTimeIntegrationTests(context);
     registerRemovalMaterializationIntegrationTests(context);
     registerLegacyClaimAxisIntegrationTests(context);

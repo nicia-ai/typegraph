@@ -1777,6 +1777,12 @@ export async function isSchemaInitialized(
  *   laxer validator can hold an ontology today's hardening rejects.
  *   `requiresMigration`, built on this function, does not propagate this
  *   throw; see its own docblock.
+ * @throws ConfigurationError (R2) when the current graph's
+ *   `subClassOf`/`equivalentTo`/`sameAs` hierarchy is not a structural
+ *   subtype of its target — reported HERE, before an upgrade, rather than
+ *   only at commit; see `computeSchemaDiff`'s own docblock for the exact
+ *   trigger (a relation change, or a property change on a kind already
+ *   party to one).
  */
 export async function getSchemaChanges<G extends GraphDef>(
   backend: GraphBackend,

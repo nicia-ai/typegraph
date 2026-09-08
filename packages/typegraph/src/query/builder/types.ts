@@ -21,6 +21,7 @@ import {
   type NodeType,
   type TemporalMode,
 } from "../../core/types";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
   type AggregateOrderSpec,
@@ -45,6 +46,7 @@ import type {
   SimilarToOptions,
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
+import { type AliasExpansionAxis } from "./alias-expansion";
 import {
   type DynamicEdgeAccessor,
   type DynamicNodeAccessor,
@@ -132,6 +134,91 @@ export type NodeAlias<
   alias: string;
   optional: Optional;
 }>;
+
+/**
+ * True when `G["ontology"]` has lost its `const`-inferred tuple shape — its
+ * `length` is the general `number` rather than a tuple's fixed literal
+ * count. `defineGraph`'s `const TOntology` normally keeps the array a tuple
+ * of positionally typed relations (so {@link SubsumptionAffected} can
+ * `Extract` a `to: { kind: K }` literal out of it), but a caller can lose
+ * that shape — most commonly by building the relations in a variable
+ * annotated `readonly OntologyRelation[]` before passing it to
+ * `defineGraph({ ontology })`, the exact pattern the changeset blesses
+ * ("code that annotates a relation's result as `OntologyRelation` still
+ * compiles unchanged"). `defineGraph`'s own omitted-`ontology` default is
+ * the literal empty tuple `readonly []` (`length: 0`), which is NOT erased
+ * by this test — only a genuinely unbounded array is.
+ */
+type OntologyTypeErased<G extends GraphDef> =
+  number extends G["ontology"]["length"] ? true : false;
+
+/**
+ * Whether kind `K` in graph `G` participates in a `subClassOf`/`equivalentTo`
+ * relation that could hand a polymorphic-default query a row of a DIFFERENT
+ * concrete kind: `K` is a `subClassOf` target, or `K` is either side of an
+ * `equivalentTo`/`sameAs` pair. Direct participation is enough — a kind with
+ * a transitive descendant necessarily has a direct one — so this is a single
+ * non-recursive `Extract` over `G["ontology"]`, computable with no
+ * transitive-closure type engine. `false` (a graph with `ontology: []`, or a
+ * kind no relation touches) costs zero type churn.
+ *
+ * **An {@link OntologyTypeErased} ontology widens conservatively.** Once the
+ * tuple has lost its fixed length, every element has necessarily widened to
+ * the untyped `OntologyRelation` shape too (a tuple can only lose its length
+ * by losing the literal types that made each position distinct), so no
+ * per-element `Extract` can rule out a `subClassOf` targeting `K` — without
+ * this arm the check would silently answer `false`, an unsound
+ * under-widening. This is deliberately scored on the WHOLE array's
+ * tuple-ness, not on whether any individual union member happens to be a
+ * bare `OntologyRelation`: `broader`, `disjointWith`, `inverseOf` and every
+ * other non-C.1 meta-edge helper are typed to return plain `OntologyRelation`
+ * by design, so a real tuple that legitimately mixes a typed `subClassOf`
+ * with one of those untouched relations (`ontology: [subClassOf(Child,
+ * Parent), inverseOf(knows, knows)]`) must NOT trip this arm — the tuple's
+ * length is still the literal `2`, and the precise `Extract` test below
+ * still finds `subClassOf`'s `to: { kind: K }` literal on its own element.
+ */
+type SubsumptionAffected<G extends GraphDef, K extends string> =
+  OntologyTypeErased<G> extends true ? true
+  : [
+    Extract<
+      G["ontology"][number],
+      | { metaEdge: { name: "subClassOf" }; to: { kind: K } }
+      | { metaEdge: { name: "equivalentTo" | "sameAs" }; from: { kind: K } }
+      | { metaEdge: { name: "equivalentTo" | "sameAs" }; to: { kind: K } }
+    >,
+  ] extends [never] ?
+    false
+  : true;
+
+/**
+ * The alias type a `from(kind, alias)` call with NO explicit
+ * `includeSubClasses` resolves to, under the Q3 polymorphic-by-default
+ * axis. `PolymorphicNodeType` only when `K` is actually
+ * {@link SubsumptionAffected} — a compile-time subtype guarantee (C.1/C.2)
+ * covers the kind's PROPERTIES, never its `kind` discriminant or `NodeId`
+ * brand, so a row may come back as a narrower concrete kind whenever the
+ * axis can expand at all.
+ *
+ * **Documented limitation: a `subClassOf` (or registered-kind
+ * `equivalentTo`/`sameAs`) added at runtime through `store.evolve()` is
+ * invisible to this type.** `evolve()` merges the extension into the LIVE
+ * registry but returns `Store<G>` with the compile-time `G` unchanged, so
+ * `SubsumptionAffected<G, K>` still evaluates against the graph as it was
+ * declared, not as it now runs. A kind that only becomes polymorphic
+ * through a runtime extension therefore keeps its narrow, exact-kind alias
+ * type here — `from(kind, alias)` types the row as the single compile-time
+ * kind even though it may come back as the extension's subclass at
+ * runtime, which would let a subtype id round-trip through
+ * `store.nodes.<K>.update()` typechecked and silently match nothing. Use
+ * `fromDynamic()` (always `PolymorphicNodeType`-typed, §1.4 of the typed-
+ * subsumption plan) or `{ includeSubClasses: false }` for a kind a runtime
+ * extension subclasses.
+ */
+export type AliasNodeType<G extends GraphDef, K extends string> =
+  SubsumptionAffected<G, K> extends true ?
+    PolymorphicNodeType<G["nodes"][K]["type"]>
+  : G["nodes"][K]["type"];
 
 /**
  * A map of alias names to their node aliases.
@@ -617,6 +704,13 @@ export type QueryBuilderConfig = Readonly<{
   schemaIntrospector: SchemaIntrospector;
   /** Default traversal ontology expansion mode. */
   defaultTraversalExpansion: TraversalExpansion;
+  /**
+   * Store-level default for the `from`/`to`/`fromDynamic`/`toDynamic`
+   * subclass-expansion axis when an alias states no `includeSubClasses`
+   * (roadmap Q3). `true` (the default everywhere a store doesn't override
+   * it) makes a supertype query polymorphic.
+   */
+  defaultIncludeSubClasses: boolean;
   /** Whether this builder's graph enables Operational Identity. */
   identityEnabled: boolean;
   /** Equal-id behavior used by historical identity traversal compilation. */
@@ -635,7 +729,8 @@ export type QueryBuilderState = Readonly<{
   startKinds: readonly string[];
   /** The current alias (last traversal target, or startAlias if no traversals) */
   currentAlias: string;
-  includeSubClasses: boolean;
+  /** The start alias's resolved expansion axis — see `alias-expansion.ts`. */
+  startExpansion: AliasExpansionAxis;
   traversals: readonly Traversal[];
   predicates: readonly NodePredicate[];
   projection: readonly ProjectedField[];
@@ -672,6 +767,15 @@ export type CreateQueryBuilderOptions = Readonly<{
   schema?: SqlSchema;
   /** Default traversal ontology expansion mode (default: "inverse"). */
   defaultTraversalExpansion?: TraversalExpansion;
+  /**
+   * Default subclass-expansion axis for `from`/`to`/`fromDynamic`/
+   * `toDynamic` when an alias states no `includeSubClasses` (default:
+   * `true`, roadmap Q3). A store-issued builder threads its own
+   * `queryDefaults.includeSubClasses`; a standalone `createQueryBuilder`
+   * defaults to `true` too, so a store-less builder and a store-issued one
+   * agree.
+   */
+  defaultIncludeSubClasses?: boolean;
   /**
    * Overrides whether a builder may compile identity-aware traversals
    * (`traverse(..., { includeIdentityMembers: true })`).

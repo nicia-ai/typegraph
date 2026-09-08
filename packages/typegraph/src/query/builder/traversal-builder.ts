@@ -9,7 +9,12 @@ import {
   type RuntimeNodeTypeFor,
 } from "../../core/runtime-kind";
 import { type AnyEdgeType, type NodeType } from "../../core/types";
-import { EndpointError, KindNotFoundError } from "../../errors";
+import {
+  ConfigurationError,
+  EndpointError,
+  KindNotFoundError,
+} from "../../errors";
+import { type PolymorphicNodeType } from "../../ontology/types";
 import { isInteropProbeKey } from "../../utils/object";
 import {
   type NodePredicate,
@@ -29,6 +34,11 @@ import {
   type Predicate,
   stringField,
 } from "../predicates";
+import {
+  type AliasExpansionOptions,
+  expandKindsForAxis,
+  resolveAliasExpansion,
+} from "./alias-expansion";
 // Type-only import to get the QueryBuilder type without runtime circular dependency
 import {
   createDynamicFieldBuilder,
@@ -39,6 +49,7 @@ import { getQueryBuilderInternalContext } from "./internal-context";
 import { type QueryBuilder } from "./query-builder";
 import {
   type AliasMap,
+  type AliasNodeType,
   type BaseFieldAccessor,
   type BuildRecursiveAliases,
   type EdgeAccessor,
@@ -486,7 +497,18 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: false },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<AliasNodeType<G, K & string>, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: { includeSubClasses: false; includeNarrower?: false },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<G["nodes"][K]["type"], Optional>>,
@@ -498,7 +520,23 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options: { includeSubClasses: true },
+    options: { includeSubClasses: true; includeNarrower?: false },
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<PolymorphicNodeType<G["nodes"][K]["type"]>, Optional>
+      >,
+    EdgeAliases & Record<EA, EdgeAlias<G["edges"][EK]["type"], Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
+    kind: K,
+    alias: UniqueAlias<A, Aliases>,
+    options: { includeNarrower: true; includeSubClasses?: false },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -510,7 +548,7 @@ export class TraversalBuilder<
   to<K extends ValidEdgeTargets<G, EK, Dir>, A extends string>(
     kind: K,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options?: AliasExpansionOptions,
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<NodeType, Optional>>,
@@ -520,9 +558,14 @@ export class TraversalBuilder<
   > {
     validateSqlIdentifier(alias);
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-    const kinds =
-      includeSubClasses ? this.#config.registry.expandSubClasses(kind) : [kind];
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultIncludeSubClasses,
+    );
+    const kinds = expandKindsForAxis(expansion, kind, this.#config.registry);
+    if (expansion === "narrower") {
+      this.#assertNarrowerEndpointsAdmitted(kind, kinds);
+    }
 
     const newState = this.#stateWithTraversal(alias, kinds);
 
@@ -544,10 +587,50 @@ export class TraversalBuilder<
   toDynamic<T extends string | RuntimeNodeKind, A extends string>(
     kind: T,
     alias: UniqueAlias<A, Aliases>,
-    options?: { includeSubClasses?: boolean },
+    options: { includeSubClasses: false; includeNarrower?: false },
   ): QueryBuilder<
     G,
     Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: { includeSubClasses?: true; includeNarrower?: false },
+  ): QueryBuilder<
+    G,
+    Aliases &
+      Record<
+        A,
+        NodeAlias<PolymorphicNodeType<DynamicNodeTypeFor<T>>, Optional>
+      >,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options: { includeNarrower: true; includeSubClasses?: false },
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
+    EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
+    RecAliases & BuildRecursiveAliases<DC, PC, A>,
+    CoordinateState
+  >;
+
+  toDynamic<T extends string | RuntimeNodeKind, A extends string>(
+    kind: T,
+    alias: UniqueAlias<A, Aliases>,
+    options?: AliasExpansionOptions,
+  ): QueryBuilder<
+    G,
+    Aliases & Record<A, NodeAlias<NodeType, Optional>>,
     EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
     RecAliases & BuildRecursiveAliases<DC, PC, A>,
     CoordinateState
@@ -565,11 +648,18 @@ export class TraversalBuilder<
     }
     this.#assertValidEndpoint(kindName);
 
-    const includeSubClasses = options?.includeSubClasses ?? false;
-    const kinds =
-      includeSubClasses ?
-        this.#config.registry.expandSubClasses(kindName)
-      : [kindName];
+    const expansion = resolveAliasExpansion(
+      options,
+      this.#config.defaultIncludeSubClasses,
+    );
+    const kinds = expandKindsForAxis(
+      expansion,
+      kindName,
+      this.#config.registry,
+    );
+    if (expansion === "narrower") {
+      this.#assertNarrowerEndpointsAdmitted(kindName, kinds);
+    }
 
     const baseState = this.#stateWithTraversal(alias, kinds);
     const newState: QueryBuilderState = {
@@ -579,11 +669,51 @@ export class TraversalBuilder<
 
     return new QueryBuilderClass(this.#config, newState) as QueryBuilder<
       G,
-      Aliases & Record<A, NodeAlias<DynamicNodeTypeFor<T>, Optional>>,
+      Aliases & Record<A, NodeAlias<NodeType, Optional>>,
       EdgeAliases & Record<EA, EdgeAlias<ET, Optional>>,
       RecAliases & BuildRecursiveAliases<DC, PC, A>,
       CoordinateState
     >;
+  }
+
+  /**
+   * C.3 endpoint admission for a `to()`/`toDynamic()` alias expanded through
+   * `includeNarrower`. `broader`/`narrower` is NOT an assignability axis —
+   * unlike subclass expansion, a narrower kind is not automatically admitted
+   * by `expandEdgeEndpointAllowance` — so each expanded kind is checked
+   * individually through the existing `#assertValidEndpoint` owner, and a
+   * failure is re-raised as the C.3-specific, narrower-naming error rather
+   * than the generic `EndpointError`.
+   *
+   * @throws ConfigurationError (`ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED`)
+   *   naming the offending kind, the root kind, and the edge kind.
+   */
+  #assertNarrowerEndpointsAdmitted(
+    rootKind: string,
+    expandedKinds: readonly string[],
+  ): void {
+    const edgeKind = this.#edgeKinds[0] ?? "(unknown)";
+    for (const kind of expandedKinds) {
+      try {
+        this.#assertValidEndpoint(kind);
+      } catch (error) {
+        if (!(error instanceof EndpointError)) throw error;
+        throw new ConfigurationError(
+          `includeNarrower expansion of "${rootKind}" includes "${kind}", ` +
+            `which is not an admitted endpoint of edge "${edgeKind}".`,
+          {
+            code: "ONTOLOGY_NARROWER_ENDPOINT_NOT_ADMITTED",
+            rootKind,
+            narrowerKind: kind,
+            edgeKind,
+          },
+          {
+            suggestion: `Widen edge "${edgeKind}"'s declared endpoints to admit "${kind}", or drop its broader/narrower relation to "${rootKind}".`,
+            cause: error,
+          },
+        );
+      }
+    }
   }
 
   /**

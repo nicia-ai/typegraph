@@ -473,6 +473,16 @@ for (const hit of hits) {
 | `offset` | `number` | `0` | Rank-relative pagination: skip the first `offset` ranked hits. |
 | `includeSubClasses` | `boolean` | `false` | Also search `subClassOf` descendant kinds and merge their scores into one ranking. |
 
+`search()`'s `includeSubClasses` stays **opt-in** and defaults to `false` —
+this is a deliberate asymmetry with the query builder's `from()`/`to()`,
+which default to `includeSubClasses: true`. `search()` is a facade with its
+own documented option rather than a `from()`/`to()` call, and flipping its
+default in the same release would also change which vector-metric union
+applies (search across multiple kinds must agree on one declared metric; see
+[Semantic Search](/semantic-search)) with no migration knob of its own. If
+this asymmetry surprises you, that's the intended signal that it's worth
+double-checking whether your search call should opt in explicitly.
+
 The same three options are available on `store.search.vector` and
 `store.search.hybrid` (where `where` and `includeSubClasses` apply to both
 halves). Search always follows current-read semantics: tombstoned nodes and
