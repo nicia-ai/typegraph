@@ -80,40 +80,70 @@
  * `revisionTracking` and `history` together from the graph's first write.
  *
  * Beyond that gap, the delta is trustworthy only when EVERY writer to this
- * graph goes through a store that captures history. This module has no way
- * to detect a NON-capturing writer interleaved with a capturing one — a raw
- * `GraphBackend` write, a second `Store` over the same backend/graph
- * constructed without `history: true`, or an engine-side mutation outside
- * TypeGraph entirely all change the live rows without ever inserting a
- * recorded row, and `changesSince` has no signal (no gap in `recorded_from`,
- * no clock/floor mismatch) to catch it by. Such a write UNDER-REPORTS
- * silently: it is simply absent from every `"keys"` delta this module ever
- * returns, never surfaced as `unbounded`. This is a materially different
- * failure mode from the detectable gap above, which the fail-open
- * contract's "corroborated" branch handles by refusing to guess — here
- * there is no signal to refuse ON. A caller that cannot guarantee every
- * writer captures history must not treat a `"keys"` delta from this source
- * as exhaustive.
+ * graph goes through a store that captures history. This module detects
+ * ONE shape of a non-capturing writer sharing the graph — a second `Store`
+ * over the same backend/graph constructed with `revisionTracking: true` but
+ * no `history`, which advances the SAME shared clock without ever inserting
+ * a recorded row (see `clock.ts`'s `advanceRevisionClock`: revision
+ * tracking and history capture allocate from one clock by design). This
+ * module's completeness evidence is the invariant every capturing commit
+ * upholds on its own: it allocates a revision and touches EITHER
+ * `recorded_from` (an insert, update, soft delete, or resurrection) OR
+ * `recorded_to` (a hard delete, which closes the open row without
+ * inserting a replacement) AT that revision — never neither — so the
+ * greatest revision either column carries can never fall behind the
+ * clock's current revision UNLESS some commit advanced the clock without
+ * capturing. `changesSince` checks exactly that — current revision
+ * strictly ahead of that greatest evidenced revision (see
+ * {@link latestRecordedFrom}) — and returns `unbounded` when it holds,
+ * REGARDLESS of the requested `since`: a hole anywhere in the captured
+ * record means this module cannot vouch for completeness at all, not only
+ * for the span after the hole.
+ *
+ * That check catches the non-capturing write only while it is the MOST
+ * RECENT action on the clock: a later capturing commit closes the gap again
+ * (the evidenced ceiling catches back up to the clock), silently erasing
+ * the evidence. A non-capturing writer whose writes are always followed by a
+ * capturing one is therefore still invisible — no signal at all remains to
+ * catch it by (no gap in `recorded_from`, no clock/floor mismatch), and such
+ * a write UNDER-REPORTS silently: it is simply absent from every `"keys"`
+ * delta this module ever returns, never surfaced as `unbounded`. The same is
+ * true of a raw `GraphBackend` write bypassing every `Store`, or an
+ * engine-side mutation outside TypeGraph entirely. This is a materially
+ * different failure mode from the corroborated pre-capture gap above, which
+ * the fail-open contract handles by refusing to guess — here there is
+ * sometimes no signal to refuse ON. A caller that cannot guarantee every
+ * writer captures history, or that a non-capturing tracked writer's commits
+ * are never immediately followed by a capturing one, must not treat a
+ * `"keys"` delta from this source as exhaustive; the only fully safe
+ * configuration is `history: true` on every writer touching the graph.
  *
  * ## Token identity is scoped to one store, not one `graphId`
  *
  * `revision()`'s token is the bare recorded-clock value (or the genesis
- * sentinel) — it carries no discriminator for WHICH physical store's clock
- * produced it beyond the `graphId` refusal above. Two independently
- * created stores that happen to share a `graphId` are not always safe to
- * compare: a fresh database mints its own random revision-origin nonce
- * (`ensureRevisionOrigin`), so a clone into a separate database cannot
- * numerically collide with the original in practice; but the SAME store's
- * clock after `clear()` drops the recorded relations and the clock row
- * without touching the origin row restarts numbering from the same low
- * values, so a pre-clear revision token can coincide with a post-clear one
- * under the same origin. This module's own callers (the conformance tests,
- * `resolveLineage`) only ever compare a revision against the SAME store's
- * later clock reading, which is safe. Comparing tokens minted by two
- * different stores' `recordedRelationsLineage` — as a base/fork anchor
- * comparison would — is NOT yet safe and must be resolved (namespace the
- * token by origin, and account for `clear()`'s reset) before any caller
- * anchors across stores on this source.
+ * sentinel) — it carries NO discriminator of its own for WHICH physical
+ * store's clock produced it, beyond the `graphId` refusal above. Two
+ * independently created stores that happen to share a `graphId` mint
+ * numerically comparable clock values (a fresh database starts counting
+ * from the same low integers as any other), and the SAME store's clock
+ * after `clear()` restarts numbering too (`Store.clear()` drops the
+ * recorded relations and the clock row) — so a bare token from this module
+ * is NEVER safe to compare across stores, or across a store's own
+ * `clear()` boundary, on its own. This module's own direct callers (the
+ * conformance tests) only ever compare a revision against the SAME store's
+ * later clock reading with no intervening `clear()`, which is safe.
+ *
+ * Every caller that anchors ACROSS stores or across time — `base-version.ts`
+ * is the one today — is required to pair this bare token with the store's
+ * durable per-graph revision-origin nonce (`ensureRevisionOrigin`/
+ * `readRevisionOrigin`, `store/recorded-capture/clock.ts`) before treating
+ * two readings as comparable, and `Store.clear()` rotates that origin (see
+ * `resetRevisionOrigin`) precisely so a pre-clear reading can never satisfy
+ * a post-clear origin check even when the bare numbers coincide. Both
+ * `base@V` anchor forms embed the origin for exactly this reason (see
+ * `base-version.ts`'s module doc and `revisionOriginMatch`); a future
+ * direct consumer of this module's bare token that skips that pairing would
+ * reopen the same hazard.
  */
 import {
   type EngineRevision,
@@ -253,6 +283,56 @@ async function earliestRecordedFrom(
 }
 
 /**
+ * The largest revision any recorded relation carries EVIDENCE for, for this
+ * graph — nodes, edges, AND identity assertions, the same three-relation
+ * scope {@link earliestRecordedFrom} queries for the floor. This is the
+ * completeness ceiling `changesSince` compares the graph's current clock
+ * revision against (see the module doc's "what changesSince cannot
+ * answer").
+ *
+ * Evidence means EITHER column, not `recorded_from` alone: an insert,
+ * update, soft delete, or resurrection writes a row whose `recorded_from`
+ * is the allocated revision, but a HARD delete closes the existing open row
+ * — moving ONLY its `recorded_to` to the allocated revision — without
+ * inserting any row at that revision (see the module doc's per-write-shape
+ * breakdown). `recorded_from` alone would therefore lag the clock by one
+ * commit after every hard delete even though capture is complete; folding
+ * in `recorded_to` (excluding the open-interval sentinel, which marks a
+ * row that has NOT closed and must never register as "activity at the
+ * sentinel revision") closes that gap. `undefined` when no recorded row
+ * exists yet for this graph.
+ */
+async function latestRecordedFrom(
+  session: LineageSession,
+  schema: SqlSchema,
+  graphId: string,
+): Promise<number | undefined> {
+  const rows = await session.execute<
+    Readonly<{ latest: bigint | number | string | null }>
+  >(
+    asCompiledRowsSql(sql`
+      SELECT MAX(revision) AS latest FROM (
+        SELECT recorded_from AS revision FROM ${schema.recordedNodesTable} WHERE graph_id = ${graphId}
+        UNION ALL
+        SELECT recorded_to AS revision FROM ${schema.recordedNodesTable} WHERE graph_id = ${graphId} AND recorded_to <> ${RECORDED_MAX_REVISION}
+        UNION ALL
+        SELECT recorded_from AS revision FROM ${schema.recordedEdgesTable} WHERE graph_id = ${graphId}
+        UNION ALL
+        SELECT recorded_to AS revision FROM ${schema.recordedEdgesTable} WHERE graph_id = ${graphId} AND recorded_to <> ${RECORDED_MAX_REVISION}
+        UNION ALL
+        SELECT recorded_from AS revision FROM ${schema.recordedIdentityAssertionsTable} WHERE graph_id = ${graphId}
+        UNION ALL
+        SELECT recorded_to AS revision FROM ${schema.recordedIdentityAssertionsTable} WHERE graph_id = ${graphId} AND recorded_to <> ${RECORDED_MAX_REVISION}
+      ) AS lineage_latest_recorded_activity
+    `),
+  );
+  const latest = rows[0]?.latest;
+  return latest === null || latest === undefined ?
+      undefined
+    : decodeAggregateRevision(latest);
+}
+
+/**
  * Every `(kind, id)` in one recorded relation with a change strictly after
  * `sinceRevision` — the shared query behind both the node and edge halves
  * of a `"keys"` delta. See the module doc for why the two-armed predicate
@@ -354,6 +434,17 @@ export function recordedRelationsLineage<G extends GraphDef>(
         GENESIS_REVISION_NUMBER
       : recordedInstantRevision(currentInstant);
     if (requested > currentRevision) return UNBOUNDED_DELTA;
+
+    // Completeness evidence (see the module doc): a capturing store's own
+    // clock can never run ahead of the latest row it captured. When it
+    // does, some OTHER writer sharing this graph's clock advanced it
+    // without capturing — the delta this module could report is missing
+    // that writer's rows entirely, so it refuses to report one at all,
+    // independent of `requested`.
+    const latestFrom = await latestRecordedFrom(session, schema, graphId);
+    if (currentRevision > (latestFrom ?? GENESIS_REVISION_NUMBER)) {
+      return UNBOUNDED_DELTA;
+    }
 
     const earliestFrom = await earliestRecordedFrom(session, schema, graphId);
     if (earliestFrom !== undefined && requested < earliestFrom - 1) {

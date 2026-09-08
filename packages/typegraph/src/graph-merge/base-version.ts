@@ -23,9 +23,16 @@
  *         a `lineage` (necessarily the BACKEND's own — a store with no
  *         revision tracking never captures history, so the recorded-relations
  *         lineage is unreachable here; see `store/recorded-capture/lineage.ts`).
- *         The anchor is the engine's opaque whole-database revision,
- *         O(1) to read the same way. It is engine-wide rather than
- *         per-graph, which is why re-validating it (see
+ *         The anchor pairs the SAME durable per-graph revision-origin nonce
+ *         the revision anchor uses (ensured here too, at mint time, on this
+ *         store's backend) with the engine's opaque whole-database revision
+ *         — origin-namespaced for the identical reason the revision anchor
+ *         is: two independent databases whose engines both happen to report
+ *         the same revision string (a fresh counter starting at "r1") would
+ *         otherwise mint indistinguishable engine anchors, making a branch
+ *         forked from one database look mergeable into the other. Both
+ *         reads are O(1). It is engine-wide rather than per-graph, which is
+ *         why re-validating it (see
  *         `graph-merge/merge.ts`'s `assertTargetUnchanged` and
  *         `assertForkPointUnchanged`) cannot stop at a raw inequality: a
  *         revision bump from a commit to an UNRELATED graph on the same
@@ -83,8 +90,10 @@ import type {
 } from "./typegraph-internal";
 import { getEdgeKinds, getNodeKinds, sha256Hex } from "./typegraph-internal";
 import {
+  ensureRevisionOrigin,
   readRevisionOrigin,
   recordedRelationsLineage,
+  recordedRevisionOriginsVerdict,
   resolveLineage,
   storeBackend,
   storeRuntime,
@@ -325,11 +334,25 @@ export async function computeBaseVersion<G extends GraphDef>(
     // outside any transaction, so the root backend is the only session
     // available, and it is the same object `resolveLineage(store)` just
     // resolved `lineage` off of.
-    const [schemaComponent, activeVersion, revision] = await Promise.all([
-      computeSchemaComponent(store),
-      readActiveSchemaVersion(storeBackend(store), store.graphId),
-      lineage.revision(storeBackend(store)),
-    ]);
+    const backend = storeBackend(store);
+    const [schemaComponent, activeVersion, origin, revision] =
+      await Promise.all([
+        computeSchemaComponent(store),
+        readActiveSchemaVersion(backend, store.graphId),
+        // The SAME `typegraph_revision_origins` row the TypeGraph revision
+        // anchor above binds to — ensured here too, on the store's own
+        // graph, so an engine-anchored store (no TypeGraph revision
+        // tracking) still gets a durable per-graph namespace to distinguish
+        // it from an unrelated database whose engine coincidentally reports
+        // the same revision. See `engineComponent`'s own doc.
+        ensureRevisionOrigin(
+          backend,
+          recordedRevisionOriginsVerdict(backend),
+          store.revisionSchema,
+          store.graphId,
+        ),
+        lineage.revision(backend),
+      ]);
     // Same schema-half shape as the revision-anchor branch, and for the same
     // reason: nothing here guarantees an engine's revision is blind to a
     // schema-only round-trip, so the active version stays folded in.
@@ -341,7 +364,7 @@ export async function computeBaseVersion<G extends GraphDef>(
     // `lineage.changesSince` and the engine-anchor re-validation guards in
     // `graph-merge/merge.ts` tolerate it as unchanged.
     return asBaseVersion(
-      `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${engineComponent(revision)}`,
+      `${schemaComponent}${SCHEMA_VERSION_TAG}${activeVersion}${TOKEN_SEPARATOR}${engineComponent(origin, revision)}`,
     );
   }
   const [schemaComponent, contentComponent] = await Promise.all([
@@ -375,20 +398,80 @@ async function computeStoreContentComponent<G extends GraphDef>(
   );
 }
 
+/**
+ * THE one grammar for an origin-namespaced anchor component: `<prefix>`
+ * followed by the durable per-graph origin nonce, the separator, and the
+ * revision — shared by both anchor forms that carry an origin (the
+ * TypeGraph revision anchor and the engine anchor) so there is exactly one
+ * place that encodes and decodes `<origin><sep><revision>`, never two
+ * hand-spelled copies drifting apart. The origin itself is a `generateId()`
+ * nonce (URL-safe nanoid alphabet), which never contains
+ * {@link REVISION_COMPONENT_SEPARATOR}, so the FIRST separator in the
+ * encoded string unambiguously ends the origin even when the revision that
+ * follows contains separators of its own (a `RecordedInstant` does).
+ */
+function encodeAnchorComponent(
+  prefix: string,
+  origin: string,
+  revision: string,
+): string {
+  return `${prefix}${origin}${REVISION_COMPONENT_SEPARATOR}${revision}`;
+}
+
+function decodeAnchorComponent(
+  prefix: string,
+  component: string,
+): Readonly<{ origin: string; revision: string }> | undefined {
+  if (!component.startsWith(prefix)) return undefined;
+  const encoded = component.slice(prefix.length);
+  const separator = encoded.indexOf(REVISION_COMPONENT_SEPARATOR);
+  if (separator <= 0 || separator === encoded.length - 1) return undefined;
+  return {
+    origin: encoded.slice(0, separator),
+    revision: encoded.slice(separator + 1),
+  };
+}
+
 function revisionComponent(
   origin: string,
   revision: string | undefined,
 ): string {
-  return `${REVISION_COMPONENT_PREFIX}${origin}${REVISION_COMPONENT_SEPARATOR}${revision ?? INITIAL_REVISION}`;
+  return encodeAnchorComponent(
+    REVISION_COMPONENT_PREFIX,
+    origin,
+    revision ?? INITIAL_REVISION,
+  );
 }
 
-function engineComponent(revision: EngineRevision): string {
-  return `${ENGINE_COMPONENT_PREFIX}${revision}`;
+/**
+ * Builds the engine-anchor component: the store's durable per-graph revision
+ * origin (the SAME `typegraph_revision_origins` row the TypeGraph revision
+ * anchor uses, ensured at mint time by {@link computeBaseVersion}) alongside
+ * the engine's own opaque revision. Without the origin, two independent
+ * databases whose engines both happen to report the same revision string
+ * (a fresh counter starting at "r1", for instance) would mint identical
+ * engine anchors for unrelated graphs — see the module doc's clear()-epoch
+ * and cross-database notes.
+ */
+function engineComponent(origin: string, revision: EngineRevision): string {
+  return encodeAnchorComponent(ENGINE_COMPONENT_PREFIX, origin, revision);
 }
 
 /** True when a base token uses the O(1) durable revision-anchor component. */
 export function hasRevisionAnchor(version: BaseVersion): boolean {
   return contentComponentOf(version).startsWith(REVISION_COMPONENT_PREFIX);
+}
+
+function engineAnchorParts(
+  version: BaseVersion,
+): Readonly<{ origin: string; revision: EngineRevision }> | undefined {
+  const parts = decodeAnchorComponent(
+    ENGINE_COMPONENT_PREFIX,
+    contentComponentOf(version),
+  );
+  return parts === undefined ? undefined : (
+      { origin: parts.origin, revision: parts.revision as EngineRevision }
+    );
 }
 
 /**
@@ -401,10 +484,16 @@ export function hasRevisionAnchor(version: BaseVersion): boolean {
 export function engineAnchorOf(
   version: BaseVersion,
 ): EngineRevision | undefined {
-  const component = contentComponentOf(version);
-  return component.startsWith(ENGINE_COMPONENT_PREFIX) ?
-      (component.slice(ENGINE_COMPONENT_PREFIX.length) as EngineRevision)
-    : undefined;
+  return engineAnchorParts(version)?.revision;
+}
+
+/**
+ * Extracts the durable store-specific origin namespace from an
+ * engine-anchored base token, the engine-anchor counterpart of
+ * {@link revisionOriginOf}. `undefined` for any other anchor form.
+ */
+export function engineAnchorOriginOf(version: BaseVersion): string | undefined {
+  return engineAnchorParts(version)?.origin;
 }
 
 /**
@@ -428,16 +517,19 @@ export function revisionOriginOf(version: BaseVersion): string | undefined {
 }
 
 /**
- * THE one owner of the revision-anchor origin-match decision:
- * `expectedVersion`'s revision-origin component against the LIVE origin row
- * `readRevisionOrigin` reads off `backend` for `graphId`. `merge.ts`'s
- * `assertTargetUnchanged` (re-validating a revision-anchored `base@V` inside
- * the commit transaction) and this module's own `lineageDeltaSinceAnchor`
- * (deciding whether a revision-anchored `base` can trust a recorded-relations
- * `changesSince` read) both need exactly this comparison; extracted here so
- * neither re-spells it. Returns the two values actually compared alongside
- * the verdict, so a caller that refuses on a mismatch embeds both in its own
- * error `details` without a second read.
+ * THE one owner of the origin-match decision for EITHER origin-namespaced
+ * anchor form: `expectedVersion`'s origin component — the revision anchor's
+ * when it carries one, else the engine anchor's — against the LIVE origin
+ * row {@link readRevisionOrigin} reads off `backend` for `graphId`. A token
+ * only ever carries one anchor form, so exactly one of the two extractors
+ * below answers. `merge.ts`'s `assertTargetUnchanged` (re-validating either
+ * anchor form inside the commit transaction) and this module's own
+ * `lineageDeltaSinceAnchor` (deciding whether a `base` of either
+ * origin-namespaced form can trust a `changesSince` read) both need exactly
+ * this comparison; extracted here so neither re-spells it. Returns the two
+ * values actually compared alongside the verdict, so a caller that refuses
+ * on a mismatch embeds both in its own error `details` without a second
+ * read.
  */
 export async function revisionOriginMatch(
   backend: Pick<GraphBackend, "execute">,
@@ -451,7 +543,8 @@ export async function revisionOriginMatch(
     matches: boolean;
   }>
 > {
-  const expectedOrigin = revisionOriginOf(expectedVersion);
+  const expectedOrigin =
+    revisionOriginOf(expectedVersion) ?? engineAnchorOriginOf(expectedVersion);
   const liveOrigin = await readRevisionOrigin(backend, schema, graphId);
   return { expectedOrigin, liveOrigin, matches: liveOrigin === expectedOrigin };
 }
@@ -459,15 +552,10 @@ export async function revisionOriginMatch(
 function revisionPartsOf(
   version: BaseVersion,
 ): Readonly<{ origin: string; revision: string }> | undefined {
-  const component = contentComponentOf(version);
-  if (!component.startsWith(REVISION_COMPONENT_PREFIX)) return undefined;
-  const encoded = component.slice(REVISION_COMPONENT_PREFIX.length);
-  const separator = encoded.indexOf(REVISION_COMPONENT_SEPARATOR);
-  if (separator <= 0 || separator === encoded.length - 1) return undefined;
-  return {
-    origin: encoded.slice(0, separator),
-    revision: encoded.slice(separator + 1),
-  };
+  return decodeAnchorComponent(
+    REVISION_COMPONENT_PREFIX,
+    contentComponentOf(version),
+  );
 }
 
 /**
@@ -590,6 +678,17 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
   }
   const engineAnchor = engineAnchorOf(base);
   if (engineAnchor === undefined) return undefined;
+  // Same origin re-check as the revision-anchor branch above, and for the
+  // same reason: the engine anchor's numeric-looking revision is meaningless
+  // against a `baseStore` whose own origin row does not match the one
+  // `base` was minted with — see `revisionOriginMatch`'s doc.
+  const engineOriginMatch = await revisionOriginMatch(
+    storeBackend(baseStore),
+    baseStore.revisionSchema,
+    baseStore.graphId,
+    base,
+  );
+  if (!engineOriginMatch.matches) return undefined;
   const lineage = resolveLineage(baseStore);
   if (lineage === undefined) return undefined;
   // PLANNING-time call, strictly outside any commit transaction: the root

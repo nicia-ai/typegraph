@@ -238,3 +238,59 @@ describe("store.clear()", () => {
     await expect(historyStore.clear()).resolves.toBeUndefined();
   });
 });
+
+describe("store.clear() rotates the durable revision origin", () => {
+  let backend: GraphBackend;
+
+  beforeEach(() => {
+    backend = createTestBackend();
+  });
+
+  it("mints a different revisionOriginNow() after clear(), under history", async () => {
+    const store = createStore(graph, backend, { history: true });
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const originBeforeClear = await store.revisionOriginNow();
+
+    await store.clear();
+
+    const originAfterClear = await store.revisionOriginNow();
+    // Mutation-proof: commenting out `clear()`'s `resetRevisionOrigin` call
+    // (`store.ts`) makes this equality hold instead, reproducing the P1
+    // finding — a pre-clear branch's revision anchor would silently match
+    // again once the graph is repopulated to the same revision count.
+    expect(originAfterClear).not.toBe(originBeforeClear);
+  });
+
+  it("mints a different revisionOriginNow() after clear(), under plain revisionTracking (no history)", async () => {
+    const store = createStore(graph, backend, { revisionTracking: true });
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+    const originBeforeClear = await store.revisionOriginNow();
+
+    await store.clear();
+
+    const originAfterClear = await store.revisionOriginNow();
+    expect(originAfterClear).not.toBe(originBeforeClear);
+  });
+
+  it("rotates the origin even when revisionOriginNow() was never called before the first clear()", async () => {
+    // Exercises `ensureRevisionOriginsRelation`'s own bootstrap: this store
+    // never minted an origin before `clear()`, so the origins table may not
+    // exist yet when `clear()` runs.
+    const store = createStore(graph, backend, { history: true });
+    await store.nodes.Person.create({
+      email: "alice@example.com",
+      name: "Alice",
+    });
+
+    await expect(store.clear()).resolves.toBeUndefined();
+    await expect(store.revisionOriginNow()).resolves.toEqual(
+      expect.any(String),
+    );
+  });
+});

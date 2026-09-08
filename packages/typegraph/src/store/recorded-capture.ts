@@ -73,11 +73,13 @@ import {
 export {
   advanceRevisionClock,
   ensureRevisionOrigin,
+  ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
   readRecordedClock,
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
+  resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
 export {

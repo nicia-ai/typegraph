@@ -352,7 +352,11 @@ describe("base@V engine anchor", () => {
     const forkBranch = unwrap(
       await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
     );
-    expect(forkBranch.base).toContain("\0engine:r0");
+    // The engine anchor embeds the store's durable per-graph origin ahead
+    // of the scripted revision (`engine:<origin>:<revision>`, see
+    // `base-version.ts`'s `engineComponent`), so every assertion in this
+    // suite matches the revision suffix rather than a literal `engine:r0`.
+    expect(forkBranch.base).toMatch(/\0engine:[^:]+:r0$/);
     await forkBranch.store.nodes.Widget.create({
       label: "from fork",
       group: "g1",
@@ -858,7 +862,7 @@ describe("base@V engine anchor", () => {
     const forkBranch = unwrap(
       await branch<WidgetGraph>(forkPoint, makePlainBackend, { id: BRANCH }),
     );
-    expect(forkBranch.base).toContain("\0engine:r0");
+    expect(forkBranch.base).toMatch(/\0engine:[^:]+:r0$/);
     await forkBranch.store.nodes.Widget.create({
       label: "from fork",
       group: "g1",
@@ -884,7 +888,7 @@ describe("base@V engine anchor", () => {
       const anchors = planned.data.anchors;
       expect(anchors.kind).toBe("incremental");
       if (anchors.kind === "incremental") {
-        expect(anchors.forkPoint.baseVersion).toContain("\0engine:r1");
+        expect(anchors.forkPoint.baseVersion).toMatch(/\0engine:[^:]+:r1$/);
         expect(anchors.branches).toEqual([
           { branchId: BRANCH, baseVersion: anchors.forkPoint.baseVersion },
         ]);
@@ -1037,7 +1041,7 @@ describe("base@V engine anchor", () => {
         id: BRANCH,
       }),
     );
-    expect(forkBranch.base).toContain("\0engine:r0");
+    expect(forkBranch.base).toMatch(/\0engine:[^:]+:r0$/);
     await forkBranch.store.nodes.Widget.create({
       label: "from fork",
       group: "g1",
@@ -1060,6 +1064,119 @@ describe("base@V engine anchor", () => {
     if (isErr(result)) {
       expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
     }
+  });
+});
+
+// Regression coverage for the P1 finding this suite's other cases could not
+// have caught: every one of them scripts ONE backend's `lineage` and forks
+// from it, so the branch's engine anchor and the target it merges into
+// always share the same physical database (and, before this fix, the same
+// BARE revision number was the only thing the anchor compared). These cases
+// build TWO physically INDEPENDENT scripted-lineage backends whose engines
+// coincidentally report the identical revision string "r1" — a fresh
+// per-database counter would do exactly this — and prove the anchor no
+// longer treats that coincidence as proof of a shared fork point.
+describe("engine anchor: origin binding across independent databases", () => {
+  let cleanups: (() => Promise<void>)[];
+
+  beforeEach(() => {
+    cleanups = [];
+  });
+
+  afterEach(async () => {
+    for (const cleanup of cleanups) {
+      await cleanup();
+    }
+  });
+
+  function makeBackend(state: ScriptedLineageState): GraphBackend {
+    const fixture = scriptedLineageBackend(state);
+    cleanups.push(fixture.cleanup);
+    return fixture.backend;
+  }
+
+  function makePlainBackend(): Promise<GraphBackend> {
+    const fixture = createSqliteMergeBackend();
+    cleanups.push(fixture.cleanup);
+    return Promise.resolve(fixture.backend);
+  }
+
+  it("refuses a branch forked from one database against an unrelated database whose engine coincidentally reports the same bare revision", async () => {
+    const stateA = initialState();
+    stateA.revision = "r1" as EngineRevision;
+    const [storeA] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(stateA),
+    );
+    await storeA.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(storeA, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    // A COMPLETELY SEPARATE database, never forked from or written through
+    // `storeA` — its scripted lineage just happens to report the exact same
+    // bare "r1" revision string.
+    const stateB = initialState();
+    stateB.revision = "r1" as EngineRevision;
+    const [storeB] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(stateB),
+    );
+    await storeB.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const result = await merge<WidgetGraph>(
+      storeB,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    // Mutation-proof: reverting `engineComponent` to embed the bare
+    // revision alone (dropping the origin) makes this assertion fail — both
+    // sides mint an identical `engine:r1` anchor and the merge wrongly
+    // succeeds.
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+    expect(await widgetLabels(storeB)).toEqual(["base"]);
+  });
+
+  it("merges the same branch into its real origin store without issue", async () => {
+    const stateA = initialState();
+    stateA.revision = "r1" as EngineRevision;
+    const [storeA] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(stateA),
+    );
+    await storeA.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(storeA, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const result = await merge<WidgetGraph>(
+      storeA,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    expect(isOk(result)).toBe(true);
+    expect(await widgetLabels(storeA)).toEqual(["base", "from fork"]);
   });
 });
 

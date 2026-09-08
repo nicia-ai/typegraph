@@ -25,7 +25,10 @@ of at boot — see the parity-snapshot note below for exactly what moves.
 store constructed with `history: true`: `revision()` reports the graph's recorded-time clock;
 `changesSince` covers every write shape a recorded relation can express — inserts, updates, soft
 deletes, hard deletes, and resurrections — deduplicated, and reports `unbounded` for a revision it
-cannot answer for (unrecognized, or predating a detectable pre-capture gap). `resolveLineage(store)`
+cannot answer for (unrecognized, predating a detectable pre-capture gap, or when this graph's clock
+has advanced past the latest revision either recorded column carries evidence for — the signal that
+some OTHER writer sharing the graph's clock, a `revisionTracking`-only `Store` with no `history`,
+advanced it without capturing anything). `resolveLineage(store)`
 is the one place graph-merge (and any other caller) picks a `lineage` source: the backend's own when
 declared, else this recorded-relations one when history is on, else `undefined`. A new system index,
 `since_idx (graph_id, recorded_from)`, backs `changesSince` on the two recorded relations, and the
@@ -57,20 +60,28 @@ untouched, one stamped 2 is caught up in place on next open, and a store built a
 a version-3 adoption step (or accept the three indexes into its own fresh-install DDL and mark the
 step `bootstrap: "covered-by-generated-ddl"`) before upgrading past this release.
 
-`base@V`'s anchor gains a third form, `engine:<revision>`, chosen when a store has no
+`base@V`'s anchor gains a third form, `engine:<origin>:<revision>`, chosen when a store has no
 `revisionTracking`/`history` but its backend declares `lineage` directly (a capturing store's
 recorded-relations lineage never reaches this form — capture also turns revision tracking on, so
-the per-graph anchor wins first). The precedence — revision anchor, then engine anchor, then the
-compatibility content fingerprint — is documented once, in `base-version.ts`. Re-validating an
-engine anchor confirms a raw revision mismatch through `changesSince` before refusing, since the
-engine's revision is whole-database and an unrelated graph's commit must not fail this graph's
-merge; an empty delta is tolerated as unchanged, and a non-empty delta or `unbounded` raises
-`BaseVersionMismatchError` with `details: { expectedRevision, liveRevision, changedKeys? }`, where
-`changedKeys` (when present) is capped to the first 20 node keys and first 20 edge keys plus each
-list's own total count, never the raw unbounded delta. One known gap: `changesSince` names only node
-and edge keys, so a commit touching only a graph's current identity assertions is invisible to an
-engine-anchored guard and tolerated as unchanged — the content-fingerprint and revision-anchor forms
-do not share this gap.
+the per-graph anchor wins first). `<origin>` is the SAME durable per-graph revision-origin nonce
+the revision anchor carries (`typegraph_revision_origins`, ensured at mint time on the store's own
+backend); the engine's own revision is whole-database, not per-graph, so pairing it with the
+per-graph origin is what keeps two independent databases whose engines coincidentally report the
+same bare revision string from minting indistinguishable anchors — without it, a branch forked
+from one database could satisfy the base-version precondition of an unrelated database. The
+precedence — revision anchor, then engine anchor, then the compatibility content fingerprint — is
+documented once, in `base-version.ts`. Re-validating an engine anchor checks the live origin row
+first (`revisionOriginMatch`, the same predicate the revision anchor's guard uses) and refuses with
+`BaseVersionMismatchError` ("forked from a different store") on a mismatch before ever consulting
+`changesSince`; once the origin matches, a raw revision mismatch is confirmed through `changesSince`
+before refusing, since the engine's revision is whole-database and an unrelated graph's commit must
+not fail this graph's merge — an empty delta is tolerated as unchanged, and a non-empty delta or
+`unbounded` raises `BaseVersionMismatchError` with
+`details: { expectedRevision, liveRevision, changedKeys? }`, where `changedKeys` (when present) is
+capped to the first 20 node keys and first 20 edge keys plus each list's own total count, never the
+raw unbounded delta. One known gap: `changesSince` names only node and edge keys, so a commit
+touching only a graph's current identity assertions is invisible to an engine-anchored guard and
+tolerated as unchanged — the content-fingerprint and revision-anchor forms do not share this gap.
 
 `GraphBranch` gains an optional `forkRevision`, the fork's own `lineage.revision(session)`
 captured by `branch()` right after the working copy is created, with the working copy's own root

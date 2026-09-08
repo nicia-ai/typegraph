@@ -341,7 +341,11 @@ describe("branchPruneTo: falls back to the full diff when a lineage call rejects
     // engine-anchored, so `lineageDeltaSinceAnchor` DOES call `changesSince`
     // on this same lineage below.
     const base = await computeBaseVersion(baseStore);
-    expect(base).toContain("\0engine:base-r0");
+    // The engine anchor embeds the store's durable per-graph origin ahead
+    // of the scripted revision (`engine:<origin>:<revision>` —
+    // `base-version.ts`'s `engineComponent`), so this asserts on the
+    // revision suffix rather than a literal substring.
+    expect(base).toMatch(/\0engine:[^:]+:base-r0$/);
 
     const { backend: forkBackendRaw, cleanup: forkCleanup } =
       createSqliteMergeBackend();

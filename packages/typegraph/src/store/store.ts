@@ -317,10 +317,12 @@ import {
   createRecordedBackend,
   createRecordedTransactionScope,
   ensureRevisionOrigin,
+  ensureRevisionOriginsRelation,
   lockRecordedGraphWrite,
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  resetRevisionOrigin,
   throwHistoryUnsafeSqlAccess,
   throwRevisionTrackingUnsafeSqlAccess,
   withRecordedFlushObserver,
@@ -4065,6 +4067,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * The store is usable after clearing — new data can be created immediately.
    */
   async clear(): Promise<void> {
+    if (this.#revisionTrackingEnabled) {
+      // `ensureRevisionOriginsTable` is schema DDL, never projected onto an
+      // open `transaction()` handle (unlike ordinary row writes) — it must
+      // run on the ROOT backend, before `doClear` opens its transaction, so
+      // the row-only `resetRevisionOrigin` below can rely on the table
+      // already existing inside it. Idempotent (`CREATE TABLE IF NOT
+      // EXISTS`), so running it unconditionally here is safe even when a
+      // prior `revisionOriginNow()` call already created it.
+      await ensureRevisionOriginsRelation(
+        this.#baseBackend,
+        this.#recordedRevisionOrigins,
+      );
+    }
     const doClear = async (
       target: GraphBackend | TransactionBackend,
     ): Promise<void> => {
@@ -4079,12 +4094,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           await readRecordedClock(target, this.#sqlSchema(), this.graphId)
         : undefined;
       await target.clearGraph(this.graphId);
-      // `clearGraph` deletes the recorded-clock row alongside graph data.
-      // Live revision tracking immediately seeds a fresh anchor so a pre-clear
-      // branch cannot match a now-empty graph. History capture intentionally
-      // preserves its long-standing `recordedNow() === undefined` clear
-      // contract; a pre-clear history branch already carries a non-empty clock
-      // value and therefore still fails the base-version precondition.
+      if (this.#revisionTrackingEnabled) {
+        // Rotate the durable per-graph revision-origin nonce in the SAME
+        // transaction as `clearGraph`. `clearGraph` deletes the recorded-clock
+        // row (and, under history, every recorded relation row) but never
+        // touches the origin row — without this, a graph repopulated after
+        // clear() to the same revision COUNT would restore both halves of
+        // the TypeGraph revision anchor (origin unchanged, numbering
+        // restarting from the same low values) and a pre-clear branch would
+        // silently pass the base-version precondition again. See
+        // `resetRevisionOrigin`'s own doc for why this must be the origin
+        // row, not the clock, that fences the epoch.
+        await resetRevisionOrigin(target, this.#sqlSchema(), this.graphId);
+      }
+      // Live (non-capturing) revision tracking immediately reseeds the
+      // clock so a pre-clear branch cannot match a now-empty graph purely
+      // by revision number, ahead of the origin rotation above ever being
+      // exercised for a token minted from this exact clock value. History
+      // capture intentionally preserves its long-standing
+      // `recordedNow() === undefined` clear contract and leaves the clock
+      // unseeded; the rotated origin above is what fences a pre-clear
+      // history branch once the graph is repopulated, not the clock value.
       if (this.#revisionTrackingEnabled && !this.#captureEnabled) {
         await advanceRevisionClock(
           target,
@@ -4099,6 +4129,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await (this.#baseBackend.capabilities.execution.interactiveTransactions ?
       this.#baseBackend.transaction(async (tx) => doClear(tx))
     : doClear(this.#baseBackend));
+
+    // The origin row was rotated inside the transaction above (when
+    // revision tracking is on); drop this Store's memoized copy so the next
+    // `revisionOriginNow()` call re-reads the fresh nonce instead of
+    // returning the pre-clear origin it cached.
+    if (this.#revisionTrackingEnabled) {
+      this.#revisionOrigin = undefined;
+    }
 
     // `clearGraph` is graph-agnostic and can't reach the strategy-owned
     // per-`(kind, field)` vector tables, so reset them here — otherwise cleared

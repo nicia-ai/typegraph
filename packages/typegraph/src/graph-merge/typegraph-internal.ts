@@ -1,5 +1,8 @@
 export { requireLineage } from "../backend/capabilities/lineage";
-export { batchPointReadVerdict } from "../backend/capabilities/resolve";
+export {
+  batchPointReadVerdict,
+  recordedRevisionOriginsVerdict,
+} from "../backend/capabilities/resolve";
 export { runRetriedUnit } from "../backend/capabilities/retried-unit";
 export {
   requireFenceLockTables,
@@ -75,6 +78,7 @@ export {
 export { forceWriteTransactionRevision } from "../store/operations/write-transaction";
 export {
   advanceRevisionClock,
+  ensureRevisionOrigin,
   forceRecordedGraphRevision,
   readRecordedClock,
   readRevisionOrigin,

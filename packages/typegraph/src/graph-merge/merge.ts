@@ -54,6 +54,7 @@ import {
   computeSchemaComponent,
   contentComponentOf,
   engineAnchorOf,
+  engineAnchorOriginOf,
   hasRevisionAnchor,
   readActiveSchemaVersion,
   revisionAnchorOf,
@@ -2425,6 +2426,34 @@ async function assertTargetUnchanged<G extends GraphDef>(
     // backstops a schema commit racing the plan, so this is the fast half
     // of the fencing the revision-anchor branch above gets for free from
     // `lockMergeTargetWrite`'s `staleSchemaError`.
+    //
+    // The origin check runs FIRST, on this same pinned `txBackend`, before
+    // either the schema re-read or `changesSince` below — the identical
+    // shape and the SAME shared predicate (`revisionOriginMatch`) the
+    // revision-anchor branch above uses. Without it, a branch forked from a
+    // DIFFERENT store whose engine coincidentally reports the same bare
+    // revision string as this target would fall straight through to
+    // `changesSince`, which has no way to tell a genuine anchor from a
+    // numerically coincidental one minted by an unrelated database.
+    const originMatch = await revisionOriginMatch(
+      txBackend,
+      target.revisionSchema,
+      target.graphId,
+      expectedBaseVersion,
+    );
+    if (!originMatch.matches) {
+      throw new BaseVersionMismatchError(
+        "The merge branch was forked from a different store; the resolved plan was not applied.",
+        {
+          details: {
+            expectedOrigin: originMatch.expectedOrigin,
+            liveOrigin: originMatch.liveOrigin,
+          },
+          suggestion:
+            "Merge the branch back into its original base store, or fork a new branch from this target.",
+        },
+      );
+    }
     const liveActiveVersion = await readActiveSchemaVersion(
       txBackend,
       target.graphId,
@@ -2589,13 +2618,21 @@ function edgeCollection(edges: TxEdges, kind: string): EdgeCollectionLike {
  * must carry an engine anchor, `liveVersion` must ALSO carry one (never a
  * revision anchor or a content fingerprint — this tolerance's
  * `changesSince` consultation only means anything when the live token's OWN
- * form agrees that the engine anchor is still the authority), and the two
- * must share an identical schema half. A live token that has moved to a
- * different anchor FORM is a real divergence a `changesSince` check on the
- * stale engine revision cannot speak to at all — that path belongs to
- * whichever guard the live token's own form dispatches to, not this one.
- * Returns the shared engine revision to check `changesSince` against, or
- * `undefined` when the pair is not eligible.
+ * form agrees that the engine anchor is still the authority), the two must
+ * share an identical schema half, AND the two must share an identical
+ * origin: `liveVersion` is always freshly minted by `computeBaseVersion`
+ * (which ensures the live origin at read time), so an origin mismatch here
+ * means `expectedVersion` was never forked from THIS store no matter how its
+ * bare revision number compares — exactly the cross-database collision
+ * `engineComponent`'s own doc warns about, and this is where both
+ * plan-time callers (`toleratedByEngineAnchor`'s outer precondition,
+ * `assertForkPointUnchanged`'s fork-point re-read) catch it, with no extra
+ * read of their own needed. A live token that has moved to a different
+ * anchor FORM is a real divergence a `changesSince` check on the stale
+ * engine revision cannot speak to at all — that path belongs to whichever
+ * guard the live token's own form dispatches to, not this one. Returns the
+ * shared engine revision to check `changesSince` against, or `undefined`
+ * when the pair is not eligible.
  */
 function engineAnchorToleranceEligible(
   expectedVersion: BaseVersion,
@@ -2605,7 +2642,8 @@ function engineAnchorToleranceEligible(
   if (
     expectedRevision === undefined ||
     engineAnchorOf(liveVersion) === undefined ||
-    schemaComponentOf(expectedVersion) !== schemaComponentOf(liveVersion)
+    schemaComponentOf(expectedVersion) !== schemaComponentOf(liveVersion) ||
+    engineAnchorOriginOf(expectedVersion) !== engineAnchorOriginOf(liveVersion)
   ) {
     return undefined;
   }
@@ -5139,9 +5177,12 @@ async function assertInheritedEdgesUnchanged<G extends GraphDef>(
  * the in-memory graph definition, which is exactly why `assertTargetUnchanged`
  * re-checks only the anchor half too. On a whole-token MISMATCH under an
  * engine anchor, though, the schema half IS compared separately
- * ({@link schemaComponentOf}) before the engine-wide revision is allowed to
- * explain the mismatch away — an engine-wide bump tolerating an empty delta
- * must never also paper over a real schema change.
+ * ({@link schemaComponentOf}), and so is the origin half
+ * ({@link engineAnchorOriginOf}, inside `engineAnchorToleranceEligible`),
+ * before the engine-wide revision is allowed to explain the mismatch away —
+ * an engine-wide bump tolerating an empty delta must never also paper over
+ * a real schema change or a fork point that turns out to belong to a
+ * different store entirely.
  *
  * The re-read goes through the fork point's OWN backend rather than this
  * transaction: the fork point is a different store, and what must hold is its

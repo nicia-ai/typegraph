@@ -375,6 +375,25 @@ delete — deduplicated, and must answer `{ kind: "unbounded" }` rather than
 guess whenever it cannot bound the delta for a given revision (an unrecognized
 token, or history older than what it retains).
 
+**A revision must identify the database it came from, or the caller anchoring
+on it must.** Nothing in `EngineRevision`'s own shape distinguishes a revision
+minted by one physical database from a numerically coincidental one minted by
+an entirely different database — two independent engines whose counters both
+happen to read "r1" are indistinguishable by equality alone. `base-version.ts`
+does not trust a raw `lineage.revision()` for this reason: the engine anchor
+it mints pairs your revision with the store's own durable per-graph
+`typegraph_revision_origins` nonce (`engine:<origin>:<revision>`), the SAME
+namespacing the TypeGraph revision anchor already carries, and every
+re-validation checks that origin BEFORE ever comparing the bare revision (see
+[Lineage and pruned diffs](/graph-merge#lineage-and-pruned-diffs)'s engine
+anchor section). If your engine's own revision already carries a durable,
+per-database identity of its own (e.g. it is scoped to a specific cluster or
+instance and can never collide with another one), `revision()` may fold that
+identity into the token itself instead — `base@V`'s pairing still applies on
+top, so this is a belt-and-suspenders option, not a requirement. What you must
+never do is return a revision whose equality-comparable form could coincide
+with another database's, and rely on nothing to disambiguate them.
+
 Test a new `lineage` against `tests/backends/integration/lineage-conformance.ts`'s
 `registerLineageConformanceIntegrationTests` (registered per-dialect through
 `createIntegrationTestSuite`, or called directly against your own backend,
