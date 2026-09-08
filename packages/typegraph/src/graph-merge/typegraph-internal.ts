@@ -1,3 +1,4 @@
+export { requireLineage } from "../backend/capabilities/lineage";
 export { batchPointReadVerdict } from "../backend/capabilities/resolve";
 export { runRetriedUnit } from "../backend/capabilities/retried-unit";
 export {

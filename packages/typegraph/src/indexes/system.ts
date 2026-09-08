@@ -379,24 +379,39 @@ export function generateSystemIndexDDL(
 }
 
 /**
- * Runtime DDL for the two recorded-relation `since_idx` indexes — the
- * lineage capability's changed-since scan (`store/recorded-capture/
- * lineage.ts`). Both dialect factories thread this into the base-schema
+ * Runtime DDL for the base-schema release's three `since_idx (graph_id,
+ * recorded_from)` indexes — the lineage capability's changed-since scan
+ * (`store/recorded-capture/lineage.ts`): the two recorded relations
+ * (`recordedNodes`, `recordedEdges`, declared in
+ * {@link SYSTEM_INDEX_DECLARATIONS} and managed by `materializeIndexes`),
+ * plus the recorded identity-assertions relation's own `since_idx`, which
+ * `earliestRecordedFrom`'s per-graph `MIN(recorded_from)` floor folds into
+ * the same scan but which is NOT a {@link SystemIndexTable} — like that
+ * relation's other three indexes (`entity_idx`/`a_idx`/`b_idx`), it is
+ * structural, hand-declared with the table rather than run through
+ * `materializeIndexes`' lazy backfill, and this function follows the same
+ * pattern for it. Both dialect factories thread this into the base-schema
  * version-3 adoption step (`engine/members/base-schema-members.ts`) the
  * same way `fencesTableDdl` feeds version 2: a fresh bootstrap already
- * carries these indexes through the schema factories' own system-index
+ * carries all three indexes through the schema factories' own index
  * builders, but a database that reaches adoption without re-running
  * bootstrap DDL (a reopen of an already-provisioned installation) needs
- * this explicit `CREATE INDEX IF NOT EXISTS` pair. One owner for the
- * declaration lookup keeps the two dialect factories from re-spelling the
- * `suffix === "since_idx"` filter and risking drift between them.
+ * this explicit `CREATE INDEX IF NOT EXISTS` triple. One owner for the
+ * declaration lookup and the identity-assertions index's own name (both
+ * routed through {@link systemIndexName}, the single naming choke point)
+ * keeps the two dialect factories from re-spelling either and risking
+ * drift between them; the identity-assertions name this renders MUST match
+ * the schema factories' own hand-written `index(...)` call byte-for-byte —
+ * the shape-ratchet test (`tests/base-schema-shape-ratchet.test.ts`) is
+ * what would catch a drift.
  */
 export function sinceIndexAdoptionDdl(
   recordedTableNames: Readonly<{
     recordedNodes: string;
     recordedEdges: string;
+    recordedIdentityAssertions: string;
   }>,
-): readonly [string, string] {
+): readonly [string, string, string] {
   function sinceIndexDdlFor(table: "recordedNodes" | "recordedEdges"): string {
     const declaration = requireDefined(
       SYSTEM_INDEX_DECLARATIONS.find(
@@ -409,35 +424,21 @@ export function sinceIndexAdoptionDdl(
       concurrent: false,
     });
   }
-  return [sinceIndexDdlFor("recordedNodes"), sinceIndexDdlFor("recordedEdges")];
-}
-
-/**
- * Runtime DDL for the recorded identity-assertions relation's own
- * `since_idx (graph_id, recorded_from)` — `earliestRecordedFrom`'s
- * per-graph `MIN(recorded_from)` floor (`store/recorded-capture/
- * lineage.ts`) folds this relation in alongside the two recorded relations
- * `sinceIndexAdoptionDdl` covers, but the index itself is NOT declared in
- * {@link SYSTEM_INDEX_DECLARATIONS}: unlike `recordedNodes`/`recordedEdges`,
- * the identity-assertions relation is not a {@link SystemIndexTable} at
- * all — its three other indexes (`entity_idx`/`a_idx`/`b_idx`) are
- * structural, hand-declared with the table rather than run through
- * `materializeIndexes`' lazy backfill, and this one follows the same
- * pattern rather than joining that machinery. Both dialect factories
- * thread this into the base-schema version-4 adoption step
- * (`engine/members/base-schema-members.ts`) the same way `sinceIndexDdl`
- * feeds version 3: a fresh bootstrap already carries the index through the
- * schema factories' own hand-declared `index(...)` call, but a database
- * that reaches adoption without re-running bootstrap DDL needs this
- * explicit `CREATE INDEX IF NOT EXISTS`. The name this renders —
- * `${physicalTableName}_since_idx` — MUST match the schema factories'
- * own hand-written index name byte-for-byte; the shape-ratchet test
- * (`tests/base-schema-shape-ratchet.test.ts`) is what would catch a drift.
- */
-export function identityAssertionsSinceIndexAdoptionDdl(
-  physicalTableName: string,
-): string {
-  const name = quoteIdentifier(`${physicalTableName}_since_idx`);
-  const table = quoteIdentifier(physicalTableName);
-  return `CREATE INDEX IF NOT EXISTS ${name} ON ${table} (${quoteIdentifier("graph_id")}, ${quoteIdentifier("recorded_from")});`;
+  function identityAssertionsSinceIndexDdl(): string {
+    const name = quoteIdentifier(
+      systemIndexName(
+        recordedTableNames.recordedIdentityAssertions,
+        "since_idx",
+      ),
+    );
+    const table = quoteIdentifier(
+      recordedTableNames.recordedIdentityAssertions,
+    );
+    return `CREATE INDEX IF NOT EXISTS ${name} ON ${table} (${quoteIdentifier("graph_id")}, ${quoteIdentifier("recorded_from")});`;
+  }
+  return [
+    sinceIndexDdlFor("recordedNodes"),
+    sinceIndexDdlFor("recordedEdges"),
+    identityAssertionsSinceIndexDdl(),
+  ];
 }

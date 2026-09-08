@@ -35,16 +35,6 @@ export const BASE_SCHEMA_RELEASES = [
     id: "lineage-since-index",
     orderedShapeDigests: {
       postgres:
-        "e2d5832950a585e360cceae64d95d9b6b9cd2919878971ba1fb07a17b6b2efdb",
-      sqlite:
-        "da50d018730367a99e682daa4f3780869e6e5eae657a6b062c1b3a09631e92ed",
-    },
-  },
-  {
-    version: 4,
-    id: "lineage-identity-since-index",
-    orderedShapeDigests: {
-      postgres:
         "3566f85b41ee4139e580fb6964ef6258ba9fa1d3756dcc42b47a5235690d6375",
       sqlite:
         "4bd7e6a5caeb3b5e54933b26f6697e53fc7a9aa916c0606c77006fdc93080981",

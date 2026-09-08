@@ -4175,8 +4175,8 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
     };
     readonly lineage: {
         readonly kind: "reasoned";
-        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) is the one live consumer: two reads, both selecting the backend's own `lineage` over the derived one.";
-        readonly accesses: 2;
+        readonly reason: "Whole-database revision and per-graph change delta, consulted directly by a caller that wants to skip a full comparison rather than through a bundle disposition; every such caller already knows how to fall back to the full comparison when this is absent, so there is no per-operation degradation table to own. Its absence refusal lives in backend/capabilities/, which the live access scanner excludes wholesale (it is the registry's own directory). The store's own recorded-relations derivation (`resolveLineage`, store/recorded-capture/lineage.ts) selects the backend's own `lineage` over the derived one: two reads on the same line. `assertTargetUnchanged` (graph-merge/merge.ts) resolves `resolveLineage(target)` once as `planned`, then reads the pinned transaction handle's own `lineage` twice on one line — once to compare it against `planned` by identity, once as the value used when that identity holds — falling back to `planned` itself when it does not: two more reads, both on the transaction handle.";
+        readonly accesses: 4;
     };
     readonly claimIndexMaterialization: {
         readonly kind: "deferred";

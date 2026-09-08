@@ -15,8 +15,9 @@ same optional `lineage` member (through the new `LineageBackend` member type, mi
 so a store's own recorded-relations derivation backs the capability instead (below); the `lineage`
 member itself emits no SQL. The recorded relations it derives from are
 already part of the schema regardless of `history`, and a DDL-running boot (`createStoreWithSchema`,
-unless `systemIndexes: "skip"`) now materializes two new system indexes on them, history on or off.
-A caller that opted out with `systemIndexes: "skip"` gets those two on the next explicit
+unless `systemIndexes: "skip"`) now materializes two new system indexes on them, history on or off,
+plus a third structural index on the recorded identity-assertions relation. A caller that opted out
+with `systemIndexes: "skip"` gets the two system indexes on the next explicit
 `store.materializeSystemIndexes()` call instead of at boot — see the parity-snapshot note below for
 exactly what moves.
 
@@ -27,38 +28,34 @@ deletes, hard deletes, and resurrections — deduplicated, and reports `unbounde
 cannot answer for (unrecognized, or predating a detectable pre-capture gap). `resolveLineage(store)`
 is the one place graph-merge (and any other caller) picks a `lineage` source: the backend's own when
 declared, else this recorded-relations one when history is on, else `undefined`. A new system index,
-`since_idx (graph_id, recorded_from)`, backs `changesSince` on both recorded relations; a database
-already open when this ships adopts it on its NEXT open, through the base-schema release-3 adoption
-step below (`"lineage-since-index"`) — the same lazy backfill machinery a missing system index
-already goes through for any OTHER caller, and immediately for one that opted out of boot-time
-materialization with `systemIndexes: "skip"`, via its own explicit
-`store.materializeSystemIndexes()` call. The parity snapshot moves by exactly these two index
-declarations, plus one extra version-marker `INSERT`/`SELECT` round trip on each of four capture
-scenarios on both bundled backends (bootstrap publishing the new base-schema release below) — no
-other statement, and no graph-data write SQL, changes.
+`since_idx (graph_id, recorded_from)`, backs `changesSince` on the two recorded relations, and the
+recorded identity-assertions relation gains a matching `since_idx` of its own (structural, created
+with the table, since it is not a `materializeIndexes`-managed system index) — `earliestRecordedFrom`
+(the pre-capture-gap detector `changesSince` consults) folds that relation into the same
+`MIN(recorded_from)` floor as the two recorded relations. A database already open when this ships
+adopts all three indexes on its NEXT open, through the base-schema release-3 adoption step below
+(`"lineage-since-index"`) — the same lazy backfill machinery a missing system index already goes
+through for any OTHER caller (the two recorded-relation indexes; the identity-assertions index is
+adopted only through the base-schema step, never through `store.materializeSystemIndexes()`), and
+immediately for the two recorded-relation indexes when a caller opted out of boot-time materialization
+with `systemIndexes: "skip"`, via its own explicit `store.materializeSystemIndexes()` call. The parity
+snapshot moves by exactly these three index declarations, plus one extra version-marker
+`INSERT`/`SELECT` round trip on each of four capture scenarios on both bundled backends (bootstrap
+publishing the new base-schema release below) — no other statement, and no graph-data write SQL,
+changes.
 
 `GraphBackend` adopters that ship their own `EngineProvisioning` gain a required base-schema
 release: `CURRENT_BASE_SCHEMA_VERSION` advances from 2 to 3, id `"lineage-since-index"`, adopting
-the two `since_idx` indexes above through `CREATE INDEX IF NOT EXISTS` (idempotent, safe to run
+the three `since_idx` indexes above through `CREATE INDEX IF NOT EXISTS` (idempotent, safe to run
 concurrently, and a no-op on a fresh install whose generated DDL already carries them). The bump is
 one-way — there is no downgrade path — and deployment-visible: a database already stamped 3 is
 untouched, one stamped 2 is caught up in place on next open, and a store built against an
 `EngineProvisioning` whose adoption-step registry stops at 2 fails to construct
-(`CompilerInvariantError`, "adoption registry must end at the current version"). A custom SQL
-engine profile must register a version-3 adoption step (or accept the two indexes into its own
-fresh-install DDL and mark the step `bootstrap: "covered-by-generated-ddl"`) before upgrading past
-this release.
-
-A second release follows immediately: `CURRENT_BASE_SCHEMA_VERSION` advances from 3 to 4, id
-`"lineage-identity-since-index"`, adopting one more `since_idx (graph_id, recorded_from)` — this one
-on the recorded identity-assertions relation, which `earliestRecordedFrom` (the pre-capture-gap
-detector `changesSince` consults) folds into the same floor as the two recorded relations above but
-which carried no index of its own until now. Unlike the two indexes release 3 adopts, this one is
-NOT a `materializeIndexes`-managed system index — like that relation's other three indexes
-(`entity_idx`/`a_idx`/`b_idx`), it is structural: created with the table, adopted only through this
-base-schema step, never through `store.materializeSystemIndexes()`. Same adoption mechanics as
-release 3 otherwise (idempotent `CREATE INDEX IF NOT EXISTS`, one-way, a custom SQL engine profile
-must register a version-4 step or fold the index into its own fresh-install DDL).
+(`CompilerInvariantError`, "adoption registry must end at the current version"). A zero-DDL
+`createVerifiedStore` attach against a database still stamped 2 refuses with
+`BaseSchemaMigrationError` until `adoptBaseSchema()` runs. A custom SQL engine profile must register
+a version-3 adoption step (or accept the three indexes into its own fresh-install DDL and mark the
+step `bootstrap: "covered-by-generated-ddl"`) before upgrading past this release.
 
 `base@V`'s anchor gains a third form, `engine:<revision>`, chosen when a store has no
 `revisionTracking`/`history` but its backend declares `lineage` directly (a capturing store's
@@ -85,3 +82,14 @@ both sides can supply a bounded delta; a hand-built branch, a store with no `lin
 answer on either side, or either side's `changesSince` REJECTING falls back to the full diff exactly
 as before. Pruning is a pure optimization: it never changes what a merge decides, only how much of
 the store it reads to decide it.
+
+## Breaking
+
+- `BaseSchemaRuntime` (and the `CreateBaseSchemaMembersDeps` it is derived from) requires its
+  `sinceIndexDdl` field to carry three `CREATE INDEX IF NOT EXISTS` statements instead of two —
+  `readonly [string, string, string]`, in `(recordedNodes, recordedEdges,
+  recordedIdentityAssertions)` order — built from a dialect's own physical table names via
+  `sinceIndexAdoptionDdl` (`src/indexes/system.ts`), which now also takes a
+  `recordedIdentityAssertions` table name. A custom `SqlEngineProfile` that builds its own
+  `baseSchemaRuntime` must pass the widened tuple; there is no longer a separate
+  `identityAssertionsSinceIndexDdl` field to supply.

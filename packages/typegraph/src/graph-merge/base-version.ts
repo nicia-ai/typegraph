@@ -538,8 +538,10 @@ export function schemaActiveVersionOf(
  * directly rather than going through `resolveLineage` — that selection is
  * for a store with NO TypeGraph revision anchor at all, which a
  * revision-anchored `base` can never be (see the module doc's precedence).
- * An engine anchor is answered through `resolveLineage(baseStore)`, exactly
- * as `assertTargetUnchanged`'s own engine branch does.
+ * An engine anchor is answered through `resolveLineage(baseStore)` — this is
+ * a PLANNING-time call, strictly outside any commit transaction, unlike
+ * `assertTargetUnchanged`'s own engine branch, which reads the pinned
+ * transaction handle's `lineage` instead (see that function's doc comment).
  *
  * The revision-anchor branch re-checks `assertTargetUnchanged`'s FIRST guard
  * before trusting the numeric revision at all: `revisionOriginOf(base)`

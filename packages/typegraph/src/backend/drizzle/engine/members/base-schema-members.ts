@@ -79,27 +79,17 @@ export type CreateBaseSchemaMembersDeps = Readonly<{
    */
   ensureEdgeMatchIdentityStorage: () => Promise<void>;
   /**
-   * `CREATE INDEX IF NOT EXISTS` for the two recorded-relation `since_idx`
-   * indexes (the lineage capability's changed-since scan), in
-   * `(recordedNodes, recordedEdges)` order — the version-3 adoption step,
-   * built once by the caller via `sinceIndexAdoptionDdl`
-   * (`../../../indexes/system`) from its own dialect's physical table
-   * names. Both indexes already exist after a fresh bootstrap (the schema
-   * factories derive them from the same declarations), so this dep is only
-   * exercised by the offline `adopt()` path, the same way `fencesTableDdl`
-   * is for version 2.
+   * `CREATE INDEX IF NOT EXISTS` for the base-schema release's three
+   * `since_idx` indexes (the lineage capability's changed-since scan), in
+   * `(recordedNodes, recordedEdges, recordedIdentityAssertions)` order —
+   * the version-3 adoption step, built once by the caller via
+   * `sinceIndexAdoptionDdl` (`../../../indexes/system`) from its own
+   * dialect's physical table names. All three indexes already exist after
+   * a fresh bootstrap (the schema factories derive them from the same
+   * declarations), so this dep is only exercised by the offline `adopt()`
+   * path, the same way `fencesTableDdl` is for version 2.
    */
-  sinceIndexDdl: readonly [string, string];
-  /**
-   * `CREATE INDEX IF NOT EXISTS` for the recorded identity-assertions
-   * relation's own `since_idx` — the version-4 adoption step, built once by
-   * the caller via `identityAssertionsSinceIndexAdoptionDdl`
-   * (`../../../indexes/system`) from its own dialect's physical table name.
-   * The index already exists after a fresh bootstrap (the schema factories
-   * hand-declare it with the table), so this dep is only exercised by the
-   * offline `adopt()` path, the same way `sinceIndexDdl` is for version 3.
-   */
-  identityAssertionsSinceIndexDdl: string;
+  sinceIndexDdl: readonly [string, string, string];
 }>;
 
 export type BaseSchemaMembers = Readonly<{
@@ -113,10 +103,9 @@ export type BaseSchemaMembers = Readonly<{
  * Builds the base-schema member group. Moved out of the two dialect files
  * unchanged: version 1 (the graph-templates table plus edge-match-identity
  * adoption, run before bootstrap's generated DDL), version 2 (the fence
- * rows table), version 3 (the recorded-relations `since_idx` indexes) and
- * version 4 (the recorded identity-assertions relation's own `since_idx`)
- * all follow the same prepare/adopt-before/adopt-after bootstrap
- * sequencing.
+ * rows table) and version 3 (the recorded-relations' and recorded
+ * identity-assertions relation's `since_idx` indexes) all follow the same
+ * prepare/adopt-before/adopt-after bootstrap sequencing.
  */
 export function createBaseSchemaMembers(
   deps: CreateBaseSchemaMembersDeps,
@@ -132,7 +121,6 @@ export function createBaseSchemaMembers(
     ensureEdgeMatchIdentityStorage,
     fencesTableDdl,
     sinceIndexDdl,
-    identityAssertionsSinceIndexDdl,
   } = deps;
 
   const baseSchemaLifecycle: BaseSchemaLifecycle = createBaseSchemaLifecycle({
@@ -166,13 +154,6 @@ export function createBaseSchemaMembers(
           for (const ddl of sinceIndexDdl) {
             await ensureTable(ddl);
           }
-        },
-        bootstrap: { phase: "covered-by-generated-ddl" },
-      },
-      {
-        version: 4,
-        async adopt(): Promise<void> {
-          await ensureTable(identityAssertionsSinceIndexDdl);
         },
         bootstrap: { phase: "covered-by-generated-ddl" },
       },

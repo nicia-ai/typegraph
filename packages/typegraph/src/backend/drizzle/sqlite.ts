@@ -52,7 +52,6 @@ import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
 import {
-  identityAssertionsSinceIndexAdoptionDdl,
   sinceIndexAdoptionDdl,
 } from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
@@ -1627,10 +1626,10 @@ export function buildSqliteEngineProfile(
     sinceIndexDdl: sinceIndexAdoptionDdl({
       recordedNodes: getTableName(tables.recordedNodes),
       recordedEdges: getTableName(tables.recordedEdges),
+      recordedIdentityAssertions: getTableName(
+        tables.recordedIdentityAssertions,
+      ),
     }),
-    identityAssertionsSinceIndexDdl: identityAssertionsSinceIndexAdoptionDdl(
-      getTableName(tables.recordedIdentityAssertions),
-    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`

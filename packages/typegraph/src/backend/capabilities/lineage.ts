@@ -54,8 +54,9 @@ export type LineageDelta =
  *
  * Both members MUST be safe to call from inside an open transaction on the
  * SAME backend the `lineage` was read off. This requirement is scoped to a
- * BACKEND-supplied `lineage` (`EngineProvisioning.lineage`) — the only
- * source `assertTargetUnchanged`'s in-transaction re-validation ever
+ * BACKEND-supplied `lineage` (`EngineProvisioning.lineage`) reachable from
+ * EITHER the root backend or a `transaction()` handle it builds — the only
+ * two sources `assertTargetUnchanged`'s in-transaction re-validation ever
  * reaches. TypeGraph's own `recordedRelationsLineage`
  * (`store/recorded-capture/lineage.ts`) never has to honor it:
  * `resolveLineage` derives that source only for a store constructed with
@@ -71,15 +72,23 @@ export type LineageDelta =
  *
  * `graph-merge`'s engine-anchor re-validation (`assertTargetUnchanged` in
  * `graph-merge/merge.ts`) is the concrete caller this requirement exists
- * for: it resolves `lineage` off the target's own root backend and then
- * invokes `revision()`/`changesSince()` from strictly inside that same
- * target's open commit transaction, because no advisory lock pins an
- * engine-anchored store's write path the way a revision-anchored one is
- * pinned. An implementation that issues its own transaction, or that
- * assumes exclusive use of a single connection/session, can hang or error
- * under that call pattern — the bundled caller-serialized SQLite backend's
- * own reentrancy guard refuses this exact reentry with a typed
- * `ConfigurationError` rather than hanging (see
+ * for: it PREFERS `lineage` off the pinned transaction handle, but only when
+ * that handle's `lineage` is the IDENTICAL object `resolveLineage(target)`
+ * resolves off the root — the read the plan itself already anchored
+ * against — and FALLS BACK to that root read otherwise (a different or
+ * absent transaction-handle `lineage`, including a `lineage` reachable only
+ * through a root-only `deriveBackend` overlay that no `transaction()` handle
+ * ever carries). Either way, `revision()`/`changesSince()` are invoked from
+ * strictly inside that same target's open commit transaction, because no
+ * advisory lock pins an engine-anchored store's write path the way a
+ * revision-anchored one is pinned — so ANY `lineage` reachable from either
+ * the root or a `transaction()` handle of a backend must tolerate that
+ * reentry, whether or not it is ever threaded onto a handle at all. An
+ * implementation that issues its own transaction, or that assumes exclusive
+ * use of a single connection/session, can hang or error under that call
+ * pattern — the bundled caller-serialized SQLite backend's own reentrancy
+ * guard refuses this exact reentry with a typed `ConfigurationError` rather
+ * than hanging (see
  * `tests/graph-merge/base-version-engine-anchor.test.ts`'s real-backend-read
  * case), but a `lineage` MUST NOT rely on running under a backend that
  * happens to detect its own reentrancy: it must instead use a connection

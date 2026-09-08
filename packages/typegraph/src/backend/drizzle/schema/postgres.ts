@@ -360,7 +360,7 @@ export function createPostgresTables(
       // alone, so none can serve `earliestRecordedFrom`'s per-graph
       // `MIN(recorded_from)` scan (`store/recorded-capture/lineage.ts`)
       // without a full table scan.
-      index(`${n.recordedIdentityAssertions}_since_idx`).on(
+      index(systemIndexName(n.recordedIdentityAssertions, "since_idx")).on(
         t.graphId,
         t.recordedFrom,
       ),

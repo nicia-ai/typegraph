@@ -405,25 +405,31 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `BulkOperationHookContext`. Gate: every added symbol at every moved
 //   entrypoint is one of those eight names, no entrypoint's debt decreased,
 //   and no other entrypoint moved.
-// R-2 (closing the lineage-capability review findings). `TransactionBackend`
+// TransactionBackend gaining LineageBackend batch. `TransactionBackend`
 // gained `LineageBackend` (a `Pick<GraphBackend, "lineage">`, mirroring the
 // pre-existing `CatalogBackend`) so `tx.lineage` is type-accessible on a
 // transaction handle the same way `tx.catalog` already was — the runtime fix
 // this ships alongside threads a profile-supplied `lineage` onto a
 // transaction-scoped backend in both dialects, which was previously silently
-// dropped. `LineageBackend` itself is a newly EXPORTED public type (not
-// forgotten), but it makes `LineageMembers`/`LineageDelta`/`EntityKey`/
-// `EngineRevision` reachable one MORE way at every entrypoint whose rendered
-// surface already includes `TransactionBackend`; those four were already
-// counted as forgotten exports wherever `GraphBranch`/`GraphBackend.lineage`
-// reached them (see the batch above), so only entrypoints that render
-// `TransactionBackend` WITHOUT already rendering one of those two move here,
-// each by exactly +1 (`LineageBackend` itself, the one new symbol this
-// change adds to the type graph): `./sqlite/local`, `./postgres/pglite`,
-// `./adapters/drizzle/{sqlite,postgres}`, `./adapters/drizzle/postgres/
-// pglite`, `./adapters/drizzle/sqlite/{local,libsql}`, `./adapters/drizzle/
-// engine`, and `./provenance`. Gate: every moved entrypoint's debt increased
-// by exactly 1, and no other entrypoint moved.
+// dropped. `LineageBackend` is directly exported only from `./backend`, the
+// module that defines it; every OTHER entrypoint that renders
+// `TransactionBackend` at all (its type literal spells `LineageBackend` out
+// as one of its intersection members) reaches `LineageBackend` only through
+// that reachability, so the rule is simply: every entrypoint that renders
+// `TransactionBackend` and does not itself export `LineageBackend` gains
+// forgotten-export debt for it, by exactly +1. Fourteen entrypoints render
+// `TransactionBackend` without exporting `LineageBackend` and so move: `.`,
+// `./adapters/drizzle/engine`, `./adapters/drizzle/postgres`, `./adapters/
+// drizzle/postgres/pglite`, `./adapters/drizzle/sqlite`, `./adapters/
+// drizzle/sqlite/libsql`, `./adapters/drizzle/sqlite/local`,
+// `./graph-merge`, `./interchange`, `./postgres/pglite`, `./profiler`,
+// `./provenance`, `./schema`, and `./sqlite/local`. `LineageMembers`/
+// `LineageDelta`/`EntityKey`/`EngineRevision` were already counted as
+// forgotten exports at every one of those fourteen wherever
+// `GraphBranch`/`GraphBackend.lineage` reached them (see the batch above),
+// so `LineageBackend` is the only symbol this step adds to any of their
+// counts. Gate: every moved entrypoint's debt increased by exactly 1, and
+// no other entrypoint moved.
 // Post-rebase batch. `feat/lineage-capability` added `GraphBranch.
 // forkRevision?: EngineRevision` (the pruned-diff step) before rebasing onto
 // a `main` that had independently added `GraphBranch.close` (the forked

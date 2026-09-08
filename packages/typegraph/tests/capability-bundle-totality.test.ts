@@ -108,7 +108,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("32 reasoned entries sum to 93 accesses; 50 deferred entries sum to 217", () => {
+  it("32 reasoned entries sum to 95 accesses; 50 deferred entries sum to 217", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -137,8 +137,14 @@ describe("capability bundle totality (T9)", () => {
     // store's resolved schema — 90 -> 91. The lineage capability then added
     // `lineage`, a reasoned member with two live accesses (`resolveLineage`'s
     // two reads of the backend's own `lineage`, in
-    // `store/recorded-capture/lineage.ts`) — 91 -> 93.
-    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(93);
+    // `store/recorded-capture/lineage.ts`) — 91 -> 93. Reading the engine
+    // anchor's lineage on the pinned session then added two more:
+    // `assertTargetUnchanged` (`graph-merge/merge.ts`) resolves
+    // `resolveLineage(target)` once and reads the transaction handle's own
+    // `lineage` twice on one line — once to compare it against that
+    // resolution by identity, once as the value used when identical —
+    // falling back to the resolved value itself otherwise — 93 -> 95.
+    expect(reasoned.reduce((sum, entry) => sum + entry.accesses, 0)).toBe(95);
     expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(217);
   });
 });

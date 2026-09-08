@@ -64,7 +64,6 @@ import {
   StaleVersionError,
 } from "../../errors";
 import {
-  identityAssertionsSinceIndexAdoptionDdl,
   sinceIndexAdoptionDdl,
 } from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
@@ -1538,10 +1537,10 @@ export function buildPostgresEngineProfile(
     sinceIndexDdl: sinceIndexAdoptionDdl({
       recordedNodes: getTableName(tables.recordedNodes),
       recordedEdges: getTableName(tables.recordedEdges),
+      recordedIdentityAssertions: getTableName(
+        tables.recordedIdentityAssertions,
+      ),
     }),
-    identityAssertionsSinceIndexDdl: identityAssertionsSinceIndexAdoptionDdl(
-      getTableName(tables.recordedIdentityAssertions),
-    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable` /

@@ -211,6 +211,7 @@ import {
   forceWriteTransactionRevision,
   readRecordedClock,
   readRevisionOrigin,
+  requireLineage,
   resolveLineage,
   runRetriedUnit,
   storeBackend,
@@ -2413,12 +2414,12 @@ async function assertTargetUnchanged<G extends GraphDef>(
     // protects a write THIS transaction's own apply performs against a
     // concurrent writer, but it has no read-write dependency to abort
     // against for the planning reads that produced this plan — those ran
-    // OUTSIDE any transaction (see the fuller residual note on the
-    // `resolveLineage` read below). The active schema version is re-read
-    // here explicitly for the same reason: nothing about the transaction's
-    // isolation level backstops a schema commit racing the plan, so this is
-    // the fast half of the fencing the revision-anchor branch above gets
-    // for free from `lockMergeTargetWrite`'s `staleSchemaError`.
+    // OUTSIDE any transaction (see the residual note below `lineage` is
+    // read). The active schema version is re-read here explicitly for the
+    // same reason: nothing about the transaction's isolation level
+    // backstops a schema commit racing the plan, so this is the fast half
+    // of the fencing the revision-anchor branch above gets for free from
+    // `lockMergeTargetWrite`'s `staleSchemaError`.
     const liveActiveVersion = await readActiveSchemaVersion(
       txBackend,
       target.graphId,
@@ -2432,51 +2433,54 @@ async function assertTargetUnchanged<G extends GraphDef>(
         },
       );
     }
-    // Resolved through `resolveLineage` — the ONE owner of lineage source
-    // selection every caller shares — off the target's OWN root backend,
-    // not `txBackend`: a backend built through `deriveBackend`'s decoration
-    // overlay (the shape a custom `lineage` implementation takes today)
-    // never carries an overlaid member onto the transaction-scoped handle
-    // its own `transaction()` builds — that handle is constructed from
-    // state the base backend closed over, not from whatever a caller
-    // layered on top of it afterward. Reading the root backend here
-    // narrows the TOCTOU window to "immediately before commit" rather than
-    // eliminating it: `computeBaseVersion` only ever chose this branch
-    // because `resolveLineage(target)` answered at plan time. A `target`
-    // that reaches an engine anchor here and then resolves `undefined` is
-    // NOT a race this guard exists to catch: `resolveLineage`'s answer for
-    // a fixed `store` argument is either a static `backend.lineage` read
-    // (the only source reachable in this branch — revision tracking is off,
-    // so the recorded-relations derivation is unreachable, see the module
-    // doc's anchor precedence) or nothing, and nothing in TypeGraph's own
-    // write path ever toggles that property on a backend between planning
-    // and commit. The check is defensive against a custom backend whose own
-    // `lineage` member is unstable across reads (a getter, or code that
-    // mutates it after construction) — this guard refuses rather than
-    // silently falling through to a full comparison the resolved plan never
-    // accounted for. The residual gap this branch leaves is real and
-    // plainly bounded: an engine-anchored target detects
-    // only the changes `changesSince` reports for THIS graph, read just
-    // before commit — it is not backstopped by the commit transaction's own
-    // write set, because the planning reads that produced this plan
-    // happened OUTSIDE any transaction, so SERIALIZABLE has no
-    // read-write dependency on them to abort against. (The legacy
+    // `resolveLineage(target)` — off the root — is the ONE source of the
+    // anchor this plan already minted: `computeBaseVersion` called it before
+    // any transaction opened, and `expectedEngineRevision` above is only
+    // ever comparable against a revision the SAME `lineage` object produced
+    // (two backends never share a comparable revision space — see
+    // `EngineRevision`'s own doc). `txBackend.lineage` is read too, but
+    // trusted only when it IS that identical object: when a profile-supplied
+    // `lineage` is threaded onto every `transaction()` handle the SAME
+    // `EngineProvisioning` builds (`CreateSqliteTransactionBackendOptions`/
+    // its Postgres twin), `txBackend.lineage` and `resolveLineage(target)`
+    // resolve to the same reference every time, so this reduces to reading
+    // the pinned transaction handle. A `lineage` reachable only through a
+    // root-only `deriveBackend` overlay (the sanctioned way to decorate ANY
+    // backend, including one whose author never touched
+    // `EngineProvisioning`) never reaches a `transaction()` handle that way,
+    // so the two objects differ; a DIFFERENT `lineage` threaded only onto
+    // `transaction()` handles (never the root) differs too. Either
+    // divergence means `txBackend.lineage` was never the source the plan
+    // anchored against, so it is never used for the comparison — using it
+    // would risk comparing `expectedEngineRevision` against a revision from
+    // an unrelated space, which is exactly what produced a false
+    // `BaseVersionMismatchError` on an unmodified target before this fix.
+    // `LineageMembers`' members take no session argument, so reading the bag
+    // off `txBackend` was never actually pinning the READ to this
+    // transaction's session either way — it only changes which
+    // implementation answers — so falling back to the identical root read
+    // the plan already relied on costs nothing beyond what
+    // `assertForkPointUnchanged` below already accepts for its own no-lock,
+    // root-backend read. Every `lineage` reachable from either object MUST
+    // therefore tolerate being invoked from inside this open commit
+    // transaction (see `capabilities/lineage.ts`'s doc). `requireLineage`
+    // still refuses with a `ConfigurationError` naming this operation when
+    // NEITHER source supplies `lineage` — a backend whose `lineage`
+    // disappeared entirely between the plan-time read and this commit. The
+    // residual gap this branch leaves is real and plainly bounded: an
+    // engine-anchored target detects only the changes `changesSince` reports
+    // for THIS graph, read just before commit — it is not backstopped by the
+    // commit transaction's own write set, because the planning reads that
+    // produced this plan happened OUTSIDE any transaction, so SERIALIZABLE
+    // has no read-write dependency on them to abort against. (The legacy
     // content-fingerprint branch below does not share this gap: it
-    // recomputes its fingerprint through `txBackend` itself, inside the
-    // same transaction whose write set it then collides with.) The same
-    // bounded guarantee `assertForkPointUnchanged` below already accepts
-    // for its own no-lock, root-backend read.
-    const lineage = resolveLineage(target);
-    if (lineage === undefined) {
-      throw new BaseVersionMismatchError(
-        "The merge target no longer resolves a lineage source for its engine-anchored base@V; the resolved plan was not applied.",
-        {
-          details: { expectedRevision: expectedEngineRevision },
-          suggestion:
-            "Re-run the merge — computeBaseVersion re-resolves the anchor form from the target's current configuration.",
-        },
-      );
-    }
+    // recomputes its fingerprint through `txBackend` itself, inside the same
+    // transaction whose write set it then collides with.)
+    const planned = resolveLineage(target);
+    const lineage = requireLineage(
+      { lineage: txBackend.lineage === planned ? txBackend.lineage : planned },
+      "assertTargetUnchanged",
+    );
     const mismatch = await engineAnchorMismatch(
       lineage,
       target.graphId,
@@ -5182,13 +5186,21 @@ async function assertForkPointUnchanged<G extends GraphDef>(
     liveVersion,
   );
   if (expectedEngineRevision !== undefined) {
-    // Resolved through `resolveLineage` — the same one owner of lineage
-    // source selection `assertTargetUnchanged` consults — off the fork
-    // point's OWN backend. `undefined` here means the fork point's lineage
-    // source changed since `computeBaseVersion` chose this anchor form,
-    // which this guard cannot verify against; falling through to the
-    // generic mismatch below (rather than tolerating on no evidence) keeps
-    // the refusal fail-closed.
+    // Read through `resolveLineage` — the ONE owner of lineage source
+    // selection — rather than the fork point's root backend directly: an
+    // engine anchor is chosen only when the BACKEND itself supplies
+    // `lineage` (revision tracking is off in this branch, so the
+    // recorded-relations derivation is unreachable — see the module doc's
+    // anchor precedence), so `resolveLineage(precondition.store)` finds
+    // exactly the same object a direct `storeBackend(...).lineage` read
+    // would. There is no transaction of the fork point's own to pin a
+    // session-scoped read to — it is immutable by contract and this
+    // function takes no lock (see this function's own doc comment on why)
+    // — so the root backend IS the only session available, and `resolveLineage`
+    // reaching it costs nothing over reading it directly. `undefined` here
+    // means the fork point's own backend no longer supplies a `lineage` it
+    // did at plan time; falling through to the generic mismatch below
+    // (rather than refusing on no evidence) keeps the refusal fail-closed.
     const lineage = resolveLineage(precondition.store);
     if (lineage !== undefined) {
       const mismatch = await engineAnchorMismatch(

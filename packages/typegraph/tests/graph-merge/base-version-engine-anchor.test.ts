@@ -12,28 +12,49 @@
  * `BaseVersionMismatchError`, as does any schema drift underneath the
  * anchor (the engine revision alone cannot vouch for the schema).
  *
- * No bundled backend implements `lineage` yet, so this suite overlays a
- * scripted one (a mutable revision plus a scripted delta) over SQLite via a
- * bare `deriveBackend` — no `transaction` override, and no other
- * decoration: every guard under test resolves `lineage` off the store's own
- * root backend, which `deriveBackend`'s overlay reaches directly. Revision
- * drift is injected deterministically through the `embedder` callback,
- * invoked during planning, strictly after the outer `base@V` precondition
- * and strictly before the commit transaction — exactly the technique
+ * No bundled backend implements `lineage` yet, so this suite scripts one (a
+ * mutable revision plus a scripted delta) through `EngineProvisioning.lineage`
+ * on a real SQLite profile — the same route `buildSqliteEngineProfile`'s own
+ * profile takes, so both the root backend AND a `transaction()` handle it
+ * builds resolve the SAME `LineageMembers` object, exactly like a real
+ * profile-supplied `lineage` (`tests/lineage-transaction-threading.test.ts`
+ * proves the general threading; this suite exercises what graph-merge's
+ * guards do with it). `assertTargetUnchanged` reads `lineage` off the pinned
+ * transaction handle specifically — a separate small suite below (not this
+ * scripting) proves that with a fixture where the root and the transaction
+ * handle resolve DIFFERENT `lineage` objects. Revision drift is injected
+ * deterministically through the `embedder` callback, invoked during
+ * planning, strictly after the outer `base@V` precondition and strictly
+ * before the commit transaction — exactly the technique
  * `tests/graph-merge/commit-revalidation.test.ts` uses to land a concurrent
  * write in that same window — or, for the outer precondition's own
  * tolerance, by mutating the scripted state directly before `merge()` is
  * even called.
+ *
+ * `assertTargetUnchanged` reads `lineage` off the pinned transaction handle
+ * only when it is the IDENTICAL object `resolveLineage(target)` resolves
+ * off the root, and falls back to that root object otherwise — a separate
+ * small suite below (not this scripting) proves both halves: that the two
+ * really are identical in the sanctioned `EngineProvisioning`-only wiring
+ * this file's own scripting otherwise relies on, that a transaction-only
+ * `lineage` which DIFFERS from the root's is never trusted for the
+ * comparison, and that the root's is used when the transaction handle
+ * carries none at all.
  */
 import {
   createStoreWithSchema,
   defineGraph,
   defineNode,
 } from "@nicia-ai/typegraph";
+import Database from "better-sqlite3";
+import { drizzle as drizzleSqlite } from "drizzle-orm/better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { deriveBackend } from "../../src/backend/derive-backend";
+import { generateSqliteMigrationSQL } from "../../src/backend/drizzle/ddl";
+import { createSqlBackend } from "../../src/backend/drizzle/engine";
+import { buildSqliteEngineProfile } from "../../src/backend/drizzle/sqlite";
 import type {
   EngineRevision,
   GraphBackend,
@@ -59,6 +80,7 @@ import { asBranchId } from "../../src/graph-merge/types";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { getCommittedSchemaVersion, migrateSchema } from "../../src/schema";
+import { resolveLineage } from "../../src/store/recorded-capture/lineage";
 import { storeBackend } from "../../src/store/runtime-port";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend, fakeEmbedder } from "./test-utils";
@@ -122,48 +144,92 @@ function scriptedLineage(state: ScriptedLineageState): LineageMembers {
   };
 }
 
-/**
- * Overlays a scripted `lineage` onto `backend` — a bare `deriveBackend`
- * overlay, present on the root object only. This is a SUPPORTED
- * configuration: every base@V call site under test (the outer
- * `validateBaseVersions`/`validateForkPointVersions` preconditions and the
- * in-transaction `assertTargetUnchanged`/`assertForkPointUnchanged`
- * re-validation) resolves `lineage` off a store's own root backend rather
- * than requiring it on a transaction-scoped handle a decoration overlay
- * cannot reach — see `merge.ts`'s `assertTargetUnchanged` for why.
- */
-function withScriptedLineage(
-  backend: GraphBackend,
-  state: ScriptedLineageState,
-): GraphBackend {
-  return deriveBackend(backend, { lineage: scriptedLineage(state) });
+/** A constructed scripted-lineage backend paired with its disposer. */
+interface ScriptedLineageFixture {
+  backend: GraphBackend;
+  cleanup: () => Promise<void>;
 }
 
 /**
- * A scripted `lineage` whose `revision()` and `changesSince()` each issue a
- * REAL read against `backend` — through the ordinary `backend.execute` path
- * a `lineage` with no connection of its own would use — before returning
- * the scripted value, unlike {@link scriptedLineage}, which never touches
- * `backend` at all. `assertTargetUnchanged` (`merge.ts`) is the first
- * base@V call site that consults `lineage` from strictly INSIDE the
- * target's own open commit transaction, on the target's root backend
- * rather than the pinned transaction handle (see that function's doc
- * comment on why). On the bundled caller-serialized SQLite backend, this
- * call pattern is exactly what {@link LineageMembers}' own doc comment
- * warns against: the backend's reentrancy guard
- * (`serialized-execution-queue.ts`) detects the read reentering the open
- * transaction's execution slot and refuses it with a typed
- * `ConfigurationError` rather than actually hanging. The test that uses
- * this fixture pins that concrete, fail-loud shape.
+ * Attaches `lineage` to `profile.provisioning` IN PLACE, mutating the same
+ * mutable object every `EngineProvisioning`-reading closure — the root
+ * backend's own conditional spread AND every `transaction()` handle's —
+ * reads by reference (`tests/lineage-transaction-threading.test.ts`'s own
+ * doc comment explains why this, rather than `deriveEngineProfile`, is the
+ * way to script a bundled profile's `lineage` for a test). Must run BEFORE
+ * `createSqlBackend(profile)`: the root backend's own `.lineage` is baked
+ * onto the assembled object once, at construction time, from whatever
+ * `provisioning.lineage` held then.
  */
-function scriptedLineageWithBackendRead(
-  backend: GraphBackend,
+function attachLineage(provisioning: object, lineage: LineageMembers): void {
+  (provisioning as { lineage?: LineageMembers }).lineage = lineage;
+}
+
+/** Closes a raw better-sqlite3 connection, discarding its non-`void` return. */
+function closeSqlite(sqlite: Database.Database): () => Promise<void> {
+  return () => {
+    sqlite.close();
+    return Promise.resolve();
+  };
+}
+
+/**
+ * A real SQLite session whose `EngineProvisioning.lineage` is the scripted
+ * one built from `state` — the ONE way this suite gives a backend a
+ * `lineage` that a `transaction()` handle actually carries (`deriveBackend`
+ * decorates the root object only; see
+ * `tests/lineage-transaction-threading.test.ts`). Both the root backend and
+ * every `tx` it builds resolve the SAME `LineageMembers` object, exactly
+ * like a real profile-supplied `lineage` would.
+ */
+function scriptedLineageBackend(
   state: ScriptedLineageState,
-): LineageMembers {
+): ScriptedLineageFixture {
+  const sqlite = new Database(":memory:");
+  sqlite.exec(generateSqliteMigrationSQL());
+  const db = drizzleSqlite(sqlite);
+  const profile = buildSqliteEngineProfile(db, {
+    executionProfile: { isSync: true },
+  });
+  attachLineage(profile.provisioning, scriptedLineage(state));
+  const backend = createSqlBackend(profile);
+  return { backend, cleanup: closeSqlite(sqlite) };
+}
+
+/**
+ * Same as {@link scriptedLineageBackend}, except `revision()`/
+ * `changesSince()` each issue a REAL read against the backend — through the
+ * ordinary `backend.execute` path a `lineage` with no connection of its own
+ * would use — before returning the scripted value. `assertTargetUnchanged`
+ * (`merge.ts`) consults `lineage` from strictly INSIDE the target's own
+ * open commit transaction, on the pinned transaction handle; on the bundled
+ * caller-serialized SQLite backend, this call pattern is exactly what
+ * {@link LineageMembers}' own doc comment warns against: the backend's
+ * reentrancy guard (`serialized-execution-queue.ts`) detects the read
+ * reentering the open transaction's execution slot and refuses it with a
+ * typed `ConfigurationError` rather than actually hanging. The test that
+ * uses this fixture pins that concrete, fail-loud shape. The closure reads
+ * `backend` through a cell filled in right after construction, since the
+ * scripted `lineage` must be attached (for the root's own bake) before
+ * `createSqlBackend` returns the object the closure needs to call
+ * `execute` on.
+ */
+function scriptedLineageBackendWithRealRead(
+  state: ScriptedLineageState,
+): ScriptedLineageFixture {
+  const sqlite = new Database(":memory:");
+  sqlite.exec(generateSqliteMigrationSQL());
+  const db = drizzleSqlite(sqlite);
+  const profile = buildSqliteEngineProfile(db, {
+    executionProfile: { isSync: true },
+  });
+  const backendCell: { current?: GraphBackend } = {};
   async function probe(): Promise<void> {
-    await backend.execute(asCompiledRowsSql(sql`SELECT 1 AS probe`));
+    await requireDefined(backendCell.current).execute(
+      asCompiledRowsSql(sql`SELECT 1 AS probe`),
+    );
   }
-  return {
+  attachLineage(profile.provisioning, {
     revision: async () => {
       await probe();
       return state.revision;
@@ -172,16 +238,10 @@ function scriptedLineageWithBackendRead(
       await probe();
       return state.delta(since, graphId);
     },
-  };
-}
-
-function withScriptedLineageBackendRead(
-  backend: GraphBackend,
-  state: ScriptedLineageState,
-): GraphBackend {
-  return deriveBackend(backend, {
-    lineage: scriptedLineageWithBackendRead(backend, state),
   });
+  const backend = createSqlBackend(profile);
+  backendCell.current = backend;
+  return { backend, cleanup: closeSqlite(sqlite) };
 }
 
 /**
@@ -227,15 +287,15 @@ describe("base@V engine anchor", () => {
   });
 
   function makeBackend(state: ScriptedLineageState): GraphBackend {
-    const fixture = createSqliteMergeBackend();
+    const fixture = scriptedLineageBackend(state);
     cleanups.push(fixture.cleanup);
-    return withScriptedLineage(fixture.backend, state);
+    return fixture.backend;
   }
 
   function makeBackendWithRealRead(state: ScriptedLineageState): GraphBackend {
-    const fixture = createSqliteMergeBackend();
+    const fixture = scriptedLineageBackendWithRealRead(state);
     cleanups.push(fixture.cleanup);
-    return withScriptedLineageBackendRead(fixture.backend, state);
+    return fixture.backend;
   }
 
   function makePlainBackend(): Promise<GraphBackend> {
@@ -988,6 +1048,193 @@ describe("base@V engine anchor", () => {
     expect(isErr(result)).toBe(true);
     if (isErr(result)) {
       expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
+  });
+});
+
+describe("assertTargetUnchanged reads lineage off the pinned transaction handle", () => {
+  it("carries the identical lineage object resolveLineage(target) resolves off the root, when a profile-supplied lineage reaches every transaction() handle", async () => {
+    const state = initialState();
+
+    const sqlite = new Database(":memory:");
+    sqlite.exec(generateSqliteMigrationSQL());
+    const db = drizzleSqlite(sqlite);
+    const profile = buildSqliteEngineProfile(db, {
+      executionProfile: { isSync: true },
+    });
+    // Threaded through `EngineProvisioning.lineage` — the sanctioned wiring
+    // (`tests/lineage-transaction-threading.test.ts` proves the general
+    // threading) — never a root-only `deriveBackend` overlay, so this is the
+    // ONE configuration in which `assertTargetUnchanged`'s
+    // `txBackend.lineage === planned` comparison (`planned` being
+    // `resolveLineage(target)` off the root) can ever be true.
+    attachLineage(profile.provisioning, scriptedLineage(state));
+    const backend = createSqlBackend(profile);
+
+    try {
+      const [store] = await createStoreWithSchema(widgetGraph, backend);
+      const planned = resolveLineage(store);
+      expect(planned).toBeDefined();
+
+      let handleLineage: LineageMembers | undefined;
+      await backend.transaction((tx) => {
+        handleLineage = tx.lineage;
+        return Promise.resolve();
+      });
+
+      // Mutation-prove: gut the transaction-construction wiring in
+      // `sqlite.ts`/`postgres.ts` to stop forwarding the root's own
+      // `lineage` bag onto a `transaction()` handle by reference (build a
+      // fresh bag instead), and this identity fails — exactly the
+      // condition under which `assertTargetUnchanged`'s
+      // `txBackend.lineage === planned` branch would silently stop being
+      // reachable, so every engine-anchored merge would fall back to a
+      // second root read on every commit instead of the pinned handle.
+      expect(handleLineage).toBe(planned);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("prefers the root's lineage over a transaction handle's DIFFERENT lineage, so a divergent transaction-only source cannot report a false mismatch", async () => {
+    // Reproduces the configuration a prior fix round got wrong: a
+    // profile-supplied `lineage` threaded through `EngineProvisioning` (so
+    // it reaches every `transaction()` handle, never the root) alongside a
+    // SEPARATE root-only `deriveBackend` overlay `lineage` (the sanctioned
+    // way to decorate ANY backend). `computeBaseVersion` anchors the plan on
+    // the ROOT overlay's revision (`resolveLineage(target)` finds it there
+    // first, since the overlay shadows `.lineage` on the root object). If
+    // the commit-time guard then consulted the transaction handle's
+    // DIFFERENT `lineage` instead, it would compare that anchor against a
+    // revision space the transaction-only source has never heard of and
+    // report an `unbounded` delta — refusing the merge of a target nobody
+    // touched.
+    const rootRevision = "overlay-b" as EngineRevision;
+    function rootLineage(): LineageMembers {
+      return {
+        revision: () => Promise.resolve(rootRevision),
+        changesSince: () =>
+          Promise.resolve({ kind: "keys", nodes: [], edges: [] }),
+      };
+    }
+
+    // Recognizes none of the root's revisions — an engine that tracks its
+    // own, unrelated revision space, exactly like `EngineRevision`'s own doc
+    // says two backends' revisions never compare.
+    function txLineage(): LineageMembers {
+      return {
+        revision: () => Promise.resolve("engine-a" as EngineRevision),
+        changesSince: () => Promise.resolve({ kind: "unbounded" }),
+      };
+    }
+
+    const sqlite = new Database(":memory:");
+    sqlite.exec(generateSqliteMigrationSQL());
+    const db = drizzleSqlite(sqlite);
+    const profile = buildSqliteEngineProfile(db, {
+      executionProfile: { isSync: true },
+    });
+    attachLineage(profile.provisioning, txLineage());
+    const built = createSqlBackend(profile);
+    const backend = deriveBackend(built, { lineage: rootLineage() });
+
+    const forkFixture = createSqliteMergeBackend();
+    try {
+      const [baseStore] = await createStoreWithSchema(widgetGraph, backend);
+      await baseStore.nodes.Widget.bulkCreate([
+        { id: "base-1", props: { label: "base", group: "g1" } },
+      ]);
+
+      const forkBranch = unwrap(
+        await branch<WidgetGraph>(
+          baseStore,
+          () => Promise.resolve(forkFixture.backend),
+          { id: BRANCH },
+        ),
+      );
+      await forkBranch.store.nodes.Widget.create({
+        label: "from fork",
+        group: "g1",
+      });
+
+      const result = await merge<WidgetGraph>(
+        baseStore,
+        [forkBranch],
+        engineAnchorMergeOptions(fakeEmbedder),
+      );
+
+      // Mutation-prove by reverting `assertTargetUnchanged`'s engine-anchor
+      // branch to `txBackend.lineage ?? resolveLineage(target)`: the
+      // commit-time read then lands on `txLineage()`, whose `revision()`
+      // ("engine-a") never equals the plan's anchor ("overlay-b"), so
+      // `changesSince("overlay-b", ...)` is consulted on `txLineage()` and
+      // answers `{ kind: "unbounded" }` — an unconditional refusal — and
+      // this assertion fails.
+      expect(isOk(result)).toBe(true);
+    } finally {
+      await forkFixture.cleanup();
+      sqlite.close();
+    }
+  });
+
+  it("falls back to the root's lineage when the transaction handle carries none (a root-only deriveBackend overlay, never threaded through EngineProvisioning)", async () => {
+    const state = initialState();
+
+    // No `EngineProvisioning.lineage` is attached to this profile — the
+    // ONLY `lineage` this backend has is the `deriveBackend` overlay below,
+    // applied to the already-constructed root object. A `transaction()`
+    // handle this backend builds never carries it (the same fact the
+    // previous test proves in the other direction), so `assertTargetUnchanged`
+    // reaching the transaction handle alone would find no `lineage` at all
+    // even though `resolveLineage(target)` — the SAME read
+    // `computeBaseVersion` used to anchor the token at plan time — finds one
+    // on the root every time.
+    const sqlite = new Database(":memory:");
+    sqlite.exec(generateSqliteMigrationSQL());
+    const db = drizzleSqlite(sqlite);
+    const profile = buildSqliteEngineProfile(db, {
+      executionProfile: { isSync: true },
+    });
+    const built = createSqlBackend(profile);
+    const backend = deriveBackend(built, { lineage: scriptedLineage(state) });
+
+    const forkFixture = createSqliteMergeBackend();
+    try {
+      const [baseStore] = await createStoreWithSchema(widgetGraph, backend);
+      await baseStore.nodes.Widget.bulkCreate([
+        { id: "base-1", props: { label: "base", group: "g1" } },
+      ]);
+
+      const forkBranch = unwrap(
+        await branch<WidgetGraph>(
+          baseStore,
+          () => Promise.resolve(forkFixture.backend),
+          { id: BRANCH },
+        ),
+      );
+      await forkBranch.store.nodes.Widget.create({
+        label: "from fork",
+        group: "g1",
+      });
+
+      const result = await merge<WidgetGraph>(
+        baseStore,
+        [forkBranch],
+        engineAnchorMergeOptions(fakeEmbedder),
+      );
+
+      // Mutation-prove by reverting `assertTargetUnchanged` to a bare
+      // `requireLineage(txBackend, "assertTargetUnchanged")` (no fallback to
+      // `resolveLineage(target)`): the transaction handle here has no
+      // `lineage` of its own, so the guard throws `LINEAGE_UNAVAILABLE`
+      // instead of finding this root-only overlay, and BOTH assertions below
+      // fail (an error result whose cause is not this shape, and a widget
+      // list that never gained the fork's row).
+      expect(isOk(result)).toBe(true);
+      expect(await widgetLabels(baseStore)).toEqual(["base", "from fork"]);
+    } finally {
+      await forkFixture.cleanup();
+      sqlite.close();
     }
   });
 });
