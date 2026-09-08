@@ -26,6 +26,7 @@ import { createTestBackend } from "./test-utils";
 
 const Task = defineNode("Task", { schema: z.object({}) });
 const dependsOn = defineEdge("dependsOn", { schema: z.object({}) });
+const plainMany = defineEdge("plainMany", { schema: z.object({}) });
 
 const graph = defineGraph({
   id: "import_acyclicity_test",
@@ -36,6 +37,11 @@ const graph = defineGraph({
       from: [Task],
       to: [Task],
       acyclic: true,
+    },
+    plainMany: {
+      type: plainMany,
+      from: [Task],
+      to: [Task],
     },
   },
 });
@@ -133,6 +139,63 @@ describe("import: edge acyclicity", () => {
 
       const remaining = await store.edges.dependsOn.find({});
       expect(remaining).toEqual([]);
+    } finally {
+      sqlite.close();
+    }
+  });
+
+  it("refuses before the first chunk even when an earlier chunk has no acyclic edges", async () => {
+    // batchSize: 1 puts the harmless plainMany edge in its own chunk ahead of
+    // the acyclic one. The refusal this graph owes is a property of its
+    // SCHEMA (it declares an acyclic kind), checked once before chunk 1 —
+    // not a property of what a given chunk's rows happen to contain — so
+    // chunk 1 must never commit even though nothing in it would fail on its
+    // own. Losing the up-front check would still refuse on chunk 2 (the
+    // per-chunk fence is generic), but only after chunk 1 already committed.
+    const sqlite = new Database(":memory:");
+    try {
+      const db = drizzle(sqlite);
+      for (const statement of generateSqliteDDL()) sqlite.exec(statement);
+      const backend: GraphBackend = createSqliteBackend(db, {
+        executionProfile: { transactionMode: "none", isSync: true },
+      });
+      const store = createStore(graph, backend);
+      const chunkedOptions = ImportOptionsSchema.parse({
+        onConflict: "error",
+        refreshStatistics: false,
+        batchSize: 1,
+      });
+
+      await expect(
+        importGraph(
+          store,
+          payload([
+            {
+              kind: "plainMany",
+              id: "p1",
+              from: { kind: "Task", id: "a" },
+              to: { kind: "Task", id: "b" },
+              properties: {},
+            },
+            {
+              kind: "dependsOn",
+              id: "e1",
+              from: { kind: "Task", id: "a" },
+              to: { kind: "Task", id: "b" },
+              properties: {},
+            },
+          ]),
+          chunkedOptions,
+        ),
+      ).rejects.toMatchObject({
+        details: {
+          code: "CONSTRAINT_WRITE_FENCE_UNSUPPORTED",
+          constraint: "edgeAcyclicity",
+        },
+      });
+
+      expect(await store.edges.plainMany.find({})).toEqual([]);
+      expect(await store.edges.dependsOn.find({})).toEqual([]);
     } finally {
       sqlite.close();
     }
