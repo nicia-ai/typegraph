@@ -3743,6 +3743,7 @@ export const MERGE_ERROR_CODES: {
     readonly evidence: "GRAPH_MERGE_EVIDENCE";
     readonly candidateWriteSet: "GRAPH_MERGE_CANDIDATE_WRITE_SET";
     readonly review: "GRAPH_MERGE_REVIEW";
+    readonly compositionOrphan: "MERGE_COMPOSITION_ORPHAN";
 };
 
 // @public
@@ -3767,6 +3768,24 @@ export const MERGE_REVIEW_FORMAT_VERSION: 1;
 
 // @public
 export type MergeBranch<G extends GraphDef> = GraphBranch<G> | IngestionBranch<G>;
+
+// @public
+export class MergeCompositionOrphanError extends MergeError {
+    constructor(details: MergeCompositionOrphanErrorDetails);
+    // (undocumented)
+    readonly code: "MERGE_COMPOSITION_ORPHAN";
+    // (undocumented)
+    readonly details: MergeCompositionOrphanErrorDetails;
+    // (undocumented)
+    protected static readonly errorCategory = "constraint";
+}
+
+// @public
+export type MergeCompositionOrphanErrorDetails = Readonly<{
+    part: MergePlanEntityRef;
+    whole: MergePlanEntityRef;
+    viaEdgeKind: string;
+}>;
 
 // @public
 export class MergeConflictError extends MergeError {
@@ -3938,6 +3957,13 @@ export class MergePlanCapabilityError extends MergeError {
     // (undocumented)
     protected static readonly errorCategory = "user";
 }
+
+// @public
+export type MergePlanCompositionOrphan = Readonly<{
+    part: MergePlanEntityRef;
+    whole: MergePlanEntityRef;
+    viaEdgeKind: string;
+}>;
 
 // @public (undocumented)
 export type MergePlanDiagnostics = Readonly<{
@@ -4135,6 +4161,7 @@ export type MergePlanReview = Readonly<{
     baseAmbiguities: readonly JsonValue[];
     provenanceRecords: readonly JsonValue[];
     warnings: readonly string[];
+    compositionOrphans: readonly MergePlanCompositionOrphan[];
     diagnostics?: MergePlanDiagnostics | undefined;
 }>;
 
