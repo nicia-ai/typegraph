@@ -7,13 +7,18 @@
 every node and edge of one graph that changed — inserted, updated, deleted, or resurrected — since
 that revision, or admits `{ kind: "unbounded" }` when it cannot bound the answer. It is a query
 surface only; nothing in it writes a row. `requireLineage` is the typed refusal for a caller that
-needs it and finds it absent, in the same style as `requireCatalog`. `EngineProvisioning` gains a
-matching optional `lineage` field, forwarded onto the backend unchanged; neither bundled Drizzle
-profile supplies one, so a store's own recorded-relations derivation backs the capability instead
-(below); the `lineage` member itself emits no SQL. The recorded relations it derives from are
+needs it and finds it absent, in the same style as `requireCatalog`. `TransactionBackend` gains the
+same optional `lineage` member (through the new `LineageBackend` member type, mirroring
+`CatalogBackend`), so a profile-supplied `lineage` is visible on a `transaction()` handle exactly as
+`catalog` already was, not only on the root backend. `EngineProvisioning` gains a matching optional
+`lineage` field, forwarded onto the backend unchanged; neither bundled Drizzle profile supplies one,
+so a store's own recorded-relations derivation backs the capability instead (below); the `lineage`
+member itself emits no SQL. The recorded relations it derives from are
 already part of the schema regardless of `history`, and a DDL-running boot (`createStoreWithSchema`,
-unless `systemIndexes: "skip"`) now materializes two new system indexes on them, history on or off —
-see the parity-snapshot note below for exactly what moves.
+unless `systemIndexes: "skip"`) now materializes two new system indexes on them, history on or off.
+A caller that opted out with `systemIndexes: "skip"` gets those two on the next explicit
+`store.materializeSystemIndexes()` call instead of at boot — see the parity-snapshot note below for
+exactly what moves.
 
 `recordedRelationsLineage(store)` derives `lineage` from a store's own recorded relations for any
 store constructed with `history: true`: `revision()` reports the graph's recorded-time clock;
@@ -22,12 +27,15 @@ deletes, hard deletes, and resurrections — deduplicated, and reports `unbounde
 cannot answer for (unrecognized, or predating a detectable pre-capture gap). `resolveLineage(store)`
 is the one place graph-merge (and any other caller) picks a `lineage` source: the backend's own when
 declared, else this recorded-relations one when history is on, else `undefined`. A new system index,
-`since_idx (graph_id, recorded_from)`, backs `changesSince` on both recorded relations; existing
-databases obtain it through the same index-materialization machinery that already backfills a
-missing system index lazily. The parity snapshot moves by exactly these two index declarations,
-plus one extra version-marker `INSERT`/`SELECT` round trip on each of four capture scenarios on
-both bundled backends (bootstrap publishing the new base-schema release below) — no other
-statement, and no graph-data write SQL, changes.
+`since_idx (graph_id, recorded_from)`, backs `changesSince` on both recorded relations; a database
+already open when this ships adopts it on its NEXT open, through the base-schema release-3 adoption
+step below (`"lineage-since-index"`) — the same lazy backfill machinery a missing system index
+already goes through for any OTHER caller, and immediately for one that opted out of boot-time
+materialization with `systemIndexes: "skip"`, via its own explicit
+`store.materializeSystemIndexes()` call. The parity snapshot moves by exactly these two index
+declarations, plus one extra version-marker `INSERT`/`SELECT` round trip on each of four capture
+scenarios on both bundled backends (bootstrap publishing the new base-schema release below) — no
+other statement, and no graph-data write SQL, changes.
 
 `GraphBackend` adopters that ship their own `EngineProvisioning` gain a required base-schema
 release: `CURRENT_BASE_SCHEMA_VERSION` advances from 2 to 3, id `"lineage-since-index"`, adopting
@@ -41,6 +49,17 @@ engine profile must register a version-3 adoption step (or accept the two indexe
 fresh-install DDL and mark the step `bootstrap: "covered-by-generated-ddl"`) before upgrading past
 this release.
 
+A second release follows immediately: `CURRENT_BASE_SCHEMA_VERSION` advances from 3 to 4, id
+`"lineage-identity-since-index"`, adopting one more `since_idx (graph_id, recorded_from)` — this one
+on the recorded identity-assertions relation, which `earliestRecordedFrom` (the pre-capture-gap
+detector `changesSince` consults) folds into the same floor as the two recorded relations above but
+which carried no index of its own until now. Unlike the two indexes release 3 adopts, this one is
+NOT a `materializeIndexes`-managed system index — like that relation's other three indexes
+(`entity_idx`/`a_idx`/`b_idx`), it is structural: created with the table, adopted only through this
+base-schema step, never through `store.materializeSystemIndexes()`. Same adoption mechanics as
+release 3 otherwise (idempotent `CREATE INDEX IF NOT EXISTS`, one-way, a custom SQL engine profile
+must register a version-4 step or fold the index into its own fresh-install DDL).
+
 `base@V`'s anchor gains a third form, `engine:<revision>`, chosen when a store has no
 `revisionTracking`/`history` but its backend declares `lineage` directly (a capturing store's
 recorded-relations lineage never reaches this form — capture also turns revision tracking on, so
@@ -49,10 +68,12 @@ compatibility content fingerprint — is documented once, in `base-version.ts`. 
 engine anchor confirms a raw revision mismatch through `changesSince` before refusing, since the
 engine's revision is whole-database and an unrelated graph's commit must not fail this graph's
 merge; an empty delta is tolerated as unchanged, and a non-empty delta or `unbounded` raises
-`BaseVersionMismatchError` with `details: { expectedRevision, liveRevision, changedKeys? }`. One
-known gap: `changesSince` names only node and edge keys, so a commit touching only a graph's current
-identity assertions is invisible to an engine-anchored guard and tolerated as unchanged — the
-content-fingerprint and revision-anchor forms do not share this gap.
+`BaseVersionMismatchError` with `details: { expectedRevision, liveRevision, changedKeys? }`, where
+`changedKeys` (when present) is capped to the first 20 node keys and first 20 edge keys plus each
+list's own total count, never the raw unbounded delta. One known gap: `changesSince` names only node
+and edge keys, so a commit touching only a graph's current identity assertions is invisible to an
+engine-anchored guard and tolerated as unchanged — the content-fingerprint and revision-anchor forms
+do not share this gap.
 
 `GraphBranch` gains an optional `forkRevision`, the fork's own `lineage.revision()` captured by
 `branch()` right after the working copy is created. `diffAgainstBase` takes an optional `pruneTo`
@@ -60,7 +81,7 @@ lineage delta: when present, each node/edge kind is read by id set instead of a 
 enumeration, restricted to the union of what changed on the fork since `forkRevision` and on the
 base since its own `base@V` anchor. A key absent from both deltas cannot have moved since the fork
 point, so pruning cannot miss a change — it only narrows how much is read. Pruning applies only when
-both sides can supply a bounded delta; a hand-built branch, a store with no `lineage`, or an
-`unbounded` answer on either side falls back to the full diff exactly as before. Pruning is a pure
-optimization: it never changes what a merge decides, only how much of the store it reads to decide
-it.
+both sides can supply a bounded delta; a hand-built branch, a store with no `lineage`, an `unbounded`
+answer on either side, or either side's `changesSince` REJECTING falls back to the full diff exactly
+as before. Pruning is a pure optimization: it never changes what a merge decides, only how much of
+the store it reads to decide it.

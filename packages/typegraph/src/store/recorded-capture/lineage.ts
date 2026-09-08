@@ -79,6 +79,22 @@
  * exact: a caller that must never miss a pre-capture change should prefer
  * `revisionTracking` and `history` together from the graph's first write.
  *
+ * Beyond that gap, the delta is trustworthy only when EVERY writer to this
+ * graph goes through a store that captures history. This module has no way
+ * to detect a NON-capturing writer interleaved with a capturing one — a raw
+ * `GraphBackend` write, a second `Store` over the same backend/graph
+ * constructed without `history: true`, or an engine-side mutation outside
+ * TypeGraph entirely all change the live rows without ever inserting a
+ * recorded row, and `changesSince` has no signal (no gap in `recorded_from`,
+ * no clock/floor mismatch) to catch it by. Such a write UNDER-REPORTS
+ * silently: it is simply absent from every `"keys"` delta this module ever
+ * returns, never surfaced as `unbounded`. This is a materially different
+ * failure mode from the detectable gap above, which the fail-open
+ * contract's "corroborated" branch handles by refusing to guess — here
+ * there is no signal to refuse ON. A caller that cannot guarantee every
+ * writer captures history must not treat a `"keys"` delta from this source
+ * as exhaustive.
+ *
  * ## Token identity is scoped to one store, not one `graphId`
  *
  * `revision()`'s token is the bare recorded-clock value (or the genesis

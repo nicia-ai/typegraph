@@ -373,6 +373,7 @@ export type {
   InsertSchemaParams,
   InsertUniqueParams,
   KindRemovalRow,
+  LineageBackend,
   LineageDelta,
   LineageMembers,
   LiveNodeRow,

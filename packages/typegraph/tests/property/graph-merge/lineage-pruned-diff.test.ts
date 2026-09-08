@@ -408,11 +408,23 @@ type Scenario = Readonly<{
   forkNodeOps: readonly NodeOp[];
   baseEdgeOps: readonly EdgeOp[];
   forkEdgeOps: readonly EdgeOp[];
+  /**
+   * Drives BOTH `diffAgainstBase` calls below (the full comparison AND the
+   * pruned one always run with the SAME flag — comparing them under
+   * DIFFERENT flags would trivially differ on `forkNodeVersions`/
+   * `forkEdgeSignatures` alone, proving nothing about pruning). `false`
+   * exercises the production-dominant fork read (an id-set fetch, not the
+   * full version-map enumeration `captureTargetStateFor` needs) under
+   * pruning — every prior run of this property hardcoded `true`, so that
+   * path never saw a random write sequence.
+   */
+  captureForkState: boolean;
 }>;
 
 const scenarioArb: fc.Arbitrary<Scenario> = fc.record({
   baseNodeOps: fc.array(nodeOpArb, { maxLength: 5 }),
   forkNodeOps: fc.array(nodeOpArb, { maxLength: 5 }),
+  captureForkState: fc.boolean(),
   baseEdgeOps: fc.array(edgeOpArb, { maxLength: 4 }),
   forkEdgeOps: fc.array(edgeOpArb, { maxLength: 4 }),
 });
@@ -515,12 +527,12 @@ describe.each(backendMatrix())(
               const fullDiff = await diffAgainstBase(
                 baseStore,
                 forkStore,
-                true,
+                scenario.captureForkState,
               );
               const prunedDiff = await diffAgainstBase(
                 baseStore,
                 forkStore,
-                true,
+                scenario.captureForkState,
                 pruneTo,
               );
 

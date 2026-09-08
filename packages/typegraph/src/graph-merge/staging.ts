@@ -271,8 +271,13 @@ function dedupeEntityKeys(keys: readonly EntityKey[]): EntityKey[] {
  * whenever EITHER side cannot supply a bounded delta: the branch was not
  * produced by `branch()` (no `forkRevision`, e.g. `mergeIncremental`'s
  * hand-built committed-target branch), the fork's own store resolves no
- * `lineage` at diff time, the fork's `changesSince` answers `unbounded`, or
- * the base-side counterpart of any of those.
+ * `lineage` at diff time, the fork's `changesSince` answers `unbounded`, the
+ * base-side counterpart of any of those, or either `changesSince` call
+ * itself REJECTING (a transient engine error, an unhealthy connection).
+ * Pruning is a pure optimization over the full diff, never a precondition
+ * for one: a rejection here must fall back to the full comparison rather
+ * than fail a merge the full diff would otherwise have completed, so both
+ * lineage calls below run through {@link safeLineageDelta}.
  */
 export async function branchPruneTo<G extends GraphDef>(
   baseStore: Store<G>,
@@ -281,18 +286,36 @@ export async function branchPruneTo<G extends GraphDef>(
   if (branch.forkRevision === undefined) return undefined;
   const forkLineage = resolveLineage(branch.store);
   if (forkLineage === undefined) return undefined;
-  const forkDelta = await forkLineage.changesSince(
-    branch.forkRevision,
-    branch.store.graphId,
+  const forkRevision = branch.forkRevision;
+  const forkDelta = await safeLineageDelta(() =>
+    forkLineage.changesSince(forkRevision, branch.store.graphId),
   );
-  if (forkDelta.kind !== "keys") return undefined;
-  const baseDelta = await lineageDeltaSinceAnchor(baseStore, branch.base);
+  if (forkDelta?.kind !== "keys") return undefined;
+  const baseDelta = await safeLineageDelta(() =>
+    lineageDeltaSinceAnchor(baseStore, branch.base),
+  );
   if (baseDelta?.kind !== "keys") return undefined;
   return {
     kind: "keys",
     nodes: dedupeEntityKeys([...forkDelta.nodes, ...baseDelta.nodes]),
     edges: dedupeEntityKeys([...forkDelta.edges, ...baseDelta.edges]),
   };
+}
+
+/**
+ * Runs one lineage delta call, treating a REJECTION the same as an
+ * `undefined`/`unbounded` answer: {@link branchPruneTo}'s own doc comment is
+ * the "one owner" of why a rejection must fall back to the full diff rather
+ * than propagate and fail a merge the full diff would have completed.
+ */
+async function safeLineageDelta(
+  fetch: () => Promise<LineageDelta | undefined>,
+): Promise<LineageDelta | undefined> {
+  try {
+    return await fetch();
+  } catch {
+    return undefined;
+  }
 }
 
 /**

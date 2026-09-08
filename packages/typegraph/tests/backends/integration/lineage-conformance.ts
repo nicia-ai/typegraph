@@ -63,6 +63,21 @@ const gapGraph = defineGraph({
   edges: {},
 });
 
+/**
+ * Identity-enabled twin of {@link gapGraph}, for the case whose earliest
+ * CAPTURED commit is an identity assertion rather than a node or edge
+ * write — `earliestRecordedFrom`'s identity-assertions arm is what keeps
+ * that case from looking like a pre-capture gap. `"ignore"` is enough:
+ * this graph never folds same-id nodes across kinds, it only needs
+ * `store.identity` to exist.
+ */
+const identityGapGraph = defineGraph({
+  id: "lineage_identity_gap",
+  nodes: { LineagePerson: { type: LineagePerson } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "ignore" },
+});
+
 function byId(left: EntityKey, right: EntityKey): number {
   return (
     left.id < right.id ? -1
@@ -293,6 +308,61 @@ export function registerLineageConformanceIntegrationTests(
         );
       }
       expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: captured.id }]);
+    });
+
+    it("does not report unbounded when the earliest captured commit is an identity assertion, not a node or edge write", async () => {
+      const backend = context.getStore().backend;
+      const [trackingStore] = await createStoreWithSchema(
+        identityGapGraph,
+        backend,
+        { revisionTracking: true },
+      );
+      const first = await trackingStore.nodes.LineagePerson.create({
+        name: "Untracked first",
+      });
+      const second = await trackingStore.nodes.LineagePerson.create({
+        name: "Untracked second",
+      });
+      // Read right at the untracked/captured boundary — after BOTH
+      // pre-capture writes, so nothing between this revision and the first
+      // captured commit below is missing a recorded row. A revision read
+      // any earlier (see the two cases above) predates `second`'s own
+      // untracked write and IS a genuine gap.
+      const boundaryRevision = await trackingStore.revisionNow();
+      if (boundaryRevision === undefined) {
+        throw new Error("expected the clock to have advanced");
+      }
+      await trackingStore.revisionOriginNow();
+
+      const [historyStore] = await createStoreWithSchema(
+        identityGapGraph,
+        backend,
+        { history: true },
+      );
+      // The first commit this graph ever captures touches ONLY the
+      // identity-assertions relation: `first`/`second` already exist from
+      // the untracked phase above, so this assertion inserts no node or
+      // edge row. Without `earliestRecordedFrom` folding the identity
+      // table into its floor, this revision would look like a gap (the
+      // recorded nodes/edges tables' own earliest row is the LATER
+      // "Captured" write below).
+      await historyStore.identity.assertSame(first, second);
+      const captured = await historyStore.nodes.LineagePerson.create({
+        name: "Captured",
+      });
+
+      const lineage = recordedRelationsLineage(historyStore);
+      const delta = await lineage.changesSince(
+        boundaryRevision as unknown as EngineRevision,
+        historyStore.graphId,
+      );
+      if (delta.kind !== "keys") {
+        throw new Error(
+          "expected the identity-assertion floor to keep this revision in bounds, not report unbounded",
+        );
+      }
+      expect(delta.nodes).toEqual([{ kind: "LineagePerson", id: captured.id }]);
+      expect(delta.edges).toEqual([]);
     });
   });
 }

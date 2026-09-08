@@ -53,11 +53,27 @@ export type LineageDelta =
  * fall back to a full scan when it is absent — see {@link requireLineage}.
  *
  * Both members MUST be safe to call from inside an open transaction on the
- * SAME backend the `lineage` was read off. `graph-merge`'s engine-anchor
- * re-validation (`assertTargetUnchanged` in `graph-merge/merge.ts`) is the
- * concrete caller: it resolves `lineage` off the target's own root backend
- * and then invokes `revision()`/`changesSince()` from strictly inside that
- * same target's open commit transaction, because no advisory lock pins an
+ * SAME backend the `lineage` was read off. This requirement is scoped to a
+ * BACKEND-supplied `lineage` (`EngineProvisioning.lineage`) — the only
+ * source `assertTargetUnchanged`'s in-transaction re-validation ever
+ * reaches. TypeGraph's own `recordedRelationsLineage`
+ * (`store/recorded-capture/lineage.ts`) never has to honor it:
+ * `resolveLineage` derives that source only for a store constructed with
+ * `history: true`, and history always turns TypeGraph's own revision
+ * tracking on too, so `computeBaseVersion` picks the per-graph revision
+ * anchor over the engine anchor for such a store every time (see the
+ * anchor-precedence note in `graph-merge/base-version.ts`) — its
+ * `assertTargetUnchanged` call never reaches the engine-anchor branch that
+ * invokes `lineage` mid-transaction at all. Every call graph-merge makes
+ * into `recordedRelationsLineage` (`lineageDeltaSinceAnchor`,
+ * `branchPruneTo`) runs at PLANNING time, strictly outside any commit
+ * transaction.
+ *
+ * `graph-merge`'s engine-anchor re-validation (`assertTargetUnchanged` in
+ * `graph-merge/merge.ts`) is the concrete caller this requirement exists
+ * for: it resolves `lineage` off the target's own root backend and then
+ * invokes `revision()`/`changesSince()` from strictly inside that same
+ * target's open commit transaction, because no advisory lock pins an
  * engine-anchored store's write path the way a revision-anchored one is
  * pinned. An implementation that issues its own transaction, or that
  * assumes exclusive use of a single connection/session, can hang or error

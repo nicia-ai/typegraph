@@ -509,6 +509,52 @@ describe.each(backendMatrix())("branch [$name]", (entry) => {
     expect(closeCount).toBe(1);
   });
 
+  it("closes the working copy when the post-clone lineage revision read rejects", async () => {
+    const { baseStore } = await seedBase();
+    const fixture = await entry.make();
+    cleanups.push(fixture.cleanup);
+
+    // Same shape as the schema-anchor-read failure above, for the OTHER
+    // half of `captureBranchForkState`: the clone succeeds, so `branch()`
+    // owns the backend from that point on, and the very next read —
+    // `resolveLineage(store).revision()` for `forkRevision` — fails.
+    let closeCount = 0;
+    const failure = new Error("engine revision read boom");
+    const rejectingLineage: LineageMembers = {
+      revision: () => Promise.reject(failure),
+      changesSince: () => Promise.reject(failure),
+    };
+    const tracked: GraphBackend = new Proxy(fixture.backend, {
+      get(target, property, _receiver) {
+        if (property === "close") {
+          return async () => {
+            closeCount += 1;
+            await target.close();
+          };
+        }
+        if (property === "lineage") return rejectingLineage;
+        return getBackendProperty(target, property);
+      },
+    });
+
+    const result = await branch<G>(
+      baseStore,
+      () => Promise.reject(new Error("makeBackend must not be called")),
+      undefined,
+      {
+        create: (source) =>
+          createStoreWithSchema(source.graph, tracked).then(([store]) => store),
+      },
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error.name).toBe("BranchError");
+      expect(result.error.cause).toBe(failure);
+    }
+    expect(closeCount).toBe(1);
+  });
+
   it("accepts an explicit working-copy strategy override", async () => {
     const { baseStore, aliceId } = await seedBase();
     const strategy = cloneWorkingCopyStrategy<G>(() => makeBackend());
@@ -669,5 +715,10 @@ describe("branch(): forkRevision capture", () => {
 
     const forked = unwrap(result);
     expect(forked.forkRevision).toBeUndefined();
+    // Not merely `undefined`-valued: the key itself is absent, matching
+    // `branch()`'s conditional spread (`exactOptionalPropertyTypes`) — a
+    // caller that spreads `forked` or serializes it must not see a
+    // `forkRevision: undefined` entry appear out of nowhere.
+    expect("forkRevision" in forked).toBe(false);
   });
 });

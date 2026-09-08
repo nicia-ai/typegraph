@@ -405,6 +405,25 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 //   `BulkOperationHookContext`. Gate: every added symbol at every moved
 //   entrypoint is one of those eight names, no entrypoint's debt decreased,
 //   and no other entrypoint moved.
+// R-2 (closing the lineage-capability review findings). `TransactionBackend`
+// gained `LineageBackend` (a `Pick<GraphBackend, "lineage">`, mirroring the
+// pre-existing `CatalogBackend`) so `tx.lineage` is type-accessible on a
+// transaction handle the same way `tx.catalog` already was — the runtime fix
+// this ships alongside threads a profile-supplied `lineage` onto a
+// transaction-scoped backend in both dialects, which was previously silently
+// dropped. `LineageBackend` itself is a newly EXPORTED public type (not
+// forgotten), but it makes `LineageMembers`/`LineageDelta`/`EntityKey`/
+// `EngineRevision` reachable one MORE way at every entrypoint whose rendered
+// surface already includes `TransactionBackend`; those four were already
+// counted as forgotten exports wherever `GraphBranch`/`GraphBackend.lineage`
+// reached them (see the batch above), so only entrypoints that render
+// `TransactionBackend` WITHOUT already rendering one of those two move here,
+// each by exactly +1 (`LineageBackend` itself, the one new symbol this
+// change adds to the type graph): `./sqlite/local`, `./postgres/pglite`,
+// `./adapters/drizzle/{sqlite,postgres}`, `./adapters/drizzle/postgres/
+// pglite`, `./adapters/drizzle/sqlite/{local,libsql}`, `./adapters/drizzle/
+// engine`, and `./provenance`. Gate: every moved entrypoint's debt increased
+// by exactly 1, and no other entrypoint moved.
 // Post-rebase batch. `feat/lineage-capability` added `GraphBranch.
 // forkRevision?: EngineRevision` (the pruned-diff step) before rebasing onto
 // a `main` that had independently added `GraphBranch.close` (the forked
@@ -425,36 +444,36 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // every moved entrypoint's debt only increased, and by the same amount.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
-    count: 392,
-    sha256: "f8b1c3654ae0ceaf35708570758c9e274fccbdd1068e5a4b72b896f5f3f9c458",
+    count: 393,
+    sha256: "9368e0c30150a27cf86bd40b7a035ac2a71135cd8e96bc0dcac3cf169bb9e58b",
   },
   "./adapters/drizzle/engine": {
-    count: 324,
-    sha256: "6f6e93abf300a7bc69b5e90ad408b9d5226a37cd68fd7d1260b7fce74c2a3639",
+    count: 325,
+    sha256: "5731df47877bafa303d24680f8a44405ea1a10a84cf5f59fb10c314eb989e91a",
   },
   "./adapters/drizzle/indexes": {
     count: 24,
     sha256: "6c11a8d2c13c886a2d6473f8af99d9c4988c7bbfe97545a6a6f748cdd18bf6d8",
   },
   "./adapters/drizzle/postgres": {
-    count: 250,
-    sha256: "e8f8b2af76815bea97c1db5ea78ca2d4b01cbd852eb6be6a61a87199f3151ed2",
+    count: 251,
+    sha256: "d8f2c2dd3d8d2e92d54365210a860f9975d8ac7525c5f5d1d28c0c13dc2dac41",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 254,
-    sha256: "a995302b110d6abec455beba0bf834dac1fb9c122aa44c41848d6aad237102b3",
+    count: 255,
+    sha256: "30a85b96c8ce347a477b665e88d28508ee631c6b2a9ad5a328bf240f720420c0",
   },
   "./adapters/drizzle/sqlite": {
-    count: 251,
-    sha256: "573292effe54fd489abf8d78b5d6f5cad3e6e632d7d5ea34cbf6f1972ef8bded",
+    count: 252,
+    sha256: "999f0a20c924bbcbabe2b9afeb3f028c3e712b310787143db9b8825fd4cf869c",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 254,
-    sha256: "cbfafdcce3e8e6d906a57681e741a6454cc0dec2ff4359dc86bdb5fa8bf7afd6",
+    count: 255,
+    sha256: "a7db2d90f40104b02fdf3628b147635980e15e8b8fce0cb9f687771160a9af6d",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 254,
-    sha256: "cbfafdcce3e8e6d906a57681e741a6454cc0dec2ff4359dc86bdb5fa8bf7afd6",
+    count: 255,
+    sha256: "a7db2d90f40104b02fdf3628b147635980e15e8b8fce0cb9f687771160a9af6d",
   },
   "./backend": {
     count: 16,
@@ -472,36 +491,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // lists: EDGE_TEMPORAL_READ_NAMES, IDENTITY_READ_NAMES, and NODE_READ_NAMES.
   // These three implementation constants are referenced, not public exports.
   "./graph-merge": {
-    count: 730,
-    sha256: "73c2a71a206e3406dadd9994ce17f49fce6e59497685574e96fd223b4e7bc9c4",
+    count: 731,
+    sha256: "deb474801d4658eed8082d2db692784c03b3849cb678d8bcf73dee06b39d25b6",
   },
   "./indexes": {
     count: 46,
     sha256: "5a43d419097711d242c6208632e7e498374a5977eb10a7faba904b10e13f35cd",
   },
   "./interchange": {
-    count: 713,
-    sha256: "180aee4f0e225128e0a71ccd0194cd77ba026276661105f0b7bbade123b558d3",
+    count: 714,
+    sha256: "356309a4a1295c03c4a3144c3eaeb7213c7da5c0236515c2f6678ac78090a2b4",
   },
   "./postgres/pglite": {
-    count: 710,
-    sha256: "446df2a59d329ad1bacc853fa6e4976d776a4fc37a2d87970ec950ae7590241d",
+    count: 711,
+    sha256: "3715bb692f1dd525347d337802cbe7d12376c37a4aa4ab59270f820b28424d48",
   },
   "./profiler": {
-    count: 715,
-    sha256: "bd7eb82dc113bb0f541ae06d7895f57c4689ed67e17f4b7a92a1b581bd86f78e",
+    count: 716,
+    sha256: "73ac0b1457475ab4daad92c9f0f47da359d8da05320940f5c8298b1cb1c46dbb",
   },
   "./provenance": {
-    count: 721,
-    sha256: "321f6b71fa7096861e3569e0d357ee90aa915ce36fae327f19af4fa8c811c1fb",
+    count: 722,
+    sha256: "e3d5db01e609fa33f54711aa7cf6f85a559097e03320986fca9410a5351fc775",
   },
   "./schema": {
-    count: 275,
-    sha256: "7c52310bfbf230e1e4bc3ec390f11ddd9edba5da51939dc0a2de9f0bcd7a4937",
+    count: 276,
+    sha256: "3f393ab78e398c921be771571596703d95c0a44052b915084bbfc155b6e5694d",
   },
   "./sqlite/local": {
-    count: 710,
-    sha256: "446df2a59d329ad1bacc853fa6e4976d776a4fc37a2d87970ec950ae7590241d",
+    count: 711,
+    sha256: "3715bb692f1dd525347d337802cbe7d12376c37a4aa4ab59270f820b28424d48",
   },
 };
 

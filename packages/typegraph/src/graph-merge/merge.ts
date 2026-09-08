@@ -57,7 +57,7 @@ import {
   hasRevisionAnchor,
   readActiveSchemaVersion,
   revisionAnchorOf,
-  revisionOriginOf,
+  revisionOriginMatch,
   schemaActiveVersionOf,
   schemaComponentOf,
 } from "./base-version";
@@ -190,6 +190,7 @@ import type {
   Edge,
   EdgeId,
   EngineRevision,
+  EntityKey,
   GraphDef,
   IdentityTransferAssertion,
   JsonValue,
@@ -2305,6 +2306,34 @@ async function engineAnchorMismatch(
   return { liveRevision, delta };
 }
 
+/** Caps how many keys {@link boundedChangedKeys} embeds per list. */
+const CHANGED_KEYS_DETAIL_LIMIT = 20;
+
+/**
+ * Caps a `"keys"` {@link LineageDelta}'s node/edge lists for inclusion in a
+ * thrown `BaseVersionMismatchError`'s `details` bag: the first
+ * {@link CHANGED_KEYS_DETAIL_LIMIT} keys of each list, plus that list's own
+ * total count. An engine's `changesSince` can legitimately name thousands of
+ * rows (a bulk write on an unrelated portion of a large graph); embedding
+ * every one of them in a single thrown error would make the error itself
+ * the next thing to worry about.
+ */
+function boundedChangedKeys(
+  delta: Extract<LineageDelta, { kind: "keys" }>,
+): Readonly<{
+  nodes: readonly EntityKey[];
+  nodesTotal: number;
+  edges: readonly EntityKey[];
+  edgesTotal: number;
+}> {
+  return {
+    nodes: delta.nodes.slice(0, CHANGED_KEYS_DETAIL_LIMIT),
+    nodesTotal: delta.nodes.length,
+    edges: delta.edges.slice(0, CHANGED_KEYS_DETAIL_LIMIT),
+    edgesTotal: delta.edges.length,
+  };
+}
+
 /**
  * The in-transaction half of the base@V guard: revision-anchored targets read
  * their durable clock under the graph lock; an engine-anchored target
@@ -2338,17 +2367,20 @@ async function assertTargetUnchanged<G extends GraphDef>(
           { cause },
         ),
     });
-    const expectedOrigin = revisionOriginOf(expectedBaseVersion);
-    const liveOrigin = await readRevisionOrigin(
+    const originMatch = await revisionOriginMatch(
       txBackend,
       target.revisionSchema,
       target.graphId,
+      expectedBaseVersion,
     );
-    if (liveOrigin !== expectedOrigin) {
+    if (!originMatch.matches) {
       throw new BaseVersionMismatchError(
         "The merge branch was forked from a different revision-tracked store; the resolved plan was not applied.",
         {
-          details: { expectedOrigin, liveOrigin },
+          details: {
+            expectedOrigin: originMatch.expectedOrigin,
+            liveOrigin: originMatch.liveOrigin,
+          },
           suggestion:
             "Merge the branch back into its original base store, or fork a new branch from this target.",
         },
@@ -2410,12 +2442,20 @@ async function assertTargetUnchanged<G extends GraphDef>(
     // layered on top of it afterward. Reading the root backend here
     // narrows the TOCTOU window to "immediately before commit" rather than
     // eliminating it: `computeBaseVersion` only ever chose this branch
-    // because `resolveLineage(target)` answered at plan time, so a `target`
-    // that reaches an engine anchor here and then resolves to `undefined`
-    // means the store's own lineage source changed between planning and
-    // commit — a state this guard cannot verify against, so it refuses
-    // rather than silently falling through. The residual gap this branch
-    // leaves is real and plainly bounded: an engine-anchored target detects
+    // because `resolveLineage(target)` answered at plan time. A `target`
+    // that reaches an engine anchor here and then resolves `undefined` is
+    // NOT a race this guard exists to catch: `resolveLineage`'s answer for
+    // a fixed `store` argument is either a static `backend.lineage` read
+    // (the only source reachable in this branch — revision tracking is off,
+    // so the recorded-relations derivation is unreachable, see the module
+    // doc's anchor precedence) or nothing, and nothing in TypeGraph's own
+    // write path ever toggles that property on a backend between planning
+    // and commit. The check is defensive against a custom backend whose own
+    // `lineage` member is unstable across reads (a getter, or code that
+    // mutates it after construction) — this guard refuses rather than
+    // silently falling through to a full comparison the resolved plan never
+    // accounted for. The residual gap this branch leaves is real and
+    // plainly bounded: an engine-anchored target detects
     // only the changes `changesSince` reports for THIS graph, read just
     // before commit — it is not backstopped by the commit transaction's own
     // write set, because the planning reads that produced this plan
@@ -2450,7 +2490,7 @@ async function assertTargetUnchanged<G extends GraphDef>(
             expectedRevision: expectedEngineRevision,
             liveRevision: mismatch.liveRevision,
             ...(mismatch.delta.kind === "keys" ?
-              { changedKeys: mismatch.delta }
+              { changedKeys: boundedChangedKeys(mismatch.delta) }
             : {}),
           },
           suggestion:
@@ -2552,6 +2592,36 @@ function edgeCollection(edges: TxEdges, kind: string): EdgeCollectionLike {
 }
 
 /**
+ * THE one owner of the engine-anchor tolerance's ELIGIBILITY check —
+ * `toleratedByEngineAnchor` and `assertForkPointUnchanged`'s engine branch
+ * both consult this before spending a `lineage` round trip. `expectedVersion`
+ * must carry an engine anchor, `liveVersion` must ALSO carry one (never a
+ * revision anchor or a content fingerprint — this tolerance's
+ * `changesSince` consultation only means anything when the live token's OWN
+ * form agrees that the engine anchor is still the authority), and the two
+ * must share an identical schema half. A live token that has moved to a
+ * different anchor FORM is a real divergence a `changesSince` check on the
+ * stale engine revision cannot speak to at all — that path belongs to
+ * whichever guard the live token's own form dispatches to, not this one.
+ * Returns the shared engine revision to check `changesSince` against, or
+ * `undefined` when the pair is not eligible.
+ */
+function engineAnchorToleranceEligible(
+  expectedVersion: BaseVersion,
+  liveVersion: BaseVersion,
+): EngineRevision | undefined {
+  const expectedRevision = engineAnchorOf(expectedVersion);
+  if (
+    expectedRevision === undefined ||
+    engineAnchorOf(liveVersion) === undefined ||
+    schemaComponentOf(expectedVersion) !== schemaComponentOf(liveVersion)
+  ) {
+    return undefined;
+  }
+  return expectedRevision;
+}
+
+/**
  * Whether an outer base@V precondition should accept `liveVersion` even
  * though it textually differs from `expectedVersion` — the SAME tolerance
  * `assertTargetUnchanged`/`assertForkPointUnchanged` apply inside the
@@ -2565,21 +2635,20 @@ function edgeCollection(edges: TxEdges, kind: string): EdgeCollectionLike {
  * happens.
  *
  * Requires the two tokens to carry an engine anchor over an IDENTICAL
- * schema half; a revision-anchor or content-fingerprint mismatch, or any
- * schema drift, is a real divergence this predicate does not touch.
+ * schema half ({@link engineAnchorToleranceEligible}); a revision-anchor or
+ * content-fingerprint mismatch, or any schema drift, is a real divergence
+ * this predicate does not touch.
  */
 async function toleratedByEngineAnchor<G extends GraphDef>(
   store: Store<G>,
   expectedVersion: BaseVersion,
   liveVersion: BaseVersion,
 ): Promise<boolean> {
-  const expectedRevision = engineAnchorOf(expectedVersion);
-  if (
-    expectedRevision === undefined ||
-    schemaComponentOf(expectedVersion) !== schemaComponentOf(liveVersion)
-  ) {
-    return false;
-  }
+  const expectedRevision = engineAnchorToleranceEligible(
+    expectedVersion,
+    liveVersion,
+  );
+  if (expectedRevision === undefined) return false;
   const lineage = resolveLineage(store);
   if (lineage === undefined) return false;
   const mismatch = await engineAnchorMismatch(
@@ -3366,6 +3435,20 @@ export async function planMerge<G extends GraphDef>(
   }
   const precondition = await validateBaseVersions(target, branches);
   if (isErr(precondition)) return err(precondition.error);
+  // Each branch's OWN raw `base` is recorded here, unlike
+  // `planMergeIncremental`'s sibling `anchors.branches[].baseVersion`,
+  // which normalizes to the resolved `forkVersion` instead. That
+  // normalization exists for one specific reason: `candidate-review.ts`'s
+  // `validateReview` re-checks `anchors.branches[0].baseVersion ===
+  // anchors.forkPoint.baseVersion` for an INCREMENTAL plan under review,
+  // and recording a tolerated branch's stale-looking raw `base` there would
+  // make that already-accepted plan read as "incompatible-plan" later. No
+  // snapshot-mode consumer compares `anchors.branches[].baseVersion`
+  // against `anchors.base.baseVersion` the same way — a snapshot plan's
+  // anchors are a durable audit record, not a re-validated equality gate —
+  // so there is nothing here for a tolerated engine-anchor mismatch to
+  // falsely trip, and the raw per-branch `base` is exactly what a reviewer
+  // means to see.
   const anchors: MergePlanAnchors = {
     kind: "snapshot",
     base: { graphId: store.graphId, baseVersion: precondition.data },
@@ -5090,11 +5173,15 @@ async function assertForkPointUnchanged<G extends GraphDef>(
   // twin guard, which this mirrors using the fork point's OWN backend rather
   // than a transaction (the fork point is a different, immutable store; see
   // this function's own doc comment on why it takes no lock either).
-  const expectedEngineRevision = engineAnchorOf(precondition.version);
-  if (
-    expectedEngineRevision !== undefined &&
-    schemaComponentOf(liveVersion) === schemaComponentOf(precondition.version)
-  ) {
+  // Eligibility (both tokens engine-anchored, identical schema half) is the
+  // SAME check `toleratedByEngineAnchor` makes — see
+  // `engineAnchorToleranceEligible`'s own doc comment for why `liveVersion`
+  // must carry an engine anchor too, not only `precondition.version`.
+  const expectedEngineRevision = engineAnchorToleranceEligible(
+    precondition.version,
+    liveVersion,
+  );
+  if (expectedEngineRevision !== undefined) {
     // Resolved through `resolveLineage` — the same one owner of lineage
     // source selection `assertTargetUnchanged` consults — off the fork
     // point's OWN backend. `undefined` here means the fork point's lineage

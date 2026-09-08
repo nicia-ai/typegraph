@@ -51,7 +51,10 @@ import {
 import { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 
 import { CompilerInvariantError, ConfigurationError } from "../../errors";
-import { sinceIndexAdoptionDdl } from "../../indexes/system";
+import {
+  identityAssertionsSinceIndexAdoptionDdl,
+  sinceIndexAdoptionDdl,
+} from "../../indexes/system";
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import type { ResolvedSqlTableNames } from "../../query/compiler/schema";
 import {
@@ -117,6 +120,7 @@ import {
   type IndexState,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
+  type LineageMembers,
   type LockSchemaVersionForWriteParams,
   type NormalizedColumnKind,
   normalizeGraphAnalyticsCapabilities,
@@ -686,6 +690,16 @@ type CreateSqliteOperationBackendOptions = Readonly<{
    * builds its own probes bound to the transaction's own session.
    */
   catalog?: BackendCatalogProbes | undefined;
+  /**
+   * The root backend's own `lineage` bag, threaded through so a
+   * transaction-scoped call exposes the SAME object — see
+   * `EngineProvisioning.lineage`. Unlike `catalog`, there is nothing to
+   * rebuild when this is omitted: a profile-supplied `lineage` is a
+   * read-only bag of engine-wide queries bound to nothing session-specific,
+   * so a transaction-scoped call with no `lineage` passed through simply
+   * carries none, matching the root.
+   */
+  lineage?: LineageMembers | undefined;
 }>;
 
 type CreateSqliteTransactionBackendOptions = Readonly<{
@@ -711,6 +725,8 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    * caller's, not one TypeGraph has audited.
    */
   isFirstParty: boolean;
+  /** The root backend's own `lineage` bag. See {@link CreateSqliteOperationBackendOptions}. */
+  lineage?: LineageMembers | undefined;
 }>;
 
 function createSqliteOperationBackend(
@@ -730,6 +746,7 @@ function createSqliteOperationBackend(
     transactionScoped,
     fenceTarget,
     catalog,
+    lineage,
   } = options;
 
   // CRUD statements route through the execution adapter's compiled path on
@@ -1064,7 +1081,12 @@ function createSqliteOperationBackend(
   // call, which shares no bag of its own — this builds a fresh one bound to
   // THIS call's own `executionAdapter` (the transaction's own adapter), so
   // every catalog probe on a transaction-scoped backend runs on the
-  // transaction's own session.
+  // transaction's own session. `lineage`, unlike `catalog`, has no
+  // transaction-scoped fallback to build: it is simply carried through
+  // (`options.lineage`, the SAME object exposed as `backend.lineage`) so a
+  // profile-supplied lineage capability reaches a `transaction()` handle
+  // exactly as `catalog` does, and stays absent when the profile declares
+  // none.
   return {
     ...operations,
     ...vectorEmbeddingMethods,
@@ -1075,6 +1097,7 @@ function createSqliteOperationBackend(
         operationStrategy,
         serializedQueue,
       ),
+    ...(lineage === undefined ? {} : { lineage }),
   };
 }
 
@@ -1605,6 +1628,9 @@ export function buildSqliteEngineProfile(
       recordedNodes: getTableName(tables.recordedNodes),
       recordedEdges: getTableName(tables.recordedEdges),
     }),
+    identityAssertionsSinceIndexDdl: identityAssertionsSinceIndexAdoptionDdl(
+      getTableName(tables.recordedIdentityAssertions),
+    ),
   };
 
   // Deps for `createIndexMaterializationMembers`, beyond `ensureTable`
@@ -1830,6 +1856,7 @@ export function buildSqliteEngineProfile(
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
             fenceTarget,
+            lineage: provisioning.lineage,
             isFirstParty,
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
@@ -1863,6 +1890,7 @@ export function buildSqliteEngineProfile(
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
             fenceTarget,
+            lineage: provisioning.lineage,
             isFirstParty,
           });
           return fn(txBackend);
@@ -1888,6 +1916,7 @@ export function buildSqliteEngineProfile(
                 vectorStrategy,
                 contributionMaterializer: ctx.contributionMaterializer,
                 fenceTarget,
+                lineage: provisioning.lineage,
                 isFirstParty,
               });
               return fn(txBackend);
@@ -1920,6 +1949,7 @@ export function buildSqliteEngineProfile(
         vectorStrategy,
         contributionMaterializer: ctx.contributionMaterializer,
         fenceTarget,
+        lineage: provisioning.lineage,
         isFirstParty: txIsFirstParty,
       });
       return gateFulltext(
@@ -1985,6 +2015,7 @@ export function buildSqliteEngineProfile(
                 vectorStrategy,
                 contributionMaterializer: ctx.contributionMaterializer,
                 fenceTarget,
+                lineage: provisioning.lineage,
                 isFirstParty,
               });
               // Read-only multi-statement operations need one snapshot but must not
@@ -2261,6 +2292,7 @@ function createTransactionBackend(
     contributionMaterializer: options.contributionMaterializer,
     transactionScoped: true,
     fenceTarget: options.fenceTarget,
+    lineage: options.lineage,
   });
   return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
 }

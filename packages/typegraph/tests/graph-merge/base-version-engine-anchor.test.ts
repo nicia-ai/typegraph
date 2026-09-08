@@ -342,14 +342,67 @@ describe("base@V engine anchor", () => {
       expect(result.error.details).toMatchObject({
         expectedRevision: "r0",
         liveRevision: "r1",
+        // Bounded shape (`merge.ts`'s `boundedChangedKeys`): the first 20
+        // keys per list plus each list's own total count, not the raw
+        // `LineageDelta` — an unbounded engine delta must not embed
+        // thousands of keys in a single thrown error.
         changedKeys: {
-          kind: "keys",
           nodes: [{ kind: "Widget", id: "base-1" }],
+          nodesTotal: 1,
+          edges: [],
+          edgesTotal: 0,
         },
       });
     }
     // Nothing committed from the stale plan.
     expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+
+  it("caps a large changesSince delta's changedKeys detail to the first 20 per list plus a count", async () => {
+    const state = initialState();
+    const [baseStore] = await createStoreWithSchema(
+      widgetGraph,
+      makeBackend(state),
+    );
+    await baseStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(baseStore, makePlainBackend, { id: BRANCH }),
+    );
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const manyNodes = Array.from({ length: 25 }, (_, index) => ({
+      kind: "Widget",
+      id: `changed-${index}`,
+    }));
+    const embedder = driftingEmbedder(() => {
+      state.revision = "r1" as EngineRevision;
+      state.delta = () => ({
+        kind: "keys",
+        nodes: manyNodes,
+        edges: [{ kind: "knows", id: "e0" }],
+      });
+    });
+    const result = await merge<WidgetGraph>(
+      baseStore,
+      [forkBranch],
+      engineAnchorMergeOptions(embedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      const details = result.error.details as {
+        changedKeys: { nodes: unknown[]; nodesTotal: number };
+      };
+      expect(details.changedKeys.nodes).toHaveLength(20);
+      expect(details.changedKeys.nodes).toEqual(manyNodes.slice(0, 20));
+      expect(details.changedKeys.nodesTotal).toBe(25);
+    }
   });
 
   it("refuses the merge when changesSince cannot bound the delta", async () => {
@@ -886,5 +939,55 @@ describe("base@V engine anchor", () => {
     }
     // Nothing committed from the schema-stale plan.
     expect(await widgetLabels(baseStore)).toEqual(["base"]);
+  });
+
+  it("refuses the engine-anchor tolerance when the live target's own base@V has moved to a different anchor FORM, even with a real lineage and a matching schema", async () => {
+    // Two `Store`s share the SAME backend and graph, one WITHOUT revision
+    // tracking (what `forkBranch` forks from — an engine-anchored base@V,
+    // since the backend has a real `lineage`) and one WITH it (`target`,
+    // whose OWN base@V is revision-anchored regardless of `backend.lineage`
+    // still being present — see `computeBaseVersion`'s precedence). Nothing
+    // about `resolveLineage(target)` fails here: `backend.lineage` answers
+    // `state.revision` unchanged, so a `toleratedByEngineAnchor` that
+    // skipped checking the LIVE token's own anchor form would compare that
+    // unmoved revision against the branch's stale engine anchor and
+    // wrongly call this "unchanged" — even though the target's real
+    // anchor (its TypeGraph revision) is a completely different axis this
+    // comparison never looked at.
+    const state = initialState();
+    const backend = makeBackend(state);
+    const [engineStore] = await createStoreWithSchema(widgetGraph, backend);
+    await engineStore.nodes.Widget.bulkCreate([
+      { id: "base-1", props: { label: "base", group: "g1" } },
+    ]);
+
+    const forkBranch = unwrap(
+      await branch<WidgetGraph>(engineStore, makePlainBackend, {
+        id: BRANCH,
+      }),
+    );
+    expect(forkBranch.base).toContain("\0engine:r0");
+    await forkBranch.store.nodes.Widget.create({
+      label: "from fork",
+      group: "g1",
+    });
+
+    const [target] = await createStoreWithSchema(widgetGraph, backend, {
+      revisionTracking: true,
+    });
+    const targetVersion = await computeBaseVersion(target);
+    expect(hasRevisionAnchor(targetVersion)).toBe(true);
+    expect(engineAnchorOf(targetVersion)).toBeUndefined();
+
+    const result = await merge<WidgetGraph>(
+      target,
+      [forkBranch],
+      engineAnchorMergeOptions(fakeEmbedder),
+    );
+
+    expect(isErr(result)).toBe(true);
+    if (isErr(result)) {
+      expect(result.error).toBeInstanceOf(BaseVersionMismatchError);
+    }
   });
 });

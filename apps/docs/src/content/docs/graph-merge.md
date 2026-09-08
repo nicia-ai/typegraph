@@ -1103,16 +1103,18 @@ what changed on the *base* since the anchor in its own `base@V` — instead of
 enumerating every live row on both sides. A key absent from both deltas
 cannot have changed since the fork point, so narrowing the read to their
 union cannot miss anything the full diff would have found; it only fetches
-fewer rows to compare. Pruning is a pure optimization with one rule: whenever either side cannot
-supply a bounded delta, the merge falls back to comparing every live row,
-exactly as it always has. That covers no `forkRevision` (a hand-built
-branch, or one whose store resolved no `lineage`); either side's
-`changesSince` answering `unbounded`; and the base's own anchor failing to
-resolve against the base store's lineage at all — an origin mismatch between
-a revision-anchored `base` and the base store's live revision row, a
-revision anchor minted before the base store's first tracked write, or an
-engine anchor whose store now resolves no `lineage`. Nothing about *what* a
-merge decides depends on whether its diff was pruned.
+fewer rows to compare. Pruning is a pure optimization with one rule:
+whenever either side cannot supply a bounded delta, the merge falls back to
+comparing every live row, exactly as it always has. That covers no
+`forkRevision` (a hand-built branch, or one whose store resolved no
+`lineage`); either side's `changesSince` answering `unbounded` or
+REJECTING (a transient engine error never fails a merge the full diff would
+have completed); and the base's own anchor failing to resolve against the
+base store's lineage at all — an origin mismatch between a revision-anchored
+`base` and the base store's live revision row, a revision anchor minted
+before the base store's first tracked write, or an engine anchor whose store
+now resolves no `lineage`. Nothing about *what* a merge decides depends on
+whether its diff was pruned.
 
 ## Working copies
 

@@ -350,6 +350,16 @@ export function createSqliteTables(
         t.recordedFrom,
         t.recordedTo,
       ),
+      // `recorded_from`-led lookup, same rationale as the two recorded
+      // relations' `since_idx` (`../../../indexes/system.ts`): `entity_idx`/
+      // `a_idx`/`b_idx` all lead with an endpoint, not `recorded_from`
+      // alone, so none can serve `earliestRecordedFrom`'s per-graph
+      // `MIN(recorded_from)` scan (`store/recorded-capture/lineage.ts`)
+      // without a full table scan.
+      index(`${n.recordedIdentityAssertions}_since_idx`).on(
+        t.graphId,
+        t.recordedFrom,
+      ),
     ],
   );
 

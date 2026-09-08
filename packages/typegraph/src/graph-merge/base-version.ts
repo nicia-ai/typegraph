@@ -68,6 +68,7 @@
  * the real store surface.
  */
 
+import type { SqlSchema } from "../query/compiler/schema";
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
 import { enumerateAllEdges, enumerateAllNodes } from "./state-diff";
@@ -422,6 +423,35 @@ export function revisionOriginOf(version: BaseVersion): string | undefined {
   return revisionPartsOf(version)?.origin;
 }
 
+/**
+ * THE one owner of the revision-anchor origin-match decision:
+ * `expectedVersion`'s revision-origin component against the LIVE origin row
+ * `readRevisionOrigin` reads off `backend` for `graphId`. `merge.ts`'s
+ * `assertTargetUnchanged` (re-validating a revision-anchored `base@V` inside
+ * the commit transaction) and this module's own `lineageDeltaSinceAnchor`
+ * (deciding whether a revision-anchored `base` can trust a recorded-relations
+ * `changesSince` read) both need exactly this comparison; extracted here so
+ * neither re-spells it. Returns the two values actually compared alongside
+ * the verdict, so a caller that refuses on a mismatch embeds both in its own
+ * error `details` without a second read.
+ */
+export async function revisionOriginMatch(
+  backend: Pick<GraphBackend, "execute">,
+  schema: SqlSchema,
+  graphId: string,
+  expectedVersion: BaseVersion,
+): Promise<
+  Readonly<{
+    expectedOrigin: string | undefined;
+    liveOrigin: string | undefined;
+    matches: boolean;
+  }>
+> {
+  const expectedOrigin = revisionOriginOf(expectedVersion);
+  const liveOrigin = await readRevisionOrigin(backend, schema, graphId);
+  return { expectedOrigin, liveOrigin, matches: liveOrigin === expectedOrigin };
+}
+
 function revisionPartsOf(
   version: BaseVersion,
 ): Readonly<{ origin: string; revision: string }> | undefined {
@@ -539,12 +569,13 @@ export async function lineageDeltaSinceAnchor<G extends GraphDef>(
   const revisionAnchor = revisionAnchorOf(base);
   if (revisionAnchor !== undefined) {
     if (!baseStore.historyEnabled) return undefined;
-    const liveOrigin = await readRevisionOrigin(
+    const originMatch = await revisionOriginMatch(
       storeBackend(baseStore),
       baseStore.revisionSchema,
       baseStore.graphId,
+      base,
     );
-    if (liveOrigin !== revisionOriginOf(base)) return undefined;
+    if (!originMatch.matches) return undefined;
     return recordedRelationsLineage(baseStore).changesSince(
       revisionAnchor as EngineRevision,
       baseStore.graphId,

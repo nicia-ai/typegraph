@@ -2994,11 +2994,14 @@ export type GraphBackend = Readonly<{
   /**
    * The engine's whole-database revision and the per-graph change delta
    * since an earlier one. Present only when a backend's engine declares it
-   * (`EngineProvisioning.lineage`); absent on both bundled Drizzle backends
-   * regardless of `history`, where `resolveLineage` falls back to the
-   * store's own recorded-relations derivation instead of this member.
-   * Every consumer falls back to a full comparison when this is absent —
-   * see `requireLineage` in `backend/capabilities/lineage.ts`.
+   * (`EngineProvisioning.lineage`) — absent by default on a custom backend
+   * that supplies none, and absent on both bundled Drizzle profiles
+   * regardless of `history`. A history-enabled store never populates this
+   * member itself: it always resolves its lineage from its own recorded
+   * relations instead (`resolveLineage` in
+   * `store/recorded-capture/lineage.ts`), never from this member. Every
+   * consumer falls back to a full comparison when this is absent — see
+   * `requireLineage` in `backend/capabilities/lineage.ts`.
    */
   lineage?: LineageMembers | undefined;
 
@@ -3663,6 +3666,9 @@ export type IndexMaterializationBackend = Pick<
 /** The optional catalog-introspection surface. See {@link BackendCatalogProbes}. */
 export type CatalogBackend = Pick<GraphBackend, "catalog">;
 
+/** The optional engine-lineage surface. See {@link LineageMembers}. */
+export type LineageBackend = Pick<GraphBackend, "lineage">;
+
 export type ContributionMaterializationBackend = Pick<
   GraphBackend,
   | "ensureContributionMaterializationsTable"
@@ -3760,6 +3766,7 @@ export type TransactionBackend = Readonly<
     FulltextOperationBackend &
     IndexMaterializationBackend &
     CatalogBackend &
+    LineageBackend &
     ContributionMaterializationBackend &
     RemovalMaterializationBackend &
     GraphLifecycleBackend &

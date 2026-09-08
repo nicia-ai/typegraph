@@ -1096,6 +1096,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_since_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_closure" (
   "graph_id" TEXT NOT NULL,
   "member_kind" TEXT NOT NULL,
@@ -1319,6 +1323,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -2348,6 +2369,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_since_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_closure" (
   "graph_id" TEXT NOT NULL,
   "member_kind" TEXT NOT NULL,
@@ -2571,6 +2596,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: graph-tem
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = $1",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values ($1, $2, $3) on conflict ("installation") do update set "version" = $4, "updated_at" = $5 where "typegraph_base_schema_versions"."version" <= $6",
   },
@@ -3205,6 +3247,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_since_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_closure" (
   "graph_id" TEXT NOT NULL,
   "member_kind" TEXT NOT NULL,
@@ -3416,6 +3462,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },
@@ -4301,6 +4364,10 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
   },
   {
     "params": [],
+    "sql": "CREATE INDEX IF NOT EXISTS "typegraph_recorded_identity_assertions_since_idx" ON "typegraph_recorded_identity_assertions" ("graph_id", "recorded_from");",
+  },
+  {
+    "params": [],
     "sql": "CREATE TABLE IF NOT EXISTS "typegraph_identity_closure" (
   "graph_id" TEXT NOT NULL,
   "member_kind" TEXT NOT NULL,
@@ -4512,6 +4579,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: g
       3,
       "<<TIMESTAMP>>",
       3,
+    ],
+    "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
+  },
+  {
+    "params": [
+      1,
+    ],
+    "sql": "select "version" from "typegraph_base_schema_versions" where "typegraph_base_schema_versions"."installation" = ?",
+  },
+  {
+    "params": [
+      1,
+      4,
+      "<<TIMESTAMP>>",
+      4,
+      "<<TIMESTAMP>>",
+      4,
     ],
     "sql": "insert into "typegraph_base_schema_versions" ("installation", "version", "updated_at") values (?, ?, ?) on conflict ("typegraph_base_schema_versions"."installation") do update set "version" = ?, "updated_at" = ? where "typegraph_base_schema_versions"."version" <= ?",
   },
