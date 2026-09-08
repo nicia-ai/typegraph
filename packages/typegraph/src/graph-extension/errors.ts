@@ -85,6 +85,14 @@ export const GRAPH_EXTENSION_ISSUE_CODES = [
   "ONTOLOGY_SELF_LOOP",
   "ONTOLOGY_DISJOINT_CONFLICT",
   "ONTOLOGY_INVERSE_MULTIPLE_PARTNERS",
+  // `validateGraphExtension` never emits this one itself: its document-scoped
+  // `validateOntology` call has no kind classifier (an extension's ontology
+  // may reference base-graph kinds it cannot see on its own), so
+  // `detectInvalidEquivalenceClasses` skips the check. This code instead
+  // surfaces as a `ConfigurationError` when the MERGED graph's `KindRegistry`
+  // is built (`buildKindRegistry`), which does have both kind maps. It is
+  // listed here because that is still a graph-extension-shaped failure a
+  // caller may want to branch on.
   "ONTOLOGY_EQUIVALENCE_INVALID_CLASS",
   "DUPLICATE_ONTOLOGY_RELATION",
   "INVALID_DOCUMENT_SHAPE",
