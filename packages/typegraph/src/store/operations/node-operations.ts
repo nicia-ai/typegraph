@@ -228,7 +228,10 @@ import {
   canFuseSchemaFenceInFirstWrite,
   isAutocommitSingleStatementWrite,
 } from "./autocommit-single-statement";
-import { type NodeInsertSyncItem } from "./node-write-pipeline";
+import {
+  type NodeDeletePolicy,
+  type NodeInsertSyncItem,
+} from "./node-write-pipeline";
 import {
   atomicResolvedUpdateAttemptBudget,
   booleanWriteResultChanges,
@@ -3764,6 +3767,7 @@ export async function executeNodeDelete<G extends GraphDef>(
   kind: string,
   id: string,
   backend: GraphBackend | TransactionBackend,
+  policy?: NodeDeletePolicy,
 ): Promise<void> {
   // Gate outside hooks and execution (matching edge deletes): an absent or
   // already-tombstoned node is a no-op, so it neither fires hooks nor submits
@@ -3776,17 +3780,27 @@ export async function executeNodeDelete<G extends GraphDef>(
 
   const opContext = ctx.createOperationContext("delete", "node", kind, id);
 
-  const atomicExecutor = resolveAtomicNodeDeleteBatchExecutor({
-    backend,
-    graph: ctx.graph,
-    kind,
-    ids: [id],
-    schemaVersion: ctx.schemaVersion,
-    identityEnabled: ctx.identity !== undefined,
-    registry: ctx.registry,
-    historyEnabled: ctx.historyEnabled,
-    revisionTrackingEnabled: ctx.revisionTrackingEnabled,
-  });
+  // The fused atomic executor has no notion of `policy.consumedEdgeIds`: its
+  // restrict check is a single, read-free SQL shape that cannot narrow the
+  // edges it counts. A policy narrowing this delete's behavior therefore
+  // always takes the portable path below, which is the only path that reads
+  // and honors `policy` (see `enforceNodeDeleteBehavior`) — the fused command
+  // is an optimization attempt, not evidence its dimensions ran, and must not
+  // be reached when a dimension it cannot honor is in play.
+  const atomicExecutor =
+    (policy?.consumedEdgeIds?.size ?? 0) > 0 ?
+      undefined
+    : resolveAtomicNodeDeleteBatchExecutor({
+        backend,
+        graph: ctx.graph,
+        kind,
+        ids: [id],
+        schemaVersion: ctx.schemaVersion,
+        identityEnabled: ctx.identity !== undefined,
+        registry: ctx.registry,
+        historyEnabled: ctx.historyEnabled,
+        revisionTrackingEnabled: ctx.revisionTrackingEnabled,
+      });
   if (atomicExecutor !== undefined) {
     await runAtomicProgramWithHooks(
       ctx,
@@ -3816,12 +3830,15 @@ export async function executeNodeDelete<G extends GraphDef>(
       // not individually atomic, so it runs in one write transaction. Under
       // recorded-time capture this also collapses the cascade into a single
       // recorded commit instant instead of one instant per sub-write.
-      await session.retireNode({
-        existing: preflight,
-        schema: registration.type.schema,
-        uniqueConstraints: registration.unique ?? [],
-        onDelete: registration.onDelete,
-      });
+      await session.retireNode(
+        {
+          existing: preflight,
+          schema: registration.type.schema,
+          uniqueConstraints: registration.unique ?? [],
+          onDelete: registration.onDelete,
+        },
+        policy,
+      );
       if (identity !== undefined) {
         await identity.detachDeleted(target, { kind, id }, "soft");
       }

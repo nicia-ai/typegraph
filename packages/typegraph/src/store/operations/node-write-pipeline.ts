@@ -122,6 +122,31 @@ type NodeDeleteMode = "soft" | "hard";
  */
 export type NodeDeletePolicy = Readonly<{
   enforceDeleteBehavior: boolean;
+  /**
+   * Edges a caller has already decided to consume outside this delete's own
+   * enforcement: excluded from both the `restrict` count and the `cascade` /
+   * `disconnect` removal, so a consumed edge is evaluated and deleted exactly
+   * once — by whichever caller planned the consumption, not a second time by
+   * this delete's own delete-behavior enforcement.
+   *
+   * This is the generic seam a future composition cascade plans against
+   * (`planCompositionCascade`, not part of this slice): the cascade will
+   * populate it with the composition edge ids it is consuming itself. No
+   * producer populates it yet, so it is always `undefined` today and every
+   * delete's behavior is unchanged from before this field existed — proven by
+   * the byte-identical-when-empty tests alongside this type.
+   */
+  consumedEdgeIds?: ReadonlySet<string>;
+  /**
+   * Whether a whole delete cascades to its parts. Default `true`. Reserved
+   * for the composition cascade prologue (not part of this slice, see
+   * `consumedEdgeIds`) — no code reads this field yet, so it has no runtime
+   * effect today. Plumbed now so a caller with a stable opinion (merge apply,
+   * which must pass `false` once the cascade exists because its plan already
+   * carries the part deletions) has a stable policy shape to pass through
+   * ahead of the cascade landing.
+   */
+  cascadeComposition?: boolean;
 }>;
 
 function uniquenessContext(ctx: NodeWriteContext, backend: Backend) {
@@ -152,6 +177,12 @@ function nodeSyncContext(
  * the delete (`restrict`) or are removed alongside the node (`cascade` /
  * `disconnect`). Skipped entirely when the caller's {@link NodeDeletePolicy}
  * disables enforcement.
+ *
+ * `policy.consumedEdgeIds` narrows the edges considered by EITHER arm before
+ * the behavior switch runs: an edge a caller already consumed neither blocks
+ * a `restrict` delete nor gets removed a second time by this delete's own
+ * `cascade` / `disconnect` cleanup. The narrowing is the single seam a future
+ * composition cascade plans against — see {@link NodeDeletePolicy}.
  */
 async function enforceNodeDeleteBehavior(
   ctx: NodeWriteContext,
@@ -174,31 +205,39 @@ async function enforceNodeDeleteBehavior(
 
   if (connectedEdges.length === 0) return;
 
+  const { consumedEdgeIds } = policy ?? {};
+  const unconsumedEdges =
+    consumedEdgeIds === undefined ? connectedEdges : (
+      connectedEdges.filter((edge) => !consumedEdgeIds.has(edge.id))
+    );
+
   switch (behavior) {
     case "restrict": {
+      if (unconsumedEdges.length === 0) return;
       throw new RestrictedDeleteError({
         nodeKind: args.kind,
         nodeId: args.id,
-        edgeCount: connectedEdges.length,
-        edgeKinds: [...new Set(connectedEdges.map((edge) => edge.kind))],
+        edgeCount: unconsumedEdges.length,
+        edgeKinds: [...new Set(unconsumedEdges.map((edge) => edge.kind))],
       });
     }
 
     case "cascade":
     case "disconnect": {
+      if (unconsumedEdges.length === 0) return;
       // Both behaviors remove connected edges. "cascade" signals intent to
       // remove dependent data; "disconnect" signals intent to sever the
       // relationship. The effect is identical because edges cannot exist
       // without both endpoints. One batched statement per bind-budget
       // chunk instead of one statement per edge; the per-edge loop remains
       // for backends without the batch members.
-      const connectedEdgeIds = connectedEdges.map((edge) => edge.id);
+      const connectedEdgeIds = unconsumedEdges.map((edge) => edge.id);
       const batchDelete =
         args.mode === "hard" ?
           backend.hardDeleteEdgesBatch
         : backend.deleteEdgesBatch;
       if (batchDelete === undefined) {
-        for (const edge of connectedEdges) {
+        for (const edge of unconsumedEdges) {
           await (args.mode === "hard" ?
             backend.hardDeleteEdge({ graphId: ctx.graphId, id: edge.id })
           : backend.deleteEdge({ graphId: ctx.graphId, id: edge.id }));
