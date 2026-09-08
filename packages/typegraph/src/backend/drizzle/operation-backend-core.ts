@@ -5347,7 +5347,11 @@ export function createCommonOperationBackend(
       for (const declaration of params.edgeCardinalities) {
         const axisName = edgeCardinalityAxisName(declaration);
         const entry = edgeKindsByAxis.get(axisName) ?? {
-          ref: declaration,
+          // Narrowed to the axis ref alone: `declaration` also carries
+          // `edgeKind`, and keeping that field on `ref` would let a later
+          // `{...ref, edgeKind: row.edge_kind}` merge silently depend on
+          // spread ORDER to discard it instead of the type excluding it.
+          ref: { direction: declaration.direction, cardinality: declaration.cardinality } as EdgeCardinalityAxisRef,
           edgeKinds: [],
         };
         entry.edgeKinds.push(declaration.edgeKind);
@@ -5371,8 +5375,8 @@ export function createCommonOperationBackend(
         );
         for (const row of rows) {
           contendedEdgeRows.push({
-            edgeKind: row.edge_kind,
             ...ref,
+            edgeKind: row.edge_kind,
             edgeId: row.edge_id,
             fromKind: row.from_kind,
             fromId: row.from_id,
