@@ -38,6 +38,26 @@ export type OntologyValidationIssue = Readonly<{
   details: Readonly<Record<string, unknown>>;
 }>;
 
+/**
+ * `validateOntologyRelations`'s issue shape when called WITHOUT a `kinds`
+ * classifier: `detectInvalidEquivalenceClasses` returns immediately in that
+ * case (see its docstring), so `"ONTOLOGY_EQUIVALENCE_INVALID_CLASS"` is
+ * PROVABLY absent from the result, not merely unlikely. The no-`kinds`
+ * overload below encodes that as a type, which is what lets
+ * `graph-extension/validation.ts` assign an issue's `code` straight into a
+ * `GraphExtensionIssue` — a union that deliberately does not list this code
+ * (see `GRAPH_EXTENSION_ISSUE_CODES`) — without a cast.
+ */
+export type OntologyValidationIssueWithoutEquivalenceClass = Readonly<{
+  relationIndex?: number;
+  message: string;
+  code: Exclude<
+    OntologyValidationIssueCode,
+    "ONTOLOGY_EQUIVALENCE_INVALID_CLASS"
+  >;
+  details: Readonly<Record<string, unknown>>;
+}>;
+
 const STRICTLY_HIERARCHICAL: ReadonlySet<string> = new Set([
   META_EDGE_SUB_CLASS_OF,
   META_EDGE_BROADER,
@@ -80,7 +100,18 @@ export type OntologyKindClassification = Readonly<{
 /**
  * Validates the semantic coherence shared by authored extensions, live graph
  * registries, and serialized-schema registries.
+ *
+ * Overloaded on whether `kinds` is supplied: without it, the equivalence-
+ * class check cannot run (see `detectInvalidEquivalenceClasses`), so the
+ * result is typed as never carrying `"ONTOLOGY_EQUIVALENCE_INVALID_CLASS"`.
  */
+export function validateOntologyRelations(
+  ontology: readonly NamedOntologyRelation[],
+): readonly OntologyValidationIssueWithoutEquivalenceClass[];
+export function validateOntologyRelations(
+  ontology: readonly NamedOntologyRelation[],
+  kinds: OntologyKindClassification,
+): readonly OntologyValidationIssue[];
 export function validateOntologyRelations(
   ontology: readonly NamedOntologyRelation[],
   kinds?: OntologyKindClassification,
@@ -262,6 +293,16 @@ function detectMultipleInversePartners(
  * Transitivity is why this is a runtime check and not only a signature:
  * `equivalentTo(edgeA, iri)` plus `equivalentTo(edgeB, iri)` puts two edge
  * kinds in one class without either call spelling the pair.
+ *
+ * Only fires with a `kinds` classifier supplied — `buildValidatedKindRegistry`
+ * always supplies one (defaulting to the caller's own node/edge maps), so a
+ * graph's own ontology is always checked. `validateGraphExtension`'s
+ * document-scoped call omits `kinds` (an extension's ontology may name
+ * base-graph kinds it cannot classify on its own) and so never reaches this
+ * check; the graph-extension issue codes deliberately do NOT list
+ * `"ONTOLOGY_EQUIVALENCE_INVALID_CLASS"` for that reason. It only ever
+ * reaches a caller as a `ConfigurationError` thrown when the MERGED graph's
+ * `KindRegistry` is built (`buildKindRegistry`).
  */
 function detectInvalidEquivalenceClasses(
   ontology: readonly NamedOntologyRelation[],
