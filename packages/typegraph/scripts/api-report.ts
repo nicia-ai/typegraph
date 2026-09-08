@@ -534,6 +534,24 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // Store-bearing entrypoints above (+1 apiece: `./interchange` 717 → 718,
 // `./profiler` 719 → 720, `./graph-merge` 734 → 735, `./provenance`
 // 725 → 726, `./sqlite/local` 714 → 715, `./postgres/pglite` 714 → 715).
+//
+// Identity transition log batch: `StoreRuntime.identityContext()` (added
+// earlier in this feature, alongside the transition log's relations and
+// `IdentityTableNames`/`SqlTableNames` gaining `identityTransitions` /
+// `identityTransitionRetention`) was never reconciled against this ledger —
+// `pnpm api-report:update` had not been run since. It returns
+// `IdentityServiceContext<G>`, an internal (non-exported) type that itself
+// names `PlainNodeRef`; neither is exported directly anywhere, including the
+// root. Both become newly reachable, and so newly forgotten-exported, at
+// every entrypoint whose full `StoreRuntime` member set renders: `.`
+// (388→390), `./interchange` (709→711), `./profiler` (711→713),
+// `./graph-merge` (726→728), `./provenance` (717→719), `./sqlite/local`
+// (706→708), `./postgres/pglite` (706→708) — +2 apiece, `IdentityServiceContext`
+// and `PlainNodeRef` exactly. The `identityTransitions`/`identityTransitionRetention`
+// string fields and `SchemaManagerOptions.historyEnabled` boolean introduce
+// no new symbol names, so they move no entrypoint's debt on their own. Gate:
+// every moved entrypoint's delta is exactly +2, both added names are
+// `IdentityServiceContext`/`PlainNodeRef`, and no other entrypoint moved.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   ".": {
     count: 407,
