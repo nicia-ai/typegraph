@@ -7,6 +7,7 @@
  * - Auto-migration for safe changes
  * - Error reporting for breaking changes
  */
+import { batchPointReadVerdict } from "../backend/capabilities/resolve";
 import { assertEdgeMatchIdentityBackendSupport } from "../backend/edge-match-identity";
 import { countSchemaKindRows } from "../backend/schema-kind-emptiness";
 import {
@@ -347,6 +348,17 @@ export type SchemaManagerOptions = Readonly<{
    * substituted or suppressed.
    */
   schema?: SqlSchema;
+  /**
+   * Mirrors the Store's own `history: true` option. Threaded through so a
+   * schema commit that runs BEFORE any Store exists to wrap the backend —
+   * every commit `prepareStoreWithSchema` drives, first enablement included —
+   * can still bind its identity preflight's ledger touches and transition-log
+   * notes to a capture session, exactly as `store.evolve()`'s own
+   * already-wrapped `this.#backend` does. Never set for the standalone
+   * `initializeSchema` / `migrateSchema` entry points called outside a Store
+   * — there, the identity preflight's writes are correctly current-only.
+   */
+  historyEnabled?: boolean;
 }>;
 
 // ============================================================
@@ -414,6 +426,7 @@ export async function ensureSchema<G extends GraphDef>(
     const result = await initializeSchemaImpl(backend, graph, {
       ...(options?.schema === undefined ? {} : { schema: options.schema }),
       baseSchemaPrepared: true,
+      historyEnabled: options?.historyEnabled ?? false,
     });
     return {
       status: "initialized",
@@ -469,6 +482,7 @@ export async function ensureSchema<G extends GraphDef>(
           undefined
         : await prepareIdentitySchemaCommit(backend, graph, {
             enablement: storedSchema.identity === undefined,
+            historyEnabled: options?.historyEnabled ?? false,
             ...(options?.schema === undefined ?
               {}
             : { schema: options.schema }),
@@ -921,6 +935,8 @@ type InitializeSchemaImplOptions = InitializeSchemaOptions &
   Readonly<{
     /** The caller already completed the deployment-wide adoption gate. */
     baseSchemaPrepared: boolean;
+    /** See {@link SchemaManagerOptions.historyEnabled}. Default `false`. */
+    historyEnabled?: boolean;
   }>;
 
 export async function initializeSchema<G extends GraphDef>(
@@ -1012,6 +1028,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
   // accepts while identity reads answer from a never-built closure.
   const preflight = await prepareIdentitySchemaCommit(backend, graph, {
     enablement: true,
+    historyEnabled: options.historyEnabled ?? false,
     ...(options.schema === undefined ? {} : { schema: options.schema }),
   });
   // The preflight issues idempotent identity DDL INSIDE this transaction (see
@@ -1254,8 +1271,18 @@ export async function migrateSchema<G extends GraphDef>(
  * Bundled backends use a durable version marker, so a warm privileged open is
  * one read and no base-adoption DDL. Runtime-only construction remains
  * DDL-free.
+ *
+ * Exported so `prepareStoreWithSchema` (store.ts) can call it before ITS OWN
+ * `ensureIdentitySchemaStorage` call — which runs deliberately earlier than
+ * `ensureSchema`'s own `adoptBaseSchemaStorage`, to issue identity DDL before
+ * the schema-commit write lock. A base-schema relation an already-enabled
+ * graph now depends on (the identity transition log, base-schema release 3)
+ * must exist by THAT earlier point too, or an upgrade reads as the ledger
+ * data loss `assertIdentityStoragePresent` refuses.
  */
-async function adoptBaseSchemaStorage(backend: GraphBackend): Promise<void> {
+export async function adoptBaseSchemaStorage(
+  backend: GraphBackend,
+): Promise<void> {
   if (backend.adoptBaseSchema !== undefined) {
     await backend.adoptBaseSchema();
     return;
@@ -1397,6 +1424,8 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     enablement: boolean;
     schema?: SqlSchema;
     droppedNodeKinds?: readonly string[];
+    /** See {@link SchemaManagerOptions.historyEnabled}. Default `false`. */
+    historyEnabled?: boolean;
   }>,
 ): Promise<
   (transactionBackend: SchemaCommitPreflightBackend) => Promise<void>
@@ -1438,6 +1467,12 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
       enablement: options.enablement,
       droppedNodeKinds: options.droppedNodeKinds ?? [],
       provisionDerivedRelations: provisioning.provisionInCommit,
+      // `batchPointReadVerdict` needs the ROOT `GraphBackend` — available
+      // here, not inside `identitySchemaCommitPreflight`, which sees only
+      // the schema-commit TRANSACTION target.
+      ...(options.historyEnabled === true ?
+        { captureBinding: { batchPointRead: batchPointReadVerdict(backend) } }
+      : {}),
     },
   );
 }

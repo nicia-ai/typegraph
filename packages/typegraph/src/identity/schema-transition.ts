@@ -1,3 +1,5 @@
+import { type BATCH_POINT_READ } from "../backend/capabilities/bundle-registry";
+import { type BundleVerdictOf } from "../backend/capabilities/resolve";
 import {
   requireWriteFence,
   resolveWriteFencePlan,
@@ -14,7 +16,9 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
+  createRecordedTransactionScope,
   lockRecordedGraphWrite,
+  transactionOwnsSqliteWriteLock,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
 import { nowIso } from "../utils/date";
@@ -46,6 +50,8 @@ function identityTableNames(schema: SqlSchema): IdentityTableNames {
     recordedIdentityAssertions: schema.tables.recordedIdentityAssertions,
     identityClosure: schema.tables.identityClosure,
     identitySeparation: schema.tables.identitySeparation,
+    identityTransitions: schema.tables.identityTransitions,
+    identityTransitionRetention: schema.tables.identityTransitionRetention,
   };
 }
 
@@ -563,6 +569,33 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     enablement: boolean;
     droppedNodeKinds?: readonly string[];
     provisionDerivedRelations?: readonly string[];
+    /**
+     * Present exactly when the calling Store enables `history: true`.
+     * `batchPointRead` is resolved against the ROOT `GraphBackend` by the
+     * caller (`prepareIdentitySchemaCommit`) — this function sees only the
+     * schema-commit TRANSACTION target, which cannot resolve it itself.
+     *
+     * This preflight's `target` is a schema-commit transaction opened
+     * before any Store exists to wrap it with `createRecordedBackend`
+     * (every caller of this function runs before that wrap, first
+     * enablement included), so `withRecordedIdentityMutationTarget` would
+     * otherwise ALWAYS find it unbound and silently drop every ledger touch
+     * and transition note below, regardless of `history`. When present,
+     * this binds a capture session directly to `target` — but the binding
+     * is registered against `target` ITSELF, not a wrapped overlay (unlike
+     * `Store#removeIdentityKindsInSchemaPreflight`'s pattern):
+     * `createRecordedTransactionScope` registers BOTH the overlay it
+     * returns AND the raw target it was given against the same session, and
+     * every write below reaches `target` through `withRecordedIdentityMutationTarget`'s
+     * own touch/noteTransition callbacks, never through the overlay's
+     * touch-tracked node/edge methods. Routing through the overlay instead
+     * would break `lockIdentityEnablementNodes`, which needs
+     * `executeStatement` — a raw-SQL surface the overlay refuses outright
+     * because it cannot observe what a raw statement touched.
+     */
+    captureBinding?: Readonly<{
+      batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
+    }>;
   }>,
 ): (target: SchemaCommitPreflightBackend) => Promise<void> {
   return async (target: SchemaCommitPreflightBackend) => {
@@ -573,6 +606,19 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     );
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
+    // Registers `target` itself (not just the discarded overlay) against a
+    // capture session — see the `captureBinding` doc comment above for why
+    // every call below keeps using `target` directly rather than the
+    // overlay `createRecordedTransactionScope` also returns.
+    const captureScope =
+      options.captureBinding === undefined ?
+        undefined
+      : createRecordedTransactionScope(
+          target,
+          options.captureBinding.batchPointRead,
+          ctx.schema,
+          transactionOwnsSqliteWriteLock(target),
+        );
     // Snapshotted before either cascade runs, and diffed against the
     // rebuild's own result below: `rebuildIdentityClosureForContext` recomputes
     // every class at once rather than handing back which ones it touched, so
@@ -627,10 +673,20 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
       ctx.graphId,
     );
     const affected = combineSnapshotMembers(before, afterRows);
+    // `before` needs the SAME singleton fill `after` gets: a member that was
+    // a live singleton (no closure ROW — `fillLiveSingletons`' own doc
+    // explains why that is not "gone") before this commit would otherwise
+    // read as `oldClassOf.get(key) === undefined` to `diffClosureTransitions`,
+    // which is its OWN signal for "no longer exists" — silently skipping the
+    // one shape `schema-transition` exists to cover: first enablement folding
+    // two previously-untouched singletons that never had a materialized row.
+    const beforeFilled = fillLiveSingletons(before, affected, (kind) =>
+      ctx.registry.nodeKinds.has(kind),
+    );
     const after = fillLiveSingletons(afterRows, affected, (kind) =>
       ctx.registry.nodeKinds.has(kind),
     );
-    const transitions = diffClosureTransitions(affected, before, after);
+    const transitions = diffClosureTransitions(affected, beforeFilled, after);
     if (transitions.length > 0) {
       await withRecordedIdentityMutationTarget(
         target,
@@ -644,6 +700,9 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
           return Promise.resolve();
         },
       );
+    }
+    if (captureScope !== undefined) {
+      await captureScope.flush();
     }
   };
 }

@@ -1025,6 +1025,22 @@ function createRecordedTransactionBackend(
   return overlay;
 }
 
+/**
+ * The one owner of "does the transaction handed to
+ * {@link createRecordedTransactionScope} already hold a SQLite write lock"
+ * (its `ownsWriteLock` parameter) — every caller that cannot otherwise prove
+ * it structurally (i.e. is not itself inside a known `BEGIN IMMEDIATE` path)
+ * calls this instead of re-spelling the dialect comparison inline. PostgreSQL
+ * has no equivalent lock a schema-commit transaction could already be
+ * holding at this call, so `false` there is correct, not a stand-in for "not
+ * yet implemented".
+ */
+export function transactionOwnsSqliteWriteLock(
+  target: TransactionBackend,
+): boolean {
+  return target.dialect === "sqlite";
+}
+
 export function createRecordedTransactionScope(
   target: TransactionBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,

@@ -482,8 +482,7 @@ describe("identity transition log", () => {
     expect(kindDropRows.length).toBeGreaterThanOrEqual(1);
   });
 
-  // eslint-disable-next-line vitest/no-disabled-tests -- tracked gap, see the comment below; NOT a stand-in for coverage.
-  it.skip("notes a schema-transition cause when first enablement folds a pre-existing same-id pair", async () => {
+  it("notes a schema-transition cause when first enablement folds a pre-existing same-id pair", async () => {
     // §2.3: `schema-transition` is `identitySchemaCommitPreflight`'s cause
     // whenever the closure changed and NO node kind was dropped —
     // distinguishing it from `kind-drop`, the other cause the same preflight
@@ -492,23 +491,18 @@ describe("identity transition log", () => {
     // rebuild folds Person/shared and Author/shared into one class with
     // nothing dropped.
     //
-    // SKIPPED, not deleted: this reproduces a real, separately-confirmed
-    // defect outside PR-1's fix list. `prepareStoreWithSchema`
-    // (src/store/store.ts) runs the FIRST schema commit — including a first
-    // enablement — through `ensureSchemaWithIdentityPrecedence` against the
+    // Previously skipped: `prepareStoreWithSchema` (src/store/store.ts) runs
+    // the FIRST schema commit — including a first enablement — against the
     // RAW constructor-argument `backend`, before `StoreImplementation`'s own
     // constructor wraps it with `createRecordedBackend` (history capture).
-    // `identitySchemaCommitPreflight`'s `withRecordedIdentityMutationTarget`
-    // therefore finds no capture binding on that first commit and silently
-    // drops every note it takes — confirmed by instrumenting
-    // `withRecordedIdentityMutationTarget`: it logs UNBOUND twice during this
-    // exact scenario, even with `{ history: true }` passed to BOTH opens.
-    // `store.evolve()` (what the shipped `kind-drop` test above uses) does
-    // not have this problem — it commits through `this.#backend`, the
-    // store's own already-wrapped reference — which is why that cause has
-    // working coverage and this one does not. Un-skip once the construction
-    // order is fixed so the enablement preflight commits through a bound
-    // capture session.
+    // `identitySchemaCommitPreflight` now binds a capture session directly
+    // to its OWN schema-commit transaction target when the caller threads
+    // `historyEnabled` (via `SchemaManagerOptions.historyEnabled`,
+    // `prepareStoreWithSchema`'s `ensureOptions`) — the same
+    // `createRecordedTransactionScope` pattern
+    // `Store#removeIdentityKindsInSchemaPreflight` already used for its own
+    // schema-commit transaction — so this no longer depends on a Store
+    // object existing yet.
     const GRAPH_ID = "identity_transition_log_schema_transition";
     const Author = defineNode("Author", {
       schema: z.object({ penName: z.string() }),
